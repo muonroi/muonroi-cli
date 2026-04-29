@@ -1,6 +1,15 @@
 import { generateText, type ModelMessage } from "ai";
-import { resolveModelRuntime, type XaiProvider } from "../grok/client";
+// FORK-02: ../grok/client deleted; stubs below keep tsc --noEmit clean until plan 00-05.
+import { type XaiProvider, type ResolvedModelRuntime } from "./agent";
 import { containsEncryptedReasoning } from "./reasoning";
+
+// FORK-02 stub: resolveModelRuntime — throws at runtime, compiles clean.
+function resolveModelRuntime(_provider: XaiProvider, modelId: string): ResolvedModelRuntime {
+  throw new Error(
+    `muonroi-cli FORK-02: resolveModelRuntime not yet wired for model ${modelId}. ` +
+      "Anthropic adapter ships in plan 00-05 (TUI-02, PROV-03).",
+  );
+}
 
 export interface CompactionSettings {
   reserveTokens: number;

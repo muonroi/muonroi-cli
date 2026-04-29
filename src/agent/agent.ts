@@ -1,22 +1,9 @@
+// FORK-02: src/grok/* deleted; Anthropic provider lands in plan 00-05 (TUI-02, PROV-03).
+// src/agent/agent.ts is intentionally non-functional between this plan and 00-05.
+// tsc --noEmit passes; runtime call sites throw NotImplementedError (see stubs below).
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
-import {
-  addBatchRequests,
-  type BatchChatCompletionRequest,
-  type BatchChatCompletionResponse,
-  type BatchChatMessage,
-  type BatchClientOptions,
-  type BatchFunctionTool,
-  type BatchToolCall,
-  createBatch,
-  getBatchChatCompletion,
-  pollBatchRequestResult,
-} from "../grok/batch";
-import { createProvider, generateTitle as genTitle, resolveModelRuntime, type XaiProvider } from "../grok/client";
-import { DEFAULT_MODEL, getModelInfo, normalizeModelId } from "../grok/models";
-import { toolSetToBatchTools } from "../grok/tool-schemas";
-import { createTools } from "../grok/tools";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -90,7 +77,176 @@ import {
 } from "./compaction";
 import { DelegationManager } from "./delegations";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
-import { buildVisionUserMessages } from "./vision-input";
+// FORK-02: vision-input.ts deleted (multimodal anti-feature per PROJECT.md Out-of-Scope)
+
+// ---------------------------------------------------------------------------
+// FORK-02 STUBS — grok/* types and functions replaced by these compile-only
+// placeholders. All runtime call sites below throw NotImplementedError until
+// the Anthropic provider ships in plan 00-05 (PROV-03, TUI-02).
+// ---------------------------------------------------------------------------
+
+// Stub types replacing src/grok/client exports
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type XaiProvider = any; // FORK-02 stub — replaced by Anthropic/multi-provider client in plan 00-05
+
+export interface ModelInfoStub {
+  contextWindow?: number;
+  responsesOnly?: boolean;
+  supportsClientTools?: boolean;
+  supportsMaxOutputTokens?: boolean;
+  reasoningEfforts?: string[];
+}
+
+export interface ResolvedModelRuntime {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  model: any; // FORK-02 stub — LanguageModel from plan 00-05
+  modelId: string;
+  modelInfo?: ModelInfoStub;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  providerOptions?: any;
+}
+
+// Stub types replacing src/grok/batch exports
+export interface BatchClientOptions {
+  apiKey: string;
+  baseURL?: string;
+  signal?: AbortSignal;
+}
+
+export interface BatchChatMessage {
+  role: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  content: any;
+  tool_call_id?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tool_calls?: any[];
+  name?: string;
+}
+
+export interface BatchFunctionTool {
+  type: "function";
+  function: { name: string; description?: string; parameters?: unknown };
+}
+
+export interface BatchToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export interface BatchChatCompletionRequest {
+  model: string;
+  messages: BatchChatMessage[];
+  tools?: BatchFunctionTool[];
+  temperature?: number;
+  max_tokens?: number;
+  reasoning_effort?: string;
+}
+
+export interface BatchChatCompletionResponse {
+  choices: Array<{
+    message: { role: string; content: string | null; tool_calls?: BatchToolCall[] };
+    finish_reason: string;
+  }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    cost_in_usd_ticks?: number;
+  };
+}
+
+// FORK-02 stub functions — all throw NotImplementedError at runtime
+
+function _forkNotImplemented(feature: string): never {
+  throw new Error(
+    `muonroi-cli FORK-02: ${feature} not yet wired. ` +
+      "Anthropic adapter ships in plan 00-05 (TUI-02, PROV-03).",
+  );
+}
+
+function createProvider(_apiKey: string, _baseURL?: string): XaiProvider {
+  return _forkNotImplemented("createProvider (grok/client)");
+}
+
+function genTitle(
+  _provider: XaiProvider,
+  _userMessage: string,
+): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
+  return Promise.resolve(_forkNotImplemented("generateTitle (grok/client)"));
+}
+
+function resolveModelRuntime(_provider: XaiProvider, modelId: string): ResolvedModelRuntime {
+  return _forkNotImplemented(`resolveModelRuntime (grok/client) for model ${modelId}`);
+}
+
+function normalizeModelId(id: string): string {
+  // FORK-02 stub — pass-through until grok/models is replaced in plan 00-05
+  return id;
+}
+
+function getModelInfo(_modelId: string): ModelInfoStub | undefined {
+  // FORK-02 stub — returns undefined until grok/models is replaced in plan 00-05
+  return undefined;
+}
+
+const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning"; // FORK-02 stub placeholder
+
+async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
+  return _forkNotImplemented("toolSetToBatchTools (grok/tool-schemas)");
+}
+
+async function createBatch(_opts: BatchClientOptions & { name?: string }): Promise<{ batch_id: string }> {
+  return _forkNotImplemented("createBatch (grok/batch)");
+}
+
+async function addBatchRequests(
+  _opts: BatchClientOptions & { batchId: string; batchRequests: unknown[] },
+): Promise<void> {
+  _forkNotImplemented("addBatchRequests (grok/batch)");
+}
+
+async function pollBatchRequestResult(
+  _opts: BatchClientOptions & { batchId: string; batchRequestId: string },
+): Promise<unknown> {
+  return _forkNotImplemented("pollBatchRequestResult (grok/batch)");
+}
+
+function getBatchChatCompletion(_result: unknown): BatchChatCompletionResponse {
+  return _forkNotImplemented("getBatchChatCompletion (grok/batch)");
+}
+
+function createTools(
+  _bash: unknown,
+  _provider: XaiProvider,
+  _mode: unknown,
+  _opts?: {
+    runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
+    runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
+    readDelegation?: (id: string) => Promise<ToolResult>;
+    listDelegations?: () => Promise<ToolResult>;
+    scheduleManager?: unknown;
+    subagents?: unknown[];
+    sendTelegramFile?: (filePath: string) => Promise<ToolResult>;
+    sessionId?: string;
+  },
+): ToolSet {
+  return _forkNotImplemented("createTools (grok/tools)");
+}
+
+async function buildVisionUserMessages(
+  _prompt: string,
+  _cwd: string,
+  _signal?: AbortSignal,
+): Promise<ModelMessage[]> {
+  return _forkNotImplemented("buildVisionUserMessages (agent/vision-input)");
+}
+
+// ---------------------------------------------------------------------------
+// END FORK-02 STUBS
+// ---------------------------------------------------------------------------
 
 const MAX_TOOL_ROUNDS = 400;
 const VISION_MODEL = "grok-4-1-fast-reasoning";
@@ -1525,7 +1681,7 @@ export class Agent {
         const settings = attemptedOverflowRecovery
           ? relaxCompactionSettings(this.getCompactionSettings())
           : this.getCompactionSettings();
-        if (modelInfo) {
+        if (modelInfo?.contextWindow) {
           await this.compactForContext(
             provider,
             system,
@@ -1836,7 +1992,7 @@ export class Agent {
           const settings = attemptedOverflowRecovery
             ? relaxCompactionSettings(this.getCompactionSettings())
             : this.getCompactionSettings();
-          if (modelInfo) {
+          if (modelInfo?.contextWindow) {
             await this.compactForContext(
               provider,
               system,
@@ -1968,49 +2124,9 @@ export class Agent {
                   },
                 };
 
-                let paymentPrecheck: import("../types/index").PaymentPrecheck | undefined;
-                if (approvalPart.toolCall?.toolName === "paid_request") {
-                  try {
-                    const input = approvalPart.toolCall.input as { url?: string; method?: string } | null;
-                    const url = input?.url;
-                    if (url) {
-                      const { scanUrl } = await import("../payments/brin");
-                      const brin = await scanUrl(url);
-                      if (brin) {
-                        const securityRaw = `${brin.score}/100 (${brin.verdict}, ${brin.confidence} confidence)`;
-                        paymentPrecheck = {
-                          security: securityRaw,
-                          securityLabel: securityRaw,
-                          securityUrl: brin.url ?? "",
-                        };
-                      }
-
-                      const probeRes = await fetch(url, {
-                        method: input?.method ?? "GET",
-                        signal: AbortSignal.timeout(3_000),
-                      });
-                      if (probeRes.status === 402) {
-                        const header = probeRes.headers.get("payment-required");
-                        if (header) {
-                          const decoded = JSON.parse(Buffer.from(header, "base64").toString("utf-8"));
-                          const opts = decoded.accepts ?? [];
-                          if (opts.length > 0) {
-                            const opt = opts[0];
-                            paymentPrecheck = {
-                              ...paymentPrecheck,
-                              amount: opt.amount ?? opt.maxAmountRequired ?? opt.price ?? "",
-                              network: opt.network ?? "",
-                              asset: opt.asset ?? "",
-                              description: decoded.resource?.description ?? decoded.description ?? "",
-                            };
-                          }
-                        }
-                      }
-                    }
-                  } catch {
-                    // pre-check is best-effort
-                  }
-                }
+                // FORK-02: payments/brin deleted with src/payments/*; payment pre-check disabled.
+                // Stripe billing replaces Coinbase in plan 00-04 / Phase 4.
+                const paymentPrecheck: import("../types/index").PaymentPrecheck | undefined = undefined;
 
                 yield {
                   type: "tool_approval_request",
@@ -2374,15 +2490,15 @@ function toolOutputToText(output: {
 }
 
 function getBatchUsage(response: BatchChatCompletionResponse): ProcessMessageUsage {
-  const usage = response.usage ?? {};
-  const inputTokens = asNumber(usage.input_tokens) ?? asNumber(usage.prompt_tokens);
-  const outputTokens = asNumber(usage.output_tokens) ?? asNumber(usage.completion_tokens);
-  const totalTokens = asNumber(usage.total_tokens) ?? sumDefined(inputTokens, outputTokens);
+  const usage = response.usage as BatchChatCompletionResponse["usage"] | undefined;
+  const inputTokens = asNumber(usage?.input_tokens) ?? asNumber(usage?.prompt_tokens);
+  const outputTokens = asNumber(usage?.output_tokens) ?? asNumber(usage?.completion_tokens);
+  const totalTokens = asNumber(usage?.total_tokens) ?? sumDefined(inputTokens, outputTokens);
   return {
     inputTokens,
     outputTokens,
     totalTokens,
-    costUsdTicks: asNumber(usage.cost_in_usd_ticks),
+    costUsdTicks: asNumber(usage?.cost_in_usd_ticks),
   };
 }
 

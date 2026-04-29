@@ -4,7 +4,11 @@ import * as dotenv from "dotenv";
 import packageJson from "../package.json";
 import { Agent } from "./agent/agent";
 import { completeDelegation, failDelegation, loadDelegation } from "./agent/delegations";
-import { MODELS, normalizeModelId } from "./grok/models";
+// FORK-02: ./grok/models deleted; stubs below keep tsc --noEmit clean until plan 00-05.
+// FORK-02 stub: pass-through until grok/models replaced in plan 00-05.
+function normalizeModelId(id: string): string { return id; }
+// FORK-02 stub: empty model list until plan 00-05 wires Anthropic provider.
+const MODELS: Array<{ id: string; name: string; reasoning?: boolean; multiAgent?: boolean; responsesOnly?: boolean; description: string; contextWindow: number; inputPrice: number; outputPrice: number; aliases?: string[] }> = [];
 import {
   createHeadlessJsonlEmitter,
   type HeadlessOutputFormat,
@@ -12,7 +16,7 @@ import {
   renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
-import { runTelegramHeadlessBridge } from "./telegram/headless-bridge";
+// FORK-02: ./telegram/ deleted; telegram-bridge command removed below.
 import { startScheduleDaemon } from "./tools/schedule";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
@@ -366,38 +370,7 @@ program
     );
   });
 
-program
-  .command("telegram-bridge")
-  .description("Start the Telegram remote-control bridge without opening the TUI")
-  .option("-k, --api-key <key>", "Grok API key")
-  .option("-u, --base-url <url>", "API base URL")
-  .option("-m, --model <model>", "Model to use")
-  .option("-d, --directory <dir>", "Working directory", process.cwd())
-  .option("--sandbox", "Run agent shell commands inside a Shuru sandbox")
-  .option("--no-sandbox", "Run agent shell commands directly on the host")
-  .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
-  .option("--log-file <path>", "Bridge log file", "telegram-remote-bridge.log")
-  .option("--pair-code-file <path>", "Pairing code file", "telegram-pair-code.txt")
-  .action(async (options) => {
-    changeDirectoryOrExit(options.directory);
-    const config = resolveConfig(options);
-
-    process.off("SIGTERM", exitCleanlyOnSigterm);
-    try {
-      await runTelegramHeadlessBridge({
-        apiKey: requireApiKey(config.apiKey),
-        baseURL: config.baseURL,
-        model: config.model,
-        maxToolRounds: config.maxToolRounds,
-        sandboxMode: config.sandboxMode,
-        sandboxSettings: config.sandboxSettings,
-        logFile: options.logFile,
-        pairCodeFile: options.pairCodeFile,
-      });
-    } finally {
-      process.on("SIGTERM", exitCleanlyOnSigterm);
-    }
-  });
+// FORK-02: telegram-bridge command removed (src/telegram/ deleted per PROJECT.md Out-of-Scope).
 
 program
   .command("models")
@@ -450,67 +423,8 @@ program
     process.exit(result.success ? 0 : 1);
   });
 
-const walletCommand = program.command("wallet").description("Manage the local x402 wallet and payment settings");
-
-walletCommand
-  .command("init")
-  .description("Generate a new wallet keypair and enable payments for the selected chain")
-  .option("--chain <chain>", "Wallet chain: base or base-sepolia", "base-sepolia")
-  .action(async (options) => {
-    const { WalletManager } = await import("./wallet/manager");
-    const selectedChain = options.chain === "base" ? "base" : "base-sepolia";
-    const wallet = new WalletManager();
-    const data = wallet.init(selectedChain);
-    const current = loadPaymentSettings();
-    savePaymentSettings({
-      enabled: true,
-      chain: data.chain,
-      approval: current.approval,
-    });
-
-    console.log("\nWallet initialized.");
-    console.log(`  Address: ${data.address}`);
-    console.log(`  Chain:   ${data.chain}`);
-    console.log(`  Created: ${data.createdAt}`);
-    console.log("\nPayments have been enabled in ~/.grok/user-settings.json.");
-  });
-
-walletCommand
-  .command("balance")
-  .description("Show the current wallet balance")
-  .action(async () => {
-    const { WalletManager } = await import("./wallet/manager");
-    const wallet = new WalletManager();
-    const balance = await wallet.getBalance();
-    console.log(`\nAddress: ${balance.address}`);
-    console.log(`Chain:   ${balance.chain}`);
-    console.log(`${balance.nativeSymbol}:     ${balance.nativeBalance}`);
-    console.log(`USDC:    ${balance.usdcBalance}\n`);
-  });
-
-walletCommand
-  .command("history")
-  .description("Show recent x402 payment attempts")
-  .option("--limit <n>", "Number of records to show", "20")
-  .action(async (options) => {
-    const { PaymentHistory } = await import("./payments/history");
-    const limit = Number.parseInt(options.limit, 10) || 20;
-    const history = new PaymentHistory().list(limit);
-
-    if (history.length === 0) {
-      console.log("\nNo payment history yet.\n");
-      return;
-    }
-
-    console.log();
-    for (const row of history) {
-      console.log(`${row.createdAt}  ${row.status}`);
-      console.log(`  ${row.method} ${row.url}`);
-      console.log(`  ${row.amount} ${row.asset} on ${row.network}`);
-      if (row.txHash) console.log(`  tx: ${row.txHash}`);
-      console.log();
-    }
-  });
+// FORK-02: wallet commands removed (src/wallet/, src/payments/ deleted per PROJECT.md Out-of-Scope).
+// Stripe billing replaces Coinbase in Phase 4.
 
 program
   .command("daemon")
