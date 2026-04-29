@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 00-fork-skeleton plan 07 (TUI boot, abort, pending-calls; SC1 PASSED, SC2/SC3/SC4 deferred)
-last_updated: "2026-04-29T15:18:23.244Z"
+status: verifying
+stopped_at: Completed 00-fork-skeleton plan 08 (CI smoke + deps-check + DECISIONS D-007..D-009; Phase 0 COMPLETE 17/17 REQs)
+last_updated: "2026-04-29T15:25:27.797Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 5
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 8
-  completed_plans: 7
+  completed_plans: 8
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 
 Phase: 00 (fork-skeleton) — EXECUTING
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-29
 
 Progress: [░░░░░░░░░░] 0%
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 00-fork-skeleton P05 | 523671min | 2 tasks | 7 files |
 | Phase 00-fork-skeleton P07 | 10 | 3 tasks | 8 files |
 | Phase 00-fork-skeleton P07 | 30 | 3 tasks | 8 files |
+| Phase 00-fork-skeleton P08 | 15 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -93,6 +94,7 @@ Recent decisions affecting current work:
 - [Phase 00-fork-skeleton]: getSessionDir split into session-dir.ts (no bun:sqlite) for Vitest compatibility — pending-calls.ts imports session-dir.ts directly
 - [Phase 00-fork-skeleton]: AbortContext injected via AgentOptions; orchestrator bridges external signal to local AbortController per turn (preserves existing cleanup paths)
 - [Phase 00-fork-skeleton]: SC1 smoke PASSED on Windows 11 dev box (OpenTUI renders, Ctrl+C exits clean); SC2/SC3/SC4 deferred — no Anthropic API key on dev box; all logic covered by 197 unit tests
+- [Phase 00-fork-skeleton]: smoke-boot-only exits BEFORE loadAnthropicKey; vitest@4.1.5 pin locked D-007; ollama-ai-provider-v2 typo logged D-008; Phase 0 clean baseline D-009
 
 ### Pending Todos
 
@@ -124,6 +126,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29T15:18:23.234Z
-Stopped at: Completed 00-fork-skeleton plan 07 (TUI boot, abort, pending-calls; SC1 PASSED, SC2/SC3/SC4 deferred)
+Last session: 2026-04-29T15:25:27.790Z
+Stopped at: Completed 00-fork-skeleton plan 08 (CI smoke + deps-check + DECISIONS D-007..D-009; Phase 0 COMPLETE 17/17 REQs)
 Resume file: None
