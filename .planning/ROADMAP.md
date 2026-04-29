@@ -34,7 +34,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 00-01-PLAN.md — Fork import + LICENSE preservation + UPSTREAM_DEPS.md (FORK-01, FORK-05, FORK-06)
 - [x] 00-02-PLAN.md — Strip telegram/audio/wallet/payments/grok/vision-input dead surface (FORK-02)
 - [x] 00-03-PLAN.md — Storage rename ~/.grok/ → ~/.muonroi-cli/ (FORK-03)
-- [ ] 00-04-PLAN.md — Dependency swap to locked v1 stack + FORK-07 folder layout (FORK-04, FORK-07)
+- [x] 00-04-PLAN.md — Dependency swap to locked v1 stack + FORK-07 folder layout (FORK-04, FORK-07)
 - [ ] 00-05-PLAN.md — Anthropic provider + key load + log redactor middleware (TUI-02, PROV-03, PROV-07)
 - [ ] 00-06-PLAN.md — EE HTTP client (replaces shell-spawn) + usage/config skeletons (EE-01, USAGE-01, USAGE-06)
 - [ ] 00-07-PLAN.md — TUI boot + Ctrl+C abort safety + session resume (TUI-01, TUI-03, TUI-04)
@@ -108,7 +108,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 0. Fork & Skeleton | 3/8 | In Progress|  |
+| 0. Fork & Skeleton | 4/8 | In Progress|  |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/TBD | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 0/TBD | Not started | - |
