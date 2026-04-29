@@ -31,6 +31,7 @@ We do not sell tokens. We sell experience: memory that shrinks while capability 
 - [ ] Migration path local EE → cloud EE without principle loss
 - [ ] Offline-first heavy logic — judge worker, compaction, router classifier run without network when needed
 - [ ] Runaway scenario tests — usage guard proven not to leak past cap under infinite loop / large file recursion / model thrashing
+- [ ] **Auto-judge feedback loop** — orchestrator captures `warningId + expectedBehavior` at PreToolUse, compares to actual outcome (error / diff / test failure / success) at PostToolUse, auto-tags `FOLLOWED / IGNORED / IRRELEVANT`, and calls `/api/feedback` without agent intervention. Closes EE evolution loop without relying on chat-side reporting.
 
 ### Out of Scope
 
@@ -75,6 +76,9 @@ The forking decision is driven by economics — `grok-cli` ships ~4,800 lines of
 | SiliconFlow as cold-path brain only | Latency + single-vendor risk disqualify it as primary; cold-path absorbs both costs acceptably | — Pending |
 | Stripe for billing, not Coinbase | SaaS subscription is the use case; crypto wallet from `grok-cli` is irrelevant | — Pending |
 | Companion artifacts at root: `IDEA.md` + `DECISIONS.md` + `README.md` | IDEA = vision source, DECISIONS = locked architectural log, README = public "Why not Cursor?" pitch | — Pending |
+| Phase 0 sized at 1.5–2 weeks (not 1) | Research synthesizer mapped 5 HIGH-severity pitfalls + 6 architecture deliverables to Phase 0 — undersized in IDEA's first draft | — Pending |
+| Source folder layout: `src/{ui, orchestrator, providers, router, usage, ee, flow, gsd, lsp, mcp, headless, tools, storage, utils}` | Optimized for solo maintainer, mirrors architecture research split, replaces grok-cli's `src/grok` and `src/agent` cleanly | — Pending |
+| Auto-judge feedback loop owned by orchestrator (not agent prompts) | Closes EE evolution loop without relying on agent reporting — feedback fires deterministically per tool call | — Pending |
 
 ## Success Metrics
 
