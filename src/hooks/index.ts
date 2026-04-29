@@ -1,5 +1,22 @@
+/**
+ * Hook dispatcher — routes PreToolUse / PostToolUse events through the
+ * Experience Engine HTTP client at localhost:8082.
+ *
+ * Plan 00.06: src/hooks/executor.ts (shell-spawn approach) has been deleted.
+ * This module is the new dispatcher. It preserves the original public function
+ * signatures so call sites in the orchestrator do not change.
+ *
+ * Shell-spawn was:
+ *   spawn("sh", ["-c", hook.command], ...)  — broken on Windows without WSL.
+ * HTTP client is:
+ *   POST http://localhost:8082/api/intercept  — cross-platform, safe, auditable.
+ *
+ * Architecture: EE is optional. If EE is not running, all intercepts fall back
+ * to { decision: "allow" } so the TUI is never blocked by a missing EE process.
+ */
+
+// Re-export type-only items that callers may import from this module
 export { getMatchingHooks, loadHooksConfig } from "./config.js";
-export { execCommandHook, executeHooks } from "./executor.js";
 export type {
   AggregatedHookResult,
   BaseHookInput,
@@ -17,8 +34,7 @@ export type {
 } from "./types.js";
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
-import { getMatchingHooks, loadHooksConfig } from "./config.js";
-import { executeHooks } from "./executor.js";
+import { intercept, posttool } from "../ee/index.js";
 import type {
   AggregatedHookResult,
   HookInput,
@@ -26,7 +42,6 @@ import type {
   PostToolUseHookInput,
   PreToolUseHookInput,
 } from "./types.js";
-import { getMatchQuery } from "./types.js";
 
 function emptyResult(): AggregatedHookResult {
   return {
@@ -39,21 +54,78 @@ function emptyResult(): AggregatedHookResult {
 }
 
 /**
- * Fire hooks for a generic event. Loads config, matches, and executes.
- * Swallows all errors so hooks never crash the agent.
+ * Dispatch a hook event to the EE HTTP client.
+ *
+ * - PreToolUse:  blocking intercept call → may return decision:block
+ * - PostToolUse: fire-and-forget posttool call
+ * - All other events: allow by default (Phase 1 EE-02+ extends this)
+ *
+ * Swallows all errors so hooks never crash the orchestrator.
  */
 export async function executeEventHooks(
   input: HookInput,
   cwd: string,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
 ): Promise<AggregatedHookResult> {
   try {
-    const config = loadHooksConfig();
-    const matchValue = getMatchQuery(input);
-    const hooks = getMatchingHooks(config, input.hook_event_name, matchValue);
-    if (hooks.length === 0) return emptyResult();
-    return await executeHooks(hooks, input, cwd, signal);
+    if (input.hook_event_name === "PreToolUse") {
+      const r = await intercept({
+        toolName: input.tool_name,
+        toolInput: input.tool_input,
+        cwd,
+      });
+      if (r.decision === "block") {
+        return {
+          blocked: true,
+          blockingErrors: [{ command: "ee:intercept", stderr: r.reason ?? "ee-blocked" }],
+          preventContinuation: true,
+          stopReason: r.reason ?? "ee-blocked",
+          additionalContexts: r.suggestions ?? [],
+          decision: "block",
+          results: [],
+        };
+      }
+      return {
+        blocked: false,
+        blockingErrors: [],
+        preventContinuation: false,
+        additionalContexts: r.suggestions ?? [],
+        decision: "approve",
+        results: [],
+      };
+    }
+
+    if (input.hook_event_name === "PostToolUse") {
+      posttool({
+        toolName: input.tool_name,
+        toolInput: input.tool_input,
+        outcome: {
+          // PostToolUse always means success — failure goes to PostToolUseFailure
+          success: true,
+        },
+        cwd,
+      });
+      return emptyResult();
+    }
+
+    if (input.hook_event_name === "PostToolUseFailure") {
+      const failInput = input as PostToolUseFailureHookInput;
+      posttool({
+        toolName: failInput.tool_name,
+        toolInput: failInput.tool_input,
+        outcome: {
+          success: false,
+          error: failInput.error,
+        },
+        cwd,
+      });
+      return emptyResult();
+    }
+
+    // All other event names: allow by default (Phase 1 EE-02+ extends coverage)
+    return emptyResult();
   } catch {
+    // EE errors must never crash the orchestrator
     return emptyResult();
   }
 }
