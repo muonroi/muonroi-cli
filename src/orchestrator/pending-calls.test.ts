@@ -196,7 +196,7 @@ describe("PendingCallsLog", () => {
 
 describe("getSessionDir (B-3)", () => {
   it("Test 9: returns path under .muonroi-cli/sessions/<id> and creates the directory", async () => {
-    const { getSessionDir } = await import("../storage/sessions.js");
+    const { getSessionDir } = await import("../storage/session-dir.js");
     const sid = `test-b3-${Date.now()}`;
     const dir = await getSessionDir(sid, tmpBase);
 
