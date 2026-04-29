@@ -1,0 +1,23 @@
+{
+  "version": "1.38.5",
+  "project_code": "MUONROI",
+  "project_title": "muonroi-cli",
+  "mode": "yolo",
+  "granularity": "standard",
+  "parallelization": true,
+  "commit_docs": true,
+  "model_profile": "balanced",
+  "workflow": {
+    "research": true,
+    "plan_check": true,
+    "verifier": true,
+    "nyquist_validation": true,
+    "auto_advance": true,
+    "_auto_chain_active": false
+  },
+  "planning": {
+    "sub_repos": []
+  },
+  "created_at": "2026-04-29",
+  "notes": "Solo maintainer. Fork-and-amputate of grok-cli with EE+QC+GSD core. BYOK + orchestration fee model. Phase 0 must include usage guard."
+}
