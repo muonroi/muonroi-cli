@@ -115,3 +115,13 @@
   - `.planning/PROJECT.md` Key Decisions table: project-level decisions (overlaps OK)
   - PR descriptions: code-level decisions tied to a single change
 - **When to add an entry**: Any decision that future-you will be tempted to revisit. If you would not want to re-debate it in 3 months, lock it here.
+
+---
+
+## Companion Files (cross-reference)
+
+- `LICENSE` — our MIT license per D-001.
+- `LICENSE-grok-cli` — preserved upstream MIT, immutable per D-001 / Pitfall 15.
+- `UPSTREAM_DEPS.md` — locked dependency list with release feeds per FORK-05 / Pitfall 1.
+- `IDEA.md` — vision source (read-only reference).
+- `.planning/PROJECT.md` — living project context (Key Decisions table overlaps OK).
