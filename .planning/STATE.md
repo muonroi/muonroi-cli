@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 00-fork-skeleton plan 06 (EE HTTP client + storage skeletons)
-last_updated: "2026-04-29T14:30:13.922Z"
+stopped_at: Completed 00-fork-skeleton plan 05 (Anthropic provider + log redactor)
+last_updated: "2026-04-29T14:31:40.359Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 8
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 00 (fork-skeleton) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 00 P03 | 45 | 2 tasks | 26 files |
 | Phase 00-fork-skeleton P04 | 35 | 2 tasks | 22 files |
 | Phase 00-fork-skeleton P06 | 5 | 2 tasks | 16 files |
+| Phase 00-fork-skeleton P05 | 523671min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,9 @@ Recent decisions affecting current work:
 - [Phase 00-fork-skeleton]: keytar@^7.9.0 builds successfully on Windows 11 — native build OK; explicit dep kept for PROV-03 OS keychain.
 - [Phase 00-fork-skeleton]: usage-cap.ts named differently from plan to avoid clash with existing SQLite usage.ts
 - [Phase 00-fork-skeleton]: posttool declared as non-async synchronous void function per B-4 — EE must never block orchestrator hot path
+- [Phase 00-fork-skeleton]: keytar exports named functions (not default) — keytarMod.getPassword() not keytarMod.default.getPassword()
+- [Phase 00-fork-skeleton]: AI SDK v6 field names locked: chunk.text (text-delta), chunk.input (tool-call), chunk.finishReason (finish) — verified via context7 2026-04-29
+- [Phase 00-fork-skeleton]: createProvider() returns @ai-sdk/anthropic factory; resolveModelRuntime() calls factory(modelId) to get AI SDK LanguageModel — orchestrator architecture preserved
 
 ### Pending Todos
 
@@ -115,6 +119,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29T14:30:13.917Z
-Stopped at: Completed 00-fork-skeleton plan 06 (EE HTTP client + storage skeletons)
+Last session: 2026-04-29T14:31:40.355Z
+Stopped at: Completed 00-fork-skeleton plan 05 (Anthropic provider + log redactor)
 Resume file: None
