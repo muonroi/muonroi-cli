@@ -1,5 +1,5 @@
 import type { ModelMessage } from "ai";
-import { getCompactionSummaryText } from "../agent/compaction";
+import { getCompactionSummaryText } from "../orchestrator/compaction";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
 import { getDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
