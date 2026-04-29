@@ -32,7 +32,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
   5. PreToolUse / PostToolUse hooks reach `localhost:8082` over HTTP (not via `spawn("sh", …)`), proving the EE client replaces grok-cli's shell-spawn executor.
 **Plans**: 8 plans
 - [x] 00-01-PLAN.md — Fork import + LICENSE preservation + UPSTREAM_DEPS.md (FORK-01, FORK-05, FORK-06)
-- [ ] 00-02-PLAN.md — Strip telegram/audio/wallet/payments/grok/vision-input dead surface (FORK-02)
+- [x] 00-02-PLAN.md — Strip telegram/audio/wallet/payments/grok/vision-input dead surface (FORK-02)
 - [ ] 00-03-PLAN.md — Storage rename ~/.grok/ → ~/.muonroi-cli/ (FORK-03)
 - [ ] 00-04-PLAN.md — Dependency swap to locked v1 stack + FORK-07 folder layout (FORK-04, FORK-07)
 - [ ] 00-05-PLAN.md — Anthropic provider + key load + log redactor middleware (TUI-02, PROV-03, PROV-07)
@@ -108,7 +108,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 0. Fork & Skeleton | 1/8 | In Progress|  |
+| 0. Fork & Skeleton | 2/8 | In Progress|  |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/TBD | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 0/TBD | Not started | - |

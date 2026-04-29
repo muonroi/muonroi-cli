@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 00-fork-skeleton plan 01 (fork import + LICENSE + UPSTREAM_DEPS)
-last_updated: "2026-04-29T13:33:45.186Z"
+stopped_at: Completed 00-fork-skeleton plan 02 (strip telegram/audio/wallet/payments/grok/vision-input)
+last_updated: "2026-04-29T13:54:07.343Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 8
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 00 (fork-skeleton) — EXECUTING
-Plan: 2 of 8
+Plan: 3 of 8
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 
 *Updated after each plan completion*
 | Phase 00-fork-skeleton P01 | 8 | 2 tasks | 151 files |
+| Phase 00 P02 | 45 | 2 tasks | 52 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,8 @@ Recent decisions affecting current work:
 - Pre-Phase 0: Stack pinned — `ai@6.0.169`, `@opentui/core@0.1.107` (NOT 0.2.0), `ollama-ai-provider-v2@1.50.1`, Bun `>=1.3.13`.
 - [Phase 00-fork-skeleton]: grok-cli source cloned from GitHub (upstream not present locally) — hash verified identical to 09b64bc
 - [Phase 00-fork-skeleton]: engines.bun >= 1.3.13 added to package.json per D-003 at fork import time
+- [Phase 00]: agent.ts grok-client call sites stubbed with NotImplementedError (not deleted) so tsc graph stays intact until Anthropic adapter lands in plan 00-05
+- [Phase 00]: payments/brin dynamic import removed from agent.ts; payment pre-check = undefined until Stripe ships Phase 4
 
 ### Pending Todos
 
@@ -102,6 +105,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:33:45.183Z
-Stopped at: Completed 00-fork-skeleton plan 01 (fork import + LICENSE + UPSTREAM_DEPS)
+Last session: 2026-04-29T13:54:07.339Z
+Stopped at: Completed 00-fork-skeleton plan 02 (strip telegram/audio/wallet/payments/grok/vision-input)
 Resume file: None
