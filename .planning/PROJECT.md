@@ -12,11 +12,14 @@ We do not sell tokens. We sell experience: memory that shrinks while capability 
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Fork `grok-cli` and strip to a maintainable core (UI shell, LSP, MCP, headless, daemon, hooks, common tools) — Validated in Phase 00: fork-skeleton
+- [x] Cross-platform support — Windows CI smoke passes (bun install + tsc + vitest + headless boot on windows-latest) — Validated in Phase 00: fork-skeleton
+- [x] Experience Engine PreToolUse hook integration via HTTP client to localhost:8082 (EE-01) — Validated in Phase 00: fork-skeleton
+- [x] Usage guard storage primitives — config.json + usage.json with atomic-rename writes, cap schema in place — Validated in Phase 00: fork-skeleton
 
 ### Active
 
-- [ ] Fork `grok-cli` and strip to a maintainable core (UI shell, LSP, MCP, headless, daemon, hooks, common tools)
+- [ ] Multi-provider adapter for Anthropic, OpenAI, Gemini, DeepSeek, Ollama
 - [ ] Multi-provider adapter for Anthropic, OpenAI, Gemini, DeepSeek, Ollama
 - [ ] 3-tier brain router — hot-path local classifier, warm-path Ollama on existing VPS, cold-path SiliconFlow
 - [ ] Experience Engine PreToolUse hook integration that injects warnings + principles before destructive tool calls
@@ -68,7 +71,7 @@ The forking decision is driven by economics — `grok-cli` ships ~4,800 lines of
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Fork `grok-cli` instead of greenfield | Saves 3–6 months of TUI/LSP/MCP work; license is MIT-compatible | — Pending validation in Phase 0 |
+| Fork `grok-cli` instead of greenfield | Saves 3–6 months of TUI/LSP/MCP work; license is MIT-compatible | ✓ Validated Phase 00 — 148 files imported, tsc clean, 197 tests pass, Windows CI green |
 | 3-tier brain router (local → Ollama → SiliconFlow) | Single-vendor brain creates latency + outage risk; tiered path keeps hot path free and fast | — Pending |
 | BYOK pricing model + orchestration fee | Subsidizing inference at flat $20 kills margin on power users; orchestration fee scales linearly | — Pending |
 | Usage guard mandatory in Phase 0 | BYOK without realtime spend visibility is reputation risk — one runaway loop and the user blames the tool | — Pending |
