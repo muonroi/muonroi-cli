@@ -29,12 +29,12 @@
 
 ### USAGE — Realtime spend visibility and hard cap
 
-- [ ] **USAGE-01**: User can configure `cap.monthly_usd` (default $15) via `~/.muonroi-cli/config.json` and have it enforced from first run.
+- [x] **USAGE-01**: User can configure `cap.monthly_usd` (default $15) via `~/.muonroi-cli/config.json` and have it enforced from first run.
 - [ ] **USAGE-02**: System fires three threshold events at 50%, 80%, 100% of the configured cap with appropriate UX — notice / warning / halt. (IDEA hard requirement)
 - [ ] **USAGE-03**: System enforces cap via reservation ledger that holds `current + reservations + projected ≤ cap` atomically across concurrent tool calls. Naive counter-then-act is rejected. (Pitfall 3)
 - [ ] **USAGE-04**: System auto-downgrades model when projected spend would breach cap, following Opus → Sonnet → Haiku → halt chain, with explicit status-bar transition before each switch. (Pitfall 12)
 - [ ] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
-- [ ] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
+- [x] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
 - [ ] **USAGE-07**: Runaway-scenario test suite proves cap is never exceeded under infinite tool loop, large-file recursion, model thrashing, and 10-parallel-call burst. (IDEA success metric)
 - [ ] **USAGE-08**: User can invoke `/cost` slash command to print current status-bar contents on demand.
 
@@ -60,7 +60,7 @@
 
 ### EE — Experience Engine integration
 
-- [ ] **EE-01**: TUI replaces grok-cli's shell-spawn hooks (`src/hooks/executor.ts`) with HTTP client (`src/ee/client.ts`) talking to `localhost:8082`. (Architecture cross-cutting #2)
+- [x] **EE-01**: TUI replaces grok-cli's shell-spawn hooks (`src/hooks/executor.ts`) with HTTP client (`src/ee/client.ts`) talking to `localhost:8082`. (Architecture cross-cutting #2)
 - [ ] **EE-02**: PreToolUse hook posts to `/api/intercept` blocking, renders `⚠️ [Experience]` warnings inline before tool execution; `decision === 'block'` aborts the call. (Pitfall 6)
 - [ ] **EE-03**: PostToolUse hook posts to `/api/posttool` fire-and-forget (no await); judge-worker runs async on EE side. Loss window on EE crash is acceptable (~30 lessons / 10min). (Open Q7)
 - [ ] **EE-04**: All EE calls carry `tenantId` parameter from day 1, even when single-tenant local. (Pitfall 4 schema)
@@ -166,12 +166,12 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | TUI-03 | Phase 0 | Pending |
 | TUI-04 | Phase 0 | Pending |
 | TUI-05 | Phase 1 | Pending |
-| USAGE-01 | Phase 0 | Pending |
+| USAGE-01 | Phase 0 | Complete |
 | USAGE-02 | Phase 1 | Pending |
 | USAGE-03 | Phase 1 | Pending |
 | USAGE-04 | Phase 1 | Pending |
 | USAGE-05 | Phase 1 | Pending |
-| USAGE-06 | Phase 0 | Pending |
+| USAGE-06 | Phase 0 | Complete |
 | USAGE-07 | Phase 1 | Pending |
 | USAGE-08 | Phase 2 | Pending |
 | PROV-01 | Phase 1 | Pending |
@@ -188,7 +188,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | ROUTE-05 | Phase 1 | Pending |
 | ROUTE-06 | Phase 1 | Pending |
 | ROUTE-07 | Phase 1 | Pending |
-| EE-01 | Phase 0 | Pending |
+| EE-01 | Phase 0 | Complete |
 | EE-02 | Phase 1 | Pending |
 | EE-03 | Phase 1 | Pending |
 | EE-04 | Phase 1 | Pending |
