@@ -361,16 +361,14 @@ program
   .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option("--update", "Update grok to the latest version and exit")
-  .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage + loadAnthropicKey and exit 0")
+  .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access (FORK-08)")
   .action(async (message: string[], options) => {
-    // Plan 00-07 boot smoke flag — used by `bun run src/index.ts --smoke-boot-only`.
+    // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
+    // FORK-08 / windows-smoke.yml. Phase 0 only.
+    // Deliberately exits BEFORE loadAnthropicKey() — CI runners have no keychain configured.
     if (options.smokeBootOnly) {
       const [_cfg, _usg] = await Promise.all([loadConfig(), loadUsage()]);
-      await loadAnthropicKey().catch(() => {
-        // Key missing is acceptable for smoke — it means we fall through to env var path.
-        // If both keychain and env are missing, this exits 0 anyway (smoke only checks load paths).
-      });
-      console.log("[muonroi-cli] boot smoke: loadConfig + loadUsage complete");
+      console.log("[muonroi-cli] smoke-boot-only — config + usage loaded; exiting 0.");
       process.exit(0);
     }
 

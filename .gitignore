@@ -1,0 +1,28 @@
+# Bun
+node_modules/
+bun.lockb
+.bun/
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# Atomic IO leftovers (safety — should not land in repo)
+*.tmp
+*.tmp.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# CI artifacts
+deps-outdated.txt
+
+# Logs
+*.log
+
+# Dev-time muonroi-cli artifacts
+# (live in user home, but if MUONROI_CLI_HOME=. is set during dev these may appear here)
+.muonroi-cli/
