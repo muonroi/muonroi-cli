@@ -1,7 +1,6 @@
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { DEFAULT_MODEL, getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../grok/models";
 import type { HooksConfig } from "../hooks/types";
 import type {
   LspBuiltInServerId,
@@ -11,6 +10,35 @@ import type {
   NormalizedLspSettings,
 } from "../lsp/types";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+
+// ---------------------------------------------------------------------------
+// FORK-02 STUBS — ../grok/models deleted; stubs keep tsc --noEmit clean until plan 00-05.
+// ---------------------------------------------------------------------------
+
+// FORK-02 stub: DEFAULT_MODEL placeholder until plan 00-05 wires Anthropic provider.
+const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning";
+
+// FORK-02 stub: pass-through until grok/models replaced in plan 00-05.
+function normalizeModelId(id: string): string {
+  return id;
+}
+
+// FORK-02 stub: empty until grok/models replaced in plan 00-05.
+function getModelIds(): string[] {
+  return [];
+}
+
+// FORK-02 stub: returns undefined until grok/models replaced in plan 00-05.
+function getEffectiveReasoningEffort(
+  _modelId: string,
+  effort?: ReasoningEffort,
+): ReasoningEffort | undefined {
+  return effort;
+}
+
+// ---------------------------------------------------------------------------
+// END FORK-02 STUBS
+// ---------------------------------------------------------------------------
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";

@@ -4,21 +4,9 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Agent } from "../agent/agent";
-import {
-  DEFAULT_MODEL,
-  getEffectiveReasoningEffort,
-  getModelIds,
-  getModelInfo,
-  getSupportedReasoningEfforts,
-  MODELS,
-  normalizeModelId,
-} from "../grok/models";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
-import { createTelegramBridge, type TelegramBridgeHandle } from "../telegram/bridge";
-import { approvePairingCode } from "../telegram/pairing";
-import { createTurnCoordinator } from "../telegram/turn-coordinator";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -82,17 +70,54 @@ import {
   PlanView,
 } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
-import {
-  buildAssistantEntry,
-  buildToolResultEntry,
-  buildUserEntry,
-  decorateTelegramEntries,
-  getTelegramSourceLabel,
-  getUnflushedTelegramAssistantContent,
-  replaceTurnEntries,
-} from "./telegram-turn-ui";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
+
+// ---------------------------------------------------------------------------
+// FORK-02 STUBS — grok/models, telegram/*, and telegram-turn-ui deleted.
+// These compile-only placeholders keep tsc --noEmit clean until plan 00-05.
+// ---------------------------------------------------------------------------
+
+// FORK-02 stub: model list and helpers (grok/models → plan 00-05 Anthropic provider)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const MODELS: any[] = [];
+const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning";
+function getModelIds(): string[] { return []; }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function getModelInfo(_id: string): any { return undefined; }
+function normalizeModelId(id: string): string { return id; }
+function getEffectiveReasoningEffort(_modelId: string, effort?: ReasoningEffort): ReasoningEffort | undefined { return effort; }
+function getSupportedReasoningEfforts(_modelId: string): ReasoningEffort[] { return []; }
+
+// FORK-02 stub: telegram bridge (src/telegram/* deleted per PROJECT.md Out-of-Scope)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type TelegramBridgeHandle = any;
+function createTelegramBridge(_opts: unknown): TelegramBridgeHandle { return null as TelegramBridgeHandle; }
+function approvePairingCode(
+  _code: string,
+): { ok: true; userId: number } | { ok: false; error: string } {
+  return { ok: false, error: "Telegram deleted (FORK-02). Use muonroi-cli." };
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function createTurnCoordinator(): any { return { reset: () => {}, handleEvent: () => {} }; }
+
+// FORK-02 stub: telegram-turn-ui.ts deleted; these are no-ops for compile.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildAssistantEntry(..._args: any[]): any { return {}; }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildToolResultEntry(..._args: any[]): any { return {}; }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildUserEntry(..._args: any[]): any { return {}; }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function decorateTelegramEntries(_entries: any[], _userId: number, _remoteKey: string): any[] { return []; }
+function getTelegramSourceLabel(_role?: string, _userId?: number): string { return ""; }
+function getUnflushedTelegramAssistantContent(_content: string, _flushedChars: number): string { return ""; }
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function replaceTurnEntries(_prev: any[], _remoteKey: string, _delta: any[]): any[] { return _prev; }
+
+// ---------------------------------------------------------------------------
+// END FORK-02 STUBS
+// ---------------------------------------------------------------------------
 
 const STAR_PALETTE = ["#777777", "#666666", "#4a4a4a", "#333333", "#222222"];
 const LOADING_SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
@@ -894,24 +919,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setWalletFocusIndex(0);
     setWalletSettings(loadPaymentSettings());
     setShowWalletPicker(true);
+    // FORK-02: wallet/manager deleted; wallet UI disabled until Stripe ships in Phase 4.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
-    import("../wallet/manager")
-      .then(async ({ WalletManager }) => {
-        if (!WalletManager.exists()) {
-          setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
-          return;
-        }
-        const wm = new WalletManager();
-        const data = wm.getWalletData();
-        setWalletDisplayInfo({ address: data.address, ethBalance: null, usdcBalance: null });
-        const balance = await wm.getBalance();
-        setWalletDisplayInfo({
-          address: balance.address,
-          ethBalance: balance.nativeBalance,
-          usdcBalance: balance.usdcBalance,
-        });
-      })
-      .catch(() => {});
   }, []);
 
   const setReasoningEfforts = useCallback((next: Record<string, ReasoningEffort>) => {
@@ -1718,7 +1727,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       onAssistantMessage: upsertTelegramAssistantMessage,
       onToolCalls: showTelegramToolCalls,
       onToolResult: appendTelegramToolResult,
-      onError: (msg) => {
+      onError: (msg: string) => {
         setMessages((p) => [...p, { type: "assistant", content: `Telegram: ${msg}`, timestamp: new Date() }]);
       },
     });
