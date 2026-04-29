@@ -57,27 +57,26 @@ describe("Redactor — error redaction", () => {
 
 describe("Redactor — global patches", () => {
   it("Test 7: installGlobalPatches patches console.log to redact secrets", () => {
-    const originalLog = console.log;
     const captured: string[] = [];
 
-    // Patch console.log BEFORE installing global patches to capture output
-    // We need to test AFTER patches are installed
-    redactor.installGlobalPatches();
-
-    // Spy on the patched console.log by replacing the already-patched version
-    const patchedLog = console.log;
+    // Intercept the original console.log BEFORE installGlobalPatches wraps it
+    // so we capture what the PATCHED version actually forwards.
+    const originalLog = console.log;
     console.log = (...args: unknown[]) => {
       captured.push(args.map(String).join(" "));
-      patchedLog.apply(console, args);
     };
 
+    // Now install global patches — they will wrap the spy above
+    redactor.installGlobalPatches();
+
+    // Call through the patched console.log
     console.log("test sk-ant-1234567890abcdefghij");
 
     // Restore
-    console.log = originalLog;
     redactor.uninstallGlobalPatches();
+    console.log = originalLog;
 
-    // The captured string should have redacted the secret
+    // The captured string should have been redacted by the patch
     const output = captured.join(" ");
     expect(output).not.toContain("sk-ant-1234567890abcdefghij");
     expect(output).toContain("***REDACTED***");
