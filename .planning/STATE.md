@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 00-fork-skeleton plan 03 (rename ~/.grok/ → ~/.muonroi-cli/ storage namespace)
-last_updated: "2026-04-29T14:12:57.753Z"
+stopped_at: Completed 00-fork-skeleton plan 04 (deps swap to locked v1 stack + FORK-07 layout)
+last_updated: "2026-04-29T14:22:17.331Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 8
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 00 (fork-skeleton) — EXECUTING
-Plan: 4 of 8
+Plan: 5 of 8
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 00-fork-skeleton P01 | 8 | 2 tasks | 151 files |
 | Phase 00 P02 | 45 | 2 tasks | 52 files |
 | Phase 00 P03 | 45 | 2 tasks | 26 files |
+| Phase 00-fork-skeleton P04 | 35 | 2 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase 00]: Used synchronous vi.doMock factory with pre-imported actuals to fix Windows os.homedir() mock isolation in delegations.test.ts
 - [Phase 00]: GROK_API_KEY/GROK_MODEL/GROK_BASE_URL env vars not renamed in 00-03 — xAI API-specific, deferred to plan 00-05 (Anthropic provider swap)
 - [Phase 00]: ui/app.tsx Row.grok renamed to Row.brand with cursor offset +4→+7 to match 'muonroi' brand text length
+- [Phase 00-fork-skeleton]: ollama-ai-provider-v2: locked stack specified 1.50.1 but does not exist on npm; used 1.5.5 (highest 1.x). Research SUMMARY.md likely had a typo. Log for DECISIONS.md in plan 00-08.
+- [Phase 00-fork-skeleton]: keytar@^7.9.0 builds successfully on Windows 11 — native build OK; explicit dep kept for PROV-03 OS keychain.
 
 ### Pending Todos
 
@@ -109,6 +112,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29T14:12:57.749Z
-Stopped at: Completed 00-fork-skeleton plan 03 (rename ~/.grok/ → ~/.muonroi-cli/ storage namespace)
+Last session: 2026-04-29T14:22:17.327Z
+Stopped at: Completed 00-fork-skeleton plan 04 (deps swap to locked v1 stack + FORK-07 layout)
 Resume file: None
