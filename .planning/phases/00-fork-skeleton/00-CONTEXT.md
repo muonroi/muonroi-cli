@@ -35,7 +35,7 @@ A forked, amputated `muonroi-cli` boots on the dev box, renders the OpenTUI shel
 - **Usage guard skeleton (USAGE-01, USAGE-06):** Write `~/.muonroi-cli/config.json` schema with `cap.monthly_usd` (default 15); read on boot. Create `~/.muonroi-cli/usage.json` skeleton with `{ current_month_utc: "YYYY-MM", current_usd: 0, reservations: [] }`; read/write via atomic-rename pattern (`.tmp` then rename). No enforcement in Phase 0 — that's Phase 1 USAGE-02..05/07. File-owner role for cap state locks here per cross-phase note in ROADMAP Phase 0.
 
 ### Testing, Tooling & CI
-- **Test runner:** Bun test (built into Bun runtime, zero config). Jest-style API; matches stack pin `bun >= 1.3.13`.
+- **Test runner:** Inherit `vitest@4.1.5` from grok-cli upstream (test script is `bunx vitest run`). Migration to `bun test` deferred — Phase 0 priority is fork-and-amputate, not test-framework swap. Locked in DECISIONS.md as part of FORK-04 deps inheritance.
 - **CI in Phase 0 (FORK-08):** GitHub Actions Windows-only smoke job — `bun install`, `bun test`, then a headless boot smoke that runs `bun run dev` with stdin piped, asserts OpenTUI renders within 3s, then sends Ctrl+C and asserts clean exit. Block Phase 1 if fails. Plus a weekly `bun outdated` job per FORK-05. Full matrix (Win/Mac/Linux) lands in Phase 3 CORE-05.
 - **Commit style:** Conventional Commits — `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`, `test:`. Enables automated changelog later; signals intent without ceremony.
 - **TypeScript config:** Inherit grok-cli's `tsconfig.json` baseline. Adjust only `compilerOptions.paths` to map our `src/{ui, orchestrator, providers, router, usage, ee, flow, gsd, lsp, mcp, headless, tools, storage, utils}` layout (FORK-07). Strict mode + ESM-only refactor deferred — Phase 0 minimizes churn.
@@ -65,13 +65,13 @@ The fork base is the `grok-cli` repo (Vibe Kit, MIT). Key inherited surfaces (pe
 - OpenTUI component tree from grok-cli — input box, output stream, slash palette, status frame.
 - Streaming async-generator pattern — keep verbatim in Phase 0, abstract in Phase 1.
 - AI SDK v6 (`ai@6.0.169`) — Anthropic provider via `@ai-sdk/anthropic`.
-- `keytar` — already in grok-cli's tree (used by `~/.grok/` credentials store), retarget at `~/.muonroi-cli/` keys.
+- `keytar` — **NEW dependency** added in Plan 00-04 (NOT inherited — verified absent from grok-cli `package.json` and `src/`). Used for OS keychain access per PROV-03. Plan 00-05 must use a dynamic `import()` so a missing module degrades gracefully to env-var fallback without crashing boot.
 
 ### Established Patterns (from grok-cli)
 - Bun runtime + ESM modules.
 - React 19 + OpenTUI for terminal rendering.
 - Async generators for stream chunks.
-- File-backed session storage with JSON-per-session.
+- **SQLite-backed session storage** via `bun:sqlite` (`src/storage/db.ts`, `migrations.ts`, `sessions.ts:SessionStore`). Sessions are SQLite rows, not file-per-session JSON. Phase 0 inherits this verbatim — `--session latest` resolves to the most recent SQLite row. Per-session sibling directory `~/.muonroi-cli/sessions/<id>/` is created lazily by Phase 0 only for `pending_calls.jsonl` and `.tmp` staging files (it does NOT replace SQLite session storage).
 
 ### Integration Points (Phase 0 deliveries)
 - `src/providers/anthropic.ts` — first Anthropic adapter shell (PROV-03/07).
