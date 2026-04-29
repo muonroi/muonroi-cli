@@ -1,3 +1,19 @@
+---
+gsd_state_version: 1.0
+milestone: v1.0
+milestone_name: milestone
+status: executing
+stopped_at: Completed 00-fork-skeleton plan 01 (fork import + LICENSE + UPSTREAM_DEPS)
+last_updated: "2026-04-29T13:33:45.186Z"
+last_activity: 2026-04-29
+progress:
+  total_phases: 5
+  completed_phases: 0
+  total_plans: 8
+  completed_plans: 1
+  percent: 0
+---
+
 # Project State
 
 ## Project Reference
@@ -5,20 +21,21 @@
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3× further than any subscription-locked tool.
-**Current focus:** Phase 0 — Fork & Skeleton (not started)
+**Current focus:** Phase 00 — fork-skeleton
 
 ## Current Position
 
-Phase: 0 of 4 (Fork & Skeleton)
-Plan: 0 of TBD in current phase
-Status: Ready to plan
-Last activity: 2026-04-29 — Roadmap created, requirement traceability mapped
+Phase: 00 (fork-skeleton) — EXECUTING
+Plan: 2 of 8
+Status: Ready to execute
+Last activity: 2026-04-29
 
 Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
 **Velocity:**
+
 - Total plans completed: 0
 - Average duration: —
 - Total execution time: 0 hours
@@ -34,10 +51,12 @@ Progress: [░░░░░░░░░░] 0%
 | 4. Cloud & Billing | 0 | — | — |
 
 **Recent Trend:**
+
 - Last 5 plans: none yet
 - Trend: —
 
 *Updated after each plan completion*
+| Phase 00-fork-skeleton P01 | 8 | 2 tasks | 151 files |
 
 ## Accumulated Context
 
@@ -50,6 +69,8 @@ Recent decisions affecting current work:
 - Pre-Phase 0: Source folder layout locked: `src/{ui, orchestrator, providers, router, usage, ee, flow, gsd, lsp, mcp, headless, tools, storage, utils}`.
 - Pre-Phase 0: Auto-judge feedback loop owned by orchestrator (not agent prompts) — closes EE evolution loop without relying on agent reporting.
 - Pre-Phase 0: Stack pinned — `ai@6.0.169`, `@opentui/core@0.1.107` (NOT 0.2.0), `ollama-ai-provider-v2@1.50.1`, Bun `>=1.3.13`.
+- [Phase 00-fork-skeleton]: grok-cli source cloned from GitHub (upstream not present locally) — hash verified identical to 09b64bc
+- [Phase 00-fork-skeleton]: engines.bun >= 1.3.13 added to package.json per D-003 at fork import time
 
 ### Pending Todos
 
@@ -58,6 +79,7 @@ None yet — captured during execution via `/gsd-add-todo`.
 ### Blockers/Concerns
 
 All Priority-1 open questions resolved 2026-04-29 — see `DECISIONS.md`:
+
 - D-001: License = MIT
 - D-002: Storage path = `~/.muonroi-cli/`
 - D-003: Bun pin = `>=1.3.13` (Day-1 Windows smoke per FORK-08 still required to validate)
@@ -80,6 +102,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29
-Stopped at: Roadmap and traceability finalized; Phase 0 ready to plan
-Resume file: None — start with `/gsd-plan-phase 0`
+Last session: 2026-04-29T13:33:45.183Z
+Stopped at: Completed 00-fork-skeleton plan 01 (fork import + LICENSE + UPSTREAM_DEPS)
+Resume file: None
