@@ -1,9 +1,9 @@
-// FORK-02: src/grok/* deleted; Anthropic provider lands in plan 00-05 (TUI-02, PROV-03).
-// src/agent/agent.ts is intentionally non-functional between this plan and 00-05.
-// tsc --noEmit passes; runtime call sites throw NotImplementedError (see stubs below).
+// Plan 00-05: Anthropic provider wired. FORK-02 stubs replaced with real provider calls.
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { loadAnthropicKey } from "../providers/index.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -158,64 +158,84 @@ export interface BatchChatCompletionResponse {
   };
 }
 
-// FORK-02 stub functions — all throw NotImplementedError at runtime
+// ---------------------------------------------------------------------------
+// Plan 00-05: Provider implementations — FORK-02 stubs replaced
+// ---------------------------------------------------------------------------
 
-function _forkNotImplemented(feature: string): never {
-  throw new Error(
-    `muonroi-cli FORK-02: ${feature} not yet wired. ` +
-      "Anthropic adapter ships in plan 00-05 (TUI-02, PROV-03).",
-  );
+/**
+ * Create an Anthropic provider instance for use with AI SDK v6 streamText.
+ * Returns an @ai-sdk/anthropic provider object (replaces the grok xAI client).
+ */
+function createProvider(apiKey: string, _baseURL?: string): XaiProvider {
+  // XaiProvider is typed as any in FORK-02 stub; here we return the real Anthropic provider factory.
+  // The returned value is used by resolveModelRuntime to create model instances.
+  return createAnthropic({ apiKey });
 }
 
-function createProvider(_apiKey: string, _baseURL?: string): XaiProvider {
-  return _forkNotImplemented("createProvider (grok/client)");
-}
-
+/**
+ * Generate a session title using the Anthropic provider.
+ * Kept as a lightweight stub for Phase 0 — title generation ships in Phase 1.
+ */
 function genTitle(
   _provider: XaiProvider,
-  _userMessage: string,
+  userMessage: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
-  return Promise.resolve(_forkNotImplemented("generateTitle (grok/client)"));
+  // Phase 0 stub: return a truncated version of the first user message as title.
+  // Phase 1 will replace this with a real LLM-based title generation call.
+  const title = userMessage.slice(0, 60).trim() || "New session";
+  return Promise.resolve({ title, modelId: DEFAULT_MODEL });
 }
 
-function resolveModelRuntime(_provider: XaiProvider, modelId: string): ResolvedModelRuntime {
-  return _forkNotImplemented(`resolveModelRuntime (grok/client) for model ${modelId}`);
+/**
+ * Resolve a model ID to a runnable AI SDK LanguageModel.
+ * Uses the Anthropic provider factory created by createProvider().
+ */
+function resolveModelRuntime(provider: XaiProvider, modelId: string): ResolvedModelRuntime {
+  // provider is an @ai-sdk/anthropic provider factory; call it with modelId to get a LanguageModel.
+  // This is the pattern used by AI SDK v6: provider(modelId) → LanguageModel.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const model = (provider as any)(modelId);
+  return {
+    model,
+    modelId,
+    modelInfo: getModelInfo(modelId),
+  };
 }
 
 function normalizeModelId(id: string): string {
-  // FORK-02 stub — pass-through until grok/models is replaced in plan 00-05
   return id;
 }
 
 function getModelInfo(_modelId: string): ModelInfoStub | undefined {
-  // FORK-02 stub — returns undefined until grok/models is replaced in plan 00-05
+  // Phase 0: no model info registry. Phase 1 will add context window + pricing data.
   return undefined;
 }
 
-const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning"; // FORK-02 stub placeholder
+const DEFAULT_MODEL = "claude-3-5-haiku-latest"; // Plan 00-05: Anthropic default model
 
 async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
-  return _forkNotImplemented("toolSetToBatchTools (grok/tool-schemas)");
+  // Batch API not supported with Anthropic in Phase 0. Phase 1 may add this.
+  throw new Error("Batch API not available in Phase 0. Use standard streaming mode.");
 }
 
 async function createBatch(_opts: BatchClientOptions & { name?: string }): Promise<{ batch_id: string }> {
-  return _forkNotImplemented("createBatch (grok/batch)");
+  throw new Error("Batch API not available in Phase 0. Use standard streaming mode.");
 }
 
 async function addBatchRequests(
   _opts: BatchClientOptions & { batchId: string; batchRequests: unknown[] },
 ): Promise<void> {
-  _forkNotImplemented("addBatchRequests (grok/batch)");
+  throw new Error("Batch API not available in Phase 0. Use standard streaming mode.");
 }
 
 async function pollBatchRequestResult(
   _opts: BatchClientOptions & { batchId: string; batchRequestId: string },
 ): Promise<unknown> {
-  return _forkNotImplemented("pollBatchRequestResult (grok/batch)");
+  throw new Error("Batch API not available in Phase 0. Use standard streaming mode.");
 }
 
 function getBatchChatCompletion(_result: unknown): BatchChatCompletionResponse {
-  return _forkNotImplemented("getBatchChatCompletion (grok/batch)");
+  throw new Error("Batch API not available in Phase 0. Use standard streaming mode.");
 }
 
 function createTools(
@@ -233,7 +253,9 @@ function createTools(
     sessionId?: string;
   },
 ): ToolSet {
-  return _forkNotImplemented("createTools (grok/tools)");
+  // Phase 0: tools infrastructure is the AI SDK ToolSet.
+  // Phase 1 will wire the full tool registry (bash, read_file, grep, lsp, etc.).
+  return {};
 }
 
 async function buildVisionUserMessages(
@@ -241,11 +263,12 @@ async function buildVisionUserMessages(
   _cwd: string,
   _signal?: AbortSignal,
 ): Promise<ModelMessage[]> {
-  return _forkNotImplemented("buildVisionUserMessages (agent/vision-input)");
+  // Vision input is an anti-feature per PROJECT.md Out-of-Scope. Always throws.
+  throw new Error("Vision input is not supported in muonroi-cli (anti-feature per PROJECT.md).");
 }
 
 // ---------------------------------------------------------------------------
-// END FORK-02 STUBS
+// END Plan 00-05 provider implementations
 // ---------------------------------------------------------------------------
 
 const MAX_TOOL_ROUNDS = 400;
