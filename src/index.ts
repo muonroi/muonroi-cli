@@ -1,4 +1,10 @@
 #!/usr/bin/env bun
+// SECURITY: Redactor must be the FIRST import. installGlobalPatches() wraps
+// console.* before any subsequent import side-effect or log can emit an API key.
+// See: PROV-07, Pitfall 2 (HIGH severity API key leakage).
+import { redactor } from "./utils/redactor.js";
+redactor.installGlobalPatches();
+
 import { InvalidArgumentError, program } from "commander";
 import * as dotenv from "dotenv";
 import packageJson from "../package.json";
