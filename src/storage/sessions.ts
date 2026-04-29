@@ -167,3 +167,12 @@ function toSessionInfo(row: SessionRow): SessionInfo {
     updatedAt: new Date(row.updated_at),
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B-3: Re-export getSessionDir from the isolated session-dir module.
+//
+// getSessionDir is kept in a separate file (no bun:sqlite import) so it can be
+// safely loaded in Vitest (Node) test environments without pulling in bun:sqlite.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { getSessionDir } from "./session-dir.js";
