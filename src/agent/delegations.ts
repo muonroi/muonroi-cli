@@ -228,7 +228,7 @@ export async function failDelegation(jobPath: string, error: string, output = ""
 
 async function ensureDelegationsDir(cwd: string): Promise<string> {
   const projectId = getProjectId(cwd);
-  const dir = path.join(os.homedir(), ".grok", "delegations", projectId);
+  const dir = path.join(os.homedir(), ".muonroi-cli", "delegations", projectId);
   await fs.mkdir(dir, { recursive: true });
   return dir;
 }

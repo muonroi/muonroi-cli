@@ -5,7 +5,7 @@ import { createRequire } from "module";
 import { dirname, isAbsolute, join, resolve } from "path";
 import type { ComputerToolMetadata, ToolResult } from "../types/index";
 
-const COMPUTER_ARTIFACT_DIR = ".grok/computer";
+const COMPUTER_ARTIFACT_DIR = ".muonroi-cli/computer";
 const DEFAULT_SCREENSHOT_NAME = "computer-shot";
 
 export interface ComputerScreenshotInput {

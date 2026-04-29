@@ -56,7 +56,7 @@ describe("loadCustomInstructions", () => {
     fs.mkdirSync(path.join(repoRoot, ".git"));
     fs.mkdirSync(cwd, { recursive: true });
 
-    writeFile(path.join(home, ".grok", "AGENTS.md"), "global instructions");
+    writeFile(path.join(home, ".muonroi-cli", "AGENTS.md"), "global instructions");
     writeFile(path.join(repoRoot, "AGENTS.md"), "root instructions");
     writeFile(path.join(repoRoot, "pkg", "AGENTS.md"), "pkg instructions");
     writeFile(path.join(repoRoot, "pkg", "feature", "AGENTS.md"), "feature instructions");

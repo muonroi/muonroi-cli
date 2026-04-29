@@ -112,7 +112,7 @@ describe("getScriptInstallContext", () => {
 });
 
 describe("buildScriptUninstallPlan", () => {
-  it("removes the full ~/.grok directory by default", () => {
+  it("removes the full ~/.muonroi-cli directory by default", () => {
     const homeDir = createTempDir("grok-uninstall-");
     const installDir = getScriptInstallDir(homeDir);
     const currentTarget = getReleaseTargetForPlatform()!;
@@ -134,7 +134,7 @@ describe("buildScriptUninstallPlan", () => {
     );
 
     const plan = buildScriptUninstallPlan({}, homeDir);
-    expect(plan?.removePaths).toContain(path.join(homeDir, ".grok"));
+    expect(plan?.removePaths).toContain(path.join(homeDir, ".muonroi-cli"));
   });
 
   it("keeps config and data when requested", () => {
@@ -159,7 +159,7 @@ describe("buildScriptUninstallPlan", () => {
     );
 
     const plan = buildScriptUninstallPlan({ keepConfig: true, keepData: true }, homeDir);
-    expect(plan?.removePaths).not.toContain(path.join(homeDir, ".grok"));
+    expect(plan?.removePaths).not.toContain(path.join(homeDir, ".muonroi-cli"));
     expect(plan?.removePaths).toContain(path.join(installDir, currentTarget.binaryName));
   });
 });

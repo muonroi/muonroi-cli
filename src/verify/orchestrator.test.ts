@@ -61,7 +61,7 @@ describe("verify orchestrator", () => {
     expect(agent.detectVerifyRecipe).not.toHaveBeenCalled();
   });
 
-  it("creates .grok/environment.json from verify-detect when no manifest exists", async () => {
+  it("creates .muonroi-cli/environment.json from verify-detect when no manifest exists", async () => {
     const dir = makeTempDir("grok-verify-orch-generate-");
     fs.writeFileSync(
       path.join(dir, "package.json"),
@@ -93,7 +93,7 @@ describe("verify orchestrator", () => {
     };
 
     const prepared = await prepareVerifyRun(agent, {});
-    expect(prepared.manifestPath).toBe(path.join(dir, ".grok", "environment.json"));
+    expect(prepared.manifestPath).toBe(path.join(dir, ".muonroi-cli", "environment.json"));
     expect(fs.existsSync(prepared.manifestPath!)).toBe(true);
     expect(prepared.usedVerifyDetect).toBe(true);
     expect(prepared.profile.recipe.installCommands).toEqual(["npm ci"]);
@@ -118,7 +118,7 @@ describe("verify orchestrator", () => {
 
     const prepared = await prepareVerifyRun(agent, {});
     expect(prepared.manifestPath).toBeUndefined();
-    expect(fs.existsSync(path.join(dir, ".grok", "environment.json"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, ".muonroi-cli", "environment.json"))).toBe(false);
     expect(prepared.usedVerifyDetect).toBe(false);
   });
 

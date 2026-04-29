@@ -55,7 +55,7 @@ describe("verify environment manifest", () => {
     expect(loaded?.sandboxSettings.allowNet).toBe(true);
   });
 
-  it("prefers .grok/environment.json over the root manifest", () => {
+  it("prefers .muonroi-cli/environment.json over the root manifest", () => {
     const dir = makeTempDir("grok-verify-env-precedence-");
     fs.writeFileSync(
       path.join(dir, "environment.json"),
@@ -67,9 +67,9 @@ describe("verify environment manifest", () => {
         smokeKind: "none",
       }),
     );
-    fs.mkdirSync(path.join(dir, ".grok"));
+    fs.mkdirSync(path.join(dir, ".muonroi-cli"));
     fs.writeFileSync(
-      path.join(dir, ".grok", "environment.json"),
+      path.join(dir, ".muonroi-cli", "environment.json"),
       JSON.stringify({
         ecosystem: "node",
         appKind: "nextjs",
@@ -80,12 +80,12 @@ describe("verify environment manifest", () => {
     );
 
     const loaded = loadVerifyEnvironment(dir);
-    expect(loaded?.path).toBe(path.join(dir, ".grok", "environment.json"));
+    expect(loaded?.path).toBe(path.join(dir, ".muonroi-cli", "environment.json"));
     expect(loaded?.recipe.appKind).toBe("nextjs");
     expect(loaded?.recipe.installCommands).toEqual(["npm ci"]);
   });
 
-  it("writes a generated .grok/environment.json manifest", () => {
+  it("writes a generated .muonroi-cli/environment.json manifest", () => {
     const dir = makeTempDir("grok-verify-env-write-");
     const written = saveVerifyEnvironment(
       dir,
@@ -108,7 +108,7 @@ describe("verify environment manifest", () => {
       { verifyBaseFrom: "verify-node-web", ports: ["3000:3000"], allowEphemeralInstall: true },
     );
 
-    expect(written).toBe(path.join(dir, ".grok", "environment.json"));
+    expect(written).toBe(path.join(dir, ".muonroi-cli", "environment.json"));
     const loaded = loadVerifyEnvironment(dir);
     expect(loaded?.path).toBe(written);
     expect(loaded?.recipe.installCommands).toEqual(["npm ci"]);

@@ -4,8 +4,8 @@ import os from "os";
 import path from "path";
 import { getCurrentModel } from "../utils/settings";
 
-const SCHEDULES_DIR = path.join(os.homedir(), ".grok", "schedules");
-const SCHEDULE_DAEMON_PID_PATH = path.join(os.homedir(), ".grok", "daemon.pid");
+const SCHEDULES_DIR = path.join(os.homedir(), ".muonroi-cli", "schedules");
+const SCHEDULE_DAEMON_PID_PATH = path.join(os.homedir(), ".muonroi-cli", "daemon.pid");
 
 export interface StoredSchedule {
   id: string;

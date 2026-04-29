@@ -129,7 +129,7 @@ const PROMPT_LOADING_FRAMES = [
 ] as const;
 
 type Star = { col: number; ch: string };
-type Row = { stars: Star[]; grok?: number };
+type Row = { stars: Star[]; brand?: number };
 type ContextStats = {
   contextWindow: number;
   usedTokens: number;
@@ -186,7 +186,7 @@ const HERO_ROWS: Row[] = [
       { col: 19, ch: "·" },
       { col: 27, ch: "·" },
     ],
-    grok: 13,
+    brand: 13,
   },
   {
     stars: [
@@ -237,14 +237,14 @@ function HeroLogo({ t }: { t: Theme }) {
         let cursor = 0;
 
         for (const star of row.stars) {
-          if (row.grok !== undefined && cursor <= row.grok && star.col > row.grok) {
-            els.push(" ".repeat(row.grok - cursor));
+          if (row.brand !== undefined && cursor <= row.brand && star.col > row.brand) {
+            els.push(" ".repeat(row.brand - cursor));
             els.push(
-              <span key="grok" style={{ fg: t.primary }}>
-                {"Grok"}
+              <span key="brand" style={{ fg: t.primary }}>
+                {"muonroi"}
               </span>,
             );
-            cursor = row.grok + 4;
+            cursor = row.brand + 7;
           }
           const gap = star.col - cursor;
           if (gap > 0) els.push(" ".repeat(gap));
@@ -256,14 +256,14 @@ function HeroLogo({ t }: { t: Theme }) {
           cursor = star.col + 1;
         }
 
-        if (row.grok !== undefined && cursor <= row.grok) {
-          els.push(" ".repeat(row.grok - cursor));
+        if (row.brand !== undefined && cursor <= row.brand) {
+          els.push(" ".repeat(row.brand - cursor));
           els.push(
-            <span key="grok" style={{ fg: t.primary }}>
-              {"Grok"}
+            <span key="brand" style={{ fg: t.primary }}>
+              {"muonroi"}
             </span>,
           );
-          cursor = row.grok + 4;
+          cursor = row.brand + 7;
         }
 
         els.push(" ".repeat(Math.max(0, 35 - cursor)));
@@ -5165,7 +5165,7 @@ function TelegramTokenModal({
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.text}>
-            {"From @BotFather: /newbot, then paste the token here. Stored in ~/.grok/user-settings.json."}
+            {"From @BotFather: /newbot, then paste the token here. Stored in ~/.muonroi-cli/user-settings.json."}
           </text>
         </box>
         <box paddingLeft={2} paddingRight={2} paddingTop={1}>

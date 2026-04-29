@@ -21,9 +21,9 @@ export interface SQLiteDatabase {
 let db: SQLiteDatabase | null = null;
 
 export function getDatabasePath(): string {
-  const dir = path.join(os.homedir(), ".grok");
+  const dir = path.join(os.homedir(), ".muonroi-cli");
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return path.join(dir, "grok.db");
+  return path.join(dir, "muonroi.db");
 }
 
 export function getDatabase(): SQLiteDatabase {

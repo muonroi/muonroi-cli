@@ -36,7 +36,7 @@ function directoryChain(fromRoot: string, toCwd: string): string[] {
 function loadAgentsSegments(canonicalCwd: string): string[] {
   const segments: string[] = [];
 
-  const globalAgents = readNonEmptyFile(path.join(os.homedir(), ".grok", "AGENTS.md"));
+  const globalAgents = readNonEmptyFile(path.join(os.homedir(), ".muonroi-cli", "AGENTS.md"));
   if (globalAgents) segments.push(globalAgents);
 
   const root = findGitRoot(canonicalCwd) ?? canonicalCwd;

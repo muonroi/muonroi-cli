@@ -3,7 +3,7 @@ import { access, mkdir, readdir, readFile, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 
-const CACHE_ROOT = path.join(os.homedir(), ".grok", "cache", "lsp");
+const CACHE_ROOT = path.join(os.homedir(), ".muonroi-cli", "cache", "lsp");
 const locks = new Map<string, Promise<unknown>>();
 
 function packageDir(pkg: string): string {

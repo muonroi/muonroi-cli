@@ -212,7 +212,7 @@ describe("verify entrypoint helpers", () => {
     expect(prompt).toContain("MANDATORY workflow");
     expect(prompt).toContain("Phase 4");
     expect(prompt).toContain("QA tester");
-    expect(prompt).toContain(".grok/verify-artifacts");
+    expect(prompt).toContain(".muonroi-cli/verify-artifacts");
     expect(prompt).toContain("Keep the report compact");
     expect(prompt).toContain("Evidence is mandatory even on failure");
   });
@@ -248,7 +248,7 @@ describe("verify entrypoint helpers", () => {
     expect(prompt).toContain("Step 1");
     expect(prompt).toContain("Step 2");
     expect(prompt).toContain("task");
-    expect(prompt).toContain(".grok/environment.json");
+    expect(prompt).toContain(".muonroi-cli/environment.json");
     expect(prompt).toContain('"ecosystem"');
     expect(prompt).toContain('"bootstrapCommands"');
     expect(prompt).toContain("apt-get");

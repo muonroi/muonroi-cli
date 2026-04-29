@@ -22,14 +22,14 @@ describe("computer tools", () => {
     }
   });
 
-  it("stores screenshots under .grok/computer by default", () => {
+  it("stores screenshots under .muonroi-cli/computer by default", () => {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-computer-"));
     tempDirs.push(cwd);
 
     const outputPath = buildScreenshotPath(cwd);
 
-    expect(outputPath).toContain(path.join(".grok", "computer"));
-    expect(path.dirname(outputPath)).toBe(path.join(cwd, ".grok", "computer"));
+    expect(outputPath).toContain(path.join(".muonroi-cli", "computer"));
+    expect(path.dirname(outputPath)).toBe(path.join(cwd, ".muonroi-cli", "computer"));
   });
 
   it("captures screenshots through agent-desktop", async () => {
