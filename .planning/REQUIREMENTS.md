@@ -11,7 +11,7 @@
 ### FORK — Fork-and-amputate from grok-cli
 
 - [x] **FORK-01**: Fork `grok-cli` into `muonroi-cli` with first commit referencing `IDEA.md` and preserving `LICENSE-grok-cli` immutable. (Pitfall 15)
-- [ ] **FORK-02**: Delete grok-specific surface — `src/telegram/`, `src/audio/`, `src/wallet/`, `src/payments/`, `src/agent/vision-input.*`, `src/grok/*` — and remove their tests in the same commits. (Pitfall 18)
+- [x] **FORK-02**: Delete grok-specific surface — `src/telegram/`, `src/audio/`, `src/wallet/`, `src/payments/`, `src/agent/vision-input.*`, `src/grok/*` — and remove their tests in the same commits. (Pitfall 18)
 - [ ] **FORK-03**: Rename storage paths from `~/.grok/` to `~/.muonroi-cli/` across sessions, transcripts, configs, and credentials. Sessions that existed under `~/.grok/` are not migrated (clean break). (Open Q14)
 - [ ] **FORK-04**: Remove deprecated dependencies (`@ai-sdk/xai`, `@coinbase/agentkit`, `grammy`, `agent-desktop`) and pin v1 dependency set per `research/SUMMARY.md` "Locked Stack Decisions" (`ai@6.0.169`, `@opentui/core@0.1.107`, `ollama-ai-provider-v2@1.50.1`, etc.). (Conflict 6)
 - [x] **FORK-05**: Create `UPSTREAM_DEPS.md` listing every external dependency with release-feed pointer; add CI job running `bun outdated` weekly. (Pitfall 1)
@@ -154,7 +154,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | FORK-01 | Phase 0 | Complete |
-| FORK-02 | Phase 0 | Pending |
+| FORK-02 | Phase 0 | Complete |
 | FORK-03 | Phase 0 | Pending |
 | FORK-04 | Phase 0 | Pending |
 | FORK-05 | Phase 0 | Complete |
