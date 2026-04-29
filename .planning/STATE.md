@@ -57,10 +57,15 @@ None yet — captured during execution via `/gsd-add-todo`.
 
 ### Blockers/Concerns
 
-Priority-1 open questions to resolve before Phase 0 starts (per research/SUMMARY.md):
-1. Bun version pin — confirm `>=1.3.13` works on Windows 11 dev box (Day-1 smoke per FORK-08).
-2. License model for muonroi-cli's own code — MIT, AGPL, or commercial-source-available — must land in DECISIONS.md before first public commit.
-3. Storage path naming — `~/.muonroi-cli/` vs `~/.muonroi/` — pick one early.
+All Priority-1 open questions resolved 2026-04-29 — see `DECISIONS.md`:
+- D-001: License = MIT
+- D-002: Storage path = `~/.muonroi-cli/`
+- D-003: Bun pin = `>=1.3.13` (Day-1 Windows smoke per FORK-08 still required to validate)
+- D-004: Phase 0 sized 1.5–2 weeks; Phase 3 compressed to weeks 7–8
+- D-005: Auto-judge feedback loop in Phase 1 (EE-09)
+- D-006: 5 providers ship in Phase 1, no split
+
+No remaining blockers. Phase 0 ready to plan.
 
 ## Deferred Items
 
