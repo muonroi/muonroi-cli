@@ -10,7 +10,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - Integer phases (0, 1, 2, 3, 4): Planned milestone work
 - Decimal phases (e.g. 1.1): Urgent insertions (marked with INSERTED)
 
-- [ ] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives
+- [x] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives (completed 2026-04-29)
 - [ ] **Phase 1: Brain & Cap Chain** — Multi-provider adapter, 3-tier router, EE PreToolUse warnings, full cap chain with auto-downgrade
 - [ ] **Phase 2: Continuity & Slash Commands** — `.muonroi-flow/` artifacts, deliberate compaction, GSD slash commands, session resume from disk
 - [ ] **Phase 3: Polish, Headless, Cross-Platform Beta** — Headless validation, MCP/LSP smoke tests, CI matrix, permission modes, doctor + bug-report, beta packaging
@@ -38,7 +38,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 00-05-PLAN.md — Anthropic provider + key load + log redactor middleware (TUI-02, PROV-03, PROV-07)
 - [x] 00-06-PLAN.md — EE HTTP client (replaces shell-spawn) + usage/config skeletons (EE-01, USAGE-01, USAGE-06)
 - [x] 00-07-PLAN.md — TUI boot + Ctrl+C abort safety + session resume (TUI-01, TUI-03, TUI-04)
-- [ ] 00-08-PLAN.md — Windows CI smoke + weekly bun outdated + DECISIONS log (FORK-08, FORK-05, FORK-06)
+- [x] 00-08-PLAN.md — Windows CI smoke + weekly bun outdated + DECISIONS log (FORK-08, FORK-05, FORK-06)
 **UI hint**: yes
 
 ### Phase 1: Brain & Cap Chain
@@ -108,7 +108,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 0. Fork & Skeleton | 7/8 | In Progress|  |
+| 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/TBD | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 0/TBD | Not started | - |

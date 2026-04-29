@@ -17,7 +17,7 @@
 - [x] **FORK-05**: Create `UPSTREAM_DEPS.md` listing every external dependency with release-feed pointer; add CI job running `bun outdated` weekly. (Pitfall 1)
 - [x] **FORK-06**: Create `DECISIONS.md` at repo root for locked architectural decisions; first entries cover license, storage paths, `.muonroi-flow/` naming, Bun pin. (Open Q1, Q2, Q3, Q5)
 - [x] **FORK-07**: Establish source folder layout: `src/{ui, orchestrator, providers, router, usage, ee, flow, gsd, lsp, mcp, headless, tools, storage, utils}`. Move retained files into target locations in the cleanup commit.
-- [ ] **FORK-08**: Day-1 Windows smoke — clone, install, render OpenTUI, exit cleanly on Windows 11 dev box. Block Phase 1 if fails. (Pitfall 16)
+- [x] **FORK-08**: Day-1 Windows smoke — clone, install, render OpenTUI, exit cleanly on Windows 11 dev box. Block Phase 1 if fails. (Pitfall 16)
 
 ### TUI — Terminal UI shell preserved
 
@@ -160,7 +160,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FORK-05 | Phase 0 | Complete |
 | FORK-06 | Phase 0 | Complete |
 | FORK-07 | Phase 0 | Complete |
-| FORK-08 | Phase 0 | Pending |
+| FORK-08 | Phase 0 | Complete |
 | TUI-01 | Phase 0 | Complete |
 | TUI-02 | Phase 0 | Complete |
 | TUI-03 | Phase 0 | Complete |
