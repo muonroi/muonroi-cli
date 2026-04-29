@@ -40,6 +40,12 @@ import {
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
+// Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
+import { createAbortContext } from "./orchestrator/abort.js";
+import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
+import { loadConfig } from "./storage/config.js";
+import { loadUsage } from "./storage/usage-cap.js";
+import { loadAnthropicKey } from "./providers/index.js";
 
 dotenv.config();
 
@@ -70,7 +76,55 @@ async function startInteractive(
   session?: string,
   initialMessage?: string,
 ) {
-  const agent = new Agent(apiKey, baseURL, model, maxToolRounds, { session, sandboxMode, sandboxSettings, batchApi });
+  // ── Plan 00-07 boot order ──────────────────────────────────────────────────
+  // 1. redactor.installGlobalPatches() — already at top of file (line 6).
+  // 2. loadConfig + loadUsage (validates storage paths, logs usage cap state).
+  const [config, usage] = await Promise.all([loadConfig(), loadUsage()]);
+  void config; // Phase 0: plumbed but not yet surfaced in TUI status bar (TUI-05, Phase 1).
+  void usage;  // Phase 0: same — cap guard will gate on this in plan 00-06+ / Phase 1.
+
+  // 3. loadAnthropicKey — enrolls key into redactor; falls back to env var.
+  const anthropicKey = await loadAnthropicKey().catch(() => undefined);
+  void anthropicKey; // Agent also calls loadAnthropicKey internally; this run is for redactor enrollment.
+
+  // 5-6. createPendingCallsLog + createAbortContext — wired before Agent so
+  //       the Agent receives them via AgentOptions (Pitfall 9, TUI-04).
+  //   Session ID is not available until Agent opens SQLite; use a stable
+  //   pre-session sentinel "pre-session" for the pending-calls log.
+  //   After Agent is constructed we promote to the real session ID.
+  const orchestratorAbort = createAbortContext();
+
+  // 7. SIGINT handler — must be registered BEFORE mountTUI so Ctrl+C fires
+  //    abort before OpenTUI's own handler chains.  The handler is non-blocking:
+  //    it only sets the abort signal; OpenTUI's teardown flushes terminal state
+  //    on its own reconciler path.
+  process.on("SIGINT", () => {
+    orchestratorAbort.abort("SIGINT");
+    // OpenTUI will receive its own SIGINT / Ctrl+C via exitOnCtrlC:false;
+    // onExit below handles the cleanup sequence.
+  });
+
+  // ── Construct Agent (opens SQLite, loads transcript, wires abort + pending) ─
+  // PendingCallsLog: use session selector as provisional ID; Agent will have
+  // the real session ID after construction.
+  const provisionalSessionId = session ?? "latest";
+  const pendingCalls = createPendingCallsLog(provisionalSessionId);
+  // Reconcile any orphaned .tmp files from a prior crash (Pitfall 9).
+  const reconciled = await pendingCalls.reconcile();
+  if (reconciled.abandoned > 0) {
+    console.warn(`[muonroi-cli] reconciled ${reconciled.abandoned} abandoned tool calls from prior session`);
+  }
+
+  const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
+    session,
+    sandboxMode,
+    sandboxSettings,
+    batchApi,
+    abortContext: orchestratorAbort,
+    pendingCalls,
+  });
+  // ── /Plan 00-07 boot order ────────────────────────────────────────────────
+
   const { createCliRenderer } = await import("@opentui/core");
   const { createRoot } = await import("@opentui/react");
   const { createElement } = await import("react");
@@ -307,7 +361,19 @@ program
   .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option("--update", "Update grok to the latest version and exit")
+  .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage + loadAnthropicKey and exit 0")
   .action(async (message: string[], options) => {
+    // Plan 00-07 boot smoke flag — used by `bun run src/index.ts --smoke-boot-only`.
+    if (options.smokeBootOnly) {
+      const [_cfg, _usg] = await Promise.all([loadConfig(), loadUsage()]);
+      await loadAnthropicKey().catch(() => {
+        // Key missing is acceptable for smoke — it means we fall through to env var path.
+        // If both keychain and env are missing, this exits 0 anyway (smoke only checks load paths).
+      });
+      console.log("[muonroi-cli] boot smoke: loadConfig + loadUsage complete");
+      process.exit(0);
+    }
+
     if (options.update) {
       console.log("Checking for updates...");
       const result = await runUpdate(packageJson.version);

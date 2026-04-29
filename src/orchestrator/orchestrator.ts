@@ -4,6 +4,7 @@ import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { loadAnthropicKey } from "../providers/index.js";
+import { stableCallId } from "./pending-calls.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -281,6 +282,12 @@ interface AgentOptions {
   sandboxMode?: SandboxMode;
   sandboxSettings?: SandboxSettings;
   batchApi?: boolean;
+  /** Optional external AbortContext (from src/index.ts SIGINT handler). When provided,
+   *  the orchestrator uses its signal instead of creating a new AbortController per turn.
+   *  TUI-04: Ctrl+C mid-tool-call abort safety. */
+  abortContext?: import("./abort.js").AbortContext;
+  /** Optional PendingCallsLog for Pitfall 9 staged-write tracking per tool call. */
+  pendingCalls?: import("./pending-calls.js").PendingCallsLog;
 }
 
 type ProcessMessageFinishReason = "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other";
@@ -726,6 +733,10 @@ export class Agent {
   private sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null = null;
   private batchApi = false;
   private sessionStartHookFired = false;
+  /** External abort context from src/index.ts SIGINT handler (TUI-04). */
+  private externalAbortContext: import("./abort.js").AbortContext | null = null;
+  /** Pending calls log for Pitfall 9 staged-write tracking. */
+  private pendingCalls: import("./pending-calls.js").PendingCallsLog | null = null;
 
   constructor(
     apiKey: string | undefined,
@@ -754,6 +765,9 @@ export class Agent {
     const envMax = Number(process.env.GROK_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
+    // TUI-04: wire external abort context and pending calls log if provided.
+    this.externalAbortContext = options.abortContext ?? null;
+    this.pendingCalls = options.pendingCalls ?? null;
 
     if (options.persistSession !== false) {
       this.sessionStore = new SessionStore(this.bash.getCwd());
@@ -1934,7 +1948,20 @@ export class Agent {
     userMessage: string,
     observer?: ProcessMessageObserver,
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    this.abortController = new AbortController();
+    // TUI-04: prefer the external AbortContext (from SIGINT handler) so that
+    // Ctrl+C mid-tool-call triggers a single, unified abort across all I/O.
+    // If no external context, fall back to creating a local AbortController.
+    if (this.externalAbortContext) {
+      // Wrap the external signal in a local controller so existing cleanup
+      // paths (this.abortController = null) still work without side-effects.
+      this.abortController = new AbortController();
+      // Forward external abort to the local controller.
+      this.externalAbortContext.signal.addEventListener("abort", () => {
+        this.abortController?.abort(this.externalAbortContext?.reason());
+      }, { once: true });
+    } else {
+      this.abortController = new AbortController();
+    }
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
 
@@ -2107,6 +2134,16 @@ export class Agent {
               case "tool-call": {
                 const tc = toToolCall(part);
                 activeToolCalls.push(tc);
+                // Pitfall 9: log the pending call so reconcile() can recover any
+                // staged .tmp files if the process is killed before tool-result.
+                if (this.pendingCalls) {
+                  const turnId = this.session?.id ?? "anon";
+                  const callId = stableCallId(turnId, tc.function.name, tc.function.arguments);
+                  // Phase 0: predictStagedPaths = [] for all tools (refined in Phase 1).
+                  void this.pendingCalls.begin({ call_id: callId, tool_name: tc.function.name }).catch(() => {});
+                  // Attach callId to the ToolCall so tool-result can end it.
+                  (tc as ToolCall & { _pendingCallId?: string })._pendingCallId = callId;
+                }
                 notifyObserver(observer?.onToolStart, {
                   toolCall: tc,
                   timestamp: Date.now(),
@@ -2122,6 +2159,15 @@ export class Agent {
                   function: { name: part.toolName, arguments: JSON.stringify(part.input ?? {}) },
                 };
                 const tr = toToolResult(part.output);
+                // Pitfall 9: settle the pending call log entry.
+                if (this.pendingCalls) {
+                  const pending = activeToolCalls.find((t) => t.id === part.toolCallId);
+                  const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
+                  if (callId) {
+                    const endStatus = signal.aborted ? "aborted" : "settled";
+                    void this.pendingCalls.end(callId, endStatus).catch(() => {});
+                  }
+                }
                 notifyObserver(observer?.onToolFinish, {
                   toolCall: tc,
                   toolResult: tr,
