@@ -21,10 +21,10 @@
 
 ### TUI — Terminal UI shell preserved
 
-- [ ] **TUI-01**: User can launch `muonroi-cli` and see the OpenTUI shell render with the inherited grok-cli component tree (input box, output stream, slash command palette). (Table stake)
+- [x] **TUI-01**: User can launch `muonroi-cli` and see the OpenTUI shell render with the inherited grok-cli component tree (input box, output stream, slash command palette). (Table stake)
 - [x] **TUI-02**: User can run an Anthropic-only stub conversation end-to-end with streaming output preserved (async-generator-of-StreamChunk pattern from grok-cli). (Open Q8)
-- [ ] **TUI-03**: User can resume the most recent session via `--session latest` from renamed storage paths. (Table stake)
-- [ ] **TUI-04**: User can press Ctrl+C mid-tool-call without leaving dangling state — `pending_calls` log resolves and staged file writes (`.tmp`) atomically rename or roll back. (Pitfall 9)
+- [x] **TUI-03**: User can resume the most recent session via `--session latest` from renamed storage paths. (Table stake)
+- [x] **TUI-04**: User can press Ctrl+C mid-tool-call without leaving dangling state — `pending_calls` log resolves and staged file writes (`.tmp`) atomically rename or roll back. (Pitfall 9)
 - [ ] **TUI-05**: User sees a status bar at all times displaying current model, router tier badge (`hot`/`warm`/`cold`), live input/output token counters, live USD estimate per session, and live USD spent this calendar month UTC.
 
 ### USAGE — Realtime spend visibility and hard cap
@@ -161,10 +161,10 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FORK-06 | Phase 0 | Complete |
 | FORK-07 | Phase 0 | Complete |
 | FORK-08 | Phase 0 | Pending |
-| TUI-01 | Phase 0 | Pending |
+| TUI-01 | Phase 0 | Complete |
 | TUI-02 | Phase 0 | Complete |
-| TUI-03 | Phase 0 | Pending |
-| TUI-04 | Phase 0 | Pending |
+| TUI-03 | Phase 0 | Complete |
+| TUI-04 | Phase 0 | Complete |
 | TUI-05 | Phase 1 | Pending |
 | USAGE-01 | Phase 0 | Complete |
 | USAGE-02 | Phase 1 | Pending |
