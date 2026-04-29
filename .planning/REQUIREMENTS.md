@@ -147,6 +147,97 @@ Explicit exclusions. Do not re-add without a DECISIONS.md entry.
 
 ## Traceability
 
-Mapping requirements to phases — finalized by `gsd-roadmapper` in ROADMAP.md.
+Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 
-(Initial mapping pending roadmapper output.)
+**Coverage:** 77 / 77 requirements mapped (68 v1 + 9 v2). No orphans, no duplicates.
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| FORK-01 | Phase 0 | Pending |
+| FORK-02 | Phase 0 | Pending |
+| FORK-03 | Phase 0 | Pending |
+| FORK-04 | Phase 0 | Pending |
+| FORK-05 | Phase 0 | Pending |
+| FORK-06 | Phase 0 | Pending |
+| FORK-07 | Phase 0 | Pending |
+| FORK-08 | Phase 0 | Pending |
+| TUI-01 | Phase 0 | Pending |
+| TUI-02 | Phase 0 | Pending |
+| TUI-03 | Phase 0 | Pending |
+| TUI-04 | Phase 0 | Pending |
+| TUI-05 | Phase 1 | Pending |
+| USAGE-01 | Phase 0 | Pending |
+| USAGE-02 | Phase 1 | Pending |
+| USAGE-03 | Phase 1 | Pending |
+| USAGE-04 | Phase 1 | Pending |
+| USAGE-05 | Phase 1 | Pending |
+| USAGE-06 | Phase 0 | Pending |
+| USAGE-07 | Phase 1 | Pending |
+| USAGE-08 | Phase 2 | Pending |
+| PROV-01 | Phase 1 | Pending |
+| PROV-02 | Phase 1 | Pending |
+| PROV-03 | Phase 0 | Pending |
+| PROV-04 | Phase 1 | Pending |
+| PROV-05 | Phase 1 | Pending |
+| PROV-06 | Phase 1 | Pending |
+| PROV-07 | Phase 0 | Pending |
+| ROUTE-01 | Phase 1 | Pending |
+| ROUTE-02 | Phase 1 | Pending |
+| ROUTE-03 | Phase 1 | Pending |
+| ROUTE-04 | Phase 1 | Pending |
+| ROUTE-05 | Phase 1 | Pending |
+| ROUTE-06 | Phase 1 | Pending |
+| ROUTE-07 | Phase 1 | Pending |
+| EE-01 | Phase 0 | Pending |
+| EE-02 | Phase 1 | Pending |
+| EE-03 | Phase 1 | Pending |
+| EE-04 | Phase 1 | Pending |
+| EE-05 | Phase 1 | Pending |
+| EE-06 | Phase 1 | Pending |
+| EE-07 | Phase 1 | Pending |
+| EE-08 | Phase 1 | Pending |
+| EE-09 | Phase 1 | Pending |
+| EE-10 | Phase 1 | Pending |
+| FLOW-01 | Phase 2 | Pending |
+| FLOW-02 | Phase 2 | Pending |
+| FLOW-03 | Phase 2 | Pending |
+| FLOW-04 | Phase 2 | Pending |
+| FLOW-05 | Phase 2 | Pending |
+| FLOW-06 | Phase 2 | Pending |
+| FLOW-07 | Phase 2 | Pending |
+| FLOW-08 | Phase 2 | Pending |
+| FLOW-09 | Phase 2 | Pending |
+| FLOW-10 | Phase 2 | Pending |
+| FLOW-11 | Phase 2 | Pending |
+| FLOW-12 | Phase 2 | Pending |
+| CORE-01 | Phase 3 | Pending |
+| CORE-02 | Phase 3 | Pending |
+| CORE-03 | Phase 3 | Pending |
+| CORE-04 | Phase 3 | Pending |
+| CORE-05 | Phase 3 | Pending |
+| CORE-06 | Phase 3 | Pending |
+| CORE-07 | Phase 3 | Pending |
+| OPS-01 | Phase 3 | Pending |
+| OPS-02 | Phase 3 | Pending |
+| OPS-03 | Phase 3 | Pending |
+| OPS-04 | Phase 3 | Pending |
+| CLOUD-01 | Phase 4 | Pending |
+| CLOUD-02 | Phase 4 | Pending |
+| CLOUD-03 | Phase 4 | Pending |
+| CLOUD-04 | Phase 4 | Pending |
+| BILL-01 | Phase 4 | Pending |
+| BILL-02 | Phase 4 | Pending |
+| BILL-03 | Phase 4 | Pending |
+| WEB-01 | Phase 4 | Pending |
+| WEB-02 | Phase 4 | Pending |
+
+### Per-Phase Summary
+
+| Phase | Requirement Count | Categories |
+|-------|------------------|------------|
+| Phase 0 — Fork & Skeleton | 17 | FORK (8), TUI-01..04 (4), USAGE-01/06 (2), EE-01 (1), PROV-03/07 (2) |
+| Phase 1 — Brain & Cap Chain | 27 | TUI-05 (1), PROV-01/02/04/05/06 (5), ROUTE (7), EE-02..10 (9), USAGE-02/03/04/05/07 (5) |
+| Phase 2 — Continuity & Slash Commands | 13 | FLOW (12), USAGE-08 (1) |
+| Phase 3 — Polish, Headless, Cross-Platform Beta | 11 | CORE (7), OPS (4) |
+| Phase 4 — Cloud & Billing | 9 | CLOUD (4), BILL (3), WEB (2) |
+| **Total** | **77** | — |
