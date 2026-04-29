@@ -470,7 +470,7 @@ function formatCustomSubagentsPromptSection(subagents: CustomSubagentConfig[]): 
     return `### ${agent.name}\n- model: ${agent.model}\n- instruction:\n${instruction}`;
   });
 
-  return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.grok/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
+  return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.muonroi-cli/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
 }
 
 function buildSystemPrompt(
@@ -524,7 +524,7 @@ function buildSubagentPrompt(
         : isVerifyDetect
           ? "You are the Verify Detect sub-agent. You inspect a repository to produce a structured verification recipe. You are read-only."
           : isVerifyManifest
-            ? "You are the Verify Manifest sub-agent. You inspect a repository and create or update .grok/environment.json so verification can run reproducibly."
+            ? "You are the Verify Manifest sub-agent. You inspect a repository and create or update .muonroi-cli/environment.json so verification can run reproducibly."
             : isVerify
               ? "You are the Verify sub-agent. You specialize in sandbox-aware local verification using builds, tests, app boot checks, and optional browser smoke tests."
               : isComputer
@@ -545,9 +545,9 @@ function buildSubagentPrompt(
         ]
       : isVerifyManifest
         ? [
-            "Focus on creating or updating .grok/environment.json as the primary verification contract for this repository.",
-            "Read package.json and key config files to understand the project, then write .grok/environment.json.",
-            "Prefer editing only .grok/environment.json unless the delegated task explicitly requires something else.",
+            "Focus on creating or updating .muonroi-cli/environment.json as the primary verification contract for this repository.",
+            "Read package.json and key config files to understand the project, then write .muonroi-cli/environment.json.",
+            "Prefer editing only .muonroi-cli/environment.json unless the delegated task explicitly requires something else.",
             "",
             "SANDBOX ENVIRONMENT (Shuru):",
             "- OS: Debian GNU/Linux 13 (trixie)",
@@ -1284,7 +1284,7 @@ export class Agent {
       !isComputer &&
       !custom
     ) {
-      const message = `Unknown sub-agent "${agentKey}". Use general, explore, vision, verify, verify-detect, verify-manifest, computer, or a configured name from ~/.grok/user-settings.json.`;
+      const message = `Unknown sub-agent "${agentKey}". Use general, explore, vision, verify, verify-detect, verify-manifest, computer, or a configured name from ~/.muonroi-cli/user-settings.json.`;
       return {
         success: false,
         output: message,
@@ -1387,7 +1387,7 @@ export class Agent {
 
       const childPrompt =
         isVerify && verifyPreparedRecipe
-          ? `${request.prompt}\n\nPrepared verify recipe JSON (use this as the primary execution recipe and keep .grok/environment.json aligned with it if present):\n${JSON.stringify(verifyPreparedRecipe, null, 2)}`
+          ? `${request.prompt}\n\nPrepared verify recipe JSON (use this as the primary execution recipe and keep .muonroi-cli/environment.json aligned with it if present):\n${JSON.stringify(verifyPreparedRecipe, null, 2)}`
           : request.prompt;
 
       const childMessages = isVision

@@ -78,7 +78,7 @@ interface ReleaseDownload {
 }
 
 export function getGrokUserDir(homeDir = os.homedir()): string {
-  return path.join(homeDir, ".grok");
+  return path.join(homeDir, ".muonroi-cli");
 }
 
 export function getScriptInstallDir(homeDir = os.homedir()): string {

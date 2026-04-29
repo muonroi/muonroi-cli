@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const tempDirs: string[] = [];
-const originalHome = process.env.HOME;
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -13,7 +12,7 @@ function makeTempDir(prefix: string): string {
 }
 
 function readStoredDelegationRecord(home: string): Record<string, unknown> {
-  const delegationsRoot = path.join(home, ".grok", "delegations");
+  const delegationsRoot = path.join(home, ".muonroi-cli", "delegations");
   const projectDirs = fs.readdirSync(delegationsRoot);
   expect(projectDirs).toHaveLength(1);
   const projectDir = path.join(delegationsRoot, projectDirs[0] as string);
@@ -24,20 +23,24 @@ function readStoredDelegationRecord(home: string): Record<string, unknown> {
 
 async function importDelegationsModule(options: { home?: string; spawnMock?: ReturnType<typeof vi.fn> } = {}) {
   vi.resetModules();
+  vi.doUnmock("os");
   vi.doUnmock("child_process");
 
   if (options.home) {
-    process.env.HOME = options.home;
+    const osActual = await vi.importActual<typeof import("os")>("os");
+    vi.doMock("os", () => ({
+      ...osActual,
+      default: { ...osActual, homedir: () => options.home! },
+      homedir: () => options.home!,
+    }));
   }
 
   if (options.spawnMock) {
-    vi.doMock("child_process", async () => {
-      const actual = await vi.importActual<typeof import("child_process")>("child_process");
-      return {
-        ...actual,
-        spawn: options.spawnMock,
-      };
-    });
+    const cpActual = await vi.importActual<typeof import("child_process")>("child_process");
+    vi.doMock("child_process", () => ({
+      ...cpActual,
+      spawn: options.spawnMock,
+    }));
   }
 
   return import("./delegations");
@@ -47,9 +50,9 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-  process.env.HOME = originalHome;
   vi.restoreAllMocks();
   vi.resetModules();
+  vi.doUnmock("os");
   vi.doUnmock("child_process");
 });
 

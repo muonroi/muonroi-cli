@@ -114,7 +114,7 @@ describe("shouldRunOnHostInSandboxMode", () => {
   it("allows compound commands with only safe prefixes like mkdir and sleep", () => {
     expect(
       shouldRunOnHostInSandboxMode(
-        "mkdir -p .grok/verify-artifacts && agent-browser --session verify open http://127.0.0.1:3000",
+        "mkdir -p .muonroi-cli/verify-artifacts && agent-browser --session verify open http://127.0.0.1:3000",
         { hostBrowserCommandsOnHost: true },
       ),
     ).toBe(true);
@@ -123,7 +123,7 @@ describe("shouldRunOnHostInSandboxMode", () => {
     ).toBe(true);
     expect(
       shouldRunOnHostInSandboxMode(
-        "mkdir -p .grok/verify-artifacts && agent-browser open http://127.0.0.1:3000 && agent-browser screenshot",
+        "mkdir -p .muonroi-cli/verify-artifacts && agent-browser open http://127.0.0.1:3000 && agent-browser screenshot",
         { hostBrowserCommandsOnHost: true },
       ),
     ).toBe(true);
@@ -190,9 +190,9 @@ describe("wrapHostBrowserCommand", () => {
 
   it("handles session flags and screenshot paths correctly", () => {
     const result = wrapHostBrowserCommand(
-      "agent-browser --session verify screenshot .grok/verify-artifacts/verify-smoke-home.png",
+      "agent-browser --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png",
     );
-    expect(result).toContain("__grok_ab --session verify screenshot .grok/verify-artifacts/verify-smoke-home.png");
+    expect(result).toContain("__grok_ab --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png");
   });
 });
 

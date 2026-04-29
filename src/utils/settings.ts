@@ -209,7 +209,7 @@ export interface ProjectSettings {
   lsp?: LspSettings;
 }
 
-const USER_DIR = path.join(os.homedir(), ".grok");
+const USER_DIR = path.join(os.homedir(), ".muonroi-cli");
 const USER_SETTINGS_PATH = path.join(USER_DIR, "user-settings.json");
 
 function ensureDir(dir: string): void {
@@ -313,12 +313,12 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
 }
 
 export function loadProjectSettings(): ProjectSettings {
-  const projectPath = path.join(process.cwd(), ".grok", "settings.json");
+  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
   return readJson<ProjectSettings>(projectPath) || {};
 }
 
 export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
-  const projectPath = path.join(process.cwd(), ".grok", "settings.json");
+  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
   const current = loadProjectSettings();
   writeJson(projectPath, {
     ...current,

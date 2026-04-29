@@ -81,7 +81,7 @@ describe("schedule helpers", () => {
     expect(mod.cronMatchesDate("0 9 * * 5-7", monday)).toBe(false);
   });
 
-  it("creates, lists, and removes recurring schedules under ~/.grok/schedules", async () => {
+  it("creates, lists, and removes recurring schedules under ~/.muonroi-cli/schedules", async () => {
     const home = makeTempDir("grok-schedule-home-");
     const cwd = makeTempDir("grok-schedule-cwd-");
     const mod = await importScheduleModule({ home });

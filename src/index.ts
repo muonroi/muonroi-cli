@@ -190,7 +190,7 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     const delegation = await loadDelegation(jobPath);
     const apiKey = stringOption(options.apiKey) || getApiKey();
     if (!apiKey) {
-      throw new Error("API key required. Set GROK_API_KEY, use --api-key, or save it to ~/.grok/user-settings.json.");
+      throw new Error("API key required. Set GROK_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.");
     }
 
     const baseURL = stringOption(options.baseUrl) || getBaseURL();
@@ -263,7 +263,7 @@ function resolveConfig(options: CliOptions) {
 function requireApiKey(apiKey: string | undefined): string {
   if (!apiKey) {
     console.error(
-      "Error: API key required. Set GROK_API_KEY env var, use --api-key, or save to ~/.grok/user-settings.json",
+      "Error: API key required. Set GROK_API_KEY env var, use --api-key, or save to ~/.muonroi-cli/user-settings.json",
     );
     process.exit(1);
   }
@@ -410,8 +410,8 @@ program
   .description("Remove a script-installed Grok binary and optional data")
   .option("--dry-run", "Show what would be removed without removing it")
   .option("--force", "Skip the confirmation prompt")
-  .option("--keep-config", "Keep ~/.grok config files")
-  .option("--keep-data", "Keep ~/.grok data files")
+  .option("--keep-config", "Keep ~/.muonroi-cli config files")
+  .option("--keep-data", "Keep ~/.muonroi-cli data files")
   .action(async (options) => {
     const result = await runScriptManagedUninstall({
       dryRun: options.dryRun === true,
