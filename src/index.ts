@@ -2,8 +2,8 @@
 import { InvalidArgumentError, program } from "commander";
 import * as dotenv from "dotenv";
 import packageJson from "../package.json";
-import { Agent } from "./agent/agent";
-import { completeDelegation, failDelegation, loadDelegation } from "./agent/delegations";
+import { Agent } from "./orchestrator/orchestrator";
+import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 // FORK-02: ./grok/models deleted; stubs below keep tsc --noEmit clean until plan 00-05.
 // FORK-02 stub: pass-through until grok/models replaced in plan 00-05.
 function normalizeModelId(id: string): string { return id; }

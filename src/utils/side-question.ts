@@ -1,6 +1,6 @@
 import { generateText } from "ai";
 // FORK-02: ../grok/client deleted; stubs keep tsc --noEmit clean until plan 00-05.
-import { type XaiProvider, type ResolvedModelRuntime } from "../agent/agent";
+import { type XaiProvider, type ResolvedModelRuntime } from "../orchestrator/orchestrator";
 
 // FORK-02 stub: resolveModelRuntime — throws at runtime, compiles clean.
 function resolveModelRuntime(_provider: XaiProvider, modelId: string): ResolvedModelRuntime {

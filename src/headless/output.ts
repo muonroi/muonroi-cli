@@ -1,4 +1,4 @@
-import type { ProcessMessageObserver, ProcessMessageStepFinish, ProcessMessageStepStart } from "../agent/agent";
+import type { ProcessMessageObserver, ProcessMessageStepFinish, ProcessMessageStepStart } from "../orchestrator/orchestrator";
 import type { StreamChunk, ToolCall, ToolResult } from "../types";
 
 export type HeadlessOutputFormat = "text" | "json";
