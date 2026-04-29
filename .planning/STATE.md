@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 00-fork-skeleton plan 02 (strip telegram/audio/wallet/payments/grok/vision-input)
-last_updated: "2026-04-29T13:54:07.343Z"
+stopped_at: Completed 00-fork-skeleton plan 03 (rename ~/.grok/ → ~/.muonroi-cli/ storage namespace)
+last_updated: "2026-04-29T14:12:57.753Z"
 last_activity: 2026-04-29
 progress:
   total_phases: 5
   completed_phases: 0
   total_plans: 8
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 00 (fork-skeleton) — EXECUTING
-Plan: 3 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-04-29
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 *Updated after each plan completion*
 | Phase 00-fork-skeleton P01 | 8 | 2 tasks | 151 files |
 | Phase 00 P02 | 45 | 2 tasks | 52 files |
+| Phase 00 P03 | 45 | 2 tasks | 26 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Recent decisions affecting current work:
 - [Phase 00-fork-skeleton]: engines.bun >= 1.3.13 added to package.json per D-003 at fork import time
 - [Phase 00]: agent.ts grok-client call sites stubbed with NotImplementedError (not deleted) so tsc graph stays intact until Anthropic adapter lands in plan 00-05
 - [Phase 00]: payments/brin dynamic import removed from agent.ts; payment pre-check = undefined until Stripe ships Phase 4
+- [Phase 00]: Used synchronous vi.doMock factory with pre-imported actuals to fix Windows os.homedir() mock isolation in delegations.test.ts
+- [Phase 00]: GROK_API_KEY/GROK_MODEL/GROK_BASE_URL env vars not renamed in 00-03 — xAI API-specific, deferred to plan 00-05 (Anthropic provider swap)
+- [Phase 00]: ui/app.tsx Row.grok renamed to Row.brand with cursor offset +4→+7 to match 'muonroi' brand text length
 
 ### Pending Todos
 
@@ -105,6 +109,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-29T13:54:07.339Z
-Stopped at: Completed 00-fork-skeleton plan 02 (strip telegram/audio/wallet/payments/grok/vision-input)
+Last session: 2026-04-29T14:12:57.749Z
+Stopped at: Completed 00-fork-skeleton plan 03 (rename ~/.grok/ → ~/.muonroi-cli/ storage namespace)
 Resume file: None
