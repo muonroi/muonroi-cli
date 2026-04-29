@@ -1,0 +1,32 @@
+name: windows-smoke
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ">=1.3.13"
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bunx tsc --noEmit
+      - name: Test
+        run: bunx vitest run
+      - name: Boot smoke (headless)
+        shell: pwsh
+        run: |
+          $proc = Start-Process bun -ArgumentList "run","src/index.ts","--smoke-boot-only" -PassThru -NoNewWindow -Wait
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Boot smoke failed with exit code $($proc.ExitCode)"
+            exit 1
+          }
+          Write-Host "Boot smoke OK (exit 0)"

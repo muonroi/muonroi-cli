@@ -105,6 +105,68 @@
 
 ---
 
+## D-007 — Test runner = vitest@4.1.5 (inherited from grok-cli; bun test deferred)
+
+**Date:** 2026-04-29
+**Status:** Locked
+**Context:** B-1 from plan-checker round 1: Phase 0 plans use `bunx vitest run` because
+grok-cli's upstream test suite is vitest-based (see grok-cli/package.json scripts and
+vitest.config.ts). Migrating to `bun test` would require rewriting every inherited
+test (tool tests, storage tests, hook tests, etc.) — out of scope for fork-and-amputate.
+**Decision:** Inherit `vitest@4.1.5` from grok-cli upstream verbatim. Use
+`bunx vitest run` (Bun's vitest runner) in CI and locally. Do NOT migrate to
+`bun test` in Phase 0.
+**Rationale:**
+- Phase 0 priority is fork-and-amputate, not test-framework swap.
+- Bun runs vitest cleanly (`bunx vitest run`).
+- All Phase 0 new tests (redactor, atomic-io, config, usage, ee/client, abort, pending-calls)
+  are written with vitest API for consistency with inherited tests.
+**Consequences:**
+- CI workflow uses `bunx vitest run`, not `bun test`.
+- Future migration to `bun test` (if desired) is a Phase 3+ chore — deferred.
+- DECISIONS.md, UPSTREAM_DEPS.md, and 00-CONTEXT.md all reference vitest@4.1.5 consistently.
+
+---
+
+## D-008 — ollama-ai-provider-v2 version typo (locked stack 1.50.1 → actual 1.5.5)
+
+**Date:** 2026-04-29
+**Status:** Locked
+**Context:** research/SUMMARY.md locked `ollama-ai-provider-v2@1.50.1`. During plan 00.04
+dependency install, version 1.50.1 did not exist on npm. The locked target appears to be
+a semver typo (1.50.1 looks like "1.5.1" or "1.5.5" with a spurious extra digit).
+**Decision:** Pin `ollama-ai-provider-v2@1.5.5` (highest 1.x patch available on npm).
+Re-evaluate when Ollama provider Phase 1 integration tests run.
+**Rationale:**
+- 1.5.5 is the highest 1.x release with a compatible API surface to the locked target.
+- Changing the major version (2.x) is out of scope — breaking API changes likely.
+- The typo origin is the research synthesis step; the actual released package follows
+  standard semver (1.5.x), not the 1.50.x notation.
+**Consequences:**
+- UPSTREAM_DEPS.md updated to reflect 1.5.5.
+- Phase 1 integration tests (PROV-01) will validate actual Ollama streaming compatibility.
+- If 1.5.5 has API incompatibilities, the fix is isolated to src/providers/ (Phase 1 scope).
+
+---
+
+## D-009 — Phase 0 ships at locked stack with no further deviations (plans 00.01–00.07)
+
+**Date:** 2026-04-29
+**Status:** Locked
+**Context:** Phase 0 fork + cleanup + skeletons completed across plans 00.01–00.07.
+Locked stack from research/SUMMARY.md and decisions D-001..D-008 held verbatim except
+for the ollama-ai-provider-v2 version typo (D-008).
+**Decision:** No further DECISIONS entries required for Phase 0.
+**Rationale:** Bun >=1.3.13 ran clean on Windows 11; @opentui/core@0.1.107 published and
+installed correctly; keytar@^7.9.0 built successfully on Windows 11 — native build OK,
+no env-var-only fallback needed; EE HTTP client wired without bootstrap blocker;
+AbortContext + PendingCallsLog implemented and tested; SC1 boot smoke PASSED on
+Windows 11 dev box.
+**Consequences:** Phase 1 begins from a clean baseline; UPSTREAM_DEPS.md remains the
+single source for dependency-watch surface.
+
+---
+
 ## Decision Log Conventions
 
 - **D-XXX**: Sequential identifier, never reused.
