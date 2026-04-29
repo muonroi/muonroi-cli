@@ -22,7 +22,7 @@
 ### TUI — Terminal UI shell preserved
 
 - [ ] **TUI-01**: User can launch `muonroi-cli` and see the OpenTUI shell render with the inherited grok-cli component tree (input box, output stream, slash command palette). (Table stake)
-- [ ] **TUI-02**: User can run an Anthropic-only stub conversation end-to-end with streaming output preserved (async-generator-of-StreamChunk pattern from grok-cli). (Open Q8)
+- [x] **TUI-02**: User can run an Anthropic-only stub conversation end-to-end with streaming output preserved (async-generator-of-StreamChunk pattern from grok-cli). (Open Q8)
 - [ ] **TUI-03**: User can resume the most recent session via `--session latest` from renamed storage paths. (Table stake)
 - [ ] **TUI-04**: User can press Ctrl+C mid-tool-call without leaving dangling state — `pending_calls` log resolves and staged file writes (`.tmp`) atomically rename or roll back. (Pitfall 9)
 - [ ] **TUI-05**: User sees a status bar at all times displaying current model, router tier badge (`hot`/`warm`/`cold`), live input/output token counters, live USD estimate per session, and live USD spent this calendar month UTC.
@@ -42,11 +42,11 @@
 
 - [ ] **PROV-01**: System exposes single `Adapter` interface; per-provider classes implement it for Anthropic, OpenAI, Gemini, DeepSeek, Ollama. (Pitfall 26)
 - [ ] **PROV-02**: User can select provider per-session via config or per-call via slash command; default falls back to first key found in OS keychain.
-- [ ] **PROV-03**: System loads BYOK API keys from OS keychain (keytar). Plain-text key in env or config file is accepted with warning. Logs and bug-reports never include key contents. (Pitfall 2)
+- [x] **PROV-03**: System loads BYOK API keys from OS keychain (keytar). Plain-text key in env or config file is accepted with warning. Logs and bug-reports never include key contents. (Pitfall 2)
 - [ ] **PROV-04**: System supports tool-use loop with streaming for all 5 providers, including parallel tool calls where the provider supports them. (Pitfall 28)
 - [ ] **PROV-05**: System normalizes provider error shapes into a stable internal error type (rate-limit, auth, content-filter, server-error, unknown).
 - [ ] **PROV-06**: System ships pricing table (input/output USD per million tokens) per provider per model, refreshable via config. (Pitfall 19 prep — remote fetch is Phase 4)
-- [ ] **PROV-07**: System logs redactor scrubs API keys, JWT-shape strings, and known header names from any structured log output. (Pitfall 2)
+- [x] **PROV-07**: System logs redactor scrubs API keys, JWT-shape strings, and known header names from any structured log output. (Pitfall 2)
 
 ### ROUTE — 3-tier brain router
 
@@ -162,7 +162,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FORK-07 | Phase 0 | Complete |
 | FORK-08 | Phase 0 | Pending |
 | TUI-01 | Phase 0 | Pending |
-| TUI-02 | Phase 0 | Pending |
+| TUI-02 | Phase 0 | Complete |
 | TUI-03 | Phase 0 | Pending |
 | TUI-04 | Phase 0 | Pending |
 | TUI-05 | Phase 1 | Pending |
@@ -176,11 +176,11 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | USAGE-08 | Phase 2 | Pending |
 | PROV-01 | Phase 1 | Pending |
 | PROV-02 | Phase 1 | Pending |
-| PROV-03 | Phase 0 | Pending |
+| PROV-03 | Phase 0 | Complete |
 | PROV-04 | Phase 1 | Pending |
 | PROV-05 | Phase 1 | Pending |
 | PROV-06 | Phase 1 | Pending |
-| PROV-07 | Phase 0 | Pending |
+| PROV-07 | Phase 0 | Complete |
 | ROUTE-01 | Phase 1 | Pending |
 | ROUTE-02 | Phase 1 | Pending |
 | ROUTE-03 | Phase 1 | Pending |
