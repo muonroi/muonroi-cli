@@ -32,6 +32,8 @@ export function recordUsageEvent(
   model: string,
   usage?: TokenUsageLike,
   messageSeq?: number | null,
+  pilActive = false,
+  enrichmentDelta = 0,
 ): void {
   if (!usage) return;
 
@@ -44,8 +46,9 @@ export function recordUsageEvent(
   getDatabase()
     .prepare(`
     INSERT INTO usage_events (
-      session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at,
+      pil_active, enrichment_delta
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       sessionId,
@@ -57,6 +60,8 @@ export function recordUsageEvent(
       totalTokens,
       costMicros,
       new Date().toISOString(),
+      pilActive ? 1 : 0,
+      enrichmentDelta,
     );
 }
 
