@@ -61,12 +61,12 @@
 ### EE — Experience Engine integration
 
 - [x] **EE-01**: TUI replaces grok-cli's shell-spawn hooks (`src/hooks/executor.ts`) with HTTP client (`src/ee/client.ts`) talking to `localhost:8082`. (Architecture cross-cutting #2)
-- [ ] **EE-02**: PreToolUse hook posts to `/api/intercept` blocking, renders `⚠️ [Experience]` warnings inline before tool execution; `decision === 'block'` aborts the call. (Pitfall 6)
+- [x] **EE-02**: PreToolUse hook posts to `/api/intercept` blocking, renders `⚠️ [Experience]` warnings inline before tool execution; `decision === 'block'` aborts the call. (Pitfall 6)
 - [ ] **EE-03**: PostToolUse hook posts to `/api/posttool` fire-and-forget (no await); judge-worker runs async on EE side. Loss window on EE crash is acceptable (~30 lessons / 10min). (Open Q7)
-- [ ] **EE-04**: All EE calls carry `tenantId` parameter from day 1, even when single-tenant local. (Pitfall 4 schema)
-- [ ] **EE-05**: Principles carry scope payload schema (`global`, `ecosystem:muonroi`, `repo:<remote>`, `branch:<name>`); PreToolUse query filters by current `cwd + git remote`. (Pitfall 6)
-- [ ] **EE-06**: Each principle has stable `principle_uuid` field with `embedding_model_version` recorded — Phase 4 cloud migration prep. (Pitfall 7 schema)
-- [ ] **EE-07**: TUI reads EE auth token from `~/.experience/config.json` at startup. (Open Q4)
+- [x] **EE-04**: All EE calls carry `tenantId` parameter from day 1, even when single-tenant local. (Pitfall 4 schema)
+- [x] **EE-05**: Principles carry scope payload schema (`global`, `ecosystem:muonroi`, `repo:<remote>`, `branch:<name>`); PreToolUse query filters by current `cwd + git remote`. (Pitfall 6)
+- [x] **EE-06**: Each principle has stable `principle_uuid` field with `embedding_model_version` recorded — Phase 4 cloud migration prep. (Pitfall 7 schema)
+- [x] **EE-07**: TUI reads EE auth token from `~/.experience/config.json` at startup. (Open Q4)
 - [ ] **EE-08**: PreToolUse latency CI guard — p95 hook overhead must stay under 25ms; CI fails on regression. (Pitfall 25)
 - [ ] **EE-09**: **Auto-judge feedback loop** — orchestrator captures `warningId + expectedBehavior` at PreToolUse, compares to actual outcome (tool exit code, diff, test result, error class) at PostToolUse, auto-tags `FOLLOWED / IGNORED / IRRELEVANT`, calls `/api/feedback` deterministically every tool call. No agent reporting required.
 - [ ] **EE-10**: Junk-principle pruning — confidence decay on unmatched principles; auto-archive after 30 days unmatched. (Pitfall 30)
@@ -189,12 +189,12 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | ROUTE-06 | Phase 1 | Complete |
 | ROUTE-07 | Phase 1 | Complete |
 | EE-01 | Phase 0 | Complete |
-| EE-02 | Phase 1 | Pending |
+| EE-02 | Phase 1 | Complete |
 | EE-03 | Phase 1 | Pending |
-| EE-04 | Phase 1 | Pending |
-| EE-05 | Phase 1 | Pending |
-| EE-06 | Phase 1 | Pending |
-| EE-07 | Phase 1 | Pending |
+| EE-04 | Phase 1 | Complete |
+| EE-05 | Phase 1 | Complete |
+| EE-06 | Phase 1 | Complete |
+| EE-07 | Phase 1 | Complete |
 | EE-08 | Phase 1 | Pending |
 | EE-09 | Phase 1 | Pending |
 | EE-10 | Phase 1 | Pending |

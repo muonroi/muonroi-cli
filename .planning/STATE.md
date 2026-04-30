@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-05-PLAN (Downgrade Chain + /route)
-last_updated: "2026-04-30T03:41:08.816Z"
+stopped_at: Completed 01-07-PLAN (EE PreToolUse Rendering + Scope)
+last_updated: "2026-04-30T03:42:20.424Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 16
-  completed_plans: 13
+  completed_plans: 14
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 01 (brain-cap-chain) — EXECUTING
-Plan: 6 of 8
+Plan: 7 of 8
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -70,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-brain-cap-chain P03 | 6 | 2 tasks | 13 files |
 | Phase 01 P02 | 7 | 2 tasks | 12 files |
 | Phase 01-brain-cap-chain P05 | 5 | 2 tasks | 9 files |
+| Phase 01-brain-cap-chain P07 | 6 | 2 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -113,6 +114,10 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: capCheck() runs on every decide() path (hot/warm/cold/fallback) — cap precedence is absolute per ROUTE-06
 - [Phase 01-brain-cap-chain]: Slash commands self-register via module import side-effect; Plan 06 wires dispatchSlash into app.tsx
 - [Phase 01-brain-cap-chain]: decide() dry-run reserves then immediately releases; orchestrator re-reserves at actual stream time
+- [Phase 01-brain-cap-chain]: Scope cache key is cwd string — same cwd returns same Scope object reference (Pitfall 6)
+- [Phase 01-brain-cap-chain]: 401 surfaced as reason=auth-required at client level; intercept() handles refresh+retry
+- [Phase 01-brain-cap-chain]: interceptWithDefaults() deprecated helper fills tenantId=local + buildScope() for unmigrated callers
+- [Phase 01-brain-cap-chain]: feedback()+touch() fire-and-forget stubs on EEClient for Plan 08 interface contract
 
 ### Pending Todos
 
@@ -144,6 +149,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:41:08.812Z
-Stopped at: Completed 01-05-PLAN (Downgrade Chain + /route)
+Last session: 2026-04-30T03:42:20.419Z
+Stopped at: Completed 01-07-PLAN (EE PreToolUse Rendering + Scope)
 Resume file: None
