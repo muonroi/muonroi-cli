@@ -31,6 +31,10 @@
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched"
   },
+  "files": [
+    "src/",
+    "dist/"
+  ],
   "keywords": [
     "cli",
     "agent",
