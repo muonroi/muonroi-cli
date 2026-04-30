@@ -89,7 +89,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
   4. User runs `muonroi-cli doctor` and gets a self-check report covering Bun version, OS, key presence in keychain, Ollama health, EE health, Qdrant health, and recent error rate; `muonroi-cli bug-report` produces an anonymized bundle with keys redacted.
   5. User finds GitHub issue templates with auto-redaction guidance and a `STATUS.md` with known issues + beta enrollment instructions in the repo.
 **Plans**: 5 plans
-- [ ] 03-01-PLAN.md — Permission modes (safe/auto-edit/yolo) + CLI branding fix (CORE-07)
+- [x] 03-01-PLAN.md — Permission modes (safe/auto-edit/yolo) + CLI branding fix (CORE-07)
 - [ ] 03-02-PLAN.md — Headless golden test + MCP smoke + LSP smoke + delegation arch test (CORE-01, CORE-02, CORE-03, CORE-04)
 - [ ] 03-03-PLAN.md — Doctor + bug-report operator commands (OPS-01, OPS-02)
 - [ ] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
@@ -121,5 +121,5 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
-| 3. Polish, Headless, Cross-Platform Beta | 0/5 | Not started | - |
+| 3. Polish, Headless, Cross-Platform Beta | 1/5 | In Progress|  |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
