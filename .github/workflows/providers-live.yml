@@ -1,0 +1,25 @@
+name: providers-live
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'  # weekly Monday 06:00 UTC
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        provider: [anthropic, openai, gemini, deepseek, ollama]
+    env:
+      PROV_LIVE: '1'
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun install --frozen-lockfile
+      - run: bunx vitest run tests/live/${{ matrix.provider }}.live.test.ts --reporter=dot
+        continue-on-error: true
