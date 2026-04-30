@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildMcpToolSet } from "./runtime.js";
 
@@ -8,6 +11,9 @@ import { buildMcpToolSet } from "./runtime.js";
  * @modelcontextprotocol/sdk closes stdin immediately on Windows+Bun, preventing
  * real server handshake. Tests cover all code paths reachable without a live
  * transport connection (empty list, disabled servers, validation failures).
+ *
+ * The stdio handshake test (discovers tools from stdio MCP echo stub) runs on
+ * Linux/macOS only — it is skipped on Windows where StdioClientTransport hangs on Bun.
  */
 describe("MCP smoke test — buildMcpToolSet", () => {
   it("returns empty tools and no errors for empty server list", async () => {
@@ -82,4 +88,83 @@ describe("MCP smoke test — buildMcpToolSet", () => {
       return bundle.close();
     });
   });
+
+  it.skipIf(process.platform === "win32")(
+    "discovers tools from stdio MCP echo stub",
+    async () => {
+      // Inline MCP echo server script — handles initialize, notifications/initialized,
+      // and tools/list using Content-Length framing per the MCP JSON-RPC spec.
+      const echoServerScript = `
+const { stdin, stdout } = require('process');
+let buf = '';
+stdin.setEncoding('utf8');
+stdin.on('data', (chunk) => {
+  buf += chunk;
+  while (true) {
+    const headerEnd = buf.indexOf('\\r\\n\\r\\n');
+    if (headerEnd === -1) break;
+    const header = buf.slice(0, headerEnd);
+    const match = header.match(/Content-Length:\\s*(\\d+)/i);
+    if (!match) { buf = buf.slice(headerEnd + 4); continue; }
+    const len = parseInt(match[1], 10);
+    const bodyStart = headerEnd + 4;
+    if (buf.length < bodyStart + len) break;
+    const body = buf.slice(bodyStart, bodyStart + len);
+    buf = buf.slice(bodyStart + len);
+    handleMessage(JSON.parse(body));
+  }
+});
+function send(obj) {
+  const s = JSON.stringify(obj);
+  stdout.write('Content-Length: ' + Buffer.byteLength(s) + '\\r\\n\\r\\n' + s);
+}
+function handleMessage(msg) {
+  if (msg.method === 'initialize') {
+    send({ jsonrpc: '2.0', id: msg.id, result: {
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'echo-stub', version: '1.0.0' }
+    }});
+  } else if (msg.method === 'notifications/initialized') {
+    // no response needed
+  } else if (msg.method === 'tools/list') {
+    send({ jsonrpc: '2.0', id: msg.id, result: {
+      tools: [{
+        name: 'echo',
+        description: 'Echoes input',
+        inputSchema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] }
+      }]
+    }});
+  }
+}
+`;
+
+      const tmpDir = await mkdtemp(join(tmpdir(), "mcp-echo-stub-"));
+      const scriptPath = join(tmpDir, "echo-server.js");
+      let bundle: Awaited<ReturnType<typeof buildMcpToolSet>> | undefined;
+
+      try {
+        await writeFile(scriptPath, echoServerScript, "utf8");
+
+        bundle = await buildMcpToolSet([
+          {
+            id: "test_echo",
+            label: "test_echo",
+            enabled: true,
+            transport: "stdio",
+            command: "node",
+            args: [scriptPath],
+          },
+        ]);
+
+        expect(bundle.errors).toHaveLength(0);
+        expect(Object.keys(bundle.tools).length).toBeGreaterThanOrEqual(1);
+        expect(Object.keys(bundle.tools)).toContain("mcp_test_echo__echo");
+      } finally {
+        if (bundle) await bundle.close();
+        await rm(tmpDir, { recursive: true, force: true });
+      }
+    },
+    15000,
+  );
 });
