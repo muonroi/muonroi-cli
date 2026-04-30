@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 02-04-PLAN (Kill-restart continuity + warning persistence)
-last_updated: "2026-04-30T07:59:40.131Z"
+status: executing
+stopped_at: Completed 03-01-PLAN (Permission mode + branding fix)
+last_updated: "2026-04-30T08:33:18.145Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 21
-  completed_plans: 21
+  total_plans: 26
+  completed_plans: 22
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3× further than any subscription-locked tool.
-**Current focus:** Phase 02 — continuity-slash-commands
+**Current focus:** Phase 03 — polish-headless-cross-platform-beta
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 03 (polish-headless-cross-platform-beta) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-04-30
 
 Progress: [░░░░░░░░░░] 0%
@@ -78,6 +78,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P03 | 5 | 2 tasks | 13 files |
 | Phase 02-continuity-slash-commands P05 | 2 | 1 tasks | 2 files |
 | Phase 02-continuity-slash-commands P04 | 3 | 2 tasks | 5 files |
+| Phase 03-polish-headless-cross-platform-beta P01 | 4 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -138,6 +139,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Slash commands return signal-prefixed strings (__COMPACT__/__EXPAND__/__CLEAR__) for orchestrator message mutation
 - [Phase 02-continuity-slash-commands]: handleCostSlash is synchronous (not async) since statusBarStore.getState() is a sync read
 - [Phase 02-continuity-slash-commands]: persistWarning uses fire-and-forget pattern (catch + console.warn, never throw) since EE persistence must not block orchestrator hot path
+- [Phase 03-polish-headless-cross-platform-beta]: PermissionMode type is safe | auto-edit | yolo; safe is the default on all code paths
+- [Phase 03-polish-headless-cross-platform-beta]: orchestrator calls respondToToolApproval(id, true) for auto-approved tools to skip UI yield entirely
 
 ### Pending Todos
 
@@ -169,6 +172,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T07:54:37.921Z
-Stopped at: Completed 02-04-PLAN (Kill-restart continuity + warning persistence)
+Last session: 2026-04-30T08:33:18.141Z
+Stopped at: Completed 03-01-PLAN (Permission mode + branding fix)
 Resume file: None

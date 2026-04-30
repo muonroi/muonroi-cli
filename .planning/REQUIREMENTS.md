@@ -94,7 +94,7 @@
 - [ ] **CORE-04**: Sub-agent / `task`-`delegate` system from grok-cli is preserved unchanged — do not delete. Documentation kept light in v1. (Cross-cutting insight 7)
 - [ ] **CORE-05**: System works on Windows 10, Windows 11, macOS, Linux without major divergence — verified by CI matrix in Phase 3. (Hard constraint)
 - [ ] **CORE-06**: Standalone binaries built per-target via `bun build --compile` and published to npm + GitHub Releases.
-- [ ] **CORE-07**: System ships 3 named permission modes — `safe` (confirm every tool), `auto-edit` (auto-approve reads + edits, confirm bash), `yolo` (auto-approve all). Phase 3 polish.
+- [x] **CORE-07**: System ships 3 named permission modes — `safe` (confirm every tool), `auto-edit` (auto-approve reads + edits, confirm bash), `yolo` (auto-approve all). Phase 3 polish.
 
 ### OPS — Operations and support tooling
 
@@ -216,7 +216,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | CORE-04 | Phase 3 | Pending |
 | CORE-05 | Phase 3 | Pending |
 | CORE-06 | Phase 3 | Pending |
-| CORE-07 | Phase 3 | Pending |
+| CORE-07 | Phase 3 | Complete |
 | OPS-01 | Phase 3 | Pending |
 | OPS-02 | Phase 3 | Pending |
 | OPS-03 | Phase 3 | Pending |
