@@ -35,7 +35,7 @@
 - [x] **USAGE-04**: System auto-downgrades model when projected spend would breach cap, following Opus → Sonnet → Haiku → halt chain, with explicit status-bar transition before each switch. (Pitfall 12)
 - [x] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
 - [x] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
-- [ ] **USAGE-07**: Runaway-scenario test suite proves cap is never exceeded under infinite tool loop, large-file recursion, model thrashing, and 10-parallel-call burst. (IDEA success metric)
+- [x] **USAGE-07**: Runaway-scenario test suite proves cap is never exceeded under infinite tool loop, large-file recursion, model thrashing, and 10-parallel-call burst. (IDEA success metric)
 - [ ] **USAGE-08**: User can invoke `/cost` slash command to print current status-bar contents on demand.
 
 ### PROV — Multi-provider adapter
@@ -62,14 +62,14 @@
 
 - [x] **EE-01**: TUI replaces grok-cli's shell-spawn hooks (`src/hooks/executor.ts`) with HTTP client (`src/ee/client.ts`) talking to `localhost:8082`. (Architecture cross-cutting #2)
 - [x] **EE-02**: PreToolUse hook posts to `/api/intercept` blocking, renders `⚠️ [Experience]` warnings inline before tool execution; `decision === 'block'` aborts the call. (Pitfall 6)
-- [ ] **EE-03**: PostToolUse hook posts to `/api/posttool` fire-and-forget (no await); judge-worker runs async on EE side. Loss window on EE crash is acceptable (~30 lessons / 10min). (Open Q7)
+- [x] **EE-03**: PostToolUse hook posts to `/api/posttool` fire-and-forget (no await); judge-worker runs async on EE side. Loss window on EE crash is acceptable (~30 lessons / 10min). (Open Q7)
 - [x] **EE-04**: All EE calls carry `tenantId` parameter from day 1, even when single-tenant local. (Pitfall 4 schema)
 - [x] **EE-05**: Principles carry scope payload schema (`global`, `ecosystem:muonroi`, `repo:<remote>`, `branch:<name>`); PreToolUse query filters by current `cwd + git remote`. (Pitfall 6)
 - [x] **EE-06**: Each principle has stable `principle_uuid` field with `embedding_model_version` recorded — Phase 4 cloud migration prep. (Pitfall 7 schema)
 - [x] **EE-07**: TUI reads EE auth token from `~/.experience/config.json` at startup. (Open Q4)
-- [ ] **EE-08**: PreToolUse latency CI guard — p95 hook overhead must stay under 25ms; CI fails on regression. (Pitfall 25)
-- [ ] **EE-09**: **Auto-judge feedback loop** — orchestrator captures `warningId + expectedBehavior` at PreToolUse, compares to actual outcome (tool exit code, diff, test result, error class) at PostToolUse, auto-tags `FOLLOWED / IGNORED / IRRELEVANT`, calls `/api/feedback` deterministically every tool call. No agent reporting required.
-- [ ] **EE-10**: Junk-principle pruning — confidence decay on unmatched principles; auto-archive after 30 days unmatched. (Pitfall 30)
+- [x] **EE-08**: PreToolUse latency CI guard — p95 hook overhead must stay under 25ms; CI fails on regression. (Pitfall 25)
+- [x] **EE-09**: **Auto-judge feedback loop** — orchestrator captures `warningId + expectedBehavior` at PreToolUse, compares to actual outcome (tool exit code, diff, test result, error class) at PostToolUse, auto-tags `FOLLOWED / IGNORED / IRRELEVANT`, calls `/api/feedback` deterministically every tool call. No agent reporting required.
+- [x] **EE-10**: Junk-principle pruning — confidence decay on unmatched principles; auto-archive after 30 days unmatched. (Pitfall 30)
 
 ### FLOW — `.muonroi-flow/` artifact system + GSD slash commands
 
@@ -172,7 +172,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | USAGE-04 | Phase 1 | Complete |
 | USAGE-05 | Phase 1 | Complete |
 | USAGE-06 | Phase 0 | Complete |
-| USAGE-07 | Phase 1 | Pending |
+| USAGE-07 | Phase 1 | Complete |
 | USAGE-08 | Phase 2 | Pending |
 | PROV-01 | Phase 1 | Complete |
 | PROV-02 | Phase 1 | Complete |
@@ -190,14 +190,14 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | ROUTE-07 | Phase 1 | Complete |
 | EE-01 | Phase 0 | Complete |
 | EE-02 | Phase 1 | Complete |
-| EE-03 | Phase 1 | Pending |
+| EE-03 | Phase 1 | Complete |
 | EE-04 | Phase 1 | Complete |
 | EE-05 | Phase 1 | Complete |
 | EE-06 | Phase 1 | Complete |
 | EE-07 | Phase 1 | Complete |
-| EE-08 | Phase 1 | Pending |
-| EE-09 | Phase 1 | Pending |
-| EE-10 | Phase 1 | Pending |
+| EE-08 | Phase 1 | Complete |
+| EE-09 | Phase 1 | Complete |
+| EE-10 | Phase 1 | Complete |
 | FLOW-01 | Phase 2 | Pending |
 | FLOW-02 | Phase 2 | Pending |
 | FLOW-03 | Phase 2 | Pending |
