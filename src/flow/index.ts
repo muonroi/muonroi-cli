@@ -14,9 +14,9 @@ export { ensureFlowDir, FLOW_DIR_NAME } from "./scaffold.js";
 // Artifact I/O
 export { readArtifact, writeArtifact } from "./artifact-io.js";
 
-// Run manager (added in Task 2)
-// export { createRun, loadRun, getActiveRunId, setActiveRunId, updateRunFile } from "./run-manager.js";
-// export type { RunState } from "./run-manager.js";
+// Run manager
+export { createRun, loadRun, getActiveRunId, setActiveRunId, updateRunFile } from "./run-manager.js";
+export type { RunState } from "./run-manager.js";
 
-// Migration (added in Task 2)
-// export { detectLegacyFlow, migrateQuickCodexFlow } from "./migration.js";
+// Migration
+export { detectLegacyFlow, migrateQuickCodexFlow } from "./migration.js";
