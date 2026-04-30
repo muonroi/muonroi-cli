@@ -1,5 +1,6 @@
 import type {
   EEClient,
+  FeedbackPayload,
   InterceptRequest,
   InterceptResponse,
   PostToolPayload,
@@ -151,6 +152,34 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       } catch {
         return null;
       }
+    },
+
+    /**
+     * feedback: fire-and-forget. Plan 08 implements the full handler.
+     * B-4: MUST NOT be async — never blocks the orchestrator.
+     */
+    feedback(payload: FeedbackPayload): void {
+      f(`${baseUrl}/api/feedback`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        /* swallow all errors — fire-and-forget */
+      });
+    },
+
+    /**
+     * touch: fire-and-forget principle touch for 30-day decay. Plan 08 implements.
+     * B-4: MUST NOT be async.
+     */
+    touch(principle_uuid: string, tenantId: string): void {
+      f(`${baseUrl}/api/principle/touch?id=${encodeURIComponent(principle_uuid)}`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({ tenantId }),
+      }).catch(() => {
+        /* swallow all errors — fire-and-forget */
+      });
     },
   };
 }
