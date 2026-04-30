@@ -80,10 +80,10 @@
 - [x] **FLOW-05**: User can run `/discuss` slash command to enter QC-style front-half clarification with affected-area discussion and gray-area gates. Writes `.muonroi-flow/runs/<id>/`.
 - [x] **FLOW-06**: User can run `/plan` slash command to produce a verified plan in the active run, requiring resolved gray-areas and evidence-based phase scope.
 - [x] **FLOW-07**: User can run `/execute` slash command to enter QC-lock execution loop on the active run with explicit verification gates.
-- [ ] **FLOW-08**: User can run `/compact` slash command to trigger deliberate two-pass compaction — extract decisions/facts/constraints to `.muonroi-flow/decisions.md` first, then compact chat. (Pitfall 13)
-- [ ] **FLOW-09**: User can run `/clear` slash command to relock current state from artifacts and discard chat context.
-- [ ] **FLOW-10**: User can run `/expand` slash command to reverse the last `/compact` operation by restoring archived context from `.muonroi-flow/history/`.
-- [ ] **FLOW-11**: Compaction preserves user-marked "preserve verbatim" sections regardless of token budget.
+- [x] **FLOW-08**: User can run `/compact` slash command to trigger deliberate two-pass compaction — extract decisions/facts/constraints to `.muonroi-flow/decisions.md` first, then compact chat. (Pitfall 13)
+- [x] **FLOW-09**: User can run `/clear` slash command to relock current state from artifacts and discard chat context.
+- [x] **FLOW-10**: User can run `/expand` slash command to reverse the last `/compact` operation by restoring archived context from `.muonroi-flow/history/`.
+- [x] **FLOW-11**: Compaction preserves user-marked "preserve verbatim" sections regardless of token budget.
 - [ ] **FLOW-12**: Hook-derived warnings persist into the active run artifact so compaction never erases relevant EE constraints. (IDEA hard constraint)
 
 ### CORE — Headless / MCP / LSP preserved
@@ -205,10 +205,10 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FLOW-05 | Phase 2 | Complete |
 | FLOW-06 | Phase 2 | Complete |
 | FLOW-07 | Phase 2 | Complete |
-| FLOW-08 | Phase 2 | Pending |
-| FLOW-09 | Phase 2 | Pending |
-| FLOW-10 | Phase 2 | Pending |
-| FLOW-11 | Phase 2 | Pending |
+| FLOW-08 | Phase 2 | Complete |
+| FLOW-09 | Phase 2 | Complete |
+| FLOW-10 | Phase 2 | Complete |
+| FLOW-11 | Phase 2 | Complete |
 | FLOW-12 | Phase 2 | Pending |
 | CORE-01 | Phase 3 | Pending |
 | CORE-02 | Phase 3 | Pending |
