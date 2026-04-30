@@ -30,6 +30,23 @@ const makePipelineContext = (): PipelineContext => ({
   taskType: 'debug',
   domain: 'typescript',
   confidence: 0.85,
+  outputStyle: 'concise',
+  tokenBudget: 500,
+  metrics: {
+    totalMs: 3,
+    layerTimings: [
+      { name: 'layer1-intent', ms: 1 },
+      { name: 'layer2-personality', ms: 0 },
+      { name: 'layer3-ee-injection', ms: 0 },
+      { name: 'layer4-gsd-structuring', ms: 0 },
+      { name: 'layer5-context-enrichment', ms: 0 },
+      { name: 'layer6-output', ms: 1 },
+    ],
+    inputChars: 12,
+    outputChars: 31,
+    estimatedTokensSaved: 20,
+    enrichmentTokensAdded: 5,
+  },
   layers: [
     { name: 'layer1-task-detect', applied: true, delta: '+task_type=debug' },
     { name: 'layer2-domain-inject', applied: true, delta: '+domain=typescript' },
@@ -105,7 +122,24 @@ describe('handleOptimizeSlash', () => {
     }
   });
 
-  it('Test 6: handler is async SlashHandler returning string (not void, not null)', async () => {
+  it('Test 6: output contains Output style line', async () => {
+    const ctx = makePipelineContext();
+    vi.mocked(getPilLastResult).mockReturnValue(ctx);
+    const result = await dispatchSlash('optimize', [], makeCtx()) as string;
+    expect(result).toContain('Output style: concise');
+  });
+
+  it('Test 7: output contains Metrics section with timing', async () => {
+    const ctx = makePipelineContext();
+    vi.mocked(getPilLastResult).mockReturnValue(ctx);
+    const result = await dispatchSlash('optimize', [], makeCtx()) as string;
+    expect(result).toContain('Metrics:');
+    expect(result).toContain('total pipeline:');
+    expect(result).toContain('est. tokens saved:');
+    expect(result).toContain('layer timings:');
+  });
+
+  it('Test 8: handler is async SlashHandler returning string', async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
 
