@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-07-PLAN (EE PreToolUse Rendering + Scope)
-last_updated: "2026-04-30T03:42:20.424Z"
+stopped_at: Completed 01-08-PLAN (Wave-4 Quality Gate)
+last_updated: "2026-04-30T03:49:44.544Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 16
-  completed_plans: 14
+  completed_plans: 15
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 01 (brain-cap-chain) — EXECUTING
-Plan: 7 of 8
+Plan: 8 of 8
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P02 | 7 | 2 tasks | 12 files |
 | Phase 01-brain-cap-chain P05 | 5 | 2 tasks | 9 files |
 | Phase 01-brain-cap-chain P07 | 6 | 2 tasks | 14 files |
+| Phase 01-brain-cap-chain P08 | 5 | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -118,6 +119,7 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: 401 surfaced as reason=auth-required at client level; intercept() handles refresh+retry
 - [Phase 01-brain-cap-chain]: interceptWithDefaults() deprecated helper fills tenantId=local + buildScope() for unmigrated callers
 - [Phase 01-brain-cap-chain]: feedback()+touch() fire-and-forget stubs on EEClient for Plan 08 interface contract
+- [Phase 01-brain-cap-chain]: judge() uses 4 deterministic rules (no LLM) for FOLLOWED/IGNORED/IRRELEVANT classification
 
 ### Pending Todos
 
@@ -149,6 +151,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:42:20.419Z
-Stopped at: Completed 01-07-PLAN (EE PreToolUse Rendering + Scope)
+Last session: 2026-04-30T03:49:44.540Z
+Stopped at: Completed 01-08-PLAN (Wave-4 Quality Gate)
 Resume file: None
