@@ -34,6 +34,7 @@ export async function runPipeline(raw: string): Promise<PipelineContext> {
     enriched: raw,
     taskType: null,
     domain: null,
+    confidence: 0,
     layers: [],
   };
   try {

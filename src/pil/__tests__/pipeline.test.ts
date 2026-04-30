@@ -69,7 +69,7 @@ describe('runPipeline()', () => {
     const { resolveAfter } = await import('../timeout.js');
 
     // Verify resolveAfter returns value after ms
-    const fallback: PipelineContext = { raw: 'timeout-test', enriched: 'timeout-test', taskType: null, domain: null, layers: [] };
+    const fallback: PipelineContext = { raw: 'timeout-test', enriched: 'timeout-test', taskType: null, domain: null, confidence: 0, layers: [] };
 
     const resultPromise = resolveAfter(200, fallback);
     vi.advanceTimersByTime(201);

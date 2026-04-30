@@ -2,24 +2,36 @@
  * src/pil/layer6-output.ts
  *
  * Layer 6: Output optimization.
- * Applies structured output rules suffix to system prompts for coding tasks.
- * applyPilSuffix() is called by the orchestrator at prompt assembly time.
+ * Appends a per-task-type system prompt suffix via applyPilSuffix().
+ * Each suffix is tuned to minimize output tokens while preserving quality.
+ * Conversational turns (taskType=null) pass through unchanged.
  */
 
-import type { PipelineContext } from './types.js';
+import type { PipelineContext, TaskType } from './types.js';
 
-const OUTPUT_SUFFIX_CODING = `
+const SUFFIXES: Record<TaskType, string> = {
+  refactor: `
+OUTPUT RULES (refactor): Show only changed code. Prefer unified diff or replacement function. No prose unless architecture changes. One sentence max if explanation needed. No preamble.`,
 
-OUTPUT RULES (strict):
-- Be extremely concise. No filler, no preamble, no meta-commentary.
-- Use bullet points and code blocks. Prefer tool calls over prose.
-- Never say "I cannot", "As an AI", "I apologize", or start with "Certainly".
-- If a code change is needed, output only the diff or the changed function.
-- Prefer structured output (Tool Calling) over free-form text for all coding tasks.`;
+  debug: `
+OUTPUT RULES (debug): Format = Hypothesis → Root cause (1 line) → Fix (code only) → Verify command. No preamble. No "I think" hedging.`,
+
+  plan: `
+OUTPUT RULES (plan): Numbered steps only. Each step: action verb + acceptance criterion. No prose paragraphs. Add "Assumptions:" section only if needed.`,
+
+  analyze: `
+OUTPUT RULES (analyze): Bullet findings with evidence (file:line or direct quote). Add severity label (High/Med/Low) when applicable. No filler sentences.`,
+
+  documentation: `
+OUTPUT RULES (documentation): Markdown only. Lead with a code example, then explanation. No "This function..." openers. All examples in fenced code blocks.`,
+
+  generate: `
+OUTPUT RULES (generate): Complete, runnable code only. Include all imports. Brief inline comments for non-obvious logic only. No prose outside code blocks. No partial snippets.`,
+};
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext): string {
   if (ctx.taskType === null) return systemPrompt;
-  return systemPrompt + OUTPUT_SUFFIX_CODING;
+  return systemPrompt + SUFFIXES[ctx.taskType];
 }
 
 export async function layer6Output(ctx: PipelineContext): Promise<PipelineContext> {
@@ -33,11 +45,16 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
         ],
       };
     }
+    const suffix = SUFFIXES[ctx.taskType];
     return {
       ...ctx,
       layers: [
         ...ctx.layers,
-        { name: 'output-optimization', applied: true, delta: 'output-optimization-applied' },
+        {
+          name: 'output-optimization',
+          applied: true,
+          delta: `suffix=${ctx.taskType},chars=${suffix.trim().length}`,
+        },
       ],
     };
   } catch {

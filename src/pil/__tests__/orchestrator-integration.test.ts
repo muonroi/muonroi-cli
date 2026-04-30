@@ -36,6 +36,7 @@ describe('PIL orchestrator contract', () => {
       enriched: 'refactor the loop',
       taskType: 'refactor',
       domain: null,
+      confidence: 0.85,
       layers: [],
     };
     const base = 'You are a helpful assistant.';
@@ -50,6 +51,7 @@ describe('PIL orchestrator contract', () => {
       enriched: 'hello world',
       taskType: null,
       domain: null,
+      confidence: 0,
       layers: [],
     };
     const base = 'You are a helpful assistant.';
@@ -69,6 +71,7 @@ describe('PIL orchestrator contract', () => {
       enriched: userMessage,
       taskType: null,
       domain: null,
+      confidence: 0,
       layers: [],
     };
     // Verify fallback structure matches orchestrator catch shape

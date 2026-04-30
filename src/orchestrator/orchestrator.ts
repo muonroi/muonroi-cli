@@ -2007,7 +2007,7 @@ export class Agent {
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
     // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
     const pilCtx = await runPipeline(userMessage).catch(() => ({
-      raw: userMessage, enriched: userMessage, taskType: null, domain: null, layers: [],
+      raw: userMessage, enriched: userMessage, taskType: null, domain: null, confidence: 0, layers: [],
     }));
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;

@@ -11,6 +11,7 @@ const makeCtx = (raw: string): PipelineContext => ({
   enriched: raw,
   taskType: null,
   domain: null,
+  confidence: 0,
   layers: [],
 });
 
