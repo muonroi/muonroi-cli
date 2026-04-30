@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01.1-01-PLAN.md
-last_updated: "2026-04-30T10:15:16.733Z"
+stopped_at: Completed 01.1-02-PLAN.md
+last_updated: "2026-04-30T10:19:10.672Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 6
   completed_phases: 4
   total_plans: 32
-  completed_plans: 29
+  completed_plans: 30
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 01.1 (prompt-intelligence-layer-input-enrichment-output-optimization) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -86,6 +86,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-polish-headless-cross-platform-beta P06 | 5 | 2 tasks | 9 files |
 | Phase 03-polish-headless-cross-platform-beta P07 | 5 | 1 tasks | 1 files |
 | Phase 01.1-prompt-intelligence-layer-input-enrichment-output-optimization P01 | 15 | 3 tasks | 15 files |
+| Phase 01.1-prompt-intelligence-layer-input-enrichment-output-optimization P02 | 15 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -161,6 +162,7 @@ Recent decisions affecting current work:
 - [Phase 01.1]: Layers 2-5 are intentional stubs with no EE imports — arch constraint enforced by grep in tests
 - [Phase 01.1]: Fallback PipelineContext captured before runLayers() — resolveAfter receives pristine fallback reference for correct 200ms timeout behavior
 - [Phase 01.1]: REASON_TO_TASK_TYPE map is conservative: 8 clear code-manipulation reasons mapped; unknown/low-confidence reasons return null taskType
+- [Phase 01.1]: PIL intercept placed after consumeBackgroundNotifications() before messages.push() — exact mutation point per D-01; buildSystemPrompt() called once wrapped by applyPilSuffix then applyModelConstraints
 
 ### Roadmap Evolution
 
@@ -196,6 +198,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T10:15:16.728Z
-Stopped at: Completed 01.1-01-PLAN.md
+Last session: 2026-04-30T10:19:10.667Z
+Stopped at: Completed 01.1-02-PLAN.md
 Resume file: None
