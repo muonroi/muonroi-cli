@@ -19,11 +19,12 @@ describe('ROUTE-06: cap-driven downgrade overrides classifier', () => {
   let stub: StubHandle;
 
   beforeAll(async () => {
-    // Create tmpdir home with very low cap so any opus request breaches
+    // Create tmpdir home with extremely low cap so even haiku breaches.
+    // Haiku costs ~$0.0072 for 4k/1k tokens; cap at $0.001 forces downgrade chain.
     home = await fs.mkdtemp(path.join(os.tmpdir(), 'muonroi-cap-router-'));
     await fs.writeFile(
       path.join(home, 'config.json'),
-      JSON.stringify({ cap: { monthly_usd: 0.01 } }),
+      JSON.stringify({ cap: { monthly_usd: 0.001 } }),
     );
 
     // EE stub that returns null (both warm/cold fail -> fallback to defaultModel)
@@ -40,7 +41,10 @@ describe('ROUTE-06: cap-driven downgrade overrides classifier', () => {
     midstreamPolicy.clear();
   });
 
-  it('downgrades opus to cheaper model or HALT when cap breached', async () => {
+  it('downgrades and sets cap_overridden when all models breach cap', async () => {
+    // With $0.001 cap, all models breach -> chain exhausts to HALT.
+    // Classifier returns hot with haiku hint for "create file" but haiku also
+    // costs ~$0.0072 which exceeds $0.001.
     const opts: DecideOpts = {
       tenantId: 'local',
       cwd: process.cwd(),
@@ -53,13 +57,12 @@ describe('ROUTE-06: cap-driven downgrade overrides classifier', () => {
 
     expect(result.cap_overridden).toBe(true);
     expect(result.reason).toContain('cap-driven-downgrade');
-    // Final model should be downgraded from opus (either sonnet, haiku, or HALT)
-    expect(result.model).not.toBe('claude-3-opus-latest');
+    // With $0.001 cap, entire chain exhausted -> HALT
+    expect(result.model).toBe('HALT');
+    expect(result.tier).toBe('degraded');
   });
 
-  it('returns HALT when entire chain breaches cap', async () => {
-    // With $0.01 cap, even haiku at 4000 input + 1000 output may breach
-    // Force the midstream refuse to simulate cap exhaustion
+  it('returns HALT immediately when midstreamPolicy.refuseNext() is true', async () => {
     midstreamPolicy.forceRefuseNext();
 
     const opts: DecideOpts = {
@@ -75,5 +78,6 @@ describe('ROUTE-06: cap-driven downgrade overrides classifier', () => {
     expect(result.cap_overridden).toBe(true);
     expect(result.model).toBe('HALT');
     expect(result.tier).toBe('degraded');
+    expect(result.reason).toContain('cap-halt');
   });
 });
