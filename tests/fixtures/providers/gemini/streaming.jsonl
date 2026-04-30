@@ -1,0 +1,6 @@
+{"type":"text-delta","text":"Hello"}
+{"type":"text-delta","text":" from Gemini"}
+{"type":"text-delta","text":"!"}
+{"type":"text-delta","text":" How may I assist?"}
+{"type":"text-delta","text":" I'm ready."}
+{"type":"finish","finishReason":"stop","totalUsage":{"promptTokens":10,"completionTokens":9}}

@@ -1,0 +1,4 @@
+{"type":"text-delta","text":"Let me read those files."}
+{"type":"tool-call","toolCallId":"oai_call_201","toolName":"readFile","input":{"path":"a.ts"}}
+{"type":"tool-call","toolCallId":"oai_call_202","toolName":"readFile","input":{"path":"b.ts"}}
+{"type":"finish","finishReason":"tool-calls","totalUsage":{"promptTokens":20,"completionTokens":16}}

@@ -1,0 +1,6 @@
+{"type":"text-delta","text":"Hello"}
+{"type":"text-delta","text":" from DeepSeek"}
+{"type":"text-delta","text":"!"}
+{"type":"text-delta","text":" Ready to help."}
+{"type":"text-delta","text":" Let's go."}
+{"type":"finish","finishReason":"stop","totalUsage":{"promptTokens":10,"completionTokens":8}}
