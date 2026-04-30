@@ -3,11 +3,11 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 03-07-PLAN (platform-conditional MCP stdio handshake test)
-last_updated: "2026-04-30T09:20:49.629Z"
+stopped_at: Phase 01.1 context gathered
+last_updated: "2026-04-30T09:53:46.507Z"
 last_activity: 2026-04-30
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 4
   total_plans: 28
   completed_plans: 28
@@ -158,6 +158,10 @@ Recent decisions affecting current work:
 - [Phase 03-polish-headless-cross-platform-beta]: EE stub relocated from tests/stubs/ to src/__test-stubs__/ because tsconfig rootDir=./src excluded tests/ from type-checking scope
 - [Phase 03-polish-headless-cross-platform-beta]: it.skipIf(win32) MCP stdio handshake test uses node (not bun) command for echo server to avoid StdioClientTransport+Bun hang; cleans tmpdir in finally block
 
+### Roadmap Evolution
+
+- Phase 01.1 inserted after Phase 1: Prompt Intelligence Layer — Input Enrichment & Output Optimization (URGENT)
+
 ### Pending Todos
 
 None yet — captured during execution via `/gsd-add-todo`.
@@ -188,6 +192,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T09:16:18.906Z
-Stopped at: Completed 03-07-PLAN (platform-conditional MCP stdio handshake test)
-Resume file: None
+Last session: 2026-04-30T09:53:46.503Z
+Stopped at: Phase 01.1 context gathered
+Resume file: .planning/phases/01.1-prompt-intelligence-layer-input-enrichment-output-optimization/01.1-CONTEXT.md
