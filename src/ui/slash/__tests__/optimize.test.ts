@@ -29,6 +29,7 @@ const makePipelineContext = (): PipelineContext => ({
   enriched: 'Please fix this bug in the code.',
   taskType: 'debug',
   domain: 'typescript',
+  confidence: 0.85,
   layers: [
     { name: 'layer1-task-detect', applied: true, delta: '+task_type=debug' },
     { name: 'layer2-domain-inject', applied: true, delta: '+domain=typescript' },

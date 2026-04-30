@@ -23,5 +23,7 @@ export interface PipelineContext {
   enriched: string;
   taskType: TaskType | null;
   domain: string | null;
+  /** Classifier confidence score 0..1. 0 = fallback/timeout path. */
+  confidence: number;
   layers: LayerResult[];
 }
