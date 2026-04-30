@@ -13,7 +13,16 @@ import { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
 export interface UsageState {
   current_month_utc: string; // "YYYY-MM" e.g. "2026-04"
   current_usd: number; // running spend this month
-  reservations: Array<{ id: string; usd: number; createdAtMs: number }>; // Phase 1 fills
+  reservations: Array<{
+    id: string;
+    usd: number;
+    createdAtMs: number;
+    model?: string;
+    provider?: string;
+    est_input_tokens?: number;
+    est_output_tokens?: number;
+  }>; // Phase 1 fills
+  thresholds_fired_this_month?: number[]; // e.g. [50, 80] -- used by thresholds.ts to dedupe per month
 }
 
 function currentMonthUTC(d: Date = new Date()): string {
@@ -31,7 +40,7 @@ function muonroiHome(override?: string): string {
 }
 
 function defaultState(): UsageState {
-  return { current_month_utc: currentMonthUTC(), current_usd: 0, reservations: [] };
+  return { current_month_utc: currentMonthUTC(), current_usd: 0, reservations: [], thresholds_fired_this_month: [] };
 }
 
 /**
@@ -54,6 +63,7 @@ export async function loadUsage(homeOverride?: string): Promise<UsageState> {
       current_month_utc: currentMonthUTC(),
       current_usd: 0,
       reservations: [],
+      thresholds_fired_this_month: [],
     };
     await atomicWriteJSON(filePath, reset);
     return reset;
