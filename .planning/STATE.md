@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-01-PLAN (Permission mode + branding fix)
-last_updated: "2026-04-30T08:33:18.145Z"
+stopped_at: Completed 03-02-PLAN (Golden tests — headless, MCP, LSP, delegation)
+last_updated: "2026-04-30T08:44:18.882Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 26
-  completed_plans: 22
+  completed_plans: 23
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 03 (polish-headless-cross-platform-beta) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -79,6 +79,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02-continuity-slash-commands P05 | 2 | 1 tasks | 2 files |
 | Phase 02-continuity-slash-commands P04 | 3 | 2 tasks | 5 files |
 | Phase 03-polish-headless-cross-platform-beta P01 | 4 | 2 tasks | 5 files |
+| Phase 03-polish-headless-cross-platform-beta P02 | 8 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -141,6 +142,8 @@ Recent decisions affecting current work:
 - [Phase 02-continuity-slash-commands]: persistWarning uses fire-and-forget pattern (catch + console.warn, never throw) since EE persistence must not block orchestrator hot path
 - [Phase 03-polish-headless-cross-platform-beta]: PermissionMode type is safe | auto-edit | yolo; safe is the default on all code paths
 - [Phase 03-polish-headless-cross-platform-beta]: orchestrator calls respondToToolApproval(id, true) for auto-approved tools to skip UI yield entirely
+- [Phase 03-polish-headless-cross-platform-beta]: StdioClientTransport from @modelcontextprotocol/sdk hangs on Windows+Bun — MCP smoke test uses unit-level fallback; stub checked in for Linux CI
+- [Phase 03-polish-headless-cross-platform-beta]: Delegation arch test checks method names (runDelegation/listDelegations) not 'delegate' string — orchestrator uses methods not tool name strings
 
 ### Pending Todos
 
@@ -172,6 +175,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T08:33:18.141Z
-Stopped at: Completed 03-01-PLAN (Permission mode + branding fix)
+Last session: 2026-04-30T08:44:18.878Z
+Stopped at: Completed 03-02-PLAN (Golden tests — headless, MCP, LSP, delegation)
 Resume file: None

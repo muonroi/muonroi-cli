@@ -88,10 +88,10 @@
 
 ### CORE — Headless / MCP / LSP preserved
 
-- [ ] **CORE-01**: System runs in headless / CI mode via `--prompt` flag with JSON output format `--format json`. Validated end-to-end with golden tests in Phase 3. (Table stake)
-- [ ] **CORE-02**: System loads MCP servers from config; tool surface from MCP servers integrates into the same tool-use loop. Smoke test in Phase 3. (Table stake)
-- [ ] **CORE-03**: LSP integration preserved — system queries LSP for symbol info, diagnostics, references during tool execution. Smoke test in Phase 3. (Table stake)
-- [ ] **CORE-04**: Sub-agent / `task`-`delegate` system from grok-cli is preserved unchanged — do not delete. Documentation kept light in v1. (Cross-cutting insight 7)
+- [x] **CORE-01**: System runs in headless / CI mode via `--prompt` flag with JSON output format `--format json`. Validated end-to-end with golden tests in Phase 3. (Table stake)
+- [x] **CORE-02**: System loads MCP servers from config; tool surface from MCP servers integrates into the same tool-use loop. Smoke test in Phase 3. (Table stake)
+- [x] **CORE-03**: LSP integration preserved — system queries LSP for symbol info, diagnostics, references during tool execution. Smoke test in Phase 3. (Table stake)
+- [x] **CORE-04**: Sub-agent / `task`-`delegate` system from grok-cli is preserved unchanged — do not delete. Documentation kept light in v1. (Cross-cutting insight 7)
 - [ ] **CORE-05**: System works on Windows 10, Windows 11, macOS, Linux without major divergence — verified by CI matrix in Phase 3. (Hard constraint)
 - [ ] **CORE-06**: Standalone binaries built per-target via `bun build --compile` and published to npm + GitHub Releases.
 - [x] **CORE-07**: System ships 3 named permission modes — `safe` (confirm every tool), `auto-edit` (auto-approve reads + edits, confirm bash), `yolo` (auto-approve all). Phase 3 polish.
@@ -210,10 +210,10 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FLOW-10 | Phase 2 | Complete |
 | FLOW-11 | Phase 2 | Complete |
 | FLOW-12 | Phase 2 | Complete |
-| CORE-01 | Phase 3 | Pending |
-| CORE-02 | Phase 3 | Pending |
-| CORE-03 | Phase 3 | Pending |
-| CORE-04 | Phase 3 | Pending |
+| CORE-01 | Phase 3 | Complete |
+| CORE-02 | Phase 3 | Complete |
+| CORE-03 | Phase 3 | Complete |
+| CORE-04 | Phase 3 | Complete |
 | CORE-05 | Phase 3 | Pending |
 | CORE-06 | Phase 3 | Pending |
 | CORE-07 | Phase 3 | Complete |
