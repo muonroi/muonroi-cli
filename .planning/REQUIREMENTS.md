@@ -30,8 +30,8 @@
 ### USAGE — Realtime spend visibility and hard cap
 
 - [x] **USAGE-01**: User can configure `cap.monthly_usd` (default $15) via `~/.muonroi-cli/config.json` and have it enforced from first run.
-- [ ] **USAGE-02**: System fires three threshold events at 50%, 80%, 100% of the configured cap with appropriate UX — notice / warning / halt. (IDEA hard requirement)
-- [ ] **USAGE-03**: System enforces cap via reservation ledger that holds `current + reservations + projected ≤ cap` atomically across concurrent tool calls. Naive counter-then-act is rejected. (Pitfall 3)
+- [x] **USAGE-02**: System fires three threshold events at 50%, 80%, 100% of the configured cap with appropriate UX — notice / warning / halt. (IDEA hard requirement)
+- [x] **USAGE-03**: System enforces cap via reservation ledger that holds `current + reservations + projected ≤ cap` atomically across concurrent tool calls. Naive counter-then-act is rejected. (Pitfall 3)
 - [ ] **USAGE-04**: System auto-downgrades model when projected spend would breach cap, following Opus → Sonnet → Haiku → halt chain, with explicit status-bar transition before each switch. (Pitfall 12)
 - [ ] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
 - [x] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
@@ -167,8 +167,8 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | TUI-04 | Phase 0 | Complete |
 | TUI-05 | Phase 1 | Pending |
 | USAGE-01 | Phase 0 | Complete |
-| USAGE-02 | Phase 1 | Pending |
-| USAGE-03 | Phase 1 | Pending |
+| USAGE-02 | Phase 1 | Complete |
+| USAGE-03 | Phase 1 | Complete |
 | USAGE-04 | Phase 1 | Pending |
 | USAGE-05 | Phase 1 | Pending |
 | USAGE-06 | Phase 0 | Complete |

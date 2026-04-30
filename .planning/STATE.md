@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-01-PLAN (Provider Adapter + 5 providers + pricing + errors + keychain + live-smoke)
-last_updated: "2026-04-30T03:23:32.930Z"
+stopped_at: Completed 01-04-PLAN (Reservation Ledger + Thresholds)
+last_updated: "2026-04-30T03:31:59.881Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 16
-  completed_plans: 9
+  completed_plans: 11
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 01 (brain-cap-chain) — EXECUTING
-Plan: 2 of 8
+Plan: 4 of 8
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -66,6 +66,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 00-fork-skeleton P07 | 30 | 3 tasks | 8 files |
 | Phase 00-fork-skeleton P08 | 15 | 2 tasks | 5 files |
 | Phase 01-brain-cap-chain P01 | 8 | 3 tasks | 32 files |
+| Phase 01-brain-cap-chain P04 | 6 | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: Shared stream-loop.ts extracts AI SDK v6 fullStream->StreamChunk mapping to DRY across 5 providers
 - [Phase 01-brain-cap-chain]: Fixture loader moved to src/providers/__test-utils__/ due to tsconfig rootDir constraint
 - [Phase 01-brain-cap-chain]: Ollama adapter skips redactor.enrollSecret (keyless provider)
+- [Phase 01-brain-cap-chain]: proper-lockfile chosen over hand-rolled lock for reservation ledger (MIT, stale recovery, Bun-Windows compat confirmed)
+- [Phase 01-brain-cap-chain]: Threshold events emitted after lock release; dedupe via thresholds_fired_this_month in usage.json
 
 ### Pending Todos
 
@@ -130,6 +133,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:23:32.925Z
-Stopped at: Completed 01-01-PLAN (Provider Adapter + 5 providers + pricing + errors + keychain + live-smoke)
+Last session: 2026-04-30T03:31:48.153Z
+Stopped at: Completed 01-04-PLAN (Reservation Ledger + Thresholds)
 Resume file: None
