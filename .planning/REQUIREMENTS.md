@@ -36,7 +36,7 @@
 - [x] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
 - [x] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
 - [x] **USAGE-07**: Runaway-scenario test suite proves cap is never exceeded under infinite tool loop, large-file recursion, model thrashing, and 10-parallel-call burst. (IDEA success metric)
-- [ ] **USAGE-08**: User can invoke `/cost` slash command to print current status-bar contents on demand.
+- [x] **USAGE-08**: User can invoke `/cost` slash command to print current status-bar contents on demand.
 
 ### PROV — Multi-provider adapter
 
@@ -173,7 +173,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | USAGE-05 | Phase 1 | Complete |
 | USAGE-06 | Phase 0 | Complete |
 | USAGE-07 | Phase 1 | Complete |
-| USAGE-08 | Phase 2 | Pending |
+| USAGE-08 | Phase 2 | Complete |
 | PROV-01 | Phase 1 | Complete |
 | PROV-02 | Phase 1 | Complete |
 | PROV-03 | Phase 0 | Complete |
