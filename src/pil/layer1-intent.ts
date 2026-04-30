@@ -11,9 +11,9 @@ import { classify } from '../router/classifier/index.js';
 
 const REASON_TO_TASK_TYPE: Record<string, TaskType> = {
   'regex:refactor': 'refactor',
-  'regex:edit': 'debug',
+  'regex:edit': 'generate',
   'regex:create-file': 'generate',
-  'regex:run-command': 'debug',
+  'regex:run-command': 'analyze',
   'regex:explain': 'analyze',
   'regex:search': 'analyze',
   'tree-sitter:typescript': 'refactor',

@@ -738,6 +738,9 @@ export class Agent {
   private sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null = null;
   private batchApi = false;
   private sessionStartHookFired = false;
+  /** PIL context for current turn — set after runPipeline, cleared after recordUsage. */
+  private _pilActive = false;
+  private _pilEnrichmentDelta = 0;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -1056,7 +1059,13 @@ export class Agent {
   ): void {
     if (!usage) return;
     if (this.session) {
-      recordUsageEvent(this.session.id, source, model, usage);
+      const pilActive = source === "message" ? this._pilActive : false;
+      const enrichmentDelta = source === "message" ? this._pilEnrichmentDelta : 0;
+      recordUsageEvent(this.session.id, source, model, usage, null, pilActive, enrichmentDelta);
+      if (source === "message") {
+        this._pilActive = false;
+        this._pilEnrichmentDelta = 0;
+      }
     }
   }
 
@@ -2001,6 +2010,9 @@ export class Agent {
       raw: userMessage, enriched: userMessage, taskType: null, domain: null, layers: [],
     }));
     const enrichedMessage = pilCtx.enriched;
+    this._pilActive = pilCtx.taskType !== null;
+    // enrichmentDelta: characters added to input by PIL suffix (proxy for input token overhead)
+    this._pilEnrichmentDelta = Math.round((enrichedMessage.length - userMessage.length) / 4);
 
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);

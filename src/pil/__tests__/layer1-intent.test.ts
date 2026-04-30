@@ -34,11 +34,11 @@ describe('layer1Intent', () => {
     expect(result.layers[0].name).toBe('intent-detection');
   });
 
-  it('maps regex:edit reason to taskType=debug, applied=true', async () => {
+  it('maps regex:edit reason to taskType=generate, applied=true', async () => {
     mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.8, reason: 'regex:edit' });
     const ctx = makeCtx('edit the file');
     const result = await layer1Intent(ctx);
-    expect(result.taskType).toBe('debug');
+    expect(result.taskType).toBe('generate');
     expect(result.layers[0].applied).toBe(true);
   });
 
