@@ -72,6 +72,10 @@ import {
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
+import { StatusBar } from "./status-bar/index.js";
+import { wireStatusBar } from "./status-bar/store.js";
+import { dispatchSlash } from "./slash/registry.js";
+import "./slash/route.js"; // side-effect: self-registers /route handler
 
 // ---------------------------------------------------------------------------
 // FORK-02 STUBS — grok/models, telegram/*, and telegram-turn-ui deleted.
@@ -638,6 +642,8 @@ interface ActiveTurnState {
 export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
   const t = dark;
   const renderer = useRenderer();
+  // Wire status bar subscriptions once at boot (Plan 06)
+  useEffect(() => wireStatusBar(), []);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -2328,6 +2334,24 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         processMessage(buildCustomSubagentSlashPrompt(customSubagentCommand.agentName, customSubagentCommand.prompt));
         return true;
       }
+      // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
+      if (c.startsWith("/")) {
+        const parts = c.slice(1).split(/\s+/);
+        const name = parts[0] ?? '';
+        const args = parts.slice(1);
+        dispatchSlash(name, args, {
+          cwd: agent.getCwd(),
+          tenantId: 'local',
+          defaultProvider: 'anthropic',
+          defaultModel: model,
+          lastPrompt: messages[messages.length - 1]?.content,
+        }).then((result) => {
+          if (result !== null) {
+            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+          }
+        });
+        return true;
+      }
       return false;
     },
     [
@@ -3485,6 +3509,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               />
             </box>
           </box>
+          <box paddingLeft={2} paddingRight={2} flexShrink={0}>
+            <StatusBar />
+          </box>
           <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
             <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
             {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
@@ -3550,6 +3577,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               </text>
             </box>
           )}
+          <box paddingLeft={2} paddingRight={2} flexShrink={0}>
+            <StatusBar />
+          </box>
           <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
             <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
             {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
