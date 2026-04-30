@@ -32,8 +32,8 @@
 - [x] **USAGE-01**: User can configure `cap.monthly_usd` (default $15) via `~/.muonroi-cli/config.json` and have it enforced from first run.
 - [x] **USAGE-02**: System fires three threshold events at 50%, 80%, 100% of the configured cap with appropriate UX — notice / warning / halt. (IDEA hard requirement)
 - [x] **USAGE-03**: System enforces cap via reservation ledger that holds `current + reservations + projected ≤ cap` atomically across concurrent tool calls. Naive counter-then-act is rejected. (Pitfall 3)
-- [ ] **USAGE-04**: System auto-downgrades model when projected spend would breach cap, following Opus → Sonnet → Haiku → halt chain, with explicit status-bar transition before each switch. (Pitfall 12)
-- [ ] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
+- [x] **USAGE-04**: System auto-downgrades model when projected spend would breach cap, following Opus → Sonnet → Haiku → halt chain, with explicit status-bar transition before each switch. (Pitfall 12)
+- [x] **USAGE-05**: System mid-stream policy — finish currently in-flight stream after threshold breach, refuse next stream. Acceptable overshoot ~101% per single in-flight stream. (Open Q9)
 - [x] **USAGE-06**: Cap state lives in TUI process at `~/.muonroi-cli/usage.json` with in-memory mirror — never authoritative in EE. EE optionally receives async telemetry for dashboards (Phase 4). (Architecture anti-pattern 4)
 - [ ] **USAGE-07**: Runaway-scenario test suite proves cap is never exceeded under infinite tool loop, large-file recursion, model thrashing, and 10-parallel-call burst. (IDEA success metric)
 - [ ] **USAGE-08**: User can invoke `/cost` slash command to print current status-bar contents on demand.
@@ -54,8 +54,8 @@
 - [x] **ROUTE-02**: When local classifier abstains, system queries warm-path EE `/api/route-model` endpoint (Ollama on VPS) at <300ms p95. (Architecture data flow)
 - [x] **ROUTE-03**: When warm path is unhealthy or abstains, system falls back to cold-path SiliconFlow proxy via EE at <1s p95. (Pitfall 8)
 - [x] **ROUTE-04**: System health-checks Ollama VPS every 30s with 60s TTL cache; status-bar tier badge surfaces `degraded` when warm path is down.
-- [ ] **ROUTE-05**: User can invoke `/route` slash command to print the routing decision for the next prompt with reason (heuristic match, EE classifier confidence, cap-driven downgrade).
-- [ ] **ROUTE-06**: Router consults cap state on every model selection — if projected spend would breach cap, downgrade chain takes precedence over routing decision. (USAGE-04 integration)
+- [x] **ROUTE-05**: User can invoke `/route` slash command to print the routing decision for the next prompt with reason (heuristic match, EE classifier confidence, cap-driven downgrade).
+- [x] **ROUTE-06**: Router consults cap state on every model selection — if projected spend would breach cap, downgrade chain takes precedence over routing decision. (USAGE-04 integration)
 - [x] **ROUTE-07**: Classifier confidence threshold is configurable; below threshold routes warm-path automatically. (Pitfall 11)
 
 ### EE — Experience Engine integration
@@ -169,8 +169,8 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | USAGE-01 | Phase 0 | Complete |
 | USAGE-02 | Phase 1 | Complete |
 | USAGE-03 | Phase 1 | Complete |
-| USAGE-04 | Phase 1 | Pending |
-| USAGE-05 | Phase 1 | Pending |
+| USAGE-04 | Phase 1 | Complete |
+| USAGE-05 | Phase 1 | Complete |
 | USAGE-06 | Phase 0 | Complete |
 | USAGE-07 | Phase 1 | Pending |
 | USAGE-08 | Phase 2 | Pending |
@@ -185,8 +185,8 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | ROUTE-02 | Phase 1 | Complete |
 | ROUTE-03 | Phase 1 | Complete |
 | ROUTE-04 | Phase 1 | Complete |
-| ROUTE-05 | Phase 1 | Pending |
-| ROUTE-06 | Phase 1 | Pending |
+| ROUTE-05 | Phase 1 | Complete |
+| ROUTE-06 | Phase 1 | Complete |
 | ROUTE-07 | Phase 1 | Complete |
 | EE-01 | Phase 0 | Complete |
 | EE-02 | Phase 1 | Pending |

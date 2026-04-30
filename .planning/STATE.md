@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: "Completed 01-02-PLAN (Hot-Path Classifier: regex + tree-sitter + arch test + perf bench)"
-last_updated: "2026-04-30T03:33:21.241Z"
+stopped_at: Completed 01-05-PLAN (Downgrade Chain + /route)
+last_updated: "2026-04-30T03:41:08.816Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 1
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 01 (brain-cap-chain) — EXECUTING
-Plan: 5 of 8
+Plan: 6 of 8
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -69,6 +69,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-brain-cap-chain P04 | 6 | 2 tasks | 10 files |
 | Phase 01-brain-cap-chain P03 | 6 | 2 tasks | 13 files |
 | Phase 01 P02 | 7 | 2 tasks | 12 files |
+| Phase 01-brain-cap-chain P05 | 5 | 2 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -109,6 +110,9 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: routeModel/coldRoute return null on any failure (timeout/5xx/network) -- callers use null-check fallthrough
 - [Phase 01]: web-tree-sitter Parser/Language resolved via mod.Parser ?? mod.default?.Parser for CJS/ESM compat
 - [Phase 01]: Classifier threshold default 0.55, configurable via classify(prompt, threshold) second parameter
+- [Phase 01-brain-cap-chain]: capCheck() runs on every decide() path (hot/warm/cold/fallback) — cap precedence is absolute per ROUTE-06
+- [Phase 01-brain-cap-chain]: Slash commands self-register via module import side-effect; Plan 06 wires dispatchSlash into app.tsx
+- [Phase 01-brain-cap-chain]: decide() dry-run reserves then immediately releases; orchestrator re-reserves at actual stream time
 
 ### Pending Todos
 
@@ -140,6 +144,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:33:21.236Z
-Stopped at: Completed 01-02-PLAN (Hot-Path Classifier: regex + tree-sitter + arch test + perf bench)
+Last session: 2026-04-30T03:41:08.812Z
+Stopped at: Completed 01-05-PLAN (Downgrade Chain + /route)
 Resume file: None
