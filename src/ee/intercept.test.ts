@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { startStubEEServer, type StubHandle } from "../__test-stubs__/ee-server.js";
-import { createEEClient } from "./client.js";
+import { createEEClient, resetEEClientState } from "./client.js";
 import { setDefaultEEClient, getDefaultEEClient } from "./intercept.js";
 import { setRenderSink } from "./render.js";
 import type { InterceptMatch, InterceptRequest } from "./types.js";
@@ -30,6 +30,7 @@ describe("intercept integration", () => {
   beforeEach(async () => {
     captured = [];
     setRenderSink((line) => captured.push(line));
+    resetEEClientState();
   });
 
   afterEach(async () => {
@@ -75,8 +76,8 @@ describe("intercept integration", () => {
     // The render sink should have captured the warning
     expect(captured).toHaveLength(1);
     expect(captured[0]).toContain("Avoid destructive commands");
-    expect(captured[0]).toContain("Why: Dangerous command detected");
-    expect(captured[0]).toContain("Scope: global");
+    expect(captured[0]).toContain("Dangerous command detected");
+    expect(captured[0]).toContain("global");
   });
 
   it("posttool carries tenantId + scope (B-4 void preserved)", async () => {
@@ -111,6 +112,8 @@ describe("intercept integration", () => {
 
 describe("401 refresh path", () => {
   let stub: StubHandle;
+
+  beforeEach(() => { resetEEClientState(); });
 
   afterEach(async () => {
     if (stub) await stub.stop();

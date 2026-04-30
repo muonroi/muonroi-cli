@@ -13,30 +13,24 @@ const baseMatch: InterceptMatch = {
 };
 
 describe("renderInterceptWarning", () => {
-  it("renders 5-line boxed warning with confidence%, message, why, scope", () => {
+  it("renders 3-line warning with confidence, message, why, scope", () => {
     const result = renderInterceptWarning(baseMatch);
     const lines = result.split("\n");
-    expect(lines).toHaveLength(5);
-    expect(lines[0]).toContain("⚠ Experience Warning");
-    expect(lines[1]).toContain("85%");
-    expect(lines[1]).toContain("Avoid editing X");
-    expect(lines[2]).toContain("It causes Y");
-    expect(lines[3]).toContain("repo:foo/bar");
-    expect(lines[4]).toContain("└");
+    expect(lines[0]).toBe("⚠ [Experience - 0.85] Avoid editing X");
+    expect(lines[1]).toBe("  Why: It causes Y");
+    expect(lines[2]).toBe("  Scope: repo:foo/bar");
   });
 
-  it("renders confidence as integer percentage (85% not 0.85)", () => {
-    expect(renderInterceptWarning(baseMatch)).toContain("85%");
-  });
-
-  it("renders confidence=1 as 100%", () => {
+  it("renders confidence=1 as 1.00", () => {
     const match: InterceptMatch = { ...baseMatch, confidence: 1 };
-    expect(renderInterceptWarning(match)).toContain("100%");
+    const result = renderInterceptWarning(match);
+    expect(result).toContain("⚠ [Experience - 1.00]");
   });
 
-  it("renders confidence=0 as 0%", () => {
+  it("renders confidence=0 as 0.00", () => {
     const match: InterceptMatch = { ...baseMatch, confidence: 0 };
-    expect(renderInterceptWarning(match)).toContain("[0%]");
+    const result = renderInterceptWarning(match);
+    expect(result).toContain("⚠ [Experience - 0.00]");
   });
 });
 
