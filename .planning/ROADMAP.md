@@ -73,7 +73,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 01.1-01-PLAN.md — src/pil/ module: types, pipeline, L1, L2-5 stubs, L6, store (PIL-01, PIL-02, PIL-03, PIL-04, PIL-05)
 - [x] 01.1-02-PLAN.md — Orchestrator integration: runPipeline intercept + applyPilSuffix wiring (PIL-05, PIL-08)
 - [x] 01.1-03-PLAN.md — /optimize slash command + DB migration v3 + recordUsageEvent PIL fields (PIL-06, PIL-07, PIL-08)
-- [ ] 01.1-04-PLAN.md — Arch guard test (no-network-in-pil-layer1) + Phase gate (PIL-01, PIL-02)
+- [x] 01.1-04-PLAN.md — Arch guard test (no-network-in-pil-layer1) + Phase gate (PIL-01, PIL-02)
 
 ### Phase 2: Continuity & Slash Commands
 **Goal**: `.muonroi-flow/` artifacts coordinate state across sessions and slash commands; deliberate two-pass compaction never drops decisions; `/discuss /plan /execute /compact /clear /expand /cost /route` all work; killing the TUI mid-task and restarting clean restores work from disk alone.
@@ -141,7 +141,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
-| 01.1. Prompt Intelligence Layer | 3/4 | In Progress|  |
+| 01.1. Prompt Intelligence Layer | 4/4 | Complete   | 2026-04-30 |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 6/7 | In Progress|  |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
