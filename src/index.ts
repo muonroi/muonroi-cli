@@ -46,6 +46,7 @@ import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
 import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { loadAnthropicKey } from "./providers/index.js";
+import { type PermissionMode } from "./utils/permission-mode.js";
 
 dotenv.config();
 
@@ -75,6 +76,7 @@ async function startInteractive(
   sandboxSettings: SandboxSettings,
   session?: string,
   initialMessage?: string,
+  permissionMode: PermissionMode = "safe",
 ) {
   // ── Plan 00-07 boot order ──────────────────────────────────────────────────
   // 1. redactor.installGlobalPatches() — already at top of file (line 6).
@@ -122,6 +124,7 @@ async function startInteractive(
     batchApi,
     abortContext: orchestratorAbort,
     pendingCalls,
+    permissionMode,
   });
   // ── /Plan 00-07 boot order ────────────────────────────────────────────────
 
@@ -175,12 +178,14 @@ async function runHeadless(
   sandboxSettings: SandboxSettings,
   format: HeadlessOutputFormat,
   session?: string,
+  permissionMode: PermissionMode = "safe",
 ) {
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
     sandboxMode,
     sandboxSettings,
     batchApi,
+    permissionMode,
   });
   const prelude = renderHeadlessPrelude(format, agent.getSessionId() || undefined);
   if (prelude.stdout) process.stdout.write(prelude.stdout);
@@ -340,8 +345,8 @@ function parseHeadlessOutputFormat(value: string): HeadlessOutputFormat {
 }
 
 program
-  .name("grok")
-  .description("AI coding agent powered by Grok — built with Bun and OpenTUI")
+  .name("muonroi-cli")
+  .description("AI coding agent — built with Bun and OpenTUI")
   .version(packageJson.version)
   .argument("[message...]", "Initial message to send")
   .option("-k, --api-key <key>", "Grok API key")
@@ -360,7 +365,8 @@ program
   .option("--background-task-file <path>", "Run a persisted background delegation")
   .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
-  .option("--update", "Update grok to the latest version and exit")
+  .option("--permission <mode>", "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)", "safe")
+  .option("--update", "Update muonroi-cli to the latest version and exit")
   .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access (FORK-08)")
   .action(async (message: string[], options) => {
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
@@ -406,6 +412,7 @@ program
         config.sandboxSettings,
         options.format,
         options.session,
+        options.permission as PermissionMode,
       );
       return;
     }
@@ -422,6 +429,7 @@ program
         config.sandboxSettings,
         options.format,
         options.session,
+        options.permission as PermissionMode,
       );
       return;
     }
@@ -437,6 +445,7 @@ program
       config.sandboxSettings,
       options.session,
       initialMessage,
+      options.permission as PermissionMode,
     );
   });
 
