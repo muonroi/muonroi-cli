@@ -50,13 +50,13 @@
 
 ### ROUTE — 3-tier brain router
 
-- [ ] **ROUTE-01**: System routes ~90% of calls via in-process classifier (regex + tree-sitter WASM patterns) at <1ms p99. CI architecture test fails any PR adding network calls to the hot-path module. (Cross-cutting insight 5)
+- [x] **ROUTE-01**: System routes ~90% of calls via in-process classifier (regex + tree-sitter WASM patterns) at <1ms p99. CI architecture test fails any PR adding network calls to the hot-path module. (Cross-cutting insight 5)
 - [x] **ROUTE-02**: When local classifier abstains, system queries warm-path EE `/api/route-model` endpoint (Ollama on VPS) at <300ms p95. (Architecture data flow)
 - [x] **ROUTE-03**: When warm path is unhealthy or abstains, system falls back to cold-path SiliconFlow proxy via EE at <1s p95. (Pitfall 8)
 - [x] **ROUTE-04**: System health-checks Ollama VPS every 30s with 60s TTL cache; status-bar tier badge surfaces `degraded` when warm path is down.
 - [ ] **ROUTE-05**: User can invoke `/route` slash command to print the routing decision for the next prompt with reason (heuristic match, EE classifier confidence, cap-driven downgrade).
 - [ ] **ROUTE-06**: Router consults cap state on every model selection — if projected spend would breach cap, downgrade chain takes precedence over routing decision. (USAGE-04 integration)
-- [ ] **ROUTE-07**: Classifier confidence threshold is configurable; below threshold routes warm-path automatically. (Pitfall 11)
+- [x] **ROUTE-07**: Classifier confidence threshold is configurable; below threshold routes warm-path automatically. (Pitfall 11)
 
 ### EE — Experience Engine integration
 
@@ -181,13 +181,13 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | PROV-05 | Phase 1 | Complete |
 | PROV-06 | Phase 1 | Complete |
 | PROV-07 | Phase 0 | Complete |
-| ROUTE-01 | Phase 1 | Pending |
+| ROUTE-01 | Phase 1 | Complete |
 | ROUTE-02 | Phase 1 | Complete |
 | ROUTE-03 | Phase 1 | Complete |
 | ROUTE-04 | Phase 1 | Complete |
 | ROUTE-05 | Phase 1 | Pending |
 | ROUTE-06 | Phase 1 | Pending |
-| ROUTE-07 | Phase 1 | Pending |
+| ROUTE-07 | Phase 1 | Complete |
 | EE-01 | Phase 0 | Complete |
 | EE-02 | Phase 1 | Pending |
 | EE-03 | Phase 1 | Pending |
