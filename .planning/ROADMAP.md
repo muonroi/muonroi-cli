@@ -13,7 +13,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives (completed 2026-04-29)
 - [x] **Phase 1: Brain & Cap Chain** — Multi-provider adapter, 3-tier router, EE PreToolUse warnings, full cap chain with auto-downgrade (completed 2026-04-30)
 - [ ] **Phase 2: Continuity & Slash Commands** — `.muonroi-flow/` artifacts, deliberate compaction, GSD slash commands, session resume from disk
-- [ ] **Phase 3: Polish, Headless, Cross-Platform Beta** — Headless validation, MCP/LSP smoke tests, CI matrix, permission modes, doctor + bug-report, beta packaging
+- [x] **Phase 3: Polish, Headless, Cross-Platform Beta** — Headless validation, MCP/LSP smoke tests, CI matrix, permission modes, doctor + bug-report, beta packaging (completed 2026-04-30)
 - [ ] **Phase 4: Cloud & Billing** — Multi-tenant Qdrant, Stripe billing, web dashboard, local→cloud migration tool, remote pricing fetch
 
 ## Phase Details
@@ -92,7 +92,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 03-01-PLAN.md — Permission modes (safe/auto-edit/yolo) + CLI branding fix (CORE-07)
 - [x] 03-02-PLAN.md — Headless golden test + MCP smoke + LSP smoke + delegation arch test (CORE-01, CORE-02, CORE-03, CORE-04)
 - [x] 03-03-PLAN.md — Doctor + bug-report operator commands (OPS-01, OPS-02)
-- [ ] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
+- [x] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
 - [x] 03-05-PLAN.md — GitHub issue templates + STATUS.md (OPS-03, OPS-04)
 **UI hint**: yes
 
@@ -121,5 +121,5 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
-| 3. Polish, Headless, Cross-Platform Beta | 4/5 | In Progress|  |
+| 3. Polish, Headless, Cross-Platform Beta | 5/5 | Complete   | 2026-04-30 |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
