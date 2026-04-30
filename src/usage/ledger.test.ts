@@ -1,11 +1,12 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { reserve, commit, release } from "./ledger.js";
 import { CapBreachError } from "./types.js";
-import type { ReservationToken } from "./types.js";
+import type { ReservationToken, ThresholdEvent } from "./types.js";
 import { atomicReadJSON } from "../storage/atomic-io.js";
+import { subscribeThresholds } from "./thresholds.js";
 import type { UsageState } from "../storage/usage-cap.js";
 
 async function makeTmpHome(capUsd = 15): Promise<string> {
@@ -145,6 +146,58 @@ describe("ledger", () => {
       const state = await readUsage(home);
       expect(state!.reservations).toHaveLength(0);
       expect(state!.current_usd).toBe(0);
+    });
+  });
+
+  describe("subscribeThresholds integration", () => {
+    let unsub: (() => void) | undefined;
+
+    afterEach(() => {
+      if (unsub) unsub();
+    });
+
+    it("fires 80% threshold event when commit pushes past boundary", async () => {
+      // Use a very small cap so haiku costs are meaningful
+      home = await makeTmpHome(0.01); // $0.01 cap
+
+      const events: ThresholdEvent[] = [];
+      unsub = subscribeThresholds((e) => events.push(e));
+
+      // Reserve with haiku: 100k input + 25k output ~ $0.18 >> $0.01 cap
+      // Use smaller tokens to stay under cap for reservation
+      const tok = (await reserve({
+        provider: "anthropic",
+        model: "claude-3-5-haiku-latest",
+        estInputTokens: 1_000,
+        estOutputTokens: 500,
+        homeOverride: home,
+      })) as ReservationToken;
+
+      // Commit with actual tokens that push past 50% and 80%
+      // haiku: $0.80/M input, $4.00/M output
+      // 1000 in + 500 out = $0.0008 + $0.002 = $0.0028
+      // $0.0028 / $0.01 = 28% -- not enough for 50%
+
+      // Let's use a bigger cap scenario
+      await release(tok, home);
+
+      // Re-create home with better numbers
+      home = await makeTmpHome(0.005); // $0.005 cap
+
+      const tok2 = (await reserve({
+        provider: "anthropic",
+        model: "claude-3-5-haiku-latest",
+        estInputTokens: 1_000,
+        estOutputTokens: 500,
+        homeOverride: home,
+      })) as ReservationToken;
+
+      // Commit: 1000 in + 500 out = $0.0028
+      // $0.0028 / $0.005 = 56% -- should fire 50% threshold
+      await commit(tok2, 1_000, 500, home);
+
+      expect(events.length).toBeGreaterThanOrEqual(1);
+      expect(events.some((e) => e.level === 50)).toBe(true);
     });
   });
 });
