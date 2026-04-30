@@ -57,6 +57,8 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
   const suffixCharsMatch = ctx.layers.find(l => l.name === 'output-optimization')?.delta?.match(/chars=(\d+)/);
   const suffixChars = suffixCharsMatch ? parseInt(suffixCharsMatch[1], 10) : 0;
 
+  const enrichmentCharsAdded = Math.max(0, ctx.enriched.length - ctx.raw.length);
+
   ctx = {
     ...ctx,
     metrics: {
@@ -65,6 +67,7 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
       inputChars: ctx.raw.length,
       outputChars: ctx.enriched.length,
       estimatedTokensSaved: Math.round(suffixChars / 4),
+      enrichmentTokensAdded: Math.round(enrichmentCharsAdded / 4),
     },
   };
 

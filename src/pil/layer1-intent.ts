@@ -8,8 +8,9 @@
  * Fail-open: any error returns ctx unchanged with applied=false.
  */
 
-import type { PipelineContext, TaskType } from './types.js';
+import type { PipelineContext, TaskType, OutputStyle } from './types.js';
 import { classify } from '../router/classifier/index.js';
+import { ollamaClassify } from './ollama-classify.js';
 
 // Maps every classifier reason string to a TaskType (or null for non-coding signals).
 const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
@@ -56,6 +57,19 @@ const KEYWORD_PATTERNS: Array<{ pattern: RegExp; taskType: TaskType; confidence:
   },
 ];
 
+const DETAIL_KEYWORDS =
+  /\b(explain|teach|why\b|how does|what is|learn|understand|deep dive|in detail|elaborate|walk me through|thorough|comprehensive)\b/i;
+
+const CONCISE_KEYWORDS =
+  /\b(just|quick(?:ly)?|brief(?:ly)?|short|tl;?dr|one.?liner|fast|simply)\b/i;
+
+function detectOutputStyle(raw: string, taskType: TaskType | null): OutputStyle | null {
+  if (taskType === null) return null;
+  if (DETAIL_KEYWORDS.test(raw)) return 'detailed';
+  if (CONCISE_KEYWORDS.test(raw)) return 'concise';
+  return 'balanced';
+}
+
 function extractDomain(reason: string): string | null {
   if (reason.includes('typescript')) return 'typescript';
   if (reason.includes('python')) return 'python';
@@ -81,18 +95,30 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       }
     }
 
+    // Pass 3: Ollama fallback for ambiguous prompts
+    if (taskType === null && confidence < 0.55) {
+      const ollamaResult = await ollamaClassify(ctx.raw);
+      if (ollamaResult) {
+        taskType = ollamaResult.taskType;
+        confidence = ollamaResult.confidence;
+      }
+    }
+
+    const outputStyle = detectOutputStyle(ctx.raw, taskType);
+
     return {
       ...ctx,
       taskType,
       domain,
       confidence,
+      outputStyle,
       layers: [
         ...ctx.layers,
         {
           name: 'intent-detection',
           applied: taskType !== null,
           delta: taskType !== null
-            ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? 'none'}`
+            ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? 'none'},style=${outputStyle ?? 'none'}`
             : null,
         },
       ],

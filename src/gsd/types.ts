@@ -14,17 +14,31 @@ const PHASE_KEYWORDS: Record<GsdPhase, string[]> = {
   review: ["review", "audit", "inspect", "examine", "evaluate"],
 };
 
+const PHASE_PRIORITY: Record<GsdPhase, number> = {
+  execute: 5,
+  verify: 4,
+  discuss: 3,
+  plan: 2,
+  review: 1,
+};
+
 export function detectGsdPhase(text: string): GsdPhase | null {
   const lower = text.toLowerCase();
+
   let bestPhase: GsdPhase | null = null;
   let bestPos = Infinity;
+  let bestPriority = -1;
 
   for (const [phase, keywords] of Object.entries(PHASE_KEYWORDS) as [GsdPhase, string[]][]) {
     for (const kw of keywords) {
       const pos = lower.indexOf(kw);
-      if (pos !== -1 && pos < bestPos) {
-        bestPos = pos;
+      if (pos === -1) continue;
+
+      const priority = PHASE_PRIORITY[phase];
+      if (pos < bestPos || (pos === bestPos && priority > bestPriority)) {
         bestPhase = phase;
+        bestPos = pos;
+        bestPriority = priority;
       }
     }
   }

@@ -5,10 +5,16 @@ vi.mock('../../router/classifier/index.js', () => ({
   classify: vi.fn(),
 }));
 
+vi.mock('../ollama-classify.js', () => ({
+  ollamaClassify: vi.fn().mockResolvedValue(null),
+}));
+
 import { layer1Intent } from '../layer1-intent.js';
 import { classify } from '../../router/classifier/index.js';
+import { ollamaClassify } from '../ollama-classify.js';
 
 const mockClassify = vi.mocked(classify);
+const mockOllamaClassify = vi.mocked(ollamaClassify);
 
 const makeCtx = (raw = 'test prompt'): PipelineContext => ({
   raw,
@@ -16,6 +22,9 @@ const makeCtx = (raw = 'test prompt'): PipelineContext => ({
   taskType: null,
   domain: null,
   confidence: 0,
+  outputStyle: null,
+  tokenBudget: 500,
+  metrics: null,
   layers: [],
 });
 
@@ -120,6 +129,86 @@ describe('layer1Intent — keyword fallback (classifier returns null)', () => {
     const result = await layer1Intent(makeCtx('hello how are you'));
     expect(result.taskType).toBeNull();
     expect(result.layers[0].applied).toBe(false);
+  });
+});
+
+describe('layer1Intent — outputStyle detection', () => {
+  it('coding task without detail or concise keywords → balanced', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
+    const result = await layer1Intent(makeCtx('refactor this function'));
+    expect(result.outputStyle).toBe('balanced');
+  });
+
+  it('coding task with "explain" keyword → detailed', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.75, reason: 'regex:refactor' });
+    const result = await layer1Intent(makeCtx('explain why we should refactor this'));
+    expect(result.outputStyle).toBe('detailed');
+  });
+
+  it('"teach me" triggers detailed style', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.8, reason: 'regex:edit' });
+    const result = await layer1Intent(makeCtx('teach me how to edit this'));
+    expect(result.outputStyle).toBe('detailed');
+  });
+
+  it('conversational turn (taskType=null) → outputStyle=null', async () => {
+    mockClassify.mockReturnValue({ tier: 'abstain', confidence: 0.2, reason: 'low-confidence' });
+    const result = await layer1Intent(makeCtx('hello how are you'));
+    expect(result.outputStyle).toBeNull();
+  });
+
+  it('delta string includes style info for coding tasks', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
+    const result = await layer1Intent(makeCtx('refactor this'));
+    expect(result.layers[0].delta).toContain('style=balanced');
+  });
+
+  it('returns concise for terse indicators', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
+    const result = await layer1Intent(makeCtx('just fix the bug quickly'));
+    expect(result.outputStyle).toBe('concise');
+  });
+
+  it('returns balanced as default for normal coding prompts', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
+    const result = await layer1Intent(makeCtx('refactor the authentication module'));
+    expect(result.outputStyle).toBe('balanced');
+  });
+});
+
+describe('layer1Intent — Ollama fallback (Pass 3)', () => {
+  beforeEach(() => {
+    mockClassify.mockReturnValue({ tier: 'abstain', confidence: 0.2, reason: 'low-confidence' });
+    mockOllamaClassify.mockResolvedValue(null);
+  });
+
+  it('Ollama called when classifier and keywords both miss', async () => {
+    await layer1Intent(makeCtx('some ambiguous input without keywords'));
+    expect(mockOllamaClassify).toHaveBeenCalledWith('some ambiguous input without keywords');
+  });
+
+  it('Ollama result used when it returns a taskType', async () => {
+    mockOllamaClassify.mockResolvedValue({ taskType: 'plan', confidence: 0.55 });
+    const result = await layer1Intent(makeCtx('some ambiguous input'));
+    expect(result.taskType).toBe('plan');
+    expect(result.confidence).toBe(0.55);
+  });
+
+  it('Ollama NOT called when classifier returns high confidence', async () => {
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
+    await layer1Intent(makeCtx('refactor this'));
+    expect(mockOllamaClassify).not.toHaveBeenCalled();
+  });
+
+  it('Ollama NOT called when keyword match found', async () => {
+    await layer1Intent(makeCtx('there is a bug here'));
+    expect(mockOllamaClassify).not.toHaveBeenCalled();
+  });
+
+  it('Ollama returning null leaves taskType as null (fail-open)', async () => {
+    mockOllamaClassify.mockResolvedValue(null);
+    const result = await layer1Intent(makeCtx('some ambiguous input'));
+    expect(result.taskType).toBeNull();
   });
 });
 

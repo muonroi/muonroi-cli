@@ -26,6 +26,7 @@ export interface PipelineMetrics {
   inputChars: number;
   outputChars: number;
   estimatedTokensSaved: number;
+  enrichmentTokensAdded: number;
 }
 
 export interface PipelineContext {
@@ -43,4 +44,5 @@ export interface PipelineContext {
   gsdPhase?: string | null;
   resumeDigest?: string | null;
   activeRunId?: string | null;
+  digestAgeMs?: number | null;
 }
