@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { startStubEEServer, type StubHandle } from "../../tests/stubs/ee-server.js";
+import { startStubEEServer, type StubHandle } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "./client.js";
 import type { FeedbackPayload } from "./types.js";
 

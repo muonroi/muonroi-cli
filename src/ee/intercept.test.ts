@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { startStubEEServer, type StubHandle } from "../../tests/stubs/ee-server.js";
+import { startStubEEServer, type StubHandle } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "./client.js";
 import { setDefaultEEClient, getDefaultEEClient } from "./intercept.js";
 import { setRenderSink } from "./render.js";
