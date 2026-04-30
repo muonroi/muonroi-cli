@@ -40,12 +40,12 @@
 
 ### PROV — Multi-provider adapter
 
-- [ ] **PROV-01**: System exposes single `Adapter` interface; per-provider classes implement it for Anthropic, OpenAI, Gemini, DeepSeek, Ollama. (Pitfall 26)
-- [ ] **PROV-02**: User can select provider per-session via config or per-call via slash command; default falls back to first key found in OS keychain.
+- [x] **PROV-01**: System exposes single `Adapter` interface; per-provider classes implement it for Anthropic, OpenAI, Gemini, DeepSeek, Ollama. (Pitfall 26)
+- [x] **PROV-02**: User can select provider per-session via config or per-call via slash command; default falls back to first key found in OS keychain.
 - [x] **PROV-03**: System loads BYOK API keys from OS keychain (keytar). Plain-text key in env or config file is accepted with warning. Logs and bug-reports never include key contents. (Pitfall 2)
-- [ ] **PROV-04**: System supports tool-use loop with streaming for all 5 providers, including parallel tool calls where the provider supports them. (Pitfall 28)
-- [ ] **PROV-05**: System normalizes provider error shapes into a stable internal error type (rate-limit, auth, content-filter, server-error, unknown).
-- [ ] **PROV-06**: System ships pricing table (input/output USD per million tokens) per provider per model, refreshable via config. (Pitfall 19 prep — remote fetch is Phase 4)
+- [x] **PROV-04**: System supports tool-use loop with streaming for all 5 providers, including parallel tool calls where the provider supports them. (Pitfall 28)
+- [x] **PROV-05**: System normalizes provider error shapes into a stable internal error type (rate-limit, auth, content-filter, server-error, unknown).
+- [x] **PROV-06**: System ships pricing table (input/output USD per million tokens) per provider per model, refreshable via config. (Pitfall 19 prep — remote fetch is Phase 4)
 - [x] **PROV-07**: System logs redactor scrubs API keys, JWT-shape strings, and known header names from any structured log output. (Pitfall 2)
 
 ### ROUTE — 3-tier brain router
@@ -174,12 +174,12 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | USAGE-06 | Phase 0 | Complete |
 | USAGE-07 | Phase 1 | Pending |
 | USAGE-08 | Phase 2 | Pending |
-| PROV-01 | Phase 1 | Pending |
-| PROV-02 | Phase 1 | Pending |
+| PROV-01 | Phase 1 | Complete |
+| PROV-02 | Phase 1 | Complete |
 | PROV-03 | Phase 0 | Complete |
-| PROV-04 | Phase 1 | Pending |
-| PROV-05 | Phase 1 | Pending |
-| PROV-06 | Phase 1 | Pending |
+| PROV-04 | Phase 1 | Complete |
+| PROV-05 | Phase 1 | Complete |
+| PROV-06 | Phase 1 | Complete |
 | PROV-07 | Phase 0 | Complete |
 | ROUTE-01 | Phase 1 | Pending |
 | ROUTE-02 | Phase 1 | Pending |
