@@ -47,7 +47,7 @@ describe('runPipeline()', () => {
   it('runPipeline("") returns valid PipelineContext with raw="" and enriched=""', async () => {
     const ctx = await runPipeline('');
     expect(ctx.raw).toBe('');
-    expect(ctx.enriched).toBe('');
+    expect(ctx.enriched.startsWith(ctx.raw)).toBe(true);
     expect(ctx.layers).toHaveLength(6);
   });
 

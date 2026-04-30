@@ -1,4 +1,4 @@
-import { describe, expect, test, mock, beforeEach } from "bun:test";
+import { describe, expect, test, vi, beforeEach } from "vitest";
 import { layer3EeInjection } from "../layer3-ee-injection";
 import type { PipelineContext } from "../types";
 
@@ -19,7 +19,7 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 
 describe("layer3EeInjection", () => {
   beforeEach(() => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(JSON.stringify({ points: [] }), { status: 200 }),
       ),
@@ -36,7 +36,7 @@ describe("layer3EeInjection", () => {
   });
 
   test("injects experience hints when EE returns points", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -59,7 +59,7 @@ describe("layer3EeInjection", () => {
 
   test("respects tokenBudget — truncates if needed", async () => {
     const longText = "A".repeat(2000);
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(
         new Response(
           JSON.stringify({
@@ -82,7 +82,7 @@ describe("layer3EeInjection", () => {
   });
 
   test("fails open on network error", async () => {
-    globalThis.fetch = mock(() => Promise.reject(new Error("ECONNREFUSED"))) as any;
+    globalThis.fetch = vi.fn(() => Promise.reject(new Error("ECONNREFUSED"))) as any;
 
     const ctx = makeCtx();
     const result = await layer3EeInjection(ctx);
@@ -93,7 +93,7 @@ describe("layer3EeInjection", () => {
   });
 
   test("fails open on non-200 response", async () => {
-    globalThis.fetch = mock(() =>
+    globalThis.fetch = vi.fn(() =>
       Promise.resolve(new Response("Internal Server Error", { status: 500 })),
     ) as any;
 

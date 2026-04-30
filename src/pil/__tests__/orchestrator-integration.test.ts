@@ -25,8 +25,8 @@ beforeEach(() => {
 describe('PIL orchestrator contract', () => {
   it('enriched message is used when pipeline succeeds', async () => {
     const ctx = await runPipeline('refactor this function');
-    // enriched should equal raw (stubs do not modify enriched string in Plan 01 impl)
-    expect(ctx.enriched).toBe('refactor this function');
+    // Layer 2 personality now appends hints, so enriched starts with raw
+    expect(ctx.enriched.startsWith('refactor this function')).toBe(true);
     expect(ctx.layers).toHaveLength(6);
   });
 
@@ -37,6 +37,9 @@ describe('PIL orchestrator contract', () => {
       taskType: 'refactor',
       domain: null,
       confidence: 0.85,
+      outputStyle: 'concise',
+      tokenBudget: 500,
+      metrics: null,
       layers: [],
     };
     const base = 'You are a helpful assistant.';
@@ -52,6 +55,9 @@ describe('PIL orchestrator contract', () => {
       taskType: null,
       domain: null,
       confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
       layers: [],
     };
     const base = 'You are a helpful assistant.';
@@ -72,6 +78,9 @@ describe('PIL orchestrator contract', () => {
       taskType: null,
       domain: null,
       confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
       layers: [],
     };
     // Verify fallback structure matches orchestrator catch shape
