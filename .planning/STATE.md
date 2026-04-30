@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 01-08-PLAN (Wave-4 Quality Gate)
-last_updated: "2026-04-30T03:49:44.544Z"
+status: verifying
+stopped_at: Completed 01-06-PLAN (TUI Status Bar)
+last_updated: "2026-04-30T03:52:00.540Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 16
-  completed_plans: 15
+  completed_plans: 16
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 
 Phase: 01 (brain-cap-chain) — EXECUTING
 Plan: 8 of 8
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-30
 
 Progress: [░░░░░░░░░░] 0%
@@ -72,6 +72,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-brain-cap-chain P05 | 5 | 2 tasks | 9 files |
 | Phase 01-brain-cap-chain P07 | 6 | 2 tasks | 14 files |
 | Phase 01-brain-cap-chain P08 | 5 | 2 tasks | 13 files |
+| Phase 01-brain-cap-chain P06 | 7 | 1 tasks | 9 files |
 
 ## Accumulated Context
 
@@ -120,6 +121,8 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: interceptWithDefaults() deprecated helper fills tenantId=local + buildScope() for unmigrated callers
 - [Phase 01-brain-cap-chain]: feedback()+touch() fire-and-forget stubs on EEClient for Plan 08 interface contract
 - [Phase 01-brain-cap-chain]: judge() uses 4 deterministic rules (no LLM) for FOLLOWED/IGNORED/IRRELEVANT classification
+- [Phase 01-brain-cap-chain]: renderStatusBar() pure function extracted for testability without react-dom
+- [Phase 01-brain-cap-chain]: dispatchSlash wired as async fallback in app.tsx handleCommand for extensible slash commands
 
 ### Pending Todos
 
@@ -151,6 +154,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:49:44.540Z
-Stopped at: Completed 01-08-PLAN (Wave-4 Quality Gate)
+Last session: 2026-04-30T03:52:00.536Z
+Stopped at: Completed 01-06-PLAN (TUI Status Bar)
 Resume file: None
