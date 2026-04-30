@@ -13,8 +13,8 @@ import { DEFAULT_TOKEN_BUDGET } from './budget.js';
 import { layer1Intent } from './layer1-intent.js';
 import { layer2Personality } from './layer2-personality.js';
 import { layer3EeInjection } from './layer3-ee-injection.js';
-import { layer4GsdStructuringStub } from './layer4-stub.js';
-import { layer5ContextEnrichmentStub } from './layer5-stub.js';
+import { layer4Gsd } from './layer4-gsd.js';
+import { layer5Context } from './layer5-context.js';
 import { layer6Output } from './layer6-output.js';
 import { resolveAfter } from './timeout.js';
 import { setPilLastResult } from './store.js';
@@ -37,8 +37,8 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
   if (ctx.taskType !== null) {
     await timed('layer2-personality', layer2Personality);
     await timed('layer3-ee-injection', layer3EeInjection);
-    await timed('layer4-gsd-structuring', layer4GsdStructuringStub);
-    await timed('layer5-context-enrichment', layer5ContextEnrichmentStub);
+    await timed('layer4-gsd-structuring', layer4Gsd);
+    await timed('layer5-context-enrichment', layer5Context);
   } else {
     for (const name of SKIPPED_LAYERS) {
       timings.push({ name: `layer-${name}`, ms: 0 });
@@ -71,7 +71,13 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
   return ctx;
 }
 
-export async function runPipeline(raw: string): Promise<PipelineContext> {
+export interface PipelineOptions {
+  gsdPhase?: string | null;
+  resumeDigest?: string | null;
+  activeRunId?: string | null;
+}
+
+export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
   const fallback: PipelineContext = {
     raw,
     enriched: raw,
@@ -82,6 +88,9 @@ export async function runPipeline(raw: string): Promise<PipelineContext> {
     tokenBudget: DEFAULT_TOKEN_BUDGET,
     metrics: null,
     layers: [],
+    gsdPhase: options?.gsdPhase ?? null,
+    resumeDigest: options?.resumeDigest ?? null,
+    activeRunId: options?.activeRunId ?? null,
   };
   try {
     const result = await Promise.race([
