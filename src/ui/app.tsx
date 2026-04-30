@@ -78,35 +78,32 @@ import { dispatchSlash } from "./slash/registry.js";
 import "./slash/route.js"; // side-effect: self-registers /route handler
 import "./slash/optimize.js"; // side-effect: self-registers /optimize command (PIL-07)
 
+import {
+  MODELS,
+  getModelIds,
+  getModelInfo,
+  normalizeModelId,
+  getEffectiveReasoningEffort,
+  getSupportedReasoningEfforts,
+} from "../models/registry.js";
+
+const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
+
 // ---------------------------------------------------------------------------
-// FORK-02 STUBS — grok/models, telegram/*, and telegram-turn-ui deleted.
-// These compile-only placeholders keep tsc --noEmit clean until plan 00-05.
+// Telegram stubs — removed feature, compile-only placeholders
 // ---------------------------------------------------------------------------
 
-// FORK-02 stub: model list and helpers (grok/models → plan 00-05 Anthropic provider)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const MODELS: any[] = [];
-const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning";
-function getModelIds(): string[] { return []; }
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getModelInfo(_id: string): any { return undefined; }
-function normalizeModelId(id: string): string { return id; }
-function getEffectiveReasoningEffort(_modelId: string, effort?: ReasoningEffort): ReasoningEffort | undefined { return effort; }
-function getSupportedReasoningEfforts(_modelId: string): ReasoningEffort[] { return []; }
-
-// FORK-02 stub: telegram bridge (src/telegram/* deleted per PROJECT.md Out-of-Scope)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TelegramBridgeHandle = any;
 function createTelegramBridge(_opts: unknown): TelegramBridgeHandle { return null as TelegramBridgeHandle; }
 function approvePairingCode(
   _code: string,
 ): { ok: true; userId: number } | { ok: false; error: string } {
-  return { ok: false, error: "Telegram deleted (FORK-02). Use muonroi-cli." };
+  return { ok: false, error: "Telegram bridge not available." };
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createTurnCoordinator(): any { return { reset: () => {}, handleEvent: () => {} }; }
 
-// FORK-02 stub: telegram-turn-ui.ts deleted; these are no-ops for compile.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function buildAssistantEntry(..._args: any[]): any { return {}; }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -119,10 +116,6 @@ function getTelegramSourceLabel(_role?: string, _userId?: number): string { retu
 function getUnflushedTelegramAssistantContent(_content: string, _flushedChars: number): string { return ""; }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function replaceTurnEntries(_prev: any[], _remoteKey: string, _delta: any[]): any[] { return _prev; }
-
-// ---------------------------------------------------------------------------
-// END FORK-02 STUBS
-// ---------------------------------------------------------------------------
 
 const STAR_PALETTE = ["#777777", "#666666", "#4a4a4a", "#333333", "#222222"];
 const LOADING_SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
@@ -343,7 +336,7 @@ const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "verify", label: "verify", description: "Run local verification" },
   { id: "skills", label: "skills", description: "Manage skills" },
   { id: "btw", label: "btw", description: "Ask a side question without interrupting" },
-  { id: "update", label: "update", description: "Update grok to the latest version" },
+  { id: "update", label: "update", description: "Update muonroi-cli to the latest version" },
 ];
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
@@ -606,7 +599,7 @@ ${prompt}`;
 }
 
 const CONNECT_CHANNELS: { id: string; label: string; description: string }[] = [
-  { id: "telegram", label: "Telegram", description: "Chat with Grok from Telegram" },
+  { id: "telegram", label: "Telegram", description: "Chat from Telegram" },
 ];
 
 const MCP_REMOTE_FIELDS: McpEditorField[] = ["transport", "label", "url", "headers", "env"];
@@ -859,7 +852,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) ||
           m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()),
       )
-    : MODELS;
+    : [...MODELS];
   const filteredModelIds = filteredModels.map((m) => m.id);
   const filteredSlashItems = slashSearchQuery
     ? SLASH_MENU_ITEMS.filter(
@@ -926,7 +919,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setWalletFocusIndex(0);
     setWalletSettings(loadPaymentSettings());
     setShowWalletPicker(true);
-    // FORK-02: wallet/manager deleted; wallet UI disabled until Stripe ships in Phase 4.
+    // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
   }, []);
 
@@ -1615,7 +1608,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
       const apiKey = getApiKey();
       if (!apiKey) {
-        throw new Error("Grok API key required. Add it in the CLI or set GROK_API_KEY.");
+        throw new Error("API key required. Set MUONROI_API_KEY or add via CLI.");
       }
 
       const u = loadUserSettings();
@@ -1886,7 +1879,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       return;
     }
     if (!getApiKey()) {
-      setTelegramTokenError("Add a Grok API key first.");
+      setTelegramTokenError("Add an API key first.");
       return;
     }
     const u = loadUserSettings();
@@ -1932,7 +1925,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       },
     ]);
     try {
-      await bridgeRef.current?.sendDm(result.userId, "Pairing approved. You can message Grok here.");
+      await bridgeRef.current?.sendDm(result.userId, "Pairing approved. You can message muonroi-cli here.");
     } catch {
       /* optional DM */
     }
@@ -1941,7 +1934,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const beginTelegramFromConnect = useCallback(() => {
     setShowConnectModal(false);
     if (!getApiKey()) {
-      setMessages((p) => [...p, { type: "assistant", content: "Add a Grok API key first.", timestamp: new Date() }]);
+      setMessages((p) => [...p, { type: "assistant", content: "Add an API key first.", timestamp: new Date() }]);
       openApiKeyModal();
       return;
     }
@@ -3917,7 +3910,7 @@ function PromptBox({
                 !showApiKeyModal &&
                 !blockPrompt
               }
-              placeholder={isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message Grok..."}
+              placeholder={isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."}
               textColor={t.text}
               backgroundColor={t.backgroundElement}
               placeholderColor={t.textMuted}
@@ -4964,7 +4957,7 @@ function UpdateModal({
         </box>
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.text}>
-            {"A new version of grok is available: "}
+            {"A new version of muonroi-cli is available: "}
             <span style={{ fg: t.textMuted }}>
               {"v"}
               {currentVersion}

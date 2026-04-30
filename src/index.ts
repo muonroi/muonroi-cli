@@ -6,15 +6,11 @@ import { redactor } from "./utils/redactor.js";
 redactor.installGlobalPatches();
 
 import { InvalidArgumentError, program } from "commander";
-import * as dotenv from "dotenv";
+
 import packageJson from "../package.json";
 import { Agent } from "./orchestrator/orchestrator";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
-// FORK-02: ./grok/models deleted; stubs below keep tsc --noEmit clean until plan 00-05.
-// FORK-02 stub: pass-through until grok/models replaced in plan 00-05.
-function normalizeModelId(id: string): string { return id; }
-// FORK-02 stub: empty model list until plan 00-05 wires Anthropic provider.
-const MODELS: Array<{ id: string; name: string; reasoning?: boolean; multiAgent?: boolean; responsesOnly?: boolean; description: string; contextWindow: number; inputPrice: number; outputPrice: number; aliases?: string[] }> = [];
+import { MODELS, normalizeModelId } from "./models/registry.js";
 import {
   createHeadlessJsonlEmitter,
   type HeadlessOutputFormat,
@@ -22,7 +18,6 @@ import {
   renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
-// FORK-02: ./telegram/ deleted; telegram-bridge command removed below.
 import { startScheduleDaemon } from "./tools/schedule";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
@@ -48,7 +43,6 @@ import { loadUsage } from "./storage/usage-cap.js";
 import { loadAnthropicKey } from "./providers/index.js";
 import { type PermissionMode } from "./utils/permission-mode.js";
 
-dotenv.config();
 
 const exitCleanlyOnSigterm = () => {
   process.exit(0);
@@ -255,7 +249,7 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     const delegation = await loadDelegation(jobPath);
     const apiKey = stringOption(options.apiKey) || getApiKey();
     if (!apiKey) {
-      throw new Error("API key required. Set GROK_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.");
+      throw new Error("API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.");
     }
 
     const baseURL = stringOption(options.baseUrl) || getBaseURL();
@@ -328,7 +322,7 @@ function resolveConfig(options: CliOptions) {
 function requireApiKey(apiKey: string | undefined): string {
   if (!apiKey) {
     console.error(
-      "Error: API key required. Set GROK_API_KEY env var, use --api-key, or save to ~/.muonroi-cli/user-settings.json",
+      "Error: API key required. Set MUONROI_API_KEY env var, use --api-key, or save to ~/.muonroi-cli/user-settings.json",
     );
     process.exit(1);
   }
@@ -349,7 +343,7 @@ program
   .description("AI coding agent — built with Bun and OpenTUI")
   .version(packageJson.version)
   .argument("[message...]", "Initial message to send")
-  .option("-k, --api-key <key>", "Grok API key")
+  .option("-k, --api-key <key>", "API key")
   .option("-u, --base-url <url>", "API base URL")
   .option("-m, --model <model>", "Model to use")
   .option("-d, --directory <dir>", "Working directory", process.cwd())
@@ -367,10 +361,9 @@ program
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option("--permission <mode>", "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)", "safe")
   .option("--update", "Update muonroi-cli to the latest version and exit")
-  .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access (FORK-08)")
+  .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access")
   .action(async (message: string[], options) => {
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
-    // FORK-08 / windows-smoke.yml. Phase 0 only.
     // Deliberately exits BEFORE loadAnthropicKey() — CI runners have no keychain configured.
     if (options.smokeBootOnly) {
       const [_cfg, _usg] = await Promise.all([loadConfig(), loadUsage()]);
@@ -449,13 +442,11 @@ program
     );
   });
 
-// FORK-02: telegram-bridge command removed (src/telegram/ deleted per PROJECT.md Out-of-Scope).
-
 program
   .command("models")
-  .description("List available Grok models")
+  .description("List available models")
   .action(() => {
-    console.log("\nAvailable Grok Models:\n");
+    console.log("\nAvailable Models:\n");
     for (const m of MODELS) {
       const tags = [
         m.reasoning ? "reasoning" : "non-reasoning",
@@ -476,7 +467,7 @@ program
 
 program
   .command("update")
-  .description("Update Grok to the latest release")
+  .description("Update muonroi-cli to the latest release")
   .action(async () => {
     console.log("Checking for updates...");
     const result = await runUpdate(packageJson.version);
@@ -486,7 +477,7 @@ program
 
 program
   .command("uninstall")
-  .description("Remove a script-installed Grok binary and optional data")
+  .description("Remove a script-installed muonroi-cli binary and optional data")
   .option("--dry-run", "Show what would be removed without removing it")
   .option("--force", "Skip the confirmation prompt")
   .option("--keep-config", "Keep ~/.muonroi-cli config files")
@@ -501,9 +492,6 @@ program
     console.log(result.output);
     process.exit(result.success ? 0 : 1);
   });
-
-// FORK-02: wallet commands removed (src/wallet/, src/payments/ deleted per PROJECT.md Out-of-Scope).
-// Stripe billing replaces Coinbase in Phase 4.
 
 program
   .command("daemon")

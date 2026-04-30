@@ -1,8 +1,6 @@
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
-// FORK-02: ../grok/models deleted; stub MODELS keeps tsc --noEmit clean until plan 00-05.
-// FORK-02 stub: empty model list — real models ship in plan 00-05 (PROV-03).
-const MODELS: Array<{ id: string; name: string }> = [];
+import { MODELS } from "../models/registry.js";
 import type { CustomSubagentConfig } from "../utils/settings";
 import { formatSubagentName } from "../utils/subagent-display";
 import type { Theme } from "./theme";

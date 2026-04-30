@@ -1,4 +1,4 @@
-// Plan 00-05: Anthropic provider wired. FORK-02 stubs replaced with real provider calls.
+// Anthropic provider wired — real provider calls.
 import { toolNeedsApproval, type PermissionMode } from "../utils/permission-mode.js";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
@@ -40,6 +40,7 @@ import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from 
 import type {
   AgentMode,
   ChatEntry,
+  ModelInfo,
   Plan,
   SessionInfo,
   SessionSnapshot,
@@ -80,36 +81,29 @@ import {
 import { DelegationManager } from "./delegations";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { runPipeline, applyPilSuffix } from '../pil/index.js';
-// FORK-02: vision-input.ts deleted (multimodal anti-feature per PROJECT.md Out-of-Scope)
+import { getModelInfo, normalizeModelId } from "../models/registry.js";
 
 // ---------------------------------------------------------------------------
-// FORK-02 STUBS — grok/* types and functions replaced by these compile-only
-// placeholders. All runtime call sites below throw NotImplementedError until
-// the Anthropic provider ships in plan 00-05 (PROV-03, TUI-02).
+// Provider type stubs — compile-only placeholders until full provider
+// integration ships (PROV-03, TUI-02).
 // ---------------------------------------------------------------------------
 
-// Stub types replacing src/grok/client exports
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type XaiProvider = any; // FORK-02 stub — replaced by Anthropic/multi-provider client in plan 00-05
+export type LegacyProvider = any;
 
-export interface ModelInfoStub {
-  contextWindow?: number;
-  responsesOnly?: boolean;
-  supportsClientTools?: boolean;
-  supportsMaxOutputTokens?: boolean;
-  reasoningEfforts?: string[];
-}
+/** @deprecated Use ModelInfo from "../types/index" instead. */
+export type ModelInfoStub = ModelInfo;
 
 export interface ResolvedModelRuntime {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  model: any; // FORK-02 stub — LanguageModel from plan 00-05
+  model: any;
   modelId: string;
-  modelInfo?: ModelInfoStub;
+  modelInfo?: ModelInfo;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: any;
 }
 
-// Stub types replacing src/grok/batch exports
+// Batch API type stubs
 export interface BatchClientOptions {
   apiKey: string;
   baseURL?: string;
@@ -162,16 +156,15 @@ export interface BatchChatCompletionResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Plan 00-05: Provider implementations — FORK-02 stubs replaced
+// Provider implementations
 // ---------------------------------------------------------------------------
 
 /**
  * Create an Anthropic provider instance for use with AI SDK v6 streamText.
- * Returns an @ai-sdk/anthropic provider object (replaces the grok xAI client).
+ * Returns an @ai-sdk/anthropic provider object for multi-provider routing.
  */
-function createProvider(apiKey: string, _baseURL?: string): XaiProvider {
-  // XaiProvider is typed as any in FORK-02 stub; here we return the real Anthropic provider factory.
-  // The returned value is used by resolveModelRuntime to create model instances.
+function createProvider(apiKey: string, _baseURL?: string): LegacyProvider {
+  // Returns the real Anthropic provider factory for use by resolveModelRuntime.
   return createAnthropic({ apiKey });
 }
 
@@ -180,7 +173,7 @@ function createProvider(apiKey: string, _baseURL?: string): XaiProvider {
  * Kept as a lightweight stub for Phase 0 — title generation ships in Phase 1.
  */
 function genTitle(
-  _provider: XaiProvider,
+  _provider: LegacyProvider,
   userMessage: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   // Phase 0 stub: return a truncated version of the first user message as title.
@@ -193,7 +186,7 @@ function genTitle(
  * Resolve a model ID to a runnable AI SDK LanguageModel.
  * Uses the Anthropic provider factory created by createProvider().
  */
-function resolveModelRuntime(provider: XaiProvider, modelId: string): ResolvedModelRuntime {
+function resolveModelRuntime(provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
   // provider is an @ai-sdk/anthropic provider factory; call it with modelId to get a LanguageModel.
   // This is the pattern used by AI SDK v6: provider(modelId) → LanguageModel.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -205,16 +198,7 @@ function resolveModelRuntime(provider: XaiProvider, modelId: string): ResolvedMo
   };
 }
 
-function normalizeModelId(id: string): string {
-  return id;
-}
-
-function getModelInfo(_modelId: string): ModelInfoStub | undefined {
-  // Phase 0: no model info registry. Phase 1 will add context window + pricing data.
-  return undefined;
-}
-
-const DEFAULT_MODEL = "claude-3-5-haiku-latest"; // Plan 00-05: Anthropic default model
+const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 
 async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
   // Batch API not supported with Anthropic in Phase 0. Phase 1 may add this.
@@ -243,7 +227,7 @@ function getBatchChatCompletion(_result: unknown): BatchChatCompletionResponse {
 
 function createTools(
   _bash: unknown,
-  _provider: XaiProvider,
+  _provider: LegacyProvider,
   _mode: unknown,
   _opts?: {
     runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
@@ -350,7 +334,7 @@ You are running inside a terminal (CLI). Your text output is rendered in a plain
 - Never use unicode box-drawing, fancy borders, or ASCII art in your responses.`;
 
 const MODE_PROMPTS: Record<AgentMode, string> = {
-  agent: `You are Grok CLI in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
+  agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
 
 ${ENVIRONMENT}
 
@@ -446,7 +430,7 @@ IMPORTANT:
 
 Be direct. Execute, don't just describe. Show results, not plans.`,
 
-  plan: `You are Grok CLI in Plan mode — you analyze and plan but DO NOT execute changes.
+  plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
 
 ${ENVIRONMENT}
 
@@ -468,7 +452,7 @@ BEHAVIOR:
 - Highlight potential risks, edge cases, and dependencies in the plan summary
 - NEVER create, modify, or delete files — only read and analyze`,
 
-  ask: `You are Grok CLI in Ask mode — you answer questions clearly and thoroughly.
+  ask: `You are muonroi-cli in Ask mode — you answer questions clearly and thoroughly.
 
 ${ENVIRONMENT}
 
@@ -717,7 +701,7 @@ function applyModelConstraints(system: string, modelId: string): string {
 }
 
 export class Agent {
-  private provider: XaiProvider | null = null;
+  private provider: LegacyProvider | null = null;
   private apiKey: string | null = null;
   private baseURL: string | null = null;
   private bash: BashTool;
@@ -772,7 +756,7 @@ export class Agent {
       () => this.modelId,
     );
     this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
-    const envMax = Number(process.env.GROK_MAX_TOKENS);
+    const envMax = Number(process.env.MUONROI_MAX_TOKENS || process.env.GROK_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
     // TUI-04: wire external abort context and pending calls log if provided.
@@ -1670,7 +1654,7 @@ export class Agent {
   }
 
   private async compactForContext(
-    provider: XaiProvider,
+    provider: LegacyProvider,
     system: string,
     contextWindow: number,
     signal: AbortSignal,
@@ -1716,7 +1700,7 @@ export class Agent {
   private async *processMessageBatchTurn(args: {
     userModelMessage: ModelMessage;
     observer?: ProcessMessageObserver;
-    provider: XaiProvider;
+    provider: LegacyProvider;
     subagents: CustomSubagentConfig[];
     system: string;
     runtime: ReturnType<typeof resolveModelRuntime>;
@@ -2007,12 +1991,12 @@ export class Agent {
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
     // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
     const pilCtx = await runPipeline(userMessage).catch(() => ({
-      raw: userMessage, enriched: userMessage, taskType: null, domain: null, confidence: 0, layers: [],
+      raw: userMessage, enriched: userMessage, taskType: null, domain: null, confidence: 0, outputStyle: null, tokenBudget: 500, metrics: null, layers: [],
     }));
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
-    // enrichmentDelta: characters added to input by PIL suffix (proxy for input token overhead)
-    this._pilEnrichmentDelta = Math.round((enrichedMessage.length - userMessage.length) / 4);
+    this._pilEnrichmentDelta = pilCtx.metrics?.estimatedTokensSaved
+      ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);
@@ -2226,8 +2210,7 @@ export class Agent {
                   },
                 };
 
-                // FORK-02: payments/brin deleted with src/payments/*; payment pre-check disabled.
-                // Stripe billing replaces Coinbase in plan 00-04 / Phase 4.
+                // Payment pre-check disabled — Stripe billing pending.
                 const paymentPrecheck: import("../types/index").PaymentPrecheck | undefined = undefined;
 
                 // Plan 03-01: check permission mode before yielding approval request to UI.
@@ -2361,7 +2344,7 @@ export class Agent {
     }
   }
 
-  private requireProvider(): XaiProvider {
+  private requireProvider(): LegacyProvider {
     if (!this.provider) {
       throw new Error("API key required. Add an API key to continue.");
     }
@@ -2436,7 +2419,7 @@ function buildBatchName(prefix: string, label: string): string {
       .replace(/\s+/g, "-")
       .replace(/[^a-zA-Z0-9._-]+/g, "")
       .slice(0, 48) || "run";
-  return `grok-cli-${prefix}-${compact}`;
+  return `muonroi-cli-${prefix}-${compact}`;
 }
 
 function buildBatchChatCompletionRequest(args: {

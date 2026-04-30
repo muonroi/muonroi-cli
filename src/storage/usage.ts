@@ -1,11 +1,7 @@
-// FORK-02: ../grok/models deleted; stub below keeps tsc --noEmit clean until plan 00-05.
 import type { UsageEvent, UsageSource } from "../types/index";
 import { getDatabase } from "./db";
 
-// FORK-02 stub: getModelInfo — returns undefined until grok/models replaced in plan 00-05.
-function getModelInfo(_model: string): { inputPrice: number; outputPrice: number } | undefined {
-  return undefined;
-}
+import { getModelInfo } from "../models/registry.js";
 
 interface UsageRow {
   id: number;
