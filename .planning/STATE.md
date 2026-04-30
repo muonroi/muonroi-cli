@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02-01-PLAN (Flow scaffolding)
-last_updated: "2026-04-30T04:25:37.745Z"
+stopped_at: Completed 02-02-PLAN (GSD slash commands)
+last_updated: "2026-04-30T04:30:33.890Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 21
-  completed_plans: 17
+  completed_plans: 18
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 02 (continuity-slash-commands) — EXECUTING
-Plan: 2 of 5
+Plan: 3 of 5
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -74,6 +74,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-brain-cap-chain P08 | 5 | 2 tasks | 13 files |
 | Phase 01-brain-cap-chain P06 | 7 | 1 tasks | 9 files |
 | Phase 02-continuity-slash-commands P01 | 4 | 2 tasks | 11 files |
+| Phase 02-continuity-slash-commands P02 | 3 | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -127,6 +128,9 @@ Recent decisions affecting current work:
 - [Phase 02-continuity-slash-commands]: Run IDs use Date.now().toString(36) + randomBytes(2).toString('hex') for sortable collision-safe identifiers
 - [Phase 02-continuity-slash-commands]: Parser uses regex heading splitting (not AST) -- zero dependency cost, matches existing codebase patterns
 - [Phase 02-continuity-slash-commands]: Migration derives run IDs from QC filename slugs; unknown sections preserved in state.md (tolerant)
+- [Phase 02-continuity-slash-commands]: Gray area entries use G<N> [open|resolved] format with incrementing IDs in gray-areas.md
+- [Phase 02-continuity-slash-commands]: /plan inline block message lists open G-entries with resolution path hints per Research Pitfall 4
+- [Phase 02-continuity-slash-commands]: /execute sets state.md Status to executing as QC-lock entry point
 
 ### Pending Todos
 
@@ -158,6 +162,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T04:25:37.740Z
-Stopped at: Completed 02-01-PLAN (Flow scaffolding)
+Last session: 2026-04-30T04:30:33.885Z
+Stopped at: Completed 02-02-PLAN (GSD slash commands)
 Resume file: None
