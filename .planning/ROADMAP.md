@@ -56,6 +56,25 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 **Plans**: TBD
 **UI hint**: yes
 
+### Phase 01.1: Prompt Intelligence Layer — Input Enrichment & Output Optimization (INSERTED)
+
+**Goal**: A 6-layer pipeline runs inside the orchestrator — Input Analysis, Personality Adaptation, EE Experience Injection, GSD Workflow Structuring, Context Enrichment, and Output Optimization — transforming raw user prompts into high-quality structured requests and enforcing Tool Calling or Minimal JSON output to reduce output tokens 60–80%. Add `/optimize` slash command for manual testing. Start with Layer 1 (Intent Detection) + Layer 6 (Output Optimization) as core, then expand to Layers 2–5.
+**Depends on**: Phase 1
+**Requirements**: PIL-01, PIL-02, PIL-03, PIL-04, PIL-05, PIL-06, PIL-07, PIL-08
+**Estimated**: weeks 3–4 (between Brain & Cap Chain and Continuity phases)
+**Schema/cross-phase**: Pipeline runs in orchestrator pre-send hook. Fail-open: if any layer fails or times out, original prompt proceeds. `/optimize` slash command wired for manual debug.
+**Success Criteria** (what must be TRUE):
+  1. Raw user prompt passes through 6-layer pipeline before reaching router; each layer's output is observable via `/optimize` output.
+  2. Layer 1 classifies task type (refactor, debug, plan, analyze, doc) correctly via local regex + tree-sitter reuse from src/router/classifier/.
+  3. Layer 6 enforces Tool Calling output for coding tasks via system prompt suffix; output tokens drop measurably vs free-form baseline (tracked via pil_active/enrichment_delta in usage_events).
+  4. Pipeline is fail-open: any layer exception or 200ms timeout returns original prompt unchanged.
+  5. `/optimize` slash command prints the enriched prompt and layer-by-layer table for the last turn.
+**Plans**: 4 plans
+- [ ] 01.1-01-PLAN.md — src/pil/ module: types, pipeline, L1, L2-5 stubs, L6, store (PIL-01, PIL-02, PIL-03, PIL-04, PIL-05)
+- [ ] 01.1-02-PLAN.md — Orchestrator integration: runPipeline intercept + applyPilSuffix wiring (PIL-05, PIL-08)
+- [ ] 01.1-03-PLAN.md — /optimize slash command + DB migration v3 + recordUsageEvent PIL fields (PIL-06, PIL-07, PIL-08)
+- [ ] 01.1-04-PLAN.md — Arch guard test (no-network-in-pil-layer1) + Phase gate (PIL-01, PIL-02)
+
 ### Phase 2: Continuity & Slash Commands
 **Goal**: `.muonroi-flow/` artifacts coordinate state across sessions and slash commands; deliberate two-pass compaction never drops decisions; `/discuss /plan /execute /compact /clear /expand /cost /route` all work; killing the TUI mid-task and restarting clean restores work from disk alone.
 **Depends on**: Phase 1
@@ -122,6 +141,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
+| 01.1. Prompt Intelligence Layer | 0/4 | Not started | - |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 6/7 | In Progress|  |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
