@@ -6,7 +6,7 @@
  * runs this on every PR to prevent regressions.
  */
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { startStubEEServer, type StubHandle } from "../stubs/ee-server.js";
+import { startStubEEServer, type StubHandle } from "../../src/__test-stubs__/ee-server.js";
 import { setDefaultEEClient } from "../../src/ee/intercept.js";
 import { createEEClient } from "../../src/ee/client.js";
 import { intercept } from "../../src/ee/intercept.js";

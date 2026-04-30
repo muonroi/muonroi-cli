@@ -8,7 +8,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { startStubEEServer, type StubHandle } from '../stubs/ee-server.js';
+import { startStubEEServer, type StubHandle } from '../../src/__test-stubs__/ee-server.js';
 import { createEEClient } from '../../src/ee/client.js';
 import { setDefaultEEClient } from '../../src/ee/intercept.js';
 import { decide, type DecideOpts } from '../../src/router/decide.js';
