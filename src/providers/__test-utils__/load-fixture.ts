@@ -5,11 +5,15 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// Fixtures are at <repo>/tests/fixtures/providers/<provider>/<scenario>.jsonl
+// This file lives at <repo>/src/providers/__test-utils__/load-fixture.ts
+const FIXTURES_ROOT = resolve(__dirname, '..', '..', '..', 'tests', 'fixtures', 'providers');
+
 /**
  * Parse a JSONL fixture file into an array of AI SDK v6 TextStreamPart-like objects.
  */
 export function loadFixtureChunks(provider: string, scenario: string): unknown[] {
-  const filePath = resolve(__dirname, provider, `${scenario}.jsonl`);
+  const filePath = resolve(FIXTURES_ROOT, provider, `${scenario}.jsonl`);
   const text = readFileSync(filePath, 'utf-8');
   return text
     .split('\n')

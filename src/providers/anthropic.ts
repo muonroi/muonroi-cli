@@ -27,7 +27,8 @@
 import { streamText } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { redactor } from "../utils/redactor.js";
-import type { ProviderRequest, ProviderStream } from "./types.js";
+import type { Adapter, AdapterRequest, ProviderConfig, ProviderRequest, ProviderStream } from "./types.js";
+import { streamFromFullStream } from "./stream-loop.js";
 
 // ---------------------------------------------------------------------------
 // Error class
@@ -126,88 +127,46 @@ export async function loadAnthropicKey(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Streaming provider
+// Phase 1 — Adapter interface implementation
 // ---------------------------------------------------------------------------
 
 /**
- * Wraps AI SDK v6 streamText + @ai-sdk/anthropic into the ProviderStream contract.
- * Yields StreamChunk values compatible with grok-cli's async-generator pattern.
- *
- * AI SDK v6 fullStream event field names (context7 verified 2026-04-29):
- *   - text-delta: chunk.text (string)
- *   - tool-call:  chunk.toolCallId, chunk.toolName, chunk.input
- *   - tool-result: chunk.toolCallId, chunk.output
- *   - finish:     chunk.finishReason, chunk.totalUsage ?? chunk.usage
- *   - error:      chunk.error
- *
- * Phase 0 skips: text-start, text-end, reasoning, source, file, tool-input-* events.
- * Phase 1 may surface reasoning/source for tool tier upgrades.
+ * Create an Anthropic adapter satisfying the Adapter interface.
+ * Enrolls the API key with the redactor before any potential log.
+ */
+export function createAnthropicAdapter(config: ProviderConfig): Adapter {
+  if (config.apiKey) {
+    redactor.enrollSecret(config.apiKey);
+  }
+
+  const provider = createAnthropic({ apiKey: config.apiKey });
+
+  return {
+    id: 'anthropic',
+    async *stream(req: AdapterRequest): ProviderStream {
+      const result = streamText({
+        model: provider(config.model),
+        messages: req.messages,
+        tools: req.tools as any,
+        toolChoice: req.toolChoice as any,
+        abortSignal: req.abortSignal,
+      });
+      yield* streamFromFullStream(result.fullStream);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Back-compat streaming provider (Phase 0 callers)
+// ---------------------------------------------------------------------------
+
+/**
+ * Back-compat wrapper: delegates to createAnthropicAdapter.
+ * Phase 0 callers (loadAnthropicKey, streamAnthropicMessage) still work unchanged.
  */
 export async function* streamAnthropicMessage(req: ProviderRequest): ProviderStream {
-  const anthropic = createAnthropic({ apiKey: req.apiKey });
-
-  try {
-    // streamText returns a result object synchronously in AI SDK v6.
-    // fullStream is the async iterator over TextStreamPart events.
-    const result = streamText({
-      model: anthropic(req.model),
-      messages: req.messages,
-      abortSignal: req.abortSignal,
-    });
-
-    for await (const chunk of result.fullStream) {
-      switch (chunk.type) {
-        case "text-delta":
-          // v6: TextStreamPart.text (string). Verified via context7 vercel/ai docs 2026-04-29.
-          // NOT 'textDelta' (v5 name) — v6 uses 'text'.
-          yield { kind: "text-delta", text: chunk.text };
-          break;
-
-        case "tool-call":
-          yield {
-            kind: "tool-call",
-            toolCallId: chunk.toolCallId,
-            toolName: chunk.toolName,
-            input: chunk.input,
-          };
-          break;
-
-        case "tool-result":
-          yield {
-            kind: "tool-result",
-            toolCallId: chunk.toolCallId,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            output: (chunk as any).output,
-          };
-          break;
-
-        case "finish":
-          yield {
-            kind: "finish",
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            reason: chunk.finishReason as any,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            usage: (chunk as any).totalUsage ?? (chunk as any).usage,
-          };
-          break;
-
-        case "error":
-          yield {
-            kind: "error",
-            error: chunk.error instanceof Error ? chunk.error : new Error(String(chunk.error)),
-          };
-          break;
-
-        // Phase 0 ignores: text-start, text-end, reasoning, source, file, tool-input-*
-        // Phase 1 may surface reasoning/source for tool tier upgrades.
-        default:
-          break;
-      }
-    }
-  } catch (err) {
-    yield {
-      kind: "error",
-      error: err instanceof Error ? err : new Error(String(err)),
-    };
-  }
+  yield* createAnthropicAdapter({ apiKey: req.apiKey, model: req.model }).stream({
+    messages: req.messages,
+    abortSignal: req.abortSignal,
+  });
 }

@@ -3,7 +3,7 @@
  * Verifies DeepSeek + SiliconFlow share the OpenAI-compatible adapter.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { loadFixtureChunks, createMockFullStream } from '../../tests/fixtures/providers/load-fixture.js';
+import { loadFixtureChunks, createMockFullStream } from './__test-utils__/load-fixture.js';
 import type { StreamChunk } from './types.js';
 
 vi.mock('ai', () => ({
