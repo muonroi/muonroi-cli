@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 2;
+const LATEST_DB_VERSION = 3;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -14,6 +14,13 @@ export function applyMigrations(db: SQLiteDatabase): void {
     if (version < 2) {
       createCompactionSchema(db);
       db.pragma("user_version = 2");
+    }
+    if (version < 3) {
+      db.exec(`
+        ALTER TABLE usage_events ADD COLUMN pil_active INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE usage_events ADD COLUMN enrichment_delta INTEGER NOT NULL DEFAULT 0;
+      `);
+      db.pragma("user_version = 3");
     }
   });
 
