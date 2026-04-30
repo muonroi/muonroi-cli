@@ -56,3 +56,56 @@ export interface ProviderRequest {
  * Used as the common return type for all provider streaming functions.
  */
 export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
+
+// ---------------------------------------------------------------------------
+// Phase 1 — Multi-provider Adapter interface
+// ---------------------------------------------------------------------------
+
+/**
+ * Supported provider identifiers.
+ * 'google' maps to Gemini via @ai-sdk/google; 'deepseek' and 'siliconflow'
+ * share the OpenAI-compatible adapter with different baseURLs.
+ */
+export type ProviderId = 'anthropic' | 'openai' | 'google' | 'deepseek' | 'siliconflow' | 'ollama';
+
+/**
+ * Per-provider configuration passed to adapter factories.
+ */
+export interface ProviderConfig {
+  /** BYOK API key. Ollama may be keyless; defaults to env OLLAMA_API_KEY when present. */
+  apiKey?: string;
+  /** Base URL override for OpenAI-compatible providers (deepseek/siliconflow) + ollama VPS. */
+  baseURL?: string;
+  /** AI model identifier, e.g. "claude-3-5-haiku-latest". */
+  model: string;
+}
+
+/**
+ * Tool definition for provider tool-use calls.
+ */
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema describing the tool's input. */
+  inputSchema: Record<string, unknown>;
+}
+
+/**
+ * Unified request shape for the Adapter.stream() method.
+ * Decouples from ProviderRequest (which carries apiKey per-call).
+ */
+export interface AdapterRequest {
+  messages: ProviderRequest['messages'];
+  tools?: ToolDefinition[];
+  toolChoice?: 'auto' | 'required' | 'none' | { type: 'tool'; toolName: string };
+  abortSignal?: AbortSignal;
+}
+
+/**
+ * The single contract all provider adapters implement.
+ * Created via per-provider factory functions; registered in adapter.ts.
+ */
+export interface Adapter {
+  readonly id: ProviderId;
+  stream(req: AdapterRequest): ProviderStream;
+}
