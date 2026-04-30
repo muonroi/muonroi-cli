@@ -81,6 +81,9 @@ import {
 import { DelegationManager } from "./delegations";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { runPipeline, applyPilSuffix } from '../pil/index.js';
+import { ensureFlowDir } from "../flow/scaffold.js";
+import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
+import { loadFlowResumeDigest } from "./flow-resume.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 
 // ---------------------------------------------------------------------------
@@ -731,6 +734,12 @@ export class Agent {
   private pendingCalls: import("./pending-calls.js").PendingCallsLog | null = null;
   /** Active permission mode — controls which tool calls auto-approve vs require user confirmation. */
   private permissionMode: PermissionMode = "safe";
+  /** Flow run init promise — awaited before first message turn. */
+  private _flowReady: Promise<void> | null = null;
+  /** Active .muonroi-flow/ run ID for this session. */
+  private _activeRunId: string | null = null;
+  /** Resume digest loaded from active flow run state.md. */
+  private _resumeDigest: string | null = null;
 
   constructor(
     apiKey: string | undefined,
@@ -773,11 +782,45 @@ export class Agent {
       this.messages = transcript.messages;
       this.messageSeqs = transcript.seqs;
       this.sessionStore.setModel(this.session.id, this.modelId);
+
+      // Flow run setup — fire-and-forget, awaited before first message turn.
+      this._flowReady = this._initFlow();
+    }
+  }
+
+  /**
+   * Initialize .muonroi-flow/ run for this session.
+   * Fail-open: any error sets _activeRunId = null silently.
+   */
+  private async _initFlow(): Promise<void> {
+    try {
+      const flowDir = await ensureFlowDir(this.bash.getCwd());
+      const existing = await getActiveRunId(flowDir);
+      if (existing) {
+        this._activeRunId = existing;
+        return;
+      }
+      const run = await createRun(flowDir);
+      await setActiveRunId(flowDir, run.id);
+      this._activeRunId = run.id;
+    } catch {
+      this._activeRunId = null;
+    }
+
+    // Load resume digest for PIL context injection (fail-open).
+    try {
+      this._resumeDigest = await loadFlowResumeDigest(this.bash.getCwd());
+    } catch {
+      this._resumeDigest = null;
     }
   }
 
   getModel(): string {
     return this.modelId;
+  }
+
+  getActiveRunId(): string | null {
+    return this._activeRunId;
   }
 
   setModel(model: string): void {
@@ -1966,6 +2009,9 @@ export class Agent {
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
 
+    // Ensure flow run is ready before processing (fail-open).
+    await this._flowReady?.catch(() => {});
+
     if (!this.sessionStartHookFired) {
       this.sessionStartHookFired = true;
       const isResume = this.messages.length > 0;
@@ -1990,7 +2036,10 @@ export class Agent {
 
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
     // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
-    const pilCtx = await runPipeline(userMessage).catch(() => ({
+    const pilCtx = await runPipeline(userMessage, {
+      resumeDigest: this._resumeDigest,
+      activeRunId: this._activeRunId,
+    }).catch(() => ({
       raw: userMessage, enriched: userMessage, taskType: null, domain: null, confidence: 0, outputStyle: null, tokenBudget: 500, metrics: null, layers: [],
     }));
     const enrichedMessage = pilCtx.enriched;
