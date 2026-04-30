@@ -10,7 +10,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - Integer phases (0, 1, 2, 3, 4): Planned milestone work
 - Decimal phases (e.g. 1.1): Urgent insertions (marked with INSERTED)
 
-- [x] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives (completed 2026-04-29)
+- [x] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives (completed 2026-04-29)
 - [x] **Phase 1: Brain & Cap Chain** — Multi-provider adapter, 3-tier router, EE PreToolUse warnings, full cap chain with auto-downgrade (completed 2026-04-30)
 - [ ] **Phase 2: Continuity & Slash Commands** — `.muonroi-flow/` artifacts, deliberate compaction, GSD slash commands, session resume from disk
 - [ ] **Phase 3: Polish, Headless, Cross-Platform Beta** — Headless validation, MCP/LSP smoke tests, CI matrix, permission modes, doctor + bug-report, beta packaging
@@ -68,7 +68,12 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
   3. User runs `/compact` and the system performs two-pass deliberate compaction (extract decisions/facts/constraints to `.muonroi-flow/decisions.md` first, then compact chat); user-marked "preserve verbatim" sections survive regardless of token budget; `/expand` reverses the last `/compact`.
   4. User in a directory with a pre-existing `.quick-codex-flow/` is offered a one-shot migration to `.muonroi-flow/` on first run; junk-principle pruning auto-archives principles unmatched for 30 days.
   5. User invokes `/cost` and sees current status-bar contents (model, tier badge, tokens, USD/session, USD/month) printed on demand.
-**Plans**: TBD
+**Plans**: 5 plans
+- [ ] 02-01-PLAN.md — .muonroi-flow/ scaffolding + tolerant parser + migration (FLOW-01, FLOW-02, FLOW-03)
+- [ ] 02-02-PLAN.md — /discuss + /plan + /execute slash commands (FLOW-05, FLOW-06, FLOW-07)
+- [ ] 02-03-PLAN.md — Two-pass compaction + /compact + /expand + /clear (FLOW-08, FLOW-09, FLOW-10, FLOW-11)
+- [ ] 02-04-PLAN.md — Kill-restart continuity + hook-warning persistence (FLOW-04, FLOW-12)
+- [ ] 02-05-PLAN.md — /cost slash command (USAGE-08)
 **UI hint**: yes
 
 ### Phase 3: Polish, Headless, Cross-Platform Beta
@@ -110,6 +115,6 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
-| 2. Continuity & Slash Commands | 0/TBD | Not started | - |
+| 2. Continuity & Slash Commands | 0/5 | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 0/TBD | Not started | - |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
