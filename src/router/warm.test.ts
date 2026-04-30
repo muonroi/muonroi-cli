@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { startStubEEServer, type StubHandle } from '../../tests/stubs/ee-server.js';
+import { startStubEEServer, type StubHandle } from '../__test-stubs__/ee-server.js';
 import { createEEClient } from '../ee/client.js';
 import { setDefaultEEClient } from '../ee/intercept.js';
 import { callWarmRoute } from './warm.js';

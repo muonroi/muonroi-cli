@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { registerSlash, dispatchSlash, listSlashCommands, type SlashContext } from './registry.js';
-import { startStubEEServer, type StubHandle } from '../../../tests/stubs/ee-server.js';
+import { startStubEEServer, type StubHandle } from '../../__test-stubs__/ee-server.js';
 import { createEEClient } from '../../ee/client.js';
 import { setDefaultEEClient } from '../../ee/intercept.js';
 import { midstreamPolicy } from '../../usage/midstream.js';
