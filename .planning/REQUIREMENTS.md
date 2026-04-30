@@ -98,8 +98,8 @@
 
 ### OPS — Operations and support tooling
 
-- [ ] **OPS-01**: User can run `muonroi-cli doctor` to self-check Bun version, OS, key presence in keychain, Ollama health, EE health, Qdrant health, recent error rate.
-- [ ] **OPS-02**: User can run `muonroi-cli bug-report` to bundle anonymized state for issue submission — keys redacted, API responses sampled with secrets stripped. (Pitfall 20)
+- [x] **OPS-01**: User can run `muonroi-cli doctor` to self-check Bun version, OS, key presence in keychain, Ollama health, EE health, Qdrant health, recent error rate.
+- [x] **OPS-02**: User can run `muonroi-cli bug-report` to bundle anonymized state for issue submission — keys redacted, API responses sampled with secrets stripped. (Pitfall 20)
 - [ ] **OPS-03**: Repo ships GitHub issue templates with auto-redaction guidance and `doctor` output requirement.
 - [ ] **OPS-04**: Repo ships `STATUS.md` with known issues, beta enrollment instructions, and gradient rollout plan.
 
@@ -217,8 +217,8 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | CORE-05 | Phase 3 | Pending |
 | CORE-06 | Phase 3 | Pending |
 | CORE-07 | Phase 3 | Complete |
-| OPS-01 | Phase 3 | Pending |
-| OPS-02 | Phase 3 | Pending |
+| OPS-01 | Phase 3 | Complete |
+| OPS-02 | Phase 3 | Complete |
 | OPS-03 | Phase 3 | Pending |
 | OPS-04 | Phase 3 | Pending |
 | CLOUD-01 | Phase 4 | Pending |
