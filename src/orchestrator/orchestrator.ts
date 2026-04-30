@@ -79,6 +79,7 @@ import {
 } from "./compaction";
 import { DelegationManager } from "./delegations";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { runPipeline, applyPilSuffix } from '../pil/index.js';
 // FORK-02: vision-input.ts deleted (multimodal anti-feature per PROJECT.md Out-of-Scope)
 
 // ---------------------------------------------------------------------------
@@ -1993,20 +1994,33 @@ export class Agent {
     await this.fireHook(promptInput, signal).catch(() => {});
 
     await this.consumeBackgroundNotifications();
-    const userModelMessage: ModelMessage = { role: "user", content: userMessage };
+
+    // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
+    // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
+    const pilCtx = await runPipeline(userMessage).catch(() => ({
+      raw: userMessage, enriched: userMessage, taskType: null, domain: null, layers: [],
+    }));
+    const enrichedMessage = pilCtx.enriched;
+
+    const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
 
     const provider = this.requireProvider();
     const subagents = loadValidSubAgents();
+    // PIL: applyPilSuffix wraps buildSystemPrompt output for Layer 6 (D-10, D-11)
+    // Call buildSystemPrompt ONCE, pass to applyPilSuffix, then to applyModelConstraints
     const system = applyModelConstraints(
-      buildSystemPrompt(
-        this.bash.getCwd(),
-        this.mode,
-        this.bash.getSandboxMode(),
-        this.planContext,
-        subagents,
-        this.bash.getSandboxSettings(),
+      applyPilSuffix(
+        buildSystemPrompt(
+          this.bash.getCwd(),
+          this.mode,
+          this.bash.getSandboxMode(),
+          this.planContext,
+          subagents,
+          this.bash.getSandboxSettings(),
+        ),
+        pilCtx,
       ),
       this.modelId,
     );

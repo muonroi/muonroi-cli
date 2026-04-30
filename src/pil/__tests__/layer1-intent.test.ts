@@ -51,7 +51,7 @@ describe('layer1Intent', () => {
   });
 
   it('maps tree-sitter:typescript reason to taskType=refactor, applied=true', async () => {
-    mockClassify.mockReturnValue({ tier: 'warm', confidence: 0.75, reason: 'tree-sitter:typescript' });
+    mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.75, reason: 'tree-sitter:typescript' });
     const ctx = makeCtx('some typescript code');
     const result = await layer1Intent(ctx);
     expect(result.taskType).toBe('refactor');
