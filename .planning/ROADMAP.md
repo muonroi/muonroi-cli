@@ -94,7 +94,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 03-03-PLAN.md — Doctor + bug-report operator commands (OPS-01, OPS-02)
 - [x] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
 - [x] 03-05-PLAN.md — GitHub issue templates + STATUS.md (OPS-03, OPS-04)
-- [ ] 03-06-PLAN.md — [GAP CLOSURE] Fix tsconfig rootDir error — move ee-server stub into src/ (CORE-05)
+- [x] 03-06-PLAN.md — [GAP CLOSURE] Fix tsconfig rootDir error — move ee-server stub into src/ (CORE-05)
 - [ ] 03-07-PLAN.md — [GAP CLOSURE] Platform-conditional MCP stdio handshake test (CORE-02)
 **UI hint**: yes
 
@@ -123,5 +123,5 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
-| 3. Polish, Headless, Cross-Platform Beta | 5/7 | Gap closure | - |
+| 3. Polish, Headless, Cross-Platform Beta | 6/7 | In Progress|  |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
