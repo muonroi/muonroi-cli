@@ -69,7 +69,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
   4. User in a directory with a pre-existing `.quick-codex-flow/` is offered a one-shot migration to `.muonroi-flow/` on first run; junk-principle pruning auto-archives principles unmatched for 30 days.
   5. User invokes `/cost` and sees current status-bar contents (model, tier badge, tokens, USD/session, USD/month) printed on demand.
 **Plans**: 5 plans
-- [ ] 02-01-PLAN.md — .muonroi-flow/ scaffolding + tolerant parser + migration (FLOW-01, FLOW-02, FLOW-03)
+- [x] 02-01-PLAN.md — .muonroi-flow/ scaffolding + tolerant parser + migration (FLOW-01, FLOW-02, FLOW-03)
 - [ ] 02-02-PLAN.md — /discuss + /plan + /execute slash commands (FLOW-05, FLOW-06, FLOW-07)
 - [ ] 02-03-PLAN.md — Two-pass compaction + /compact + /expand + /clear (FLOW-08, FLOW-09, FLOW-10, FLOW-11)
 - [ ] 02-04-PLAN.md — Kill-restart continuity + hook-warning persistence (FLOW-04, FLOW-12)

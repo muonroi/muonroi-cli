@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 01-06-PLAN (TUI Status Bar)
-last_updated: "2026-04-30T03:56:36.043Z"
+status: executing
+stopped_at: Completed 02-01-PLAN (Flow scaffolding)
+last_updated: "2026-04-30T04:25:37.745Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 2
-  total_plans: 16
-  completed_plans: 16
+  total_plans: 21
+  completed_plans: 17
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3× further than any subscription-locked tool.
-**Current focus:** Phase 01 — brain-cap-chain
+**Current focus:** Phase 02 — continuity-slash-commands
 
 ## Current Position
 
-Phase: 2
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 02 (continuity-slash-commands) — EXECUTING
+Plan: 2 of 5
+Status: Ready to execute
 Last activity: 2026-04-30
 
 Progress: [░░░░░░░░░░] 0%
@@ -73,6 +73,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01-brain-cap-chain P07 | 6 | 2 tasks | 14 files |
 | Phase 01-brain-cap-chain P08 | 5 | 2 tasks | 13 files |
 | Phase 01-brain-cap-chain P06 | 7 | 1 tasks | 9 files |
+| Phase 02-continuity-slash-commands P01 | 4 | 2 tasks | 11 files |
 
 ## Accumulated Context
 
@@ -123,6 +124,9 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: judge() uses 4 deterministic rules (no LLM) for FOLLOWED/IGNORED/IRRELEVANT classification
 - [Phase 01-brain-cap-chain]: renderStatusBar() pure function extracted for testability without react-dom
 - [Phase 01-brain-cap-chain]: dispatchSlash wired as async fallback in app.tsx handleCommand for extensible slash commands
+- [Phase 02-continuity-slash-commands]: Run IDs use Date.now().toString(36) + randomBytes(2).toString('hex') for sortable collision-safe identifiers
+- [Phase 02-continuity-slash-commands]: Parser uses regex heading splitting (not AST) -- zero dependency cost, matches existing codebase patterns
+- [Phase 02-continuity-slash-commands]: Migration derives run IDs from QC filename slugs; unknown sections preserved in state.md (tolerant)
 
 ### Pending Todos
 
@@ -154,6 +158,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:52:00.536Z
-Stopped at: Completed 01-06-PLAN (TUI Status Bar)
+Last session: 2026-04-30T04:25:37.740Z
+Stopped at: Completed 02-01-PLAN (Flow scaffolding)
 Resume file: None
