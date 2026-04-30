@@ -76,7 +76,7 @@
 - [x] **FLOW-01**: Repo-local `.muonroi-flow/` directory contains: `roadmap.md`, `state.md`, `backlog.md`, `decisions.md`, plus per-run `runs/<run-id>/` subdirs with `roadmap.md`, `state.md`, `delegations.md`, `gray-areas.md`. Naming locked in DECISIONS.md before Phase 2 starts. (Pitfall 14)
 - [x] **FLOW-02**: `.muonroi-flow/` artifacts are read tolerantly (sections by heading, missing sections OK), written deterministically (atomic rename via `.tmp`).
 - [x] **FLOW-03**: System detects existing `.quick-codex-flow/` on first run and offers one-shot migration to `.muonroi-flow/`. (Conflict 5)
-- [ ] **FLOW-04**: Session resume reads `.muonroi-flow/runs/<id>/state.md` before chat transcript — proven by killing TUI mid-task and restarting clean. (IDEA success metric)
+- [x] **FLOW-04**: Session resume reads `.muonroi-flow/runs/<id>/state.md` before chat transcript — proven by killing TUI mid-task and restarting clean. (IDEA success metric)
 - [x] **FLOW-05**: User can run `/discuss` slash command to enter QC-style front-half clarification with affected-area discussion and gray-area gates. Writes `.muonroi-flow/runs/<id>/`.
 - [x] **FLOW-06**: User can run `/plan` slash command to produce a verified plan in the active run, requiring resolved gray-areas and evidence-based phase scope.
 - [x] **FLOW-07**: User can run `/execute` slash command to enter QC-lock execution loop on the active run with explicit verification gates.
@@ -84,7 +84,7 @@
 - [x] **FLOW-09**: User can run `/clear` slash command to relock current state from artifacts and discard chat context.
 - [x] **FLOW-10**: User can run `/expand` slash command to reverse the last `/compact` operation by restoring archived context from `.muonroi-flow/history/`.
 - [x] **FLOW-11**: Compaction preserves user-marked "preserve verbatim" sections regardless of token budget.
-- [ ] **FLOW-12**: Hook-derived warnings persist into the active run artifact so compaction never erases relevant EE constraints. (IDEA hard constraint)
+- [x] **FLOW-12**: Hook-derived warnings persist into the active run artifact so compaction never erases relevant EE constraints. (IDEA hard constraint)
 
 ### CORE — Headless / MCP / LSP preserved
 
@@ -201,7 +201,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FLOW-01 | Phase 2 | Complete |
 | FLOW-02 | Phase 2 | Complete |
 | FLOW-03 | Phase 2 | Complete |
-| FLOW-04 | Phase 2 | Pending |
+| FLOW-04 | Phase 2 | Complete |
 | FLOW-05 | Phase 2 | Complete |
 | FLOW-06 | Phase 2 | Complete |
 | FLOW-07 | Phase 2 | Complete |
@@ -209,7 +209,7 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | FLOW-09 | Phase 2 | Complete |
 | FLOW-10 | Phase 2 | Complete |
 | FLOW-11 | Phase 2 | Complete |
-| FLOW-12 | Phase 2 | Pending |
+| FLOW-12 | Phase 2 | Complete |
 | CORE-01 | Phase 3 | Pending |
 | CORE-02 | Phase 3 | Pending |
 | CORE-03 | Phase 3 | Pending |
