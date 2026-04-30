@@ -89,6 +89,10 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           signal: AbortSignal.timeout(interceptTimeoutMs),
         });
         if (!resp.ok) {
+          // 401 = auth required — surface typed reason so intercept() can refresh
+          if (resp.status === 401) {
+            return { decision: "allow", reason: "auth-required" };
+          }
           logUnreachable(`status ${resp.status}`);
           return { decision: "allow", reason: "ee-unreachable" };
         }
