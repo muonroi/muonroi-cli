@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createEEClient } from "./client.js";
+import { createEEClient, resetEEClientState } from "./client.js";
 import type { InterceptRequest, PostToolPayload } from "./types.js";
 
 const mockReq: InterceptRequest = {
@@ -38,6 +38,7 @@ describe("EEClient - health", () => {
 describe("EEClient - intercept", () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    resetEEClientState(); // clear cache + circuit between tests
   });
 
   afterEach(() => {
@@ -128,6 +129,8 @@ describe("EEClient - posttool", () => {
 });
 
 describe("EEClient - auth", () => {
+  beforeEach(() => { resetEEClientState(); });
+
   it("Test 9: auth header included when authToken provided", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,

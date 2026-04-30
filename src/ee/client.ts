@@ -18,15 +18,11 @@ const DEFAULT_BASE = "http://localhost:8082";
  * B-4 rationale: intercept is on the hot-path of every tool call. A degraded EE
  * must NOT silently add 5s/call. 100ms is fast enough to detect a wedged EE
  * immediately, and slow enough to absorb normal localhost p99 jitter on Windows ConPTY.
- * Phase 1 EE-08 will tighten this to 25ms p95 with a CI guard.
  */
 const DEFAULT_TIMEOUT_MS = 100;
-
-/**
- * Health check gets a separate 1s budget — it is not on the hot-path.
- */
 const DEFAULT_HEALTH_TIMEOUT_MS = 1000;
 
+// ─── Rate-limited unreachable log ─────────────────────────────────────────────
 let lastUnreachableLogMs = 0;
 const UNREACHABLE_LOG_INTERVAL_MS = 60_000;
 
@@ -34,31 +30,144 @@ function logUnreachable(reason: string): void {
   const now = Date.now();
   if (now - lastUnreachableLogMs > UNREACHABLE_LOG_INTERVAL_MS) {
     lastUnreachableLogMs = now;
-    // The redactor (installed at boot in plan 00.05) wraps console.warn.
     console.warn(`[muonroi-cli] EE unreachable (${reason}); intercept short-circuiting to allow.`);
   }
 }
+
+// ─── Circuit breaker ──────────────────────────────────────────────────────────
+type CircuitState = "closed" | "open" | "half-open";
+
+const CIRCUIT_FAILURE_THRESHOLD = 3;   // consecutive failures before opening
+const CIRCUIT_OPEN_DURATION_MS   = 30_000; // stay open for 30s
+const CIRCUIT_RESET_TIMEOUT_MS   = 60_000; // reset consecutive counter after 60s idle
+
+let _circuitState: CircuitState = "closed";
+let _consecutiveFailures = 0;
+let _circuitOpenedAt = 0;
+let _lastFailureAt = 0;
+
+function recordCircuitSuccess(): void {
+  _circuitState = "closed";
+  _consecutiveFailures = 0;
+}
+
+function recordCircuitFailure(): void {
+  const now = Date.now();
+  // Reset counter if last failure was long ago (stale state)
+  if (now - _lastFailureAt > CIRCUIT_RESET_TIMEOUT_MS) _consecutiveFailures = 0;
+  _lastFailureAt = now;
+  _consecutiveFailures++;
+  if (_consecutiveFailures >= CIRCUIT_FAILURE_THRESHOLD) {
+    _circuitState = "open";
+    _circuitOpenedAt = now;
+    console.warn(
+      `[muonroi-cli] EE circuit breaker OPEN after ${_consecutiveFailures} consecutive failures. ` +
+      `Skipping intercept calls for ${CIRCUIT_OPEN_DURATION_MS / 1000}s.`
+    );
+  }
+}
+
+/**
+ * Returns true if the circuit allows a request through.
+ * Transitions open→half-open after CIRCUIT_OPEN_DURATION_MS.
+ */
+function circuitAllows(): boolean {
+  if (_circuitState === "closed") return true;
+  if (_circuitState === "open") {
+    if (Date.now() - _circuitOpenedAt >= CIRCUIT_OPEN_DURATION_MS) {
+      _circuitState = "half-open";
+      return true; // let one probe through
+    }
+    return false;
+  }
+  // half-open: allow exactly one probe
+  return true;
+}
+
+// ─── Intercept response cache ─────────────────────────────────────────────────
+const CACHE_TTL_MS = 5 * 60_000; // 5 minutes
+const CACHE_MAX_ENTRIES = 200;
+
+interface CacheEntry {
+  response: InterceptResponse;
+  expiresAt: number;
+}
+
+const _interceptCache = new Map<string, CacheEntry>();
+
+function cacheKey(req: InterceptRequest): string {
+  // Normalize toolInput to a stable JSON string (sort keys for maps)
+  try {
+    const inputStr = JSON.stringify(req.toolInput, Object.keys(req.toolInput as object).sort());
+    return `${req.toolName}|${inputStr}|${JSON.stringify(req.scope)}`;
+  } catch {
+    return `${req.toolName}|__unstringifiable__|${JSON.stringify(req.scope)}`;
+  }
+}
+
+function getCached(req: InterceptRequest): InterceptResponse | null {
+  const key = cacheKey(req);
+  const entry = _interceptCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    _interceptCache.delete(key);
+    return null;
+  }
+  return entry.response;
+}
+
+function setCached(req: InterceptRequest, response: InterceptResponse): void {
+  // Only cache allow decisions — block decisions must always re-evaluate
+  if (response.decision !== "allow") return;
+  if (_interceptCache.size >= CACHE_MAX_ENTRIES) {
+    // Evict oldest entry
+    const oldest = _interceptCache.keys().next().value;
+    if (oldest) _interceptCache.delete(oldest);
+  }
+  _interceptCache.set(cacheKey(req), {
+    response,
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
+/** Clear intercept cache — for tests and /doctor command. */
+export function clearInterceptCache(): void {
+  _interceptCache.clear();
+}
+
+export function getCircuitState(): CircuitState {
+  return _circuitState;
+}
+
+/** Reset circuit breaker and cache — for tests only. */
+export function resetEEClientState(): void {
+  _interceptCache.clear();
+  _circuitState = "closed";
+  _consecutiveFailures = 0;
+  _circuitOpenedAt = 0;
+  _lastFailureAt = 0;
+  lastUnreachableLogMs = 0;
+}
+
+// ─── Client factory ───────────────────────────────────────────────────────────
 
 export interface CreateEEClientOpts {
   baseUrl?: string;
   authToken?: string;
   timeoutMs?: number;
-  fetchImpl?: typeof fetch; // injectable for tests (T-00.06-01: keeps test mocks out of production)
+  fetchImpl?: typeof fetch;
 }
 
 /**
- * Create an EE HTTP client.
+ * Create an EE HTTP client with intercept cache + circuit breaker.
  *
  * Graceful-degradation rules:
- * - intercept: on 5xx / network error / timeout, return { decision: "allow", reason: "ee-unreachable" }
- *   and emit a rate-limited console.warn (at most once per minute).
- * - posttool: on any error, swallow silently. Fire-and-forget — never blocks the orchestrator.
- * - health: returns status regardless of outcome, never throws.
+ * - intercept: cache hit → 0ms. Circuit open → 0ms allow. Timeout/error → allow + warn once/min.
+ * - posttool/feedback/touch: fire-and-forget, never block orchestrator (B-4).
  */
 export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const authToken = opts.authToken;
-  // B-4: opts.timeoutMs overrides the intercept budget (tests pass shorter values to assert fallback).
   const interceptTimeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const f = opts.fetchImpl ?? fetch;
 
@@ -81,6 +190,15 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     async intercept(req: InterceptRequest): Promise<InterceptResponse> {
+      // 1. Cache hit — skip network entirely
+      const cached = getCached(req);
+      if (cached) return cached;
+
+      // 2. Circuit breaker — skip if open
+      if (!circuitAllows()) {
+        return { decision: "allow", reason: "circuit-open" };
+      }
+
       try {
         const resp = await f(`${baseUrl}/api/intercept`, {
           method: "POST",
@@ -89,35 +207,30 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           signal: AbortSignal.timeout(interceptTimeoutMs),
         });
         if (!resp.ok) {
-          // 401 = auth required — surface typed reason so intercept() can refresh
           if (resp.status === 401) {
             return { decision: "allow", reason: "auth-required" };
           }
           logUnreachable(`status ${resp.status}`);
+          recordCircuitFailure();
           return { decision: "allow", reason: "ee-unreachable" };
         }
-        return (await resp.json()) as InterceptResponse;
+        const result = (await resp.json()) as InterceptResponse;
+        recordCircuitSuccess();
+        setCached(req, result);
+        return result;
       } catch (err) {
         logUnreachable((err as Error).name ?? "error");
+        recordCircuitFailure();
         return { decision: "allow", reason: "ee-unreachable" };
       }
     },
 
-    /**
-     * posttool: TRULY fire-and-forget. Returns void synchronously.
-     *
-     * No AbortSignal.timeout — a hung EE connection is just a leaked socket that
-     * the kernel cleans up eventually. This MUST NOT block the orchestrator.
-     * B-4: posttool MUST NOT be declared async.
-     */
     posttool(payload: PostToolPayload): void {
       f(`${baseUrl}/api/posttool`, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => {
-        /* swallow all errors — fire-and-forget */
-      });
+      }).catch(() => { /* fire-and-forget */ });
     },
 
     async routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null> {
@@ -158,32 +271,20 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }
     },
 
-    /**
-     * feedback: fire-and-forget. Plan 08 implements the full handler.
-     * B-4: MUST NOT be async — never blocks the orchestrator.
-     */
     feedback(payload: FeedbackPayload): void {
       f(`${baseUrl}/api/feedback`, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => {
-        /* swallow all errors — fire-and-forget */
-      });
+      }).catch(() => { /* fire-and-forget */ });
     },
 
-    /**
-     * touch: fire-and-forget principle touch for 30-day decay. Plan 08 implements.
-     * B-4: MUST NOT be async.
-     */
     touch(principle_uuid: string, tenantId: string): void {
       f(`${baseUrl}/api/principle/touch?id=${encodeURIComponent(principle_uuid)}`, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ tenantId }),
-      }).catch(() => {
-        /* swallow all errors — fire-and-forget */
-      });
+      }).catch(() => { /* fire-and-forget */ });
     },
   };
 }

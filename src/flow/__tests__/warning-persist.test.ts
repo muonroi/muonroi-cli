@@ -76,9 +76,9 @@ describe("persistWarning", () => {
     const run = await createRun(flowDir);
     await setActiveRunId(flowDir, run.id);
 
-    await persistWarning(cwd, makeMatch({ message: "Warning A" }));
-    await persistWarning(cwd, makeMatch({ message: "Warning B" }));
-    await persistWarning(cwd, makeMatch({ message: "Warning C" }));
+    await persistWarning(cwd, makeMatch({ message: "Warning A", principle_uuid: "uuid-a" }));
+    await persistWarning(cwd, makeMatch({ message: "Warning B", principle_uuid: "uuid-b" }));
+    await persistWarning(cwd, makeMatch({ message: "Warning C", principle_uuid: "uuid-c" }));
 
     const restored = await loadRun(flowDir, run.id);
     const snapshot = getSection(restored!.state, "Experience Snapshot");
@@ -103,10 +103,10 @@ describe("persistWarning", () => {
 
     const restored = await loadRun(flowDir, run.id);
     const snapshot = getSection(restored!.state, "Experience Snapshot");
-    // renderInterceptWarning format: "⚠ [Experience - 0.92] Avoid rm -rf\n  Why: Dangerous command\n  Scope: global"
-    expect(snapshot).toContain("[Experience - 0.92]");
+    // renderInterceptWarning format: boxed 5-line warning with percentage confidence
+    expect(snapshot).toContain("92%");
     expect(snapshot).toContain("Avoid rm -rf");
-    expect(snapshot).toContain("Why: Dangerous command");
-    expect(snapshot).toContain("Scope: global");
+    expect(snapshot).toContain("Dangerous command");
+    expect(snapshot).toContain("global");
   });
 });
