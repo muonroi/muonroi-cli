@@ -73,9 +73,9 @@
 
 ### FLOW — `.muonroi-flow/` artifact system + GSD slash commands
 
-- [ ] **FLOW-01**: Repo-local `.muonroi-flow/` directory contains: `roadmap.md`, `state.md`, `backlog.md`, `decisions.md`, plus per-run `runs/<run-id>/` subdirs with `roadmap.md`, `state.md`, `delegations.md`, `gray-areas.md`. Naming locked in DECISIONS.md before Phase 2 starts. (Pitfall 14)
-- [ ] **FLOW-02**: `.muonroi-flow/` artifacts are read tolerantly (sections by heading, missing sections OK), written deterministically (atomic rename via `.tmp`).
-- [ ] **FLOW-03**: System detects existing `.quick-codex-flow/` on first run and offers one-shot migration to `.muonroi-flow/`. (Conflict 5)
+- [x] **FLOW-01**: Repo-local `.muonroi-flow/` directory contains: `roadmap.md`, `state.md`, `backlog.md`, `decisions.md`, plus per-run `runs/<run-id>/` subdirs with `roadmap.md`, `state.md`, `delegations.md`, `gray-areas.md`. Naming locked in DECISIONS.md before Phase 2 starts. (Pitfall 14)
+- [x] **FLOW-02**: `.muonroi-flow/` artifacts are read tolerantly (sections by heading, missing sections OK), written deterministically (atomic rename via `.tmp`).
+- [x] **FLOW-03**: System detects existing `.quick-codex-flow/` on first run and offers one-shot migration to `.muonroi-flow/`. (Conflict 5)
 - [ ] **FLOW-04**: Session resume reads `.muonroi-flow/runs/<id>/state.md` before chat transcript — proven by killing TUI mid-task and restarting clean. (IDEA success metric)
 - [ ] **FLOW-05**: User can run `/discuss` slash command to enter QC-style front-half clarification with affected-area discussion and gray-area gates. Writes `.muonroi-flow/runs/<id>/`.
 - [ ] **FLOW-06**: User can run `/plan` slash command to produce a verified plan in the active run, requiring resolved gray-areas and evidence-based phase scope.
@@ -198,9 +198,9 @@ Mapping requirements to phases — finalized by `gsd-roadmapper` 2026-04-29.
 | EE-08 | Phase 1 | Complete |
 | EE-09 | Phase 1 | Complete |
 | EE-10 | Phase 1 | Complete |
-| FLOW-01 | Phase 2 | Pending |
-| FLOW-02 | Phase 2 | Pending |
-| FLOW-03 | Phase 2 | Pending |
+| FLOW-01 | Phase 2 | Complete |
+| FLOW-02 | Phase 2 | Complete |
+| FLOW-03 | Phase 2 | Complete |
 | FLOW-04 | Phase 2 | Pending |
 | FLOW-05 | Phase 2 | Pending |
 | FLOW-06 | Phase 2 | Pending |
