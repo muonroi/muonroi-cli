@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-04-PLAN (Reservation Ledger + Thresholds)
-last_updated: "2026-04-30T03:31:59.881Z"
+stopped_at: Completed 01-03-PLAN (Warm/Cold Router + Health Probe + decide() ladder)
+last_updated: "2026-04-30T03:32:19.853Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 00-fork-skeleton P08 | 15 | 2 tasks | 5 files |
 | Phase 01-brain-cap-chain P01 | 8 | 3 tasks | 32 files |
 | Phase 01-brain-cap-chain P04 | 6 | 2 tasks | 10 files |
+| Phase 01-brain-cap-chain P03 | 6 | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -102,6 +103,9 @@ Recent decisions affecting current work:
 - [Phase 01-brain-cap-chain]: Ollama adapter skips redactor.enrollSecret (keyless provider)
 - [Phase 01-brain-cap-chain]: proper-lockfile chosen over hand-rolled lock for reservation ledger (MIT, stale recovery, Bun-Windows compat confirmed)
 - [Phase 01-brain-cap-chain]: Threshold events emitted after lock release; dedupe via thresholds_fired_this_month in usage.json
+- [Phase 01-brain-cap-chain]: EE stub server uses node:http (not Bun.serve) for vitest compatibility
+- [Phase 01-brain-cap-chain]: classifier/index.ts ships as always-abstain stub since Plan 02 not yet executed; Plan 02 replaces
+- [Phase 01-brain-cap-chain]: routeModel/coldRoute return null on any failure (timeout/5xx/network) -- callers use null-check fallthrough
 
 ### Pending Todos
 
@@ -133,6 +137,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T03:31:48.153Z
-Stopped at: Completed 01-04-PLAN (Reservation Ledger + Thresholds)
+Last session: 2026-04-30T03:32:19.849Z
+Stopped at: Completed 01-03-PLAN (Warm/Cold Router + Health Probe + decide() ladder)
 Resume file: None
