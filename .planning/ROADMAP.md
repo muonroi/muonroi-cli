@@ -73,7 +73,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 02-02-PLAN.md — /discuss + /plan + /execute slash commands (FLOW-05, FLOW-06, FLOW-07)
 - [x] 02-03-PLAN.md — Two-pass compaction + /compact + /expand + /clear (FLOW-08, FLOW-09, FLOW-10, FLOW-11)
 - [ ] 02-04-PLAN.md — Kill-restart continuity + hook-warning persistence (FLOW-04, FLOW-12)
-- [ ] 02-05-PLAN.md — /cost slash command (USAGE-08)
+- [x] 02-05-PLAN.md — /cost slash command (USAGE-08)
 **UI hint**: yes
 
 ### Phase 3: Polish, Headless, Cross-Platform Beta
