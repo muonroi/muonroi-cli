@@ -90,7 +90,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
   5. User finds GitHub issue templates with auto-redaction guidance and a `STATUS.md` with known issues + beta enrollment instructions in the repo.
 **Plans**: 5 plans
 - [x] 03-01-PLAN.md — Permission modes (safe/auto-edit/yolo) + CLI branding fix (CORE-07)
-- [ ] 03-02-PLAN.md — Headless golden test + MCP smoke + LSP smoke + delegation arch test (CORE-01, CORE-02, CORE-03, CORE-04)
+- [x] 03-02-PLAN.md — Headless golden test + MCP smoke + LSP smoke + delegation arch test (CORE-01, CORE-02, CORE-03, CORE-04)
 - [ ] 03-03-PLAN.md — Doctor + bug-report operator commands (OPS-01, OPS-02)
 - [ ] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
 - [ ] 03-05-PLAN.md — GitHub issue templates + STATUS.md (OPS-03, OPS-04)
