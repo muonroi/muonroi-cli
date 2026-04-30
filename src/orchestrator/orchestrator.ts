@@ -1,4 +1,5 @@
 // Plan 00-05: Anthropic provider wired. FORK-02 stubs replaced with real provider calls.
+import { toolNeedsApproval, type PermissionMode } from "../utils/permission-mode.js";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
@@ -288,6 +289,9 @@ interface AgentOptions {
   abortContext?: import("./abort.js").AbortContext;
   /** Optional PendingCallsLog for Pitfall 9 staged-write tracking per tool call. */
   pendingCalls?: import("./pending-calls.js").PendingCallsLog;
+  /** Permission mode controlling which tool calls require manual approval.
+   *  safe (default) = confirm all; auto-edit = auto-approve file ops; yolo = auto-approve all. */
+  permissionMode?: PermissionMode;
 }
 
 type ProcessMessageFinishReason = "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other";
@@ -737,6 +741,8 @@ export class Agent {
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
   private pendingCalls: import("./pending-calls.js").PendingCallsLog | null = null;
+  /** Active permission mode — controls which tool calls auto-approve vs require user confirmation. */
+  private permissionMode: PermissionMode = "safe";
 
   constructor(
     apiKey: string | undefined,
@@ -768,6 +774,7 @@ export class Agent {
     // TUI-04: wire external abort context and pending calls log if provided.
     this.externalAbortContext = options.abortContext ?? null;
     this.pendingCalls = options.pendingCalls ?? null;
+    this.permissionMode = options.permissionMode ?? "safe";
 
     if (options.persistSession !== false) {
       this.sessionStore = new SessionStore(this.bash.getCwd());
@@ -2196,6 +2203,15 @@ export class Agent {
                 // FORK-02: payments/brin deleted with src/payments/*; payment pre-check disabled.
                 // Stripe billing replaces Coinbase in plan 00-04 / Phase 4.
                 const paymentPrecheck: import("../types/index").PaymentPrecheck | undefined = undefined;
+
+                // Plan 03-01: check permission mode before yielding approval request to UI.
+                // auto-edit auto-approves file ops; yolo auto-approves everything.
+                const toolName = approvalPart.toolCall?.toolName ?? "";
+                if (!toolNeedsApproval(toolName, this.permissionMode)) {
+                  // Auto-approve: respond directly without surfacing to UI.
+                  this.respondToToolApproval(approvalPart.approvalId, true);
+                  break;
+                }
 
                 yield {
                   type: "tool_approval_request",
