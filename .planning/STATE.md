@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 01.1 context gathered
-last_updated: "2026-04-30T09:53:46.507Z"
+status: executing
+stopped_at: Completed 01.1-01-PLAN.md
+last_updated: "2026-04-30T10:15:16.733Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 6
   completed_phases: 4
-  total_plans: 28
-  completed_plans: 28
+  total_plans: 32
+  completed_plans: 29
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-29)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3× further than any subscription-locked tool.
-**Current focus:** Phase 03 — polish-headless-cross-platform-beta
+**Current focus:** Phase 01.1 — prompt-intelligence-layer-input-enrichment-output-optimization
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 01.1 (prompt-intelligence-layer-input-enrichment-output-optimization) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-04-30
 
 Progress: [░░░░░░░░░░] 0%
@@ -85,6 +85,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-polish-headless-cross-platform-beta P04 | 8 | 2 tasks | 3 files |
 | Phase 03-polish-headless-cross-platform-beta P06 | 5 | 2 tasks | 9 files |
 | Phase 03-polish-headless-cross-platform-beta P07 | 5 | 1 tasks | 1 files |
+| Phase 01.1-prompt-intelligence-layer-input-enrichment-output-optimization P01 | 15 | 3 tasks | 15 files |
 
 ## Accumulated Context
 
@@ -157,6 +158,9 @@ Recent decisions affecting current work:
 - [Phase 03-polish-headless-cross-platform-beta]: Standalone binary users use ANTHROPIC_API_KEY env var — keytar native addon does not work in compiled bun binary (Pitfall 2 documented)
 - [Phase 03-polish-headless-cross-platform-beta]: EE stub relocated from tests/stubs/ to src/__test-stubs__/ because tsconfig rootDir=./src excluded tests/ from type-checking scope
 - [Phase 03-polish-headless-cross-platform-beta]: it.skipIf(win32) MCP stdio handshake test uses node (not bun) command for echo server to avoid StdioClientTransport+Bun hang; cleans tmpdir in finally block
+- [Phase 01.1]: Layers 2-5 are intentional stubs with no EE imports — arch constraint enforced by grep in tests
+- [Phase 01.1]: Fallback PipelineContext captured before runLayers() — resolveAfter receives pristine fallback reference for correct 200ms timeout behavior
+- [Phase 01.1]: REASON_TO_TASK_TYPE map is conservative: 8 clear code-manipulation reasons mapped; unknown/low-confidence reasons return null taskType
 
 ### Roadmap Evolution
 
@@ -192,6 +196,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T09:53:46.503Z
-Stopped at: Phase 01.1 context gathered
-Resume file: .planning/phases/01.1-prompt-intelligence-layer-input-enrichment-output-optimization/01.1-CONTEXT.md
+Last session: 2026-04-30T10:15:16.728Z
+Stopped at: Completed 01.1-01-PLAN.md
+Resume file: None
