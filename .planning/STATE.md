@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 03-05-PLAN (GitHub issue templates and STATUS.md)
-last_updated: "2026-04-30T08:55:13.964Z"
+status: verifying
+stopped_at: Completed 03-04-PLAN (Cross-platform CI matrix and release pipeline)
+last_updated: "2026-04-30T08:58:34.823Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 26
-  completed_plans: 25
+  completed_plans: 26
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 
 Phase: 03 (polish-headless-cross-platform-beta) — EXECUTING
 Plan: 5 of 5
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-30
 
 Progress: [░░░░░░░░░░] 0%
@@ -82,6 +82,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-polish-headless-cross-platform-beta P02 | 8 | 2 tasks | 5 files |
 | Phase 03-polish-headless-cross-platform-beta P03 | 5 | 2 tasks | 5 files |
 | Phase 03-polish-headless-cross-platform-beta P05 | 2 | 2 tasks | 3 files |
+| Phase 03-polish-headless-cross-platform-beta P04 | 8 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -150,6 +151,8 @@ Recent decisions affecting current work:
 - [Phase 03-polish-headless-cross-platform-beta]: Named import { readFile } from fs/promises required for vitest mock compatibility on Windows+Bun
 - [Phase 03-polish-headless-cross-platform-beta]: Bug report template requires muonroi-cli doctor output and bug-report bundle as structured fields with validations
 - [Phase 03-polish-headless-cross-platform-beta]: STATUS.md documents 4 known issues with severity/workaround table for solo-maintainer beta ops surface
+- [Phase 03-polish-headless-cross-platform-beta]: ci-matrix build-smoke job verifies binary compiles only — does not run it (cross-compile arm64 on x64 runner cannot execute)
+- [Phase 03-polish-headless-cross-platform-beta]: Standalone binary users use ANTHROPIC_API_KEY env var — keytar native addon does not work in compiled bun binary (Pitfall 2 documented)
 
 ### Pending Todos
 
@@ -181,6 +184,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T08:55:13.960Z
-Stopped at: Completed 03-05-PLAN (GitHub issue templates and STATUS.md)
+Last session: 2026-04-30T08:58:34.819Z
+Stopped at: Completed 03-04-PLAN (Cross-platform CI matrix and release pipeline)
 Resume file: None
