@@ -8,9 +8,13 @@ vi.mock('../../router/classifier/index.js', () => ({
 
 import { runPipeline } from '../pipeline.js';
 import { getPilLastResult } from '../store.js';
+import { classify } from '../../router/classifier/index.js';
+
+const mockClassify = vi.mocked(classify);
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockClassify.mockReturnValue({ tier: 'hot', confidence: 0.85, reason: 'regex:refactor' });
 });
 
 describe('runPipeline()', () => {
@@ -20,18 +24,15 @@ describe('runPipeline()', () => {
     expect(ctx.layers).toHaveLength(6);
   });
 
-  it('returns enriched === raw when all layers are stubs/pass-through', async () => {
+  it('returns enriched that starts with raw (layers may append hints)', async () => {
     const ctx = await runPipeline('some prompt');
-    // enriched should equal raw since no layer modifies the enriched string
-    expect(ctx.enriched).toBe(ctx.raw);
+    expect(ctx.enriched.startsWith(ctx.raw)).toBe(true);
   });
 
-  it('if layer2Stub throws, pipeline still returns a valid context (fail-open)', async () => {
-    // Override layer2 to throw via dynamic mock
-    vi.doMock('../layer2-stub.js', () => ({
-      layer2PersonalityStub: vi.fn().mockRejectedValue(new Error('layer2 failed')),
+  it('if layer2 throws, pipeline still returns a valid context (fail-open)', async () => {
+    vi.doMock('../layer2-personality.js', () => ({
+      layer2Personality: vi.fn().mockRejectedValue(new Error('layer2 failed')),
     }));
-    // Pipeline has try/catch so it should still return a context
     const ctx = await runPipeline('some prompt');
     expect(ctx).toBeDefined();
     expect(ctx.raw).toBeDefined();
@@ -48,6 +49,51 @@ describe('runPipeline()', () => {
     expect(ctx.raw).toBe('');
     expect(ctx.enriched).toBe('');
     expect(ctx.layers).toHaveLength(6);
+  });
+
+  it('conversational turn (taskType=null) skips layers 2-5 with delta=skipped:null-taskType', async () => {
+    mockClassify.mockReturnValue({ tier: 'abstain', confidence: 0.2, reason: 'low-confidence' });
+    const ctx = await runPipeline('hello how are you');
+    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers[1].delta).toBe('skipped:null-taskType');
+    expect(ctx.layers[2].delta).toBe('skipped:null-taskType');
+    expect(ctx.layers[3].delta).toBe('skipped:null-taskType');
+    expect(ctx.layers[4].delta).toBe('skipped:null-taskType');
+    expect(ctx.taskType).toBeNull();
+  });
+
+  it('coding task runs all 6 layers normally (no skip)', async () => {
+    const ctx = await runPipeline('refactor this function');
+    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.taskType).toBe('refactor');
+    // layers 2-5 should NOT have skipped delta
+    for (let i = 1; i <= 4; i++) {
+      expect(ctx.layers[i].delta).not.toBe('skipped:null-taskType');
+    }
+  });
+
+  it('metrics.totalMs is a non-negative number', async () => {
+    const ctx = await runPipeline('refactor this');
+    expect(ctx.metrics).not.toBeNull();
+    expect(ctx.metrics!.totalMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('metrics.layerTimings has 6 entries', async () => {
+    const ctx = await runPipeline('refactor this');
+    expect(ctx.metrics!.layerTimings).toHaveLength(6);
+  });
+
+  it('metrics.inputChars equals raw.length', async () => {
+    const ctx = await runPipeline('hello world');
+    expect(ctx.metrics!.inputChars).toBe('hello world'.length);
+  });
+
+  it('fallback/timeout path has metrics: null', async () => {
+    // The fallback object has metrics: null
+    const { resolveAfter } = await import('../timeout.js');
+    const fallback: PipelineContext = { raw: 'x', enriched: 'x', taskType: null, domain: null, confidence: 0, outputStyle: null, tokenBudget: 500, metrics: null, layers: [] };
+    const result = await resolveAfter(1, fallback);
+    expect(result.metrics).toBeNull();
   });
 
   it('timeout scenario: pipeline resolving after 200ms returns fallback ctx with layers=[]', async () => {
@@ -69,7 +115,7 @@ describe('runPipeline()', () => {
     const { resolveAfter } = await import('../timeout.js');
 
     // Verify resolveAfter returns value after ms
-    const fallback: PipelineContext = { raw: 'timeout-test', enriched: 'timeout-test', taskType: null, domain: null, confidence: 0, layers: [] };
+    const fallback: PipelineContext = { raw: 'timeout-test', enriched: 'timeout-test', taskType: null, domain: null, confidence: 0, outputStyle: null, tokenBudget: 500, metrics: null, layers: [] };
 
     const resultPromise = resolveAfter(200, fallback);
     vi.advanceTimersByTime(201);

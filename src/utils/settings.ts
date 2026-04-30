@@ -11,34 +11,13 @@ import type {
 } from "../lsp/types";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 
-// ---------------------------------------------------------------------------
-// FORK-02 STUBS — ../grok/models deleted; stubs keep tsc --noEmit clean until plan 00-05.
-// ---------------------------------------------------------------------------
+import {
+  getModelIds,
+  normalizeModelId,
+  getEffectiveReasoningEffort,
+} from "../models/registry.js";
 
-// FORK-02 stub: DEFAULT_MODEL placeholder until plan 00-05 wires Anthropic provider.
-const DEFAULT_MODEL = "grok-4-1-fast-non-reasoning";
-
-// FORK-02 stub: pass-through until grok/models replaced in plan 00-05.
-function normalizeModelId(id: string): string {
-  return id;
-}
-
-// FORK-02 stub: empty until grok/models replaced in plan 00-05.
-function getModelIds(): string[] {
-  return [];
-}
-
-// FORK-02 stub: returns undefined until grok/models replaced in plan 00-05.
-function getEffectiveReasoningEffort(
-  _modelId: string,
-  effort?: ReasoningEffort,
-): ReasoningEffort | undefined {
-  return effort;
-}
-
-// ---------------------------------------------------------------------------
-// END FORK-02 STUBS
-// ---------------------------------------------------------------------------
+const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";
@@ -98,7 +77,7 @@ export interface SandboxSettings {
 export interface TelegramAudioInputSettings {
   /** Enable Telegram voice/audio transcription before sending text to the agent. Default: true. */
   enabled?: boolean;
-  /** Language code (e.g. `en`, `fr`) forwarded to the Grok STT endpoint. Default: en. */
+  /** Language code (e.g. `en`, `fr`) forwarded to the STT endpoint. Default: en. */
   language?: string;
 }
 
@@ -337,15 +316,16 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
 }
 
 export function getApiKey(): string | undefined {
-  return process.env.GROK_API_KEY || loadUserSettings().apiKey;
+  return process.env.MUONROI_API_KEY || process.env.GROK_API_KEY || loadUserSettings().apiKey;
 }
 
 export function getBaseURL(): string {
-  return process.env.GROK_BASE_URL || "https://api.x.ai/v1";
+  return process.env.MUONROI_BASE_URL || process.env.GROK_BASE_URL || "https://api.anthropic.com";
 }
 
 export function getCurrentModel(mode?: AgentMode): string {
-  if (process.env.GROK_MODEL) return normalizeModelId(process.env.GROK_MODEL);
+  const envModel = process.env.MUONROI_MODEL || process.env.GROK_MODEL;
+  if (envModel) return normalizeModelId(envModel);
 
   const project = loadProjectSettings();
   if (project.model) return normalizeModelId(project.model);
@@ -364,11 +344,11 @@ export function getCurrentModel(mode?: AgentMode): string {
 
 /**
  * Returns the explicitly configured model for a mode, or undefined if none is set.
- * Only GROK_MODEL env var suppresses this (absolute override). Project-level model
+ * Only MUONROI_MODEL env var suppresses this (absolute override). Project-level model
  * does NOT suppress — modeModels is an explicit per-mode config that applies on mode switch.
  */
 export function getModeSpecificModel(mode: AgentMode): string | undefined {
-  if (process.env.GROK_MODEL) return undefined;
+  if (process.env.MUONROI_MODEL || process.env.GROK_MODEL) return undefined;
 
   const user = loadUserSettings();
   const modeModel = user.modeModels?.[mode];
