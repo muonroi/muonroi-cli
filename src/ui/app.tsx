@@ -76,6 +76,7 @@ import { StatusBar } from "./status-bar/index.js";
 import { wireStatusBar } from "./status-bar/store.js";
 import { dispatchSlash } from "./slash/registry.js";
 import "./slash/route.js"; // side-effect: self-registers /route handler
+import "./slash/optimize.js"; // side-effect: self-registers /optimize command (PIL-07)
 
 // ---------------------------------------------------------------------------
 // FORK-02 STUBS — grok/models, telegram/*, and telegram-turn-ui deleted.
