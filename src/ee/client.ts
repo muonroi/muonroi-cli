@@ -1,4 +1,13 @@
-import type { EEClient, InterceptRequest, InterceptResponse, PostToolPayload } from "./types.js";
+import type {
+  EEClient,
+  InterceptRequest,
+  InterceptResponse,
+  PostToolPayload,
+  RouteModelRequest,
+  RouteModelResponse,
+  ColdRouteRequest,
+  ColdRouteResponse,
+} from "./types.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
 
@@ -104,6 +113,44 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }).catch(() => {
         /* swallow all errors — fire-and-forget */
       });
+    },
+
+    async routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null> {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 250);
+        if (signal) signal.addEventListener("abort", () => ctrl.abort());
+        const resp = await f(`${baseUrl}/api/route-model`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(req),
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        if (!resp.ok) return null;
+        return (await resp.json()) as RouteModelResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null> {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 1000);
+        if (signal) signal.addEventListener("abort", () => ctrl.abort());
+        const resp = await f(`${baseUrl}/api/cold-route`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(req),
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        if (!resp.ok) return null;
+        return (await resp.json()) as ColdRouteResponse;
+      } catch {
+        return null;
+      }
     },
   };
 }

@@ -29,8 +29,37 @@ export interface PostToolPayload {
   tenantId?: string; // Phase 1 EE-04
 }
 
+export interface RouteModelRequest {
+  prompt: string;
+  tenantId: string;
+  cwd: string;
+}
+
+export interface RouteModelResponse {
+  model: string;
+  provider: string;
+  tier: 'warm' | 'cold';
+  confidence: number;
+  reason: string;
+}
+
+export interface ColdRouteRequest {
+  prompt: string;
+  tenantId: string;
+  cwd: string;
+}
+
+export interface ColdRouteResponse {
+  model: string;
+  provider: string;
+  tier: 'cold';
+  reason: string;
+}
+
 export interface EEClient {
   health(): Promise<{ ok: boolean; status: number }>;
   intercept(req: InterceptRequest): Promise<InterceptResponse>;
   posttool(payload: PostToolPayload): void;
+  routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null>;
+  coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null>;
 }
