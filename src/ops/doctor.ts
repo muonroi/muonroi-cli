@@ -9,7 +9,7 @@
  */
 
 import os from "os";
-import fs from "fs/promises";
+import { readFile } from "fs/promises";
 import path from "path";
 import { health as eeHealth } from "../ee/health.js";
 
@@ -68,12 +68,10 @@ async function checkKeyPresence(): Promise<CheckResult> {
     };
   }
   try {
-    const keytar = await import("keytar");
-    const mod = (keytar as { default?: typeof keytar }).default ?? keytar;
-    const stored = await (mod as { getPassword: (service: string, account: string) => Promise<string | null> }).getPassword(
-      "muonroi-cli",
-      "anthropic-api-key",
-    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const keytar = await import("keytar") as any;
+    const mod = keytar.default ?? keytar;
+    const stored = await mod.getPassword("muonroi-cli", "anthropic-api-key");
     if (stored) {
       return { name: "key_presence", status: "pass", detail: "API key found in OS keychain" };
     }
@@ -135,7 +133,7 @@ async function checkQdrant(): Promise<CheckResult> {
 async function checkRecentErrorRate(): Promise<CheckResult> {
   const errorLogPath = path.join(os.homedir(), ".muonroi-cli", "errors.log");
   try {
-    const content = await fs.readFile(errorLogPath, "utf-8");
+    const content = await readFile(errorLogPath, "utf-8");
     const lines = content.split("\n").filter(Boolean);
     const oneDayAgo = Date.now() - 86400000;
     // Count lines with ISO timestamps in last 24h (best-effort)

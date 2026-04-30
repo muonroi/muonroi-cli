@@ -526,6 +526,27 @@ program
     await daemon.start();
   });
 
+program
+  .command("doctor")
+  .description("Run health checks for muonroi-cli dependencies and services")
+  .action(async () => {
+    const { runDoctor, formatDoctorReport } = await import("./ops/doctor.js");
+    const results = await runDoctor();
+    console.log("\nmuonroi-cli doctor\n");
+    console.log(formatDoctorReport(results));
+    const hasFail = results.some((r) => r.status === "fail");
+    process.exit(hasFail ? 1 : 0);
+  });
+
+program
+  .command("bug-report")
+  .description("Generate anonymized diagnostic bundle for issue submission")
+  .action(async () => {
+    const { buildBugReport, formatBugReport } = await import("./ops/bug-report.js");
+    const bundle = await buildBugReport();
+    console.log(formatBugReport(bundle));
+  });
+
 program.parse();
 
 function formatContext(tokens: number): string {
