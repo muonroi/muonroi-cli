@@ -6,6 +6,8 @@ const mockReq: InterceptRequest = {
   toolName: "bash",
   toolInput: { command: "ls" },
   cwd: "/tmp",
+  tenantId: "local",
+  scope: { kind: "global" },
 };
 
 const mockPayload: PostToolPayload = {
@@ -13,6 +15,8 @@ const mockPayload: PostToolPayload = {
   toolInput: { command: "ls" },
   outcome: { success: true, exitCode: 0, durationMs: 10 },
   cwd: "/tmp",
+  tenantId: "local",
+  scope: { kind: "global" },
 };
 
 describe("EEClient - health", () => {
@@ -152,6 +156,8 @@ describe("EEClient - auth", () => {
       toolName: "bash",
       toolInput: { command: "echo hello" },
       cwd: "/home/user",
+      tenantId: "local",
+      scope: { kind: "global" },
     };
     await ee.intercept(reqWithNoKeys);
 

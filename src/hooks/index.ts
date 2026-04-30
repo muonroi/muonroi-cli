@@ -34,7 +34,10 @@ export type {
 } from "./types.js";
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
-import { intercept, posttool } from "../ee/index.js";
+import { interceptWithDefaults } from "../ee/intercept.js";
+import { posttool } from "../ee/posttool.js";
+import { buildScope } from "../ee/scope.js";
+import type { Scope } from "../ee/types.js";
 import type {
   AggregatedHookResult,
   HookInput,
@@ -42,6 +45,9 @@ import type {
   PostToolUseHookInput,
   PreToolUseHookInput,
 } from "./types.js";
+
+// Cached scope for posttool calls (computed once at first use)
+let _cachedScope: Scope | null = null;
 
 function emptyResult(): AggregatedHookResult {
   return {
@@ -69,7 +75,7 @@ export async function executeEventHooks(
 ): Promise<AggregatedHookResult> {
   try {
     if (input.hook_event_name === "PreToolUse") {
-      const r = await intercept({
+      const r = await interceptWithDefaults({
         toolName: input.tool_name,
         toolInput: input.tool_input,
         cwd,
@@ -96,6 +102,7 @@ export async function executeEventHooks(
     }
 
     if (input.hook_event_name === "PostToolUse") {
+      if (!_cachedScope) _cachedScope = await buildScope({ cwd });
       posttool({
         toolName: input.tool_name,
         toolInput: input.tool_input,
@@ -104,12 +111,15 @@ export async function executeEventHooks(
           success: true,
         },
         cwd,
+        tenantId: "local",
+        scope: _cachedScope,
       });
       return emptyResult();
     }
 
     if (input.hook_event_name === "PostToolUseFailure") {
       const failInput = input as PostToolUseFailureHookInput;
+      if (!_cachedScope) _cachedScope = await buildScope({ cwd });
       posttool({
         toolName: failInput.tool_name,
         toolInput: failInput.tool_input,
@@ -118,6 +128,8 @@ export async function executeEventHooks(
           error: failInput.error,
         },
         cwd,
+        tenantId: "local",
+        scope: _cachedScope,
       });
       return emptyResult();
     }
