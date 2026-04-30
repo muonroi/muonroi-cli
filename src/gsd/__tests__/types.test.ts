@@ -57,3 +57,21 @@ describe("GSD types", () => {
     expect(detectGsdPhase("")).toBeNull();
   });
 });
+
+describe("detectGsdPhase — ambiguity resolution", () => {
+  it("'implement the plan' returns execute (action verb wins)", () => {
+    expect(detectGsdPhase("implement the plan")).toBe("execute");
+  });
+
+  it("'plan the implementation' returns plan (plan appears first)", () => {
+    expect(detectGsdPhase("plan the implementation")).toBe("plan");
+  });
+
+  it("'discuss the plan before executing' returns discuss (discuss first)", () => {
+    expect(detectGsdPhase("discuss the plan before executing")).toBe("discuss");
+  });
+
+  it("'build and verify the feature' returns execute (build first)", () => {
+    expect(detectGsdPhase("build and verify the feature")).toBe("execute");
+  });
+});

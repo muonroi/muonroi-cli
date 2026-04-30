@@ -88,6 +88,18 @@ describe('runPipeline()', () => {
     expect(ctx.metrics!.inputChars).toBe('hello world'.length);
   });
 
+  it('metrics.enrichmentTokensAdded is a non-negative number', async () => {
+    const ctx = await runPipeline('refactor this function');
+    expect(ctx.metrics).not.toBeNull();
+    expect(ctx.metrics!.enrichmentTokensAdded).toBeGreaterThanOrEqual(0);
+  });
+
+  it('metrics.enrichmentTokensAdded is 0 for conversational turn', async () => {
+    mockClassify.mockReturnValue({ tier: 'abstain', confidence: 0.2, reason: 'low-confidence' });
+    const ctx = await runPipeline('hello how are you');
+    expect(ctx.metrics!.enrichmentTokensAdded).toBe(0);
+  });
+
   it('fallback/timeout path has metrics: null', async () => {
     // The fallback object has metrics: null
     const { resolveAfter } = await import('../timeout.js');

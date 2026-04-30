@@ -28,6 +28,7 @@ export const PipelineMetricsSchema = z.object({
   inputChars: z.number().min(0),
   outputChars: z.number().min(0),
   estimatedTokensSaved: z.number().min(0),
+  enrichmentTokensAdded: z.number().min(0),
 });
 
 export const PipelineContextSchema = z.object({
@@ -44,4 +45,5 @@ export const PipelineContextSchema = z.object({
   gsdPhase: z.string().nullable().optional(),
   resumeDigest: z.string().nullable().optional(),
   activeRunId: z.string().nullable().optional(),
+  digestAgeMs: z.number().nullable().optional(),
 });
