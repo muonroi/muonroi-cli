@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-03-PLAN (doctor and bug-report commands)
-last_updated: "2026-04-30T08:52:14.868Z"
+stopped_at: Completed 03-05-PLAN (GitHub issue templates and STATUS.md)
+last_updated: "2026-04-30T08:55:13.964Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 26
-  completed_plans: 24
+  completed_plans: 25
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-29)
 ## Current Position
 
 Phase: 03 (polish-headless-cross-platform-beta) — EXECUTING
-Plan: 4 of 5
+Plan: 5 of 5
 Status: Ready to execute
 Last activity: 2026-04-30
 
@@ -81,6 +81,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-polish-headless-cross-platform-beta P01 | 4 | 2 tasks | 5 files |
 | Phase 03-polish-headless-cross-platform-beta P02 | 8 | 2 tasks | 5 files |
 | Phase 03-polish-headless-cross-platform-beta P03 | 5 | 2 tasks | 5 files |
+| Phase 03-polish-headless-cross-platform-beta P05 | 2 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -147,6 +148,8 @@ Recent decisions affecting current work:
 - [Phase 03-polish-headless-cross-platform-beta]: Delegation arch test checks method names (runDelegation/listDelegations) not 'delegate' string — orchestrator uses methods not tool name strings
 - [Phase 03-polish-headless-cross-platform-beta]: redactor.redact() is the correct method name (not scrub()) — plan doc had wrong interface reference
 - [Phase 03-polish-headless-cross-platform-beta]: Named import { readFile } from fs/promises required for vitest mock compatibility on Windows+Bun
+- [Phase 03-polish-headless-cross-platform-beta]: Bug report template requires muonroi-cli doctor output and bug-report bundle as structured fields with validations
+- [Phase 03-polish-headless-cross-platform-beta]: STATUS.md documents 4 known issues with severity/workaround table for solo-maintainer beta ops surface
 
 ### Pending Todos
 
@@ -178,6 +181,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T08:52:14.863Z
-Stopped at: Completed 03-03-PLAN (doctor and bug-report commands)
+Last session: 2026-04-30T08:55:13.960Z
+Stopped at: Completed 03-05-PLAN (GitHub issue templates and STATUS.md)
 Resume file: None
