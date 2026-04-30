@@ -1,0 +1,6 @@
+{"type":"text-delta","text":"Hello"}
+{"type":"text-delta","text":" from Ollama"}
+{"type":"text-delta","text":"!"}
+{"type":"text-delta","text":" Running locally."}
+{"type":"text-delta","text":" No API key needed."}
+{"type":"finish","finishReason":"stop","totalUsage":{"promptTokens":10,"completionTokens":9}}

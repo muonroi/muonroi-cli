@@ -1,0 +1,6 @@
+{"type":"text-delta","text":"Hello"}
+{"type":"text-delta","text":" from SiliconFlow"}
+{"type":"text-delta","text":"!"}
+{"type":"text-delta","text":" Ready."}
+{"type":"text-delta","text":" How can I help?"}
+{"type":"finish","finishReason":"stop","totalUsage":{"promptTokens":10,"completionTokens":8}}

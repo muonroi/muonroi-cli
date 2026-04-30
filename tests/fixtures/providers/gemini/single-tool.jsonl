@@ -1,0 +1,3 @@
+{"type":"text-delta","text":"Let me search for that."}
+{"type":"tool-call","toolCallId":"gem_call_001","toolName":"search","input":{"query":"test"}}
+{"type":"finish","finishReason":"tool-calls","totalUsage":{"promptTokens":14,"completionTokens":11}}

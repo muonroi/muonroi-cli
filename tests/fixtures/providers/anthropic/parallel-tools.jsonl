@@ -1,0 +1,4 @@
+{"type":"text-delta","text":"I'll check both files."}
+{"type":"tool-call","toolCallId":"call_101","toolName":"readFile","input":{"path":"src/index.ts"}}
+{"type":"tool-call","toolCallId":"call_102","toolName":"readFile","input":{"path":"package.json"}}
+{"type":"finish","finishReason":"tool-calls","totalUsage":{"promptTokens":20,"completionTokens":18}}

@@ -1,0 +1,6 @@
+{"type":"text-delta","text":"Hello"}
+{"type":"text-delta","text":" from"}
+{"type":"text-delta","text":" OpenAI"}
+{"type":"text-delta","text":"!"}
+{"type":"text-delta","text":" Ready to help."}
+{"type":"finish","finishReason":"stop","totalUsage":{"promptTokens":10,"completionTokens":8}}

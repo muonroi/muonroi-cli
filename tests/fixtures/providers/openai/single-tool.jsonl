@@ -1,0 +1,3 @@
+{"type":"text-delta","text":"Checking file."}
+{"type":"tool-call","toolCallId":"oai_call_001","toolName":"listFiles","input":{"directory":"."}}
+{"type":"finish","finishReason":"tool-calls","totalUsage":{"promptTokens":12,"completionTokens":10}}
