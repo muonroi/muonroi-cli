@@ -141,7 +141,7 @@ Phases execute in numeric order: 0 → 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 0. Fork & Skeleton | 8/8 | Complete   | 2026-04-29 |
 | 1. Brain & Cap Chain | 0/TBD | Not started | - |
-| 01.1. Prompt Intelligence Layer | 4/4 | Complete   | 2026-04-30 |
+| 01.1. Prompt Intelligence Layer | 4/4 | Complete    | 2026-04-30 |
 | 2. Continuity & Slash Commands | 0/5 | Not started | - |
 | 3. Polish, Headless, Cross-Platform Beta | 6/7 | In Progress|  |
 | 4. Cloud & Billing | 0/TBD | Not started | - |
