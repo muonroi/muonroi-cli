@@ -11,7 +11,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - Decimal phases (e.g. 1.1): Urgent insertions (marked with INSERTED)
 
 - [x] **Phase 0: Fork & Skeleton** — Fork grok-cli, strip dead surface, rename storage, wire EE HTTP client, land usage-guard skeleton + key-safety primitives (completed 2026-04-29)
-- [ ] **Phase 1: Brain & Cap Chain** — Multi-provider adapter, 3-tier router, EE PreToolUse warnings, full cap chain with auto-downgrade
+- [x] **Phase 1: Brain & Cap Chain** — Multi-provider adapter, 3-tier router, EE PreToolUse warnings, full cap chain with auto-downgrade (completed 2026-04-30)
 - [ ] **Phase 2: Continuity & Slash Commands** — `.muonroi-flow/` artifacts, deliberate compaction, GSD slash commands, session resume from disk
 - [ ] **Phase 3: Polish, Headless, Cross-Platform Beta** — Headless validation, MCP/LSP smoke tests, CI matrix, permission modes, doctor + bug-report, beta packaging
 - [ ] **Phase 4: Cloud & Billing** — Multi-tenant Qdrant, Stripe billing, web dashboard, local→cloud migration tool, remote pricing fetch
