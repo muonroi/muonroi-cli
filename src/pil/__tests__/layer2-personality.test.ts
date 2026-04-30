@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { layer2Personality } from "../layer2-personality";
 import type { PipelineContext } from "../types";
 
