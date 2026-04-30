@@ -1,0 +1,45 @@
+name: Feature Request
+description: Suggest a feature for muonroi-cli
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this feature solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any other approaches you considered?
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: Which area does this affect?
+      options:
+        - CLI / TUI
+        - Provider / Model
+        - Router / Cap
+        - Experience Engine
+        - Flow / Slash Commands
+        - MCP / LSP / Tools
+        - Headless / CI
+        - Other
+    validations:
+      required: true
