@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Completed 03-06-PLAN (tsconfig rootDir fix - EE stub relocation)
-last_updated: "2026-04-30T09:14:07.538Z"
+stopped_at: Completed 03-07-PLAN (platform-conditional MCP stdio handshake test)
+last_updated: "2026-04-30T09:16:18.911Z"
 last_activity: 2026-04-30
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 28
-  completed_plans: 27
+  completed_plans: 28
   percent: 0
 ---
 
@@ -84,6 +84,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-polish-headless-cross-platform-beta P05 | 2 | 2 tasks | 3 files |
 | Phase 03-polish-headless-cross-platform-beta P04 | 8 | 2 tasks | 3 files |
 | Phase 03-polish-headless-cross-platform-beta P06 | 5 | 2 tasks | 9 files |
+| Phase 03-polish-headless-cross-platform-beta P07 | 5 | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -155,6 +156,7 @@ Recent decisions affecting current work:
 - [Phase 03-polish-headless-cross-platform-beta]: ci-matrix build-smoke job verifies binary compiles only — does not run it (cross-compile arm64 on x64 runner cannot execute)
 - [Phase 03-polish-headless-cross-platform-beta]: Standalone binary users use ANTHROPIC_API_KEY env var — keytar native addon does not work in compiled bun binary (Pitfall 2 documented)
 - [Phase 03-polish-headless-cross-platform-beta]: EE stub relocated from tests/stubs/ to src/__test-stubs__/ because tsconfig rootDir=./src excluded tests/ from type-checking scope
+- [Phase 03-polish-headless-cross-platform-beta]: it.skipIf(win32) MCP stdio handshake test uses node (not bun) command for echo server to avoid StdioClientTransport+Bun hang; cleans tmpdir in finally block
 
 ### Pending Todos
 
@@ -186,6 +188,6 @@ Items acknowledged and carried forward:
 
 ## Session Continuity
 
-Last session: 2026-04-30T09:14:07.532Z
-Stopped at: Completed 03-06-PLAN (tsconfig rootDir fix - EE stub relocation)
+Last session: 2026-04-30T09:16:18.906Z
+Stopped at: Completed 03-07-PLAN (platform-conditional MCP stdio handshake test)
 Resume file: None

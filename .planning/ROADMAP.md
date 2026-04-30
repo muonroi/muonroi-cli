@@ -95,7 +95,7 @@ A 5-phase journey from forking `grok-cli` to a billable cloud SaaS. Phases 0–3
 - [x] 03-04-PLAN.md — CI matrix (Windows/macOS/Linux) + standalone binary publish pipeline (CORE-05, CORE-06)
 - [x] 03-05-PLAN.md — GitHub issue templates + STATUS.md (OPS-03, OPS-04)
 - [x] 03-06-PLAN.md — [GAP CLOSURE] Fix tsconfig rootDir error — move ee-server stub into src/ (CORE-05)
-- [ ] 03-07-PLAN.md — [GAP CLOSURE] Platform-conditional MCP stdio handshake test (CORE-02)
+- [x] 03-07-PLAN.md — [GAP CLOSURE] Platform-conditional MCP stdio handshake test (CORE-02)
 **UI hint**: yes
 
 ### Phase 4: Cloud & Billing
