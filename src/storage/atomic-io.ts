@@ -32,6 +32,24 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
 }
 
 /**
+ * Atomically write plain text content to filePath using .tmp + rename pattern.
+ * Same durability guarantees as atomicWriteJSON but without JSON serialization.
+ */
+export async function atomicWriteText(filePath: string, content: string): Promise<void> {
+  const tmpPath = filePath + ".tmp";
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await fs.writeFile(tmpPath, content, "utf8");
+    await fs.rename(tmpPath, filePath);
+  } catch (err) {
+    await fs.unlink(tmpPath).catch(() => {
+      /* ignore */
+    });
+    throw err;
+  }
+}
+
+/**
  * Read a JSON file and parse it. Returns null if file is absent (ENOENT).
  * Throws if the file exists but contains invalid JSON.
  */
