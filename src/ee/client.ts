@@ -25,6 +25,7 @@ import type {
   RouteTaskRequest,
   RouteTaskResponse,
 } from "./types.js";
+import { enqueue, drainQueue } from "./offline-queue.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
 
@@ -62,9 +63,12 @@ let _consecutiveFailures = 0;
 let _circuitOpenedAt = 0;
 let _lastFailureAt = 0;
 
-function recordCircuitSuccess(): void {
+function recordCircuitSuccess(drainOpts?: { fetchImpl: typeof fetch; headers: Record<string, string>; baseUrl: string }): void {
   _circuitState = "closed";
   _consecutiveFailures = 0;
+  if (drainOpts) {
+    drainQueue(drainOpts.fetchImpl, drainOpts.headers, drainOpts.baseUrl);
+  }
 }
 
 function recordCircuitFailure(): void {
@@ -231,7 +235,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           return { decision: "allow", reason: "ee-unreachable" };
         }
         const result = (await resp.json()) as InterceptResponse;
-        recordCircuitSuccess();
+        recordCircuitSuccess({ fetchImpl: f, headers: headers(), baseUrl });
         setCached(req, result);
         return result;
       } catch (err) {
@@ -295,7 +299,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         headers: headers(),
         body: JSON.stringify(payload),
       }).catch(() => {
-        /* fire-and-forget */
+        void enqueue({ endpoint: "/api/feedback", body: payload, enqueuedAt: Date.now() });
       });
     },
 
@@ -329,9 +333,13 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           body: JSON.stringify(req),
           signal: AbortSignal.timeout(2000),
         });
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          void enqueue({ endpoint: "/api/prompt-stale", body: req, enqueuedAt: Date.now() });
+          return null;
+        }
         return (await resp.json()) as PromptStaleResponse;
       } catch {
+        void enqueue({ endpoint: "/api/prompt-stale", body: req, enqueuedAt: Date.now() });
         return null;
       }
     },
@@ -345,9 +353,13 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           body: JSON.stringify(req),
           signal: signal ?? AbortSignal.timeout(10_000),
         });
-        if (!resp.ok) return null;
+        if (!resp.ok) {
+          void enqueue({ endpoint: "/api/extract", body: req, enqueuedAt: Date.now() });
+          return null;
+        }
         return (await resp.json()) as ExtractResponse;
       } catch {
+        void enqueue({ endpoint: "/api/extract", body: req, enqueuedAt: Date.now() });
         return null;
       }
     },
