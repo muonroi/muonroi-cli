@@ -91,7 +91,7 @@ Plans:
 
 Plans:
 - [x] 06-01-PLAN.md — respond_general catch-all tool + Layer 1 classifyViaBrain migration
-- [ ] 06-02-PLAN.md — Layer 3 bridge migration (getEmbeddingRaw + searchCollection)
+- [x] 06-02-PLAN.md — Layer 3 bridge migration (getEmbeddingRaw + searchCollection)
 - [ ] 06-03-PLAN.md — Layer 6 output style detection + routeFeedback wiring
 
 #### Phase 7: Full Pipeline Validation
@@ -122,5 +122,5 @@ Plans:
 | 2. Continuity & Slash Commands | v1.0 | 5/5 | Complete | 2026-04-30 |
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
 | 5. EE Bridge Foundation | v1.1 | 1/1 | Complete   | 2026-05-01 |
-| 6. PIL & Router Migration | v1.1 | 1/3 | In Progress|  |
+| 6. PIL & Router Migration | v1.1 | 2/3 | In Progress|  |
 | 7. Full Pipeline Validation | v1.1 | 0/TBD | Not started | - |

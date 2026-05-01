@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: EE-Native CLI
 status: executing
-stopped_at: Completed 06-01-PLAN.md — respond_general + Layer 1 bridge migration
-last_updated: "2026-05-01T08:41:04.964Z"
+stopped_at: Completed 06-02-PLAN.md — Layer 3 Bridge Migration + /api/search
+last_updated: "2026-05-01T10:17:41.225Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 4
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-05-01)
 ## Current Position
 
 Phase: 06 (pil-router-migration) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-05-01
 
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
 *Updated after each plan completion*
 | Phase 05 P01 | 162 | 2 tasks | 3 files |
 | Phase 06 P01 | 7 | 2 tasks | 5 files |
+| Phase 06 P02 | 8 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting v1.1 work:
 - [Phase 06]: general is tool-only, NOT added to TaskType union — Layer 1 never classifies to general
 - [Phase 06]: outputStyle always null from Layer 1 — Layer 6 handles style detection via bridge
 - [Phase 06]: classifyViaBrain called with 100ms timeout to prevent blocking CLI hot path
+- [Phase 06]: Layer 3 uses bridge.getEmbeddingRaw (60ms) + bridge.searchCollection (40ms) with separate AbortSignal per call to avoid shared-signal pitfall
+- [Phase 06]: /api/search endpoint in experience-engine hardcodes 'experience-behavioral' collection for Phase 6 scope, auth-gated, limit capped at 20
 
 ### Pending Todos
 
@@ -89,6 +92,6 @@ None yet — captured during execution via `/gsd-add-todo`.
 
 ## Session Continuity
 
-Last session: 2026-05-01T08:41:04.960Z
-Stopped at: Completed 06-01-PLAN.md — respond_general + Layer 1 bridge migration
+Last session: 2026-05-01T10:17:41.221Z
+Stopped at: Completed 06-02-PLAN.md — Layer 3 Bridge Migration + /api/search
 Resume file: None
