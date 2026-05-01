@@ -2408,6 +2408,14 @@ export class Agent {
             this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
           }
 
+          // Track PIL output mode for /optimize metrics
+          {
+            const { setLastOutputMode } = await import("../pil/store.js");
+            if (!_hasResponseTools) setLastOutputMode("conversational");
+            else if (responseToolCalled) setLastOutputMode("structured");
+            else setLastOutputMode("text-fallback");
+          }
+
           const stopInput: StopHookInput = {
             hook_event_name: "Stop",
             session_id: this.session?.id,
