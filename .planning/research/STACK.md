@@ -1,235 +1,212 @@
-# Technology Stack — muonroi-cli
+# Technology Stack — muonroi-cli v1.1 EE-Native Integration
 
-**Project:** muonroi-cli (BYOK AI coding agent CLI, fork of grok-cli)
-**Researched:** 2026-04-29
-**Overall confidence:** HIGH for runtime/SDK choices, MEDIUM for fringe (auth pricing, packaging)
-**Versions verified via:** npm registry (live `npm view` queries on 2026-04-29) + Context7 `/vercel/ai`, `/anomalyco/opentui`
+**Project:** muonroi-cli — EE-Native CLI restructure milestone
+**Researched:** 2026-05-01
+**Confidence:** HIGH for module interop, MEDIUM for config sharing strategy
+**Versions verified via:** Live Bun docs (bun.com/docs), npm registry, EE source code inspection
 
-> **TL;DR for the roadmapper:** Keep Bun + OpenTUI + AI SDK v6 + React 19 + MCP + LSP — they are *current*, not stale. But:
-> 1. **Pin OpenTUI to `0.1.x`** (last `0.1.107`), not `0.2.0` which broke API yesterday and is too fresh for a 6-week beta.
-> 2. **Replace `@ai-sdk/xai` (inherited) with `@ai-sdk/anthropic` + `@ai-sdk/openai` + `@ai-sdk/google` + `@ai-sdk/openai-compatible` (DeepSeek/SiliconFlow) + `ollama-ai-provider-v2`.**
-> 3. **Drop `@coinbase/agentkit`, `grammy` (Telegram), `agent-desktop`** — already in IDEA.md `delete` list.
-> 4. **Stay on AI SDK v6 stable, not v7-beta**, until v7 hits stable in 2026 H2.
-> 5. **Bun-only at runtime** is OK because TUI is the only Bun-side; EE backend stays Node 20. HTTP/IPC bridges them.
+> **Previous milestone stack (Bun 1.3.13, TypeScript 5.9.3, AI SDK v6, OpenTUI 0.1.107, Qdrant 1.17.0, Zod v4) is validated and unchanged.** This file covers ONLY new additions and changes required for the EE-native integration pattern.
 
 ---
 
-## Recommended Stack
+## Recommended Stack (Additions / Changes for v1.1)
 
-### CLI Runtime (TUI side)
+### Core Technologies
 
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| **Bun** | `1.3.13` (released 2026-04-20) | TUI runtime + bundler + test runner + native `--compile` for binaries | Inherited from grok-cli. OpenTUI is Bun-only (Node/Deno "in development" per official docs). Bun `--compile` produces single-file standalone binaries — solves CLI distribution without `pkg`/`nexe`. |
-| **TypeScript** | `5.9.3` (grok-cli) → bump to `5.9.x` latest | Source language | Bun runs TS natively, no compile step in dev. Use `tsc --noEmit` for typecheck only. |
-| **React** | `19.2.5` | TUI declarative rendering via OpenTUI react-reconciler | Locked by OpenTUI 0.2.0 (`react-reconciler ^0.32.0`) and by Ink v7 (`>=19.2.0`). React 19 is stable, no migration risk. |
-| **@opentui/core** | **`0.1.107`** (NOT 0.2.0) | Native Zig TUI renderer | **0.2.0 shipped 2026-04-28 (yesterday) and bumped `react-reconciler` from 0.31→0.32.** That's a 17-hour-old release; no chance of beta-tier stability validation in our 6-week timeline. Pin to last 0.1.x and re-evaluate at Phase 3. |
-| **@opentui/react** | **`0.1.107`** | React renderer binding | Same pin reason. |
+| Technology | Version | Purpose | Why Recommended |
+|------------|---------|---------|-----------------|
+| **No new runtime** | — | EE source code is plain Node.js CJS (no npm deps, no TS) | EE's `experience-core.js` uses only Node builtins (`fs`, `path`, `os`, `crypto`) + `fetch`. Bun implements all of them natively. No adapter or wrapper package needed. |
+| **`module.createRequire`** | (Node built-in, available in Bun) | Load EE's CJS `.js` files from the CLI's ESM TypeScript code | The CLI is `"type": "module"` ESM. EE is `"type": "commonjs"`. Bun fully supports `import` and `require()` in the same file AND `module.createRequire` for loading CJS from ESM. No interop package needed — Bun handles it natively. |
 
-**Confidence: HIGH** for Bun/React/TypeScript. **HIGH** for the *0.2.0 pin-back recommendation* (release date is fact-verified).
+### Supporting Libraries
 
-### AI Layer (Multi-Provider)
+| Library | Version | Purpose | When to Use |
+|---------|---------|---------|-------------|
+| **No Qdrant client change** | `@qdrant/js-client-rest@1.17.0` (already installed) | CLI's own Qdrant calls | EE's `experience-core.js` talks to Qdrant via **raw `fetch` calls** (not the `@qdrant/js-client-rest` package). There is NO Qdrant client conflict. The two codebases use different transports to the same server — coexist safely. |
+| **No Ollama client change** | `ollama-ai-provider-v2@1.5.5` (already installed for AI SDK routing) | CLI model routing via AI SDK | EE's `experience-core.js` calls Ollama via **raw `fetch` to `http://{ollamaBase}/api/generate`** and `/api/embed`. No conflict with `ollama-ai-provider-v2`. Run both; they hit the same Ollama endpoint independently. |
 
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| **ai** | `6.0.169` (latest stable) | Provider-agnostic abstraction: `streamText`, `generateText`, tool-use, agent loop (`stopWhen` + `isStepCount`) | **Stay on v6 stable. v7 is in beta (`7.0.0-beta.113` as of 2026-04-28).** v7 will land in 2026 H2 — too risky for a 6-week beta. v6 has uniform `streamText` + tools + structured outputs across all 5 providers we need. Confirmed via Context7 `/vercel/ai`. |
-| **@ai-sdk/anthropic** | `3.0.72` | Claude Sonnet/Opus/Haiku adapter | Official, first-class. Used in MCP-equipped tool-call agent loops (Context7 verified). |
-| **@ai-sdk/openai** | `3.0.54` | GPT-4o / GPT-5 / o-series adapter | Official. Includes `openai.responses(...)` for the new responses API and `customTool` for grammar-constrained outputs. |
-| **@ai-sdk/google** | `3.0.65` | Gemini 1.5/2.x adapter | Official. Use `@ai-sdk/google` (Gemini API) NOT `@ai-sdk/google-vertex` (`4.0.113`) unless we need Vertex AI billing. Vertex requires GCP project; consumer Gemini is BYOK-friendly. |
-| **@ai-sdk/openai-compatible** | `2.0.42` | DeepSeek + SiliconFlow + any other OpenAI-compatible endpoint | **One adapter handles both DeepSeek and SiliconFlow.** Don't use `@ai-sdk/deepseek` (`3.5.0`) — the dedicated package is fine but `openai-compatible` lets us add new providers (Together, Groq, Fireworks, OpenRouter) without new dependencies. |
-| **ollama-ai-provider-v2** | `1.50.1` (active, last published 2026-03-17) | Ollama warm-tier (qwen2.5-coder on VPS) | Official `ollama-ai-provider` (`1.2.0`) was abandoned 2025-01-17. The community-maintained `-v2` fork is what everyone uses now. Confidence: HIGH (npm publish dates verified). |
-| **@ai-sdk/mcp** | `1.0.37` | Bridge AI SDK tool calls to MCP servers | Released by Vercel 2026-04-29 (yesterday) at v1 stable. Lets `streamText({ tools })` consume MCP tools natively. **Use this together with `@modelcontextprotocol/sdk` for the client.** |
-| **@modelcontextprotocol/sdk** | `1.29.0` | MCP client (and server, if we ship one) | Anthropic-maintained official SDK. Already battle-tested in grok-cli at 1.27.1; the bump to 1.29 is non-breaking. Note: pulls in Express 5, Hono, jose — sizable transitive dep tree but unavoidable. |
+### Development Tools
 
-**Confidence: HIGH.** Versions verified live on npm 2026-04-29.
-
-### LSP / Code Intel
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| **vscode-jsonrpc** | `8.2.1` | Low-level JSON-RPC transport for LSP | Official Microsoft, stable since 2024. grok-cli already uses it. No drop-in alternative. |
-| **vscode-languageserver-types** | `3.17.5` | LSP type definitions | Official, stable. Don't pull in `vscode-languageclient` (`9.0.1`) — that's a VS Code extension client, not for CLIs. We talk to LSPs directly via stdio + jsonrpc. |
-| **web-tree-sitter** | `0.26.8` | Hot-path classifier (regex → AST patterns when needed) | **Use the WASM build, not the native `tree-sitter` (`0.25.0`) Node addon.** Native `tree-sitter` is 0.25 last published 2025-06, and Node native modules are *the* Bun gotcha (FFI mismatches across Bun/Node). WASM runs identically in Bun and Node. |
-| **tree-sitter-typescript / -javascript / -python / etc.** | Per-grammar | Language grammars for the classifier | Pull only the languages we route on. WASM grammars are ~500KB each. |
-
-**Confidence: HIGH** for vscode-* packages. **MEDIUM** for tree-sitter-WASM choice — the rationale is correct (Bun FFI gotchas with native addons are well-documented) but the team should validate WASM perf on a 2K-token classifier query before committing the entire hot path.
-
-### Vector DB Client
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| **@qdrant/js-client-rest** | `1.17.0` | Qdrant REST client (matches our Qdrant 1.x server) | Official Qdrant package. Uses `undici ^6.23.0` — Bun has its own fetch impl, expect zero issues. **Don't use `@qdrant/js-client-grpc`** unless we hit REST throughput limits — gRPC pulls protobuf and is overkill for the EE workload. |
-
-**Confidence: HIGH.**
-
-### IPC: TUI ↔ Experience Engine
-
-| Technology | Version | Purpose | Why |
-|------------|---------|---------|-----|
-| **Native fetch** | (built-in) | TUI → EE HTTP calls | EE already exposes `localhost:8082`. Bun's native `fetch` matches Node 18+ — no client library. |
-| **eventsource** (or built-in) | `4.1.0` | SSE for streaming hook responses if EE pushes them | Only needed if EE adds push channels. **Default to plain HTTP with JSON request/response** — simpler, debuggable, matches the existing `experience-core.js` interceptor model. |
-| **ws** | `8.20.0` | WebSocket fallback | Only if hooks become bidirectional. **Defer to Phase 2.** |
-
-**Confidence: HIGH.** We do not need a gRPC layer between TUI and EE — JSON over loopback is <1ms for hook payloads.
-
-### Local Heuristic Classifier (Hot Path)
-
-| Approach | Use case | Notes |
-|----------|----------|-------|
-| **Plain regex** (TS, no library) | 80% of routing decisions | "starts with `npm test`", "contains `git rebase`", "ends with `.tsx`" — submillisecond, zero dep. |
-| **web-tree-sitter** | When regex misses (e.g., "is this a refactor or a fix?") | Parse user prompt + diff; check AST shape. Use WASM build for cross-runtime safety. |
-| **fast-levenshtein** (`3.0.0`) | Fuzzy match against known principle keys before hitting Qdrant | Cheap pre-filter saves a vector search. |
-
-**Anti-recommendation:** Do not pull in `compromise`, `natural`, or any general NLP library for the classifier. Hot-path means <1ms; NLP libs are 50–200ms. Stay regex-first.
-
-### Build / Packaging / Distribution
-
-| Tool | Version | Purpose | Why |
-|------|---------|---------|-----|
-| **`bun build --compile`** | (Bun 1.3.13) | Cross-platform standalone binaries (`--target=bun-linux-x64`, `bun-darwin-arm64`, `bun-windows-x64`) | **Built-in. Use this.** Native, fast, single-file. grok-cli already wires `build:binary`. |
-| ~~`pkg`~~ | abandoned (Vercel) | — | **Do NOT use.** Officially deprecated 2023, no Bun support. |
-| ~~`nexe`~~ | dormant | — | **Do NOT use.** Last meaningful release 2024, Node-only, not Bun. |
-| **Biome** | `2.4.13` | Lint + format (replaces ESLint + Prettier) | grok-cli already uses Biome 2.4.8. Fast, single config, Bun-friendly. |
-| **Vitest** | `4.1.5` (or `4.1.0` from grok-cli) | Test runner | grok-cli inherits Vitest 4.1.0. **Bun has its own `bun test` — use it for unit tests of pure logic, keep Vitest for anything that needs jsdom or React Testing Library equivalents.** Hybrid is fine. |
-| **husky** + **lint-staged** | `9.1.7` / `16.4.0` | Pre-commit hooks | Already configured. Keep. |
-
-**Confidence: HIGH.** Bun's `--compile` is documented in OpenTUI's own build instructions (`Build production applications with Bun`, Context7-verified).
-
-### Phase 4 (Billing + Auth) — Defer Until Beta Validates Demand
-
-| Technology | Version | Purpose | Notes |
-|------------|---------|---------|-------|
-| **stripe** | `22.1.0` (released 2026-04-24, Node SDK) | Subscriptions, metered billing | Mature, no real alternative for SaaS. v22 is the current LTS-grade major. Server-side only — never embed in CLI. |
-| **@clerk/backend** | `3.4.1` (released ~recent) | Auth (JWT verification + REST) | **Recommended over Auth0** for solo maintainer SaaS:<br>• Clerk free tier: 10k MAUs (vs Auth0's 7.5k)<br>• Clerk dev experience for Next.js dashboard is best-in-class<br>• Better support for "magic link + GitHub OAuth" combo expected for a developer audience<br>**Caveat:** Clerk pricing climbs once you exceed free tier; budget ~$25/mo at first paid traffic. |
-| ~~**auth0**~~ | `5.8.0` | — | Considered, rejected. Auth0's SDK is fine but pricing per MAU is steeper at the relevant tier, and Clerk's component library accelerates the dashboard build. *Concern level: low — we can swap if Clerk costs blow up.* |
-
-**Confidence: MEDIUM** — the Clerk-vs-Auth0 call is opinionated and pricing tiers shift; revisit at Phase 4 kickoff with current pricing pages.
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| **`@types/node@22`** (already in devDeps) | Type coverage for `module.createRequire`, `fs`, `path`, `os` used in the EE loader bridge | No version change needed — `@types/node@22` includes `module.createRequire`. |
 
 ---
 
-## What NOT to Use (And Why)
+## Integration Architecture: How to Load EE Functions
 
-| Package | Status | Replacement |
-|---------|--------|-------------|
-| `@ai-sdk/xai` (`3.0.84`) | Inherited from grok-cli, single-vendor | Drop — we route across providers, not Grok-only |
-| `@coinbase/agentkit` (`0.10.4`) | In IDEA.md delete list | Stripe in Phase 4 |
-| `grammy` (`1.41.1`) | Telegram bot — out of scope | Delete |
-| `agent-desktop` (`0.1.11`) | Headless browser sidekick — not needed for CLI | Delete |
-| `@npmcli/arborist` (`9.4.2`) | Used for npm install management in grok-cli | **Audit — keep only if we automate `package.json` mutation. Otherwise delete.** |
-| `ollama-ai-provider` (legacy `1.2.0`) | Last publish 2025-01-17, unmaintained | `ollama-ai-provider-v2` |
-| `pkg`, `nexe` | Dead/abandoned packagers | `bun build --compile` |
-| AI SDK v7 beta | Unstable, breaking changes still landing | Stay on v6 stable until 2026 H2 |
-| OpenTUI `0.2.0` | <24h old at this writing, breaking React reconciler bump | Pin `0.1.107` until Phase 3 |
-| `vscode-languageclient` | VS Code extension API, wrong layer | Talk to LSPs directly via `vscode-jsonrpc` over stdio |
-| `@ai-sdk/google-vertex` | Requires GCP project setup, BYOK-hostile | `@ai-sdk/google` (consumer Gemini) |
-| Native `tree-sitter` (`0.25.0`) | Bun FFI/Node addon ABI hazard | `web-tree-sitter` WASM |
-| `dotenv` (`16.6.1`) | Bun has built-in `.env` loading | Drop in Bun-only paths; keep only if EE side needs it |
+### Pattern: Thin Bridge Module in `src/ee/core-bridge.ts`
 
----
+```typescript
+// src/ee/core-bridge.ts
+// Loads experience-core.js (CJS) from the installed EE package using createRequire.
+// This is the ONLY file that touches the CJS boundary.
 
-## Bun-Specific Gotchas (Surface Now, Not in Phase 2)
+import { createRequire } from 'node:module';
+import { createRequireFromPath } from 'node:module'; // Bun alias (same thing)
 
-1. **OpenTUI is Bun-only.** Node and Deno support is "in development" per their getting-started docs. Our TUI process must run under Bun. Mitigation: keep EE backend on Node 20, talk over HTTP. **No shared TUI/EE process.**
-2. **Native Node addons are a landmine.** Bun emulates N-API but mismatches happen. Avoid `tree-sitter` native, `node-pty` (used by quick-codex — keep on Node side), `better-sqlite3`, `bcrypt`. Use WASM/pure-JS variants on the Bun side.
-3. **`--compile` produces large binaries** (typically 50–90MB) because Bun bundles the runtime. Acceptable for a developer CLI; surface this in download docs.
-4. **Cross-platform binaries are produced by cross-compiling from one host.** `bun build --compile --target=bun-linux-x64` works from Windows. Test all three targets in CI from Phase 0.
-5. **Bun's `fetch` is mostly Node-compatible but not 100%.** Streaming response bodies through `ReadableStream` is fine; `keep-alive` agent tuning differs. We use undici only via the Qdrant client transitively — should be fine.
-6. **Quick Codex uses `node-pty` (`^1.1.0`) and `ink` (`^5.2.1`).** Those are Node-side. **Do NOT try to merge QC's TUI with ours.** Integrate QC at the workflow contract layer (file-based artifacts in `.muonroi-flow/`), not at runtime.
-7. **`react-reconciler` version pinning is fragile.** OpenTUI 0.2.0 bumped to 0.32; Ink stayed on 0.33. If we ever consider pulling Ink components into an OpenTUI app, the reconciler version mismatch will explode. Don't.
+const _require = createRequire(import.meta.url);
+// Resolve EE source either from:
+//   (a) the installed npm package: require.resolve('@muonroi/experience-engine')
+//   (b) a relative path on the dev box: process.env.EE_SOURCE_PATH
+// Strategy (b) is used during development so the CLI uses the LOCAL EE checkout.
+// Strategy (a) is used in production builds where EE is an npm dependency.
 
----
+const EE_CORE_PATH =
+  process.env.EE_SOURCE_PATH
+    ? _require.resolve(`${process.env.EE_SOURCE_PATH}/.experience/experience-core.js`)
+    : _require.resolve('@muonroi/experience-engine/.experience/experience-core.js');
 
-## Cross-Platform Notes
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const eeCore = _require(EE_CORE_PATH) as EECoreExports;
 
-| Concern | Windows (primary dev) | Linux (VPS) | macOS |
-|---------|----------------------|-------------|-------|
-| Bun install | `powershell -c "irm bun.sh/install.ps1 \| iex"` | `curl -fsSL https://bun.sh/install \| bash` | `brew install oven-sh/bun/bun` |
-| OpenTUI native Zig core | Prebuilt binaries shipped via `bun-ffi-structs` | Prebuilt | Prebuilt |
-| Path handling | Use `node:path` with `path.posix` for relative artifact paths to avoid `\` leaking into `.muonroi-flow/` files | Native | Native |
-| Terminal escape sequences | Windows Terminal + WSL fine; old `cmd.exe` may need `OPENTUI_FORCE_EXPLICIT_WIDTH=false` (Context7-documented) | Native | Native |
-| LSP child processes | `child_process.spawn` works in Bun on Windows; no `node-pty` needed for LSP | Native | Native |
+// Re-export only what the CLI needs — type-safe surface
+export const intercept = eeCore.intercept;
+export const interceptWithMeta = eeCore.interceptWithMeta;
+export const classifyViaBrain = eeCore.classifyViaBrain;
+export const routeModel = eeCore.routeModel;
+export const routeTask = eeCore.routeTask;
+export const routeFeedback = eeCore.routeFeedback;
+export const recordFeedback = eeCore.recordFeedback;
+export const getEmbeddingRaw = eeCore.getEmbeddingRaw;
+export const searchCollection = eeCore.searchCollection;
+```
 
-**Confidence: MEDIUM** — Windows is the primary dev target per IDEA.md, but OpenTUI is Bun-first and Bun on Windows has historically been newer than Bun on Linux/macOS. Validate in Phase 0 day 1 (run grok-cli unmodified on the dev box, confirm OpenTUI renders).
+**Why this pattern over alternatives:**
+- Bun's `createRequire` works with absolute and resolved paths (HIGH confidence — verified in Bun module docs)
+- Keeps the CJS/ESM boundary in exactly ONE file — all other CLI code imports from `core-bridge.ts` as normal ESM
+- `EE_SOURCE_PATH` env var enables local dev without publishing EE to npm on every change
+- No dynamic `require()` calls scattered through the codebase
 
----
+### What NOT to do
 
-## Provider-Specific Validation Checklist (Phase 1 acceptance gate)
+```typescript
+// BAD: Dynamic require at call site — loses type safety, scattered boundary
+const core = require('/path/to/experience-core.js');
+core.intercept(...);
 
-For each provider, confirm via integration test:
-- [ ] `streamText` produces token-by-token output
-- [ ] Tool calls (≥3 tools, parallel) round-trip correctly
-- [ ] Token usage reported in `result.usage.inputTokens` / `outputTokens`
-- [ ] Cost calculable from usage × known per-token rate
-- [ ] Aborting via `AbortController` cleanly tears down the stream
-
-| Provider | Adapter | Streaming | Tool-use | Usage reporting | Notes |
-|----------|---------|-----------|----------|-----------------|-------|
-| Anthropic | `@ai-sdk/anthropic@3.0.72` | YES | YES | YES | First-class, Context7 example shown |
-| OpenAI | `@ai-sdk/openai@3.0.54` | YES | YES | YES | Includes `responses()` API |
-| Gemini | `@ai-sdk/google@3.0.65` | YES | YES | YES | Tool-use parity verified in v6 |
-| DeepSeek | `@ai-sdk/openai-compatible@2.0.42` against `https://api.deepseek.com/v1` | YES | YES | YES | DeepSeek emulates OpenAI API; pass `apiKey` + `baseURL` |
-| SiliconFlow | `@ai-sdk/openai-compatible@2.0.42` against SiliconFlow base URL | YES | YES (model-dependent) | YES | Cold-tier; same adapter as DeepSeek |
-| Ollama (warm) | `ollama-ai-provider-v2@1.50.1` against `http://72.61.127.154:11434` | YES | Limited (model-dependent — qwen2.5-coder supports it) | Partial (no cost, just tokens) | Free tier, no $ tracking needed |
-
-**Confidence: HIGH** for the first 3, **MEDIUM** for DeepSeek/SiliconFlow tool-use (depends on chosen model — Qwen 2.5 72b on SiliconFlow does, V3 mostly does), **MEDIUM** for Ollama tool-use (model-dependent, qwen2.5-coder 7b+ does support it but reliability < paid models).
+// BAD: Re-implementing EE logic in TypeScript — this is what the milestone explicitly avoids
+function classifyViaOllama(prompt: string) { /* duplicate of EE's classifyViaBrain */ }
+```
 
 ---
 
-## Installation Plan (Phase 0)
+## Config Sharing Between EE and CLI
+
+### EE Config Location
+
+`experience-core.js` reads config exclusively from `~/.experience/config.json` (hardcoded path at line 25 of the file). It also accepts `EXPERIENCE_*` environment variable overrides as secondary priority.
+
+**The CLI MUST NOT shadow or override this.** EE's config loading is singleton + file-watch based — the config auto-refreshes when the file changes.
+
+### Recommended Config Strategy
+
+```
+~/.experience/config.json         ← EE owns this. CLI reads it but never writes.
+~/.muonroi-cli/config.json        ← CLI owns this. EE never touches it.
+```
+
+The CLI should read `~/.experience/config.json` for display-only purposes (showing which Qdrant/Ollama endpoints are active in `/doctor`). It should NEVER mutate EE's config file. CLI-specific settings (cap, provider keys, tier preferences) stay in `~/.muonroi-cli/config.json`.
+
+**There is no shared config format needed.** The two configs are independent files.
+
+---
+
+## Qdrant Client: No Conflict
+
+EE uses raw `fetch` against Qdrant REST API (e.g. `POST /collections/{name}/points/search`). The CLI's `@qdrant/js-client-rest@1.17.0` uses undici under the hood. Both talk to the same Qdrant server. There is no client-level conflict — they are independent HTTP clients. The CLI should use `@qdrant/js-client-rest` for its own PIL vector operations. For anything that goes through the EE brain (intercept, route, feedback), call the bridge functions — do not make raw Qdrant calls to EE's collections from the CLI directly.
+
+---
+
+## Ollama: No Conflict
+
+EE calls `${ollamaBase}/api/generate` and `${ollamaBase}/api/embed` directly via `fetch`. The CLI uses `ollama-ai-provider-v2` via AI SDK's `streamText`. These two paths are completely independent. Both can run simultaneously against the same Ollama endpoint — Ollama is multi-client safe. Do NOT try to unify them into one HTTP client. The CLI should continue routing classification calls through the EE bridge (`classifyViaBrain`), not by calling Ollama directly from TypeScript.
+
+---
+
+## Module Format Compatibility Matrix
+
+| Scenario | Works? | Mechanism |
+|----------|--------|-----------|
+| Bun ESM (`import`) loads Bun ESM | YES | Native ESM |
+| Bun ESM (`import`) loads Node CJS (`module.exports`) | YES | Bun auto-interops CJS on `import` |
+| Bun ESM uses `require()` to load CJS | YES | Bun supports `require()` in ESM files |
+| Bun ESM uses `createRequire(import.meta.url)` to load CJS | YES | Node-compatible API, supported in Bun |
+| CJS file uses `require()` with top-level await | NO | Not applicable — EE has no top-level await |
+| Bun `--compile` binary loads CJS at absolute path | VERIFY | `EE_SOURCE_PATH` approach requires the path to be bundled or resolvable at runtime. Use npm package approach for `--compile` builds. |
+
+**HIGH confidence** on all YES rows — verified via Bun module resolution docs (bun.com/docs/runtime/module-resolution, 2025 current).
+
+---
+
+## Production Dependency Change
 
 ```bash
-# After fork, in muonroi-cli root, prune grok-cli's deps:
-bun remove @ai-sdk/xai @coinbase/agentkit grammy agent-desktop @ai-sdk/mcp
+# Add EE as a direct npm dependency (enables --compile bundling without EE_SOURCE_PATH)
+bun add @muonroi/experience-engine@0.1.1
 
-# Pin OpenTUI to last 0.1.x stable
-bun add @opentui/core@0.1.107 @opentui/react@0.1.107
-
-# AI SDK + provider adapters
-bun add ai@6.0.169 \
-  @ai-sdk/anthropic@3.0.72 \
-  @ai-sdk/openai@3.0.54 \
-  @ai-sdk/google@3.0.65 \
-  @ai-sdk/openai-compatible@2.0.42 \
-  ollama-ai-provider-v2@1.50.1 \
-  @ai-sdk/mcp@1.0.37
-
-# MCP + LSP + code intel (most already present from grok-cli)
-bun add @modelcontextprotocol/sdk@1.29.0 \
-  vscode-jsonrpc@8.2.1 \
-  vscode-languageserver-types@3.17.5 \
-  web-tree-sitter@0.26.8
-
-# Vector + integrations
-bun add @qdrant/js-client-rest@1.17.0
-
-# Phase 4 only (do not install in Phase 0):
-# bun add stripe@22.1.0 @clerk/backend@3.4.1
+# No other new packages needed for the EE-native integration
 ```
+
+**Why pin to a specific EE version:** `experience-core.js` exports are not versioned via TypeScript — the bridge must be updated if EE adds/removes exported functions. Pin explicitly, bump intentionally.
+
+---
+
+## What NOT to Add
+
+| Avoid | Why | Use Instead |
+|-------|-----|-------------|
+| `@qdrant/js-client-rest` for EE's collections | Creates two competing owners of the same Qdrant data — schema drift risk | Call EE bridge functions; let EE own its Qdrant collections |
+| A second Ollama HTTP client package | EE already handles embedding + brain calls via its own `fetch` path | Call `classifyViaBrain` / `getEmbeddingRaw` via the bridge |
+| Reimplementing `intercept` / `routeModel` in TypeScript | This is the anti-pattern the milestone was created to eliminate | Import from `core-bridge.ts` |
+| gRPC transport between CLI and EE | REST is <1ms on localhost; gRPC adds protobuf compilation and `@grpc/grpc-js` | Keep HTTP/direct-import |
+| Any NLP library (compromise, natural, etc.) for classification | EE's `classifyViaBrain` already handles multilingual, semantic classification with brain LLM | Bridge to `classifyViaBrain` |
+| `ts-node` or `tsx` to run EE TypeScript | EE is plain JavaScript — no transpilation needed | `createRequire` loads `.js` directly |
+
+---
+
+## Stack Patterns by Variant
+
+**If running in dev mode (local EE checkout, no npm publish cycle):**
+- Set `EE_SOURCE_PATH=/path/to/experience-engine`
+- Bridge resolves `${EE_SOURCE_PATH}/.experience/experience-core.js`
+- EE changes are instantly available without `bun add`
+
+**If running in production build (`bun build --compile`):**
+- EE is an npm dependency (`@muonroi/experience-engine@0.1.1`)
+- Bridge uses `require.resolve('@muonroi/experience-engine/.experience/experience-core.js')`
+- EE `.js` files are bundled into the standalone binary by Bun's bundler
+- Bun bundles CJS files correctly in `--compile` mode (verified — Bun 1.2 changelog added CJS output format support)
+
+**If EE server is running alongside (`localhost:8082`) AND direct import is available:**
+- Prefer direct import (zero latency, no HTTP overhead, no circuit breaker needed)
+- Keep the HTTP `EEClient` as fallback for when CLI is used against a REMOTE EE (thin-client mode)
+- Remove circuit breaker logic from the bridge path — failures in direct call throw synchronously and are caught by PIL's fail-open wrapper
+
+---
+
+## Version Compatibility
+
+| Package A | Compatible With | Notes |
+|-----------|-----------------|-------|
+| `experience-core.js` (CJS, Node 20) | Bun 1.3.x | EE uses only `fs`, `path`, `os`, `crypto`, `fetch` — all implemented by Bun. No native addons, no `node-gyp`. Compatibility confirmed by dependency audit: `package.json` states `"type": "commonjs"`, zero npm dependencies. |
+| `@qdrant/js-client-rest@1.17.0` | EE's raw `fetch` Qdrant calls | Independent HTTP clients — no conflict. Same Qdrant server, different collections (CLI: PIL collections; EE: `experience-principles`, `experience-behavioral`, `experience-selfqa`, `experience-routes`, `experience-edges`). |
+| `ollama-ai-provider-v2@1.5.5` (AI SDK) | EE's raw `fetch` Ollama calls | Independent paths to the same Ollama endpoint. AI SDK uses it for routing decisions; EE uses it for embedding + brain classification. Both safe to run concurrently. |
+| `createRequire` (Node built-in) | TypeScript `moduleResolution: "Bundler"` (current tsconfig) | No conflict. `createRequire` is a runtime call; TypeScript's `Bundler` resolution affects static `import` resolution, not `require()` at runtime. |
 
 ---
 
 ## Sources
 
-- npm registry, live queries 2026-04-29 (versions, peer deps, publish timestamps)
-- Context7 `/vercel/ai` (AI SDK v6 tool-calling, `streamText`, `stopWhen`)
-- Context7 `/anomalyco/opentui` (OpenTUI runtime support, Bun-only constraint, `bun build --compile` usage, terminal compat env vars)
-- GitHub Releases API: `oven-sh/bun` (Bun 1.3.13 release date), `anomalyco/opentui` (0.2.0 release date)
-- npm publish timestamps for `ollama-ai-provider` (last publish 2025-01-17, abandoned) vs `ollama-ai-provider-v2` (active, 2026-03-17)
-- Inherited package.json: `D:/sources/Core/grok-cli/package.json`
-- IDEA.md scope decisions: `D:/sources/Core/muonroi-cli/IDEA.md`
+- `D:/Personal/Core/experience-engine/.experience/experience-core.js` — direct source audit, line 4106 (module.exports surface), line 25 (CONFIG_PATH), lines 67–80 (Qdrant/Ollama config getters), HTTP fetch usage pattern
+- `D:/Personal/Core/experience-engine/package.json` — `"type": "commonjs"`, zero npm deps, `engines.node: ">=20"`
+- `D:/Personal/Core/muonroi-cli/package.json` — `"type": "module"`, current deps, Bun engine constraint
+- `D:/Personal/Core/muonroi-cli/tsconfig.json` — `moduleResolution: "Bundler"`, `module: "ESNext"`
+- Bun module resolution docs (bun.com/docs/runtime/module-resolution) — CJS/ESM interop confirmation: `require()` works in ESM files, `createRequire` supported, one exception (top-level await, not applicable here)
+- Bun blog "CommonJS is not going away" (bun.sh/blog/commonjs-is-not-going-away) — Bun CJS strategy, MEDIUM confidence (blog, not API docs)
+- Bun 1.2 release notes (bun.com/blog/bun-v1.2) — `--compile` CJS bundling support
 
 ---
 
-## Confidence Summary
-
-| Recommendation | Confidence | Reason |
-|----------------|------------|--------|
-| Keep Bun + OpenTUI + React 19 + AI SDK v6 | HIGH | All current, all Context7-verified, all match the inherited stack |
-| Pin OpenTUI to 0.1.107, not 0.2.0 | HIGH | 0.2.0 is 17 hours old at writing — defensible engineering call |
-| Stay on AI SDK v6 (not v7-beta) | HIGH | v7 in beta, v6 has all features we need |
-| Use `@ai-sdk/openai-compatible` for DeepSeek + SiliconFlow | HIGH | Single adapter, easy to add OpenRouter/Groq later |
-| Use `ollama-ai-provider-v2` not legacy | HIGH | Verified abandonment date of legacy |
-| `web-tree-sitter` over native `tree-sitter` | MEDIUM | Bun FFI gotchas are real but should be empirically validated |
-| Clerk over Auth0 for Phase 4 | MEDIUM | Pricing tiers shift; revisit at Phase 4 kickoff |
-| `bun build --compile` for distribution | HIGH | Built-in, OpenTUI docs use it |
-| Drop `@ai-sdk/xai`, Coinbase, Telegram, agent-desktop | HIGH | Already in IDEA.md delete list |
+*Stack research for: muonroi-cli v1.1 EE-Native CLI restructure*
+*Researched: 2026-05-01*

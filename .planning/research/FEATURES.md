@@ -1,349 +1,211 @@
-# Feature Research — muonroi-cli
+# Feature Research — EE-Native CLI Integration (v1.1 Milestone Delta)
 
-**Domain:** BYOK AI coding agent CLI with orchestration intelligence (EE + QC + GSD)
-**Researched:** 2026-04-29
-**Overall confidence:** HIGH (competitor surface), MEDIUM (differentiator novelty — some adjacent products exist)
+**Domain:** EE-native CLI integration — restructuring muonroi-cli to use experience-engine source code directly
+**Researched:** 2026-05-01
+**Confidence:** HIGH (competitor surface), MEDIUM (EE-native vs HTTP tradeoff specifics — primary source is architecture research, not public benchmarks)
+
+> **Scope note:** This file covers only the DELTA for milestone v1.1 EE-Native CLI.
+> The base feature landscape (table stakes, differentiators for the CLI itself) is fully documented in `.planning/research/FEATURES.md` as of 2026-04-29.
+> This research asks one question: **what does EE-native give us that HTTP-wrapper cannot?**
 
 ---
 
 ## Executive Summary
 
-The 2026 AI coding CLI market has hardened around a tight feature contract. Claude Code, Codex CLI, OpenCode, Cursor 2.0, Aider, Amp (Sourcegraph), Cline, Continue, Letta Code, Qwen Code, and `grok-cli` (our fork base) all converge on the same core: tool-using agent loop, MCP, hooks, slash commands, headless mode, sessions, multi-provider support, and at-context compaction. The CLI shell is no longer where companies compete — it is table stakes.
+The HTTP-wrapper architecture (current state) treats the Experience Engine as an external service: every PIL pipeline call, every route-model call, every feedback write, every search query crosses a localhost:8082 HTTP boundary. This works but creates four compounding problems that EE-native integration eliminates:
 
-What is **not** standard, and where muonroi-cli has genuine room:
+1. **Latency tax on every turn.** Each PreToolUse hook fires an HTTP round-trip. Each PIL layer that calls EE (L3 injection, L4-5 stubs) adds another. Stack them: a complex turn can accumulate 5-8 serial HTTP round-trips before the first token reaches the provider. In-process calls on the same Bun/Node runtime eliminate serialization + TCP overhead — measured benchmarks on same-host HTTP vs in-process show 30-60% latency reduction for local calls.
 
-1. **Per-call routing across tiers** — competitors pick a model per session or per request via gateway; nobody ships a *local-first heuristic + small-LLM judge* router that defaults 90% of calls to free.
-2. **Principle evolution** — Letta Code is the only competitor doing "memory that learns from mistakes," and it is memory-first not router-first. Mem0/Zep store facts, they do not generalize. Experience Engine's lessons-into-principles flow is genuinely differentiated.
-3. **Realtime hard cap with auto-downgrade** — Claude Code shows `/cost` and has soft compaction thresholds; gateway products (LiteLLM, Bifrost, Maxim) enforce caps but require gateway adoption. No CLI ships a built-in hard cap with model auto-downgrade chain.
-4. **Deliberate compaction at user-controlled checkpoints** — Codex CLI and Claude Code auto-compact when context gets full. Quick Codex's "compact at run-artifact handoff, not at provider's whim" is genuinely novel.
+2. **Logic duplication and drift.** The HTTP wrapper requires the CLI to re-implement routing heuristics, classification categories, and output-style maps in Bun because EE's internals are opaque. When EE's `route-model` logic evolves, the CLI must update its assumptions independently. EE-native removes this: the CLI calls EE functions, so there is one source of truth.
 
-**The locked v1 scope hits the bar on table stakes.** Forking grok-cli inherits everything users expect: TUI, MCP, LSP, hooks, headless, daemon, sub-agents, sessions. The differentiators (3-tier router, EE principles, hard-cap usage guard, deliberate compaction, file-backed run artifacts) are correctly scoped.
+3. **Classification quality ceiling.** The current hot-path uses hardcoded regex + tree-sitter for Layer 1. That ceiling is fixed by the maintainer's keyword list. EE-native Layer 1 replaces regex with EE's brain LLM (a local Ollama model) — the same model that already classifies for feedback, touch, and route decisions. Quality grows as EE's brain improves; no CLI-side changes needed.
 
-**Three risks surfaced**:
-- **Sub-agents and worktree parallelism are now table stakes** (Cursor 2.0 ships 8 parallel agents, Claude Code spawns subagents, Amp ships smart/rush/deep modes). grok-cli inherits sub-agents — keep them, do not delete.
-- **Codebase indexing / repo map is becoming a hidden table stake.** Cursor indexes; Aider's repo map is a known win; Claude Code reads on-demand. grok-cli does on-demand reads; this works for v1 but expect feedback that "the agent does not know my codebase" at scale.
-- **Plan/Act mode separation (Cline)** — strict read-only-then-execute is now a documented competitor pattern. GSD `/discuss` → `/plan` → `/execute` covers this conceptually but must be obvious to a Cursor/Cline refugee.
+4. **Closed feedback loop impossible over HTTP.** The auto-judge pattern (PreToolUse captures warningId, PostToolUse compares to outcome, feedback fires) requires correlating tool call inputs to outputs within the same process event loop. Over HTTP this means two separate HTTP calls with state held in memory between them — fragile, and loses context on crash. In-process, the correlation is a plain object reference.
+
+The ecosystem confirms these tradeoffs. In-process SDK integration eliminates subprocess overhead and removes the trust boundary that HTTP wrappers impose (Genta.dev, MCP vs API guide, 2025). The pattern of routing with a local lightweight model before any network call is confirmed as production-standard for cost-sensitive agents (RouteLLM, Ollama tiered routing, Augment Code routing guide, 2025-2026). Feedback-driven learning via PostToolUse auto-judge is now a documented pattern in production coding agents (Spotify Engineering, SICA self-improving agent, 2025).
+
+**EE-native is not a nice-to-have refactor. It is what closes the learning loop.**
 
 ---
 
 ## Feature Landscape
 
-### Table Stakes (Users Expect These)
+### Table Stakes for EE-Native CLI (Features That Make v1.1 Credible)
 
-If muonroi-cli launches without these, it feels like a toy. Every reference competitor ships them; grok-cli already has all but two.
+These are the minimum features that must exist for EE-native integration to be defensible. An HTTP-wrapper can fake most of them partially — the distinction is whether they work reliably and close the loop.
 
-| Feature | Why Expected | Complexity | grok-cli inherited? | Notes |
-|---------|--------------|------------|---------------------|-------|
-| **Tool-use loop (multi-turn agent)** | Core agent contract; every CLI does this | LOW | Yes | `src/agent/agent.ts` — to be replaced with EE+QC+GSD orchestrator |
-| **File read / edit / write tools** | Cannot edit code without these | LOW | Yes | Common tools kept |
-| **Bash / shell tool with confirmation gate** | Users expect to run tests, builds, lints | LOW | Yes | Keep approval prompts |
-| **Search (ripgrep-style)** | Code navigation primitive; everyone uses rg | LOW | Yes | Common tools kept |
-| **Diff display before applying edits** | Aider, Cursor, Claude Code all show diffs | LOW | Yes (inherited) | Verify still wired in TUI |
-| **Slash commands** | Claude Code has 55+, Codex has them, Cursor has them | LOW | Yes | GSD `/plan /discuss /execute` slot in cleanly |
-| **Streaming output** | UX baseline since 2023 | LOW | Yes | OpenTUI handles it |
-| **Session persistence + resume (`--session latest`)** | Codex `codex resume`, grok-cli has it, Claude Code has it | MEDIUM | Yes | Inherited |
-| **Multi-provider model selection** | Aider, Continue, OpenCode, Amp, Letta, Qwen Code all support BYOM | MEDIUM | Partial — grok-cli is xAI-locked | **Replace `src/grok/*` with multi-provider adapter (Anthropic + OpenAI + Gemini + DeepSeek + Ollama)** |
-| **Headless / CI mode (`--prompt`, JSON output)** | Codex non-interactive mode, Claude Code `-p`, Cursor cloud agents | MEDIUM | Yes | `src/headless` kept |
-| **MCP client integration** | Claude Code, Codex, OpenCode, Continue, Amp — all ship MCP. **2026 floor.** | MEDIUM | Yes | `src/mcp` kept |
-| **Hooks system (PreToolUse, PostToolUse, etc.)** | Codex shipped hooks 2025, Claude Code has 25 hook events in 2026 | MEDIUM | Yes | `src/hooks` kept; rewire to EE |
-| **Auto-compaction at context limit** | Codex `/compact`, Claude Code automatic at threshold, Cursor handles internally | MEDIUM | Yes | `src/agent/compaction.ts` — to be replaced with QC deliberate compaction |
-| **Permission modes (auto-accept, deny, prompt)** | Claude Code has 6 permission modes, Cline has Plan/Act, Cursor has YOLO | MEDIUM | Yes | grok-cli has confirmation gates; verify mode coverage |
-| **Git awareness (status, diff, blame, auto-commit)** | Aider's signature; Claude Code has it; expected baseline | MEDIUM | Yes | grok-cli has bash + tooling, Aider-style auto-commit is **optional** |
-| **LSP integration (real diagnostics, not just text)** | OpenCode ships LSP; Claude Code has it; Cursor uses VSCode's LSP | MEDIUM | Yes | `src/lsp` kept |
-| **Sub-agents / task delegation** | Cursor 2.0 (8 parallel), Claude Code subagents, grok-cli `task`/`delegate`, Amp multi-mode | HIGH | Yes | **Keep grok-cli's sub-agent system — deleting it would break parity** |
-| **API key management (env, file, CLI, profile)** | Every BYOK tool has multiple paths | LOW | Yes | Inherited |
-| **Cost / token visibility (per session minimum)** | Claude Code `/cost`, Codex shows tokens, Aider shows context %  | LOW | Partial | grok-cli has token counters; we extend into the usage guard |
-| **Cross-platform support (Windows / macOS / Linux)** | Listed as a v1 hard constraint; Codex has WSL workaround | MEDIUM | Yes | grok-cli runs Bun; must validate Windows path |
-| **Project-level instructions file (CLAUDE.md / AGENTS.md)** | Every CLI reads a project-scoped instructions file | LOW | Yes (`AGENTS.md`) | Inherit and extend with `.muonroi-flow/` |
-| **Skills / reusable prompts directory** | Claude Code skills, grok-cli `.agents/skills/` | LOW | Yes | Inherited; QC ships `qc-flow` and `qc-lock` as skills |
+| Feature | Why Expected | Complexity | HTTP-wrapper can do this? | Notes |
+|---------|--------------|------------|--------------------------|-------|
+| **EE brain LLM replaces regex in Layer 1** | Router classification quality grows with EE model, not frozen at keyword list | MEDIUM | Partially — wrapper calls `/api/route-model` but doesn't get intermediate reasoning, only final tier | Replace `src/router/hot.ts` regex with direct EE `classifyIntent(text)` call. EE uses Ollama qwen2.5-coder:1.5b for hot path. |
+| **`/api/search` implemented in EE** | PIL Layer 3 (EE injection) is currently a stub because the search endpoint doesn't exist in EE | MEDIUM | No — the endpoint does not exist; HTTP would call a 404 | Must implement `GET /api/search?q=&taskType=&limit=` in EE before PIL Layer 3 can work. Unblocks the core EE value prop. |
+| **`respond_general` response tool** | Catch-all for tasks not matching the 6 typed tools (refactor/debug/plan/analyze/docs/generate) | LOW | Yes — but today unclassified tasks fall through with no tool, returning raw LLM text and no Zod schema | Add `respond_general` with a permissive schema. Table stakes for robustness. |
+| **Output style detection via EE brain (multilingual)** | PIL Layer 6 currently uses hardcoded regex for Vietnamese/English detection — breaks on mixed code + comments | LOW | No — multilingual detection requires a language model; regex is wrong for mixed-language codebases | EE brain call: `detectOutputStyle(recentMessages)` → returns `{language, formality, codeHeavy}`. Single call, replaces 40 lines of heuristic. |
+| **Route feedback loop wired (every turn feeds outcome)** | EE route-model improves only if it receives outcome signals — without feedback, it is a static router | MEDIUM | Fragile — requires holding warningId in memory between two HTTP calls; loses state on crash | In-process: PostToolUse handler calls EE `recordRouteOutcome(routeId, outcome)` directly. Correlation is a plain reference, not a session cookie. |
+| **Full EE hook pipeline end-to-end (PreToolUse → PostToolUse → Judge → Feedback → Touch)** | End-to-end pipeline is the product. If any stage is missing, EE never learns, principles never evolve | HIGH | Partially — PreToolUse hook wires over HTTP (proven). PostToolUse → Judge → Feedback auto-judge does not exist yet. | PostToolUse must capture diff + test result, call EE judge worker, call `/api/feedback` with FOLLOWED/IGNORED/IRRELEVANT verdict. |
+| **CLI imports EE functions directly — no logic duplication** | Dual maintenance of routing heuristics in CLI + EE creates divergence bugs | MEDIUM | No — HTTP wrapper always duplicates at least the request/response schema | EE exports: `classifyIntent`, `routeModel`, `search`, `recordFeedback`, `touch`. CLI imports them as a library dependency. |
 
-### Differentiators (Competitive Advantage)
+### Differentiators: What EE-Native Enables That HTTP Cannot
 
-These are where muonroi-cli wins. None of them are unique-in-the-universe (memory products exist, gateways exist) but the **combination in a CLI** is genuinely uncrowded.
+These features are only achievable — or only reliable — with direct source integration.
 
-| Feature | Value Proposition | Complexity | Closest competitor | Why we win |
-|---------|-------------------|------------|--------------------|------------|
-| **3-tier router (heuristic → Ollama → SiliconFlow)** with per-call selection | 70%+ of calls routed to free/cheap without quality loss; effective cost 2–3× lower than fixed-model competitors | HIGH | OpenRouter auto-routing, Vercel AI Gateway, Bifrost — all gateway products requiring proxy adoption | We ship it **inside the CLI** with a free local hot-path. Competitors charge a 5% gateway fee or require infra. EE-driven `route-model` already proven. |
-| **Persistent principle learning from mistakes** | Memory shrinks while capability grows; agent stops repeating bugs; principles match cases never seen before | HIGH | Letta Code (memory-first agent), Mem0/Zep (fact storage) | Letta is memory-first not orchestration-first; Mem0/Zep grow linearly. EE evolves entries → principles → deletes. |
-| **Realtime hard cap with auto-downgrade chain** | BYOK without runaway risk; provable not-blow-the-budget | MEDIUM | Claude Code soft limits, LiteLLM/Bifrost gateways with hard caps | First CLI-native hard cap. No gateway required. Auto-downgrade Opus→Sonnet→Haiku→halt is novel. |
-| **Deliberate compaction at run-artifact checkpoints** | Compact when work is at clean handoff, not when provider's black-box decides | MEDIUM | Codex `/compact` (manual), Claude Code auto-compact, Cline workspace snapshots | Tied to QC's `Phase Close` and `Wave Handoff` so compaction never breaks active work. |
-| **File-backed run artifacts (`.muonroi-flow/`)** | Resume after kill / restart / different machine; no chat-state dependency | MEDIUM | QC native; Cline workspace snapshots; Letta context repositories | Session resume that does NOT depend on chat memory. Killing the CLI mid-task is provably safe. |
-| **GSD slash commands with audit trail (`/plan`, `/discuss`, `/execute`)** | Discuss → plan → execute discipline that is enforceable (gray-area gates, doctor-run) | MEDIUM | Cline Plan/Act, Aider architect/code mode, Letta Code skills | GSD enforces evidence-basis, gray-area gates, plan-check delegation. Stronger than Cline's binary toggle. |
-| **Hook-derived warnings persisted into artifacts** | EE warnings survive compaction, reach next session, do not become chat-only advice | MEDIUM | None directly | QC `Experience Snapshot` integration. Currently shipping in muonroi ecosystem. |
-| **Offline-first heavy logic** | Judge worker, compaction, router classifier all run without network | MEDIUM | Aider has offline LLM via Ollama; OpenCode supports Ollama; nobody ships a full offline orchestration layer | Hard constraint from PROJECT.md; differentiator vs. SaaS-only competitors. |
-| **Local EE → Cloud EE migration without principle loss** | Free user can upgrade to Pro without re-learning | HIGH | None — most products are SaaS-only or local-only, not both | Required for monetization path; no competitor solves this. |
-| **Cross-machine principle sharing (team brain)** | Team tier — shared brain across users with governance | HIGH | Mem0 cloud, Letta cloud (different models) | Built on EE namespacing already proven. Phase 4 / Team tier. |
+| Feature | Value Proposition | Complexity | Why HTTP-wrapper fails here | Dependency |
+|---------|-------------------|------------|---------------------------|------------|
+| **Latency-free PIL pipeline** | Zero HTTP overhead on the hot path; PIL runs in-process before every provider call | MEDIUM | HTTP adds 5-8 serial round-trips per complex turn; at p95 this is 200-400ms extra latency on a fast machine | Requires EE as a library dep in the CLI process |
+| **Auto-judge feedback loop (deterministic, crash-safe)** | Every tool call auto-tags FOLLOWED/IGNORED/IRRELEVANT without agent intervention — closes EE evolution loop | HIGH | HTTP: two separate requests with in-memory state between them; process kill loses correlation. In-process: one object reference, survives within the turn | Requires PostToolUse handler + EE judge worker callable in-process |
+| **taskType + outputStyle extension on route-model** | EE's `routeModel` currently selects tier based on complexity alone; adding taskType (refactor/debug/etc.) and outputStyle (Vietnamese, code-heavy) makes routing precision much higher | MEDIUM | HTTP can send these fields but cannot extend the routing logic without modifying EE separately and deploying | EE source allows adding fields to `RouteRequest` type directly; CLI and EE change together |
+| **Principle evolution observable in CLI session** | User sees "3 new principles inferred this session" in status bar — trust signal for the learning pitch | LOW | HTTP can fetch principle count but cannot observe the judge + evolution event synchronously within the same turn | In-process: EE emits events when principles are inferred; CLI status bar subscribes |
+| **PIL Layer 3 (EE injection) functional** | EE search results injected into prompt before every provider call — reduces hallucination, improves on-codebase accuracy | MEDIUM | Currently a stub because `/api/search` doesn't exist in EE. HTTP would remain broken even after the endpoint lands if the CLI has no way to know search latency will block the turn | EE-native: `search()` is a direct async call; if it times out, PIL fails open in-process without a TCP error |
+| **Router hot-path stays local even when EE backend is down** | If EE Node process is not running, CLI must still route via fallback — not crash | LOW | HTTP: if localhost:8082 is unreachable, the entire PIL pipeline errors. In-process: EE library functions degrade gracefully via the existing fail-open path | Requires graceful degradation wrapper around EE imports |
+| **Single version contract between CLI and EE** | CLI always uses the exact EE version it was tested with — no "EE v3.2 but CLI expects v3.1 API" drift | LOW | HTTP: EE backend can update independently, breaking CLI without a visible version mismatch | npm workspace or git submodule: versions are locked together |
 
-### Anti-Features (Commonly Requested, Often Problematic)
+### Anti-Features: Common EE-Native Patterns to Avoid
 
-These are explicitly called out as out-of-scope in PROJECT.md or are reasonable-sounding-but-bad ideas.
+These seem like natural next steps but create problems in this context.
 
-| Feature | Why Requested | Why Problematic | What we do instead |
+| Feature | Why Requested | Why Problematic | What to Do Instead |
 |---------|---------------|-----------------|--------------------|
-| **Voice mode** | Some users like dictating prompts | Solo maintainer cannot own audio pipeline + STT API contracts; grok-cli's audio code is the largest deletion target | Defer indefinitely. If users want voice, they can pipe through OS dictation. |
-| **IDE plugin (VS Code / JetBrains)** | "Cursor has it, why don't we" | Doubles the maintenance surface; v1 is a CLI; IDE plugin is a different product | Ship CLI well first. IDE later if PMF is proven. |
-| **Crypto wallet / Coinbase payments** | grok-cli ships it; some users want Web3 | Wrong audience; SaaS subscription is the use case | Replace wholesale with Stripe in Phase 4. |
-| **Telegram bot remote control** | grok-cli ships it; some users want phone access | Doubles surface area; long-polling daemon adds ops; not a power-user feature for our target | Delete. If demand surfaces post-launch, evaluate. |
-| **Vision input (image upload to model)** | grok-cli ships it; Cursor has it | Adds multimodal edge cases; not core to senior-engineer code agent | Delete from grok-cli. Re-evaluate post-PMF. |
-| **Subsidized inference (flat $20 like Claude Code)** | Predictable monthly cost | Kills margin on power users; misaligns incentives (we want to make tokens cheaper, not eat them) | BYOK + orchestration fee. Locked in IDEA.md. |
-| **Tracking grok-cli upstream** | "Free maintenance from upstream commits" | Upstream priorities (Telegram, vision, crypto) directly conflict with ours; cherry-picking is more cost than greenfielding deletions | Fork once, accept ownership. Locked in IDEA.md. |
-| **Auto-magic codebase indexing (Cursor-style)** | "The agent should know my whole codebase" | Indexing pipeline is its own product; storage cost; staleness; per-machine vs. shared confusion | On-demand reads + `repo map` (Aider-style, deferrable to v1.x). EE principles substitute for "it remembers your codebase" framing. |
-| **Image / video generation tools** | grok-cli ships these | Not relevant to coding agent; xAI-tied | Delete with `src/grok/*`. |
-| **Background agents / cloud agents (Cursor 2.0)** | "Run while I sleep" | Requires cloud infra and per-user runners; v1 is local-first | Defer. The daemon (`src/daemon`) keeps grok-cli's scheduler for one-shot scheduled prompts; that is enough for v1. |
-| **Browser automation / computer use sub-agent** | grok-cli ships it (`agent-desktop`, macOS only) | Adds OS permissions surface; macOS-only conflicts with cross-platform constraint | Delete from inherited tree (consistent with platform constraint). |
+| **Bundle EE into the CLI binary** | "One binary, no external dependency" | EE runs as a persistent Node 20 process with Qdrant + Ollama dependencies. Bundling it into Bun would require cross-runtime bridging and would force Qdrant to be an embedded process — massive ops complexity for a solo maintainer. Not achievable in v1.1. | Keep EE as a separate process. CLI imports EE as a library for function calls; EE still manages its own Qdrant/Ollama connections. The boundary is a process boundary, not a network boundary — Unix domain socket or in-process module calls. |
+| **Synchronous blocking EE calls in PIL** | "Simpler code if we await each layer" | PIL is already fail-open at 200ms. Making it synchronous and blocking turns a 200ms timeout into a 200ms guaranteed wait on every turn. Stacks with LLM latency. | Keep all EE calls async with `Promise.race([eeCall, timeout(200)])`. Fail open. |
+| **Replace EE feedback with a custom CLI-side store** | "We can do feedback lighter without EE's Qdrant schema" | Defeats the entire EE-native thesis. EE's value is principle evolution — if feedback goes to a separate store, principles never grow from CLI interactions. | All feedback flows through EE's `/api/feedback` (or direct function call). No parallel feedback store in the CLI. |
+| **Expose all EE internals as CLI slash commands** | "Power users want to query EE directly" | EE has 50+ internal endpoints. Exposing them as CLI commands creates a maintenance surface the solo maintainer cannot own. | Expose exactly 3 CLI-facing surfaces: `/route` (routing decision transparency), `/principles` (list evolved principles), `/feedback` (manual feedback override). Nothing else in v1.1. |
+| **Eager EE module import at CLI startup** | "Load everything upfront for faster runtime calls" | EE imports Qdrant client, Ollama client, DB migrations. Eager import at CLI startup adds 200-400ms cold start before the first prompt appears. | Lazy-import EE modules on first use inside PIL. If EE is not needed (headless/CI mode with EE disabled), it never loads. |
 
 ---
 
 ## Feature Dependencies
 
 ```
-Multi-provider adapter (Phase 1)
-    └──required-by──> 3-tier router (Phase 1)
-                          └──required-by──> Realtime usage guard (Phase 0/1 — guard skeleton lands first, full chain in 1)
-                          └──required-by──> Auto-downgrade chain (Phase 1)
+/api/search endpoint (in EE source)
+    └──required-by──> PIL Layer 3 EE injection (currently stub)
+                          └──required-by──> Full PIL pipeline end-to-end
 
-EE PreToolUse hook integration (Phase 1)
-    └──required-by──> Persistent principle learning (Phase 1+, evolves over Phase 2-3)
-    └──enhances────> Hook-derived warnings persisted (Phase 2)
-                          └──required-by──> Compaction-safe warnings (Phase 2)
+EE brain LLM call (classifyIntent)
+    └──replaces────> Hot-path regex classifier (Layer 1)
+    └──required-by──> taskType extension on route-model
+    └──required-by──> Output style detection (Layer 6)
 
-QC deliberate compaction (Phase 2)
-    └──requires───> .muonroi-flow/ artifact system (Phase 2)
-                          └──required-by──> Session resume from artifacts (Phase 2)
-                          └──required-by──> GSD slash commands with file-backed continuity (Phase 2)
+Auto-judge feedback loop
+    └──requires────> PostToolUse handler (exists, needs wiring)
+    └──requires────> EE judge worker callable in-process
+    └──required-by──> Principle evolution (EE's evolution loop closes only with feedback)
+    └──required-by──> Route feedback loop (route accuracy improves only with outcome signals)
 
-Headless / CI mode (Phase 3 — preserved from grok-cli, validated in 3)
-    └──requires───> Multi-provider adapter (Phase 1)
-    └──requires───> EE optional path (graceful degradation when EE unreachable)
+respond_general response tool
+    └──required-by──> Robustness for unclassified tasks (no fallthrough)
+    └──independent of EE-native (can ship over HTTP too, but needed regardless)
 
-Local EE → Cloud EE migration (Phase 4)
-    └──requires───> Stable .muonroi-flow/ format (Phase 2 frozen)
-    └──requires───> Stable EE principle export format (Phase 2 frozen)
-    └──required-by──> Pro tier monetization (Phase 4)
+Direct EE module import
+    └──required-by──> Latency-free PIL
+    └──required-by──> Crash-safe auto-judge correlation
+    └──required-by──> Principle evolution observable in status bar
+    └──conflicts────> Bundled EE binary (anti-feature — do not combine)
 
-Cross-platform (Windows/Linux/macOS)
-    └──hard-constraint──> Every feature touched
-    └──conflicts────> Computer-use sub-agent (macOS-only) — DELETE
+Graceful degradation wrapper
+    └──required-by──> Router hot-path when EE process is down
+    └──requires────> Direct EE module import (can only degrade gracefully if you control the import path)
 ```
 
 ### Dependency Notes
 
-- **Multi-provider adapter must precede 3-tier router** — the router selects between providers, so without the adapter there is nothing to route between.
-- **Usage guard skeleton in Phase 0, hard cap in Phase 1** — IDEA.md says "mandatory from Phase 0" but the auto-downgrade chain depends on multi-provider adapter (Phase 1). Skeleton = status bar + counter + threshold notice. Full = downgrade chain.
-- **EE PreToolUse hook is the gateway feature** — every EE differentiator (principles, warnings persisted, judge feedback) flows through it. If hook integration is buggy, the whole brain layer feels broken.
-- **`.muonroi-flow/` format must freeze before Phase 4** — local→cloud migration depends on a stable format. Breaking changes after launch break the upgrade path.
-- **QC compaction conflicts with native grok-cli compaction** — they cannot both run. `src/agent/compaction.ts` is a clean replacement target.
-- **GSD skills require both EE and QC** to deliver full value. They can run standalone (EE optional, QC standalone-safe), but the pitch ("Cursor-grade UX with EE+QC+GSD") falls flat without both.
+- **`/api/search` in EE must land before PIL Layer 3 is un-stubbed.** This is a cross-repo change (EE source, not CLI source). It is the single external dependency for the v1.1 milestone.
+- **Auto-judge requires PostToolUse handler to capture diff context.** The diff must be computed before calling the judge — PostToolUse receives file paths, not diffs. The handler must read pre/post state within the hook event.
+- **EE module import and graceful degradation must be designed together.** If the import is eager and EE fails to initialize, CLI fails. If import is lazy with a try-catch wrapper, CLI degrades to HTTP fallback or direct routing, keeping the existing behavior.
+- **respond_general does not require EE-native** — it is a PIL response tool gap that exists regardless. It should ship in v1.1 because it is a one-day task that fixes a known hole.
 
 ---
 
-## MVP Definition
+## MVP Definition for v1.1
 
-### Launch With (v1 Beta — 6–8 weeks per IDEA.md roadmap)
+### Launch With (v1.1 EE-Native)
 
-Minimum viable product to ship to senior-engineer beta users.
+The minimum set that closes the EE evolution loop and removes logic duplication.
 
-**Core fork operations (Phase 0):**
-- [ ] Fork grok-cli, MIT attribution preserved, `src/telegram` / `src/audio` / `src/wallet` / `src/payments` / `src/agent/vision-input` deleted
-- [ ] `src/grok/*` replaced with multi-provider adapter stub (Anthropic working, others scaffolded)
-- [ ] TUI runs with Anthropic hardcoded, sessions resume, headless mode passes smoke test
-- [ ] Usage guard skeleton — status bar with input/output token counters and live USD estimate
+- [ ] **`/api/search` implemented in EE** — unblocks PIL Layer 3; required for inject-from-brain to work
+- [ ] **EE brain LLM replaces hot-path regex (Layer 1)** — classification quality grows with EE model, no CLI maintenance
+- [ ] **`respond_general` response tool** — eliminates unclassified task fallthrough; one-day task
+- [ ] **Output style detection via EE brain (Layer 6)** — replaces hardcoded multilingual regex
+- [ ] **Route feedback loop wired** — every turn feeds outcome signal; EE route-model starts learning
+- [ ] **Full hook pipeline end-to-end** — PreToolUse → PostToolUse → Judge → Feedback → Touch; auto-judge fires deterministically
+- [ ] **CLI imports EE functions directly** — no logic duplication; single version contract; latency-free hot path
+- [ ] **Graceful degradation when EE process is down** — lazy import with fail-open path; headless/CI mode unaffected
 
-**Brain layer (Phase 1):**
-- [ ] Multi-provider adapter complete — Anthropic, OpenAI, Gemini, DeepSeek, Ollama all wired and integration-tested
-- [ ] 3-tier router — local heuristic classifier + Ollama warm path + SiliconFlow cold path with EE judge
-- [ ] EE PreToolUse hook integration injecting warnings + principles
-- [ ] Usage guard hard cap with 50% / 80% / 100% thresholds and Opus → Sonnet → Haiku → halt downgrade chain
-- [ ] Runaway scenario tests — infinite loop, large file recursion, model thrashing all halt at cap
+### Add After Validation (v1.1.x)
 
-**Orchestration layer (Phase 2):**
-- [ ] QC deliberate compaction replacing grok-cli native compaction
-- [ ] `.muonroi-flow/` artifact system — STATE.md, run files, BACKLOG, PROJECT-ROADMAP
-- [ ] GSD slash commands `/plan`, `/discuss`, `/execute` with file-backed continuity
-- [ ] Hook-derived warnings persisted to run artifacts (compaction-safe)
-- [ ] Session resume from `.muonroi-flow/` (kill-and-restart proven)
+Triggered by first-week usage data showing route decision quality or principle evolution rate.
 
-**Polish (Phase 3):**
-- [ ] Headless / CI mode validated end-to-end
-- [ ] LSP integration validated end-to-end
-- [ ] MCP integration validated end-to-end
-- [ ] Cross-platform smoke tests (Windows, Linux, macOS)
-- [ ] Beta release packaging (npm, install script, docs)
+- [ ] **Route decision transparency (`/route` slash command)** — show users which tier was selected and why; trust signal. Only add if users ask "why is this slow?" or "why did it use GPT-4?"
+- [ ] **Principle evolution count in status bar** — "3 new principles this session" badge. Add when judge pipeline is proven stable (i.e., not producing false positives).
+- [ ] **taskType + outputStyle extension on route-model** — precision improvement on routing. Defer until base routing is validated working.
 
-### Add After Validation (v1.x)
+### Defer to v1.2+
 
-Triggered by user feedback after beta lands.
-
-- [ ] **Aider-style auto-commit per edit** — only if "no audit trail of agent changes" surfaces as a top complaint. Otherwise users have git themselves.
-- [ ] **Repo map (Aider-style ranked context)** — only if "agent does not know my codebase" surfaces. Otherwise on-demand reads + EE principles cover it.
-- [ ] **Sub-agent customization (custom subAgents from grok-cli)** — keep the inherited surface, expose configuration in v1.x once we know what users actually want to delegate.
-- [ ] **Schedule / cron prompts** — `src/daemon` is preserved; expose as a v1.x feature only when users ask for it.
-- [ ] **Plan/Act mode toggle (Cline-style)** — GSD `/discuss` covers this; expose as a single-command alias only if users prefer the binary toggle.
-- [ ] **Image / vision input** — re-evaluate only after PMF; not a v1 concern.
-
-### Future Consideration (v2+ — Phase 4 in roadmap)
-
-- [ ] **Cloud EE sync** (Pro tier) — required for monetization, deliberately deferred to validate beta first.
-- [ ] **Web dashboard** (Pro tier) — principle browser, usage analytics, billing portal.
-- [ ] **Stripe billing** (Pro / Team tiers).
-- [ ] **Team brain** (Team tier) — shared principles with governance and audit log.
-- [ ] **Multi-tenant Qdrant hosting** — local-first until Pro tier needs it.
-- [ ] **IDE plugin (VS Code)** — only if CLI PMF is proven and users explicitly ask for editor-side surface.
-- [ ] **Background / cloud agents (Cursor 2.0 parity)** — only if user demand justifies the per-user runner infra.
-- [ ] **Browser automation sub-agent** — defer; macOS-only constraint conflicts with cross-platform requirement.
+- [ ] **Bundled EE binary** — explicitly rejected for v1.1. Re-evaluate only if user setup friction (running two processes) surfaces as top complaint.
+- [ ] **Full EE slash command exposure** — principle browser, search browser, etc. Phase 4 / Pro tier surface.
 
 ---
 
 ## Feature Prioritization Matrix
 
-P1 = must-have for v1 beta. P2 = v1.x. P3 = v2+ or anti-feature.
-
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Tool-use loop / file edit / bash / search | HIGH | LOW (inherited) | P1 |
-| Multi-provider adapter | HIGH | MEDIUM | P1 |
-| 3-tier router | HIGH | HIGH | P1 |
-| EE PreToolUse hook integration | HIGH | MEDIUM | P1 |
-| Usage guard with hard cap + auto-downgrade | HIGH | MEDIUM | P1 |
-| QC deliberate compaction | HIGH | MEDIUM | P1 |
-| `.muonroi-flow/` artifacts + GSD slash commands | HIGH | MEDIUM | P1 |
-| Headless / CI mode (preserved) | MEDIUM | LOW (inherited) | P1 |
-| MCP / LSP integration (preserved) | MEDIUM | LOW (inherited) | P1 |
-| Hook-derived warnings persisted | HIGH | LOW | P1 |
-| Cross-platform support | HIGH | MEDIUM | P1 |
-| Sub-agents (preserved from grok-cli) | MEDIUM | LOW (inherited) | P1 (do not delete) |
-| Aider-style auto-commit | MEDIUM | LOW | P2 |
-| Repo map / codebase indexing | MEDIUM | HIGH | P2 |
-| Schedule / cron prompts | LOW | LOW (inherited) | P2 (keep, surface later) |
-| Cloud EE sync | HIGH (for monetization) | HIGH | P3 (Phase 4) |
-| Web dashboard | MEDIUM | HIGH | P3 (Phase 4) |
-| Stripe billing | HIGH (for monetization) | MEDIUM | P3 (Phase 4) |
-| Team brain | HIGH (Team tier) | HIGH | P3 (Phase 4+) |
-| IDE plugin | LOW (we are CLI) | HIGH | P3 (anti-feature for v1) |
-| Voice mode | LOW | HIGH | P3 (anti-feature) |
-| Telegram bot | LOW | MEDIUM | P3 (anti-feature, delete) |
-| Crypto wallet | LOW | MEDIUM | P3 (anti-feature, delete) |
-| Vision input | LOW | MEDIUM | P3 (anti-feature, delete) |
-| Computer-use sub-agent | LOW (macOS-only) | HIGH | P3 (anti-feature, delete) |
+| `/api/search` in EE | HIGH (unblocks PIL L3) | MEDIUM (new EE endpoint + vector search) | P1 — blocker |
+| EE brain replaces hot-path regex | HIGH (quality + maintainability) | MEDIUM (replace ~80 lines, wire Ollama call) | P1 |
+| `respond_general` response tool | MEDIUM (robustness) | LOW (~1 day, Zod schema + handler) | P1 |
+| Output style detection via EE brain | MEDIUM (correctness for multilingual) | LOW (~half-day, one EE call) | P1 |
+| Route feedback loop | HIGH (EE router improves over time) | MEDIUM (PostToolUse state capture + EE call) | P1 |
+| Full hook pipeline end-to-end | HIGH (closes EE evolution loop) | HIGH (judge worker + auto-tag + feedback) | P1 |
+| Direct EE module import | HIGH (latency + drift prevention) | MEDIUM (module boundary design, lazy import) | P1 |
+| Graceful degradation | HIGH (reliability) | LOW (try-catch wrapper, existing fail-open) | P1 |
+| Route transparency slash command | MEDIUM (trust signal) | LOW (read EE route decision log) | P2 |
+| Principle count in status bar | LOW (vanity metric until pipeline stable) | LOW | P2 |
+| taskType + outputStyle route extension | MEDIUM (precision) | LOW (type extension + EE routing logic) | P2 |
 
 ---
 
-## Competitor Feature Analysis
+## EE-Native vs HTTP-Wrapper Comparison
 
-Concrete comparison across reference competitors. Confidence: HIGH for table-stakes columns (publicly documented), MEDIUM for differentiators (some products don't disclose internals).
+| Capability | HTTP-Wrapper (current) | EE-Native (target) |
+|------------|------------------------|-------------------|
+| PIL hot-path latency | 5-8 HTTP round-trips per complex turn; ~200-400ms overhead | Direct function calls; <5ms overhead |
+| Layer 1 classification quality | Frozen at maintainer's regex/keyword list | Grows with EE's Ollama brain model |
+| PIL Layer 3 (EE injection) | Stub — `/api/search` does not exist | Functional after EE search endpoint lands |
+| Output style detection | Hardcoded regex; breaks on mixed code+Vietnamese | EE brain call; handles arbitrary language mix |
+| Route feedback loop | Two separate HTTP calls; state lost on crash | In-process object reference; crash-safe |
+| Auto-judge (PostToolUse → Feedback) | Fragile; depends on session state across HTTP | Deterministic; correlation is a code reference |
+| Logic duplication | Router heuristics duplicated in CLI + EE | Single source in EE; CLI imports functions |
+| Version contract | EE can update independently, breaking CLI | npm workspace lock; versions move together |
+| Graceful degradation | TCP error on localhost:8082 unreachable | try-catch on import; fail-open in-process |
+| Principle evolution observable | Requires polling EE for count | EE emits events; CLI subscribes synchronously |
 
-| Feature | Claude Code | Codex CLI | Aider | Cursor 2.0 | OpenCode | Cline | Amp | Letta Code | grok-cli (base) | **muonroi-cli (planned)** |
-|---------|:-----------:|:---------:|:-----:|:----------:|:--------:|:-----:|:---:|:----------:|:---------------:|:-------------------------:|
-| Tool-use loop | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| File edit / read / write | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Bash with confirmation | Yes | Yes | Yes (limited) | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Search (rg) | Yes | Yes | Yes (repo map) | Yes (semantic) | Yes | Yes | Yes | Yes | Yes | Yes |
-| Slash commands | Yes (55+) | Yes | Yes (`/diff` etc.) | Limited | Yes | Yes | Yes | Yes (`/skill` etc.) | Yes | Yes (GSD overlay) |
-| Streaming output | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Session resume | Yes | Yes (`codex resume`) | Yes (chat history) | Yes | Yes | Yes (workspace snapshots) | Yes (threads) | Yes (memory portable) | Yes (`--session latest`) | Yes (file-backed) |
-| BYOK / multi-provider | No (Anthropic only) | No (OpenAI only) | **Yes (full BYOM)** | No (vendor) | Yes (multi) | Yes (multi) | Yes (multi) | Yes (Claude/GPT/Gemini) | No (xAI only) | **Yes (5 providers)** |
-| Headless mode | Yes (`-p`) | Yes (non-interactive) | Yes (`--message`) | Yes (cloud agents) | Yes | Yes (CLI 2.0) | Yes | Yes | Yes (`--prompt`) | Yes |
-| MCP client | Yes (best-in-class) | Yes | No | Limited | Yes | Yes | Yes | Yes | Yes | Yes |
-| LSP integration | Yes | No | No | Via VSCode | Yes | Yes | Yes | Limited | Yes | Yes |
-| Hooks system | Yes (25 events) | Yes (5 events) | No | No | Limited | Yes | No | No | Yes (17+ events) | Yes (rewired to EE) |
-| Auto-compaction | Yes (auto + `/compact`) | Yes (auto + `/compact`) | No (manual `/clear`) | Yes (internal) | Yes | Yes (workspace snapshot) | Yes | Yes (context constitution) | Yes | **Deliberate (QC)** |
-| Cost / token visibility | Yes (`/cost`) | Yes (token counts) | Yes (context %) | Limited | Yes | Yes | Yes | Yes | Yes | **Realtime status bar + USD** |
-| Hard cap / budget enforcement | Soft thresholds | No | No | No | No | No | No | No | No | **Yes (default $15/mo + auto-downgrade)** |
-| Auto-downgrade chain | No | No | No | No | No | No | Mode-based (smart/rush/deep) | No | No | **Yes (Opus→Sonnet→Haiku→halt)** |
-| Per-call routing across providers | No (gateway only) | No | No | No | No | No | Mode-based | No | No | **Yes (3-tier)** |
-| Persistent learning from mistakes | No (memory only) | No | No | No | No | No | No | **Yes (skill learning)** | No | **Yes (EE principles)** |
-| Sub-agents / parallel agents | Yes (subagents) | No | No | **Yes (8 parallel)** | No | No | No | No | Yes (`task` + `delegate`) | Yes (inherited) |
-| Plan/Act mode separation | Via subagents | No | Yes (architect mode) | Yes (Composer) | No | **Yes (Plan/Act native)** | Yes (smart/rush/deep) | Yes (skills) | Limited | **Yes (GSD `/discuss`/`/plan`/`/execute`)** |
-| Repo map / codebase index | Read-on-demand | Read-on-demand | **Yes (graph-ranked)** | **Yes (semantic index)** | Read-on-demand | Read-on-demand | Yes | Yes (context repos) | Read-on-demand | Read-on-demand (P2 add) |
-| Auto-commit per edit | No | No | **Yes (signature)** | No | No | No | No | No | No | No (P2 if asked) |
-| Project instructions file | `CLAUDE.md` | `AGENTS.md` | `.aider.conf` | `.cursorrules` | `OPENCODE.md` | `.clinerules` | `AMP.md` | Letta-managed | `AGENTS.md` | `AGENTS.md` + `.muonroi-flow/` |
-| Cross-platform native | Yes | Yes (Codex hooks disabled on Windows — needs WSL) | Yes | Yes | Yes | Yes | Yes | Yes | Yes (terminal-recommended list) | Yes (hard constraint) |
-| Offline mode | No | No | Partial (with Ollama) | No | Partial (with Ollama) | No | No | No | No | **Yes (heavy logic offline-first)** |
-
-**Key takeaways from the matrix:**
-
-- **No competitor combines BYOK multi-provider + hard cap + persistent learning + deliberate compaction** in a single CLI. Each axis is covered by someone, never combined.
-- **Aider is the closest BYOK competitor** but lacks hooks, MCP, persistent learning, and modern TUI. We win on orchestration; Aider wins on git discipline.
-- **Letta Code is the closest learning competitor** but is memory-first (not router-first), single-vendor brain, and ships its own runtime. We win on cost routing and BYOK; Letta wins on memory depth (today).
-- **Claude Code is the closest UX bar** but is Anthropic-locked, has soft caps not hard caps, and treats memory as chat history. We win on lock-in, cost control, and learning persistence; Claude Code wins on subagent depth and MCP catalog.
-- **Cursor 2.0 is the closest "feels great" bar** but is fully cloud / IDE-bound. We win on terminal-native, BYOK, offline. Cursor wins on multi-agent parallelism (8 parallel via worktrees) — that is a v2 inspiration.
+**Confidence:** MEDIUM — latency numbers are extrapolated from same-host HTTP benchmarks (30-60% overhead reduction in-process); the exact muonroi-cli numbers will only be known after instrumentation in v1.1.
 
 ---
 
-## Gaps in Planned v1 Scope (Things We Should Add)
+## Competitor Context (EE-Native Pattern in the Wild)
 
-Surfaced from competitor analysis. None require additions — flagged for awareness, may become v1.x triggers.
+No leading coding CLI ships an "experience engine" concept with persistent principle evolution — this remains a genuine differentiator (confirmed in 2026-04-29 research). However, adjacent patterns in the ecosystem confirm the approach:
 
-1. **`/cost` slash command equivalent** — IDEA.md mentions a status bar but does not explicitly call out a `/cost` slash command. **Recommendation:** add `/cost` as a P1 slash command surface that prints the status bar contents on demand. Cost ~1 hour. It is what Claude Code users will type instinctively.
-
-2. **`/clear` and explicit `/compact` slash commands** — Codex and Claude Code both expose these. QC deliberate compaction needs operator-facing surfaces. **Recommendation:** map `/compact` to QC's checkpoint-digest + carry-forward writeup, and `/clear` to QC's relock flow. Already in QC's surface.
-
-3. **Aider-style auto-commit per edit** — Aider's signature feature. Not table stakes (Claude Code, Codex don't do it), but Aider users will miss it. **Recommendation:** keep as P2. Add only if it surfaces in beta feedback. Solo maintainer cannot afford to ship a parallel git workflow that may conflict with `gsd-commit` discipline.
-
-4. **Permission mode profile (`acceptEdits`, `dontAsk`, `bypassPermissions`)** — Claude Code has 6 modes, Cline has Plan/Act, Cursor has YOLO. grok-cli has confirmation gates but not named modes. **Recommendation:** Phase 3 polish — surface 3 named modes (`safe`, `auto-edit`, `yolo`) mapped onto existing approval gates. Half-day of work.
-
-5. **Codebase awareness messaging** — Cursor/Aider users will ask "does it know my codebase?" The honest answer is "EE principles + on-demand reads + repo evidence in QC plans." **Recommendation:** address in README "Why not Cursor?" comparison; do NOT build indexing in v1. Repo map is P2.
-
-6. **Public `/route` slash command for transparency** — let users see *why* the router picked tier X for a task. EE already has `/api/route-model`. **Recommendation:** P1.5 — surface the router decision in the TUI status bar (small badge: "🟢 hot / 🟡 warm / 🔴 cold + reason"). One-day cost. High trust value when users see "why is this slow / why is this expensive."
-
----
-
-## Overbuild Risks (Things to Cut or Watch)
-
-Flagged because the locked v1 scope or grok-cli inheritance may pull these in heavier than necessary.
-
-1. **GSD skill scope creep** — `/plan`, `/discuss`, `/execute` are listed. The full GSD surface (`/gsd-new-milestone`, `/gsd-transition`, `/gsd-verify-work`, etc.) is enormous. **Recommendation:** ship only the three locked commands in v1. Other GSD commands stay as advanced features behind a `--gsd` flag or require explicit `~/.agents/skills` install. Do not advertise them in the v1 README.
-
-2. **Sub-agents are inherited but should not be expanded in v1** — grok-cli ships `task`, `delegate`, `explore`, `general`, plus custom `subAgents`. **Recommendation:** keep them working (do not delete) but do NOT add new sub-agent types in v1. The differentiator pitch is router + EE + QC, not "more sub-agents than Claude Code." If someone wants 8 parallel agents, point them to Cursor 2.0.
-
-3. **MCP integration completeness** — the Claude Code MCP catalog is huge. Trying to ship a one-click MCP installer in v1 is a rabbit hole. **Recommendation:** v1 supports MCP via `.muonroi/settings.json` config (inherited from grok-cli's `.grok/settings.json`). No GUI installer, no curated catalog. Power users will configure manually.
-
-4. **Hook event surface** — grok-cli has 17+ hook events, Claude Code has 25. EE primarily uses PreToolUse, PostToolUse, Stop, UserPromptSubmit. **Recommendation:** v1 wires EE to those 4 events. Leave the rest functional but undocumented. Surface them only if users ask.
-
-5. **Daemon / scheduling preserved but unmarketed** — `src/daemon` is kept for potential schedule features. **Recommendation:** keep the code, do not market `/schedule` in v1 README. It is a v1.x feature.
-
-6. **Custom sub-agents config (grok-cli `subAgents` in user-settings)** — exists in fork base. **Recommendation:** keep working but do not document in v1. v1.x feature.
-
-7. **Verify mode (`grok --verify`)** — grok-cli ships sandbox-based "verify your app" with screenshots/video. **Recommendation:** delete or hide. Sandbox is macOS-Apple-Silicon only, conflicts with cross-platform constraint. The marketing surface is too rich for v1 to defend.
-
-8. **Image / video / media generation tools** — already in delete list but flagging because they share files with other code paths. **Recommendation:** verify deletion is clean and does not leave dead imports.
+- **Feedback-driven agent learning (2025):** Spotify's background coding agent ships an LLM-as-judge in the verification loop. SICA (Self-Improving Coding Agent) ships an async overseer that judges tool outcomes and flags deviations. Both confirm that PostToolUse auto-judge is a production pattern, not an academic concept. Confidence: HIGH.
+- **Local-first LLM router (2025-2026):** RouteLLM + Ollama pattern of classifying with a lightweight local model before dispatching to frontier is documented production practice. 7B router classifies in <300ms. Confirmed by Augment Code routing guide and multiple Ollama integration articles. Confidence: HIGH.
+- **In-process vs HTTP for local services (2025):** Same-host HTTP adds measurable latency; the fix is either gRPC (30% faster) or in-process library calls (eliminates the hop). Academic benchmarks (CEUR-WS, IPC study) and practitioner guides (MCP vs API guide) both confirm this. Confidence: MEDIUM (no muonroi-specific measurement).
+- **Intent classification at 3-5 categories for reliability:** Production agent routing literature consistently warns that >10 intent categories degrade classifier accuracy below 60% (BSWEN agent routing guide, 2026). muonroi-cli's 6 response tool types (+ respond_general = 7) are at the edge of this bound. Confirm the 7-category boundary does not degrade EE's Ollama hot-path classifier. Confidence: MEDIUM.
 
 ---
 
 ## Sources
 
-- [Claude Code Cheat Sheet 2026: Every Command, Shortcut & Feature](https://angelo-lima.fr/en/claude-code-cheatsheet-2026-update/) — 55+ slash commands, 25 hook events, 6 permission modes
-- [Claude Code Docs: Permissions](https://code.claude.com/docs/en/permissions) — permission mode reference
-- [Claude Code Docs: Subagents](https://code.claude.com/docs/en/sub-agents) — subagent isolation, memory scopes
-- [Claude Code Docs: MCP Setup Guide 2026](https://systemprompt.io/guides/claude-code-mcp-servers-extensions)
-- [OpenAI Codex CLI: Features](https://developers.openai.com/codex/cli/features) — slash commands, hooks, resume
-- [OpenAI Codex CLI: Hooks](https://developers.openai.com/codex/hooks) — PreToolUse / PostToolUse / PermissionRequest / UserPromptSubmit / Stop
-- [OpenAI Codex CLI: Resume sessions](https://inventivehq.com/knowledge-base/openai/how-to-resume-sessions)
-- [Aider docs: Repository map](https://aider.chat/docs/repomap.html) — graph-ranked context
-- [Aider docs: Prompt caching](https://aider.chat/docs/usage/caching.html) — Anthropic + DeepSeek cache support
-- [Aider docs: Git integration](https://aider.chat/docs/git.html) — auto-commit per edit
-- [Cursor 2.0 launch blog](https://cursor.com/blog/2-0) — Composer 2.0, 8 parallel agents via worktrees, semantic codebase index
-- [OpenCode docs: CLI](https://opencode.ai/docs/cli/), [Agents](https://opencode.ai/docs/agents/), [TUI](https://opencode.ai/docs/tui/) — multi-provider, MCP, LSP, sessions
-- [Cline: Plan and Act Modes](https://deepwiki.com/cline/cline/3.4-plan-and-act-modes) — read-only/execute mode separation
-- [Cline CLI 2.0 announcement](https://devops.com/cline-cli-2-0-turns-your-terminal-into-an-ai-agent-control-plane/)
-- [Continue.dev: Agent mode model setup](https://docs.continue.dev/ide-extensions/agent/model-setup) — multi-provider switching
-- [Sourcegraph Amp manual](https://ampcode.com/manual) — smart/rush/deep modes, multi-model
-- [Qwen Code overview](https://qwenlm.github.io/qwen-code-docs/en/users/overview/) — BYOK, multi-protocol providers
-- [Letta Code: memory-first coding agent](https://www.letta.com/blog/letta-code) — Skill Learning, Context Constitution
-- [Tembo: 2026 Guide to Coding CLI Tools (15 agents compared)](https://www.tembo.io/blog/coding-cli-tools-comparison)
-- [Builder.io: Codex vs Claude Code](https://www.builder.io/blog/codex-vs-claude-code)
-- [Northflank: Claude Code vs Codex 2026](https://northflank.com/blog/claude-code-vs-openai-codex)
-- [thoughts.jock.pl: AI Coding Harness 2026](https://thoughts.jock.pl/p/ai-coding-harness-agents-2026) — 6-way comparison
-- [MorphLLM: Claude Code Alternatives 2026 (11 tested)](https://www.morphllm.com/comparisons/claude-code-alternatives)
-- [Vantage: AI Cost Observability 2026](https://www.vantage.sh/blog/finops-for-ai-token-costs)
-- [MindStudio: Claude Code Token Budget Management](https://www.mindstudio.ai/blog/ai-agent-token-budget-management-claude-code) — soft thresholds, no hard cap
-- [Maxim: Bifrost AI Gateway for Codex](https://www.getmaxim.ai/articles/bifrost-ai-gateway-for-codex-cli-governance-cost-control-and-provider-flexibility-at-scale/) — gateway-side hard caps
-- [OpenRouter BYOK docs](https://openrouter.ai/docs/guides/overview/auth/byok) — 5% gateway fee for BYOK requests
-- [Letta vs Mem0 vs Zep vs Cognee](https://forum.letta.com/t/agent-memory-solutions-letta-vs-mem0-vs-zep-vs-cognee/85)
-- [grok-cli README](https://github.com/superagent-ai/grok-cli) (local fork base, read in source)
-- Local: `D:/sources/Core/muonroi-cli/IDEA.md`, `D:/sources/Core/muonroi-cli/.planning/PROJECT.md`
-- Local: `D:/sources/Core/experience-engine/README.md`, `D:/sources/Core/quick-codex/README.md`
+- [Augment Code: Best AI Model for Coding Agents — Model Routing Guide](https://www.augmentcode.com/guides/ai-model-routing-guide) — tiered routing, table stakes vs differentiators
+- [BSWEN: AI Agent Routing — Practical Guide with Intent Classification](https://docs.bswen.com/blog/2026-03-06-agent-routing/) — 3-5 category reliability warning, structured output routing
+- [Genta.dev: MCP vs API for AI Agents](https://genta.dev/resources/mcp-vs-api-ai-agents) — in-process SDK eliminates subprocess overhead, trust boundary analysis
+- [Spotify Engineering: Feedback Loops for Background Coding Agents](https://engineering.atspotify.com/2025/12/feedback-loops-background-coding-agents-part-3) — LLM-as-judge in PostToolUse verification loop, production confirmation
+- [arXiv: A Self-Improving Coding Agent (SICA)](https://arxiv.org/html/2504.15228v1) — async overseer judges tool outcomes, flags deviations, production pattern
+- [Medium: Implementing LLM Model Routing with Ollama and LiteLLM](https://medium.com/@michael.hannecke/implementing-llm-model-routing-a-practical-guide-with-ollama-and-litellm-b62c1562f50f) — 7B router classifies in <300ms, same-host tiering
+- [RouteLLM + Ollama routing to local models](https://github.com/lm-sys/RouteLLM/blob/main/examples/routing_to_local_models.md) — local-first hot-path pattern
+- [Nature/Scientific Reports: High performance microservice communication](https://www.nature.com/articles/s41598-023-39355-4) — gRPC 30% faster than REST for same-host; in-process fastest
+- [CEUR-WS: Evaluating IPC in Microservice Architectures](https://ceur-ws.org/Vol-2767/07-QuASoQ-2020.pdf) — HTTP overhead on same host, IPC comparison
+- Local: `D:/Personal/Core/muonroi-cli/.planning/PROJECT.md` — v1.1 target features, constraints, auto-judge requirement
 
 ---
-*Feature research for: BYOK AI coding agent CLI with EE+QC+GSD orchestration*
-*Researched: 2026-04-29*
+
+*Feature research for: EE-native CLI integration (v1.1 milestone delta)*
+*Researched: 2026-05-01*

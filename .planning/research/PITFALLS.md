@@ -1,10 +1,12 @@
 # Pitfalls Research
 
 **Domain:** BYOK AI coding agent CLI built by forking and amputating `grok-cli`, integrated with Experience Engine (Qdrant + EE server) and Quick Codex run-artifact system, distributed cross-platform with eventual SaaS billing layer.
-**Researched:** 2026-04-29
+**Researched:** 2026-04-29 (base) / 2026-05-01 (milestone v1.1 EE-Native CLI addendum)
 **Confidence:** HIGH for fork/BYOK/router/EE/QC dimensions (direct domain knowledge + verified sources). MEDIUM for Phase-4 SaaS pitfalls (forward-looking, less direct evidence). MEDIUM for cross-platform pitfalls (verified through GitHub issue threads on Bun/Ollama).
 
 This document catalogs failure modes specific to muonroi-cli's design — fork-and-amputate baseline, BYOK pricing, 3-tier brain router, Usage Guard, EE/QC integration, multi-platform shipping, and Phase-4 SaaS prep. Each entry is severity-ranked and phase-mapped so the roadmapper can prioritize prevention.
+
+The **v1.1 EE-Native CLI Milestone Addendum** (Pitfalls 31–42) is appended below the original pitfalls. It covers integration-specific failure modes that arise when importing `experience-core.js` (pure CJS, zero npm deps, Node 20+) directly into a Bun ESM codebase rather than via HTTP.
 
 ---
 
@@ -438,7 +440,7 @@ We ship muonroi-cli as `npm install -g muonroi-cli` (or equivalent). User on Win
 - macOS works, Windows doesn't, after a dependency bump
 
 **Phase to address:**
-**Phase 0** — fork validates Bun on Windows during initial cleanup. **Phase 3** — release polish includes the cross-platform CI matrix.
+**Phase 0** (validate) + **Phase 3** (CI matrix).
 
 ---
 
@@ -489,7 +491,7 @@ Deleting tests for deleted code feels destructive — easier to leave them and s
 - A real bug ships in code that has 100% line coverage (the tests test imports, not behavior)
 
 **Phase to address:**
-**Phase 0** — delete obsolete tests during fork cleanup. **Phase 3** — comprehensive test review during beta polish.
+**Phase 0** (delete obsolete tests) + **Phase 3** (comprehensive test review).
 
 ---
 
@@ -514,7 +516,7 @@ Provider pricing IS opaque and CAN change with short notice. Hardcoded pricing t
 - Drift between displayed cost and provider dashboard > 5%
 
 **Phase to address:**
-**Phase 1** — pricing-table abstraction is part of multi-provider adapter. Remote-fetch is a Phase 4 enhancement.
+**Phase 1** (pricing-table abstraction) + **Phase 4** (remote-fetch).
 
 ---
 
@@ -532,7 +534,6 @@ Beta launches. 100 users sign up. A bug surfaces (specific to a Bun version, or 
 - Issue templates that REQUIRE: OS, Bun version, muonroi-cli version, provider, redacted logs, reproduction steps
 - An automated bug-report bundle command: `muonroi-cli bug-report` collects all the above (with key redaction) into a paste-able blob
 - Diagnostic "self-check": `muonroi-cli doctor` runs known-issue heuristics (Bun on Windows? Ollama GPU? Stale dependency?) and reports
-- Public roadmap of known issues so users see "this is acknowledged"
 - Cap beta enrollment by gradient — 10 users week 1, 30 week 2, 100 by month 1; pause if response time blows out
 - Status page (even a simple `STATUS.md`) for outages
 
@@ -542,7 +543,7 @@ Beta launches. 100 users sign up. A bug surfaces (specific to a Bun version, or 
 - Maintainer burnout signals (response time growing, quality dropping)
 
 **Phase to address:**
-**Phase 3** — beta-prep is Phase 3. Issue templates and `doctor` command must ship with beta launch.
+**Phase 3** — beta-prep. Issue templates and `doctor` command must ship with beta launch.
 
 ---
 
@@ -689,7 +690,299 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 - Feedback API integration: when an injected hint is marked `followed: false`, principle confidence decays
 - Periodic store-pruning: principles below a confidence threshold and unmatched for 30 days are auto-archived
 
-**Phase:** Phase 1 (when EE PreToolUse hook is wired) for the confidence schema; Phase 2 for pruning logic.
+**Phase:** Phase 1 (confidence schema) + Phase 2 (pruning logic).
+
+---
+
+---
+
+# v1.1 EE-Native CLI Milestone Addendum
+
+**Milestone:** EE-Native CLI restructure — importing `experience-core.js` (pure CJS, zero npm deps, Node 20+) directly into a Bun ESM codebase, unifying config systems, sharing a Qdrant client, wiring a deterministic auto-judge feedback loop, and doing so without breaking EE's sidecar mode.
+**Researched:** 2026-05-01
+**Confidence:** HIGH for module-format and config pitfalls (verified in codebase + confirmed against Bun docs). MEDIUM for feedback-loop deadlock patterns (verified via ag2/Claude Code PostToolUse docs). MEDIUM for Qdrant client sharing (verified against Qdrant REST client design).
+
+---
+
+## Critical Pitfalls — EE-Native Integration
+
+### Pitfall 31: CJS `module.exports` shape is not the same as an ESM named export
+
+**What goes wrong:**
+`experience-core.js` uses `module.exports = { intercept, routeModel, routeFeedback, ... }` — a CJS object-bag export with 60+ functions. When an ESM file does `import { intercept } from './experience-core.js'`, Bun's CJS-in-ESM interop wraps the exports object as the default. Named import `{ intercept }` fails at runtime with `undefined` unless the CJS module explicitly sets `__esModule: true`, which `experience-core.js` does NOT do. The import silently succeeds at TypeScript compile time (because `esModuleInterop: true` is in tsconfig) but the destructured `intercept` is `undefined` at runtime.
+
+**Why it happens:**
+`esModuleInterop: true` in tsconfig makes TypeScript happy at compile time and adds a synthetic default wrapper. But at runtime in Bun, when you `import X from './foo.cjs'`, you get the `module.exports` object as `X`. When you `import { intercept } from './foo.cjs'` with no `__esModule`, Bun returns `undefined` for the named import because the CJS module has no live named export bindings — only a `module.exports` bag. The TypeScript types compile cleanly because they're generated from the shape, not from the runtime binding semantics.
+
+**How to avoid:**
+- Always import as default: `import coreModule from './experience-core.js'` then destructure in TS: `const { intercept, routeModel } = coreModule`
+- OR: write a thin ESM wrapper `src/ee/core-shim.ts` that does `import core from '../../experience-engine/.experience/experience-core.js'; export const { intercept, routeModel, routeFeedback } = core as typeof core;` — all call sites import from the shim
+- The shim approach is strongly preferred: it is the only stable boundary, it can be typed, and it is the place to version-guard if experience-core.js's export shape changes
+- Add a smoke test: `import { intercept } from './core-shim.js'; assert(typeof intercept === 'function')`
+
+**Warning signs:**
+- TypeScript compiles cleanly but `intercept(...)` throws `TypeError: intercept is not a function` at runtime
+- Destructured functions work at the module level but arrive as `undefined` inside an async function (module evaluation order issue)
+- `console.log(intercept)` in a test file prints `undefined` even though the import has no TS error
+
+**Phase to address:**
+**v1.1 Phase 1** — the CJS shim must be the very first thing created before any call sites are written.
+
+---
+
+### Pitfall 32: `experience-core.js` reads `~/.experience/config.json` at require-time; EE config and CLI config diverge silently
+
+**What goes wrong:**
+`experience-core.js` loads `~/.experience/config.json` as a singleton at module load time (verified in source: `loadConfig()` initializes on first `getConfig()` call with mtime-based cache). The CLI loads `~/.muonroi-cli/config.json` separately. The user sets the Qdrant URL in `~/.muonroi-cli/config.json` to point at their VPS (`http://72.61.127.154:6333`). `experience-core.js` still reads `~/.experience/config.json` where `qdrantUrl` defaults to `localhost:6333`. The CLI's Qdrant queries hit the VPS; EE's internal Qdrant queries hit localhost. Principles written by EE are in a different Qdrant instance than what the CLI reads. Data split — never surface-level visible, just wrong results.
+
+**Why it happens:**
+Two independently-designed config systems with no cross-reading protocol. The maintainer operates both and keeps them in sync manually; a user would not know to configure `~/.experience/config.json` separately. The EE config is loaded at `require()` time so it cannot be injected from the CLI config without a process-start hook.
+
+**How to avoid:**
+- At CLI startup, BEFORE requiring `experience-core.js`, read `~/.muonroi-cli/config.json` and write the EE-relevant fields (`qdrantUrl`, `qdrantKey`, `ollamaUrl`, `brainProvider`, `embedProvider`) to `~/.experience/config.json` — or set the corresponding `EXPERIENCE_*` env vars which `experience-core.js` reads as fallback
+- The env-var path is cleaner and avoids touching the user's EE config file from a different tool
+- Env vars are scoped to the process; no cross-contamination between EE-as-sidecar and CLI-as-direct-importer
+- Required env-var mapping: `EXPERIENCE_QDRANT_URL`, `EXPERIENCE_QDRANT_KEY`, `EXPERIENCE_OLLAMA_URL`, `EXPERIENCE_BRAIN_PROVIDER`, `EXPERIENCE_EMBED_PROVIDER` — all read by `cfgValue()` in `experience-core.js` as second-priority after config.json
+
+**Warning signs:**
+- `/health` returns Qdrant OK but CLI-side Qdrant queries return empty results (wrong instance)
+- Principle count visible in EE's `exp-stats` command doesn't match what the CLI shows for the same user
+- User sets a custom Qdrant URL in CLI config but EE still connects to localhost
+
+**Phase to address:**
+**v1.1 Phase 1** — config bootstrap must happen before the first `require()` of experience-core.js.
+
+---
+
+### Pitfall 33: Shared `@qdrant/js-client-rest` across EE and CLI creates dual-connection overhead and version mismatch risk
+
+**What goes wrong:**
+The CLI has `@qdrant/js-client-rest@1.17.0` in its `package.json`. `experience-core.js` uses Node's native `fetch` directly to call Qdrant REST endpoints — it has ZERO npm dependencies, verified in source. When the CLI's EE shim imports `experience-core.js` and ALSO creates its own `QdrantClient` instance for PIL Layer 3 searches, there are now TWO independent HTTP connection sets to the same Qdrant instance. This is not catastrophic, but it is wasteful (two keep-alive pools, two auth headers) and can cause subtle ordering issues if one client's write is not yet visible to the other client's immediate read.
+
+**Why it happens:**
+The CLI's `@qdrant/js-client-rest` was added to support PIL Layer 3 (`/api/search`) before the EE-native restructure was planned. Post-restructure, PIL Layer 3 can delegate to `experience-core.js`'s `searchCollection()` function directly, making the CLI's Qdrant client redundant for that path.
+
+**How to avoid:**
+- Post-restructure: remove the CLI's direct Qdrant client usage from PIL Layer 3 — route all Qdrant operations through `experience-core.js` functions
+- Keep `@qdrant/js-client-rest` in the CLI's `package.json` ONLY if there are CLI-exclusive Qdrant operations (there currently are none post-restructure)
+- If both clients must coexist temporarily, ensure they use the same `qdrantUrl` + `qdrantKey` by bootstrapping env vars before either is initialized
+- Write-then-read consistency: if the CLI writes via EE's `syncToQdrant` and then immediately reads via a CLI-side client, add a retry with 50ms backoff — Qdrant REST indexing is near-instantaneous but not synchronous
+
+**Warning signs:**
+- Qdrant REST connection count doubles unexpectedly (visible in server metrics)
+- A write via `experience-core.js` doesn't appear in a CLI-side `QdrantClient.search()` immediately after (ordering, not a race per se)
+- `package.json` has `@qdrant/js-client-rest` but no direct import in the codebase after restructure
+
+**Phase to address:**
+**v1.1 Phase 2** — after PIL Layer 3 is migrated to EE-native search. Remove the redundant CLI Qdrant client in the same PR.
+
+---
+
+### Pitfall 34: EE sidecar mode breaks if CLI modifies `~/.experience/config.json` or Qdrant data during an EE server session
+
+**What goes wrong:**
+EE runs as a sidecar at `localhost:8082`. CLI restructures to call `experience-core.js` directly and — to resolve Pitfall 32 — writes EE config fields to `~/.experience/config.json`. The EE sidecar has already loaded this config at startup and caches it with mtime-based invalidation. If the CLI overwrites the config with slightly different values (e.g., it normalizes the Qdrant URL from `localhost:6333` to `http://localhost:6333`), the next mtime-change triggers a config reload in the EE sidecar mid-session. The EE sidecar's internal Qdrant URL changes. In-flight requests complete against the old URL; new requests use the new URL. For a single-user local setup this is harmless, but if the CLI is writing `config.json` on every startup, this creates unnecessary config-file churn and mtime drift.
+
+**Why it happens:**
+The EE config file is a shared mutable resource. The CLI and the EE sidecar both read it. Writing it from the CLI — even with the same values — touches mtime and triggers a reload.
+
+**How to avoid:**
+- Use env vars (`EXPERIENCE_*`) for CLI-specific Qdrant overrides, NOT config file writes — env vars are process-scoped and invisible to the EE sidecar
+- If config-file writing is unavoidable, write only ONCE on first run and only if the value is different from what's already in the file — implement a "merge and write only on diff" pattern
+- The CLI must never overwrite EE config fields that the user set deliberately (e.g., `brainModel`, `embedModel`) — only inject fields that are missing
+- Document the config hierarchy clearly: EE config (`~/.experience/`) is EE-owned; CLI config (`~/.muonroi-cli/`) is CLI-owned; overlapping fields are bridged via env vars
+
+**Warning signs:**
+- EE sidecar logs show `config reloaded` timestamps matching CLI startup times
+- A user changes `brainModel` in `~/.experience/config.json` but the CLI overwrites it on next start
+- EE `/health` reports Qdrant OK but mid-session queries fail (URL was changed by CLI during sidecar session)
+
+**Phase to address:**
+**v1.1 Phase 1** — config bridge strategy must be decided before any code that writes `~/.experience/config.json`.
+
+---
+
+### Pitfall 35: Ollama cold-start latency (5-30s) blocks the orchestrator hot path during EE brain calls
+
+**What goes wrong:**
+EE's `classifyViaBrain()` calls Ollama to classify task intent. In the EE-native restructure, the CLI calls this function directly (no HTTP sidecar buffering). On first call after model idle timeout (Ollama default: 5 min), Ollama unloads and reloads the model. This cold-start takes 5-30s depending on model size and hardware. The orchestrator is blocked waiting for the classification result. The user's TUI appears frozen. If the existing 200ms PIL pipeline timeout fires first, the pipeline fails open — but the blocking call is still in progress in the background, consuming resources and eventually returning to nobody.
+
+**Why it happens:**
+Via the HTTP sidecar, the EE server had its own timeout budget and circuit breaker. When `experience-core.js` is called in-process, there is no HTTP circuit breaker. `classifyViaBrain()` makes an internal fetch to Ollama with no timeout — or with Ollama's default 30s request timeout which is far too long for a hot path.
+
+**How to avoid:**
+- Wrap ALL `experience-core.js` brain calls with `AbortSignal.timeout(N)` where N matches the calling layer's budget: 200ms for PIL hot path, 2s for router warm path, 10s for async judge
+- The EE-native shim `src/ee/core-shim.ts` must expose timeout-aware wrappers, not bare function re-exports
+- Example pattern: `export async function classifyViaBrainWithTimeout(text: string, timeoutMs: number): Promise<ClassifyResult | null> { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeoutMs); try { return await core.classifyViaBrain(text, { signal: controller.signal }); } catch { return null; } finally { clearTimeout(timer); } }`
+- If `classifyViaBrain` does not accept an AbortSignal, wrap with `Promise.race([call(), rejectAfter(timeoutMs)])`
+- Warm the Ollama model at CLI startup (send a no-op generation request) to avoid cold-start on the first real call
+
+**Warning signs:**
+- PIL pipeline regularly exceeds its 200ms budget and fails open — Ollama classification is blocking
+- TUI spinner appears frozen for >1s during initial prompt processing
+- `classifyViaBrain` returns a result after the pipeline timeout fired — the background call completed but the result was discarded
+
+**Phase to address:**
+**v1.1 Phase 1** — every EE brain call must have an explicit timeout before the first end-to-end test.
+
+---
+
+### Pitfall 36: Auto-judge feedback loop deadlocks when PostToolUse fires during an active EE function call
+
+**What goes wrong:**
+The auto-judge is designed as fire-and-forget: `fireFeedback()` in `src/ee/judge.ts` calls `client.feedback()` which hits `/api/feedback`. Post-restructure, if `fireFeedback()` calls `experience-core.js` functions directly (e.g., `recordFeedback()`), and `recordFeedback()` internally calls Qdrant, and the Qdrant call is concurrent with an active `intercept()` call that also has a Qdrant call in flight, there is NO deadlock at the JavaScript level (event loop is single-threaded, no mutex). However, there IS a logical race: the feedback for tool call N fires before the `posttool` call for tool call N completes, which means `reconcilePendingHints()` inside EE may run with stale state for N while N's judgment is being written. This produces a corrupted reconciliation — the principle's hit count is incremented, but the follow-count is credited to the PREVIOUS tool call's matches.
+
+**Why it happens:**
+The EE sidecar design serialized these operations via HTTP: `posttool` request body = all context needed; `feedback` request body = just the verdict. In-process, the calls share mutable in-memory state (last-suggestions cache) that the sidecar kept in a file (`last-suggestions.json`). The file-based design was intentionally single-writer (only `interceptor.js` writes, only `interceptor-post.js` reads). In-process, if `intercept()` and `fireFeedback()` run in overlapping async microtask turns, the ordering guarantee disappears.
+
+**How to avoid:**
+- Preserve the sidecar's serialization contract: `fireFeedback()` MUST NOT be called until `posttool()` has resolved. In the orchestrator, enforce: `await posttool(...)` completes before `fireFeedback()` is invoked. This is already the correct order in `src/ee/posttool.ts` — verify that no code paths fire feedback before posttool.
+- Do NOT convert fire-and-forget to in-process synchronous calls — keep them fire-and-forget via `Promise.resolve().then(() => fireFeedback(...))` (next microtask tick) to maintain ordering guarantee
+- Write a test: tool call → posttool → assert feedback fires AFTER posttool resolves, not before
+- The `last-suggestions.json` file state machine should be replaced in-process with an equivalent in-memory `Map<callId, InterceptResponse>` with explicit lifecycle: set on intercept, read+delete on judge
+
+**Warning signs:**
+- Principle hit counts grow faster than expected (feedback fires before posttool state is cleared)
+- Judge classification is consistently `IRRELEVANT` even for known-firing principles (the match context was cleared before judge ran)
+- Two rapid tool calls show inverted feedback ordering in the EE activity log
+
+**Phase to address:**
+**v1.1 Phase 2** — when the full EE hook pipeline (PreToolUse → PostToolUse → Judge → Feedback → Touch) is being verified end-to-end.
+
+---
+
+## Moderate Pitfalls — EE-Native Integration
+
+### Pitfall 37: `__dirname` and synchronous `require()` in `experience-core.js` behave differently under Bun than under Node
+
+**What goes wrong:**
+`experience-core.js` uses `const fs = require('fs')`, `const path = require('path')`, and dynamic `require(crypto).randomUUID()` patterns. In Bun's CJS-in-ESM interop layer, these all work — Bun supports `require()` from ESM context and provides the Node builtins. However, Bun's `__dirname` in a CJS module loaded from an ESM entry point resolves relative to Bun's virtual bundle root, not the physical file path. If `experience-core.js` ever uses `__dirname` to build a path to adjacent files (e.g., `path.join(__dirname, 'judge-worker.js')`), the path resolves incorrectly and `spawn` fails silently on Windows.
+
+**Why it happens:**
+Bun's module resolution differs from Node's for CJS files loaded via `import()`. The `__dirname` value inside a CJS module loaded from an ESM context is implementation-defined in Bun — it typically matches the physical file path but Bun's behavior here is less well-documented than Node's. The judge-worker spawn path in `experience-core.js` (verified: uses `EXP_DIR = path.join(os.homedir(), '.experience')` not `__dirname`) is OK. But any NEW code added to the shim that tries to spawn from `__dirname` will break.
+
+**How to avoid:**
+- In the ESM shim (`src/ee/core-shim.ts`), never use `__dirname` to reference EE source files — always use `path.join(os.homedir(), '.experience', 'filename.js')` which is what EE itself uses
+- For any spawn of Node workers from the CLI, use `process.execPath` (Node binary path from Bun) — Bun sets this correctly for spawned Node processes
+- Smoke test: after loading the shim, verify that `experience-core.js`'s internal spawn of `judge-worker.js` resolves to an existing file path
+
+**Warning signs:**
+- `judge-worker.js` never runs (no feedback recorded) but no error is thrown — path resolution silently pointed nowhere
+- Windows CI passes but macOS fails (or vice versa) after adding any `__dirname`-based path in shim code
+- EE activity log shows `op: hook, hook: interceptor-post` entries but no corresponding judge outcomes
+
+**Phase to address:**
+**v1.1 Phase 1** — verify in smoke test immediately after wiring the shim.
+
+---
+
+### Pitfall 38: Bun's `node:child_process.spawn` with `detached: true` may not fully detach on Windows
+
+**What goes wrong:**
+`experience-core.js`'s judge worker is spawned detached via `spawn(process.execPath, [judgeWorkerPath], { detached: true, stdio: 'ignore' })`. On Linux/macOS, detached + `unref()` means the judge worker outlives the CLI process without issue. On Windows, Bun's `detached` implementation sets `UV_PROCESS_DETACHED` but there are known Bun issues with spawned processes keeping the parent alive if stdio is not fully closed. If the judge worker inherits a stdio handle from the CLI process, the CLI process may not exit cleanly on Windows.
+
+**Why it happens:**
+Bun's Windows process model is less mature than Linux. The Node.js Windows `detached: true` behavior itself has known quirks (GitHub issue 51018 in nodejs/node). `experience-core.js` uses `stdio: ['ignore', 'ignore', 'ignore']` which is correct, but if the Bun shim wraps the spawn, that `stdio` config may not be passed through cleanly.
+
+**How to avoid:**
+- Do not re-implement the judge worker spawn in the CLI shim — use `experience-core.js`'s existing spawn logic by calling its exported functions directly (e.g., `syncToQdrant()`, `recordFeedback()`) rather than re-spawning judge-worker.js
+- If the spawn path is kept, explicitly test on Windows: start CLI, trigger a tool call with a matching principle, observe that the CLI exits within 500ms of the last tool call (no process-hanging)
+- `muonroi-cli doctor` should check for orphaned judge-worker.js processes on Windows and offer to kill them
+
+**Warning signs:**
+- CLI hangs after all work completes on Windows (judge worker holding stdin/stdout)
+- On Windows, `tasklist | findstr node` shows a node.exe process outliving the CLI after exit
+- Users report `Ctrl+C` not killing the CLI on Windows when EE is active
+
+**Phase to address:**
+**v1.1 Phase 1** — verify Windows spawn behavior in the smoke test suite.
+
+---
+
+### Pitfall 39: Routing feedback loop (`routeFeedback`) called with wrong `taskType` corrupts EE router training data
+
+**What goes wrong:**
+The v1.1 milestone requires: "Route feedback loop wired (every turn feeds outcome to EE for continuous learning)." The `routeFeedback(request)` function in `experience-core.js` expects `{ taskType, outputStyle, modelUsed, outcome }`. If the CLI sends `taskType` from PIL Layer 1's regex-based classification (which uses 9 values: `generate`, `debug`, `refactor`, etc.) but EE's router expects the raw model-tier classification (`premium`, `balanced`, `lite`), the feedback accumulates against wrong categories. The router's learning data is polluted — it optimizes for the wrong signal.
+
+**Why it happens:**
+PIL Layer 1 and EE's `routeTask` use DIFFERENT classification ontologies. EE's router was designed around the `premium/balanced/lite` tier system. PIL was designed around task type (`generate`, `refactor`, etc.). The bridge between them is not formally specified.
+
+**How to avoid:**
+- Read `experience-core.js`'s `routeTask` and `routeFeedback` function signatures and expected payload shapes BEFORE writing the bridge code
+- Map PIL `taskType` → EE router tier explicitly: `generate/refactor/debug → premium`, `analyze/documentation/plan → balanced`, `low-confidence → lite`
+- The mapping must be a named function `pilTaskTypeToEETier(taskType: TaskType): 'premium' | 'balanced' | 'lite'` in `src/ee/core-shim.ts` — not inline at call sites
+- Write a test: feed 10 known prompts through PIL → `routeTask` → `routeFeedback` and assert the tier distribution is plausible
+
+**Warning signs:**
+- EE router stats show 90%+ of calls as `premium` even for trivial prompts (mapping is wrong — defaulting everything to top tier)
+- `routeTask` responses stop differentiating task types over time (router learned a trivially-uniform distribution)
+- CLI routes most prompts to cold-path even after feedback training should have improved warm-path confidence
+
+**Phase to address:**
+**v1.1 Phase 2** — when route feedback loop is wired.
+
+---
+
+### Pitfall 40: `experience-core.js` uses native `fetch` (Node 20 built-in) which may conflict with Bun's global `fetch` polyfill
+
+**What goes wrong:**
+`experience-core.js` calls the global `fetch` directly (no import) — relying on Node 20's native `fetch`. In Bun's ESM/CJS hybrid context, the `fetch` that `experience-core.js` sees when loaded as a CJS module-in-ESM is Bun's own `fetch` implementation. Bun's `fetch` is generally a superset of the Web Fetch API, but there are subtle behavioral differences: Bun's `fetch` does not always respect `AbortSignal` cancellation on Windows in the same way Node does; Bun's `fetch` error shapes differ (e.g., `TypeError: Failed to fetch` vs Node's `FetchError` with `.cause`). If `experience-core.js` checks `err.cause?.code === 'ECONNREFUSED'` to detect a down Qdrant instance, this check may fail silently in Bun.
+
+**Why it happens:**
+`experience-core.js` was written for Node 20 native fetch. Bun's global fetch is a different implementation. In Node, `fetch` on a refused connection throws `TypeError { cause: { code: 'ECONNREFUSED' } }`. In Bun, the error shape is different — `err.message` may contain the code instead.
+
+**How to avoid:**
+- In the EE shim, after importing `experience-core.js`, run a connectivity test: call `searchCollection('principles', 'test', 1)` and verify the result OR the error is a known shape
+- If `experience-core.js` wraps Qdrant/Ollama errors and re-throws them, read those catch paths and verify they don't rely on Node-specific error properties
+- Log the raw `err` object from failed EE calls during development to identify any shape mismatches before they become silent bugs
+
+**Warning signs:**
+- EE functions silently return empty results when Qdrant is down instead of throwing (error swallowed due to shape mismatch)
+- `experience-core.js` always reports Qdrant as healthy even when it's not (health check has wrong error parsing)
+- Timeout behavior differs between local dev (Node) and CI (Bun) — flaky tests that pass on one runtime and fail on the other
+
+**Phase to address:**
+**v1.1 Phase 1** — verify error shapes in smoke tests for Qdrant-down and Ollama-down scenarios.
+
+---
+
+## Minor Pitfalls — EE-Native Integration
+
+### Pitfall 41: Module evaluation order: `experience-core.js` may read `~/.experience/config.json` before CLI sets env vars
+
+**What goes wrong:**
+If any import in the CLI's module graph triggers evaluation of `experience-core.js` before `src/index.ts` has set `process.env.EXPERIENCE_*`, the EE module initializes with stale or default config. This is a JavaScript module evaluation order problem: dynamic `import()` controls evaluation order; static `import` at the top of a module may evaluate before user code runs.
+
+**How to avoid:**
+- Ensure `experience-core.js` is imported via dynamic `import()` AFTER env vars are set in the CLI startup sequence
+- The EE shim module (`src/ee/core-shim.ts`) must be dynamically imported, not statically imported at module top-level
+- Verify: add a startup log that prints `EXPERIENCE_QDRANT_URL` before and after the EE shim loads
+
+**Warning signs:**
+- EE connects to `localhost:6333` even though the CLI's config says otherwise (env was set too late)
+- Changing env vars via `process.env.EXPERIENCE_QDRANT_URL = 'http://...'` after the shim module loads has no effect (mtime cache was already initialized)
+
+**Phase to address:**
+**v1.1 Phase 1** — startup sequence must be explicitly ordered.
+
+---
+
+### Pitfall 42: `respond_general` response tool falls back to chat for ALL non-6-type tasks, inflating token usage
+
+**What goes wrong:**
+The v1.1 target requires `respond_general` as a catch-all for tasks the 6-type classifier doesn't cover. If the classifier confidence is low and `respond_general` is chosen, and `respond_general` makes a full LLM call without checking if the task was trivial (e.g., "what year is it?"), every low-confidence classification becomes an expensive cold-path call.
+
+**How to avoid:**
+- `respond_general` must still use the router tier — it is not automatically cold-path
+- For very low confidence + very short prompts, prefer a "echo and let the model decide" path rather than a dedicated tool call
+- Track `respond_general` call rate; if >20% of all calls go through it, the classifier needs improvement
+
+**Warning signs:**
+- `respond_general` call rate >20% (classifier is failing, not catching edge cases)
+- Token usage spikes after wiring `respond_general` — catch-all is being over-triggered
+
+**Phase to address:**
+**v1.1 Phase 2** — after classifier is improved with EE brain intent detection.
 
 ---
 
@@ -706,6 +999,9 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 | Naive cap-counter (no reservation ledger) | Faster Usage Guard ship | First runaway tool loop overshoots cap | Never — Phase 0 deliverable per IDEA constraint |
 | Tests inherited from grok-cli left in place | Free coverage number | False confidence; real bugs ship | Never — delete during fork cleanup |
 | AI SDK direct calls without adapter | Faster Phase 0 (skip adapter for hardcoded Anthropic) | AI SDK v7 migration touches 50+ files | Acceptable for Phase 0 single-provider only; Phase 1 MUST introduce adapter |
+| Import `experience-core.js` as named exports without a shim | Saves one abstraction layer | Named imports are `undefined` at runtime; TypeScript masks the error | Never — shim is the only stable boundary |
+| Write `~/.experience/config.json` from the CLI to bridge configs | Simple one-file approach | Overwrites user's EE config, breaks EE sidecar mid-session | Never — use env vars instead |
+| Skip timeout wrapping on EE brain calls | Simplifies shim code | First Ollama cold-start blocks the orchestrator for 30s | Never — every brain call must have an explicit timeout |
 
 ---
 
@@ -726,6 +1022,11 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 | OS Keychain | Assume `keytar` works on all platforms identically | macOS Keychain, Windows Credential Manager, libsecret on Linux — each has quirks; fallback to encrypted file |
 | MCP client | Assume servers all behave identically | MCP servers vary in spec compliance; adapter must tolerate non-conformance |
 | LSP | Forward stderr to user terminal | Capture LSP stderr separately; only show user-actionable diagnostics |
+| `experience-core.js` CJS | Named ESM imports (`import { intercept }`) | Default import + destructure: `import core from '...'; const { intercept } = core` |
+| `experience-core.js` config | Writing `~/.experience/config.json` from CLI | Set `EXPERIENCE_*` env vars before requiring the module |
+| `experience-core.js` brain calls | No timeout wrapper on direct in-process calls | Wrap every brain call with `AbortSignal.timeout(N)` matching the calling layer's budget |
+| EE + CLI Qdrant clients | Two independent `QdrantClient` instances | Route all Qdrant ops through `experience-core.js` functions; remove CLI-side client |
+| PostToolUse judge | Fire feedback before posttool resolves | `await posttool(...)` THEN fire feedback — ordering is required by EE's state machine |
 
 ---
 
@@ -742,6 +1043,8 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 | Reservation ledger not bounded in size | Memory grows over multi-hour sessions | TTL old reservations; reconcile on disk periodically | 8+ hour sessions per IDEA success metric |
 | Provider HTTP client creating new TLS connection per call | Latency floor +50-100ms on every call | Keep-alive + connection pool per provider | Realistic usage (>50 calls/session) |
 | Token counter recomputing entire history on each call | Linear-time growth per turn | Incremental accumulator | Sessions >100 turns |
+| EE brain call without timeout on Ollama cold-start | PIL pipeline blocks for 5-30s | `AbortSignal.timeout(200)` on PIL hot path, `AbortSignal.timeout(2000)` on router | First call after 5-min model idle — common in interactive use |
+| Two Qdrant connection pools (CLI + EE) | Double connection overhead; ordering race on write-then-read | Remove CLI-side Qdrant client after EE-native restructure | Immediately post-restructure if not cleaned up |
 
 ---
 
@@ -759,7 +1062,7 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 | Principle store readable by other users on shared filesystem | Principles often contain code/paths/PII | Mode `0700` on `~/.muonroi/`; encrypted at rest for sensitive payloads |
 | MCP server allowed unrestricted file access | A malicious MCP server reads `~/.ssh/` | MCP server permissions configurable; deny by default; user opt-in |
 | Token telemetry sent to our server with PII | GDPR violation | If telemetry is added, opt-in only; never include prompt content; document data flows |
-| User clipboard auto-copied with key prefix | Clipboard sniffer (other apps) reads it | Never auto-copy keys; explicit confirm only |
+| Setting `EXPERIENCE_*` env vars globally in user shell | Env var leak to other tools that also use `experience-core.js` | Set env vars on the CLI process only (`process.env.X = Y` before `import()`) — never document `export EXPERIENCE_*` in shell config |
 
 ---
 
@@ -775,7 +1078,6 @@ Cold-path judge worker auto-generates principles from hot-path A/B failures. Som
 | Compaction warning that doesn't say what was lost | User can't trust resumed sessions | "Compacted 12 turns into summary; full history at .muonroi-flow/history/N.md" |
 | Cross-platform assumptions (UNIX paths in error messages) | Windows users see `/tmp/foo` and don't know what to do | Path messages use OS-native form; error docs cross-referenced |
 | Untranslated error messages from providers | "rate_limit_exceeded" with no friendly explanation | Wrap provider errors with friendly text + actionable advice |
-| Beta-tester reports in Vietnamese / non-English ignored | Solo maintainer is Vietnamese, but issues come in English-only template | Template accepts both; auto-translate where helpful |
 | TUI hangs without indicator during cold-path latency | User thinks the CLI crashed | Spinner / progress indicator on every >300ms operation |
 | First-run config asks for ALL keys upfront | New user friction; abandons setup | Config is incremental — start with one provider, add more as needed |
 
@@ -793,11 +1095,13 @@ Verification gates to run before declaring a feature complete.
 - [ ] **Key redaction:** Often missing — coverage of all log paths. Verify: `grep -r "console.log\|IMLog\|log\." src/` then audit each hit; force-trigger every error path and inspect outputs.
 - [ ] **Stripe webhook:** Often missing — idempotency check before side effects. Verify: replay the same Stripe event 5 times via `stripe listen`; user state changes exactly once.
 - [ ] **Migration local→cloud:** Often missing — resumability; partial-failure leaves user stuck. Verify: kill migration mid-run; restart; verify final state matches a complete run.
-- [ ] **Routing decision telemetry:** Often missing — visibility into WHY a call was routed where. Verify: every call has a structured log entry with `tier=hot|warm|cold`, `reason=...`, `confidence=...`.
 - [ ] **Session resume:** Often missing — abort handling; pending tool calls leave dangling state. Verify: kill CLI mid-tool-call; restart; pending tool calls are reconciled, not silently retried.
 - [ ] **License attribution:** Often missing — `LICENSE-grok-cli` retained, README acknowledgment. Verify: run `licensee` scanner; manually grep for "Vibe Kit" reference.
-- [ ] **Error envelope:** Often missing — provider 429/401/500 surfaced with actionable advice. Verify: trigger each error class via mocking; user sees explanation + next step, not opaque dump.
 - [ ] **Doctor command:** Often missing — pre-empts known-issue support tickets. Verify: `muonroi-cli doctor` detects: Bun version, OS, key presence, Ollama health, Qdrant health, recent error rate.
+- [ ] **EE-native shim named export smoke test:** Often missing — TypeScript compiles but runtime has `undefined`. Verify: `assert(typeof intercept === 'function')` in a headless test before any call site uses the shim.
+- [ ] **EE config bridge via env vars:** Often missing — config written to `~/.experience/config.json` overwrites user's EE settings. Verify: start CLI with custom Qdrant URL, confirm EE uses that URL, confirm `~/.experience/config.json` is unchanged.
+- [ ] **PostToolUse → Judge ordering:** Often missing — feedback fires before posttool state resolves. Verify: instrument `posttool` and `fireFeedback` with timestamps; assert feedback always fires AFTER posttool completes.
+- [ ] **Ollama cold-start timeout:** Often missing — first PIL pipeline call after 5min idle hangs. Verify: wait 6min with model loaded, trigger intent classification, assert response arrives in <200ms (timeout fires) and pipeline does not block.
 
 ---
 
@@ -815,13 +1119,12 @@ When pitfalls happen despite prevention.
 | Compaction lost critical decision | LOW-MEDIUM | User restores from `.muonroi-flow/history/` (full chat preserved); document the failure mode for next compaction improvement |
 | Stale principle injected wrong warning | LOW | User marks principle unhelpful via feedback API; principle decays in confidence; next match suppressed |
 | Warm-path Ollama VPS down | LOW-MEDIUM | Health-check should auto-fallback to cold-path; if not, manual config flag; investigate VPS root cause separately |
-| Auto-downgrade caused user-visible regression | MEDIUM | Surface a "switch back to Opus" button at 100% threshold breach; refund operating cost for that user as goodwill |
-| Streaming abort left half-written file | LOW | `.tmp` files identifiable by suffix; doctor command cleans them; user prompted on next run |
+| EE shim named imports are `undefined` | LOW | Add default-import + destructure; re-run smoke test; no data loss |
+| EE config bridge overwrites user's EE settings | MEDIUM | Restore `~/.experience/config.json` from user backup; switch bridge to env-var approach; document the incident |
+| Feedback fires before posttool state resolves | LOW | Add `await posttool(...)` before `fireFeedback()`; re-run e2e test; existing corrupted feedback entries self-correct over time via hit accumulation |
+| Ollama cold-start blocks orchestrator | LOW | Add `AbortSignal.timeout(200)` to brain call; add Ollama warm-up on CLI startup; no data loss |
 | AI SDK breaking change post-pin | MEDIUM-HIGH | Migration guide + codemod; phased rollout (canary → all users); patch release |
-| License attribution found missing | MEDIUM | Restore `LICENSE-grok-cli`; public acknowledgment; CI check added |
 | Solo-maintainer support overload | MEDIUM | Pause new beta enrollment; triage queue with templates; consider hiring or community moderation |
-| Provider deprecated API mid-flight | MEDIUM | Adapter swap to new endpoint; release patch; deprecation runway gives 6 months usually |
-| Cursor/Claude Code shipped same feature | STRATEGIC | Lean into BYOK + multi-provider + offline-first differentiation; ship faster on remaining differentiators |
 
 ---
 
@@ -861,41 +1164,45 @@ How roadmap phases should address these pitfalls.
 | 28 | Provider API deprecation | LOW | Phase 1 (adapter) | Adapter has version-pinned endpoint mapping per provider |
 | 29 | OSS competitor on principles | STRATEGIC | Always | Pro tier value > just persistent memory |
 | 30 | Junk principles pollute | LOW | Phase 1 (schema) + Phase 2 (pruning) | Confidence schema present; periodic prune job |
+| 31 | CJS named export undefined at runtime | HIGH | v1.1 Phase 1 | `typeof intercept === 'function'` smoke test passes |
+| 32 | EE + CLI config diverge silently | HIGH | v1.1 Phase 1 | CLI with custom Qdrant URL — EE uses same URL; `~/.experience/config.json` unchanged |
+| 33 | Dual Qdrant connection pools | MEDIUM | v1.1 Phase 2 | No duplicate `QdrantClient` instances after PIL Layer 3 migration |
+| 34 | EE sidecar breaks from CLI config writes | HIGH | v1.1 Phase 1 | EE sidecar session uninterrupted after CLI startup |
+| 35 | Ollama cold-start blocks hot path | HIGH | v1.1 Phase 1 | PIL pipeline completes in <200ms even after 6-min model idle |
+| 36 | Auto-judge deadlock / ordering race | MEDIUM | v1.1 Phase 2 | Feedback timestamps always after posttool timestamps in activity log |
+| 37 | `__dirname` mismatch in CJS-in-ESM | MEDIUM | v1.1 Phase 1 | Judge-worker spawn resolves to existing file on Windows |
+| 38 | Detached spawn not fully detached on Windows | MEDIUM | v1.1 Phase 1 | CLI exits within 500ms on Windows after last tool call |
+| 39 | Wrong `taskType` in routing feedback | MEDIUM | v1.1 Phase 2 | Router tier distribution is plausible across 10 test prompts |
+| 40 | Bun fetch error shape differs from Node | MEDIUM | v1.1 Phase 1 | Qdrant-down and Ollama-down error paths produce correct logs in Bun |
+| 41 | Module evaluation order fires EE before env vars set | LOW | v1.1 Phase 1 | Dynamic `import()` of shim is after env var setup in startup sequence |
+| 42 | `respond_general` over-triggered | LOW | v1.1 Phase 2 | `respond_general` call rate <20% in test suite across 50 prompts |
 
 ---
 
 ## Sources
 
 **Direct domain knowledge (HIGH confidence):**
-- `D:/sources/Core/muonroi-cli/IDEA.md` — locked architectural decisions, hard constraints
-- `D:/sources/Core/muonroi-cli/.planning/PROJECT.md` — requirement set, success metrics
-- User memory `MEMORY.md` — Experience Engine v3.2 state, IMLog rule, multi-repo workspace, library-first principles
-- CLAUDE.md global directives — hooks, feedback API, behavioral rules
+- `D:/Personal/Core/muonroi-cli/.planning/PROJECT.md` — requirement set, success metrics, milestone v1.1 goal
+- `D:/Personal/Core/muonroi-cli/src/ee/` — existing HTTP client, judge, posttool, intercept, types
+- `D:/Personal/Core/muonroi-cli/src/pil/` — pipeline, layer1-intent, layer3-ee-injection, layer6-output
+- `D:/Personal/Core/muonroi-cli/src/storage/config.ts` — `~/.muonroi-cli/config.json` ownership
+- `D:/Personal/Core/experience-engine/.experience/experience-core.js` — CJS exports, config loading, Qdrant calls, judge-worker spawn
+- `D:/Personal/Core/experience-engine/.experience/interceptor-post.js` — PostToolUse hook, file-based state, judge-worker detached spawn
+- `D:/Personal/Core/experience-engine/server.js` — EE sidecar endpoints, config loading at startup
+- `D:/Personal/Core/experience-engine/package.json` — `"type": "commonjs"`, zero npm dependencies
 
 **Verified via WebSearch (MEDIUM confidence, multiple sources agree):**
-- [Bun SQLite — Bun docs](https://bun.com/docs/runtime/sqlite) — `bun:sqlite` is preferred over `better-sqlite3` for ABI compatibility
-- [Bun better-sqlite3 ABI mismatch — GitHub Issue #319](https://github.com/tobi/qmd/issues/319) — NODE_MODULE_VERSION 141 mismatch on Windows
-- [Bun better-sqlite3 crash — GitHub Issue #24956](https://github.com/oven-sh/bun/issues/24956) — Windows-specific failure mode
-- [Bun Windows path support — GitHub Issue #22002](https://github.com/oven-sh/bun/issues/22002) — Windows Server quirks
-- [AI SDK 6 migration guide — Vercel](https://ai-sdk.dev/docs/migration-guides/migration-guide-6-0) — `ToolCallOptions` rename, async `convertToModelMessages`
-- [AI SDK 6 announcement — Vercel](https://vercel.com/blog/ai-sdk-6) — release shape and breaking changes
-- [AI SDK v7 issue tracker — GitHub Issue #14011](https://github.com/vercel/ai/issues/14011) — forthcoming changes
-- [OpenAI API key safety best practices](https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety) — env var leak risks
-- [Smallstep CLI secrets handling guide](https://smallstep.com/blog/command-line-secrets/) — env var/shell-history leak vectors
-- [Stripe webhooks — duplicate handling](https://www.duncanmackenzie.net/blog/handling-duplicate-stripe-events/) — at-least-once delivery semantics
-- [Stripe webhook idempotency guide — Hookdeck](https://hookdeck.com/webhooks/guides/implement-webhook-idempotency) — `processed_events` table pattern
-- [Why Stripe webhooks silently fail — DEV.to](https://dev.to/jordan_sterchele/why-your-stripe-webhooks-are-silently-failing-and-how-to-fix-all-of-it-aio) — timeout retries
-- [Qdrant multi-tenancy docs](https://qdrant.tech/documentation/manage-data/multitenancy/) — payload-based partitioning pattern
-- [Qdrant tiered multi-tenancy — 1.16 release](https://qdrant.tech/blog/qdrant-1.16.x/) — dedicated shards for large tenants, hard isolation
-- [Qdrant data residency — multitenancy article](https://qdrant.tech/articles/multitenancy/) — region-based custom sharding
-- [Ollama Windows GPU detection — GitHub Issue #13338](https://github.com/ollama/ollama/issues/13338) — RTX 5090 detection failures
-- [Ollama Windows CPU fallback — GitHub Issue #12618](https://github.com/ollama/ollama/issues/12618) — silent fallback to CPU
-- [Ollama hardware support docs](https://docs.ollama.com/gpu) — driver-install ordering matters
-
-**Strategic/forward-looking (MEDIUM-LOW confidence — judgment-based):**
-- Pitfalls 27, 29 (competitive landscape) — informed by IDEA's "Why not Cursor" framing; cannot be empirically verified
+- [Bun module resolution docs](https://bun.com/docs/runtime/module-resolution) — `require()` in ESM context, CJS/ESM interop semantics
+- [Bun CommonJS not going away post](https://bun.sh/blog/commonjs-is-not-going-away) — `__esModule` flag behavior, default vs named import interop
+- [Bun CJS named exports issue #12463](https://github.com/oven-sh/bun/issues/12463) — CJS named exports in ESM are broken in certain edge cases
+- [ag2 DefaultPattern deadlock issue #2144](https://github.com/ag2ai/ag2/issues/2144) — async tool execution deadlock pattern analogous to auto-judge ordering
+- [Bun node:child_process spawn docs](https://bun.com/reference/node/child_process/spawn) — detached option behavior
+- [Windows spawn detached bug nodejs/node #51018](https://github.com/nodejs/node/issues/51018) — `detached: true` + stdio on Windows
+- [Ollama timeout fix guide](https://www.aimadetools.com/blog/ollama-api-timeout-fix/) — cold-start latency 5-30s; `AbortSignal.timeout` pattern
+- [Qdrant singleton pattern issue #372](https://github.com/qdrant/qdrant-client/issues/372) — singleton vs multiple client instances
+- [ESM vs CJS 2026 guide](https://sandeepbansod.medium.com/esm-vs-cjs-why-your-import-still-breaks-in-2026-and-how-to-finally-fix-it-9a16c318a291) — runtime error patterns for CJS-in-ESM import mismatches
 
 ---
 
-*Pitfalls research for: muonroi-cli (BYOK AI coding agent CLI, fork-and-amputate of grok-cli, EE+QC integration, Phase-4 SaaS prep)*
-*Researched: 2026-04-29*
+*Pitfalls research for: muonroi-cli — base project + v1.1 EE-Native CLI milestone*
+*Originally researched: 2026-04-29 | Milestone addendum: 2026-05-01*
