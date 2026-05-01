@@ -13,11 +13,19 @@ async function importAgentModule() {
     loadTranscriptState: vi.fn(() => ({ messages: [], seqs: [] })),
     recordUsageEvent: vi.fn(),
     SessionStore: class {
-      getWorkspace() { return null; }
-      openSession() { return null; }
-      createSession() { return null; }
+      getWorkspace() {
+        return null;
+      }
+      openSession() {
+        return null;
+      }
+      createSession() {
+        return null;
+      }
       setModel() {}
-      getRequiredSession() { return null; }
+      getRequiredSession() {
+        return null;
+      }
       setMode() {}
       touchSession() {}
     },
