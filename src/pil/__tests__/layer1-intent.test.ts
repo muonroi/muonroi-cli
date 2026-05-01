@@ -134,27 +134,24 @@ describe("layer1Intent — keyword fallback (classifier returns null)", () => {
   });
 });
 
-describe("layer1Intent — outputStyle always null from Layer 1", () => {
-  it("coding task → outputStyle is null (Layer 6 handles style)", async () => {
+describe("layer1Intent — outputStyle detection", () => {
+  it("coding task + brain returns style → outputStyle set", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
+    mockClassifyViaBrain.mockResolvedValue("concise");
+    const result = await layer1Intent(makeCtx("refactor this function"));
+    expect(result.outputStyle).toBe("concise");
+  });
+
+  it("coding task + brain returns null → outputStyle stays null", async () => {
+    mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
+    mockClassifyViaBrain.mockResolvedValue(null);
     const result = await layer1Intent(makeCtx("refactor this function"));
     expect(result.outputStyle).toBeNull();
   });
 
-  it("prompt with detail keywords → outputStyle still null from Layer 1", async () => {
-    mockClassify.mockReturnValue({ tier: "hot", confidence: 0.75, reason: "regex:refactor" });
-    const result = await layer1Intent(makeCtx("explain why we should refactor this"));
-    expect(result.outputStyle).toBeNull();
-  });
-
-  it("prompt with concise keywords → outputStyle still null from Layer 1", async () => {
-    mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
-    const result = await layer1Intent(makeCtx("just fix the bug quickly"));
-    expect(result.outputStyle).toBeNull();
-  });
-
-  it("conversational turn (taskType=null) → outputStyle=null", async () => {
+  it("conversational turn (taskType=null) → outputStyle=null, no style brain call", async () => {
     mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.2, reason: "low-confidence" });
+    mockClassifyViaBrain.mockResolvedValue(null);
     const result = await layer1Intent(makeCtx("hello how are you"));
     expect(result.outputStyle).toBeNull();
   });
@@ -168,23 +165,23 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
 
   it("classifyViaBrain called when classifier and keywords both miss", async () => {
     await layer1Intent(makeCtx("some ambiguous input without keywords"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledOnce();
+    expect(mockClassifyViaBrain).toHaveBeenCalled();
     expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("Classify into one of:"),
+      expect.stringContaining("Classify this prompt"),
       100,
     );
   });
 
-  it("classifyViaBrain called with prompt containing task type instruction", async () => {
+  it("classifyViaBrain called with prompt containing task type and style instruction", async () => {
     await layer1Intent(makeCtx("some ambiguous input"));
     const [promptArg] = mockClassifyViaBrain.mock.calls[0];
     expect(promptArg).toContain("refactor");
     expect(promptArg).toContain("debug");
-    expect(promptArg).toContain("plan");
-    expect(promptArg).toContain("none");
+    expect(promptArg).toContain("concise");
+    expect(promptArg).toContain("detailed");
   });
 
-  it("classifyViaBrain called with 100ms timeout", async () => {
+  it("classifyViaBrain called with 100ms timeout for combined detection", async () => {
     await layer1Intent(makeCtx("some ambiguous input"));
     expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.any(String), 100);
   });
@@ -214,15 +211,21 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     expect(result.taskType).toBeNull();
   });
 
-  it("classifyViaBrain NOT called when classifier returns high confidence", async () => {
+  it("classifyViaBrain called for style detection even when classifier returns high confidence", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
     await layer1Intent(makeCtx("refactor this"));
-    expect(mockClassifyViaBrain).not.toHaveBeenCalled();
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(
+      expect.stringContaining("concise, balanced, or detailed"),
+      50,
+    );
   });
 
-  it("classifyViaBrain NOT called when keyword match found", async () => {
+  it("classifyViaBrain called for style detection even when keyword match found", async () => {
     await layer1Intent(makeCtx("there is a bug here"));
-    expect(mockClassifyViaBrain).not.toHaveBeenCalled();
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(
+      expect.stringContaining("concise, balanced, or detailed"),
+      50,
+    );
   });
 });
 
