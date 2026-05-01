@@ -1837,19 +1837,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }).catch(() => {});
       }
 
-      // Session extract: send a summary of the session for knowledge extraction
-      const msgs = agent.getMessages();
-      if (msgs && msgs.length > 0) {
-        const { serializeConversation } = require("../orchestrator/compaction.js");
-        const transcript = serializeConversation(msgs);
-        if (transcript.length > 50) {
-          ee.extract({
-            transcript: transcript.slice(0, 50_000), // cap size for the endpoint
-            projectPath: cwd,
-            meta: { source: "cli-exit" as const, tenantId: "local" },
-          }).catch(() => {});
-        }
-      }
     } catch {
       // Swallow all errors — exit must never fail due to EE
     }
