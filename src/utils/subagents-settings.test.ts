@@ -59,21 +59,19 @@ describe("parseSubAgentsRawList", () => {
 
 describe("getCurrentModel with modeModels", () => {
   beforeEach(() => {
-    delete process.env.GROK_MODEL;
+    delete process.env.MUONROI_MODEL;
   });
 
   it("respects mode-specific models when provided", () => {
-    // This test assumes a test environment where we can check the logic path.
-    // In a real environment with proper settings, this would return the mode-specific model.
     const result = getCurrentModel("agent" as AgentMode);
     expect(typeof result).toBe("string");
     expect(result.length).toBeGreaterThan(0);
   });
 
-  it("respects GROK_MODEL environment variable over modeModels", () => {
-    process.env.GROK_MODEL = "grok-4-special-test";
+  it("respects MUONROI_MODEL environment variable over modeModels", () => {
+    process.env.MUONROI_MODEL = "claude-sonnet-4-6-20250514";
 
     const result = getCurrentModel("agent" as AgentMode);
-    expect(result).toBe("grok-4-special-test");
+    expect(result).toBe("claude-sonnet-4-6-20250514");
   });
 });

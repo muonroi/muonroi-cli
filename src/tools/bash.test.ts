@@ -267,7 +267,7 @@ describe("getSandboxMutationBlockReason", () => {
 
 describe("BashTool sandbox state", () => {
   it("tracks cwd changes independently of sandbox mode", () => {
-    const root = makeTempDir("grok-bash-test-");
+    const root = makeTempDir("muonroi-bash-test-");
     const nested = path.join(root, "nested");
     fs.mkdirSync(nested);
     const bash = new BashTool(root, { sandboxMode: "shuru" });

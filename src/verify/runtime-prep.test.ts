@@ -29,7 +29,7 @@ afterEach(() => {
 
 describe("prepareVerifySandbox", () => {
   it("adds checkpoint-backed sandbox settings for verify execution", async () => {
-    const dir = makeTempDir("grok-verify-runtime-prep-");
+    const dir = makeTempDir("muonroi-verify-runtime-prep-");
     fs.writeFileSync(
       path.join(dir, "package.json"),
       JSON.stringify({ dependencies: { next: "15.0.0" }, scripts: { dev: "next dev", build: "next build" } }, null, 2),

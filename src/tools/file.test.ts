@@ -89,7 +89,7 @@ describe("file tool LSP integration", () => {
 });
 
 async function createTempDir(): Promise<string> {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "grok-file-tools-"));
+  const dir = await mkdtemp(path.join(os.tmpdir(), "muonroi-file-tools-"));
   tempDirs.push(dir);
   return dir;
 }
