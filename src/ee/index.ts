@@ -21,3 +21,12 @@ export type {
   PostToolPayload,
   Scope,
 } from "./types.js";
+export {
+  classifyViaBrain,
+  getEmbeddingRaw,
+  resetBridge,
+  routeFeedback,
+  routeModel,
+  searchCollection,
+} from "./bridge.js";
+export type { EEPoint, EERouteResult } from "./bridge.js";
