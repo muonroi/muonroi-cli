@@ -7,6 +7,8 @@ import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
+import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
+import { bootstrapEEClient } from "../ee/intercept.js";
 import type {
   NotificationHookInput,
   PostCompactHookInput,
@@ -789,6 +791,7 @@ export class Agent {
    * Fail-open: any error sets _activeRunId = null silently.
    */
   private async _initFlow(): Promise<void> {
+    bootstrapEEClient().catch(() => {});
     try {
       const flowDir = await ensureFlowDir(this.bash.getCwd());
       const existing = await getActiveRunId(flowDir);
@@ -2208,6 +2211,28 @@ export class Agent {
               case "tool-call": {
                 const tc = toToolCall(part);
                 activeToolCalls.push(tc);
+
+                // EE PreToolUse hook: fire intercept before tool execution.
+                {
+                  const preInput: PreToolUseHookInput = {
+                    hook_event_name: "PreToolUse",
+                    tool_name: tc.function.name,
+                    tool_input: JSON.parse(tc.function.arguments || "{}"),
+                    session_id: this.session?.id,
+                    cwd: this.bash.getCwd(),
+                  };
+                  const preResult = await this.fireHook(preInput, signal).catch(() => ({
+                    blocked: false,
+                    blockingErrors: [],
+                    preventContinuation: false,
+                    additionalContexts: [] as string[],
+                    results: [],
+                  }));
+                  for (const ctx of preResult.additionalContexts ?? []) {
+                    yield { type: "content", content: `${ctx}\n` };
+                  }
+                }
+
                 // Pitfall 9: log the pending call so reconcile() can recover any
                 // staged .tmp files if the process is killed before tool-result.
                 if (this.pendingCalls) {
@@ -2242,6 +2267,19 @@ export class Agent {
                     void this.pendingCalls.end(callId, endStatus).catch(() => {});
                   }
                 }
+                // EE PostToolUse hook: fire-and-forget after tool execution.
+                {
+                  const postInput: PostToolUseHookInput = {
+                    hook_event_name: "PostToolUse",
+                    tool_name: part.toolName,
+                    tool_input: (part.input as Record<string, unknown>) ?? {},
+                    tool_output: typeof tr.output === "string" ? { text: tr.output } : ((tr.output as unknown as Record<string, unknown>) ?? {}),
+                    session_id: this.session?.id,
+                    cwd: this.bash.getCwd(),
+                  };
+                  void this.fireHook(postInput, signal).catch(() => {});
+                }
+
                 notifyObserver(observer?.onToolFinish, {
                   toolCall: tc,
                   toolResult: tr,
