@@ -30,7 +30,7 @@ See milestone archive for details.
 
 - [x] **Phase 08: Session End Extraction** - Wire /api/extract on session end so EE brain learns from CLI sessions (completed 2026-05-01)
 - [x] **Phase 09: Offline Queue** - Buffer EE requests when server unreachable, replay on reconnect (completed 2026-05-01)
-- [ ] **Phase 10: Prompt-stale Reconciliation** - Clean up stale PIL Layer 3 suggestions via /api/prompt-stale
+- [x] **Phase 10: Prompt-stale Reconciliation** - Clean up stale PIL Layer 3 suggestions via /api/prompt-stale (completed 2026-05-01)
 
 ## Phase Details
 
@@ -71,10 +71,10 @@ Plans:
   1. PIL Layer 3 tracks which suggestions were injected into the prompt for each turn
   2. After each tool-use turn, suggestions the agent did not follow are reported to EE via /api/prompt-stale
   3. Prompt-stale reconciliation does not add latency to the user's next turn (async fire-and-forget)
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 Plans:
 - [x] 10-01-PLAN.md — Core prompt-stale primitives (setter/resetter, reconcilePromptStale module, tests)
-- [ ] 10-02-PLAN.md — Wire into PIL Layer 3 and PostToolUse/PostToolUseFailure hooks
+- [x] 10-02-PLAN.md — Wire into PIL Layer 3 and PostToolUse/PostToolUseFailure hooks
 
 ## Progress
 
@@ -84,4 +84,4 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 10. Prompt-stale Reconciliation | v1.2 | 1/2 | In Progress|  |
+| 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete   | 2026-05-01 |
