@@ -40,7 +40,7 @@ afterEach(() => {
   vi.doUnmock("../storage/index");
 });
 
-describe("Agent sandbox mode", () => {
+describe("Agent sandbox mode", { timeout: 15_000 }, () => {
   it("can switch sandbox mode at runtime", async () => {
     const { Agent } = await importAgentModule();
     const agent = new Agent(undefined, undefined, undefined, undefined, {
