@@ -37,6 +37,7 @@ export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 import { interceptWithDefaults } from "../ee/intercept.js";
 import { type JudgeContext } from "../ee/judge.js";
 import { posttool } from "../ee/posttool.js";
+import { reconcilePromptStale } from "../ee/prompt-stale.js";
 import { buildScope } from "../ee/scope.js";
 import type { InterceptResponse, Scope } from "../ee/types.js";
 import type {
@@ -139,6 +140,8 @@ export async function executeEventHooks(
         },
         judgeCtx,
       );
+      // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
+      reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
     }
 
@@ -168,6 +171,8 @@ export async function executeEventHooks(
         },
         judgeCtx,
       );
+      // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
+      reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
     }
 
