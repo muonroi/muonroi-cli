@@ -38,7 +38,7 @@ We do not sell tokens. We sell experience: memory that shrinks while capability 
 - [ ] Migration path local EE → cloud EE without principle loss
 - [ ] Offline-first heavy logic — judge worker, compaction, router classifier run without network when needed
 - [ ] Runaway scenario tests — usage guard proven not to leak past cap under infinite loop / large file recursion / model thrashing
-- [ ] **Auto-judge feedback loop** — orchestrator captures `warningId + expectedBehavior` at PreToolUse, compares to actual outcome (error / diff / test failure / success) at PostToolUse, auto-tags `FOLLOWED / IGNORED / IRRELEVANT`, and calls `/api/feedback` without agent intervention. Closes EE evolution loop without relying on chat-side reporting.
+- [x] ~~Auto-judge feedback loop~~ — Validated in v1.1 (Phase 07: full-pipeline-validation, ROUTE-12)
 
 ### Out of Scope
 
@@ -77,6 +77,9 @@ The forking decision is driven by economics — `grok-cli` ships ~4,800 lines of
 |----------|-----------|---------|
 | Fork `grok-cli` instead of greenfield | Saves 3–6 months of TUI/LSP/MCP work; license is MIT-compatible | ✓ Validated Phase 00 — 148 files imported, tsc clean, 197 tests pass, Windows CI green |
 | 3-tier brain router (local → Ollama → SiliconFlow) | Single-vendor brain creates latency + outage risk; tiered path keeps hot path free and fast | — Pending |
+| createRequire bridge for EE (v1.1) | In-process CJS interop eliminates HTTP latency for brain calls; dual-path keeps sidecar for external hooks | ✓ Validated Phase 05 — bridge.ts loads experience-core.js, 5 async functions, zero config duplication |
+| PIL migration to EE bridge (v1.1) | Replace regex/HTTP stubs with live EE brain calls; quality grows with model, not CLI-side maintenance | ✓ Validated Phase 06 — L1/L3/L6 all use bridge, respond_general added, routeFeedback wired |
+| Auto-judge pipeline wiring (v1.1) | judgeCtx threading + posttool await closes the feedback loop without agent intervention | ✓ Validated Phase 07 — 5 events fire deterministically, 3 classifications tested |
 | BYOK pricing model + orchestration fee | Subsidizing inference at flat $20 kills margin on power users; orchestration fee scales linearly | — Pending |
 | Usage guard mandatory in Phase 0 | BYOK without realtime spend visibility is reputation risk — one runaway loop and the user blames the tool | — Pending |
 | Bun runtime for CLI, Node 20 for EE backend | Bun inherited from `grok-cli`; EE already runs Node 20 — split via HTTP/IPC | — Pending |
