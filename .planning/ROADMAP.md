@@ -80,5 +80,5 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 09. Offline Queue | v1.2 | 2/2 | Complete   | 2026-05-01 |
+| 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 10. Prompt-stale Reconciliation | v1.2 | 0/TBD | Not started | - |
