@@ -887,6 +887,10 @@ export class Agent {
     return this.bash.getCwd();
   }
 
+  getMessages(): ModelMessage[] {
+    return this.messages;
+  }
+
   async listSchedules(): Promise<StoredSchedule[]> {
     return this.schedules.list();
   }
