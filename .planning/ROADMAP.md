@@ -102,7 +102,10 @@ Plans:
   1. PreToolUse → PostToolUse → Judge → Feedback → Touch fires on every tool call without skipping a step — verified by an integration test that asserts all five events for a single tool invocation
   2. Auto-judge tags each warning FOLLOWED / IGNORED / IRRELEVANT based on actual outcome comparison — no agent chat-side reporting required
   3. Pipeline ordering is enforced: posttool() awaited before routeFeedback fires, preventing the race condition documented in research Watch Out #4
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 07-01-PLAN.md — judgeCtx threading + posttool race fix + end-to-end integration test
 
 ---
 
@@ -123,4 +126,4 @@ Plans:
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
 | 5. EE Bridge Foundation | v1.1 | 1/1 | Complete   | 2026-05-01 |
 | 6. PIL & Router Migration | v1.1 | 3/3 | Complete   | 2026-05-01 |
-| 7. Full Pipeline Validation | v1.1 | 0/TBD | Not started | - |
+| 7. Full Pipeline Validation | v1.1 | 0/1 | Not started | - |
