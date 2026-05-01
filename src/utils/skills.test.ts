@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { discoverSkills } from "./skills";
+import { discoverSkills, resetSkillsCache } from "./skills";
 
 const tempDirs: string[] = [];
 
@@ -23,6 +23,7 @@ function writeSkill(root: string, name: string, description: string): void {
 }
 
 afterEach(() => {
+  resetSkillsCache();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }

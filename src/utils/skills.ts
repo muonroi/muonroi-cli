@@ -133,12 +133,26 @@ function listProjectSkillRoots(projectRoot: string): string[] {
   return roots.reverse();
 }
 
+// --- Skills discovery cache ---
+let _skillsCache: { skills: DiscoveredSkill[]; cachedAt: number; cwd: string } | null = null;
+const SKILLS_CACHE_TTL_MS = 120_000; // 2 minutes — skills almost never change mid-session
+
+/** Clear the skills discovery cache (for tests). */
+export function resetSkillsCache(): void {
+  _skillsCache = null;
+}
+
 /**
  * Discover Agent Skills under ~/.agents/skills and from <projectRoot> upward through
  * parent directories to the git root. The nearest project-level skill overrides
  * user-level and higher-level project skills with the same `name` (frontmatter).
  */
 export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
+  const now = Date.now();
+  if (_skillsCache && _skillsCache.cwd === projectRoot && now - _skillsCache.cachedAt < SKILLS_CACHE_TTL_MS) {
+    return _skillsCache.skills;
+  }
+
   const userRoot = path.join(os.homedir(), ".agents", "skills");
 
   const byName = new Map<string, DiscoveredSkill>();
@@ -154,7 +168,9 @@ export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
     }
   }
 
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  _skillsCache = { skills, cachedAt: now, cwd: projectRoot };
+  return skills;
 }
 
 const SKILLS_INSTRUCTIONS = `AGENT SKILLS (optional):

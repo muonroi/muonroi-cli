@@ -7,6 +7,20 @@ import { findGitRoot } from "./git-root";
 
 const instructionsHookFiredFor = new Set<string>();
 
+// --- Instructions cache ---
+const _instructionsCache = new Map<string, { content: string | null; hash: string; cachedAt: number }>();
+const INSTRUCTIONS_CACHE_TTL_MS = 60_000; // 1 minute TTL — files rarely change mid-session
+
+function computeHash(parts: string[]): string {
+  const joined = parts.join("|");
+  return `${joined.length}:${joined.slice(0, 50)}:${joined.slice(-50)}`;
+}
+
+/** Clear the instructions cache (for tests). */
+export function resetInstructionsCache(): void {
+  _instructionsCache.clear();
+}
+
 function readNonEmptyFile(filePath: string): string | null {
   try {
     if (!fs.existsSync(filePath)) return null;
@@ -62,11 +76,31 @@ export function loadCustomInstructions(cwd: string): string | null {
     canonical = path.resolve(cwd);
   }
 
+  // Check cache first
+  const now = Date.now();
+  const cached = _instructionsCache.get(canonical);
+  if (cached && now - cached.cachedAt < INSTRUCTIONS_CACHE_TTL_MS) {
+    // Still fire hook on first call even when returning cached content
+    if (cached.content !== null && !instructionsHookFiredFor.has(canonical)) {
+      instructionsHookFiredFor.add(canonical);
+      const hookInput: InstructionsLoadedHookInput = {
+        hook_event_name: "InstructionsLoaded",
+        files_loaded: cached.content.split("\n\n").length,
+        cwd: canonical,
+      };
+      executeEventHooks(hookInput, canonical).catch(() => {});
+    }
+    return cached.content;
+  }
+
   const parts: string[] = [...loadAgentsSegments(canonical)];
 
-  if (parts.length === 0) return null;
+  if (parts.length === 0) {
+    _instructionsCache.set(canonical, { content: null, hash: "", cachedAt: now });
+    return null;
+  }
 
-  if (parts.length > 0 && !instructionsHookFiredFor.has(canonical)) {
+  if (!instructionsHookFiredFor.has(canonical)) {
     instructionsHookFiredFor.add(canonical);
     const hookInput: InstructionsLoadedHookInput = {
       hook_event_name: "InstructionsLoaded",
@@ -76,5 +110,7 @@ export function loadCustomInstructions(cwd: string): string | null {
     executeEventHooks(hookInput, canonical).catch(() => {});
   }
 
-  return parts.join("\n\n");
+  const content = parts.join("\n\n");
+  _instructionsCache.set(canonical, { content, hash: computeHash(parts), cachedAt: now });
+  return content;
 }
