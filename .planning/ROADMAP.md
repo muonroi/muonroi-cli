@@ -28,7 +28,7 @@ See milestone archive for details.
 
 **Milestone Goal:** Fix 3 critical EE integration gaps that prevent the CLI from closing the learning feedback loop -- session extraction, offline resilience, and stale suggestion cleanup.
 
-- [ ] **Phase 08: Session End Extraction** - Wire /api/extract on session end so EE brain learns from CLI sessions
+- [x] **Phase 08: Session End Extraction** - Wire /api/extract on session end so EE brain learns from CLI sessions (completed 2026-05-01)
 - [ ] **Phase 09: Offline Queue** - Buffer EE requests when server unreachable, replay on reconnect
 - [ ] **Phase 10: Prompt-stale Reconciliation** - Clean up stale PIL Layer 3 suggestions via /api/prompt-stale
 
@@ -43,7 +43,7 @@ See milestone archive for details.
   2. The transcript sent to EE is compacted (not raw) to reduce payload size and noise
   3. CLI shutdown completes within 2 seconds even if EE server is slow or unreachable
   4. Sessions with fewer than 5 messages produce no extraction call (no noise sent to EE)
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 - [x] 08-01-PLAN.md — Core extractSession module, client signal override, stub server, tests
 - [x] 08-02-PLAN.md — Wire into orchestrator cleanup/clearHistory, remove naive app.tsx extract
@@ -76,6 +76,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 08. Session End Extraction | v1.2 | 0/2 | Planning complete | - |
+| 08. Session End Extraction | v1.2 | 0/2 | Complete    | 2026-05-01 |
 | 09. Offline Queue | v1.2 | 0/TBD | Not started | - |
 | 10. Prompt-stale Reconciliation | v1.2 | 0/TBD | Not started | - |
