@@ -2,57 +2,47 @@
  * src/pil/layer3-ee-injection.ts
  *
  * PIL Layer 3 — Experience Engine injection.
- * Queries the EE brain for relevant experience points and injects them
- * into the prompt context as hints.
+ * Uses in-process bridge.getEmbeddingRaw + bridge.searchCollection.
+ * Eliminates network overhead and EE server dependency for vector
+ * search (PIL-02). HTTP-based approach removed in Phase 06.
  */
 
+import { getEmbeddingRaw, searchCollection } from "../ee/bridge.js";
+import type { EEPoint } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
-const EE_URL = process.env.EE_URL || "http://localhost:8082";
-const EE_TIMEOUT_MS = 100;
-
-interface EePoint {
-  id: string;
-  text: string;
-  score: number;
-  collection: string;
-}
-
-interface EeSearchResponse {
-  points: EePoint[];
-}
-
-async function queryEe(query: string, taskType: string): Promise<{ points: EePoint[]; error?: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), EE_TIMEOUT_MS);
-
+async function queryEeBridge(raw: string): Promise<{ points: EEPoint[]; error?: string }> {
   try {
-    const res = await fetch(`${EE_URL}/api/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query, taskType, limit: 5 }),
-      signal: controller.signal,
-    });
-
-    if (!res.ok) return { points: [], error: `http-${res.status}` };
-    const data = (await res.json()) as EeSearchResponse;
-    return { points: data.points ?? [] };
+    const vector = await getEmbeddingRaw(raw, AbortSignal.timeout(60));
+    if (!vector) return { points: [], error: "no-embedding" };
+    const points = await searchCollection("experience-behavioral", vector, 5, AbortSignal.timeout(40));
+    return { points };
   } catch (err) {
     return { points: [], error: String(err) };
-  } finally {
-    clearTimeout(timer);
   }
 }
 
-function formatExperienceHints(points: EePoint[]): string {
+function formatExperienceHints(points: EEPoint[]): string {
   if (points.length === 0) return "";
-  const lines = points.map((p) => `- ${p.text} [id:${p.id} col:${p.collection}]`);
+  const lines = points.map((p) => {
+    const payload = p.payload ?? {};
+    const text =
+      (payload["text"] as string) ||
+      (() => {
+        try {
+          return (JSON.parse((payload["json"] as string) || "{}") as { solution?: string }).solution || "";
+        } catch {
+          return "";
+        }
+      })();
+    return `- ${text} [id:${p.id}]`;
+  });
   return `[experience: Relevant patterns from past work]\n${lines.join("\n")}`;
 }
 
 export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineContext> {
-  const result = await queryEe(ctx.raw, ctx.taskType ?? "unknown");
+  const result = await queryEeBridge(ctx.raw);
   const { points } = result;
 
   if (result.error) {
@@ -78,11 +68,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     enriched: `${ctx.enriched}\n${trimmed}`,
     layers: [
       ...ctx.layers,
-      {
-        name: "ee-experience-injection",
-        applied: true,
-        delta: `points=${points.length} chars=${trimmed.length}`,
-      },
+      { name: "ee-experience-injection", applied: true, delta: `points=${points.length} chars=${trimmed.length}` },
     ],
   };
 }
