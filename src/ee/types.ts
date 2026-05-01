@@ -102,7 +102,7 @@ export interface FeedbackPayload {
 export interface EEClient {
   health(): Promise<{ ok: boolean; status: number }>;
   intercept(req: InterceptRequest): Promise<InterceptResponse>;
-  posttool(payload: PostToolPayload): void;
+  posttool(payload: PostToolPayload): Promise<void>;
   routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null>;
   coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null>;
   feedback(payload: FeedbackPayload): void; // Plan 08 implements

@@ -2297,7 +2297,7 @@ export class Agent {
                     session_id: this.session?.id,
                     cwd: this.bash.getCwd(),
                   };
-                  void this.fireHook(postInput, signal).catch(() => {});
+                  await this.fireHook(postInput, signal).catch(() => {});
                 }
 
                 // Response tool: yield as structured_response instead of tool_result

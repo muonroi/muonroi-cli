@@ -3,7 +3,8 @@ import type { JudgeContext } from "./judge.js";
 import type { PostToolPayload } from "./types.js";
 
 // Mock both intercept and judge modules
-const mockPosttool = vi.fn();
+// posttool is now async — mock must return a Promise so await works correctly
+const mockPosttool = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("./intercept.js", () => ({
   getDefaultEEClient: () => ({
@@ -32,7 +33,7 @@ describe("posttool() wrapper", () => {
   it("calls client.posttool with payload", async () => {
     mockPosttool.mockClear();
     const { posttool } = await import("./posttool.js");
-    posttool(mockPayload);
+    await posttool(mockPayload);
     expect(mockPosttool).toHaveBeenCalledOnce();
     expect(mockPosttool).toHaveBeenCalledWith(mockPayload);
   });
@@ -52,7 +53,7 @@ describe("posttool() wrapper", () => {
       diffPresent: false,
       tenantId: "local",
     };
-    posttool(mockPayload, ctx);
+    await posttool(mockPayload, ctx);
     expect(mockPosttool).toHaveBeenCalledOnce();
     expect(mockFF).toHaveBeenCalledOnce();
     expect(mockFF).toHaveBeenCalledWith(ctx);
@@ -65,15 +66,16 @@ describe("posttool() wrapper", () => {
     const mockFF = fireFeedback as unknown as ReturnType<typeof vi.fn>;
     mockFF.mockClear();
 
-    posttool(mockPayload);
+    await posttool(mockPayload);
     expect(mockPosttool).toHaveBeenCalledOnce();
     expect(mockFF).not.toHaveBeenCalled();
   });
 
-  it("returns void (B-4 invariant preserved)", async () => {
+  it("returns Promise<void> (async — awaitable by PostToolUse handler)", async () => {
     mockPosttool.mockClear();
     const { posttool } = await import("./posttool.js");
     const result = posttool(mockPayload);
-    expect(result).toBeUndefined();
+    expect(result).toBeInstanceOf(Promise);
+    await result; // resolves to undefined
   });
 });
