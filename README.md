@@ -6,7 +6,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)](https://bun.sh/)
 
-A terminal-native AI coding agent with **real-time web search**, `grok-code-fast-1` and a full model lineup, **sub-agents on by default**, **remote control via Telegram** (pair once, drive the agent from your phone while the CLI runs), and a terminal UI that doesn’t feel like it was assembled in a hurry.
+A terminal-native BYOK AI coding agent with **multi-provider support** (Anthropic, OpenAI, Gemini, Ollama), **sub-agents on by default**, **remote control via Telegram** (pair once, drive the agent from your phone while the CLI runs), and a terminal UI that doesn’t feel like it was assembled in a hurry.
 
 Open source. Terminal-native. Built with **Bun** and **OpenTUI**. If you want vibes *and* velocity, you’re in the right repo.
 
@@ -173,7 +173,7 @@ You keep using a text model for the session, and muonroi-cli saves generated med
 
 | Thing                             | What it means                                                                                                                                                                                                              |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Model support**                 | Models like `**grok-code-fast-1`**, `**grok-4-1-fast-reasoning**`, `**grok-4.20-multi-agent-0309**`, plus flagship and fast variants—run `muonroi-cli models` for the full menu.                         |
+| **Model support**                 | Anthropic (Claude Opus, Sonnet, Haiku), OpenAI, Gemini, Ollama, and any OpenAI-compatible provider — run `muonroi-cli models` for the full menu.                         |
 | **X + web search**                | `**search_x`** and `**search_web**` tools—live posts and docs without pretending the internet stopped in 2023.                                                                                                             |
 | **Media generation**              | Built-in `**generate_image`** and `**generate_video**` tools for text-to-image, image editing, text-to-video, and image-to-video flows. Generated files are saved locally so you can reuse them after the URLs expire. |
 | **Sub-agents (default behavior)** | Foreground `**task`** delegation (e.g. explore, general, or computer) plus background `**delegate**` for read-only deep dives—parallelize like you mean it.                                                                |
@@ -228,7 +228,7 @@ Optional `**subAgents**` — custom foreground sub-agents. Each entry needs `**n
   "subAgents": [
     {
       "name": "security-review",
-      "model": "grok-code-fast-1",
+      "model": "claude-sonnet-4-6-20250514",
       "instruction": "Prioritize security implications and suggest concrete fixes."
     }
   ]
@@ -439,7 +439,7 @@ If you're on Intel Mac or Linux, sandbox mode is not available. Use standard mod
 **Slow response times**
 
 - Check your network connection to the Anthropic API
-- Try `grok-code-fast-1` model for faster responses
+- Try a smaller model (e.g. Claude Haiku) for faster responses
 - Reduce `--max-tool-rounds` for headless runs
 
 **High memory usage**
