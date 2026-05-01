@@ -1,6 +1,5 @@
 import { z } from "zod";
 import type { ToolSet } from "ai";
-import type { TaskType } from "./types.js";
 
 const RefactorSchema = z.object({
   summary: z.string().describe("One-line summary of what changed"),
@@ -68,13 +67,19 @@ const GenerateSchema = z.object({
   explanation: z.string().optional().describe("Brief design rationale"),
 });
 
-const RESPONSE_SCHEMAS: Record<TaskType, z.ZodType> = {
+const GeneralSchema = z.object({
+  response: z.string().describe("Direct answer to the user"),
+  reasoning: z.string().optional().describe("Optional brief reasoning"),
+});
+
+const RESPONSE_SCHEMAS: Record<string, z.ZodType> = {
   refactor: RefactorSchema,
   debug: DebugSchema,
   plan: PlanSchema,
   analyze: AnalyzeSchema,
   documentation: DocsSchema,
   generate: GenerateSchema,
+  general: GeneralSchema,
 };
 
 export const RESPONSE_TOOL_PREFIX = "respond_";
@@ -83,12 +88,12 @@ export function isResponseTool(toolName: string): boolean {
   return toolName.startsWith(RESPONSE_TOOL_PREFIX);
 }
 
-export function getResponseTaskType(toolName: string): TaskType | null {
+export function getResponseTaskType(toolName: string): string | null {
   const suffix = toolName.slice(RESPONSE_TOOL_PREFIX.length);
-  return suffix in RESPONSE_SCHEMAS ? (suffix as TaskType) : null;
+  return suffix in RESPONSE_SCHEMAS ? suffix : null;
 }
 
-export function buildResponseTools(taskType: TaskType): ToolSet {
+export function buildResponseTools(taskType: string): ToolSet {
   const schema = RESPONSE_SCHEMAS[taskType];
   if (!schema) return {};
 
@@ -102,4 +107,4 @@ export function buildResponseTools(taskType: TaskType): ToolSet {
   };
 }
 
-export { RefactorSchema, DebugSchema, PlanSchema, AnalyzeSchema, DocsSchema, GenerateSchema };
+export { RefactorSchema, DebugSchema, PlanSchema, AnalyzeSchema, DocsSchema, GenerateSchema, GeneralSchema };
