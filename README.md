@@ -171,27 +171,34 @@ You keep using a text model for the session, and muonroi-cli saves generated med
 ## What you actually get
 
 
-| Thing                             | What it means                                                                                                                                                                                                              |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Model support**                 | Anthropic (Claude Opus, Sonnet, Haiku), OpenAI, Gemini, Ollama, and any OpenAI-compatible provider — run `muonroi-cli models` for the full menu.                         |
-| **X + web search**                | `**search_x`** and `**search_web**` tools—live posts and docs without pretending the internet stopped in 2023.                                                                                                             |
-| **Media generation**              | Built-in `**generate_image`** and `**generate_video**` tools for text-to-image, image editing, text-to-video, and image-to-video flows. Generated files are saved locally so you can reuse them after the URLs expire. |
-| **Sub-agents (default behavior)** | Foreground `**task`** delegation (e.g. explore, general, or computer) plus background `**delegate**` for read-only deep dives—parallelize like you mean it.                                                                |
-| **Verify**                        | `**/verify`** or `**--verify**` — inspects your app, builds, tests, boots it, and runs browser smoke checks in a sandboxed environment. Screenshots and video included.                                                    |
-| **Computer use**                  | Built-in `**computer`** sub-agent for host desktop automation via `**agent-desktop**`. It prefers semantic accessibility snapshots and stable refs, with screenshots saved under `**.muonroi-cli/computer/**` when requested.     |
-| **Custom sub-agents**             | Define named agents with `**subAgents`** in `**~/.muonroi-cli/user-settings.json**` and manage them from the TUI with `**/agents**`.                                                                                              |
-| **Remote control**                | Pair **Telegram** from the TUI (`/remote-control` → Telegram): DM your bot, `**/pair`**, approve the code in-terminal. Keep the CLI running while you ping it from your phone.                                             |
-| **No “mystery meat” UI**          | OpenTUI React terminal UI—fast, keyboard-driven, not whatever glitchy thing you’re thinking of.                                                                                                                            |
-| **Skills**                        | Agent Skills under `**.agents/skills/<name>/SKILL.md`** (project) or `**~/.agents/skills/**` (user). Use `**/skills**` in the TUI to list what’s installed.                                                                |
-| **MCPs**                          | Extend with Model Context Protocol servers—configure via `**/mcps`** in the TUI or `**.muonroi-cli/settings.json**` (`mcpServers`).                                                                                               |
-| **Sessions**                      | Conversations persist; `**--session latest`** picks up where you left off.                                                                                                                                                 |
-| **Headless**                      | `**--prompt`** / `**-p**` for non-interactive runs—pipe it, script it, bench it.                                                                                                                                           |
-| **Hackable**                      | TypeScript, clear agent loop, bash-first tools—fork it, shamelessly.                                                                                                                                                       |
+| Thing | What it means |
+| --- | --- |
+| **Multi-provider BYOK** | Anthropic (Claude Opus, Sonnet, Haiku), OpenAI, Gemini, Ollama, and any OpenAI-compatible provider — bring your own keys, run `muonroi-cli models` for the full menu. |
+| **3-tier brain router** | Classifies every prompt locally (regex + tree-sitter), warm (Ollama/EE), or cold (SiliconFlow) to pick the cheapest model that can handle the task. |
+| **Experience Engine** | Learns from mistakes. PreToolUse warnings prevent repeated errors; PostToolUse captures outcomes; an async judge closes the feedback loop. Principles compress 500 lessons into 15 high-signal rules. See [experience-engine](https://github.com/muonroi/experience-engine). |
+| **Prompt Intelligence Layer** | 6-layer pipeline (intent detection, personality, EE injection, GSD workflow, context enrichment, output optimization) that enriches every prompt before it hits the model — reduces output tokens 60-80%. |
+| **Flow system** | Durable `.muonroi-flow/` artifacts for multi-session continuity. Resume where you left off with roadmap, state, and gray-area tracking. Based on [quick-codex](https://github.com/nicepkg/quick-codex) workflow design. |
+| **Hard usage cap** | Real-time token ledger with auto-downgrade (Opus -> Sonnet -> Haiku -> halt) so you never blow your budget. |
+| **Sub-agents** | Foreground `task` delegation (explore, general, verify, computer) plus background `delegate` for read-only deep dives — parallelize like you mean it. |
+| **Verify** | `/verify` or `--verify` — inspects your app, builds, tests, boots it, and runs browser smoke checks in a sandboxed environment. Screenshots and video included. |
+| **Computer use** | Built-in `computer` sub-agent for host desktop automation via `agent-desktop`. Semantic accessibility snapshots and stable refs. |
+| **Custom sub-agents** | Define named agents with `subAgents` in `~/.muonroi-cli/user-settings.json` and manage from the TUI with `/agents`. |
+| **Telegram remote control** | Pair from the TUI, DM your bot `/pair`, approve in-terminal. Keep the CLI running while you drive from your phone. |
+| **Skills & MCPs** | Agent Skills (`.agents/skills/`), Model Context Protocol servers (`/mcps`), extensible without touching core. |
+| **Sessions** | Conversations persist; `--session latest` picks up where you left off. |
+| **Headless** | `--prompt` / `-p` for non-interactive runs — pipe it, script it, bench it. Batch API supported. |
 
+### Core ecosystem
+
+muonroi-cli is the orchestration brain. It integrates two companion projects:
+
+- **[experience-engine](https://github.com/muonroi/experience-engine)** — AI memory system that turns agent mistakes into evolving principles. Zero npm dependencies, REST API on port 8082. Provides the PreToolUse/PostToolUse hook pipeline, 4-tier knowledge architecture (principles -> behavioral -> semantic Q&A -> raw staging), and an async judge worker that auto-evaluates hint quality.
+
+- **[quick-codex](https://github.com/nicepkg/quick-codex)** — Workflow layer for durable artifact-based execution. Provides the `.muonroi-flow/` artifact system: project roadmaps, phase checkpoints, gray-area registers, and session state that survives context resets. The flow resume system in muonroi-cli loads digests from these artifacts at boot.
 
 ### Coming soon
 
-**Deeper autonomous agent testing** — persistent sandbox sessions, richer browser workflows, and stronger "prove it works" evidence.
+**Deeper autonomous agent testing** — persistent sandbox sessions, richer browser workflows, and stronger “prove it works” evidence.
 
 ---
 
