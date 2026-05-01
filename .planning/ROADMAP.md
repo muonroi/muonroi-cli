@@ -84,4 +84,4 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete   | 2026-05-01 |
+| 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete    | 2026-05-01 |
