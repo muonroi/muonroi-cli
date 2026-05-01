@@ -7,6 +7,8 @@ import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
+import { deliberateCompact } from "../flow/compaction/index.js";
+import * as path from "node:path";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -2362,10 +2364,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           defaultProvider: "anthropic",
           defaultModel: model,
           lastPrompt: messages[messages.length - 1]?.content,
-        }).then((result) => {
-          if (result !== null) {
-            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+        }).then(async (result) => {
+          if (result === null) return;
+
+          if (result.startsWith("__COMPACT__")) {
+            const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+            try {
+              const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(
+                  `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                ),
+              ]);
+            } catch (e: unknown) {
+              setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+            }
+            return;
           }
+
+          if (result.startsWith("__EXPAND__")) {
+            const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
+            setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
+            return;
+          }
+
+          if (result.startsWith("__CLEAR__")) {
+            const summary = result.replace(/^__CLEAR__\n/, "");
+            agent.clearHistory();
+            setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
+            return;
+          }
+
+          setMessages((prev) => [...prev, buildAssistantEntry(result)]);
         });
         return true;
       }
