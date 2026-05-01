@@ -45,7 +45,7 @@ See milestone archive for details.
   4. Sessions with fewer than 5 messages produce no extraction call (no noise sent to EE)
 **Plans:** 2 plans
 Plans:
-- [ ] 08-01-PLAN.md — Core extractSession module, client signal override, stub server, tests
+- [x] 08-01-PLAN.md — Core extractSession module, client signal override, stub server, tests
 - [ ] 08-02-PLAN.md — Wire into orchestrator cleanup/clearHistory, remove naive app.tsx extract
 
 ### Phase 09: Offline Queue
