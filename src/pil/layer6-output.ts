@@ -5,11 +5,17 @@
  * Appends a per-task-type system prompt suffix via applyPilSuffix().
  * Each suffix is tuned to minimize output tokens while preserving quality.
  * Conversational turns (taskType=null) pass through unchanged.
+ *
+ * PIL-03: When ctx.outputStyle is null and ctx.taskType is not null,
+ * calls classifyViaBrain with a 50ms timeout for multilingual output style
+ * detection (Vietnamese+code mix that regex cannot handle). Fail-open:
+ * if brain returns null/timeout, ctx.outputStyle stays null.
  */
 
 import type { ToolSet } from "ai";
 import type { OutputStyle, PipelineContext } from "./types.js";
 import { buildResponseTools } from "./response-tools.js";
+import { classifyViaBrain } from "../ee/bridge.js";
 
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
@@ -66,18 +72,48 @@ export function getResponseToolSet(ctx: PipelineContext): ToolSet {
   return buildResponseTools(ctx.taskType);
 }
 
+const VALID_STYLES: OutputStyle[] = ["concise", "balanced", "detailed"];
+
 export async function layer6Output(ctx: PipelineContext): Promise<PipelineContext> {
   try {
-    if (!ctx.taskType || !SUFFIXES[ctx.taskType]) {
+    if (ctx.taskType === null) {
       return {
         ...ctx,
         layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: null }],
       };
     }
-    const style: OutputStyle = ctx.outputStyle ?? "concise";
-    const suffix = SUFFIXES[ctx.taskType][style];
+
+    // PIL-03: Bridge output style detection — only when outputStyle not already set.
+    // Layer 1 no longer sets outputStyle (detectOutputStyle was removed in Plan 01).
+    // 50ms timeout is within the 200ms total PIL budget.
+    let detectedStyle: OutputStyle | null = ctx.outputStyle;
+    if (detectedStyle === null) {
+      const brainRaw = await classifyViaBrain(
+        `Analyze this prompt and return ONE word: concise, balanced, or detailed. Consider language, code density, and question complexity.\n\nPrompt: "${ctx.raw.slice(0, 300)}"`,
+        50, // 50ms timeout — within 200ms total PIL budget
+      );
+      if (brainRaw) {
+        const matched = VALID_STYLES.find((s) => brainRaw.toLowerCase().includes(s));
+        if (matched) detectedStyle = matched;
+      }
+      // Fail-open: if brain returns null/timeout, detectedStyle stays null
+    }
+
+    const taskKey = ctx.taskType as string;
+    const suffixEntry = SUFFIXES[taskKey];
+    if (!suffixEntry) {
+      return {
+        ...ctx,
+        outputStyle: detectedStyle ?? ctx.outputStyle,
+        layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: "no-suffix-entry" }],
+      };
+    }
+
+    const style: OutputStyle = detectedStyle ?? "concise";
+    const suffix = suffixEntry[style];
     return {
       ...ctx,
+      outputStyle: detectedStyle ?? ctx.outputStyle,
       layers: [
         ...ctx.layers,
         {
