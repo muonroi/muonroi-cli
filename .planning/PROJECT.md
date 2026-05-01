@@ -17,6 +17,7 @@ We do not sell tokens. We sell experience: memory that shrinks while capability 
 - [x] Experience Engine PreToolUse hook integration via HTTP client to localhost:8082 (EE-01) — Validated in Phase 00: fork-skeleton
 - [x] Usage guard storage primitives — config.json + usage.json with atomic-rename writes, cap schema in place — Validated in Phase 00: fork-skeleton
 - [x] Prompt Intelligence Layer — 6-layer pre-send pipeline (intent detection + output optimization + 4 stubs), fail-open 200ms, `/optimize` slash command, DB migration v3 — Validated in Phase 01.1: prompt-intelligence-layer
+- [x] EE Bridge Foundation — typed CJS bridge via createRequire, 5 async functions, graceful degradation, zero config duplication — Validated in Phase 05: ee-bridge-foundation
 
 ### Active
 
