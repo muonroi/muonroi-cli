@@ -22,6 +22,26 @@ export function getLastSurfacedState(): { surfacedIds: string[]; timestamp: stri
 }
 
 /**
+ * Allows non-HTTP code paths (e.g. PIL Layer 3 bridge search) to register
+ * point IDs they injected into the prompt. These IDs join the HTTP-intercept
+ * surfaced IDs for prompt-stale reconciliation.
+ */
+export function updateLastSurfacedState(ids: string[]): void {
+  if (ids.length === 0) return;
+  _lastSurfacedIds = [...ids];
+  _lastSurfacedTimestamp = new Date().toISOString();
+}
+
+/**
+ * Resets surfaced state to empty. Called after prompt-stale reconciliation
+ * dispatches so the same IDs are not re-reported on the next turn.
+ */
+export function resetLastSurfacedState(): void {
+  _lastSurfacedIds = [];
+  _lastSurfacedTimestamp = null;
+}
+
+/**
  * Module-level default EE client instance (lazy-initialized on first use).
  * Use setDefaultEEClient() to inject a custom client (e.g. in tests or at boot
  * after loading auth token from config).

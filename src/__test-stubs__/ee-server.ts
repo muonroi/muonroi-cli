@@ -15,6 +15,7 @@ export interface StubConfig {
   feedback?: (req: any) => void;
   touch?: (id: string) => void;
   extract?: (req: any) => any;
+  promptStale?: (req: any) => any;
   health?: () => boolean;
   latencyMs?: number;
 }
@@ -62,6 +63,7 @@ export async function startStubEEServer(cfg: StubConfig = {}): Promise<StubHandl
     feedback: [],
     touch: [],
     extract: [],
+    promptStale: [],
   };
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -141,6 +143,14 @@ export async function startStubEEServer(cfg: StubConfig = {}): Promise<StubHandl
     if (url.pathname === "/api/extract") {
       calls.extract.push(body);
       const r = cfg.extract?.(body) ?? { ok: true, mistakes: 0 };
+      sendJson(res, r);
+      return;
+    }
+
+    // Prompt-stale reconciliation
+    if (url.pathname === "/api/prompt-stale") {
+      calls.promptStale.push(body);
+      const r = cfg.promptStale?.(body) ?? { ok: true, unused: [], irrelevant: [], expired: [] };
       sendJson(res, r);
       return;
     }

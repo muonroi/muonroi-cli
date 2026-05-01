@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient, resetEEClientState } from "./client.js";
-import { setDefaultEEClient } from "./intercept.js";
+import { getLastSurfacedState, resetLastSurfacedState, setDefaultEEClient, updateLastSurfacedState } from "./intercept.js";
 import { setRenderSink } from "./render.js";
 import type { InterceptMatch, InterceptRequest } from "./types.js";
 
@@ -22,6 +22,35 @@ const sampleMatch: InterceptMatch = {
   scope_label: "global",
   last_matched_at: "2026-04-30T00:00:00Z",
 };
+
+describe("updateLastSurfacedState / resetLastSurfacedState", () => {
+  afterEach(() => {
+    resetLastSurfacedState();
+  });
+
+  it("updateLastSurfacedState sets surfacedIds and timestamp", () => {
+    updateLastSurfacedState(["id-1", "id-2"]);
+    const state = getLastSurfacedState();
+    expect(state.surfacedIds).toEqual(["id-1", "id-2"]);
+    expect(typeof state.timestamp).toBe("string");
+    expect(state.timestamp).not.toBe("");
+  });
+
+  it("updateLastSurfacedState with empty array is a no-op", () => {
+    updateLastSurfacedState(["id-1"]);
+    updateLastSurfacedState([]);
+    const state = getLastSurfacedState();
+    // Should still have previous value
+    expect(state.surfacedIds).toEqual(["id-1"]);
+  });
+
+  it("resetLastSurfacedState clears surfacedIds to []", () => {
+    updateLastSurfacedState(["id-1"]);
+    resetLastSurfacedState();
+    const state = getLastSurfacedState();
+    expect(state.surfacedIds).toEqual([]);
+  });
+});
 
 describe("intercept integration", () => {
   let stub: StubHandle;
