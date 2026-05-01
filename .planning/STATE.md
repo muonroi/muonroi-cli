@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
-status: verifying
-stopped_at: Completed 09-02-PLAN.md
-last_updated: "2026-05-01T18:28:17.504Z"
+status: executing
+stopped_at: Completed 10-01-PLAN.md
+last_updated: "2026-05-01T18:49:26.095Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
+  total_plans: 6
+  completed_plans: 5
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2-3x further than any subscription-locked tool.
-**Current focus:** Phase 09 — offline-queue
+**Current focus:** Phase 10 — prompt-stale-reconciliation
 
 ## Current Position
 
-Phase: 10
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 10 (prompt-stale-reconciliation) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0%
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 08 P02 | 15 | 3 tasks | 4 files |
 | Phase 09 P01 | 3 | 2 tasks | 2 files |
 | Phase 09-offline-queue P02 | 8 | 1 tasks | 1 files |
+| Phase 10 P01 | 2 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -81,6 +82,8 @@ Recent decisions affecting v1.2 work:
 - [Phase 09]: drainQueueAsync exported for tests; drainQueue (void) for production fire-and-forget
 - [Phase 09-offline-queue]: recordCircuitSuccess stays module-level with optional drainOpts to pass closure-local fetch/headers/baseUrl without restructuring
 - [Phase 09-offline-queue]: Only write operations enqueue (feedback/extract/promptStale); read/observational ops (intercept/posttool/touch) do not
+- [Phase 10]: resetLastSurfacedState() called BEFORE async dispatch to prevent double-reporting on rapid sequential PostToolUse events
+- [Phase 10]: reconcilePromptStale uses auto-compact trigger (not post-tool) to avoid cross-repo server dependency
 
 ### Key Files for v1.2
 
@@ -100,6 +103,6 @@ None identified for v1.2.
 
 ## Session Continuity
 
-Last session: 2026-05-01T18:25:07.229Z
-Stopped at: Completed 09-02-PLAN.md
+Last session: 2026-05-01T18:49:26.091Z
+Stopped at: Completed 10-01-PLAN.md
 Resume file: None
