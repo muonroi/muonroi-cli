@@ -126,4 +126,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-01 after milestone v1.2 Close EE Learning Loop started*
+*Last updated: 2026-05-02 — Phase 08 (Session End Extraction) complete: CLI auto-extracts session transcripts to EE at session end*
