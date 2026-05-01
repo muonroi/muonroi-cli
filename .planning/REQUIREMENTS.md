@@ -16,10 +16,10 @@ Requirements for closing the EE learning loop. Each maps to roadmap phases.
 
 ### Offline Queue
 
-- [ ] **QUEUE-01**: EE client buffers failed requests to local queue when server unreachable
-- [ ] **QUEUE-02**: Queue persists on disk (~/.muonroi-cli/ee-offline-queue/)
+- [x] **QUEUE-01**: EE client buffers failed requests to local queue when server unreachable
+- [x] **QUEUE-02**: Queue persists on disk (~/.muonroi-cli/ee-offline-queue/)
 - [ ] **QUEUE-03**: Queue replays automatically when EE server becomes reachable again
-- [ ] **QUEUE-04**: Queue has max size cap (100 entries) to prevent unbounded growth
+- [x] **QUEUE-04**: Queue has max size cap (100 entries) to prevent unbounded growth
 - [ ] **QUEUE-05**: Heavy events (extract) drain separately in background
 
 ### Prompt-stale Reconciliation
@@ -57,10 +57,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EXTRACT-02 | Phase 08 | Complete |
 | EXTRACT-03 | Phase 08 | Complete |
 | EXTRACT-04 | Phase 08 | Complete |
-| QUEUE-01 | Phase 09 | Pending |
-| QUEUE-02 | Phase 09 | Pending |
+| QUEUE-01 | Phase 09 | Complete |
+| QUEUE-02 | Phase 09 | Complete |
 | QUEUE-03 | Phase 09 | Pending |
-| QUEUE-04 | Phase 09 | Pending |
+| QUEUE-04 | Phase 09 | Complete |
 | QUEUE-05 | Phase 09 | Pending |
 | STALE-01 | Phase 10 | Pending |
 | STALE-02 | Phase 10 | Pending |
