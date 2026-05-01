@@ -4,13 +4,15 @@
  * Layer 1: Intent detection.
  * Pass 1 — classifier (regex + tree-sitter): maps all 14 possible reason strings to TaskType.
  * Pass 2 — keyword fallback: catches debug/plan/documentation that classifier misses.
+ * Pass 3 — EE brain fallback via bridge.classifyViaBrain (replaces ollamaClassify).
  * Populates taskType, confidence, and domain on PipelineContext.
+ * outputStyle is always null from Layer 1 — Layer 6 handles output style detection via bridge.
  * Fail-open: any error returns ctx unchanged with applied=false.
  */
 
 import { classify } from "../router/classifier/index.js";
-import { ollamaClassify } from "./ollama-classify.js";
-import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
+import { classifyViaBrain } from "../ee/bridge.js";
+import type { PipelineContext, TaskType } from "./types.js";
 
 // Maps every classifier reason string to a TaskType (or null for non-coding signals).
 const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
@@ -57,17 +59,8 @@ const KEYWORD_PATTERNS: Array<{ pattern: RegExp; taskType: TaskType; confidence:
   },
 ];
 
-const DETAIL_KEYWORDS =
-  /\b(explain|teach|why\b|how does|what is|learn|understand|deep dive|in detail|elaborate|walk me through|thorough|comprehensive)\b/i;
-
-const CONCISE_KEYWORDS = /\b(just|quick(?:ly)?|brief(?:ly)?|short|tl;?dr|one.?liner|fast|simply)\b/i;
-
-function detectOutputStyle(raw: string, taskType: TaskType | null): OutputStyle | null {
-  if (taskType === null) return null;
-  if (DETAIL_KEYWORDS.test(raw)) return "detailed";
-  if (CONCISE_KEYWORDS.test(raw)) return "concise";
-  return "balanced";
-}
+// Valid task types for bridge classification parsing (matches RESPONSE_SCHEMAS keys minus 'general').
+const VALID_TASK_TYPES: TaskType[] = ["refactor", "debug", "plan", "analyze", "documentation", "generate"];
 
 function extractDomain(reason: string): string | null {
   if (reason.includes("typescript")) return "typescript";
@@ -94,16 +87,23 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       }
     }
 
-    // Pass 3: Ollama fallback for ambiguous prompts
+    // Pass 3: EE brain fallback (replaces ollamaClassify)
     if (taskType === null && confidence < 0.55) {
-      const ollamaResult = await ollamaClassify(ctx.raw);
-      if (ollamaResult) {
-        taskType = ollamaResult.taskType;
-        confidence = ollamaResult.confidence;
+      const brainRaw = await classifyViaBrain(
+        `Classify into one of: refactor, debug, plan, analyze, documentation, generate, or none. Reply ONLY with the category name.\n\nPrompt: "${ctx.raw.slice(0, 500)}"`,
+        100, // 100ms timeout — matches EE_TIMEOUT_MS
+      );
+      if (brainRaw) {
+        const matched = VALID_TASK_TYPES.find(t => brainRaw.toLowerCase().includes(t));
+        if (matched) {
+          taskType = matched;
+          confidence = 0.55;
+        }
       }
     }
 
-    const outputStyle = detectOutputStyle(ctx.raw, taskType);
+    // outputStyle is always null from Layer 1 — Layer 6 handles output style via bridge
+    const outputStyle = null;
 
     return {
       ...ctx,
@@ -118,7 +118,7 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
           applied: taskType !== null,
           delta:
             taskType !== null
-              ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"}`
+              ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? "none"}`
               : null,
         },
       ],
