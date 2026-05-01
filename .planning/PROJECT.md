@@ -105,7 +105,7 @@ Definition of done for v1 beta:
 
 **Target features:**
 - Session End Extraction — wire /api/extract on session end so EE brain learns from CLI sessions
-- Offline Queue — buffer EE requests when server unreachable, replay on reconnect (no data loss)
+- ~~Offline Queue~~ — ✓ Validated in Phase 09 (2026-05-02): file-based FIFO queue in ~/.muonroi-cli/ee-offline-queue/, 100-entry cap, auto-replay on circuit recovery
 - Prompt-stale Reconciliation — call /api/prompt-stale to clean up stale PIL Layer 3 suggestions
 
 ## Evolution
