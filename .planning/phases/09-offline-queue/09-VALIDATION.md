@@ -39,9 +39,9 @@ created: 2026-05-02
 | Task ID | Plan | Wave | Requirement | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|-----------|-------------------|-------------|--------|
 | 09-01-01 | 01 | 1 | QUEUE-01 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
-| 09-01-02 | 01 | 1 | QUEUE-03 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
+| 09-01-02 | 01 | 1 | QUEUE-02 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
 | 09-01-03 | 01 | 1 | QUEUE-04 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
-| 09-02-01 | 02 | 2 | QUEUE-02 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
+| 09-02-01 | 02 | 2 | QUEUE-03 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
 | 09-02-02 | 02 | 2 | QUEUE-05 | unit | `bunx vitest run src/ee/offline-queue` | ❌ W0 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
@@ -50,7 +50,7 @@ created: 2026-05-02
 
 ## Wave 0 Requirements
 
-- [ ] `src/ee/__tests__/offline-queue.test.ts` — unit tests for enqueue/dequeue/cap/drain
+- [ ] `src/ee/offline-queue.test.ts` — unit tests for enqueue/dequeue/cap/drain
 - [ ] Test fixtures for temp queue directory (use `homeOverride` pattern from auth.ts)
 
 *Existing vitest infrastructure covers framework setup.*
@@ -62,7 +62,7 @@ created: 2026-05-02
 | Behavior | Requirement | Why Manual | Test Instructions |
 |----------|-------------|------------|-------------------|
 | CLI operates normally when EE is down | QUEUE-01 | Requires live EE server shutdown | 1. Stop EE server 2. Run CLI command 3. Verify no error shown 4. Check queue dir has entries |
-| Queue replays on EE recovery | QUEUE-02 | Requires EE server restart | 1. Queue entries from above 2. Start EE server 3. Trigger any EE call 4. Verify queue drains |
+| Queue replays on EE recovery | QUEUE-03 | Requires EE server restart | 1. Queue entries from above 2. Start EE server 3. Trigger any EE call 4. Verify queue drains |
 
 ---
 
