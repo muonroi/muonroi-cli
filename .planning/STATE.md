@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: EE-Native CLI
-status: verifying
-stopped_at: Completed 07-01-PLAN.md — Full Pipeline Validation (ROUTE-12)
-last_updated: "2026-05-01T11:06:08.655Z"
+milestone: v1.2
+milestone_name: Close EE Learning Loop
+status: defining-requirements
+stopped_at: ""
+last_updated: "2026-05-01T12:00:00.000Z"
 last_activity: 2026-05-01
 progress:
-  total_phases: 3
-  completed_phases: 3
-  total_plans: 5
-  completed_plans: 5
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
   percent: 0
 ---
 
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3x further than any subscription-locked tool.
-**Current focus:** Phase 07 — full-pipeline-validation
+**Current focus:** Defining requirements for v1.2
 
 ## Current Position
 
-Phase: 07
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-05-01
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-01 — Milestone v1.2 started
 
-Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
+Progress: [░░░░░░░░░░] 0%
 
 ## Performance Metrics
 
