@@ -1,6 +1,8 @@
 import { truncateToBudget } from "./budget.js";
 import type { OutputStyle, PipelineContext } from "./types.js";
 
+const DEFAULT_PERSONALITY: OutputStyle = "balanced";
+
 const PERSONALITY_HINTS: Record<OutputStyle, string> = {
   concise:
     "[personality: concise — Be direct and terse. Lead with the answer. Skip preamble. " +
@@ -14,25 +16,21 @@ const PERSONALITY_HINTS: Record<OutputStyle, string> = {
 };
 
 export async function layer2Personality(ctx: PipelineContext): Promise<PipelineContext> {
-  if (!ctx.outputStyle) {
-    return {
-      ...ctx,
-      layers: [...ctx.layers, { name: "personality-adaptation", applied: false, delta: "skipped:null-outputStyle" }],
-    };
-  }
+  const style: OutputStyle = ctx.outputStyle ?? DEFAULT_PERSONALITY;
 
-  const hint = PERSONALITY_HINTS[ctx.outputStyle];
+  const hint = PERSONALITY_HINTS[style];
   const trimmed = truncateToBudget(hint, Math.floor(ctx.tokenBudget * 0.2));
 
   return {
     ...ctx,
+    outputStyle: style,
     enriched: `${ctx.enriched}\n${trimmed}`,
     layers: [
       ...ctx.layers,
       {
         name: "personality-adaptation",
         applied: true,
-        delta: `style=${ctx.outputStyle} chars=${trimmed.length}`,
+        delta: `style=${style} source=${ctx.outputStyle ? "detected" : "default"} chars=${trimmed.length}`,
       },
     ],
   };
