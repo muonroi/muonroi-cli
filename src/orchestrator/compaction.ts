@@ -1,13 +1,12 @@
 import { generateText, type ModelMessage } from "ai";
-// FORK-02: ../grok/client deleted; stubs below keep tsc --noEmit clean until plan 00-05.
-import { type XaiProvider, type ResolvedModelRuntime } from "./orchestrator";
+import { type LegacyProvider, type ResolvedModelRuntime } from "./orchestrator";
 import { containsEncryptedReasoning } from "./reasoning";
 
-// FORK-02 stub: resolveModelRuntime — throws at runtime, compiles clean.
-function resolveModelRuntime(_provider: XaiProvider, modelId: string): ResolvedModelRuntime {
+// Stub — resolveModelRuntime not yet wired
+function resolveModelRuntime(_provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
   throw new Error(
-    `muonroi-cli FORK-02: resolveModelRuntime not yet wired for model ${modelId}. ` +
-      "Anthropic adapter ships in plan 00-05 (TUI-02, PROV-03).",
+    `resolveModelRuntime not yet wired for model ${modelId}. ` +
+      "Anthropic adapter pending.",
   );
 }
 
@@ -400,7 +399,7 @@ export function serializeConversation(messages: ModelMessage[]): string {
 }
 
 async function summarizeConversation(
-  provider: XaiProvider,
+  provider: LegacyProvider,
   modelId: string,
   messages: ModelMessage[],
   reserveTokens: number,
@@ -441,7 +440,7 @@ async function summarizeConversation(
 }
 
 export async function generateCompactionSummary(
-  provider: XaiProvider,
+  provider: LegacyProvider,
   modelId: string,
   preparation: PreparedCompaction,
   customInstructions?: string,

@@ -5,8 +5,8 @@ import { buildBugReport, formatBugReport, type BugReportBundle } from "./bug-rep
 
 // Mock fs/promises for controlled test environment
 // bug-report.ts uses named import { readFile } from "fs/promises"
-vi.mock("fs/promises", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("fs/promises")>();
+vi.mock("fs/promises", () => {
+  const actual = require("fs/promises");
   return {
     ...actual,
     readFile: vi.fn(),

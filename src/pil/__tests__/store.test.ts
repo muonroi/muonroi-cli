@@ -12,6 +12,9 @@ const makeCtx = (raw: string): PipelineContext => ({
   taskType: null,
   domain: null,
   confidence: 0,
+  outputStyle: null,
+  tokenBudget: 500,
+  metrics: null,
   layers: [],
 });
 

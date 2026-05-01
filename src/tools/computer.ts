@@ -508,7 +508,7 @@ function normalizeFailureDetail(result: AgentDesktopRunResult, parsed?: AgentDes
     .trim();
 
   if (!detail) {
-    return "Unknown agent-desktop error.";
+    return "Unknown computer tool error.";
   }
 
   const lower = detail.toLowerCase();

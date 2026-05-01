@@ -1,7 +1,7 @@
 {
   "name": "muonroi-cli",
   "version": "0.0.1",
-  "description": "BYOK AI coding agent CLI — orchestration brain that stretches your tokens 2–3× further. Forked from grok-cli.",
+  "description": "BYOK AI coding agent CLI — orchestration brain that stretches your tokens 2–3× further.",
   "type": "module",
   "main": "dist/index.js",
   "exports": {

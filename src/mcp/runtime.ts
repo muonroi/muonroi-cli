@@ -49,7 +49,7 @@ export async function buildMcpToolSet(servers: McpServerConfig[]): Promise<McpTo
     try {
       const client = await createMCPClient({
         transport: toTransport(server),
-        name: `grok-cli-${server.id}`,
+        name: `muonroi-cli-${server.id}`,
         version: "1.0.0",
       });
       clients.push(client);
