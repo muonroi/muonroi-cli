@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
-status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-05-01T17:46:59.809Z"
+status: verifying
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-05-01T17:52:49.718Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-05-01)
 
 Phase: 08 (session-end-extraction) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0%
@@ -56,6 +56,7 @@ Progress: [░░░░░░░░░░] 0%
 | 09. Offline Queue | TBD | - | - |
 | 10. Prompt-stale Reconciliation | TBD | - | - |
 | Phase 08 P01 | 4 | 2 tasks | 4 files |
+| Phase 08 P02 | 15 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Recent decisions affecting v1.2 work:
 - [v1.2 roadmap]: Phase 10 stale reconciliation is async, does not block next turn
 - [Phase 08]: buildExtractTranscript uses serializeConversation + regex truncation for tool results >500 chars (D-01/D-02)
 - [Phase 08]: extractSession counts total user messages including resumed sessions for D-07 threshold (D-06/D-07)
+- [Phase 08]: clearHistory() made async — Promise<void> backward-compatible at call sites ignoring return value
+- [Phase 08]: EEClient.extract() interface updated to include optional AbortSignal to match implementation
 
 ### Key Files for v1.2
 
@@ -91,6 +94,6 @@ None identified for v1.2.
 
 ## Session Continuity
 
-Last session: 2026-05-01T17:46:59.806Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-05-01T17:52:49.714Z
+Stopped at: Completed 08-02-PLAN.md
 Resume file: None

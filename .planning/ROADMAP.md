@@ -46,7 +46,7 @@ See milestone archive for details.
 **Plans:** 2 plans
 Plans:
 - [x] 08-01-PLAN.md — Core extractSession module, client signal override, stub server, tests
-- [ ] 08-02-PLAN.md — Wire into orchestrator cleanup/clearHistory, remove naive app.tsx extract
+- [x] 08-02-PLAN.md — Wire into orchestrator cleanup/clearHistory, remove naive app.tsx extract
 
 ### Phase 09: Offline Queue
 **Goal**: No EE data is lost when the server is temporarily unreachable
