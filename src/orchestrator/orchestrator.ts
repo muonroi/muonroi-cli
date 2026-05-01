@@ -12,7 +12,7 @@ import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { routerStore } from "../router/store.js";
-import { taskTypeToTier } from "../pil/task-tier-map.js";
+import { taskTypeToTier, taskTypeToMaxTokens, taskTypeToReasoningEffort } from "../pil/task-tier-map.js";
 import type {
   NotificationHookInput,
   PostCompactHookInput,
@@ -2184,9 +2184,31 @@ export class Agent {
           }
           let responseToolCalled = false;
 
+          // Build provider options, optionally adding reasoning budget for capable models
+          const baseProviderOpts = runtime.providerOptions ?? {};
+          const providerOpts = runtime.modelInfo?.reasoning
+            ? {
+                ...baseProviderOpts,
+                anthropic: {
+                  ...(baseProviderOpts.anthropic ?? {}),
+                  thinking: {
+                    type: "enabled" as const,
+                    budgetTokens:
+                      taskTypeToReasoningEffort(pilCtx.taskType) === "high"
+                        ? 32_768
+                        : taskTypeToReasoningEffort(pilCtx.taskType) === "medium"
+                          ? 8_192
+                          : 2_048,
+                  },
+                },
+              }
+            : baseProviderOpts;
+
           const result = streamText({
             model: runtime.model,
-            system,
+            system: runtime.modelId.startsWith("claude")
+              ? { role: "system" as const, content: system, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
+              : system,
             messages: this.messages,
             tools,
             toolChoice:
@@ -2199,8 +2221,8 @@ export class Agent {
             maxRetries: 0,
             abortSignal: signal,
             temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: this.maxTokens }),
-            ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+            ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+            ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
             experimental_onStepStart: (event: unknown) => {
               stepNumber = getStepNumber(event, stepNumber + 1);
               notifyObserver(observer?.onStepStart, {
