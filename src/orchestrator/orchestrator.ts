@@ -8,8 +8,10 @@ import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.j
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
-import { bootstrapEEClient } from "../ee/intercept.js";
+import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { reportRouteOutcome } from "../router/decide.js";
+import { routerStore } from "../router/store.js";
 import { taskTypeToTier } from "../pil/task-tier-map.js";
 import type {
   NotificationHookInput,
@@ -1718,6 +1720,18 @@ export class Agent {
     }
 
     const trigger = force ? "manual" : "auto";
+
+    // Fire-and-forget: notify EE of stale suggestions before compaction
+    const { surfacedIds, timestamp } = getLastSurfacedState();
+    if (surfacedIds.length > 0) {
+      getDefaultEEClient()
+        .promptStale({
+          state: { surfacedIds, timestamp },
+          nextPromptMeta: { trigger: "auto-compact", cwd: this.bash.getCwd(), tenantId: "local" },
+        })
+        .catch(() => {});
+    }
+
     const preCompactInput: PreCompactHookInput = {
       hook_event_name: "PreCompact",
       trigger,
@@ -2175,7 +2189,12 @@ export class Agent {
             system,
             messages: this.messages,
             tools,
-            toolChoice: _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false ? "auto" : undefined,
+            toolChoice:
+              _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false
+                ? pilCtx.taskType
+                  ? "required"
+                  : "auto"
+                : undefined,
             stopWhen: stepCountIs(this.maxToolRounds),
             maxRetries: 0,
             abortSignal: signal,
@@ -2416,6 +2435,29 @@ export class Agent {
             this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
           }
 
+          // Fallback: model responded in text despite tool_choice=required
+          // Attempt JSON extraction from assistant text → yield as structured_response
+          if (_hasResponseTools && !responseToolCalled && pilCtx.taskType && assistantText.trim()) {
+            try {
+              const jsonMatch = assistantText.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+                if (Object.keys(parsed).length > 0) {
+                  responseToolCalled = true;
+                  yield {
+                    type: "structured_response" as StreamChunk["type"],
+                    structuredResponse: {
+                      taskType: pilCtx.taskType,
+                      data: parsed,
+                    },
+                  };
+                }
+              }
+            } catch {
+              // JSON parse failed — leave as text-fallback
+            }
+          }
+
           // Track PIL output mode for /optimize metrics
           {
             const { setLastOutputMode } = await import("../pil/store.js");
@@ -2427,16 +2469,24 @@ export class Agent {
           // ROUTE-11: Fire routeFeedback after turn completes (success path).
           // Must come AFTER posttool calls (posttool fires during tool-result processing above).
           // Fire-and-forget — no await. Skipped when taskHash is null (bridge absent).
-          if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
-            void routeFeedback(
-              taskHash,
-              tier,
-              runtime.modelId,
-              "success", // Phase 6: all normal completions = 'success'
-              0, // retryCount: 0 for first attempt
-              Date.now() - turnStartMs,
-            );
+          {
+            const turnDuration = Date.now() - turnStartMs;
+            if (taskHash) {
+              const tier = taskTypeToTier(pilCtx.taskType);
+              void routeFeedback(
+                taskHash,
+                tier,
+                runtime.modelId,
+                "success", // Phase 6: all normal completions = 'success'
+                0, // retryCount: 0 for first attempt
+                turnDuration,
+              );
+            }
+            // HTTP path: also report via router store taskHash (covers warm/cold EE routes)
+            const storeHash = routerStore.getState().taskHash;
+            if (storeHash) {
+              reportRouteOutcome(storeHash, "success", turnDuration);
+            }
           }
 
           const stopInput: StopHookInput = {
@@ -2453,16 +2503,23 @@ export class Agent {
             this.discardAbortedTurn(userModelMessage);
             // ROUTE-11: Fire routeFeedback for cancelled turns (abort path).
             // Fire-and-forget — no await. Skipped when taskHash is null.
-            if (taskHash) {
-              const tier = taskTypeToTier(pilCtx.taskType);
-              void routeFeedback(
-                taskHash,
-                tier,
-                runtime.modelId,
-                "cancelled",
-                0,
-                Date.now() - turnStartMs,
-              );
+            {
+              const turnDuration = Date.now() - turnStartMs;
+              if (taskHash) {
+                const tier = taskTypeToTier(pilCtx.taskType);
+                void routeFeedback(
+                  taskHash,
+                  tier,
+                  runtime.modelId,
+                  "cancelled",
+                  0,
+                  turnDuration,
+                );
+              }
+              const storeHash = routerStore.getState().taskHash;
+              if (storeHash) {
+                reportRouteOutcome(storeHash, "cancelled", turnDuration);
+              }
             }
             yield { type: "content", content: "\n\n[Cancelled]" };
             yield { type: "done" };
@@ -2491,16 +2548,23 @@ export class Agent {
 
           // ROUTE-11: Fire routeFeedback for failed turns (error path).
           // Must come AFTER posttool calls. Fire-and-forget — no await.
-          if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
-            void routeFeedback(
-              taskHash,
-              tier,
-              runtime.modelId,
-              "fail",
-              0,
-              Date.now() - turnStartMs,
-            );
+          {
+            const turnDuration = Date.now() - turnStartMs;
+            if (taskHash) {
+              const tier = taskTypeToTier(pilCtx.taskType);
+              void routeFeedback(
+                taskHash,
+                tier,
+                runtime.modelId,
+                "fail",
+                0,
+                turnDuration,
+              );
+            }
+            const storeHash = routerStore.getState().taskHash;
+            if (storeHash) {
+              reportRouteOutcome(storeHash, "fail", turnDuration);
+            }
           }
 
           const stopFailureInput: StopFailureHookInput = {
