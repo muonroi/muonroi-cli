@@ -8,10 +8,10 @@
  */
 
 import type { ToolSet } from "ai";
-import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
+import type { OutputStyle, PipelineContext } from "./types.js";
 import { buildResponseTools } from "./response-tools.js";
 
-const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
+const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
     concise: `\nOUTPUT RULES (refactor): Show only changed code. Prefer unified diff or replacement function. No prose unless architecture changes. One sentence max if explanation needed. No preamble.`,
     balanced: `\nOUTPUT RULES (refactor): Show changed code with brief rationale. Unified diff preferred. Short explanation allowed when architecture changes. Keep prose under 3 sentences.`,
@@ -42,10 +42,15 @@ const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
     balanced: `\nOUTPUT RULES (generate): Complete, runnable code with brief explanation. Include all imports. Inline comments for key decisions. Short prose before code block explaining approach.`,
     detailed: `\nOUTPUT RULES (generate): Complete, runnable code with full explanation. Include all imports. Inline comments for logic and decisions. Explain design choices, alternatives considered, and trade-offs before the code.`,
   },
+  general: {
+    concise: `\nAnswer directly. No preamble.`,
+    balanced: `\nAnswer with brief context.`,
+    detailed: `\nAnswer thoroughly.`,
+  },
 };
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
-  if (ctx.taskType === null) return systemPrompt;
+  if (!ctx.taskType || !SUFFIXES[ctx.taskType]) return systemPrompt;
   if (responseToolsActive) {
     return (
       systemPrompt +
@@ -57,13 +62,13 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
 }
 
 export function getResponseToolSet(ctx: PipelineContext): ToolSet {
-  if (ctx.taskType === null) return {};
+  if (!ctx.taskType) return {};
   return buildResponseTools(ctx.taskType);
 }
 
 export async function layer6Output(ctx: PipelineContext): Promise<PipelineContext> {
   try {
-    if (ctx.taskType === null) {
+    if (!ctx.taskType || !SUFFIXES[ctx.taskType]) {
       return {
         ...ctx,
         layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: null }],
