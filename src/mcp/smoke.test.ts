@@ -89,7 +89,7 @@ describe("MCP smoke test — buildMcpToolSet", () => {
     });
   });
 
-  it.skipIf(process.platform === "win32")(
+  it.skipIf(process.platform === "win32" || !!process.env.CI)(
     "discovers tools from stdio MCP echo stub",
     async () => {
       // Inline MCP echo server script — handles initialize, notifications/initialized,

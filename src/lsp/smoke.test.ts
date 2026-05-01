@@ -9,9 +9,10 @@ let tsServerAvailable = false;
 let tmpDir = "";
 
 beforeAll(() => {
-  // Check if typescript-language-server is available
+  // Check if typescript-language-server AND typescript are both available
   try {
     execSync("bunx typescript-language-server --version", { timeout: 5000, stdio: "pipe" });
+    execSync("bunx tsc --version", { timeout: 5000, stdio: "pipe" });
     tsServerAvailable = true;
   } catch {
     tsServerAvailable = false;
