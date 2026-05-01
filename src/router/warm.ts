@@ -9,15 +9,21 @@ import type { RouteDecision } from "./types.js";
 
 export async function callWarmRoute(
   prompt: string,
-  opts: { tenantId: string; cwd: string; signal?: AbortSignal },
+  opts: { tenantId: string; cwd: string; signal?: AbortSignal; context?: Record<string, unknown> },
 ): Promise<RouteDecision | null> {
-  const r = await getDefaultEEClient().routeModel({ prompt, tenantId: opts.tenantId, cwd: opts.cwd }, opts.signal);
+  const r = await getDefaultEEClient().routeModel(
+    { task: prompt, tenantId: opts.tenantId, cwd: opts.cwd, context: opts.context as never },
+    opts.signal,
+  );
   if (!r) return null;
   return {
-    tier: r.tier,
+    tier: r.tier === "fast" ? "hot" : r.tier === "premium" ? "cold" : "warm",
     model: r.model,
-    provider: r.provider,
+    provider: "",
     reason: `warm:${r.reason}`,
     confidence: r.confidence,
+    taskHash: r.taskHash,
+    source: r.source,
+    reasoningEffort: r.reasoningEffort,
   };
 }

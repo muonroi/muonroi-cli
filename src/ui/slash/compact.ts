@@ -9,6 +9,7 @@
  */
 
 import * as path from "node:path";
+import { getDefaultEEClient, getLastSurfacedState } from "../../ee/intercept.js";
 import { getActiveRunId } from "../../flow/run-manager.js";
 import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
 import type { SlashHandler } from "./registry.js";
@@ -21,6 +22,17 @@ export const handleCompactSlash: SlashHandler = async (_args, ctx) => {
   const runId = await getActiveRunId(flowDir);
   if (!runId) {
     return "No active run. Nothing to compact. Start with /discuss to create a run.";
+  }
+
+  // Fire-and-forget: notify EE that surfaced suggestions are going stale due to compact
+  const { surfacedIds, timestamp } = getLastSurfacedState();
+  if (surfacedIds.length > 0) {
+    getDefaultEEClient()
+      .promptStale({
+        state: { surfacedIds, timestamp },
+        nextPromptMeta: { trigger: "compact", cwd: ctx.cwd, tenantId: "local" },
+      })
+      .catch(() => {});
   }
 
   // Return signal for orchestrator to perform compaction

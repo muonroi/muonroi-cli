@@ -63,6 +63,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         hook_event_name: "PreToolUse",
         tool_name: "Edit",
         tool_input: { path: "/tmp/x.ts" },
+        cwd: process.cwd(),
       },
       process.cwd(),
     );
@@ -74,6 +75,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         tool_name: "Edit",
         tool_input: { path: "/tmp/x.ts" },
         tool_output: { result: "ok" },
+        cwd: process.cwd(),
       },
       process.cwd(),
     );
@@ -114,6 +116,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         hook_event_name: "PreToolUse",
         tool_name: "Edit",
         tool_input: { path: "/tmp/y.ts" },
+        cwd: process.cwd(),
       },
       process.cwd(),
     );
@@ -124,6 +127,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         tool_name: "Edit",
         tool_input: { path: "/tmp/y.ts" },
         tool_output: { result: "ok" },
+        cwd: process.cwd(),
       },
       process.cwd(),
     );
@@ -157,6 +161,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         hook_event_name: "PreToolUse",
         tool_name: "Bash",
         tool_input: { command: "exit 1" },
+        cwd: process.cwd(),
       },
       process.cwd(),
     );
@@ -168,6 +173,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
         tool_name: "Bash",
         tool_input: { command: "exit 1" },
         error: "exit code 1",
+        cwd: process.cwd(),
       },
       process.cwd(),
     );

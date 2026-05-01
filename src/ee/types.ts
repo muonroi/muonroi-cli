@@ -60,35 +60,63 @@ export interface PostToolPayload {
   surfacedIds?: string[];
 }
 
-// Plan 03 types — keep tenantId required:
+// ─── P0: Route model types (aligned with EE server.js actual response) ────────
 export interface RouteModelRequest {
-  prompt: string;
+  task: string;
   tenantId: string;
   cwd: string;
+  context?: {
+    projectSlug?: string;
+    phase?: string;
+    files?: string[];
+    domain?: string;
+    activeRun?: string;
+    localRoute?: { tier: string; confidence: number };
+  };
+  runtime?: "claude" | "gemini" | "codex" | "opencode";
 }
+
+export type RouteTier = "fast" | "balanced" | "premium";
+export type RouteSource = "default" | "keyword" | "history" | "history-upgrade" | "brain";
 
 export interface RouteModelResponse {
   model: string;
-  provider: string;
-  tier: "warm" | "cold";
+  tier: RouteTier;
   confidence: number;
   reason: string;
+  source: RouteSource;
+  taskHash: string;
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 export interface ColdRouteRequest {
-  prompt: string;
+  task: string;
   tenantId: string;
   cwd: string;
+  context?: RouteModelRequest["context"];
+  runtime?: RouteModelRequest["runtime"];
 }
 
 export interface ColdRouteResponse {
   model: string;
-  provider: string;
-  tier: "cold";
+  tier: RouteTier;
   reason: string;
+  taskHash: string;
 }
 
-// Plan 08 — feedback + touch contract:
+// ─── P0: Route feedback ──────────────────────────────────────────────────────
+export type RouteOutcome = "success" | "fail" | "retry" | "cancelled";
+
+export interface RouteFeedbackPayload {
+  taskHash: string;
+  outcome: RouteOutcome;
+  tier?: string | null;
+  model?: string | null;
+  retryCount?: number;
+  duration?: number | null;
+}
+
+// ─── Feedback + touch contract ───────────────────────────────────────────────
 export type Classification = "FOLLOWED" | "IGNORED" | "IRRELEVANT";
 
 export interface FeedbackPayload {
@@ -99,12 +127,191 @@ export interface FeedbackPayload {
   tenantId: string;
 }
 
+// ─── P1: Prompt-stale reconciliation ─────────────────────────────────────────
+export interface PromptStaleRequest {
+  state: {
+    surfacedIds?: string[];
+    sessionId?: string;
+    timestamp?: string;
+  };
+  nextPromptMeta?: {
+    trigger: "compact" | "clear" | "auto-compact" | "session-end";
+    cwd?: string;
+    tenantId?: string;
+  };
+}
+
+export interface PromptStaleResponse {
+  ok: boolean;
+  unused: string[];
+  irrelevant: string[];
+  expired: string[];
+}
+
+// ─── P1: Session extract ─────────────────────────────────────────────────────
+export interface ExtractRequest {
+  transcript: string;
+  projectPath: string;
+  meta?: {
+    sessionId?: string;
+    tenantId?: string;
+    source?: "cli-exit" | "cli-clear" | "hook-stop";
+  };
+}
+
+export interface ExtractResponse {
+  ok: boolean;
+  mistakes?: number;
+  stored?: number;
+}
+
+// ─── P2: Knowledge visibility ────────────────────────────────────────────────
+export interface EEStatsResponse {
+  totalIntercepts: number;
+  suggestions: number;
+  misses: number;
+  mistakesDetected?: number;
+  lessonsStored?: number;
+  extractSessions?: number;
+  evolution?: {
+    promoted: number;
+    demoted: number;
+    abstracted: number;
+    archived: number;
+  };
+  perProject?: Record<string, { intercepts: number; suggestions: number }>;
+  feedbackCounts?: Record<string, number>;
+  noiseCounts?: Record<string, number>;
+  costLedger?: Array<{ date: string; embed: number; brain: number; judge: number; extract: number }>;
+  routingStats?: {
+    byTier: Record<string, number>;
+    bySource: Record<string, number>;
+    outcomes: Record<string, number>;
+  };
+}
+
+export interface EEGraphEdge {
+  type: "generalizes" | "relates-to" | "supersedes" | "contradicts";
+  target: string;
+  weight: number;
+  direction: "incoming" | "outgoing";
+  createdAt: string;
+}
+
+export interface EEGraphResponse {
+  id: string;
+  edges: EEGraphEdge[];
+  count: number;
+}
+
+export interface EETimelineEntry {
+  id: string;
+  trigger: string;
+  solution: string;
+  tier: number;
+  confirmedAt: string[];
+  createdAt: string;
+  superseded?: boolean;
+  score: number;
+}
+
+export interface EETimelineResponse {
+  topic: string;
+  timeline: EETimelineEntry[];
+  count: number;
+}
+
+export interface EEGatesResponse {
+  gates: Array<{
+    name: string;
+    status: "pass" | "fail" | "partial";
+    checks: Array<{ label: string; ok: boolean; detail?: string }>;
+  }>;
+}
+
+export interface EEEvolveResponse {
+  success: boolean;
+  promoted?: number;
+  demoted?: number;
+  abstracted?: number;
+  archived?: number;
+}
+
+export interface EEShareResponse {
+  shared: unknown;
+  success: boolean;
+}
+
+export interface EEImportResponse {
+  imported: unknown;
+  success: boolean;
+}
+
+// ─── Task routing ────────────────────────────────────────────────────────────
+export interface RouteTaskRequest {
+  task: string;
+  context?: Record<string, unknown>;
+  runtime?: "claude" | "gemini" | "codex" | "opencode";
+}
+
+export interface RouteTaskOption {
+  id: string;
+  label: string;
+  route: string;
+  description: string;
+}
+
+export interface RouteTaskResponse {
+  route: "qc-flow" | "qc-lock" | "direct" | null;
+  confidence: number;
+  source: string;
+  reason: string;
+  needs_disambiguation: boolean;
+  options: RouteTaskOption[];
+  taskHash: string | null;
+}
+
+// ─── Semantic search ─────────────────────────────────────────────────────────
+export interface EESearchResult {
+  id: string;
+  score: number;
+  text: string;
+  collection: string;
+}
+
+export interface EESearchResponse {
+  points: EESearchResult[];
+}
+
+// ─── User identity ───────────────────────────────────────────────────────────
+export interface EEUserResponse {
+  user: string;
+}
+
+// ─── Client interface ────────────────────────────────────────────────────────
 export interface EEClient {
   health(): Promise<{ ok: boolean; status: number }>;
   intercept(req: InterceptRequest): Promise<InterceptResponse>;
   posttool(payload: PostToolPayload): Promise<void>;
   routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null>;
   coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null>;
-  feedback(payload: FeedbackPayload): void; // Plan 08 implements
-  touch(principle_uuid: string, tenantId: string): void; // Plan 08 implements
+  feedback(payload: FeedbackPayload): void;
+  touch(principle_uuid: string, tenantId: string): void;
+  // P0: Route feedback
+  routeFeedback(payload: RouteFeedbackPayload): void;
+  // P1: Prompt-stale + extract
+  promptStale(req: PromptStaleRequest): Promise<PromptStaleResponse | null>;
+  extract(req: ExtractRequest): Promise<ExtractResponse | null>;
+  // P2: Knowledge visibility
+  stats(since?: string): Promise<EEStatsResponse | null>;
+  graph(id: string): Promise<EEGraphResponse | null>;
+  timeline(topic: string): Promise<EETimelineResponse | null>;
+  gates(): Promise<EEGatesResponse | null>;
+  evolve(trigger?: string): Promise<EEEvolveResponse | null>;
+  sharePrinciple(principleId: string): Promise<EEShareResponse | null>;
+  importPrinciple(data: unknown): Promise<EEImportResponse | null>;
+  // Task routing + search + user
+  routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null>;
+  search(query: string, limit?: number): Promise<EESearchResponse | null>;
+  user(): Promise<EEUserResponse | null>;
 }
