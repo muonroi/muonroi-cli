@@ -11,9 +11,9 @@ describe("callColdRoute", () => {
     stub = await startStubEEServer({
       coldRoute: (_req) => ({
         model: "deepseek-v3",
-        provider: "siliconflow",
-        tier: "cold" as const,
+        tier: "premium" as const,
         reason: "fallback",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
@@ -31,7 +31,7 @@ describe("callColdRoute", () => {
     expect(result).not.toBeNull();
     expect(result!.tier).toBe("cold");
     expect(result!.model).toBe("deepseek-v3");
-    expect(result!.provider).toBe("siliconflow");
+    expect(result!.provider).toBe("");
     expect(result!.reason).toContain("cold:");
   });
 
@@ -40,9 +40,9 @@ describe("callColdRoute", () => {
       latencyMs: 1500,
       coldRoute: () => ({
         model: "deepseek-v3",
-        provider: "siliconflow",
-        tier: "cold" as const,
+        tier: "premium" as const,
         reason: "fallback",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${slowStub.port}` }));
