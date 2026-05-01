@@ -14,14 +14,20 @@
 import type { InterceptMatch } from "./types.js";
 
 const BORDER_WIDTH = 46;
-const TOP_BORDER    = `┌─ ⚠ Experience Warning ${"─".repeat(BORDER_WIDTH - 22)}┐`;
+const TOP_BORDER = `┌─ ⚠ Experience Warning ${"─".repeat(BORDER_WIDTH - 22)}┐`;
 const BOTTOM_BORDER = `└${"─".repeat(BORDER_WIDTH - 1)}┘`;
 
 type RenderSink = (line: string) => void;
-let _sink: RenderSink = (line) => { console.warn(line); };
+let _sink: RenderSink = (line) => {
+  console.warn(line);
+};
 
-export function setRenderSink(fn: RenderSink): void { _sink = fn; }
-export function getRenderSink(): RenderSink { return _sink; }
+export function setRenderSink(fn: RenderSink): void {
+  _sink = fn;
+}
+export function getRenderSink(): RenderSink {
+  return _sink;
+}
 
 export function renderInterceptWarning(m: InterceptMatch): string {
   const conf = (m.confidence * 100).toFixed(0);

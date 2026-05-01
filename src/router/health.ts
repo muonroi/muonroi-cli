@@ -6,8 +6,8 @@
  *
  * Probe interval: 30s. TTL: 60s.
  */
-import { getDefaultEEClient } from '../ee/intercept.js';
-import { routerStore } from './store.js';
+import { getDefaultEEClient } from "../ee/intercept.js";
+import { routerStore } from "./store.js";
 
 const PROBE_INTERVAL_MS = 30_000;
 const TTL_MS = 60_000;
@@ -29,7 +29,7 @@ export async function startHealthProbe(): Promise<void> {
   handle = setInterval(() => {
     void probe();
   }, PROBE_INTERVAL_MS);
-  if (typeof (handle as any).unref === 'function') {
+  if (typeof (handle as any).unref === "function") {
     (handle as any).unref();
   }
 }

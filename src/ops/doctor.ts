@@ -8,8 +8,8 @@
  * Never throws — all checks handle errors gracefully (warn, not crash).
  */
 
-import os from "os";
 import { readFile } from "fs/promises";
+import os from "os";
 import path from "path";
 import { health as eeHealth } from "../ee/health.js";
 
@@ -40,9 +40,7 @@ async function checkBunVersion(): Promise<CheckResult> {
   }
   // Compare semver: need >= 1.3.13
   const [major, minor, patch] = bunVersion.split(".").map(Number);
-  const ok =
-    major > 1 ||
-    (major === 1 && (minor > 3 || (minor === 3 && patch >= 13)));
+  const ok = major > 1 || (major === 1 && (minor > 3 || (minor === 3 && patch >= 13)));
   return {
     name: "bun_version",
     status: ok ? "pass" : "fail",
@@ -69,7 +67,7 @@ async function checkKeyPresence(): Promise<CheckResult> {
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const keytar = await import("keytar") as any;
+    const keytar = (await import("keytar")) as any;
     const mod = keytar.default ?? keytar;
     const stored = await mod.getPassword("muonroi-cli", "anthropic-api-key");
     if (stored) {
@@ -106,9 +104,7 @@ async function checkEE(): Promise<CheckResult> {
     return {
       name: "ee",
       status: result.ok ? "pass" : "warn",
-      detail: result.ok
-        ? "Experience Engine healthy"
-        : `EE status ${result.status}`,
+      detail: result.ok ? "Experience Engine healthy" : `EE status ${result.status}`,
     };
   } catch {
     return { name: "ee", status: "warn", detail: "Experience Engine unreachable (optional)" };

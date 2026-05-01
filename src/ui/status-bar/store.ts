@@ -6,14 +6,14 @@
  * and subscribeDowngrade (Plan 05).
  */
 
-import { routerStore } from '../../router/store.js';
-import { subscribeThresholds } from '../../usage/thresholds.js';
-import { subscribeDowngrade } from '../../usage/downgrade.js';
+import { routerStore } from "../../router/store.js";
+import { subscribeDowngrade } from "../../usage/downgrade.js";
+import { subscribeThresholds } from "../../usage/thresholds.js";
 
 export interface StatusBarState {
   provider: string;
   model: string;
-  tier: 'hot' | 'warm' | 'cold' | 'degraded';
+  tier: "hot" | "warm" | "cold" | "degraded";
   in_tokens: number;
   out_tokens: number;
   session_usd: number;
@@ -27,9 +27,9 @@ type Listener = (s: StatusBarState) => void;
 
 function makeStore() {
   let state: StatusBarState = {
-    provider: '',
-    model: '',
-    tier: 'hot',
+    provider: "",
+    model: "",
+    tier: "hot",
     in_tokens: 0,
     out_tokens: 0,
     session_usd: 0,
@@ -103,9 +103,9 @@ export function wireStatusBar(): () => void {
 /** Test helper: reset store to default state. */
 export function __resetStatusBarStoreForTests(): void {
   statusBarStore.setState({
-    provider: '',
-    model: '',
-    tier: 'hot',
+    provider: "",
+    model: "",
+    tier: "hot",
     in_tokens: 0,
     out_tokens: 0,
     session_usd: 0,

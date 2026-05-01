@@ -29,14 +29,8 @@ import * as path from "node:path";
  *                       Falls back to MUONROI_CLI_HOME env var, then
  *                       ~/.muonroi-cli.
  */
-export async function getSessionDir(
-  sessionId: string,
-  homeOverride?: string,
-): Promise<string> {
-  const home =
-    homeOverride ??
-    process.env.MUONROI_CLI_HOME ??
-    path.join(os.homedir(), ".muonroi-cli");
+export async function getSessionDir(sessionId: string, homeOverride?: string): Promise<string> {
+  const home = homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
   const dir = path.join(home, "sessions", sessionId);
   await fs.mkdir(dir, { recursive: true });
   return dir;

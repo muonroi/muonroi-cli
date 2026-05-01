@@ -3,14 +3,12 @@
 // console.* before any subsequent import side-effect or log can emit an API key.
 // See: PROV-07, Pitfall 2 (HIGH severity API key leakage).
 import { redactor } from "./utils/redactor.js";
+
 redactor.installGlobalPatches();
 
 import { InvalidArgumentError, program } from "commander";
 
 import packageJson from "../package.json";
-import { Agent } from "./orchestrator/orchestrator";
-import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
-import { MODELS, normalizeModelId } from "./models/registry.js";
 import {
   createHeadlessJsonlEmitter,
   type HeadlessOutputFormat,
@@ -18,31 +16,31 @@ import {
   renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
+import { MODELS, normalizeModelId } from "./models/registry.js";
+// Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
+import { createAbortContext } from "./orchestrator/abort.js";
+import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
+import { Agent } from "./orchestrator/orchestrator";
+import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
+import { loadAnthropicKey } from "./providers/index.js";
+import { loadConfig } from "./storage/config.js";
+import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
+import type { PermissionMode } from "./utils/permission-mode.js";
 import {
   getApiKey,
   getBaseURL,
   getCurrentSandboxMode,
   getCurrentSandboxSettings,
-  loadPaymentSettings,
   mergeSandboxSettings,
   type SandboxMode,
   type SandboxSettings,
-  savePaymentSettings,
   saveUserSettings,
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
-// Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
-import { createAbortContext } from "./orchestrator/abort.js";
-import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
-import { loadConfig } from "./storage/config.js";
-import { loadUsage } from "./storage/usage-cap.js";
-import { loadAnthropicKey } from "./providers/index.js";
-import { type PermissionMode } from "./utils/permission-mode.js";
-
 
 const exitCleanlyOnSigterm = () => {
   process.exit(0);
@@ -77,7 +75,7 @@ async function startInteractive(
   // 2. loadConfig + loadUsage (validates storage paths, logs usage cap state).
   const [config, usage] = await Promise.all([loadConfig(), loadUsage()]);
   void config; // Phase 0: plumbed but not yet surfaced in TUI status bar (TUI-05, Phase 1).
-  void usage;  // Phase 0: same — cap guard will gate on this in plan 00-06+ / Phase 1.
+  void usage; // Phase 0: same — cap guard will gate on this in plan 00-06+ / Phase 1.
 
   // 3. loadAnthropicKey — enrolls key into redactor; falls back to env var.
   const anthropicKey = await loadAnthropicKey().catch(() => undefined);
@@ -249,7 +247,9 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     const delegation = await loadDelegation(jobPath);
     const apiKey = stringOption(options.apiKey) || getApiKey();
     if (!apiKey) {
-      throw new Error("API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.");
+      throw new Error(
+        "API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.",
+      );
     }
 
     const baseURL = stringOption(options.baseUrl) || getBaseURL();
@@ -359,7 +359,11 @@ program
   .option("--background-task-file <path>", "Run a persisted background delegation")
   .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
-  .option("--permission <mode>", "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)", "safe")
+  .option(
+    "--permission <mode>",
+    "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)",
+    "safe",
+  )
   .option("--update", "Update muonroi-cli to the latest version and exit")
   .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access")
   .action(async (message: string[], options) => {

@@ -4,7 +4,7 @@
  * Holds current tier, degraded flag, and last routing decision.
  * Plan 06 status bar subscribes to this store.
  */
-import type { RouteDecision, Tier } from './types.js';
+import type { RouteDecision, Tier } from "./types.js";
 
 export interface RouterState {
   tier: Tier;
@@ -17,7 +17,7 @@ type Listener = (s: RouterState) => void;
 
 function makeStore() {
   let state: RouterState = {
-    tier: 'hot',
+    tier: "hot",
     degraded: false,
     lastDecision: null,
     lastHealthCheckAtMs: 0,

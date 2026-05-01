@@ -26,11 +26,7 @@ export function registerSlash(name: string, handler: SlashHandler): void {
  * Dispatch a slash command by name.
  * Returns null if command not registered (caller falls back to legacy switch).
  */
-export async function dispatchSlash(
-  name: string,
-  args: string[],
-  ctx: SlashContext,
-): Promise<string | null> {
+export async function dispatchSlash(name: string, args: string[], ctx: SlashContext): Promise<string | null> {
   const h = registry.get(name);
   if (!h) return null;
   return await h(args, ctx);

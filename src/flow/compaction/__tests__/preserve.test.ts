@@ -1,10 +1,5 @@
-import { describe, it, expect } from "vitest";
-import {
-  extractPreservedBlocks,
-  restorePreservedBlocks,
-  PRESERVE_OPEN,
-  PRESERVE_CLOSE,
-} from "../preserve.js";
+import { describe, expect, it } from "vitest";
+import { extractPreservedBlocks, PRESERVE_CLOSE, PRESERVE_OPEN, restorePreservedBlocks } from "../preserve.js";
 
 describe("extractPreservedBlocks", () => {
   it("extracts single preserve block and replaces with placeholder", () => {

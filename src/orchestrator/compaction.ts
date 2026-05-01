@@ -1,13 +1,10 @@
 import { generateText, type ModelMessage } from "ai";
-import { type LegacyProvider, type ResolvedModelRuntime } from "./orchestrator";
+import type { LegacyProvider, ResolvedModelRuntime } from "./orchestrator";
 import { containsEncryptedReasoning } from "./reasoning";
 
 // Stub — resolveModelRuntime not yet wired
 function resolveModelRuntime(_provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
-  throw new Error(
-    `resolveModelRuntime not yet wired for model ${modelId}. ` +
-      "Anthropic adapter pending.",
-  );
+  throw new Error(`resolveModelRuntime not yet wired for model ${modelId}. Anthropic adapter pending.`);
 }
 
 export interface CompactionSettings {

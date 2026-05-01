@@ -39,16 +39,10 @@ export function extractPreservedBlocks(text: string): {
 /**
  * Replace placeholders with original content wrapped in preserve markers.
  */
-export function restorePreservedBlocks(
-  text: string,
-  blocks: PreservedBlock[],
-): string {
+export function restorePreservedBlocks(text: string, blocks: PreservedBlock[]): string {
   let result = text;
   for (const block of blocks) {
-    result = result.replace(
-      block.id,
-      `${PRESERVE_OPEN}${block.content}${PRESERVE_CLOSE}`,
-    );
+    result = result.replace(block.id, `${PRESERVE_OPEN}${block.content}${PRESERVE_CLOSE}`);
   }
   return result;
 }

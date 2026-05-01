@@ -2,16 +2,15 @@
  * Tests for flow-resume.ts — loadFlowResumeDigest reads .muonroi-flow/
  * state before chat transcript on cold start.
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import { tmpdir } from "node:os";
-import { mkdtemp, rm } from "node:fs/promises";
 
-import { loadFlowResumeDigest } from "../flow-resume.js";
-import { ensureFlowDir } from "../../flow/scaffold.js";
-import { createRun, setActiveRunId, updateRunFile } from "../../flow/run-manager.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { parseSections } from "../../flow/parser.js";
+import { createRun, setActiveRunId, updateRunFile } from "../../flow/run-manager.js";
+import { ensureFlowDir } from "../../flow/scaffold.js";
+import { loadFlowResumeDigest } from "../flow-resume.js";
 
 let tempDirs: string[] = [];
 

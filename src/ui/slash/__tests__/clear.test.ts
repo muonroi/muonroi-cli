@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SlashContext } from "../registry.js";
 
 // Import to trigger self-registration
@@ -40,11 +40,7 @@ describe("handleClearSlash", () => {
     await fs.mkdir(runDir, { recursive: true });
 
     // Set up state.md with active run
-    await fs.writeFile(
-      path.join(flowDir, "state.md"),
-      "## Active Run\n\ntest-run-01\n",
-      "utf8",
-    );
+    await fs.writeFile(path.join(flowDir, "state.md"), "## Active Run\n\ntest-run-01\n", "utf8");
 
     // Set up run state.md with some content
     await fs.writeFile(
@@ -80,21 +76,9 @@ describe("handleClearSlash", () => {
     const runDir = path.join(flowDir, "runs", runId);
     await fs.mkdir(runDir, { recursive: true });
 
-    await fs.writeFile(
-      path.join(flowDir, "state.md"),
-      "## Active Run\n\nrun-02\n",
-      "utf8",
-    );
-    await fs.writeFile(
-      path.join(runDir, "state.md"),
-      "## Resume Digest\n\nSome state\n",
-      "utf8",
-    );
-    await fs.writeFile(
-      path.join(flowDir, "decisions.md"),
-      "## Decisions\n\n- D1\n- D2\n- D3\n",
-      "utf8",
-    );
+    await fs.writeFile(path.join(flowDir, "state.md"), "## Active Run\n\nrun-02\n", "utf8");
+    await fs.writeFile(path.join(runDir, "state.md"), "## Resume Digest\n\nSome state\n", "utf8");
+    await fs.writeFile(path.join(flowDir, "decisions.md"), "## Decisions\n\n- D1\n- D2\n- D3\n", "utf8");
 
     const result = await dispatchSlash("clear", [], makeCtx(tmpDir));
     expect(result).toContain("Decisions:");

@@ -9,8 +9,8 @@
  */
 
 import * as path from "node:path";
-import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
 import { getActiveRunId } from "../../flow/run-manager.js";
+import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 

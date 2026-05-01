@@ -5,12 +5,11 @@
  * (randomBytes(2).toString('hex')).
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { randomBytes } from "node:crypto";
-import { parseSections, serializeSections } from "./parser.js";
-import type { SectionMap } from "./parser.js";
 import { readArtifact, writeArtifact } from "./artifact-io.js";
+import type { SectionMap } from "./parser.js";
 
 export interface RunState {
   id: string;
@@ -105,7 +104,7 @@ export async function getActiveRunId(flowDir: string): Promise<string | null> {
   const stateMap = await readArtifact(flowDir, "state.md");
   if (!stateMap) return null;
   const section = stateMap.sections.get("Active Run");
-  if (!section || !section.trim()) return null;
+  if (!section?.trim()) return null;
   return section.trim();
 }
 
@@ -124,12 +123,7 @@ export async function setActiveRunId(flowDir: string, id: string): Promise<void>
 /**
  * Write a run file atomically.
  */
-export async function updateRunFile(
-  flowDir: string,
-  runId: string,
-  filename: string,
-  map: SectionMap,
-): Promise<void> {
+export async function updateRunFile(flowDir: string, runId: string, filename: string, map: SectionMap): Promise<void> {
   const runDir = path.join(flowDir, "runs", runId);
   await writeArtifact(runDir, filename, map);
 }

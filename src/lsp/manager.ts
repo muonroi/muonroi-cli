@@ -45,7 +45,7 @@ export function createWorkspaceLspManager(
     options.createClient ??
     (async ({ serverId, root, definition, settings: normalizedSettings }) => {
       const launch = await definition.resolveLaunch(root, normalizedSettings);
-      if (!launch || !launch.command) return null;
+      if (!launch?.command) return null;
       return createLspClientSession({
         serverId,
         root,

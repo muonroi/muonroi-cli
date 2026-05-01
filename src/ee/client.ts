@@ -1,4 +1,6 @@
 import type {
+  ColdRouteRequest,
+  ColdRouteResponse,
   EEClient,
   FeedbackPayload,
   InterceptRequest,
@@ -6,8 +8,6 @@ import type {
   PostToolPayload,
   RouteModelRequest,
   RouteModelResponse,
-  ColdRouteRequest,
-  ColdRouteResponse,
 } from "./types.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
@@ -37,9 +37,9 @@ function logUnreachable(reason: string): void {
 // ─── Circuit breaker ──────────────────────────────────────────────────────────
 type CircuitState = "closed" | "open" | "half-open";
 
-const CIRCUIT_FAILURE_THRESHOLD = 3;   // consecutive failures before opening
-const CIRCUIT_OPEN_DURATION_MS   = 30_000; // stay open for 30s
-const CIRCUIT_RESET_TIMEOUT_MS   = 60_000; // reset consecutive counter after 60s idle
+const CIRCUIT_FAILURE_THRESHOLD = 3; // consecutive failures before opening
+const CIRCUIT_OPEN_DURATION_MS = 30_000; // stay open for 30s
+const CIRCUIT_RESET_TIMEOUT_MS = 60_000; // reset consecutive counter after 60s idle
 
 let _circuitState: CircuitState = "closed";
 let _consecutiveFailures = 0;
@@ -62,7 +62,7 @@ function recordCircuitFailure(): void {
     _circuitOpenedAt = now;
     console.warn(
       `[muonroi-cli] EE circuit breaker OPEN after ${_consecutiveFailures} consecutive failures. ` +
-      `Skipping intercept calls for ${CIRCUIT_OPEN_DURATION_MS / 1000}s.`
+        `Skipping intercept calls for ${CIRCUIT_OPEN_DURATION_MS / 1000}s.`,
     );
   }
 }
@@ -173,7 +173,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
   function headers(): Record<string, string> {
     const h: Record<string, string> = { "Content-Type": "application/json" };
-    if (authToken) h["Authorization"] = `Bearer ${authToken}`;
+    if (authToken) h.Authorization = `Bearer ${authToken}`;
     return h;
   }
 
@@ -230,7 +230,9 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => { /* fire-and-forget */ });
+      }).catch(() => {
+        /* fire-and-forget */
+      });
     },
 
     async routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null> {
@@ -276,7 +278,9 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => { /* fire-and-forget */ });
+      }).catch(() => {
+        /* fire-and-forget */
+      });
     },
 
     touch(principle_uuid: string, tenantId: string): void {
@@ -284,7 +288,9 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ tenantId }),
-      }).catch(() => { /* fire-and-forget */ });
+      }).catch(() => {
+        /* fire-and-forget */
+      });
     },
   };
 }

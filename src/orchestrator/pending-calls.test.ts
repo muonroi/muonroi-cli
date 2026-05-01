@@ -103,7 +103,7 @@ describe("PendingCallsLog", () => {
       started_ms: Date.now() - 60_000,
       status: "pending",
     });
-    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), staleEntry + "\n", "utf8");
+    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), `${staleEntry}\n`, "utf8");
 
     const log = createPendingCallsLog(sid);
     const result = await log.reconcile();
@@ -133,7 +133,7 @@ describe("PendingCallsLog", () => {
       status: "pending",
       staged_paths: [tmpFile],
     });
-    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), staleEntry + "\n", "utf8");
+    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), `${staleEntry}\n`, "utf8");
 
     const log = createPendingCallsLog(sid);
     await log.reconcile();
@@ -160,7 +160,7 @@ describe("PendingCallsLog", () => {
       status: "pending",
       staged_paths: [tmpFile],
     });
-    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), staleEntry + "\n", "utf8");
+    await fs.writeFile(path.join(sessionDir, "pending_calls.jsonl"), `${staleEntry}\n`, "utf8");
 
     const log = createPendingCallsLog(sid);
     await log.reconcile();
@@ -176,11 +176,7 @@ describe("PendingCallsLog", () => {
 
     // Fire 10 concurrent begin() calls
     const N = 10;
-    await Promise.all(
-      Array.from({ length: N }, (_, i) =>
-        log.begin({ call_id: `c-${i}`, tool_name: "Bash" }),
-      ),
-    );
+    await Promise.all(Array.from({ length: N }, (_, i) => log.begin({ call_id: `c-${i}`, tool_name: "Bash" })));
 
     const sessionDir = path.join(tmpBase, "sessions", sid);
     const lines = await readJSONL(path.join(sessionDir, "pending_calls.jsonl"));

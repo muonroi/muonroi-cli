@@ -1,11 +1,11 @@
 // Anthropic provider wired — real provider calls.
-import { toolNeedsApproval, type PermissionMode } from "../utils/permission-mode.js";
+
+import { createAnthropic } from "@ai-sdk/anthropic";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { loadAnthropicKey } from "../providers/index.js";
-import { stableCallId } from "./pending-calls.js";
+import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
+import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -23,6 +23,8 @@ import type {
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { buildMcpToolSet } from "../mcp/runtime";
+import { getModelInfo, normalizeModelId } from "../models/registry.js";
+import { applyPilSuffix, runPipeline } from "../pil/index.js";
 import {
   appendCompaction,
   appendMessages,
@@ -54,6 +56,7 @@ import type {
   WorkspaceInfo,
 } from "../types/index";
 import { loadCustomInstructions } from "../utils/instructions";
+import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
   getCurrentModel,
@@ -79,12 +82,9 @@ import {
   shouldCompactContext,
 } from "./compaction";
 import { DelegationManager } from "./delegations";
-import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
-import { runPipeline, applyPilSuffix } from '../pil/index.js';
-import { ensureFlowDir } from "../flow/scaffold.js";
-import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { loadFlowResumeDigest } from "./flow-resume.js";
-import { getModelInfo, normalizeModelId } from "../models/registry.js";
+import { stableCallId } from "./pending-calls.js";
+import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 
 // ---------------------------------------------------------------------------
 // Provider type stubs — compile-only placeholders until full provider
@@ -248,11 +248,7 @@ function createTools(
   return {};
 }
 
-async function buildVisionUserMessages(
-  _prompt: string,
-  _cwd: string,
-  _signal?: AbortSignal,
-): Promise<ModelMessage[]> {
+async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: AbortSignal): Promise<ModelMessage[]> {
   // Vision input is an anti-feature per PROJECT.md Out-of-Scope. Always throws.
   throw new Error("Vision input is not supported in muonroi-cli (anti-feature per PROJECT.md).");
 }
@@ -2000,9 +1996,13 @@ export class Agent {
       // paths (this.abortController = null) still work without side-effects.
       this.abortController = new AbortController();
       // Forward external abort to the local controller.
-      this.externalAbortContext.signal.addEventListener("abort", () => {
-        this.abortController?.abort(this.externalAbortContext?.reason());
-      }, { once: true });
+      this.externalAbortContext.signal.addEventListener(
+        "abort",
+        () => {
+          this.abortController?.abort(this.externalAbortContext?.reason());
+        },
+        { once: true },
+      );
     } else {
       this.abortController = new AbortController();
     }
@@ -2040,12 +2040,20 @@ export class Agent {
       resumeDigest: this._resumeDigest,
       activeRunId: this._activeRunId,
     }).catch(() => ({
-      raw: userMessage, enriched: userMessage, taskType: null, domain: null, confidence: 0, outputStyle: null, tokenBudget: 500, metrics: null, layers: [],
+      raw: userMessage,
+      enriched: userMessage,
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
     }));
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
-    this._pilEnrichmentDelta = pilCtx.metrics?.estimatedTokensSaved
-      ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
+    this._pilEnrichmentDelta =
+      pilCtx.metrics?.estimatedTokensSaved ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);

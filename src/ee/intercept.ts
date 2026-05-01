@@ -1,13 +1,9 @@
-import { createEEClient } from "./client.js";
+import { getCachedAuthToken, loadEEAuthToken, refreshAuthToken } from "./auth.js";
 import type { CreateEEClientOpts } from "./client.js";
-import type { InterceptRequest, InterceptResponse, Scope } from "./types.js";
+import { createEEClient } from "./client.js";
 import { emitMatches } from "./render.js";
 import { buildScope } from "./scope.js";
-import {
-  loadEEAuthToken,
-  refreshAuthToken,
-  getCachedAuthToken,
-} from "./auth.js";
+import type { InterceptRequest, InterceptResponse, Scope } from "./types.js";
 
 /**
  * Module-level default EE client instance (lazy-initialized on first use).
@@ -16,9 +12,7 @@ import {
  */
 let _defaultClient: ReturnType<typeof createEEClient> | null = null;
 
-export function setDefaultEEClient(
-  c: ReturnType<typeof createEEClient>,
-): void {
+export function setDefaultEEClient(c: ReturnType<typeof createEEClient>): void {
   _defaultClient = c;
 }
 
@@ -38,10 +32,7 @@ export function getDefaultEEClient(): ReturnType<typeof createEEClient> {
  * - On 401 (surfaced as reason='auth-required'): refreshes token, rebuilds client, retries once.
  * - On allow + matches[]: emits rendered ⚠ lines via render sink.
  */
-export async function intercept(
-  req: InterceptRequest,
-  opts?: CreateEEClientOpts,
-): Promise<InterceptResponse> {
+export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts): Promise<InterceptResponse> {
   const client = opts ? createEEClient(opts) : getDefaultEEClient();
   let resp = await client.intercept(req);
 
@@ -69,8 +60,7 @@ export async function intercept(
  * Fills tenantId='local' and scope (computed via buildScope({ cwd })) when omitted.
  */
 export async function interceptWithDefaults(
-  req: Omit<InterceptRequest, "tenantId" | "scope"> &
-    Partial<Pick<InterceptRequest, "tenantId" | "scope">>,
+  req: Omit<InterceptRequest, "tenantId" | "scope"> & Partial<Pick<InterceptRequest, "tenantId" | "scope">>,
 ): Promise<InterceptResponse> {
   const tenantId = req.tenantId ?? "local";
   const scope: Scope = req.scope ?? (await buildScope({ cwd: req.cwd }));

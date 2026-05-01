@@ -9,27 +9,27 @@
  * Exception: ollama is keyless by default.
  */
 
-import type { ProviderId } from './types.js';
-import { redactor } from '../utils/redactor.js';
+import { redactor } from "../utils/redactor.js";
+import type { ProviderId } from "./types.js";
 
-const KEYCHAIN_SERVICE = 'muonroi-cli';
+const KEYCHAIN_SERVICE = "muonroi-cli";
 
 const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
-  anthropic: 'anthropic',
-  openai: 'openai',
-  google: 'google',
-  deepseek: 'deepseek',
-  siliconflow: 'siliconflow',
-  ollama: 'ollama',
+  anthropic: "anthropic",
+  openai: "openai",
+  google: "google",
+  deepseek: "deepseek",
+  siliconflow: "siliconflow",
+  ollama: "ollama",
 };
 
 const ENV_BY_PROVIDER: Record<ProviderId, string> = {
-  anthropic: 'ANTHROPIC_API_KEY',
-  openai: 'OPENAI_API_KEY',
-  google: 'GOOGLE_API_KEY',
-  deepseek: 'DEEPSEEK_API_KEY',
-  siliconflow: 'SILICONFLOW_API_KEY',
-  ollama: 'OLLAMA_API_KEY',
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+  siliconflow: "SILICONFLOW_API_KEY",
+  ollama: "OLLAMA_API_KEY",
 };
 
 /**
@@ -38,7 +38,7 @@ const ENV_BY_PROVIDER: Record<ProviderId, string> = {
 export class ProviderKeyMissingError extends Error {
   constructor(public readonly provider: ProviderId) {
     super(`No API key found for provider '${provider}'.`);
-    this.name = 'ProviderKeyMissingError';
+    this.name = "ProviderKeyMissingError";
   }
 }
 
@@ -48,7 +48,7 @@ export class ProviderKeyMissingError extends Error {
  */
 async function loadKeytar(): Promise<{ getPassword(s: string, a: string): Promise<string | null> } | null> {
   try {
-    return (await import('keytar')) as any;
+    return (await import("keytar")) as any;
   } catch {
     return null;
   }
@@ -82,7 +82,7 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
   }
 
   // Ollama may be keyless
-  if (provider === 'ollama') return '';
+  if (provider === "ollama") return "";
 
   throw new ProviderKeyMissingError(provider);
 }
@@ -93,7 +93,7 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
  * Returns null if no provider has a key (unlikely — ollama is keyless fallback).
  */
 export async function firstAvailableProvider(): Promise<ProviderId | null> {
-  const order: ProviderId[] = ['anthropic', 'openai', 'google', 'deepseek', 'siliconflow', 'ollama'];
+  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "ollama"];
   for (const p of order) {
     try {
       await loadKeyForProvider(p);

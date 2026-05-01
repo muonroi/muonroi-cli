@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SlashContext } from "../registry.js";
 
 // Import to trigger self-registration
@@ -41,11 +41,7 @@ describe("handleCompactSlash", () => {
       recursive: true,
     });
     await fs.mkdir(path.join(flowDir, "history"), { recursive: true });
-    await fs.writeFile(
-      path.join(flowDir, "state.md"),
-      "## Active Run\n\ntest-run-01\n",
-      "utf8",
-    );
+    await fs.writeFile(path.join(flowDir, "state.md"), "## Active Run\n\ntest-run-01\n", "utf8");
     // Create run state.md
     await fs.writeFile(
       path.join(flowDir, "runs", "test-run-01", "state.md"),

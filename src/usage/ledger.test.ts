@@ -1,20 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import * as os from "node:os";
-import { reserve, commit, release } from "./ledger.js";
-import { CapBreachError } from "./types.js";
-import type { ReservationToken, ThresholdEvent } from "./types.js";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { atomicReadJSON } from "../storage/atomic-io.js";
-import { subscribeThresholds } from "./thresholds.js";
 import type { UsageState } from "../storage/usage-cap.js";
+import { commit, release, reserve } from "./ledger.js";
+import { subscribeThresholds } from "./thresholds.js";
+import type { ReservationToken, ThresholdEvent } from "./types.js";
+import { CapBreachError } from "./types.js";
 
 async function makeTmpHome(capUsd = 15): Promise<string> {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "muonroi-ledger-"));
-  await fs.writeFile(
-    path.join(home, "config.json"),
-    JSON.stringify({ cap: { monthly_usd: capUsd } }),
-  );
+  await fs.writeFile(path.join(home, "config.json"), JSON.stringify({ cap: { monthly_usd: capUsd } }));
   return home;
 }
 

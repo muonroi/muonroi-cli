@@ -1,46 +1,46 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { SlashContext } from '../registry.js';
-import type { PipelineContext } from '../../../pil/index.js';
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PipelineContext } from "../../../pil/index.js";
+import type { SlashContext } from "../registry.js";
 
 // Mock the PIL module before importing optimize
-vi.mock('../../../pil/index.js', () => {
+vi.mock("../../../pil/index.js", () => {
   return {
     getPilLastResult: vi.fn(),
     runPipeline: vi.fn(),
   };
 });
 
-import { getPilLastResult, runPipeline } from '../../../pil/index.js';
+import { getPilLastResult, runPipeline } from "../../../pil/index.js";
 
 // Import to trigger self-registration
-import '../optimize.js';
+import "../optimize.js";
 
-import { dispatchSlash } from '../registry.js';
+import { dispatchSlash } from "../registry.js";
 
 const makeCtx = (): SlashContext => ({
-  cwd: '/tmp',
-  tenantId: 'local',
-  defaultProvider: 'anthropic',
-  defaultModel: 'claude-sonnet-4-20250514',
+  cwd: "/tmp",
+  tenantId: "local",
+  defaultProvider: "anthropic",
+  defaultModel: "claude-sonnet-4-20250514",
 });
 
 const makePipelineContext = (): PipelineContext => ({
-  raw: 'fix this bug',
-  enriched: 'Please fix this bug in the code.',
-  taskType: 'debug',
-  domain: 'typescript',
+  raw: "fix this bug",
+  enriched: "Please fix this bug in the code.",
+  taskType: "debug",
+  domain: "typescript",
   confidence: 0.85,
-  outputStyle: 'concise',
+  outputStyle: "concise",
   tokenBudget: 500,
   metrics: {
     totalMs: 3,
     layerTimings: [
-      { name: 'layer1-intent', ms: 1 },
-      { name: 'layer2-personality', ms: 0 },
-      { name: 'layer3-ee-injection', ms: 0 },
-      { name: 'layer4-gsd-structuring', ms: 0 },
-      { name: 'layer5-context-enrichment', ms: 0 },
-      { name: 'layer6-output', ms: 1 },
+      { name: "layer1-intent", ms: 1 },
+      { name: "layer2-personality", ms: 0 },
+      { name: "layer3-ee-injection", ms: 0 },
+      { name: "layer4-gsd-structuring", ms: 0 },
+      { name: "layer5-context-enrichment", ms: 0 },
+      { name: "layer6-output", ms: 1 },
     ],
     inputChars: 12,
     outputChars: 31,
@@ -48,67 +48,67 @@ const makePipelineContext = (): PipelineContext => ({
     enrichmentTokensAdded: 5,
   },
   layers: [
-    { name: 'layer1-task-detect', applied: true, delta: '+task_type=debug' },
-    { name: 'layer2-domain-inject', applied: true, delta: '+domain=typescript' },
-    { name: 'layer3-context-compress', applied: false, delta: null },
-    { name: 'layer4-principle-inject', applied: true, delta: '+2 principles' },
-    { name: 'layer5-constraint-inject', applied: false, delta: null },
-    { name: 'layer6-output-format', applied: true, delta: '+output_format' },
+    { name: "layer1-task-detect", applied: true, delta: "+task_type=debug" },
+    { name: "layer2-domain-inject", applied: true, delta: "+domain=typescript" },
+    { name: "layer3-context-compress", applied: false, delta: null },
+    { name: "layer4-principle-inject", applied: true, delta: "+2 principles" },
+    { name: "layer5-constraint-inject", applied: false, delta: null },
+    { name: "layer6-output-format", applied: true, delta: "+output_format" },
   ],
 });
 
-describe('handleOptimizeSlash', () => {
+describe("handleOptimizeSlash", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('Test 1: no-arg form with populated store returns Enriched prompt header', async () => {
+  it("Test 1: no-arg form with populated store returns Enriched prompt header", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
 
-    const result = await dispatchSlash('optimize', [], makeCtx());
-    expect(result).toBeTypeOf('string');
-    expect(result).toContain('Enriched prompt:');
+    const result = await dispatchSlash("optimize", [], makeCtx());
+    expect(result).toBeTypeOf("string");
+    expect(result).toContain("Enriched prompt:");
   });
 
-  it('Test 2: no-arg form with populated store returns 6 layer rows', async () => {
+  it("Test 2: no-arg form with populated store returns 6 layer rows", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
 
-    const result = await dispatchSlash('optimize', [], makeCtx());
-    expect(result).toBeTypeOf('string');
+    const result = await dispatchSlash("optimize", [], makeCtx());
+    expect(result).toBeTypeOf("string");
 
     // Count layer rows: each layer appears as a line with padded name
-    const lines = (result as string).split('\n');
-    const layerLines = lines.filter((l) => l.includes('applied=yes') || l.includes('applied=no'));
+    const lines = (result as string).split("\n");
+    const layerLines = lines.filter((l) => l.includes("applied=yes") || l.includes("applied=no"));
     expect(layerLines).toHaveLength(6);
   });
 
-  it('Test 3: no-arg form with empty store returns help message containing no prompt processed yet', async () => {
+  it("Test 3: no-arg form with empty store returns help message containing no prompt processed yet", async () => {
     vi.mocked(getPilLastResult).mockReturnValue(null);
 
-    const result = await dispatchSlash('optimize', [], makeCtx());
-    expect(result).toBeTypeOf('string');
-    expect((result as string).toLowerCase()).toContain('no prompt processed yet');
+    const result = await dispatchSlash("optimize", [], makeCtx());
+    expect(result).toBeTypeOf("string");
+    expect((result as string).toLowerCase()).toContain("no prompt processed yet");
   });
 
-  it('Test 4: arg form runs runPipeline on given string and returns layer table', async () => {
+  it("Test 4: arg form runs runPipeline on given string and returns layer table", async () => {
     const ctx = makePipelineContext();
     vi.mocked(runPipeline).mockResolvedValue(ctx);
 
-    const result = await dispatchSlash('optimize', ['fix', 'this', 'bug'], makeCtx());
-    expect(runPipeline).toHaveBeenCalledWith('fix this bug');
-    expect(result).toBeTypeOf('string');
-    expect(result).toContain('Layer breakdown:');
+    const result = await dispatchSlash("optimize", ["fix", "this", "bug"], makeCtx());
+    expect(runPipeline).toHaveBeenCalledWith("fix this bug");
+    expect(result).toBeTypeOf("string");
+    expect(result).toContain("Layer breakdown:");
   });
 
-  it('Test 5: layer table row format has name padded to 28 chars and applied=yes/no', async () => {
+  it("Test 5: layer table row format has name padded to 28 chars and applied=yes/no", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
 
-    const result = await dispatchSlash('optimize', [], makeCtx()) as string;
-    const lines = result.split('\n');
-    const layerLines = lines.filter((l) => l.includes('applied=yes') || l.includes('applied=no'));
+    const result = (await dispatchSlash("optimize", [], makeCtx())) as string;
+    const lines = result.split("\n");
+    const layerLines = lines.filter((l) => l.includes("applied=yes") || l.includes("applied=no"));
 
     // Each line starts with 2 spaces then name padded to 28 chars
     for (const line of layerLines) {
@@ -122,34 +122,34 @@ describe('handleOptimizeSlash', () => {
     }
   });
 
-  it('Test 6: output contains Output style line', async () => {
+  it("Test 6: output contains Output style line", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
-    const result = await dispatchSlash('optimize', [], makeCtx()) as string;
-    expect(result).toContain('Output style: concise');
+    const result = (await dispatchSlash("optimize", [], makeCtx())) as string;
+    expect(result).toContain("Output style: concise");
   });
 
-  it('Test 7: output contains Metrics section with timing', async () => {
+  it("Test 7: output contains Metrics section with timing", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
-    const result = await dispatchSlash('optimize', [], makeCtx()) as string;
-    expect(result).toContain('Metrics:');
-    expect(result).toContain('total pipeline:');
-    expect(result).toContain('est. tokens saved:');
-    expect(result).toContain('layer timings:');
+    const result = (await dispatchSlash("optimize", [], makeCtx())) as string;
+    expect(result).toContain("Metrics:");
+    expect(result).toContain("total pipeline:");
+    expect(result).toContain("est. tokens saved:");
+    expect(result).toContain("layer timings:");
   });
 
-  it('Test 8: handler is async SlashHandler returning string', async () => {
+  it("Test 8: handler is async SlashHandler returning string", async () => {
     const ctx = makePipelineContext();
     vi.mocked(getPilLastResult).mockReturnValue(ctx);
 
-    const { handleOptimizeSlash } = await import('../optimize.js');
+    const { handleOptimizeSlash } = await import("../optimize.js");
     const result = handleOptimizeSlash([], makeCtx());
 
     // Should return a Promise (async)
     expect(result).toBeInstanceOf(Promise);
     const resolved = await result;
-    expect(typeof resolved).toBe('string');
+    expect(typeof resolved).toBe("string");
     expect(resolved).not.toBeNull();
   });
 });

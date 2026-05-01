@@ -9,14 +9,12 @@ import * as path from "node:path";
  * On serialize failure, .tmp is never created. On rename failure, .tmp is cleaned up.
  */
 export async function atomicWriteJSON(filePath: string, value: unknown): Promise<void> {
-  const tmpPath = filePath + ".tmp";
+  const tmpPath = `${filePath}.tmp`;
   let serialized: string;
   try {
     serialized = JSON.stringify(value, null, 2);
   } catch (err) {
-    throw new Error(
-      `atomicWriteJSON: failed to serialize value for ${filePath}: ${(err as Error).message}`,
-    );
+    throw new Error(`atomicWriteJSON: failed to serialize value for ${filePath}: ${(err as Error).message}`);
   }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   try {
@@ -36,7 +34,7 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
  * Same durability guarantees as atomicWriteJSON but without JSON serialization.
  */
 export async function atomicWriteText(filePath: string, content: string): Promise<void> {
-  const tmpPath = filePath + ".tmp";
+  const tmpPath = `${filePath}.tmp`;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   try {
     await fs.writeFile(tmpPath, content, "utf8");

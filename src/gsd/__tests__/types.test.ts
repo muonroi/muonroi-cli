@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GSD_PHASES, isGsdPhase, detectGsdPhase, type GsdPhase } from "../types";
+import { detectGsdPhase, GSD_PHASES, isGsdPhase } from "../types";
 
 describe("GSD types", () => {
   it("GSD_PHASES contains all expected phases", () => {

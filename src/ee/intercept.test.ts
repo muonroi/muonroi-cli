@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { startStubEEServer, type StubHandle } from "../__test-stubs__/ee-server.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient, resetEEClientState } from "./client.js";
-import { setDefaultEEClient, getDefaultEEClient } from "./intercept.js";
+import { setDefaultEEClient } from "./intercept.js";
 import { setRenderSink } from "./render.js";
 import type { InterceptMatch, InterceptRequest } from "./types.js";
 
@@ -113,17 +113,19 @@ describe("intercept integration", () => {
 describe("401 refresh path", () => {
   let stub: StubHandle;
 
-  beforeEach(() => { resetEEClientState(); });
+  beforeEach(() => {
+    resetEEClientState();
+  });
 
   afterEach(async () => {
     if (stub) await stub.stop();
   });
 
   it("retries once with refreshed token on 401", async () => {
-    let callCount = 0;
+    let _callCount = 0;
     stub = await startStubEEServer({
       intercept: () => {
-        callCount++;
+        _callCount++;
         // First call should be the retry after 401
         return { decision: "allow", matches: [sampleMatch] };
       },

@@ -5,11 +5,11 @@
  * Uses @ai-sdk/openai + AI SDK v6 streamText/fullStream.
  */
 
-import { streamText } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
-import { redactor } from '../utils/redactor.js';
-import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from './types.js';
-import { streamFromFullStream } from './stream-loop.js';
+import { createOpenAI } from "@ai-sdk/openai";
+import { streamText } from "ai";
+import { redactor } from "../utils/redactor.js";
+import { streamFromFullStream } from "./stream-loop.js";
+import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
 
 /**
  * Create an OpenAI adapter.
@@ -22,7 +22,7 @@ export function createOpenAIAdapter(config: ProviderConfig): Adapter {
   const provider = createOpenAI({ apiKey: config.apiKey });
 
   return {
-    id: 'openai',
+    id: "openai",
     async *stream(req: AdapterRequest): ProviderStream {
       const result = streamText({
         model: provider(config.model),

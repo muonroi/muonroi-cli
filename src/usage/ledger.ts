@@ -14,15 +14,15 @@
  * reserve() calls so 10-parallel tool-call bursts cannot collectively exceed cap.
  */
 
-import * as path from "node:path";
-import * as os from "node:os";
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import lockfile from "proper-lockfile";
 import { atomicReadJSON, atomicWriteJSON } from "../storage/atomic-io.js";
-import { projectCostUSD } from "./estimator.js";
-import { CapBreachError, type ReservationToken } from "./types.js";
-import { evaluateThresholds, emit } from "./thresholds.js";
 import type { UsageState } from "../storage/usage-cap.js";
+import { projectCostUSD } from "./estimator.js";
+import { emit, evaluateThresholds } from "./thresholds.js";
+import { CapBreachError, type ReservationToken } from "./types.js";
 
 const DEFAULT_CAP_USD = 15;
 
@@ -111,12 +111,7 @@ export async function reserve(args: {
   const cap = await loadCapUSD(args.homeOverride);
 
   return withLock<ReservationToken | CapBreachError>(filePath, async (state) => {
-    const projected = projectCostUSD(
-      args.provider,
-      args.model,
-      args.estInputTokens,
-      args.estOutputTokens,
-    );
+    const projected = projectCostUSD(args.provider, args.model, args.estInputTokens, args.estOutputTokens);
     const reservedTotal = state.reservations.reduce((s, r) => s + r.usd, 0);
 
     if (state.current_usd + reservedTotal + projected > cap) {

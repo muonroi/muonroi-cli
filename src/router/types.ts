@@ -1,7 +1,7 @@
-export type Tier = 'hot' | 'warm' | 'cold' | 'degraded';
+export type Tier = "hot" | "warm" | "cold" | "degraded";
 
 export interface ClassifierResult {
-  tier: 'hot' | 'abstain';
+  tier: "hot" | "abstain";
   confidence: number; // 0..1
   reason: string; // 'regex:create-file' | 'tree-sitter:typescript' | 'low-confidence' etc
   modelHint?: string; // optional preferred model id from heuristic

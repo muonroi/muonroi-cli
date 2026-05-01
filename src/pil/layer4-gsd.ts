@@ -1,6 +1,6 @@
-import type { PipelineContext } from "./types.js";
-import { truncateToBudget } from "./budget.js";
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
+import { truncateToBudget } from "./budget.js";
+import type { PipelineContext } from "./types.js";
 
 const PHASE_HINTS: Record<GsdPhase, string> = {
   discuss:
@@ -26,10 +26,7 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   if (!phase) {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "gsd-workflow-structuring", applied: false, delta: "no-phase-detected" },
-      ],
+      layers: [...ctx.layers, { name: "gsd-workflow-structuring", applied: false, delta: "no-phase-detected" }],
     };
   }
 

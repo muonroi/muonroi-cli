@@ -8,53 +8,51 @@
  * NOT mapped to tool-call events. They are UI streaming hints only.
  */
 
-import type { StreamChunk, ProviderStream } from './types.js';
-import { normalizeError } from './errors.js';
+import { normalizeError } from "./errors.js";
+import type { ProviderStream } from "./types.js";
 
 /**
  * Convert an AI SDK v6 fullStream async iterable into a ProviderStream.
  * Handles text-delta, tool-call, tool-result, finish, and error events.
  * Catches thrown errors and yields them as normalized error chunks.
  */
-export async function* streamFromFullStream(
-  fullStream: AsyncIterable<any>,
-): ProviderStream {
+export async function* streamFromFullStream(fullStream: AsyncIterable<any>): ProviderStream {
   try {
     for await (const chunk of fullStream) {
       switch (chunk.type) {
-        case 'text-delta':
-          yield { kind: 'text-delta', text: chunk.text };
+        case "text-delta":
+          yield { kind: "text-delta", text: chunk.text };
           break;
 
-        case 'tool-call':
+        case "tool-call":
           yield {
-            kind: 'tool-call',
+            kind: "tool-call",
             toolCallId: chunk.toolCallId,
             toolName: chunk.toolName,
             input: chunk.input,
           };
           break;
 
-        case 'tool-result':
+        case "tool-result":
           yield {
-            kind: 'tool-result',
+            kind: "tool-result",
             toolCallId: chunk.toolCallId,
             output: (chunk as any).output,
           };
           break;
 
-        case 'finish':
+        case "finish":
           yield {
-            kind: 'finish',
+            kind: "finish",
             reason: chunk.finishReason as any,
             usage: chunk.totalUsage ?? chunk.usage,
           };
           break;
 
-        case 'error': {
+        case "error": {
           const rawErr = chunk.error;
           const error = rawErr instanceof Error ? rawErr : new Error(String(rawErr));
-          yield { kind: 'error', error };
+          yield { kind: "error", error };
           break;
         }
 
@@ -66,6 +64,6 @@ export async function* streamFromFullStream(
       }
     }
   } catch (err) {
-    yield { kind: 'error', error: normalizeError(err) };
+    yield { kind: "error", error: normalizeError(err) };
   }
 }

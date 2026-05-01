@@ -14,11 +14,11 @@
  * TODO: Wire into orchestrator.ts boot sequence after openSession()
  */
 
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
-import { FLOW_DIR_NAME } from "../flow/scaffold.js";
-import { getActiveRunId, loadRun } from "../flow/run-manager.js";
+import * as path from "node:path";
 import { getSection } from "../flow/parser.js";
+import { getActiveRunId, loadRun } from "../flow/run-manager.js";
+import { FLOW_DIR_NAME } from "../flow/scaffold.js";
 
 /**
  * Load the Resume Digest from the active run's state.md.
@@ -49,7 +49,7 @@ export async function loadFlowResumeDigest(cwd: string): Promise<string | null> 
 
   // Extract Resume Digest
   const digest = getSection(runState.state, "Resume Digest");
-  if (!digest || !digest.trim()) return null;
+  if (!digest?.trim()) return null;
 
   return digest.trim();
 }

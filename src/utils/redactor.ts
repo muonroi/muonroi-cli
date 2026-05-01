@@ -36,8 +36,7 @@ const STATIC_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   // Environment variable assignments for common API keys
   {
-    pattern:
-      /(ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|DEEPSEEK_API_KEY)\s*=\s*\S+/g,
+    pattern: /(ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|DEEPSEEK_API_KEY)\s*=\s*\S+/g,
     replacement: "$1=***REDACTED***",
   },
   // Authorization Bearer header
@@ -157,8 +156,6 @@ class Redactor {
       return;
     }
 
-    const self = this;
-
     this.originals = {
       log: console.log,
       error: console.error,
@@ -169,24 +166,39 @@ class Redactor {
 
     const { log: origLog, error: origError, warn: origWarn, info: origInfo, debug: origDebug } = this.originals;
 
-    console.log = function (...args: unknown[]) {
-      origLog.apply(console, args.map((a) => self.stringifyArg(a)));
+    console.log = (...args: unknown[]) => {
+      origLog.apply(
+        console,
+        args.map((a) => this.stringifyArg(a)),
+      );
     };
 
-    console.error = function (...args: unknown[]) {
-      origError.apply(console, args.map((a) => self.stringifyArg(a)));
+    console.error = (...args: unknown[]) => {
+      origError.apply(
+        console,
+        args.map((a) => this.stringifyArg(a)),
+      );
     };
 
-    console.warn = function (...args: unknown[]) {
-      origWarn.apply(console, args.map((a) => self.stringifyArg(a)));
+    console.warn = (...args: unknown[]) => {
+      origWarn.apply(
+        console,
+        args.map((a) => this.stringifyArg(a)),
+      );
     };
 
-    console.info = function (...args: unknown[]) {
-      origInfo.apply(console, args.map((a) => self.stringifyArg(a)));
+    console.info = (...args: unknown[]) => {
+      origInfo.apply(
+        console,
+        args.map((a) => this.stringifyArg(a)),
+      );
     };
 
-    console.debug = function (...args: unknown[]) {
-      origDebug.apply(console, args.map((a) => self.stringifyArg(a)));
+    console.debug = (...args: unknown[]) => {
+      origDebug.apply(
+        console,
+        args.map((a) => this.stringifyArg(a)),
+      );
     };
   }
 

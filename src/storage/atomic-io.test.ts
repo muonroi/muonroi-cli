@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promises as fs } from "node:fs";
-import { atomicWriteJSON, atomicReadJSON } from "./atomic-io.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
 
 let tmpDir: string;
 
@@ -23,7 +23,7 @@ describe("atomicWriteJSON", () => {
     expect(JSON.parse(raw)).toEqual({ hello: 1 });
 
     // .tmp must NOT exist after success
-    await expect(fs.access(filePath + ".tmp")).rejects.toThrow();
+    await expect(fs.access(`${filePath}.tmp`)).rejects.toThrow();
   });
 
   it("Test 2: throws on circular reference and does not leave .tmp", async () => {
@@ -42,7 +42,7 @@ describe("atomicWriteJSON", () => {
     expect(JSON.parse(raw)).toEqual({ safe: true });
 
     // .tmp must NOT exist after failure
-    await expect(fs.access(filePath + ".tmp")).rejects.toThrow();
+    await expect(fs.access(`${filePath}.tmp`)).rejects.toThrow();
   });
 });
 

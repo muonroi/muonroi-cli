@@ -1,4 +1,4 @@
-import type { ClassifierResult } from '../types.js';
+import type { ClassifierResult } from "../types.js";
 
 // Each pattern -> intent, confidence, optional model hint
 const PATTERNS: Array<{
@@ -9,45 +9,45 @@ const PATTERNS: Array<{
 }> = [
   {
     re: /\b(create|new|make|generate)\s+(a\s+)?(file|component|module|class|function)\b/i,
-    intent: 'create-file',
+    intent: "create-file",
     confidence: 0.85,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
   {
     re: /\b(edit|modify|update|change|fix|patch)\s+(the\s+)?\S+/i,
-    intent: 'edit',
+    intent: "edit",
     confidence: 0.8,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
   {
     re: /\b(run|execute|exec)\s+(the\s+)?(command|script|npm|bun|tsc|test|build)\b/i,
-    intent: 'run-command',
+    intent: "run-command",
     confidence: 0.85,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
   {
     re: /\b(explain|what\s+does|describe|how\s+does)\b/i,
-    intent: 'explain',
+    intent: "explain",
     confidence: 0.7,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
   {
     re: /\brefactor\b/i,
-    intent: 'refactor',
+    intent: "refactor",
     confidence: 0.75,
-    modelHint: 'claude-3-5-sonnet-latest',
+    modelHint: "claude-3-5-sonnet-latest",
   },
   {
     re: /\b(search|find|grep|look\s+for)\b/i,
-    intent: 'search',
+    intent: "search",
     confidence: 0.8,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
   {
     re: /\b(install|add)\s+(package|dep|dependency|module)\b/i,
-    intent: 'install',
+    intent: "install",
     confidence: 0.85,
-    modelHint: 'claude-3-5-haiku-latest',
+    modelHint: "claude-3-5-haiku-latest",
   },
 ];
 
@@ -55,12 +55,12 @@ export function matchRegex(prompt: string): ClassifierResult {
   for (const p of PATTERNS) {
     if (p.re.test(prompt)) {
       return {
-        tier: 'hot',
+        tier: "hot",
         confidence: p.confidence,
         reason: `regex:${p.intent}`,
         modelHint: p.modelHint,
       };
     }
   }
-  return { tier: 'abstain', confidence: 0.0, reason: 'regex:no-match' };
+  return { tier: "abstain", confidence: 0.0, reason: "regex:no-match" };
 }

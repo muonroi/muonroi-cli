@@ -5,11 +5,11 @@
  * Uses @ai-sdk/google + AI SDK v6 streamText/fullStream.
  */
 
-import { streamText } from 'ai';
-import { createGoogleGenerativeAI } from '@ai-sdk/google';
-import { redactor } from '../utils/redactor.js';
-import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from './types.js';
-import { streamFromFullStream } from './stream-loop.js';
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { streamText } from "ai";
+import { redactor } from "../utils/redactor.js";
+import { streamFromFullStream } from "./stream-loop.js";
+import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
 
 /**
  * Create a Gemini (Google) adapter.
@@ -22,7 +22,7 @@ export function createGeminiAdapter(config: ProviderConfig): Adapter {
   const provider = createGoogleGenerativeAI({ apiKey: config.apiKey });
 
   return {
-    id: 'google',
+    id: "google",
     async *stream(req: AdapterRequest): ProviderStream {
       const result = streamText({
         model: provider(config.model),

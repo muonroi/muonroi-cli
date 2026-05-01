@@ -192,7 +192,9 @@ describe("wrapHostBrowserCommand", () => {
     const result = wrapHostBrowserCommand(
       "agent-browser --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png",
     );
-    expect(result).toContain("__muonroi_ab --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png");
+    expect(result).toContain(
+      "__muonroi_ab --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png",
+    );
   });
 });
 

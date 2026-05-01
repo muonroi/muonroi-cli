@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SlashContext } from "../registry.js";
 
 // Import to trigger self-registration
@@ -49,16 +49,8 @@ describe("handleExpandSlash", () => {
     await fs.mkdir(historyDir, { recursive: true });
 
     // Create two snapshots — older and newer
-    await fs.writeFile(
-      path.join(historyDir, "2026-04-29T10-00-00-000Z.md"),
-      "Old snapshot content",
-      "utf8",
-    );
-    await fs.writeFile(
-      path.join(historyDir, "2026-04-30T10-00-00-000Z.md"),
-      "Latest snapshot content",
-      "utf8",
-    );
+    await fs.writeFile(path.join(historyDir, "2026-04-29T10-00-00-000Z.md"), "Old snapshot content", "utf8");
+    await fs.writeFile(path.join(historyDir, "2026-04-30T10-00-00-000Z.md"), "Latest snapshot content", "utf8");
 
     const result = await dispatchSlash("expand", [], makeCtx(tmpDir));
     expect(result).toBeTypeOf("string");
@@ -71,11 +63,7 @@ describe("handleExpandSlash", () => {
     const historyDir = path.join(flowDir, "history");
     await fs.mkdir(historyDir, { recursive: true });
 
-    await fs.writeFile(
-      path.join(historyDir, "2026-04-30T12-00-00-000Z.md"),
-      "Snapshot to delete",
-      "utf8",
-    );
+    await fs.writeFile(path.join(historyDir, "2026-04-30T12-00-00-000Z.md"), "Snapshot to delete", "utf8");
 
     await dispatchSlash("expand", [], makeCtx(tmpDir));
 
@@ -90,11 +78,7 @@ describe("handleExpandSlash", () => {
     await fs.mkdir(historyDir, { recursive: true });
 
     const content = "Restored content here";
-    await fs.writeFile(
-      path.join(historyDir, "2026-04-30T14-00-00-000Z.md"),
-      content,
-      "utf8",
-    );
+    await fs.writeFile(path.join(historyDir, "2026-04-30T14-00-00-000Z.md"), content, "utf8");
 
     const result = await dispatchSlash("expand", [], makeCtx(tmpDir));
     expect(result).toContain("Restored from");

@@ -6,14 +6,14 @@
  * Snapshot full chat to history/<timestamp>.md before compressing.
  */
 
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
+import * as path from "node:path";
 import type { ModelMessage } from "ai";
-import { serializeConversation, estimateConversationTokens } from "../../orchestrator/compaction.js";
+import { estimateConversationTokens, serializeConversation } from "../../orchestrator/compaction.js";
 import { atomicWriteText } from "../../storage/atomic-io.js";
 import { readArtifact, writeArtifact } from "../artifact-io.js";
-import { extractDecisions } from "./extract.js";
 import { compressChat } from "./compress.js";
+import { extractDecisions } from "./extract.js";
 
 export interface CompactionResult {
   decisionsExtracted: number;
@@ -40,10 +40,7 @@ export async function deliberateCompact(
 ): Promise<CompactionResult> {
   // Pass 1: Extract decisions/facts/constraints
   const extracted = extractDecisions(messages);
-  const totalExtracted =
-    extracted.decisions.length +
-    extracted.facts.length +
-    extracted.constraints.length;
+  const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;
 
   // Append to decisions.md
   if (totalExtracted > 0) {
@@ -56,21 +53,14 @@ export async function deliberateCompact(
       if (items.length === 0) return;
       const current = existing!.sections.get(heading) ?? "";
       const newContent = items.map((i) => `- ${i}`).join("\n");
-      existing!.sections.set(
-        heading,
-        current ? `${current}\n${newContent}` : newContent,
-      );
+      existing!.sections.set(heading, current ? `${current}\n${newContent}` : newContent);
     };
 
     appendItems("Decisions", extracted.decisions);
     appendItems("Facts", extracted.facts);
     appendItems("Constraints", extracted.constraints);
 
-    await writeArtifact(flowDir, "decisions.md", existing, [
-      "Decisions",
-      "Facts",
-      "Constraints",
-    ]);
+    await writeArtifact(flowDir, "decisions.md", existing, ["Decisions", "Facts", "Constraints"]);
   }
 
   // Snapshot full chat to history/
@@ -85,13 +75,7 @@ export async function deliberateCompact(
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
   // Pass 2: Compress
-  const compressed = await compressChat(
-    messages,
-    systemPrompt,
-    tokenBudget,
-    provider,
-    modelId,
-  );
+  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId);
 
   return {
     decisionsExtracted: totalExtracted,

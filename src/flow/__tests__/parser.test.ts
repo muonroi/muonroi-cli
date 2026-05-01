@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { parseSections, serializeSections, getSection } from "../parser.js";
+import { describe, expect, it } from "vitest";
+import { getSection, parseSections, serializeSections } from "../parser.js";
 
 describe("parseSections", () => {
   it("parses two headed sections", () => {

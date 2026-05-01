@@ -1,16 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
-import { ensureFlowDir } from "../scaffold.js";
-import {
-  createRun,
-  loadRun,
-  getActiveRunId,
-  setActiveRunId,
-  updateRunFile,
-} from "../run-manager.js";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseSections } from "../parser.js";
+import { createRun, getActiveRunId, loadRun, setActiveRunId, updateRunFile } from "../run-manager.js";
+import { ensureFlowDir } from "../scaffold.js";
 
 describe("run-manager", () => {
   let tmpDir: string;
@@ -50,10 +44,7 @@ describe("run-manager", () => {
 
     it("initializes state.md with Resume Digest and Experience Snapshot headings", async () => {
       const run = await createRun(flowDir);
-      const stateContent = await fs.readFile(
-        path.join(flowDir, "runs", run.id, "state.md"),
-        "utf8",
-      );
+      const stateContent = await fs.readFile(path.join(flowDir, "runs", run.id, "state.md"), "utf8");
       expect(stateContent).toContain("## Resume Digest");
       expect(stateContent).toContain("## Experience Snapshot");
     });
@@ -97,10 +88,7 @@ describe("run-manager", () => {
       const sections = parseSections("## Test\n\nupdated content");
       await updateRunFile(flowDir, run.id, "roadmap.md", sections);
 
-      const content = await fs.readFile(
-        path.join(flowDir, "runs", run.id, "roadmap.md"),
-        "utf8",
-      );
+      const content = await fs.readFile(path.join(flowDir, "runs", run.id, "roadmap.md"), "utf8");
       expect(content).toContain("updated content");
     });
   });

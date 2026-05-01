@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createEEClient, resetEEClientState } from "./client.js";
 import type { InterceptRequest, PostToolPayload } from "./types.js";
 
@@ -129,7 +129,9 @@ describe("EEClient - posttool", () => {
 });
 
 describe("EEClient - auth", () => {
-  beforeEach(() => { resetEEClientState(); });
+  beforeEach(() => {
+    resetEEClientState();
+  });
 
   it("Test 9: auth header included when authToken provided", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
@@ -142,7 +144,7 @@ describe("EEClient - auth", () => {
 
     const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
     const headers = opts.headers as Record<string, string>;
-    expect(headers["Authorization"]).toBe("Bearer my-token");
+    expect(headers.Authorization).toBe("Bearer my-token");
   });
 
   it("Test 10: intercept body does NOT contain BYOK provider keys (sk- prefix)", async () => {

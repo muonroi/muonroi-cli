@@ -6,18 +6,18 @@
  * principle_uuid) to prevent unbounded context growth in state.md.
  */
 
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
-import { FLOW_DIR_NAME } from "./scaffold.js";
-import { getActiveRunId, loadRun, updateRunFile } from "./run-manager.js";
-import { getSection } from "./parser.js";
+import * as path from "node:path";
 import { renderInterceptWarning } from "../ee/render.js";
 import type { InterceptMatch } from "../ee/types.js";
+import { getSection } from "./parser.js";
+import { getActiveRunId, loadRun, updateRunFile } from "./run-manager.js";
+import { FLOW_DIR_NAME } from "./scaffold.js";
 
 const MAX_STORED_WARNINGS = 20;
 
 /** Parse stored warning lines back to principle_uuid for dedup. */
-function extractUuids(snapshot: string): string[] {
+function _extractUuids(snapshot: string): string[] {
   const uuids: string[] = [];
   for (const line of snapshot.split("\n")) {
     // Warnings rendered with renderInterceptWarning contain principle_uuid implicitly
@@ -33,13 +33,14 @@ function tagWarning(match: InterceptMatch, text: string): string {
 }
 
 /** Keep only the last MAX_STORED_WARNINGS unique-uuid entries. */
-function trimSnapshot(snapshot: string, newUuid: string): string {
+function trimSnapshot(snapshot: string, _newUuid: string): string {
   // Split into per-warning blocks (each starts with a timestamp tag)
   const entries = snapshot.split(/(?=\[\d{4}-\d{2}-\d{2})/);
   const seen = new Set<string>();
   const kept: string[] = [];
 
-  for (const entry of entries.reverse()) { // newest first
+  for (const entry of entries.reverse()) {
+    // newest first
     const m = entry.match(/\[uuid:([^\]]+)\]/);
     const uuid = m ? m[1] : entry.slice(0, 40); // fallback key
     if (!seen.has(uuid) && seen.size < MAX_STORED_WARNINGS - 1) {
@@ -54,7 +55,11 @@ function trimSnapshot(snapshot: string, newUuid: string): string {
 export async function persistWarning(cwd: string, match: InterceptMatch): Promise<void> {
   try {
     const flowDir = path.join(cwd, FLOW_DIR_NAME);
-    try { await fs.access(flowDir); } catch { return; }
+    try {
+      await fs.access(flowDir);
+    } catch {
+      return;
+    }
 
     const runId = await getActiveRunId(flowDir);
     if (!runId) return;

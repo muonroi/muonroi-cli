@@ -52,10 +52,7 @@ export function extractDecisions(messages: ModelMessage[]): ExtractedDecisions {
   const preservedDecisions = blocks.map((b) => b.content);
 
   // Pattern-match for explicit markers
-  const decisions = [
-    ...matchAll(serialized, DECISION_RE),
-    ...preservedDecisions,
-  ];
+  const decisions = [...matchAll(serialized, DECISION_RE), ...preservedDecisions];
   const facts = matchAll(serialized, FACT_RE);
   const constraints = matchAll(serialized, CONSTRAINT_RE);
 

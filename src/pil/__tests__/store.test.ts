@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { getPilLastResult, setPilLastResult } from '../store.js';
-import type { PipelineContext } from '../types.js';
+import { describe, expect, it } from "vitest";
+import { getPilLastResult, setPilLastResult } from "../store.js";
+import type { PipelineContext } from "../types.js";
 
 // Reset module state between tests by re-importing via dynamic import won't work easily
 // Instead we use a helper pattern: call setPilLastResult(null as any) to reset
@@ -18,8 +18,8 @@ const makeCtx = (raw: string): PipelineContext => ({
   layers: [],
 });
 
-describe('PIL store', () => {
-  it('returns null before any call', () => {
+describe("PIL store", () => {
+  it("returns null before any call", () => {
     // This only works if tests run in isolation or this is first test
     // We test the getter returns null on a fresh import
     // Since vitest reuses module state, we reset by calling set with null-like ctx
@@ -30,20 +30,20 @@ describe('PIL store', () => {
     expect(initial === null || initial !== undefined).toBe(true);
   });
 
-  it('setPilLastResult then getPilLastResult returns same ctx reference', () => {
-    const ctx = makeCtx('refactor this function');
+  it("setPilLastResult then getPilLastResult returns same ctx reference", () => {
+    const ctx = makeCtx("refactor this function");
     setPilLastResult(ctx);
     const result = getPilLastResult();
     expect(result).toBe(ctx);
   });
 
-  it('setPilLastResult called twice — second call overwrites first', () => {
-    const ctx1 = makeCtx('first prompt');
-    const ctx2 = makeCtx('second prompt');
+  it("setPilLastResult called twice — second call overwrites first", () => {
+    const ctx1 = makeCtx("first prompt");
+    const ctx2 = makeCtx("second prompt");
     setPilLastResult(ctx1);
     setPilLastResult(ctx2);
     const result = getPilLastResult();
     expect(result).toBe(ctx2);
-    expect(result?.raw).toBe('second prompt');
+    expect(result?.raw).toBe("second prompt");
   });
 });

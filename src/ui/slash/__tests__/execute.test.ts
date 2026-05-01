@@ -1,19 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
-import { ensureFlowDir } from "../../../flow/scaffold.js";
-import {
-  createRun,
-  setActiveRunId,
-  loadRun,
-  updateRunFile,
-} from "../../../flow/run-manager.js";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SectionMap } from "../../../flow/parser.js";
-import type { SlashContext } from "../registry.js";
-
+import { createRun, loadRun, setActiveRunId, updateRunFile } from "../../../flow/run-manager.js";
+import { ensureFlowDir } from "../../../flow/scaffold.js";
 // Import handler — also triggers self-registration
 import { handleExecuteSlash } from "../execute.js";
+import type { SlashContext } from "../registry.js";
 
 function makeCtx(cwd: string): SlashContext {
   return {
@@ -61,9 +55,7 @@ describe("/execute slash command", () => {
     // Write plan to roadmap.md
     const roadmap: SectionMap = {
       preamble: "",
-      sections: new Map([
-        ["Plan", "1. Build auth\n2. Add JWT\n3. Test endpoints"],
-      ]),
+      sections: new Map([["Plan", "1. Build auth\n2. Add JWT\n3. Test endpoints"]]),
     };
     await updateRunFile(flowDir, run.id, "roadmap.md", roadmap);
 
