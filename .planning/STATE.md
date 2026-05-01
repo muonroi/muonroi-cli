@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
-status: defining-requirements
+status: ready-to-plan
 stopped_at: ""
-last_updated: "2026-05-01T12:00:00.000Z"
+last_updated: "2026-05-01T13:00:00.000Z"
 last_activity: 2026-05-01
 progress:
-  total_phases: 0
+  total_phases: 3
   completed_phases: 0
   total_plans: 0
   completed_plans: 0
@@ -20,15 +20,15 @@ progress:
 
 See: .planning/PROJECT.md (updated 2026-05-01)
 
-**Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3x further than any subscription-locked tool.
-**Current focus:** Defining requirements for v1.2
+**Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2-3x further than any subscription-locked tool.
+**Current focus:** v1.2 Phase 08 - Session End Extraction
 
 ## Current Position
 
-Phase: Not started (defining requirements)
-Plan: —
-Status: Defining requirements
-Last activity: 2026-05-01 — Milestone v1.2 started
+Phase: 08 of 10 (Session End Extraction) -- first phase of v1.2
+Plan: Not started -- needs `/gsd:plan-phase 08`
+Status: Ready to plan
+Last activity: 2026-05-01 -- Roadmap created for v1.2
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -40,64 +40,54 @@ Progress: [░░░░░░░░░░] 0%
 - Average duration: ~12 min/plan
 - Total execution time: ~6.4 hours
 
-**v1.1 By Phase:**
+**v1.1 Actuals:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 5. EE Bridge Foundation | TBD | - | - |
-| 6. PIL & Router Migration | TBD | - | - |
-| 7. Full Pipeline Validation | TBD | - | - |
+| 05. EE Bridge Foundation | 1 | 162 min | 162 min |
+| 06. PIL & Router Migration | 3 | 29 min | ~10 min |
+| 07. Full Pipeline Validation | 1 | 7 min | 7 min |
 
-**Recent Trend:**
+**v1.2 By Phase:**
 
-- Last 5 plans (v1.0): 5, 15, 25, 15, 5 min
-- Trend: Stable
-
-*Updated after each plan completion*
-| Phase 05 P01 | 162 | 2 tasks | 3 files |
-| Phase 06 P01 | 7 | 2 tasks | 5 files |
-| Phase 06 P02 | 8 | 2 tasks | 3 files |
-| Phase 06 P03 | 14 | 2 tasks | 5 files |
-| Phase 07-full-pipeline-validation P01 | 7 | 2 tasks | 8 files |
+| Phase | Plans | Total | Avg/Plan |
+|-------|-------|-------|----------|
+| 08. Session End Extraction | TBD | - | - |
+| 09. Offline Queue | TBD | - | - |
+| 10. Prompt-stale Reconciliation | TBD | - | - |
 
 ## Accumulated Context
 
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
-Recent decisions affecting v1.1 work:
+Recent decisions affecting v1.2 work:
 
-- [Phase 01.1]: Layers 2-5 are intentional stubs — PIL-01/03 will replace L1/L6 in Phase 6
-- [Phase 01.1]: PIL intercept placed after consumeBackgroundNotifications() before messages.push() — bridge callsite must preserve this exact position
-- [Research v1.1]: bridge.ts uses createRequire (CJS named imports) — default import + destructure only, never named ESM imports
-- [Research v1.1]: EXPERIENCE_* env vars must be set before EE import — never write ~/.experience/config.json from CLI
-- [Research v1.1]: PIL-02 (/api/search) is a cross-repo change in experience-engine — must land before Layer 3 can work; Phase 6 is blocked on it
-- [Research v1.1]: AbortSignal.timeout required on all bridge brain calls — Ollama cold-start blocks hot path
-- [Research v1.1]: PIL taskTypes != EE tiers — mapping function needed in routeFeedback callsite (ROUTE-11)
-- [Research v1.1]: posttool() must be awaited before routeFeedback fires — ordering race documented
-- [Phase 05]: EEPoint and EERouteResult exported as type-only from bridge.ts for Phase 6 callers
-- [Phase 05]: getEECore() is async (fs.access) matching established async PIL/router patterns
-- [Phase 06]: general is tool-only, NOT added to TaskType union — Layer 1 never classifies to general
-- [Phase 06]: outputStyle always null from Layer 1 — Layer 6 handles style detection via bridge
-- [Phase 06]: classifyViaBrain called with 100ms timeout to prevent blocking CLI hot path
-- [Phase 06]: Layer 3 uses bridge.getEmbeddingRaw (60ms) + bridge.searchCollection (40ms) with separate AbortSignal per call to avoid shared-signal pitfall
-- [Phase 06]: /api/search endpoint in experience-engine hardcodes 'experience-behavioral' collection for Phase 6 scope, auth-gated, limit capped at 20
-- [Phase 06]: taskTypeToTier maps unknown types to 'balanced' (safe fallback); L6 classifyViaBrain uses 50ms timeout; routeFeedback fires after PIL output mode tracking; taskHash null guard prevents bridge-absent errors
-- [Phase 07-full-pipeline-validation]: posttool() changed from sync void to async Promise<void> to enable await in PostToolUse handler without breaking B-4 (fireFeedback stays sync)
-- [Phase 07-full-pipeline-validation]: orchestrator awaits fireHook(PostToolUse) instead of void to close ordering race with routeFeedback
-- [Phase 07-full-pipeline-validation]: _lastWarningResponse latch reset to null immediately after PostToolUse consumption — prevents cross-turn contamination
+- [Phase 07]: posttool() is async Promise<void>, orchestrator awaits fireHook(PostToolUse)
+- [Phase 07]: _lastWarningResponse latch reset to null after PostToolUse consumption
+- [Phase 06]: Layer 3 uses bridge.getEmbeddingRaw (60ms) + bridge.searchCollection (40ms)
+- [v1.2 roadmap]: Phase 08 extraction is fire-and-forget with 2s timeout, skip if <5 messages
+- [v1.2 roadmap]: Phase 09 queue persists to ~/.muonroi-cli/ee-offline-queue/, 100 entry cap
+- [v1.2 roadmap]: Phase 10 stale reconciliation is async, does not block next turn
+
+### Key Files for v1.2
+
+- EE client: src/ee/client.ts (circuit breaker pattern)
+- EE bridge: src/ee/bridge.ts (createRequire CJS interop)
+- Orchestrator: src/orchestrator/orchestrator.ts (3186 lines)
+- PIL Layer 3: src/pil/layer3-ee-injection.ts
+- Session cleanup: Agent.cleanup() method
 
 ### Pending Todos
 
-None yet — captured during execution via `/gsd-add-todo`.
+None yet.
 
 ### Blockers/Concerns
 
-- PIL-02 requires cross-repo change in experience-engine source before Phase 6 Layer 3 work can complete
-- Bridge CJS/ESM interop: default import + destructure pattern must be enforced (arch test recommended)
+None identified for v1.2.
 
 ## Session Continuity
 
-Last session: 2026-05-01T10:52:46.314Z
-Stopped at: Completed 07-01-PLAN.md — Full Pipeline Validation (ROUTE-12)
+Last session: 2026-05-01
+Stopped at: Roadmap created for v1.2 milestone
 Resume file: None

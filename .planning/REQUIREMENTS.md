@@ -53,24 +53,24 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXTRACT-01 | — | Pending |
-| EXTRACT-02 | — | Pending |
-| EXTRACT-03 | — | Pending |
-| EXTRACT-04 | — | Pending |
-| QUEUE-01 | — | Pending |
-| QUEUE-02 | — | Pending |
-| QUEUE-03 | — | Pending |
-| QUEUE-04 | — | Pending |
-| QUEUE-05 | — | Pending |
-| STALE-01 | — | Pending |
-| STALE-02 | — | Pending |
-| STALE-03 | — | Pending |
+| EXTRACT-01 | Phase 08 | Pending |
+| EXTRACT-02 | Phase 08 | Pending |
+| EXTRACT-03 | Phase 08 | Pending |
+| EXTRACT-04 | Phase 08 | Pending |
+| QUEUE-01 | Phase 09 | Pending |
+| QUEUE-02 | Phase 09 | Pending |
+| QUEUE-03 | Phase 09 | Pending |
+| QUEUE-04 | Phase 09 | Pending |
+| QUEUE-05 | Phase 09 | Pending |
+| STALE-01 | Phase 10 | Pending |
+| STALE-02 | Phase 10 | Pending |
+| STALE-03 | Phase 10 | Pending |
 
 **Coverage:**
 - v1.2 requirements: 12 total
-- Mapped to phases: 0
-- Unmapped: 12
+- Mapped to phases: 12
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-05-01*
-*Last updated: 2026-05-01 after initial definition*
+*Last updated: 2026-05-01 after roadmap creation*
