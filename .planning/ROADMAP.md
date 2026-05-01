@@ -72,7 +72,10 @@ Plans:
   1. CLI loads experience-core.js from git submodule via createRequire and exposes classifyViaBrain, searchCollection, routeModel, routeFeedback, getEmbeddingRaw as typed functions callable from any module
   2. When EE submodule or experience-core.js is absent, CLI starts normally — a descriptive one-line error is logged, headless and CI mode are fully unaffected, and the existing HTTP fallback path continues to serve sidecar hooks
   3. All bridge functions resolve config (qdrantUrl, ollamaUrl, brainModel) exclusively from ~/.experience/config.json — no EE config values appear in CLI config files or env var handling
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 05-01-PLAN.md — TDD: bridge.ts typed CJS interop + graceful degradation + barrel wiring
 
 #### Phase 6: PIL & Router Migration
 **Goal**: PIL layers 1, 3, 6 and route feedback loop use live EE bridge calls — stubs and local regex removed
@@ -113,6 +116,6 @@ Plans:
 | 1. Brain & Cap Chain | v1.0 | 8/8 | Complete | 2026-04-30 |
 | 2. Continuity & Slash Commands | v1.0 | 5/5 | Complete | 2026-04-30 |
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
-| 5. EE Bridge Foundation | v1.1 | 0/TBD | Not started | - |
+| 5. EE Bridge Foundation | v1.1 | 0/1 | Not started | - |
 | 6. PIL & Router Migration | v1.1 | 0/TBD | Not started | - |
 | 7. Full Pipeline Validation | v1.1 | 0/TBD | Not started | - |
