@@ -35,9 +35,10 @@ export type {
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
 import { interceptWithDefaults } from "../ee/intercept.js";
+import { type JudgeContext } from "../ee/judge.js";
 import { posttool } from "../ee/posttool.js";
 import { buildScope } from "../ee/scope.js";
-import type { Scope } from "../ee/types.js";
+import type { InterceptResponse, Scope } from "../ee/types.js";
 import type {
   AggregatedHookResult,
   HookInput,
@@ -48,6 +49,16 @@ import type {
 
 // Cached scope for posttool calls (computed once at first use)
 let _cachedScope: Scope | null = null;
+
+// Latch: stores the last PreToolUse warning response so PostToolUse can build judgeCtx.
+// Follows the _cachedScope module-level variable pattern.
+let _lastWarningResponse: InterceptResponse | null = null;
+
+/** Reset hook module state — for test teardown only. */
+export function resetHookState(): void {
+  _lastWarningResponse = null;
+  _cachedScope = null;
+}
 
 function emptyResult(): AggregatedHookResult {
   return {
@@ -80,6 +91,8 @@ export async function executeEventHooks(
         toolInput: input.tool_input,
         cwd,
       });
+      // Thread the warning response to PostToolUse via module-level latch
+      _lastWarningResponse = r;
       if (r.decision === "block") {
         return {
           blocked: true,
@@ -103,34 +116,58 @@ export async function executeEventHooks(
 
     if (input.hook_event_name === "PostToolUse") {
       if (!_cachedScope) _cachedScope = await buildScope({ cwd });
-      posttool({
+      const judgeCtx: JudgeContext = {
+        warningResponse: _lastWarningResponse,
         toolName: input.tool_name,
-        toolInput: input.tool_input,
-        outcome: {
-          // PostToolUse always means success — failure goes to PostToolUseFailure
-          success: true,
-        },
-        cwd,
+        outcome: { success: true },
+        cwdMatchedAtPretool: _lastWarningResponse !== null,
+        diffPresent: false,
         tenantId: "local",
-        scope: _cachedScope,
-      });
+      };
+      _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
+      await posttool(
+        {
+          toolName: input.tool_name,
+          toolInput: input.tool_input,
+          outcome: {
+            // PostToolUse always means success — failure goes to PostToolUseFailure
+            success: true,
+          },
+          cwd,
+          tenantId: "local",
+          scope: _cachedScope,
+        },
+        judgeCtx,
+      );
       return emptyResult();
     }
 
     if (input.hook_event_name === "PostToolUseFailure") {
       const failInput = input as PostToolUseFailureHookInput;
       if (!_cachedScope) _cachedScope = await buildScope({ cwd });
-      posttool({
+      const judgeCtx: JudgeContext = {
+        warningResponse: _lastWarningResponse,
         toolName: failInput.tool_name,
-        toolInput: failInput.tool_input,
-        outcome: {
-          success: false,
-          error: failInput.error,
-        },
-        cwd,
+        outcome: { success: false, error: failInput.error },
+        cwdMatchedAtPretool: _lastWarningResponse !== null,
+        diffPresent: false,
         tenantId: "local",
-        scope: _cachedScope,
-      });
+      };
+      _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
+      await posttool(
+        {
+          toolName: failInput.tool_name,
+          toolInput: failInput.tool_input,
+          outcome: {
+            success: false,
+            error: failInput.error,
+          },
+          cwd,
+          tenantId: "local",
+          scope: _cachedScope,
+        },
+        judgeCtx,
+      );
       return emptyResult();
     }
 

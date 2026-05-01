@@ -225,13 +225,13 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }
     },
 
-    posttool(payload: PostToolPayload): void {
-      f(`${baseUrl}/api/posttool`, {
+    async posttool(payload: PostToolPayload): Promise<void> {
+      await f(`${baseUrl}/api/posttool`, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
       }).catch(() => {
-        /* fire-and-forget */
+        /* fire-and-forget error swallowed */
       });
     },
 
