@@ -5,7 +5,8 @@
  */
 
 export { DEFAULT_TOKEN_BUDGET, truncateToBudget } from "./budget.js";
-export { applyPilSuffix } from "./layer6-output.js";
+export { applyPilSuffix, getResponseToolSet } from "./layer6-output.js";
+export { isResponseTool, getResponseTaskType } from "./response-tools.js";
 export { type PipelineOptions, runPipeline } from "./pipeline.js";
 export { getPilLastResult, setPilLastResult } from "./store.js";
 export type { LayerResult, OutputStyle, PipelineContext, PipelineMetrics, TaskType } from "./types.js";

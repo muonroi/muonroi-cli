@@ -211,8 +211,13 @@ export interface PaymentPrecheck {
   description?: string;
 }
 
+export interface StructuredResponse {
+  taskType: string;
+  data: Record<string, unknown>;
+}
+
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "done" | "error" | "reasoning";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "done" | "error" | "reasoning" | "structured_response";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -220,6 +225,7 @@ export interface StreamChunk {
   approvalId?: string;
   paymentPrecheck?: PaymentPrecheck;
   isAuthError?: boolean;
+  structuredResponse?: StructuredResponse;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
