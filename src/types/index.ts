@@ -189,7 +189,7 @@ export interface ToolCall {
 }
 
 export interface ChatEntry {
-  type: "user" | "assistant" | "tool_call" | "tool_result";
+  type: "user" | "assistant" | "tool_call" | "tool_result" | "structured_response";
   content: string;
   timestamp: Date;
   modeColor?: string;
@@ -199,6 +199,7 @@ export interface ChatEntry {
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
   toolResult?: ToolResult;
+  structuredResponse?: StructuredResponse;
 }
 
 export interface PaymentPrecheck {
