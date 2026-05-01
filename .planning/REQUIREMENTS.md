@@ -24,7 +24,7 @@
 ### ROUTE — Router & Feedback Loop
 
 - [x] **ROUTE-11**: Route feedback loop wired — every turn feeds outcome signal via bridge.routeFeedback(taskHash, tier, model, outcome, retryCount, duration) so EE route-model learns from actual usage
-- [ ] **ROUTE-12**: Full EE hook pipeline verified end-to-end — PreToolUse → PostToolUse → Judge → Feedback → Touch fires deterministically on every tool call; auto-judge tags FOLLOWED/IGNORED/IRRELEVANT without agent intervention
+- [x] **ROUTE-12**: Full EE hook pipeline verified end-to-end — PreToolUse → PostToolUse → Judge → Feedback → Touch fires deterministically on every tool call; auto-judge tags FOLLOWED/IGNORED/IRRELEVANT without agent intervention
 
 ---
 
@@ -135,7 +135,7 @@ Mapping requirements to phases — updated by roadmapper.
 | PIL-03 | Phase 6 | Complete |
 | PIL-04 | Phase 6 | Complete |
 | ROUTE-11 | Phase 6 | Complete |
-| ROUTE-12 | Phase 7 | Pending |
+| ROUTE-12 | Phase 7 | Complete |
 
 ### v1.0 Requirements (archived)
 

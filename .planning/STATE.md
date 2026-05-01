@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: EE-Native CLI
 status: verifying
-stopped_at: Completed 06-03-PLAN.md — Layer 6 Bridge Detection + routeFeedback Wiring
-last_updated: "2026-05-01T10:31:56.176Z"
+stopped_at: Completed 07-01-PLAN.md — Full Pipeline Validation (ROUTE-12)
+last_updated: "2026-05-01T10:52:46.319Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
-  completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
+  completed_phases: 3
+  total_plans: 5
+  completed_plans: 5
   percent: 0
 ---
 
@@ -21,12 +21,12 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3x further than any subscription-locked tool.
-**Current focus:** Phase 06 — pil-router-migration
+**Current focus:** Phase 07 — full-pipeline-validation
 
 ## Current Position
 
-Phase: 7
-Plan: Not started
+Phase: 07 (full-pipeline-validation) — EXECUTING
+Plan: 1 of 1
 Status: Phase complete — ready for verification
 Last activity: 2026-05-01
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
 | Phase 06 P01 | 7 | 2 tasks | 5 files |
 | Phase 06 P02 | 8 | 2 tasks | 3 files |
 | Phase 06 P03 | 14 | 2 tasks | 5 files |
+| Phase 07-full-pipeline-validation P01 | 7 | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Recent decisions affecting v1.1 work:
 - [Phase 06]: Layer 3 uses bridge.getEmbeddingRaw (60ms) + bridge.searchCollection (40ms) with separate AbortSignal per call to avoid shared-signal pitfall
 - [Phase 06]: /api/search endpoint in experience-engine hardcodes 'experience-behavioral' collection for Phase 6 scope, auth-gated, limit capped at 20
 - [Phase 06]: taskTypeToTier maps unknown types to 'balanced' (safe fallback); L6 classifyViaBrain uses 50ms timeout; routeFeedback fires after PIL output mode tracking; taskHash null guard prevents bridge-absent errors
+- [Phase 07-full-pipeline-validation]: posttool() changed from sync void to async Promise<void> to enable await in PostToolUse handler without breaking B-4 (fireFeedback stays sync)
+- [Phase 07-full-pipeline-validation]: orchestrator awaits fireHook(PostToolUse) instead of void to close ordering race with routeFeedback
+- [Phase 07-full-pipeline-validation]: _lastWarningResponse latch reset to null immediately after PostToolUse consumption — prevents cross-turn contamination
 
 ### Pending Todos
 
@@ -94,6 +98,6 @@ None yet — captured during execution via `/gsd-add-todo`.
 
 ## Session Continuity
 
-Last session: 2026-05-01T10:24:28.848Z
-Stopped at: Completed 06-03-PLAN.md — Layer 6 Bridge Detection + routeFeedback Wiring
+Last session: 2026-05-01T10:52:46.314Z
+Stopped at: Completed 07-01-PLAN.md — Full Pipeline Validation (ROUTE-12)
 Resume file: None
