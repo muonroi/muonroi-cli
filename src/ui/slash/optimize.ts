@@ -11,6 +11,7 @@
 
 import type { PipelineContext } from "../../pil/index.js";
 import { getPilLastResult, runPipeline } from "../../pil/index.js";
+import { getLastOutputMode } from "../../pil/store.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -27,7 +28,9 @@ function formatPilTable(ctx: PipelineContext): string {
     metricsBlock = `\n\nMetrics:\n  total pipeline: ${m.totalMs}ms\n  input chars: ${m.inputChars}\n  output chars: ${m.outputChars}\n  est. tokens saved: ${m.estimatedTokensSaved}\n  layer timings:\n${m.layerTimings.map((t) => `    ${t.name.padEnd(28)} ${t.ms}ms`).join("\n")}`;
   }
 
-  return `${header}\n${style}\n\nLayer breakdown:\n${table}${metricsBlock}`;
+  const outputMode = `Output mode: ${getLastOutputMode()}`;
+
+  return `${header}\n${style}\n${outputMode}\n\nLayer breakdown:\n${table}${metricsBlock}`;
 }
 
 export const handleOptimizeSlash: SlashHandler = async (args, _ctx) => {
