@@ -26,7 +26,7 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
-import { applyPilSuffix, runPipeline } from "../pil/index.js";
+import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
 import {
   appendCompaction,
   appendMessages,
@@ -2068,8 +2068,8 @@ export class Agent {
 
     const provider = this.requireProvider();
     const subagents = loadValidSubAgents();
-    // PIL: applyPilSuffix wraps buildSystemPrompt output for Layer 6 (D-10, D-11)
-    // Call buildSystemPrompt ONCE, pass to applyPilSuffix, then to applyModelConstraints
+    const _pilResponseTools = getResponseToolSet(pilCtx);
+    const _hasResponseTools = Object.keys(_pilResponseTools).length > 0;
     const system = applyModelConstraints(
       applyPilSuffix(
         buildSystemPrompt(
@@ -2081,6 +2081,7 @@ export class Agent {
           this.bash.getSandboxSettings(),
         ),
         pilCtx,
+        _hasResponseTools,
       ),
       this.modelId,
     );
@@ -2155,11 +2156,18 @@ export class Agent {
             }
           }
 
+          // PIL response tools: inject structured output tool when taskType detected
+          if (_hasResponseTools && runtime.modelInfo?.supportsClientTools !== false) {
+            tools = { ...tools, ..._pilResponseTools };
+          }
+          let responseToolCalled = false;
+
           const result = streamText({
             model: runtime.model,
             system,
             messages: this.messages,
             tools,
+            toolChoice: _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false ? "auto" : undefined,
             stopWhen: stepCountIs(this.maxToolRounds),
             maxRetries: 0,
             abortSignal: signal,
@@ -2282,6 +2290,21 @@ export class Agent {
                     cwd: this.bash.getCwd(),
                   };
                   void this.fireHook(postInput, signal).catch(() => {});
+                }
+
+                // Response tool: yield as structured_response instead of tool_result
+                if (isResponseTool(part.toolName)) {
+                  responseToolCalled = true;
+                  const taskType = getResponseTaskType(part.toolName);
+                  yield {
+                    type: "structured_response" as StreamChunk["type"],
+                    structuredResponse: {
+                      taskType: taskType ?? part.toolName,
+                      data: (part.output ?? {}) as Record<string, unknown>,
+                    },
+                  };
+                  notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
+                  break;
                 }
 
                 notifyObserver(observer?.onToolFinish, {

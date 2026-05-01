@@ -47,7 +47,7 @@ describe("buildResponseTools", () => {
     const tools = buildResponseTools("refactor");
     expect(Object.keys(tools)).toEqual(["respond_refactor"]);
     expect(tools.respond_refactor.description).toContain("refactor");
-    expect(tools.respond_refactor.parameters).toBeDefined();
+    expect(tools.respond_refactor.inputSchema).toBeDefined();
     expect(tools.respond_refactor.execute).toBeTypeOf("function");
   });
 

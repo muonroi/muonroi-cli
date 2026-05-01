@@ -7,7 +7,9 @@
  * Conversational turns (taskType=null) pass through unchanged.
  */
 
+import type { ToolSet } from "ai";
 import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
+import { buildResponseTools } from "./response-tools.js";
 
 const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
   refactor: {
@@ -42,10 +44,21 @@ const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
   },
 };
 
-export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext): string {
+export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
   if (ctx.taskType === null) return systemPrompt;
+  if (responseToolsActive) {
+    return (
+      systemPrompt +
+      `\nOUTPUT FORMAT: Use the respond_${ctx.taskType} tool to structure your final response. Do NOT write free-form text for your answer — use the tool's structured fields. You may still use action tools (bash, read_file, edit_file, etc.) during your work, but your final answer MUST go through respond_${ctx.taskType}.`
+    );
+  }
   const style: OutputStyle = ctx.outputStyle ?? "concise";
   return systemPrompt + SUFFIXES[ctx.taskType][style];
+}
+
+export function getResponseToolSet(ctx: PipelineContext): ToolSet {
+  if (ctx.taskType === null) return {};
+  return buildResponseTools(ctx.taskType);
 }
 
 export async function layer6Output(ctx: PipelineContext): Promise<PipelineContext> {

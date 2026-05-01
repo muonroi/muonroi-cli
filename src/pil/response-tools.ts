@@ -96,7 +96,7 @@ export function buildResponseTools(taskType: TaskType): ToolSet {
   return {
     [toolName]: {
       description: `Return your ${taskType} response as structured JSON. Always use this tool to respond.`,
-      parameters: schema,
+      inputSchema: schema,
       execute: async (input: unknown) => input,
     },
   };
