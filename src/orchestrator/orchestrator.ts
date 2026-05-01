@@ -9,6 +9,8 @@ import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
 import { bootstrapEEClient } from "../ee/intercept.js";
+import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { taskTypeToTier } from "../pil/task-tier-map.js";
 import type {
   NotificationHookInput,
   PostCompactHookInput,
@@ -2062,6 +2064,12 @@ export class Agent {
     this._pilEnrichmentDelta =
       pilCtx.metrics?.estimatedTokensSaved ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
+    // ROUTE-11: Capture turn start time and taskHash for feedback loop.
+    // routeModel is called here to get taskHash used by routeFeedback at turn completion.
+    const turnStartMs = Date.now();
+    const eeRoute = await routeModel(userMessage, {}, "cli").catch(() => null);
+    const taskHash = eeRoute?.taskHash ?? null;
+
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
@@ -2416,6 +2424,21 @@ export class Agent {
             else setLastOutputMode("text-fallback");
           }
 
+          // ROUTE-11: Fire routeFeedback after turn completes (success path).
+          // Must come AFTER posttool calls (posttool fires during tool-result processing above).
+          // Fire-and-forget — no await. Skipped when taskHash is null (bridge absent).
+          if (taskHash) {
+            const tier = taskTypeToTier(pilCtx.taskType);
+            void routeFeedback(
+              taskHash,
+              tier,
+              runtime.modelId,
+              "success", // Phase 6: all normal completions = 'success'
+              0, // retryCount: 0 for first attempt
+              Date.now() - turnStartMs,
+            );
+          }
+
           const stopInput: StopHookInput = {
             hook_event_name: "Stop",
             session_id: this.session?.id,
@@ -2428,6 +2451,19 @@ export class Agent {
         } catch (err: unknown) {
           if (signal.aborted) {
             this.discardAbortedTurn(userModelMessage);
+            // ROUTE-11: Fire routeFeedback for cancelled turns (abort path).
+            // Fire-and-forget — no await. Skipped when taskHash is null.
+            if (taskHash) {
+              const tier = taskTypeToTier(pilCtx.taskType);
+              void routeFeedback(
+                taskHash,
+                tier,
+                runtime.modelId,
+                "cancelled",
+                0,
+                Date.now() - turnStartMs,
+              );
+            }
             yield { type: "content", content: "\n\n[Cancelled]" };
             yield { type: "done" };
             return;
@@ -2451,6 +2487,20 @@ export class Agent {
           };
           if (assistantText.trim()) {
             this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+          }
+
+          // ROUTE-11: Fire routeFeedback for failed turns (error path).
+          // Must come AFTER posttool calls. Fire-and-forget — no await.
+          if (taskHash) {
+            const tier = taskTypeToTier(pilCtx.taskType);
+            void routeFeedback(
+              taskHash,
+              tier,
+              runtime.modelId,
+              "fail",
+              0,
+              Date.now() - turnStartMs,
+            );
           }
 
           const stopFailureInput: StopFailureHookInput = {
