@@ -105,7 +105,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 07-01-PLAN.md — judgeCtx threading + posttool race fix + end-to-end integration test
+- [x] 07-01-PLAN.md — judgeCtx threading + posttool race fix + end-to-end integration test
 
 ---
 
@@ -126,4 +126,4 @@ Plans:
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
 | 5. EE Bridge Foundation | v1.1 | 1/1 | Complete   | 2026-05-01 |
 | 6. PIL & Router Migration | v1.1 | 3/3 | Complete   | 2026-05-01 |
-| 7. Full Pipeline Validation | v1.1 | 0/1 | Not started | - |
+| 7. Full Pipeline Validation | v1.1 | 1/1 | Complete   | 2026-05-01 |
