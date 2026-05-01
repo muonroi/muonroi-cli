@@ -87,6 +87,7 @@ import "./slash/compact.js";
 import "./slash/expand.js";
 import "./slash/clear.js";
 import "./slash/cost.js";
+import "./slash/ee.js";
 
 import {
   getEffectiveReasoningEffort,
@@ -1821,10 +1822,42 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   }, [hasApiKey, startTelegramBridge]);
 
   const handleExit = useCallback(() => {
+    // Best-effort EE session-end reconciliation (fire-and-forget)
+    try {
+      const { getDefaultEEClient: getEE, getLastSurfacedState: getSurfaced } = require("../ee/intercept.js");
+      const { surfacedIds, timestamp } = getSurfaced();
+      const ee = getEE();
+      const cwd = agent.getCwd();
+
+      // Prompt-stale: mark surfaced suggestions as stale on session end
+      if (surfacedIds.length > 0) {
+        ee.promptStale({
+          state: { surfacedIds, timestamp },
+          nextPromptMeta: { trigger: "session-end" as const, cwd, tenantId: "local" },
+        }).catch(() => {});
+      }
+
+      // Session extract: send a summary of the session for knowledge extraction
+      const msgs = agent.getMessages();
+      if (msgs && msgs.length > 0) {
+        const { serializeConversation } = require("../orchestrator/compaction.js");
+        const transcript = serializeConversation(msgs);
+        if (transcript.length > 50) {
+          ee.extract({
+            transcript: transcript.slice(0, 50_000), // cap size for the endpoint
+            projectPath: cwd,
+            meta: { source: "cli-exit" as const, tenantId: "local" },
+          }).catch(() => {});
+        }
+      }
+    } catch {
+      // Swallow all errors — exit must never fail due to EE
+    }
+
     void bridgeRef.current?.stop();
     bridgeRef.current = null;
     onExit?.();
-  }, [onExit]);
+  }, [onExit, agent]);
 
   const showCopyBanner = useCallback(() => {
     setCopyFlashId((n) => n + 1);

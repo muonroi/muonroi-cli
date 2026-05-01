@@ -11,6 +11,10 @@ export interface RouterState {
   degraded: boolean;
   lastDecision: RouteDecision | null;
   lastHealthCheckAtMs: number;
+  /** taskHash from the last EE routing decision (for feedback loop). */
+  taskHash: string | null;
+  /** source of the last routing decision (e.g. "keyword", "history", "brain"). */
+  source: string | null;
 }
 
 type Listener = (s: RouterState) => void;
@@ -21,6 +25,8 @@ function makeStore() {
     degraded: false,
     lastDecision: null,
     lastHealthCheckAtMs: 0,
+    taskHash: null,
+    source: null,
   };
   const listeners = new Set<Listener>();
   return {

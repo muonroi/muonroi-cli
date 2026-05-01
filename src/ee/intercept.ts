@@ -5,6 +5,22 @@ import { emitMatches } from "./render.js";
 import { buildScope } from "./scope.js";
 import type { InterceptRequest, InterceptResponse, Scope } from "./types.js";
 
+// ─── Surfaced-state tracking for prompt-stale reconciliation ─────────────────
+let _lastSurfacedIds: string[] = [];
+let _lastSurfacedTimestamp: string | null = null;
+
+/**
+ * Returns the last surfaced suggestion IDs and timestamp from the most recent
+ * intercept call that returned matches. Used by prompt-stale reconciliation
+ * callers (compact, clear, session-end).
+ */
+export function getLastSurfacedState(): { surfacedIds: string[]; timestamp: string } {
+  return {
+    surfacedIds: [..._lastSurfacedIds],
+    timestamp: _lastSurfacedTimestamp ?? new Date().toISOString(),
+  };
+}
+
 /**
  * Module-level default EE client instance (lazy-initialized on first use).
  * Use setDefaultEEClient() to inject a custom client (e.g. in tests or at boot
@@ -48,6 +64,15 @@ export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts
   // Emit rendered warnings for allow + matches
   if (resp.decision === "allow" && resp.matches) {
     emitMatches(resp.matches);
+  }
+
+  // Track surfaced IDs for prompt-stale reconciliation
+  if (resp.surfacedIds && resp.surfacedIds.length > 0) {
+    _lastSurfacedIds = [...resp.surfacedIds];
+    _lastSurfacedTimestamp = new Date().toISOString();
+  } else if (resp.matches && resp.matches.length > 0) {
+    _lastSurfacedIds = resp.matches.map((m) => m.principle_uuid);
+    _lastSurfacedTimestamp = new Date().toISOString();
   }
 
   return resp;

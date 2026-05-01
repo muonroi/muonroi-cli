@@ -2,12 +2,28 @@ import type {
   ColdRouteRequest,
   ColdRouteResponse,
   EEClient,
+  EEEvolveResponse,
+  EEGatesResponse,
+  EEGraphResponse,
+  EEImportResponse,
+  EESearchResponse,
+  EEShareResponse,
+  EEStatsResponse,
+  EETimelineResponse,
+  EEUserResponse,
+  ExtractRequest,
+  ExtractResponse,
   FeedbackPayload,
   InterceptRequest,
   InterceptResponse,
   PostToolPayload,
+  PromptStaleRequest,
+  PromptStaleResponse,
+  RouteFeedbackPayload,
   RouteModelRequest,
   RouteModelResponse,
+  RouteTaskRequest,
+  RouteTaskResponse,
 } from "./types.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
@@ -291,6 +307,194 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }).catch(() => {
         /* fire-and-forget */
       });
+    },
+
+    // ─── P0: Route feedback (fire-and-forget) ─────────────────────────────────
+    routeFeedback(payload: RouteFeedbackPayload): void {
+      f(`${baseUrl}/api/route-feedback`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(payload),
+      }).catch(() => {
+        /* fire-and-forget */
+      });
+    },
+
+    // ─── P1: Prompt-stale reconciliation ──────────────────────────────────────
+    async promptStale(req: PromptStaleRequest): Promise<PromptStaleResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/prompt-stale`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(req),
+          signal: AbortSignal.timeout(2000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as PromptStaleResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    // ─── P1: Session extract ──────────────────────────────────────────────────
+    async extract(req: ExtractRequest): Promise<ExtractResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/extract`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(req),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as ExtractResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    // ─── P2: Knowledge visibility endpoints ───────────────────────────────────
+    async stats(since?: string): Promise<EEStatsResponse | null> {
+      try {
+        const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+        const resp = await f(`${baseUrl}/api/stats${qs}`, {
+          headers: headers(),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEStatsResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async graph(id: string): Promise<EEGraphResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/graph?id=${encodeURIComponent(id)}`, {
+          headers: headers(),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEGraphResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async timeline(topic: string): Promise<EETimelineResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/timeline?topic=${encodeURIComponent(topic)}`, {
+          headers: headers(),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EETimelineResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async gates(): Promise<EEGatesResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/gates`, {
+          headers: headers(),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEGatesResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async evolve(trigger?: string): Promise<EEEvolveResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/evolve`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ trigger: trigger ?? "cli" }),
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEEvolveResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async sharePrinciple(principleId: string): Promise<EEShareResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/principles/share`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ principleId }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEShareResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    async importPrinciple(data: unknown): Promise<EEImportResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/principles/import`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ principle: data }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEImportResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    // ─── Task routing ───────────────────────────────────────────────────────
+    async routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/route-task`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(req),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as RouteTaskResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    // ─── Semantic search ────────────────────────────────────────────────────
+    async search(query: string, limit?: number): Promise<EESearchResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/search`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ query, limit: limit ?? 10 }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EESearchResponse;
+      } catch {
+        return null;
+      }
+    },
+
+    // ─── User identity ──────────────────────────────────────────────────────
+    async user(): Promise<EEUserResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/user`, {
+          headers: headers(),
+          signal: AbortSignal.timeout(1000),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as EEUserResponse;
+      } catch {
+        return null;
+      }
     },
   };
 }

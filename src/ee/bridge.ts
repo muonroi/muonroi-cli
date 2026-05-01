@@ -31,10 +31,21 @@ interface EERouteResult {
   taskHash: string | null;
 }
 
+interface EERouteTaskResult {
+  route: "qc-flow" | "qc-lock" | "direct" | null;
+  confidence: number;
+  source: string;
+  reason: string;
+  needs_disambiguation: boolean;
+  options: Array<{ id: string; label: string; route: string; description: string }>;
+  taskHash: string | null;
+}
+
 interface EECore {
   classifyViaBrain(prompt: string, timeoutMs?: number): Promise<string | null>;
   searchCollection(name: string, vector: number[], topK: number, signal?: AbortSignal): Promise<EEPoint[]>;
   routeModel(task: string, context: Record<string, unknown>, runtime: string): Promise<EERouteResult>;
+  routeTask(task: string, context: Record<string, unknown> | null, runtime: string | null): Promise<EERouteTaskResult>;
   routeFeedback(
     taskHash: string,
     tier: string,
@@ -48,7 +59,7 @@ interface EECore {
 
 // ─── Exported types — narrower aliases for Phase 6 callers ────────────────────
 
-export type { EEPoint, EERouteResult };
+export type { EEPoint, EERouteResult, EERouteTaskResult };
 
 // ─── Lazy singleton state ──────────────────────────────────────────────────────
 
@@ -177,6 +188,24 @@ export async function routeFeedback(
     return await core.routeFeedback(taskHash, tier, model, outcome, retryCount, duration);
   } catch {
     return false;
+  }
+}
+
+/**
+ * Route a task to a workflow (qc-flow/qc-lock/direct) based on EE brain + history.
+ * Returns route decision or null when core absent.
+ */
+export async function routeTask(
+  task: string,
+  context: Record<string, unknown> | null = null,
+  runtime: string | null = null,
+): Promise<EERouteTaskResult | null> {
+  const core = await getEECore();
+  if (!core?.routeTask) return null;
+  try {
+    return await core.routeTask(task, context, runtime);
+  } catch {
+    return null;
   }
 }
 

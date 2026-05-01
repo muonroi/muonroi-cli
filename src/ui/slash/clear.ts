@@ -9,6 +9,7 @@
  */
 
 import * as path from "node:path";
+import { getDefaultEEClient, getLastSurfacedState } from "../../ee/intercept.js";
 import { readArtifact } from "../../flow/artifact-io.js";
 import { getActiveRunId, loadRun } from "../../flow/run-manager.js";
 import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
@@ -68,6 +69,17 @@ export const handleClearSlash: SlashHandler = async (_args, ctx) => {
     `Plan: ${hasRoadmap} from roadmap.md`,
     `Gray areas: ${grayOpen} open / ${grayTotal} total`,
   ].join("\n");
+
+  // Fire-and-forget: notify EE that surfaced suggestions are going stale due to clear
+  const { surfacedIds, timestamp } = getLastSurfacedState();
+  if (surfacedIds.length > 0) {
+    getDefaultEEClient()
+      .promptStale({
+        state: { surfacedIds, timestamp },
+        nextPromptMeta: { trigger: "clear", cwd: ctx.cwd, tenantId: "local" },
+      })
+      .catch(() => {});
+  }
 
   return `__CLEAR__\n${summary}`;
 };

@@ -14,4 +14,7 @@ export interface RouteDecision {
   reason: string;
   confidence?: number;
   cap_overridden?: boolean;
+  taskHash?: string;
+  source?: string;
+  reasoningEffort?: "low" | "medium" | "high";
 }
