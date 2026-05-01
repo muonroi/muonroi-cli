@@ -33,7 +33,7 @@ function makeAssistantMsg(text: string): ModelMessage {
 function makeToolResultMsg(result: string): ModelMessage {
   return {
     role: "tool",
-    content: [{ type: "tool-result", toolCallId: "x", content: [{ type: "text", text: result }] }],
+    content: [{ type: "tool-result", toolCallId: "x", output: result }],
   } as unknown as ModelMessage;
 }
 
@@ -129,8 +129,8 @@ describe("extractSession — unit (mocked client)", () => {
     const call = mockExtract.mock.calls[0];
     expect(typeof call[0].transcript).toBe("string");
     expect(call[0].transcript.length).toBeGreaterThan(0);
-    // Should NOT be JSON of raw messages array
-    expect(call[0].transcript).not.toMatch(/^\[/);
+    // Should be serialized text format (e.g. "[User]: ..."), NOT a JSON array string like '[{"role":...'
+    expect(call[0].transcript).not.toMatch(/^\[\{"role"/);
   });
 
   // Test 5: passes AbortSignal.timeout(2000) as second arg
