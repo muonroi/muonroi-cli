@@ -301,7 +301,7 @@ export interface EEClient {
   routeFeedback(payload: RouteFeedbackPayload): void;
   // P1: Prompt-stale + extract
   promptStale(req: PromptStaleRequest): Promise<PromptStaleResponse | null>;
-  extract(req: ExtractRequest): Promise<ExtractResponse | null>;
+  extract(req: ExtractRequest, signal?: AbortSignal): Promise<ExtractResponse | null>;
   // P2: Knowledge visibility
   stats(since?: string): Promise<EEStatsResponse | null>;
   graph(id: string): Promise<EEGraphResponse | null>;

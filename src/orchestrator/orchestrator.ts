@@ -28,6 +28,7 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
+import { extractSession } from "../ee/extract-session.js";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
@@ -990,7 +991,11 @@ export class Agent {
   }
 
   async cleanup(): Promise<void> {
-    await Promise.allSettled([this.bash.cleanup(), shutdownWorkspaceLspManager(this.bash.getCwd())]);
+    await Promise.allSettled([
+      this.bash.cleanup(),
+      shutdownWorkspaceLspManager(this.bash.getCwd()),
+      extractSession(this.messages, this.bash.getCwd(), "cli-exit", this.getSessionId()),
+    ]);
   }
 
   respondToToolApproval(approvalId: string, approved: boolean): void {
@@ -1008,7 +1013,10 @@ export class Agent {
     this.messageSeqs.push(null);
   }
 
-  clearHistory(): void {
+  async clearHistory(): Promise<void> {
+    // D-09: Extract messages accumulated since last clear BEFORE reset
+    await extractSession(this.messages, this.bash.getCwd(), "cli-clear", this.getSessionId())
+      .catch(() => {}); // D-05: redundant safety — extractSession already swallows
     this.startNewSession();
   }
 
