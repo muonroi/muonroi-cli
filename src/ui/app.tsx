@@ -9,6 +9,7 @@ import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import * as path from "node:path";
+import type { StructuredResponse } from "../types/index";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -113,6 +114,52 @@ function approvePairingCode(_code: string): { ok: true; userId: number } | { ok:
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createTurnCoordinator(): any {
   return { reset: () => {}, handleEvent: () => {} };
+}
+
+function formatStructuredResponse(sr: StructuredResponse): string {
+  const d = sr.data;
+  switch (sr.taskType) {
+    case "refactor": {
+      const r = d as { summary?: string; changes?: Array<{ file: string; diff: string }>; verify_command?: string };
+      const parts = [r.summary ?? ""];
+      for (const c of r.changes ?? []) parts.push(`\n── ${c.file} ──\n${c.diff}`);
+      if (r.verify_command) parts.push(`\nverify: ${r.verify_command}`);
+      return parts.join("\n");
+    }
+    case "debug": {
+      const r = d as { hypothesis?: string; root_cause?: string; fix?: { file: string; diff: string }; verify_command?: string };
+      const parts = [`hypothesis: ${r.hypothesis}`, `root cause: ${r.root_cause}`];
+      if (r.fix) parts.push(`\n── fix: ${r.fix.file} ──\n${r.fix.diff}`);
+      if (r.verify_command) parts.push(`verify: ${r.verify_command}`);
+      return parts.join("\n");
+    }
+    case "plan": {
+      const r = d as { steps?: Array<{ action: string; criterion: string; rationale?: string }>; assumptions?: string[]; risks?: string[] };
+      const lines = (r.steps ?? []).map((s, i) => `${i + 1}. ${s.action}\n   done when: ${s.criterion}${s.rationale ? `\n   why: ${s.rationale}` : ""}`);
+      if (r.assumptions?.length) lines.push(`\nassumptions:\n${r.assumptions.map((a) => `  - ${a}`).join("\n")}`);
+      if (r.risks?.length) lines.push(`\nrisks:\n${r.risks.map((r2) => `  - ${r2}`).join("\n")}`);
+      return lines.join("\n");
+    }
+    case "analyze": {
+      const r = d as { findings?: Array<{ text: string; evidence: string; severity: string }> };
+      return (r.findings ?? []).map((f) => `[${f.severity.toUpperCase()}] ${f.text}\n  evidence: ${f.evidence}`).join("\n");
+    }
+    case "documentation": {
+      const r = d as { content?: string; examples?: Array<{ code: string; description: string }> };
+      const parts = [r.content ?? ""];
+      for (const ex of r.examples ?? []) parts.push(`\n${ex.description}\n${ex.code}`);
+      return parts.join("\n");
+    }
+    case "generate": {
+      const r = d as { files?: Array<{ path: string; content: string; language: string }>; explanation?: string };
+      const parts: string[] = [];
+      if (r.explanation) parts.push(r.explanation);
+      for (const f of r.files ?? []) parts.push(`\n── ${f.path} (${f.language}) ──\n${f.content}`);
+      return parts.join("\n");
+    }
+    default:
+      return JSON.stringify(d, null, 2);
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -2118,6 +2165,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               case "tool_result":
                 if (chunk.toolCall && chunk.toolResult) {
                   appendLiveToolResult(chunk.toolCall, chunk.toolResult);
+                }
+                break;
+              case "structured_response":
+                if (chunk.structuredResponse) {
+                  const rendered = formatStructuredResponse(chunk.structuredResponse);
+                  applyLocalAssistantDelta(rendered);
                 }
                 break;
               case "tool_approval_request":
