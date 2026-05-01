@@ -7,10 +7,10 @@
 
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { parseSections, serializeSections } from "./parser.js";
-import type { SectionMap } from "./parser.js";
-import { ensureFlowDir } from "./scaffold.js";
 import { atomicWriteText } from "../storage/atomic-io.js";
+import type { SectionMap } from "./parser.js";
+import { parseSections, serializeSections } from "./parser.js";
+import { ensureFlowDir } from "./scaffold.js";
 
 /** QC top-level file -> muonroi-flow file mapping */
 const TOP_LEVEL_MAP: Record<string, string> = {
@@ -27,12 +27,7 @@ const SECTION_TO_FILE: Record<string, string> = {
 };
 
 /** Sections that go into runs/<id>/state.md */
-const STATE_SECTIONS = new Set([
-  "Resume Digest",
-  "Compact-Safe Summary",
-  "Experience Snapshot",
-  "Workflow State",
-]);
+const _STATE_SECTIONS = new Set(["Resume Digest", "Compact-Safe Summary", "Experience Snapshot", "Workflow State"]);
 
 /** Sections that go into the top-level decisions.md */
 const DECISIONS_SECTIONS = new Set(["Decision Register"]);
@@ -58,9 +53,7 @@ export async function detectLegacyFlow(cwd: string): Promise<boolean> {
  * - Unknown sections -> preserved in runs/<id>/state.md
  * - Original .quick-codex-flow/ is NOT deleted
  */
-export async function migrateQuickCodexFlow(
-  cwd: string,
-): Promise<{ runsCreated: number; filesCopied: number }> {
+export async function migrateQuickCodexFlow(cwd: string): Promise<{ runsCreated: number; filesCopied: number }> {
   const qcDir = path.join(cwd, ".quick-codex-flow");
   const flowDir = await ensureFlowDir(cwd);
 
@@ -83,9 +76,7 @@ export async function migrateQuickCodexFlow(
   // 2. Find and split run files (non-top-level .md files)
   const topLevelNames = new Set(Object.keys(TOP_LEVEL_MAP));
   const entries = await fs.readdir(qcDir);
-  const runFiles = entries.filter(
-    (e) => e.endsWith(".md") && !topLevelNames.has(e),
-  );
+  const runFiles = entries.filter((e) => e.endsWith(".md") && !topLevelNames.has(e));
 
   // Accumulate decisions from all run files
   let decisionsContent = "";
@@ -95,7 +86,10 @@ export async function migrateQuickCodexFlow(
     const parsed = parseSections(content);
 
     // Derive run ID from filename slug (lowercase, dashes, no extension)
-    const runId = runFile.replace(/\.md$/i, "").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+    const runId = runFile
+      .replace(/\.md$/i, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-");
     const runDir = path.join(flowDir, "runs", runId);
     await fs.mkdir(runDir, { recursive: true });
 
@@ -137,14 +131,8 @@ export async function migrateQuickCodexFlow(
 
   // 3. Append decisions to top-level decisions.md
   if (decisionsContent) {
-    const existingDecisions = await fs.readFile(
-      path.join(flowDir, "decisions.md"),
-      "utf8",
-    ).catch(() => "");
-    await atomicWriteText(
-      path.join(flowDir, "decisions.md"),
-      existingDecisions + decisionsContent,
-    );
+    const existingDecisions = await fs.readFile(path.join(flowDir, "decisions.md"), "utf8").catch(() => "");
+    await atomicWriteText(path.join(flowDir, "decisions.md"), existingDecisions + decisionsContent);
   }
 
   return { runsCreated, filesCopied };

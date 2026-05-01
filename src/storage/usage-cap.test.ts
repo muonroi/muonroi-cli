@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { promises as fs } from "node:fs";
-import { loadUsage, saveUsage } from "./usage-cap.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { atomicWriteJSON } from "./atomic-io.js";
+import { loadUsage, saveUsage } from "./usage-cap.js";
 
 let tmpDir: string;
 

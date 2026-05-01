@@ -8,10 +8,10 @@
  */
 
 export const DOWNGRADE_CHAIN: ReadonlyArray<string> = [
-  'claude-3-opus-latest',
-  'claude-3-5-sonnet-latest',
-  'claude-3-5-haiku-latest',
-  'HALT',
+  "claude-3-opus-latest",
+  "claude-3-5-sonnet-latest",
+  "claude-3-5-haiku-latest",
+  "HALT",
 ];
 
 export interface DowngradeStep {
@@ -34,11 +34,11 @@ export interface DowngradeEvent {
 export function downgradeChain(currentModel: string, capPct = 0): DowngradeStep {
   const idx = DOWNGRADE_CHAIN.indexOf(currentModel);
   const i = idx === -1 ? 0 : idx; // unknown model treated as top
-  const next = DOWNGRADE_CHAIN[i + 1] ?? 'HALT';
-  const isHalt = next === 'HALT';
+  const next = DOWNGRADE_CHAIN[i + 1] ?? "HALT";
+  const isHalt = next === "HALT";
 
   const human = (m: string) =>
-    m.includes('opus') ? 'Opus' : m.includes('sonnet') ? 'Sonnet' : m.includes('haiku') ? 'Haiku' : m;
+    m.includes("opus") ? "Opus" : m.includes("sonnet") ? "Sonnet" : m.includes("haiku") ? "Haiku" : m;
 
   const eventLabel = isHalt
     ? `Capping at ${capPct.toFixed(0)}% — halting (Haiku exhausted)`

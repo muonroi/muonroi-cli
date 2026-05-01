@@ -39,44 +39,36 @@ afterAll(() => {
 });
 
 describe("LSP smoke test — createLspClientSession", () => {
-  it(
-    "initializes LSP session with typescript-language-server",
-    { timeout: 30000 },
-    async () => {
-      if (!tsServerAvailable) {
-        console.warn("typescript-language-server not available — skipping LSP session smoke test");
-        return;
-      }
+  it("initializes LSP session with typescript-language-server", { timeout: 30000 }, async () => {
+    if (!tsServerAvailable) {
+      console.warn("typescript-language-server not available — skipping LSP session smoke test");
+      return;
+    }
 
-      const session = await createLspClientSession({
-        serverId: "ts-smoke",
-        root: tmpDir,
-        launch: { command: "bunx", args: ["typescript-language-server", "--stdio"] },
-        startupTimeoutMs: 15000,
+    const session = await createLspClientSession({
+      serverId: "ts-smoke",
+      root: tmpDir,
+      launch: { command: "bunx", args: ["typescript-language-server", "--stdio"] },
+      startupTimeoutMs: 15000,
+      diagnosticsDebounceMs: 500,
+    });
+
+    expect(session.serverId).toBe("ts-smoke");
+
+    await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
+
+    await session.stop();
+  });
+
+  it("createLspClientSession rejects for non-existent command", { timeout: 10000 }, async () => {
+    await expect(
+      createLspClientSession({
+        serverId: "bad",
+        root: os.tmpdir(),
+        launch: { command: "nonexistent-lsp-binary-xyz" },
+        startupTimeoutMs: 2000,
         diagnosticsDebounceMs: 500,
-      });
-
-      expect(session.serverId).toBe("ts-smoke");
-
-      await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
-
-      await session.stop();
-    },
-  );
-
-  it(
-    "createLspClientSession rejects for non-existent command",
-    { timeout: 10000 },
-    async () => {
-      await expect(
-        createLspClientSession({
-          serverId: "bad",
-          root: os.tmpdir(),
-          launch: { command: "nonexistent-lsp-binary-xyz" },
-          startupTimeoutMs: 2000,
-          diagnosticsDebounceMs: 500,
-        }),
-      ).rejects.toThrow();
-    },
-  );
+      }),
+    ).rejects.toThrow();
+  });
 });

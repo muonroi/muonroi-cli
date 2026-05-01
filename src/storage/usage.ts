@@ -1,7 +1,6 @@
+import { getModelInfo } from "../models/registry.js";
 import type { UsageEvent, UsageSource } from "../types/index";
 import { getDatabase } from "./db";
-
-import { getModelInfo } from "../models/registry.js";
 
 interface UsageRow {
   id: number;

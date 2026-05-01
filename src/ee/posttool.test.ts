@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import type { PostToolPayload } from "./types.js";
+import { describe, expect, it, vi } from "vitest";
 import type { JudgeContext } from "./judge.js";
+import type { PostToolPayload } from "./types.js";
 
 // Mock both intercept and judge modules
 const mockPosttool = vi.fn();

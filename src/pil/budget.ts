@@ -13,6 +13,6 @@ export function truncateToBudget(text: string, budgetTokens: number): string {
   const maxChars = budgetTokens * CHARS_PER_TOKEN;
   if (text.length <= maxChars) return text;
   const truncated = text.slice(0, maxChars);
-  const lastSpace = truncated.lastIndexOf(' ');
-  return (lastSpace > maxChars * 0.8 ? truncated.slice(0, lastSpace) : truncated) + '...';
+  const lastSpace = truncated.lastIndexOf(" ");
+  return `${lastSpace > maxChars * 0.8 ? truncated.slice(0, lastSpace) : truncated}...`;
 }

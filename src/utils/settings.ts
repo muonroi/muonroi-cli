@@ -9,13 +9,8 @@ import type {
   LspSettings,
   NormalizedLspSettings,
 } from "../lsp/types";
+import { getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../models/registry.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
-
-import {
-  getModelIds,
-  normalizeModelId,
-  getEffectiveReasoningEffort,
-} from "../models/registry.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 

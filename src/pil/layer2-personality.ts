@@ -1,5 +1,5 @@
-import type { PipelineContext, OutputStyle } from "./types.js";
 import { truncateToBudget } from "./budget.js";
+import type { OutputStyle, PipelineContext } from "./types.js";
 
 const PERSONALITY_HINTS: Record<OutputStyle, string> = {
   concise:
@@ -17,10 +17,7 @@ export async function layer2Personality(ctx: PipelineContext): Promise<PipelineC
   if (!ctx.outputStyle) {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "personality-adaptation", applied: false, delta: "skipped:null-outputStyle" },
-      ],
+      layers: [...ctx.layers, { name: "personality-adaptation", applied: false, delta: "skipped:null-outputStyle" }],
     };
   }
 

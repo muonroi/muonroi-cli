@@ -30,7 +30,7 @@ export async function syncFileWithLsp(
   );
 }
 
-export function isLspToolEnabled(cwd: string): boolean {
+export function isLspToolEnabled(_cwd: string): boolean {
   const settings = getCurrentLspSettings();
   return settings.enabled && settings.tool;
 }

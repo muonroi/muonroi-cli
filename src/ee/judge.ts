@@ -10,7 +10,7 @@
  */
 
 import { getDefaultEEClient } from "./intercept.js";
-import type { InterceptResponse, PostToolPayload, Classification } from "./types.js";
+import type { Classification, InterceptResponse, PostToolPayload } from "./types.js";
 
 export interface JudgeContext {
   warningResponse: InterceptResponse | null;
@@ -36,11 +36,7 @@ export function judge(ctx: JudgeContext): Classification {
   if (!ctx.outcome.success) {
     return "IGNORED";
   }
-  if (
-    ctx.warningResponse.matches.some(
-      (m) => m.expectedBehavior === "should-not-edit" && ctx.diffPresent,
-    )
-  ) {
+  if (ctx.warningResponse.matches.some((m) => m.expectedBehavior === "should-not-edit" && ctx.diffPresent)) {
     return "IGNORED";
   }
   return "FOLLOWED";

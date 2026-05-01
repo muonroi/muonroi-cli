@@ -1,6 +1,6 @@
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
-import { existsSync, mkdirSync } from "fs";
+import { mkdirSync } from "fs";
 import { createRequire } from "module";
 import { dirname, isAbsolute, join, resolve } from "path";
 import type { ComputerToolMetadata, ToolResult } from "../types/index";

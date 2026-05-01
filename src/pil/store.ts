@@ -5,7 +5,7 @@
  * Single-threaded per session — no zustand needed.
  */
 
-import type { PipelineContext } from './types.js';
+import type { PipelineContext } from "./types.js";
 
 let _last: PipelineContext | null = null;
 

@@ -190,7 +190,7 @@ export async function createLspClientSession(options: LspClientOptions): Promise
         },
       });
     },
-    async sendRequest<TResult>(method: string, params: unknown) {
+    async sendRequest<_TResult>(method: string, params: unknown) {
       ensureActive(stopped, options.serverId);
       return connection.sendRequest(method, params);
     },

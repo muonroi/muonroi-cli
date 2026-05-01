@@ -14,19 +14,13 @@ export interface ExperienceConfig {
 }
 
 function configPath(homeOverride?: string): string {
-  return path.join(
-    homeOverride ?? os.homedir(),
-    ".experience",
-    "config.json",
-  );
+  return path.join(homeOverride ?? os.homedir(), ".experience", "config.json");
 }
 
 let _token: string | null = null;
 let _embeddingModelVersion: string | null = null;
 
-export async function loadEEAuthToken(
-  opts: { home?: string } = {},
-): Promise<string | null> {
+export async function loadEEAuthToken(opts: { home?: string } = {}): Promise<string | null> {
   try {
     const txt = await fs.readFile(configPath(opts.home), "utf8");
     const cfg = JSON.parse(txt) as ExperienceConfig;
@@ -34,17 +28,14 @@ export async function loadEEAuthToken(
       redactor.enrollSecret(cfg.authToken);
       _token = cfg.authToken;
     }
-    if (cfg.embeddingModelVersion)
-      _embeddingModelVersion = cfg.embeddingModelVersion;
+    if (cfg.embeddingModelVersion) _embeddingModelVersion = cfg.embeddingModelVersion;
     return _token;
   } catch {
     return null;
   }
 }
 
-export async function refreshAuthToken(
-  opts: { home?: string } = {},
-): Promise<string | null> {
+export async function refreshAuthToken(opts: { home?: string } = {}): Promise<string | null> {
   _token = null;
   return await loadEEAuthToken(opts);
 }

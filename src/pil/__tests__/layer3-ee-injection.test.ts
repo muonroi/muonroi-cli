@@ -1,4 +1,4 @@
-import { describe, expect, test, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { layer3EeInjection } from "../layer3-ee-injection";
 import type { PipelineContext } from "../types";
 
@@ -20,9 +20,7 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 describe("layer3EeInjection", () => {
   beforeEach(() => {
     globalThis.fetch = vi.fn(() =>
-      Promise.resolve(
-        new Response(JSON.stringify({ points: [] }), { status: 200 }),
-      ),
+      Promise.resolve(new Response(JSON.stringify({ points: [] }), { status: 200 })),
     ) as any;
   });
 
@@ -93,9 +91,7 @@ describe("layer3EeInjection", () => {
   });
 
   test("fails open on non-200 response", async () => {
-    globalThis.fetch = vi.fn(() =>
-      Promise.resolve(new Response("Internal Server Error", { status: 500 })),
-    ) as any;
+    globalThis.fetch = vi.fn(() => Promise.resolve(new Response("Internal Server Error", { status: 500 }))) as any;
 
     const ctx = makeCtx();
     const result = await layer3EeInjection(ctx);

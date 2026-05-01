@@ -1,3 +1,6 @@
+// Muonroi-specific storage: cap state (atomic IO, config, usage)
+export { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
+export { loadConfig, type MuonroiConfig } from "./config.js";
 export { getDatabasePath } from "./db";
 export { SessionStore } from "./sessions";
 export {
@@ -13,8 +16,4 @@ export {
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { getSessionTotalTokens, listSessionUsage, recordUsageEvent, type TokenUsageLike } from "./usage";
-
-// Muonroi-specific storage: cap state (atomic IO, config, usage)
-export { atomicWriteJSON, atomicReadJSON } from "./atomic-io.js";
-export { loadConfig, type MuonroiConfig } from "./config.js";
 export { loadUsage, saveUsage, type UsageState } from "./usage-cap.js";

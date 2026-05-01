@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // RED phase: import module under test (will fail until doctor.ts is created)
-import { runDoctor, formatDoctorReport, type CheckResult } from "./doctor.js";
+import { type CheckResult, formatDoctorReport, runDoctor } from "./doctor.js";
 
 describe("doctor — runDoctor returns 7 checks", () => {
   beforeEach(() => {
@@ -44,10 +44,7 @@ describe("doctor — runDoctor returns 7 checks", () => {
   });
 
   it("unreachable services return warn (not fail or throw)", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockRejectedValue(new Error("Network unreachable")),
-    );
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network unreachable")));
     const results = await runDoctor();
     const ollamaCheck = results.find((r) => r.name === "ollama")!;
     const eeCheck = results.find((r) => r.name === "ee")!;
@@ -77,26 +74,20 @@ describe("doctor — bun_version check", () => {
 
 describe("doctor — formatDoctorReport", () => {
   it("contains [PASS] icon for passing check", () => {
-    const results: CheckResult[] = [
-      { name: "os", status: "pass", detail: "linux 5.15" },
-    ];
+    const results: CheckResult[] = [{ name: "os", status: "pass", detail: "linux 5.15" }];
     const report = formatDoctorReport(results);
     expect(report).toContain("[PASS]");
     expect(report).toContain("os");
   });
 
   it("contains [WARN] icon for warn check", () => {
-    const results: CheckResult[] = [
-      { name: "ollama", status: "warn", detail: "Ollama VPS unreachable" },
-    ];
+    const results: CheckResult[] = [{ name: "ollama", status: "warn", detail: "Ollama VPS unreachable" }];
     const report = formatDoctorReport(results);
     expect(report).toContain("[WARN]");
   });
 
   it("contains [FAIL] icon for fail check", () => {
-    const results: CheckResult[] = [
-      { name: "bun_version", status: "fail", detail: "Not running under Bun" },
-    ];
+    const results: CheckResult[] = [{ name: "bun_version", status: "fail", detail: "Not running under Bun" }];
     const report = formatDoctorReport(results);
     expect(report).toContain("[FAIL]");
   });

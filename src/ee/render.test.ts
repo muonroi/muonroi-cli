@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { renderInterceptWarning, setRenderSink, emitMatches } from "./render.js";
+import { beforeEach, describe, expect, it } from "vitest";
+import { emitMatches, renderInterceptWarning, setRenderSink } from "./render.js";
 import type { InterceptMatch } from "./types.js";
 
 const baseMatch: InterceptMatch = {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 // Import the module under test — will fail until src/utils/redactor.ts is created
 import { redactor } from "./redactor";

@@ -3,10 +3,10 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Agent } from "../orchestrator/orchestrator";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
+import { Agent } from "../orchestrator/orchestrator";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -70,21 +70,21 @@ import {
   PlanView,
 } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
-import { getCompactTuiSelectionText } from "./terminal-selection-text";
-import { dark, type Theme } from "./theme";
+import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { wireStatusBar } from "./status-bar/store.js";
-import { dispatchSlash } from "./slash/registry.js";
+import { getCompactTuiSelectionText } from "./terminal-selection-text";
+import { dark, type Theme } from "./theme";
 import "./slash/route.js"; // side-effect: self-registers /route handler
 import "./slash/optimize.js"; // side-effect: self-registers /optimize command (PIL-07)
 
 import {
-  MODELS,
+  getEffectiveReasoningEffort,
   getModelIds,
   getModelInfo,
-  normalizeModelId,
-  getEffectiveReasoningEffort,
   getSupportedReasoningEfforts,
+  MODELS,
+  normalizeModelId,
 } from "../models/registry.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
@@ -95,27 +95,43 @@ const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type TelegramBridgeHandle = any;
-function createTelegramBridge(_opts: unknown): TelegramBridgeHandle { return null as TelegramBridgeHandle; }
-function approvePairingCode(
-  _code: string,
-): { ok: true; userId: number } | { ok: false; error: string } {
+function createTelegramBridge(_opts: unknown): TelegramBridgeHandle {
+  return null as TelegramBridgeHandle;
+}
+function approvePairingCode(_code: string): { ok: true; userId: number } | { ok: false; error: string } {
   return { ok: false, error: "Telegram bridge not available." };
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function createTurnCoordinator(): any { return { reset: () => {}, handleEvent: () => {} }; }
+function createTurnCoordinator(): any {
+  return { reset: () => {}, handleEvent: () => {} };
+}
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildAssistantEntry(..._args: any[]): any { return {}; }
+function buildAssistantEntry(..._args: any[]): any {
+  return {};
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildToolResultEntry(..._args: any[]): any { return {}; }
+function buildToolResultEntry(..._args: any[]): any {
+  return {};
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildUserEntry(..._args: any[]): any { return {}; }
+function buildUserEntry(..._args: any[]): any {
+  return {};
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function decorateTelegramEntries(_entries: any[], _userId: number, _remoteKey: string): any[] { return []; }
-function getTelegramSourceLabel(_role?: string, _userId?: number): string { return ""; }
-function getUnflushedTelegramAssistantContent(_content: string, _flushedChars: number): string { return ""; }
+function decorateTelegramEntries(_entries: any[], _userId: number, _remoteKey: string): any[] {
+  return [];
+}
+function getTelegramSourceLabel(_role?: string, _userId?: number): string {
+  return "";
+}
+function getUnflushedTelegramAssistantContent(_content: string, _flushedChars: number): string {
+  return "";
+}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function replaceTurnEntries(_prev: any[], _remoteKey: string, _delta: any[]): any[] { return _prev; }
+function replaceTurnEntries(_prev: any[], _remoteKey: string, _delta: any[]): any[] {
+  return _prev;
+}
 
 const STAR_PALETTE = ["#777777", "#666666", "#4a4a4a", "#333333", "#222222"];
 const LOADING_SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
@@ -2331,12 +2347,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
       if (c.startsWith("/")) {
         const parts = c.slice(1).split(/\s+/);
-        const name = parts[0] ?? '';
+        const name = parts[0] ?? "";
         const args = parts.slice(1);
         dispatchSlash(name, args, {
           cwd: agent.getCwd(),
-          tenantId: 'local',
-          defaultProvider: 'anthropic',
+          tenantId: "local",
+          defaultProvider: "anthropic",
           defaultModel: model,
           lastPrompt: messages[messages.length - 1]?.content,
         }).then((result) => {
@@ -2359,6 +2375,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       processMessage,
       resetToNewSession,
       subAgents,
+      model,
+      messages.length,
+      messages,
     ],
   );
 
@@ -3910,7 +3929,9 @@ function PromptBox({
                 !showApiKeyModal &&
                 !blockPrompt
               }
-              placeholder={isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."}
+              placeholder={
+                isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
+              }
               textColor={t.text}
               backgroundColor={t.backgroundElement}
               placeholderColor={t.textMuted}

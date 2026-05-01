@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { toolNeedsApproval, AUTO_EDIT_ALLOWED, type PermissionMode } from "./permission-mode.js";
+import { describe, expect, it } from "vitest";
+import { AUTO_EDIT_ALLOWED, toolNeedsApproval } from "./permission-mode.js";
 
 describe("toolNeedsApproval", () => {
   // safe mode: always requires approval for every tool

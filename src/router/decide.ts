@@ -5,15 +5,16 @@
  * Cap precedence: ledger reservation checked before returning.
  * If cap breach detected, downgrade chain overrides classifier output (ROUTE-06).
  */
-import { classify } from './classifier/index.js';
-import { callWarmRoute } from './warm.js';
-import { callColdRoute } from './cold.js';
-import { routerStore } from './store.js';
-import type { RouteDecision } from './types.js';
-import { reserve, release } from '../usage/ledger.js';
-import { CapBreachError } from '../usage/types.js';
-import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from '../usage/downgrade.js';
-import { midstreamPolicy } from '../usage/midstream.js';
+
+import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
+import { release, reserve } from "../usage/ledger.js";
+import { midstreamPolicy } from "../usage/midstream.js";
+import { CapBreachError } from "../usage/types.js";
+import { classify } from "./classifier/index.js";
+import { callColdRoute } from "./cold.js";
+import { routerStore } from "./store.js";
+import type { RouteDecision } from "./types.js";
+import { callWarmRoute } from "./warm.js";
 
 export interface DecideOpts {
   tenantId: string;
@@ -43,9 +44,9 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
     if (midstreamPolicy.refuseNext()) {
       return {
         ...current,
-        tier: 'degraded',
-        model: 'HALT',
-        reason: current.reason + ' | cap-halt',
+        tier: "degraded",
+        model: "HALT",
+        reason: `${current.reason} | cap-halt`,
         cap_overridden: true,
       };
     }
@@ -71,9 +72,9 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
         midstreamPolicy.forceRefuseNext();
         return {
           ...current,
-          tier: 'degraded',
-          model: 'HALT',
-          reason: current.reason + ' | cap-driven-downgrade-halt',
+          tier: "degraded",
+          model: "HALT",
+          reason: `${current.reason} | cap-driven-downgrade-halt`,
           cap_overridden: true,
         };
       }
@@ -81,7 +82,7 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
       current = {
         ...current,
         model: step.next,
-        reason: current.reason + ' | cap-driven-downgrade',
+        reason: `${current.reason} | cap-driven-downgrade`,
         cap_overridden: true,
       };
       continue;
@@ -95,22 +96,19 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
 
   return {
     ...current,
-    model: 'HALT',
-    tier: 'degraded',
-    reason: 'chain-exhausted',
+    model: "HALT",
+    tier: "degraded",
+    reason: "chain-exhausted",
     cap_overridden: true,
   };
 }
 
-export async function decide(
-  prompt: string,
-  opts: DecideOpts,
-): Promise<RouteDecision> {
+export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
-  if (c.tier === 'hot') {
+  if (c.tier === "hot") {
     const d: RouteDecision = {
-      tier: 'hot',
+      tier: "hot",
       model: c.modelHint ?? opts.defaultModel,
       provider: opts.defaultProvider,
       reason: c.reason,
@@ -133,16 +131,16 @@ export async function decide(
   const cd = await callColdRoute(prompt, opts);
   if (cd) {
     const checked = await capCheck(cd, opts.homeOverride);
-    routerStore.setState({ tier: 'cold', lastDecision: checked });
+    routerStore.setState({ tier: "cold", lastDecision: checked });
     return checked;
   }
 
   // Step 4: Final fallback when EE entirely unreachable
   const fallback: RouteDecision = {
-    tier: routerStore.getState().degraded ? 'degraded' : 'hot',
+    tier: routerStore.getState().degraded ? "degraded" : "hot",
     model: opts.defaultModel,
     provider: opts.defaultProvider,
-    reason: 'fallback:ee-unreachable',
+    reason: "fallback:ee-unreachable",
   };
   const checked = await capCheck(fallback, opts.homeOverride);
   routerStore.setState({ lastDecision: checked });

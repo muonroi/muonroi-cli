@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { projectCostUSD, estimateTokensFromChars } from "./estimator.js";
+import { describe, expect, it } from "vitest";
+import { estimateTokensFromChars, projectCostUSD } from "./estimator.js";
 
 describe("estimator", () => {
   describe("projectCostUSD", () => {

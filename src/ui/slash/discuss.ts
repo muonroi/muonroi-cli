@@ -8,17 +8,9 @@
  * or import in test to trigger registration.
  */
 
+import { createRun, getActiveRunId, loadRun, setActiveRunId, updateRunFile } from "../../flow/run-manager.js";
 import { ensureFlowDir } from "../../flow/scaffold.js";
-import {
-  createRun,
-  getActiveRunId,
-  setActiveRunId,
-  loadRun,
-  updateRunFile,
-} from "../../flow/run-manager.js";
-import { parseSections, serializeSections } from "../../flow/parser.js";
-import type { SectionMap } from "../../flow/parser.js";
-import type { SlashContext, SlashHandler } from "./registry.js";
+import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
 /**
@@ -58,9 +50,7 @@ export const handleDiscussSlash: SlashHandler = async (args, ctx) => {
     const nextId = existingCount + 1;
     const newEntry = `G${nextId} [open] ${args.join(" ")}`;
 
-    const updatedContent = gaSection
-      ? `${gaSection}\n${newEntry}`
-      : newEntry;
+    const updatedContent = gaSection ? `${gaSection}\n${newEntry}` : newEntry;
 
     run.grayAreas.sections.set("Gray Areas", updatedContent);
     await updateRunFile(flowDir, activeRunId, "gray-areas.md", run.grayAreas);

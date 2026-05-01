@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { extractDecisions, type ExtractedDecisions } from "../extract.js";
 import type { ModelMessage } from "ai";
+import { describe, expect, it } from "vitest";
+import { extractDecisions } from "../extract.js";
 
 describe("extractDecisions", () => {
   it("extracts Decision: lines from messages", () => {
@@ -13,25 +13,19 @@ describe("extractDecisions", () => {
   });
 
   it("extracts Decided: lines", () => {
-    const messages: ModelMessage[] = [
-      { role: "user", content: "Decided: Go with PostgreSQL" },
-    ];
+    const messages: ModelMessage[] = [{ role: "user", content: "Decided: Go with PostgreSQL" }];
     const result = extractDecisions(messages);
     expect(result.decisions).toContain("Go with PostgreSQL");
   });
 
   it("extracts Fact: lines", () => {
-    const messages: ModelMessage[] = [
-      { role: "assistant", content: "Fact: The API rate limit is 100 req/min" },
-    ];
+    const messages: ModelMessage[] = [{ role: "assistant", content: "Fact: The API rate limit is 100 req/min" }];
     const result = extractDecisions(messages);
     expect(result.facts).toContain("The API rate limit is 100 req/min");
   });
 
   it("extracts Constraint: lines", () => {
-    const messages: ModelMessage[] = [
-      { role: "user", content: "Constraint: Must run on Windows and Linux" },
-    ];
+    const messages: ModelMessage[] = [{ role: "user", content: "Constraint: Must run on Windows and Linux" }];
     const result = extractDecisions(messages);
     expect(result.constraints).toContain("Must run on Windows and Linux");
   });
@@ -40,8 +34,7 @@ describe("extractDecisions", () => {
     const messages: ModelMessage[] = [
       {
         role: "user",
-        content:
-          "Some text\n<!-- preserve -->\nImportant preserved content\n<!-- /preserve -->\nMore text",
+        content: "Some text\n<!-- preserve -->\nImportant preserved content\n<!-- /preserve -->\nMore text",
       },
     ];
     const result = extractDecisions(messages);
@@ -70,8 +63,7 @@ describe("extractDecisions", () => {
     const messages: ModelMessage[] = [
       {
         role: "user",
-        content:
-          "Decision: Use TypeScript\nFact: Project uses Bun runtime\nConstraint: No new dependencies",
+        content: "Decision: Use TypeScript\nFact: Project uses Bun runtime\nConstraint: No new dependencies",
       },
     ];
     const result = extractDecisions(messages);

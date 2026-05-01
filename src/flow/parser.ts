@@ -58,9 +58,7 @@ export function serializeSections(map: SectionMap, order?: string[]): string {
   const parts: string[] = [];
   if (map.preamble) parts.push(map.preamble);
 
-  const headings = order
-    ? [...new Set([...order, ...map.sections.keys()])]
-    : [...map.sections.keys()];
+  const headings = order ? [...new Set([...order, ...map.sections.keys()])] : [...map.sections.keys()];
 
   for (const h of headings) {
     const content = map.sections.get(h);
@@ -69,7 +67,7 @@ export function serializeSections(map: SectionMap, order?: string[]): string {
     }
   }
 
-  return parts.join("\n\n") + "\n";
+  return `${parts.join("\n\n")}\n`;
 }
 
 /**

@@ -23,8 +23,7 @@ function parseGitConfig(text: string): { remote?: string } {
 
 function parseHEAD(text: string): { branch?: string; detached?: boolean } {
   const t = text.trim();
-  if (t.startsWith("ref: refs/heads/"))
-    return { branch: t.slice("ref: refs/heads/".length) };
+  if (t.startsWith("ref: refs/heads/")) return { branch: t.slice("ref: refs/heads/".length) };
   return { detached: true };
 }
 
@@ -52,12 +51,8 @@ export async function buildScope(opts: { cwd: string }): Promise<Scope> {
     cachedFor = opts.cwd;
     return cached;
   }
-  const head = await fs
-    .readFile(path.join(root, ".git", "HEAD"), "utf8")
-    .catch(() => "");
-  const cfg = await fs
-    .readFile(path.join(root, ".git", "config"), "utf8")
-    .catch(() => "");
+  const head = await fs.readFile(path.join(root, ".git", "HEAD"), "utf8").catch(() => "");
+  const cfg = await fs.readFile(path.join(root, ".git", "config"), "utf8").catch(() => "");
   const { remote } = parseGitConfig(cfg);
   const { branch } = parseHEAD(head);
   if (remote && branch) cached = { kind: "branch", remote, branch };

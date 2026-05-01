@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { detectLegacyFlow, migrateQuickCodexFlow } from "../migration.js";
 
 describe("migration", () => {
@@ -101,20 +101,16 @@ describe("migration", () => {
       await fs.writeFile(path.join(qcDir, "PROJECT-ROADMAP.md"), "", "utf8");
       await fs.writeFile(path.join(qcDir, "BACKLOG.md"), "", "utf8");
 
-      const runContent = [
-        "## Resume Digest\n\nresume info",
-        "## Custom Unknown Section\n\ncustom content here",
-      ].join("\n\n");
+      const runContent = ["## Resume Digest\n\nresume info", "## Custom Unknown Section\n\ncustom content here"].join(
+        "\n\n",
+      );
       await fs.writeFile(path.join(qcDir, "custom-run.md"), runContent, "utf8");
 
       await migrateQuickCodexFlow(tmpDir);
 
       const flowDir = path.join(tmpDir, ".muonroi-flow");
       const runs = await fs.readdir(path.join(flowDir, "runs"));
-      const state = await fs.readFile(
-        path.join(flowDir, "runs", runs[0], "state.md"),
-        "utf8",
-      );
+      const state = await fs.readFile(path.join(flowDir, "runs", runs[0], "state.md"), "utf8");
       expect(state).toContain("custom content here");
     });
 

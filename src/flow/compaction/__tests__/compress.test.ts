@@ -1,6 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { compressChat } from "../compress.js";
 import type { ModelMessage } from "ai";
+import { describe, expect, it, vi } from "vitest";
+import { compressChat } from "../compress.js";
 
 // Mock the existing compaction engine
 vi.mock("../../../orchestrator/compaction.js", () => ({
@@ -40,8 +40,7 @@ describe("compressChat", () => {
     const messages: ModelMessage[] = [
       {
         role: "user",
-        content:
-          "Some chat\n<!-- preserve -->\nCritical verbatim block\n<!-- /preserve -->\nMore chat",
+        content: "Some chat\n<!-- preserve -->\nCritical verbatim block\n<!-- /preserve -->\nMore chat",
       },
     ];
     const result = await compressChat(messages, "system", 10000);
@@ -54,8 +53,7 @@ describe("compressChat", () => {
     const messages: ModelMessage[] = [
       {
         role: "user",
-        content:
-          "Text\n<!-- preserve -->\nBlock content\n<!-- /preserve -->\nRest",
+        content: "Text\n<!-- preserve -->\nBlock content\n<!-- /preserve -->\nRest",
       },
     ];
     const result = await compressChat(messages, "system", 10000);

@@ -1,13 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import {
-  loadEEAuthToken,
-  refreshAuthToken,
-  getEmbeddingModelVersion,
-} from "./auth.js";
+import { getEmbeddingModelVersion, loadEEAuthToken, refreshAuthToken } from "./auth.js";
 
 describe("loadEEAuthToken", () => {
   let tmpHome: string;
@@ -68,18 +64,12 @@ describe("refreshAuthToken", () => {
   it("re-reads config.json and updates the cached value", async () => {
     const dir = path.join(tmpHome, ".experience");
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(
-      path.join(dir, "config.json"),
-      JSON.stringify({ authToken: "old-token" }),
-    );
+    await fs.writeFile(path.join(dir, "config.json"), JSON.stringify({ authToken: "old-token" }));
     const first = await loadEEAuthToken({ home: tmpHome });
     expect(first).toBe("old-token");
 
     // Write new token
-    await fs.writeFile(
-      path.join(dir, "config.json"),
-      JSON.stringify({ authToken: "new-token" }),
-    );
+    await fs.writeFile(path.join(dir, "config.json"), JSON.stringify({ authToken: "new-token" }));
     const second = await refreshAuthToken({ home: tmpHome });
     expect(second).toBe("new-token");
   });

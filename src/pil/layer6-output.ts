@@ -7,7 +7,7 @@
  * Conversational turns (taskType=null) pass through unchanged.
  */
 
-import type { PipelineContext, TaskType, OutputStyle } from './types.js';
+import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
   refactor: {
@@ -44,7 +44,7 @@ const SUFFIXES: Record<TaskType, Record<OutputStyle, string>> = {
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext): string {
   if (ctx.taskType === null) return systemPrompt;
-  const style: OutputStyle = ctx.outputStyle ?? 'concise';
+  const style: OutputStyle = ctx.outputStyle ?? "concise";
   return systemPrompt + SUFFIXES[ctx.taskType][style];
 }
 
@@ -53,20 +53,17 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     if (ctx.taskType === null) {
       return {
         ...ctx,
-        layers: [
-          ...ctx.layers,
-          { name: 'output-optimization', applied: false, delta: null },
-        ],
+        layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: null }],
       };
     }
-    const style: OutputStyle = ctx.outputStyle ?? 'concise';
+    const style: OutputStyle = ctx.outputStyle ?? "concise";
     const suffix = SUFFIXES[ctx.taskType][style];
     return {
       ...ctx,
       layers: [
         ...ctx.layers,
         {
-          name: 'output-optimization',
+          name: "output-optimization",
           applied: true,
           delta: `suffix=${ctx.taskType},style=${style},chars=${suffix.trim().length}`,
         },
@@ -75,10 +72,7 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
   } catch {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: 'output-optimization', applied: false, delta: null },
-      ],
+      layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: null }],
     };
   }
 }

@@ -418,7 +418,10 @@ function applyWindowsUpdate(
   });
   child.unref();
 
-  return { success: true, output: `Updated to muonroi-cli ${release.version}. Restart the CLI to use the new version.` };
+  return {
+    success: true,
+    output: `Updated to muonroi-cli ${release.version}. Restart the CLI to use the new version.`,
+  };
 }
 
 function esc(s: string): string {

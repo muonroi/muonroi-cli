@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 import {
-  MODELS,
+  getEffectiveReasoningEffort,
   getModelIds,
   getModelInfo,
-  normalizeModelId,
-  getEffectiveReasoningEffort,
   getSupportedReasoningEfforts,
+  MODELS,
+  normalizeModelId,
 } from "../registry";
 
 describe("MODELS catalog", () => {

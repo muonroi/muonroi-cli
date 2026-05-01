@@ -6,15 +6,8 @@
  */
 
 import type { ModelMessage } from "ai";
-import {
-  serializeConversation,
-  estimateMessageTokens,
-} from "../../orchestrator/compaction.js";
-import {
-  extractPreservedBlocks,
-  restorePreservedBlocks,
-  type PreservedBlock,
-} from "./preserve.js";
+import { serializeConversation } from "../../orchestrator/compaction.js";
+import { extractPreservedBlocks, type PreservedBlock, restorePreservedBlocks } from "./preserve.js";
 
 export interface CompressResult {
   summary: string;
@@ -55,18 +48,14 @@ export async function compressChat(
 
   // Over budget — truncate to fit budget while keeping preserved blocks
   // Calculate space taken by preserved blocks
-  const preservedTokens = blocks.reduce(
-    (sum, b) => sum + Math.ceil(b.content.length / 4),
-    0,
-  );
+  const preservedTokens = blocks.reduce((sum, b) => sum + Math.ceil(b.content.length / 4), 0);
   const availableTokens = Math.max(0, tokenBudget - preservedTokens);
   const availableChars = availableTokens * 4;
 
   // Truncate the cleaned text to fit
   const truncated =
     cleaned.length > availableChars
-      ? cleaned.slice(0, availableChars) +
-        `\n\n[... ${cleaned.length - availableChars} characters truncated]`
+      ? `${cleaned.slice(0, availableChars)}\n\n[... ${cleaned.length - availableChars} characters truncated]`
       : cleaned;
 
   const restored = restorePreservedBlocks(truncated, blocks);

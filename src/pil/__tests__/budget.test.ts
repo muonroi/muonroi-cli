@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { truncateToBudget, DEFAULT_TOKEN_BUDGET } from "../budget";
+import { DEFAULT_TOKEN_BUDGET, truncateToBudget } from "../budget";
 
 describe("truncateToBudget", () => {
   it("allows ~4 chars per token of budget", () => {

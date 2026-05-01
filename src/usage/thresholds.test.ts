@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { evaluateThresholds } from "./thresholds.js";
 
 describe("thresholds", () => {
@@ -18,7 +18,7 @@ describe("thresholds", () => {
     it("does not re-fire 50% if already in firedThisMonth", () => {
       const result = evaluateThresholds({
         prevUsd: 0.55,
-        nextUsd: 0.60,
+        nextUsd: 0.6,
         capUsd: 1.0,
         firedThisMonth: [50],
       });
@@ -27,7 +27,7 @@ describe("thresholds", () => {
 
     it("fires 80% and 100% in sequence", () => {
       const r80 = evaluateThresholds({
-        prevUsd: 0.70,
+        prevUsd: 0.7,
         nextUsd: 0.85,
         capUsd: 1.0,
         firedThisMonth: [50],

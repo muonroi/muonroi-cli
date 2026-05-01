@@ -2,16 +2,16 @@
  * Tests for warning-persist.ts — persistWarning appends EE hook warnings
  * to run state.md Experience Snapshot section.
  */
-import { describe, it, expect, afterEach, vi } from "vitest";
-import * as path from "node:path";
-import { tmpdir } from "node:os";
-import { mkdtemp, rm } from "node:fs/promises";
 
-import { persistWarning } from "../warning-persist.js";
-import { ensureFlowDir } from "../scaffold.js";
-import { createRun, setActiveRunId, loadRun } from "../run-manager.js";
-import { getSection } from "../parser.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import type { InterceptMatch } from "../../ee/types.js";
+import { getSection } from "../parser.js";
+import { createRun, loadRun, setActiveRunId } from "../run-manager.js";
+import { ensureFlowDir } from "../scaffold.js";
+import { persistWarning } from "../warning-persist.js";
 
 let tempDirs: string[] = [];
 

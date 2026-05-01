@@ -9,14 +9,14 @@
  * or import in test to trigger registration.
  */
 
-import { decide } from '../../router/decide.js';
-import type { SlashContext, SlashHandler } from './registry.js';
-import { registerSlash } from './registry.js';
+import { decide } from "../../router/decide.js";
+import type { SlashHandler } from "./registry.js";
+import { registerSlash } from "./registry.js";
 
 export const handleRouteSlash: SlashHandler = async (args, ctx) => {
-  const prompt = args.join(' ') || ctx.lastPrompt || '';
+  const prompt = args.join(" ") || ctx.lastPrompt || "";
   if (!prompt) {
-    return '/route: no recent prompt — type a prompt first or pass it as argument: /route <prompt>';
+    return "/route: no recent prompt — type a prompt first or pass it as argument: /route <prompt>";
   }
 
   const d = await decide(prompt, {
@@ -26,14 +26,9 @@ export const handleRouteSlash: SlashHandler = async (args, ctx) => {
     defaultProvider: ctx.defaultProvider,
   });
 
-  const lines = [
-    `Tier:     ${d.tier}`,
-    `Provider: ${d.provider}`,
-    `Model:    ${d.model}`,
-    `Reason:   ${d.reason}`,
-  ];
+  const lines = [`Tier:     ${d.tier}`, `Provider: ${d.provider}`, `Model:    ${d.model}`, `Reason:   ${d.reason}`];
 
-  if (typeof d.confidence === 'number') {
+  if (typeof d.confidence === "number") {
     lines.push(`Confidence: ${d.confidence.toFixed(2)}`);
   }
 
@@ -41,8 +36,8 @@ export const handleRouteSlash: SlashHandler = async (args, ctx) => {
     lines.push(`Cap-driven: yes (downgrade applied)`);
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 };
 
 // Self-register on module import
-registerSlash('route', handleRouteSlash);
+registerSlash("route", handleRouteSlash);

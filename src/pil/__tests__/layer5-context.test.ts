@@ -50,9 +50,7 @@ describe("layer5Context", () => {
   });
 
   it("includes activeRunId in delta when present", async () => {
-    const result = await layer5Context(
-      makeCtx({ resumeDigest: "Some digest", activeRunId: "abc123" }),
-    );
+    const result = await layer5Context(makeCtx({ resumeDigest: "Some digest", activeRunId: "abc123" }));
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer!.delta).toContain("runId=abc123");
   });
@@ -70,18 +68,14 @@ describe("layer5Context", () => {
   });
 
   it("adds stale warning when digest is older than 30 minutes", async () => {
-    const result = await layer5Context(
-      makeCtx({ resumeDigest: "Previous work on auth", digestAgeMs: 60 * 60 * 1000 }),
-    );
+    const result = await layer5Context(makeCtx({ resumeDigest: "Previous work on auth", digestAgeMs: 60 * 60 * 1000 }));
     expect(result.enriched).toContain("stale");
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer!.delta).toContain("stale=true");
   });
 
   it("no stale warning when digest is fresh", async () => {
-    const result = await layer5Context(
-      makeCtx({ resumeDigest: "Recent work", digestAgeMs: 5 * 60 * 1000 }),
-    );
+    const result = await layer5Context(makeCtx({ resumeDigest: "Recent work", digestAgeMs: 5 * 60 * 1000 }));
     expect(result.enriched).not.toContain("stale");
   });
 

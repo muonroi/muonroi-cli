@@ -9,13 +9,9 @@
  * or import in test to trigger registration.
  */
 
+import { getActiveRunId, loadRun, updateRunFile } from "../../flow/run-manager.js";
 import { ensureFlowDir } from "../../flow/scaffold.js";
-import {
-  getActiveRunId,
-  loadRun,
-  updateRunFile,
-} from "../../flow/run-manager.js";
-import type { SlashContext, SlashHandler } from "./registry.js";
+import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
 export const handleExecuteSlash: SlashHandler = async (_args, ctx) => {

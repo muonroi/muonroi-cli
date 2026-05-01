@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { judge, fireFeedback, type JudgeContext } from "./judge.js";
-import type { InterceptResponse, InterceptMatch } from "./types.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireFeedback, type JudgeContext, judge } from "./judge.js";
+import type { InterceptMatch } from "./types.js";
 
 // Mock the intercept module to control getDefaultEEClient
 const mockFeedback = vi.fn();
@@ -130,9 +130,7 @@ describe("fireFeedback()", () => {
     });
     fireFeedback(ctx);
     expect(mockFeedback).toHaveBeenCalledOnce();
-    expect(mockFeedback).toHaveBeenCalledWith(
-      expect.objectContaining({ classification: "IGNORED" }),
-    );
+    expect(mockFeedback).toHaveBeenCalledWith(expect.objectContaining({ classification: "IGNORED" }));
     expect(mockTouch).not.toHaveBeenCalled();
   });
 
@@ -147,10 +145,7 @@ describe("fireFeedback()", () => {
     const ctx = makeCtx({
       warningResponse: {
         decision: "allow",
-        matches: [
-          makeMatch({ principle_uuid: "P1" }),
-          makeMatch({ principle_uuid: "P2" }),
-        ],
+        matches: [makeMatch({ principle_uuid: "P1" }), makeMatch({ principle_uuid: "P2" })],
       },
     });
     fireFeedback(ctx);

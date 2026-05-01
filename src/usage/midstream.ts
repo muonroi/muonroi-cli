@@ -8,7 +8,7 @@
  * Subscribes to threshold events: {level:100} sets refuseNext=true.
  */
 
-import { subscribeThresholds } from './thresholds.js';
+import { subscribeThresholds } from "./thresholds.js";
 
 let _refuseNext = false;
 let _capPct = 0;

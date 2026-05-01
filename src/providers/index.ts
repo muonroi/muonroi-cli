@@ -7,9 +7,9 @@
  */
 
 export {
-  streamAnthropicMessage,
-  loadAnthropicKey,
   AnthropicKeyMissingError,
+  loadAnthropicKey,
+  streamAnthropicMessage,
 } from "./anthropic.js";
 
-export type { StreamChunk, ProviderRequest, ProviderStream } from "./types.js";
+export type { ProviderRequest, ProviderStream, StreamChunk } from "./types.js";

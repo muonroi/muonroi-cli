@@ -6,10 +6,10 @@
  * Ollama runs locally or on the VPS — no API key required by default.
  */
 
-import { streamText } from 'ai';
-import { createOllama } from 'ollama-ai-provider-v2';
-import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from './types.js';
-import { streamFromFullStream } from './stream-loop.js';
+import { streamText } from "ai";
+import { createOllama } from "ollama-ai-provider-v2";
+import { streamFromFullStream } from "./stream-loop.js";
+import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
 
 /**
  * Create an Ollama adapter.
@@ -17,11 +17,11 @@ import { streamFromFullStream } from './stream-loop.js';
  */
 export function createOllamaAdapter(config: ProviderConfig): Adapter {
   const provider = createOllama({
-    baseURL: config.baseURL ?? 'http://localhost:11434/api',
+    baseURL: config.baseURL ?? "http://localhost:11434/api",
   });
 
   return {
-    id: 'ollama',
+    id: "ollama",
     async *stream(req: AdapterRequest): ProviderStream {
       const result = streamText({
         model: provider(config.model),

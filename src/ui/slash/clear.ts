@@ -9,9 +9,9 @@
  */
 
 import * as path from "node:path";
-import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
-import { getActiveRunId, loadRun } from "../../flow/run-manager.js";
 import { readArtifact } from "../../flow/artifact-io.js";
+import { getActiveRunId, loadRun } from "../../flow/run-manager.js";
+import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -57,8 +57,7 @@ export const handleClearSlash: SlashHandler = async (_args, ctx) => {
 
   // Read roadmap presence
   const roadmap = await readArtifact(flowDir, "roadmap.md");
-  const hasRoadmap =
-    roadmap && roadmap.sections.size > 0 ? "present" : "absent";
+  const hasRoadmap = roadmap && roadmap.sections.size > 0 ? "present" : "absent";
 
   // Build relock summary
   const summary = [

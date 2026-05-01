@@ -2,21 +2,21 @@
  * Shared test helper: load JSONL fixture files and create a mock fullStream async iterable.
  * Used by all provider adapter tests to replay recorded streams without network.
  */
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 // Fixtures are at <repo>/tests/fixtures/providers/<provider>/<scenario>.jsonl
 // This file lives at <repo>/src/providers/__test-utils__/load-fixture.ts
-const FIXTURES_ROOT = resolve(__dirname, '..', '..', '..', 'tests', 'fixtures', 'providers');
+const FIXTURES_ROOT = resolve(__dirname, "..", "..", "..", "tests", "fixtures", "providers");
 
 /**
  * Parse a JSONL fixture file into an array of AI SDK v6 TextStreamPart-like objects.
  */
 export function loadFixtureChunks(provider: string, scenario: string): unknown[] {
   const filePath = resolve(FIXTURES_ROOT, provider, `${scenario}.jsonl`);
-  const text = readFileSync(filePath, 'utf-8');
+  const text = readFileSync(filePath, "utf-8");
   return text
-    .split('\n')
+    .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line));
 }

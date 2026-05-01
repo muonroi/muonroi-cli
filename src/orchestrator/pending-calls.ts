@@ -77,11 +77,7 @@ export interface PendingCallsLog {
  * Uses SHA-256; returns the first 16 hex chars (64 bits — collision-safe for
  * session-scoped call volumes).
  */
-export function stableCallId(
-  turnId: string,
-  toolName: string,
-  input: unknown,
-): string {
+export function stableCallId(turnId: string, toolName: string, input: unknown): string {
   const h = crypto.createHash("sha256");
   h.update(turnId);
   h.update(":");
@@ -117,7 +113,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
   async function appendLine(obj: unknown): Promise<void> {
     const dir = await getDir();
     const filePath = path.join(dir, "pending_calls.jsonl");
-    await fs.appendFile(filePath, JSON.stringify(obj) + "\n", "utf8");
+    await fs.appendFile(filePath, `${JSON.stringify(obj)}\n`, "utf8");
   }
 
   function serialize(work: () => Promise<void>): Promise<void> {
@@ -127,9 +123,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
     return writeChain;
   }
 
-  async function readEntries(): Promise<
-    Array<PendingCallEntry & { event?: string }>
-  > {
+  async function readEntries(): Promise<Array<PendingCallEntry & { event?: string }>> {
     const dir = await getDir();
     const filePath = path.join(dir, "pending_calls.jsonl");
     try {
@@ -137,9 +131,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
       return raw
         .split("\n")
         .filter(Boolean)
-        .map(
-          (line) => JSON.parse(line) as PendingCallEntry & { event?: string },
-        );
+        .map((line) => JSON.parse(line) as PendingCallEntry & { event?: string });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
@@ -194,9 +186,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
         }
       }
 
-      const stillPending = [...byId.values()].filter(
-        (e) => e.status === "pending",
-      );
+      const stillPending = [...byId.values()].filter((e) => e.status === "pending");
 
       for (const entry of stillPending) {
         // Best-effort cleanup of staged .tmp paths.
@@ -229,9 +219,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
             // Suppress unused variable warning for finalExists in case A/B above.
             void finalExists;
           } catch (err) {
-            console.warn(
-              `[muonroi-cli] reconcile: could not clean staged path ${tmp}: ${(err as Error).message}`,
-            );
+            console.warn(`[muonroi-cli] reconcile: could not clean staged path ${tmp}: ${(err as Error).message}`);
           }
         }
 

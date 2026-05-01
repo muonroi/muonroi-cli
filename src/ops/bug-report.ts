@@ -8,11 +8,11 @@
  * Error log tail is limited to 20 lines, all run through redactor.
  */
 
-import os from "os";
 import { readFile } from "fs/promises";
+import os from "os";
 import path from "path";
-import { runDoctor, type CheckResult } from "./doctor.js";
 import { redactor } from "../utils/redactor.js";
+import { type CheckResult, runDoctor } from "./doctor.js";
 
 export interface BugReportBundle {
   generated_at: string;
@@ -33,7 +33,7 @@ async function loadConfigRedacted(): Promise<Record<string, unknown>> {
     return {
       "cap.monthly_usd": config?.cap?.monthly_usd ?? null,
       "router.confidence_threshold": config?.router?.confidence_threshold ?? null,
-      "mcp_servers_count": Array.isArray(config?.mcpServers) ? config.mcpServers.length : 0,
+      mcp_servers_count: Array.isArray(config?.mcpServers) ? config.mcpServers.length : 0,
     };
   } catch {
     return { error: "config not found" };
@@ -54,11 +54,7 @@ async function loadErrorLogTail(): Promise<string[]> {
 }
 
 export async function buildBugReport(): Promise<BugReportBundle> {
-  const [doctor, config, errorTail] = await Promise.all([
-    runDoctor(),
-    loadConfigRedacted(),
-    loadErrorLogTail(),
-  ]);
+  const [doctor, config, errorTail] = await Promise.all([runDoctor(), loadConfigRedacted(), loadErrorLogTail()]);
 
   let eeStatus: { ok: boolean; status: number } | null = null;
   try {

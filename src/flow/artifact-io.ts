@@ -8,17 +8,14 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { atomicWriteText } from "../storage/atomic-io.js";
-import { parseSections, serializeSections } from "./parser.js";
 import type { SectionMap } from "./parser.js";
+import { parseSections, serializeSections } from "./parser.js";
 
 /**
  * Read a .muonroi-flow/ file and parse it into a SectionMap.
  * Returns null if the file does not exist (ENOENT).
  */
-export async function readArtifact(
-  flowDir: string,
-  filename: string,
-): Promise<SectionMap | null> {
+export async function readArtifact(flowDir: string, filename: string): Promise<SectionMap | null> {
   const filePath = path.join(flowDir, filename);
   try {
     const content = await fs.readFile(filePath, "utf8");

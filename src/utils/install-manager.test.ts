@@ -44,7 +44,9 @@ describe("parseChecksumsFile", () => {
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *muonroi-cli-windows-x64.exe",
       ].join("\n"),
     );
-    expect(checksums.get("muonroi-cli-darwin-arm64")).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(checksums.get("muonroi-cli-darwin-arm64")).toBe(
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
     expect(checksums.get("muonroi-cli-windows-x64.exe")).toBe(
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );

@@ -5,11 +5,11 @@
  * Used in runPipeline() with safeParse — fail-open on invalid data.
  */
 
-import { z } from 'zod';
+import { z } from "zod";
 
-export const TaskTypeSchema = z.enum(['refactor', 'debug', 'plan', 'analyze', 'documentation', 'generate']);
+export const TaskTypeSchema = z.enum(["refactor", "debug", "plan", "analyze", "documentation", "generate"]);
 
-export const OutputStyleSchema = z.enum(['concise', 'detailed', 'balanced']);
+export const OutputStyleSchema = z.enum(["concise", "detailed", "balanced"]);
 
 export const LayerResultSchema = z.object({
   name: z.string(),

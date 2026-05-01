@@ -1,18 +1,12 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createRun, getActiveRunId, loadRun, setActiveRunId } from "../../../flow/run-manager.js";
 import { ensureFlowDir } from "../../../flow/scaffold.js";
-import {
-  createRun,
-  getActiveRunId,
-  setActiveRunId,
-  loadRun,
-} from "../../../flow/run-manager.js";
-import type { SlashContext } from "../registry.js";
-
 // Import handler — also triggers self-registration
 import { handleDiscussSlash } from "../discuss.js";
+import type { SlashContext } from "../registry.js";
 
 function makeCtx(cwd: string): SlashContext {
   return {
@@ -58,10 +52,7 @@ describe("/discuss slash command", () => {
     const run = await createRun(flowDir);
     await setActiveRunId(flowDir, run.id);
 
-    const result = await handleDiscussSlash(
-      ["Should", "we", "use", "X", "or", "Y?"],
-      ctx,
-    );
+    const result = await handleDiscussSlash(["Should", "we", "use", "X", "or", "Y?"], ctx);
     expect(result).toContain("G1");
     expect(result).toContain("added");
 

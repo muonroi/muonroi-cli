@@ -66,7 +66,7 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
  * 'google' maps to Gemini via @ai-sdk/google; 'deepseek' and 'siliconflow'
  * share the OpenAI-compatible adapter with different baseURLs.
  */
-export type ProviderId = 'anthropic' | 'openai' | 'google' | 'deepseek' | 'siliconflow' | 'ollama';
+export type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "ollama";
 
 /**
  * Per-provider configuration passed to adapter factories.
@@ -95,9 +95,9 @@ export interface ToolDefinition {
  * Decouples from ProviderRequest (which carries apiKey per-call).
  */
 export interface AdapterRequest {
-  messages: ProviderRequest['messages'];
+  messages: ProviderRequest["messages"];
   tools?: ToolDefinition[];
-  toolChoice?: 'auto' | 'required' | 'none' | { type: 'tool'; toolName: string };
+  toolChoice?: "auto" | "required" | "none" | { type: "tool"; toolName: string };
   abortSignal?: AbortSignal;
 }
 

@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 
 // RED phase: import module under test (will fail until bug-report.ts is created)
-import { buildBugReport, formatBugReport, type BugReportBundle } from "./bug-report.js";
+import { type BugReportBundle, buildBugReport, formatBugReport } from "./bug-report.js";
 
 // Mock fs/promises for controlled test environment
 // bug-report.ts uses named import { readFile } from "fs/promises"
@@ -137,8 +137,9 @@ describe("buildBugReport — error_log_tail scrubs API keys", () => {
   });
 
   it("limits error_log_tail to max 20 lines", async () => {
-    const manyLines = Array.from({ length: 30 }, (_, i) =>
-      `2026-04-30T10:00:0${String(i).padStart(2, "0")}Z Log line ${i}`
+    const manyLines = Array.from(
+      { length: 30 },
+      (_, i) => `2026-04-30T10:00:0${String(i).padStart(2, "0")}Z Log line ${i}`,
     ).join("\n");
 
     const readFile = await getMockedReadFile();

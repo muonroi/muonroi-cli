@@ -1,20 +1,13 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
-import { ensureFlowDir } from "../../../flow/scaffold.js";
-import {
-  createRun,
-  getActiveRunId,
-  setActiveRunId,
-  loadRun,
-  updateRunFile,
-} from "../../../flow/run-manager.js";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SectionMap } from "../../../flow/parser.js";
-import type { SlashContext } from "../registry.js";
-
+import { createRun, loadRun, setActiveRunId, updateRunFile } from "../../../flow/run-manager.js";
+import { ensureFlowDir } from "../../../flow/scaffold.js";
 // Import handler — also triggers self-registration
 import { handlePlanSlash } from "../plan.js";
+import type { SlashContext } from "../registry.js";
 
 function makeCtx(cwd: string): SlashContext {
   return {
@@ -54,10 +47,7 @@ describe("/plan slash command", () => {
     const grayAreas: SectionMap = {
       preamble: "",
       sections: new Map([
-        [
-          "Gray Areas",
-          "G1 [open] Should we use X or Y?\nG2 [resolved] Token budget -> 80%\nG3 [open] What about Z?",
-        ],
+        ["Gray Areas", "G1 [open] Should we use X or Y?\nG2 [resolved] Token budget -> 80%\nG3 [open] What about Z?"],
       ]),
     };
     await updateRunFile(flowDir, run.id, "gray-areas.md", grayAreas);
@@ -77,16 +67,11 @@ describe("/plan slash command", () => {
     // All gray areas resolved
     const grayAreas: SectionMap = {
       preamble: "",
-      sections: new Map([
-        ["Gray Areas", "G1 [resolved] Token budget -> 80%"],
-      ]),
+      sections: new Map([["Gray Areas", "G1 [resolved] Token budget -> 80%"]]),
     };
     await updateRunFile(flowDir, run.id, "gray-areas.md", grayAreas);
 
-    const result = await handlePlanSlash(
-      ["Build", "auth", "system", "with", "JWT"],
-      ctx,
-    );
+    const result = await handlePlanSlash(["Build", "auth", "system", "with", "JWT"], ctx);
     expect(result).toContain("Plan created");
     expect(result).toContain(run.id);
 

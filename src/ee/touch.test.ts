@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
-import { startStubEEServer, type StubHandle } from "../__test-stubs__/ee-server.js";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "./client.js";
 import type { FeedbackPayload } from "./types.js";
 
@@ -50,13 +50,15 @@ describe("EEClient feedback + touch fire-and-forget", () => {
       baseUrl: "http://localhost:1",
       fetchImpl: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
     });
-    expect(() => broken.feedback({
-      principle_uuid: "X",
-      classification: "IGNORED",
-      tool_name: "Bash",
-      duration_ms: 0,
-      tenantId: "local",
-    })).not.toThrow();
+    expect(() =>
+      broken.feedback({
+        principle_uuid: "X",
+        classification: "IGNORED",
+        tool_name: "Bash",
+        duration_ms: 0,
+        tenantId: "local",
+      }),
+    ).not.toThrow();
   });
 
   it("touch() never throws even on network error", () => {

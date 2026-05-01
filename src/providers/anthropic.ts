@@ -24,11 +24,11 @@
  *       error:      chunk.error
  */
 
-import { streamText } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { streamText } from "ai";
 import { redactor } from "../utils/redactor.js";
-import type { Adapter, AdapterRequest, ProviderConfig, ProviderRequest, ProviderStream } from "./types.js";
 import { streamFromFullStream } from "./stream-loop.js";
+import type { Adapter, AdapterRequest, ProviderConfig, ProviderRequest, ProviderStream } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Error class
@@ -99,10 +99,7 @@ export async function loadAnthropicKey(): Promise<string> {
       }
     } catch (err) {
       // keytar present but backend unavailable (e.g. Linux without libsecret/dbus)
-      console.warn(
-        "[muonroi-cli] keytar backend unavailable, falling back to env var:",
-        redactor.redactError(err),
-      );
+      console.warn("[muonroi-cli] keytar backend unavailable, falling back to env var:", redactor.redactError(err));
     }
   } else {
     console.warn(
@@ -142,7 +139,7 @@ export function createAnthropicAdapter(config: ProviderConfig): Adapter {
   const provider = createAnthropic({ apiKey: config.apiKey });
 
   return {
-    id: 'anthropic',
+    id: "anthropic",
     async *stream(req: AdapterRequest): ProviderStream {
       const result = streamText({
         model: provider(config.model),

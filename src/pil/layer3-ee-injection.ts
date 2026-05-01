@@ -6,8 +6,8 @@
  * into the prompt context as hints.
  */
 
-import type { PipelineContext } from "./types.js";
 import { truncateToBudget } from "./budget.js";
+import type { PipelineContext } from "./types.js";
 
 const EE_URL = process.env.EE_URL || "http://localhost:8082";
 const EE_TIMEOUT_MS = 100;
@@ -58,20 +58,14 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   if (result.error) {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "ee-experience-injection", applied: false, delta: `error=${result.error}` },
-      ],
+      layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: `error=${result.error}` }],
     };
   }
 
   if (points.length === 0) {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "ee-experience-injection", applied: false, delta: "no-points" },
-      ],
+      layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: "no-points" }],
     };
   }
 
