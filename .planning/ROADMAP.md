@@ -60,7 +60,7 @@ Plans:
 
 ---
 
-### 🚧 v1.1 EE-Native CLI (In Progress)
+### v1.1 EE-Native CLI (In Progress)
 
 **Milestone Goal:** Restructure CLI to use EE functions directly — classification, routing, search, and feedback run in-process via bridge instead of being reimplemented or HTTP-wrapped. PIL layers 1/3/6 migrate from stubs to live EE calls. Route feedback loop closes the learning cycle.
 
@@ -87,7 +87,12 @@ Plans:
   3. PIL Layer 6 output style detection calls EE brain via bridge — returns language, formality, codeHeavy for arbitrary input including Vietnamese+code mix; hardcoded multilingual regex is removed
   4. respond_general response tool exists as catch-all for unclassified tasks — a prompt that matches no typed tool produces a response instead of silent fallthrough
   5. Every completed turn records an outcome signal via bridge.routeFeedback(taskHash, tier, model, outcome, retryCount, duration) so EE route-model can learn from actual usage
-**Plans**: TBD
+**Plans**: 3 plans
+
+Plans:
+- [ ] 06-01-PLAN.md — respond_general catch-all tool + Layer 1 classifyViaBrain migration
+- [ ] 06-02-PLAN.md — Layer 3 bridge migration (getEmbeddingRaw + searchCollection)
+- [ ] 06-03-PLAN.md — Layer 6 output style detection + routeFeedback wiring
 
 #### Phase 7: Full Pipeline Validation
 **Goal**: Full EE hook pipeline fires deterministically end-to-end on every tool call with auto-judge tagging and no agent intervention
@@ -101,7 +106,7 @@ Plans:
 
 ---
 
-### 📋 v2.0 Cloud & Billing (Planned)
+### v2.0 Cloud & Billing (Planned)
 
 **Milestone Goal:** Multi-tenant Qdrant, Stripe billing, web dashboard, and local→cloud migration tooling.
 
@@ -117,5 +122,5 @@ Plans:
 | 2. Continuity & Slash Commands | v1.0 | 5/5 | Complete | 2026-04-30 |
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
 | 5. EE Bridge Foundation | v1.1 | 1/1 | Complete   | 2026-05-01 |
-| 6. PIL & Router Migration | v1.1 | 0/TBD | Not started | - |
+| 6. PIL & Router Migration | v1.1 | 0/3 | Planning complete | - |
 | 7. Full Pipeline Validation | v1.1 | 0/TBD | Not started | - |
