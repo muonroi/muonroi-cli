@@ -75,8 +75,15 @@ import { StatusBar } from "./status-bar/index.js";
 import { wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
-import "./slash/route.js"; // side-effect: self-registers /route handler
-import "./slash/optimize.js"; // side-effect: self-registers /optimize command (PIL-07)
+import "./slash/route.js";
+import "./slash/optimize.js";
+import "./slash/discuss.js";
+import "./slash/plan.js";
+import "./slash/execute.js";
+import "./slash/compact.js";
+import "./slash/expand.js";
+import "./slash/clear.js";
+import "./slash/cost.js";
 
 import {
   getEffectiveReasoningEffort,
