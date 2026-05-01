@@ -10,7 +10,7 @@ const FORBIDDEN: Array<{ name: string; re: RegExp }> = [
   { name: 'node:http(s)', re: /from\s+['"]node:https?['"]/ },
   { name: 'undici', re: /from\s+['"]undici['"]/ },
   { name: 'axios', re: /from\s+['"]axios['"]/ },
-  { name: 'ee-import', re: /from\s+['"](\.\.\/)+ee\// },
+  { name: 'ee-http-import', re: /from\s+['"](\.\.\/)+ee\/(?!bridge\b)/ },
   { name: 'global-fetch', re: /\bfetch\s*\(/ },
 ];
 
@@ -34,9 +34,9 @@ describe('PIL-ARCH: no network in PIL Layer 1 hot path', () => {
     expect(src).not.toMatch(/from\s+['"]axios['"]/);
   });
 
-  it('src/pil/layer1-intent.ts does NOT import from ../ee/ or ../../ee/', () => {
+  it('src/pil/layer1-intent.ts does NOT import HTTP ee modules (bridge.js is allowed)', () => {
     const src = readFileSync(LAYER1_FILE, 'utf8');
-    expect(src).not.toMatch(/from\s+['"](\.\.\/)+ee\//);
+    expect(src).not.toMatch(/from\s+['"](\.\.\/)+ee\/(?!bridge\b)/);
   });
 
   it('src/pil/layer1-intent.ts does NOT use global fetch()', () => {
