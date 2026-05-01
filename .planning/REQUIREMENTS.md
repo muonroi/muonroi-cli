@@ -10,9 +10,9 @@
 
 ### BRIDGE — EE Direct Integration
 
-- [ ] **BRIDGE-01**: CLI loads experience-core.js via createRequire bridge (src/ee/bridge.ts) with typed EECore facade exposing classifyViaBrain, searchCollection, routeModel, routeFeedback, getEmbeddingRaw — single source of truth, no logic duplication
-- [ ] **BRIDGE-02**: CLI degrades gracefully when EE submodule or experience-core.js is missing — lazy singleton import with descriptive error message, headless/CI mode unaffected, existing HTTP fallback path preserved
-- [ ] **BRIDGE-03**: EE config resolved exclusively from ~/.experience/config.json — CLI never duplicates qdrantUrl, ollamaUrl, brainModel; bridge functions called with no config arguments
+- [x] **BRIDGE-01**: CLI loads experience-core.js via createRequire bridge (src/ee/bridge.ts) with typed EECore facade exposing classifyViaBrain, searchCollection, routeModel, routeFeedback, getEmbeddingRaw — single source of truth, no logic duplication
+- [x] **BRIDGE-02**: CLI degrades gracefully when EE submodule or experience-core.js is missing — lazy singleton import with descriptive error message, headless/CI mode unaffected, existing HTTP fallback path preserved
+- [x] **BRIDGE-03**: EE config resolved exclusively from ~/.experience/config.json — CLI never duplicates qdrantUrl, ollamaUrl, brainModel; bridge functions called with no config arguments
 
 ### PIL — Pipeline Migration to EE-Native
 
@@ -127,9 +127,9 @@ Mapping requirements to phases — updated by roadmapper.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BRIDGE-01 | Phase 5 | Pending |
-| BRIDGE-02 | Phase 5 | Pending |
-| BRIDGE-03 | Phase 5 | Pending |
+| BRIDGE-01 | Phase 5 | Complete |
+| BRIDGE-02 | Phase 5 | Complete |
+| BRIDGE-03 | Phase 5 | Complete |
 | PIL-01 | Phase 6 | Pending |
 | PIL-02 | Phase 6 | Pending |
 | PIL-03 | Phase 6 | Pending |
