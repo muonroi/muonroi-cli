@@ -9,6 +9,7 @@
 
 import { getEmbeddingRaw, searchCollection } from "../ee/bridge.js";
 import type { EEPoint } from "../ee/bridge.js";
+import { updateLastSurfacedState } from "../ee/intercept.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -58,6 +59,10 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
       layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: "no-points" }],
     };
   }
+
+  // STALE-01: Register injected point IDs for prompt-stale reconciliation.
+  // Use String(p.id) since EEPoint.id is string | number from Qdrant.
+  updateLastSurfacedState(points.map((p) => String(p.id)));
 
   const hint = formatExperienceHints(points);
   const budgetShare = Math.floor(ctx.tokenBudget * 0.3);
