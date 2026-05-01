@@ -12,7 +12,7 @@
 
 import { classify } from "../router/classifier/index.js";
 import { classifyViaBrain } from "../ee/bridge.js";
-import type { PipelineContext, TaskType } from "./types.js";
+import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 // Maps every classifier reason string to a TaskType (or null for non-coding signals).
 const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
@@ -62,6 +62,8 @@ const KEYWORD_PATTERNS: Array<{ pattern: RegExp; taskType: TaskType; confidence:
 // Valid task types for bridge classification parsing (matches RESPONSE_SCHEMAS keys minus 'general').
 const VALID_TASK_TYPES: TaskType[] = ["refactor", "debug", "plan", "analyze", "documentation", "generate"];
 
+const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
+
 function extractDomain(reason: string): string | null {
   if (reason.includes("typescript")) return "typescript";
   if (reason.includes("python")) return "python";
@@ -87,23 +89,40 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       }
     }
 
-    // Pass 3: EE brain fallback (replaces ollamaClassify)
+    // Pass 3: EE brain fallback — detect taskType AND outputStyle in one call
+    let outputStyle: OutputStyle | null = null;
     if (taskType === null && confidence < 0.55) {
       const brainRaw = await classifyViaBrain(
-        `Classify into one of: refactor, debug, plan, analyze, documentation, generate, or none. Reply ONLY with the category name.\n\nPrompt: "${ctx.raw.slice(0, 500)}"`,
-        100, // 100ms timeout — matches EE_TIMEOUT_MS
+        `Classify this prompt. Reply with TWO words separated by comma: <category>,<style>
+Category: refactor, debug, plan, analyze, documentation, generate, or none
+Style: concise, balanced, or detailed
+
+Prompt: "${ctx.raw.slice(0, 500)}"`,
+        100,
       );
       if (brainRaw) {
-        const matched = VALID_TASK_TYPES.find(t => brainRaw.toLowerCase().includes(t));
+        const lower = brainRaw.toLowerCase();
+        const matched = VALID_TASK_TYPES.find(t => lower.includes(t));
         if (matched) {
           taskType = matched;
           confidence = 0.55;
         }
+        const styleMatched = VALID_STYLES.find(s => lower.includes(s));
+        if (styleMatched) outputStyle = styleMatched;
       }
     }
 
-    // outputStyle is always null from Layer 1 — Layer 6 handles output style via bridge
-    const outputStyle = null;
+    // If brain didn't run (classifier handled taskType), still try quick style detection
+    if (outputStyle === null && taskType !== null) {
+      const brainRaw = await classifyViaBrain(
+        `Return ONE word: concise, balanced, or detailed.\n\nPrompt: "${ctx.raw.slice(0, 300)}"`,
+        50,
+      );
+      if (brainRaw) {
+        const styleMatched = VALID_STYLES.find(s => brainRaw.toLowerCase().includes(s));
+        if (styleMatched) outputStyle = styleMatched;
+      }
+    }
 
     return {
       ...ctx,
@@ -118,7 +137,7 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
           applied: taskType !== null,
           delta:
             taskType !== null
-              ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? "none"}`
+              ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"}`
               : null,
         },
       ],

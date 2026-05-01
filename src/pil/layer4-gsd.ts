@@ -1,4 +1,5 @@
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
+import { routeTask } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -20,8 +21,35 @@ const PHASE_HINTS: Record<GsdPhase, string> = {
     "Check for security issues, performance concerns, and maintainability.]",
 };
 
+function mapRouteToPhase(route: string): GsdPhase | null {
+  switch (route) {
+    case "qc-flow":
+      return "discuss";
+    case "qc-lock":
+      return "execute";
+    case "direct":
+      return null;
+    default:
+      return null;
+  }
+}
+
 export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> {
-  const phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? detectGsdPhase(ctx.raw);
+  let phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? null;
+  let routeSource = "keyword";
+
+  if (!phase) {
+    const eeRoute = await routeTask(ctx.raw).catch(() => null);
+    if (eeRoute?.route && !eeRoute.needs_disambiguation && eeRoute.confidence >= 0.6) {
+      phase = mapRouteToPhase(eeRoute.route);
+      routeSource = `ee:${eeRoute.source}`;
+    }
+  }
+
+  if (!phase) {
+    phase = detectGsdPhase(ctx.raw);
+    routeSource = "keyword";
+  }
 
   if (!phase) {
     return {
@@ -42,7 +70,7 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
       {
         name: "gsd-workflow-structuring",
         applied: true,
-        delta: `phase=${phase} chars=${trimmed.length}`,
+        delta: `phase=${phase} source=${routeSource} chars=${trimmed.length}`,
       },
     ],
   };
