@@ -29,7 +29,7 @@ See milestone archive for details.
 **Milestone Goal:** Fix 3 critical EE integration gaps that prevent the CLI from closing the learning feedback loop -- session extraction, offline resilience, and stale suggestion cleanup.
 
 - [x] **Phase 08: Session End Extraction** - Wire /api/extract on session end so EE brain learns from CLI sessions (completed 2026-05-01)
-- [ ] **Phase 09: Offline Queue** - Buffer EE requests when server unreachable, replay on reconnect
+- [x] **Phase 09: Offline Queue** - Buffer EE requests when server unreachable, replay on reconnect (completed 2026-05-01)
 - [ ] **Phase 10: Prompt-stale Reconciliation** - Clean up stale PIL Layer 3 suggestions via /api/prompt-stale
 
 ## Phase Details
@@ -58,10 +58,10 @@ Plans:
   3. The offline queue directory exists at ~/.muonroi-cli/ee-offline-queue/ and survives CLI restarts
   4. Queue never grows past 100 entries -- oldest entries are dropped when cap is reached
   5. Heavy events (extract payloads) drain in background without blocking the CLI hot path
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 Plans:
 - [x] 09-01-PLAN.md — TDD: Offline queue module (enqueue, drainQueue, cap enforcement, tests)
-- [ ] 09-02-PLAN.md — Wire into client.ts (enqueue on failure, drain on circuit recovery)
+- [x] 09-02-PLAN.md — Wire into client.ts (enqueue on failure, drain on circuit recovery)
 
 ### Phase 10: Prompt-stale Reconciliation
 **Goal**: Stale EE suggestions that agents ignore are reported back so EE can learn what is not useful
@@ -80,5 +80,5 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 09. Offline Queue | v1.2 | 0/2 | Planning complete | - |
+| 09. Offline Queue | v1.2 | 2/2 | Complete   | 2026-05-01 |
 | 10. Prompt-stale Reconciliation | v1.2 | 0/TBD | Not started | - |
