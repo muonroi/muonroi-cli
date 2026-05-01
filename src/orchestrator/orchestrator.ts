@@ -761,7 +761,7 @@ export class Agent {
       () => this.modelId,
     );
     this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
-    const envMax = Number(process.env.MUONROI_MAX_TOKENS || process.env.GROK_MAX_TOKENS);
+    const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
     // TUI-04: wire external abort context and pending calls log if provided.
