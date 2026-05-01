@@ -43,7 +43,10 @@ See milestone archive for details.
   2. The transcript sent to EE is compacted (not raw) to reduce payload size and noise
   3. CLI shutdown completes within 2 seconds even if EE server is slow or unreachable
   4. Sessions with fewer than 5 messages produce no extraction call (no noise sent to EE)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 08-01-PLAN.md — Core extractSession module, client signal override, stub server, tests
+- [ ] 08-02-PLAN.md — Wire into orchestrator cleanup/clearHistory, remove naive app.tsx extract
 
 ### Phase 09: Offline Queue
 **Goal**: No EE data is lost when the server is temporarily unreachable
@@ -73,6 +76,6 @@ See milestone archive for details.
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 08. Session End Extraction | v1.2 | 0/TBD | Not started | - |
+| 08. Session End Extraction | v1.2 | 0/2 | Planning complete | - |
 | 09. Offline Queue | v1.2 | 0/TBD | Not started | - |
 | 10. Prompt-stale Reconciliation | v1.2 | 0/TBD | Not started | - |
