@@ -80,7 +80,7 @@ describe("intercept integration", () => {
     expect(captured[0]).toContain("global");
   });
 
-  it("posttool carries tenantId + scope (B-4 void preserved)", async () => {
+  it("posttool carries tenantId + scope (awaitable Promise<void>)", async () => {
     stub = await startStubEEServer({
       posttool: () => {},
     });
@@ -91,6 +91,7 @@ describe("intercept integration", () => {
     setDefaultEEClient(client);
 
     const { posttool } = await import("./posttool.js");
+    // posttool is now async (Promise<void>) so it can be awaited by PostToolUse handler
     const result = posttool({
       toolName: "bash",
       toolInput: { command: "ls" },
@@ -99,11 +100,9 @@ describe("intercept integration", () => {
       tenantId: "local",
       scope: { kind: "global" },
     });
-    // B-4: returns void synchronously
-    expect(result).toBeUndefined();
+    expect(result).toBeInstanceOf(Promise);
+    await result; // await to let HTTP settle
 
-    // Let fire-and-forget settle
-    await new Promise((r) => setTimeout(r, 100));
     expect(stub.calls.posttool).toHaveLength(1);
     expect(stub.calls.posttool[0].tenantId).toBe("local");
     expect(stub.calls.posttool[0].scope).toEqual({ kind: "global" });

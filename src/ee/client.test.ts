@@ -103,16 +103,14 @@ describe("EEClient - intercept", () => {
 });
 
 describe("EEClient - posttool", () => {
-  it("Test 7: posttool is fire-and-forget — returns synchronously and fetch is called", async () => {
+  it("Test 7: posttool is awaitable — returns Promise<void> and fetch is called", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     const ee = createEEClient({ fetchImpl: mockFetch });
 
-    // posttool returns void synchronously (no await needed)
+    // posttool is now async (awaitable by PostToolUse handler)
     const returnValue = ee.posttool(mockPayload);
-    expect(returnValue).toBeUndefined();
-
-    // Wait for the microtask queue to drain so the fire-and-forget fetch actually fires
-    await Promise.resolve();
+    expect(returnValue).toBeInstanceOf(Promise);
+    await returnValue;
     expect(mockFetch).toHaveBeenCalledOnce();
   });
 
@@ -120,11 +118,8 @@ describe("EEClient - posttool", () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("network error"));
     const ee = createEEClient({ fetchImpl: mockFetch });
 
-    // Must not throw
-    expect(() => ee.posttool(mockPayload)).not.toThrow();
-    // Let the rejected promise settle
-    await Promise.resolve();
-    await Promise.resolve();
+    // Must not throw even when awaited
+    await expect(ee.posttool(mockPayload)).resolves.toBeUndefined();
   });
 });
 
