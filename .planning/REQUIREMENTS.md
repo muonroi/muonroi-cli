@@ -18,12 +18,12 @@
 
 - [x] **PIL-01**: EE brain LLM (Ollama qwen2.5-coder via bridge.classifyViaBrain) replaces hot-path regex classifier in PIL Layer 1 — classification quality grows with EE model without CLI-side keyword maintenance
 - [x] **PIL-02**: /api/search endpoint implemented in EE source — accepts query, taskType, limit parameters; returns vector search results across collections; unblocks PIL Layer 3 EE injection (currently stub)
-- [ ] **PIL-03**: Output style detection via EE brain (bridge call) replaces hardcoded multilingual regex in PIL Layer 6 — returns language, formality, codeHeavy; handles arbitrary language mix including Vietnamese+code
+- [x] **PIL-03**: Output style detection via EE brain (bridge call) replaces hardcoded multilingual regex in PIL Layer 6 — returns language, formality, codeHeavy; handles arbitrary language mix including Vietnamese+code
 - [x] **PIL-04**: respond_general response tool added as catch-all for unclassified tasks — permissive Zod schema, eliminates fallthrough where no typed tool matches
 
 ### ROUTE — Router & Feedback Loop
 
-- [ ] **ROUTE-11**: Route feedback loop wired — every turn feeds outcome signal via bridge.routeFeedback(taskHash, tier, model, outcome, retryCount, duration) so EE route-model learns from actual usage
+- [x] **ROUTE-11**: Route feedback loop wired — every turn feeds outcome signal via bridge.routeFeedback(taskHash, tier, model, outcome, retryCount, duration) so EE route-model learns from actual usage
 - [ ] **ROUTE-12**: Full EE hook pipeline verified end-to-end — PreToolUse → PostToolUse → Judge → Feedback → Touch fires deterministically on every tool call; auto-judge tags FOLLOWED/IGNORED/IRRELEVANT without agent intervention
 
 ---
@@ -132,9 +132,9 @@ Mapping requirements to phases — updated by roadmapper.
 | BRIDGE-03 | Phase 5 | Complete |
 | PIL-01 | Phase 6 | Complete |
 | PIL-02 | Phase 6 | Complete |
-| PIL-03 | Phase 6 | Pending |
+| PIL-03 | Phase 6 | Complete |
 | PIL-04 | Phase 6 | Complete |
-| ROUTE-11 | Phase 6 | Pending |
+| ROUTE-11 | Phase 6 | Complete |
 | ROUTE-12 | Phase 7 | Pending |
 
 ### v1.0 Requirements (archived)
