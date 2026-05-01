@@ -127,15 +127,15 @@ Mapping requirements to phases — updated by roadmapper.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BRIDGE-01 | TBD | Pending |
-| BRIDGE-02 | TBD | Pending |
-| BRIDGE-03 | TBD | Pending |
-| PIL-01 | TBD | Pending |
-| PIL-02 | TBD | Pending |
-| PIL-03 | TBD | Pending |
-| PIL-04 | TBD | Pending |
-| ROUTE-11 | TBD | Pending |
-| ROUTE-12 | TBD | Pending |
+| BRIDGE-01 | Phase 5 | Pending |
+| BRIDGE-02 | Phase 5 | Pending |
+| BRIDGE-03 | Phase 5 | Pending |
+| PIL-01 | Phase 6 | Pending |
+| PIL-02 | Phase 6 | Pending |
+| PIL-03 | Phase 6 | Pending |
+| PIL-04 | Phase 6 | Pending |
+| ROUTE-11 | Phase 6 | Pending |
+| ROUTE-12 | Phase 7 | Pending |
 
 ### v1.0 Requirements (archived)
 
@@ -143,9 +143,9 @@ All 68 v1.0 requirements completed across Phases 0–3 + 01.1. See git history f
 
 **Coverage:**
 - v1.1 requirements: 9 total
-- Mapped to phases: 0
-- Unmapped: 9 ⚠️ (pending roadmap creation)
+- Mapped to phases: 9
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-04-29 (v1.0), updated 2026-05-01 (v1.1)*
-*Last updated: 2026-05-01 after milestone v1.1 scoping*
+*Last updated: 2026-05-01 after roadmap v1.1 created*
