@@ -93,6 +93,20 @@ Definition of done for v1 beta:
 - Session resume from `.muonroi-flow/` artifacts succeeds without chat memory — verified by killing CLI mid-task and restarting
 - 4 LLM providers wired and proven via integration test suite
 
+## Current Milestone: v1.1 EE-Native CLI
+
+**Goal:** Restructure muonroi-cli to build around experience-engine source code — CLI uses EE functions directly for classification, routing, search, feedback instead of reimplementing or HTTP-wrapping.
+
+**Target features:**
+- Smart intent detection via EE brain LLM (replace hardcoded regex/keyword Layer 1)
+- EE route-model as primary router with taskType + outputStyle extension
+- Route feedback loop wired (every turn feeds outcome to EE for continuous learning)
+- /api/search endpoint implemented in EE (PIL Layer 3 dependency)
+- respond_general response tool for catch-all non-6-type tasks
+- Output style detection via EE brain (multilingual, not hardcoded regex)
+- Full EE hook pipeline verified end-to-end (PreToolUse → PostToolUse → Judge → Feedback → Touch)
+- CLI imports EE functions directly — no logic duplication
+
 ## Evolution
 
 This document evolves at phase transitions and milestone boundaries.
@@ -111,4 +125,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-29 after initialization with user refinements*
+*Last updated: 2026-05-01 after milestone v1.1 EE-Native CLI started*
