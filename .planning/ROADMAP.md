@@ -60,7 +60,7 @@ Plans:
   5. Heavy events (extract payloads) drain in background without blocking the CLI hot path
 **Plans:** 2 plans
 Plans:
-- [ ] 09-01-PLAN.md — TDD: Offline queue module (enqueue, drainQueue, cap enforcement, tests)
+- [x] 09-01-PLAN.md — TDD: Offline queue module (enqueue, drainQueue, cap enforcement, tests)
 - [ ] 09-02-PLAN.md — Wire into client.ts (enqueue on failure, drain on circuit recovery)
 
 ### Phase 10: Prompt-stale Reconciliation

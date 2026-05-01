@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
-status: verifying
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-05-01T17:57:00.237Z"
+status: executing
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-05-01T18:21:58.819Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 4
+  completed_plans: 3
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2-3x further than any subscription-locked tool.
-**Current focus:** Phase 08 — session-end-extraction
+**Current focus:** Phase 09 — offline-queue
 
 ## Current Position
 
-Phase: 09
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 09 (offline-queue) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0%
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | 10. Prompt-stale Reconciliation | TBD | - | - |
 | Phase 08 P01 | 4 | 2 tasks | 4 files |
 | Phase 08 P02 | 15 | 3 tasks | 4 files |
+| Phase 09 P01 | 3 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting v1.2 work:
 - [Phase 08]: extractSession counts total user messages including resumed sessions for D-07 threshold (D-06/D-07)
 - [Phase 08]: clearHistory() made async — Promise<void> backward-compatible at call sites ignoring return value
 - [Phase 08]: EEClient.extract() interface updated to include optional AbortSignal to match implementation
+- [Phase 09]: QueueEntry defined inline in offline-queue.ts (self-contained, no types.ts dep)
+- [Phase 09]: drainQueueAsync exported for tests; drainQueue (void) for production fire-and-forget
 
 ### Key Files for v1.2
 
@@ -94,6 +97,6 @@ None identified for v1.2.
 
 ## Session Continuity
 
-Last session: 2026-05-01T17:52:49.714Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-05-01T18:21:58.815Z
+Stopped at: Completed 09-01-PLAN.md
 Resume file: None
