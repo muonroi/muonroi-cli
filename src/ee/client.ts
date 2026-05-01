@@ -337,13 +337,13 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     // ─── P1: Session extract ──────────────────────────────────────────────────
-    async extract(req: ExtractRequest): Promise<ExtractResponse | null> {
+    async extract(req: ExtractRequest, signal?: AbortSignal): Promise<ExtractResponse | null> {
       try {
         const resp = await f(`${baseUrl}/api/extract`, {
           method: "POST",
           headers: headers(),
           body: JSON.stringify(req),
-          signal: AbortSignal.timeout(10_000),
+          signal: signal ?? AbortSignal.timeout(10_000),
         });
         if (!resp.ok) return null;
         return (await resp.json()) as ExtractResponse;
