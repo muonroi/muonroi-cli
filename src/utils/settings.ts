@@ -311,15 +311,15 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
 }
 
 export function getApiKey(): string | undefined {
-  return process.env.MUONROI_API_KEY || process.env.GROK_API_KEY || loadUserSettings().apiKey;
+  return process.env.MUONROI_API_KEY || loadUserSettings().apiKey;
 }
 
 export function getBaseURL(): string {
-  return process.env.MUONROI_BASE_URL || process.env.GROK_BASE_URL || "https://api.anthropic.com";
+  return process.env.MUONROI_BASE_URL || "https://api.anthropic.com";
 }
 
 export function getCurrentModel(mode?: AgentMode): string {
-  const envModel = process.env.MUONROI_MODEL || process.env.GROK_MODEL;
+  const envModel = process.env.MUONROI_MODEL;
   if (envModel) return normalizeModelId(envModel);
 
   const project = loadProjectSettings();
@@ -343,7 +343,7 @@ export function getCurrentModel(mode?: AgentMode): string {
  * does NOT suppress — modeModels is an explicit per-mode config that applies on mode switch.
  */
 export function getModeSpecificModel(mode: AgentMode): string | undefined {
-  if (process.env.MUONROI_MODEL || process.env.GROK_MODEL) return undefined;
+  if (process.env.MUONROI_MODEL) return undefined;
 
   const user = loadUserSettings();
   const modeModel = user.modeModels?.[mode];
