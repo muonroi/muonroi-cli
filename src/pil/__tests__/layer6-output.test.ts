@@ -73,68 +73,25 @@ describe("applyPilSuffix — outputStyle variants", () => {
   });
 });
 
-describe("layer6Output — PIL-03 bridge output style detection", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
+describe("layer6Output — style usage (detection moved to L1)", () => {
+  it("uses ctx.outputStyle from L1/L2 directly — no brain call", async () => {
+    const result = await layer6Output(makeCtx("debug", "concise"));
+    expect(result.layers[0].delta).toContain("style=concise");
   });
 
-  it("when ctx.outputStyle is null and ctx.taskType is not null, classifyViaBrain is called", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue(null);
-
-    await layer6Output(makeCtx("debug", null));
-
-    expect(classifyViaBrain).toHaveBeenCalledOnce();
-    const callArgs = vi.mocked(classifyViaBrain).mock.calls[0];
-    expect(callArgs[0]).toContain("Analyze this prompt");
-    expect(callArgs[1]).toBe(50); // 50ms timeout
-  });
-
-  it("when classifyViaBrain returns 'concise', ctx.outputStyle is set to 'concise'", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue("concise");
-
+  it("defaults to concise when ctx.outputStyle is null", async () => {
     const result = await layer6Output(makeCtx("debug", null));
-
-    expect(result.outputStyle).toBe("concise");
+    expect(result.layers[0].delta).toContain("style=concise");
   });
 
-  it("when classifyViaBrain returns null (timeout), ctx.outputStyle stays null (fail-open)", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue(null);
-
-    const result = await layer6Output(makeCtx("debug", null));
-
-    expect(result.outputStyle).toBeNull();
-  });
-
-  it("when ctx.outputStyle is already set, classifyViaBrain is NOT called", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue(null);
-
-    const result = await layer6Output(makeCtx("debug", "detailed"));
-
-    expect(classifyViaBrain).not.toHaveBeenCalled();
-    expect(result.outputStyle).toBe("detailed");
-  });
-
-  it("when ctx.taskType is null, classifyViaBrain is NOT called", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue(null);
-
+  it("when ctx.taskType is null, layer is not applied", async () => {
     const result = await layer6Output(makeCtx(null, null));
-
-    expect(classifyViaBrain).not.toHaveBeenCalled();
     expect(result.layers[0].applied).toBe(false);
   });
 
-  it("brain returns partial match — 'this should be detailed response' → detects 'detailed'", async () => {
-    const { classifyViaBrain } = await import("../../ee/bridge.js");
-    vi.mocked(classifyViaBrain).mockResolvedValue("this should be detailed response");
-
-    const result = await layer6Output(makeCtx("plan", null));
-
-    expect(result.outputStyle).toBe("detailed");
+  it("uses detailed style when passed from L1", async () => {
+    const result = await layer6Output(makeCtx("plan", "detailed"));
+    expect(result.layers[0].delta).toContain("style=detailed");
   });
 });
 

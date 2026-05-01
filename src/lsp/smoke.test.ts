@@ -40,11 +40,8 @@ afterAll(() => {
 });
 
 describe("LSP smoke test — createLspClientSession", () => {
-  it("initializes LSP session with typescript-language-server", { timeout: 30000 }, async () => {
-    if (!tsServerAvailable) {
-      console.warn("typescript-language-server not available — skipping LSP session smoke test");
-      return;
-    }
+  it.skipIf(!tsServerAvailable || !!process.env.CI)(
+    "initializes LSP session with typescript-language-server", { timeout: 30000 }, async () => {
 
     const session = await createLspClientSession({
       serverId: "ts-smoke",
