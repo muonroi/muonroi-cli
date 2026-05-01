@@ -20,7 +20,7 @@ afterEach(() => {
 
 describe("verify environment manifest", () => {
   it("loads a root environment.json manifest and normalizes sandbox settings", () => {
-    const dir = makeTempDir("grok-verify-env-");
+    const dir = makeTempDir("muonroi-verify-env-");
     fs.writeFileSync(
       path.join(dir, "environment.json"),
       JSON.stringify(
@@ -56,7 +56,7 @@ describe("verify environment manifest", () => {
   });
 
   it("prefers .muonroi-cli/environment.json over the root manifest", () => {
-    const dir = makeTempDir("grok-verify-env-precedence-");
+    const dir = makeTempDir("muonroi-verify-env-precedence-");
     fs.writeFileSync(
       path.join(dir, "environment.json"),
       JSON.stringify({
@@ -86,7 +86,7 @@ describe("verify environment manifest", () => {
   });
 
   it("writes a generated .muonroi-cli/environment.json manifest", () => {
-    const dir = makeTempDir("grok-verify-env-write-");
+    const dir = makeTempDir("muonroi-verify-env-write-");
     const written = saveVerifyEnvironment(
       dir,
       {

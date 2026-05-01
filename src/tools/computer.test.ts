@@ -23,7 +23,7 @@ describe("computer tools", () => {
   });
 
   it("stores screenshots under .muonroi-cli/computer by default", () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-computer-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-computer-"));
     tempDirs.push(cwd);
 
     const outputPath = buildScreenshotPath(cwd);
@@ -33,7 +33,7 @@ describe("computer tools", () => {
   });
 
   it("captures screenshots through agent-desktop", async () => {
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-computer-"));
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-computer-"));
     tempDirs.push(cwd);
     const outputPath = path.join(cwd, "artifacts", "screen.png");
     const runner: AgentDesktopRunner = vi.fn(async () => ({
@@ -126,11 +126,11 @@ describe("computer tools", () => {
       stderr: "",
     }));
 
-    const result = await computerType({ ref: "@e5", text: "hello from grok" }, "/tmp", undefined, runner);
+    const result = await computerType({ ref: "@e5", text: "hello from muonroi" }, "/tmp", undefined, runner);
 
     expect(result.success).toBe(true);
     expect(result.output).toContain("Typed into @e5.");
-    expect(runner).toHaveBeenCalledWith(["type", "@e5", "hello from grok"], "/tmp", undefined);
+    expect(runner).toHaveBeenCalledWith(["type", "@e5", "hello from muonroi"], "/tmp", undefined);
   });
 
   it("launches apps through agent-desktop", async () => {

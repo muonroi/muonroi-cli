@@ -42,16 +42,16 @@ describe("loadCustomInstructions", () => {
   });
 
   it("returns null when no instruction files exist", async () => {
-    const home = makeTempDir("grok-home-");
-    const cwd = makeTempDir("grok-cwd-");
+    const home = makeTempDir("muonroi-home-");
+    const cwd = makeTempDir("muonroi-cwd-");
     const loadCustomInstructions = await importLoadCustomInstructions(home);
 
     expect(loadCustomInstructions(cwd)).toBeNull();
   });
 
   it("loads global plus repo-chain AGENTS files in order", async () => {
-    const home = makeTempDir("grok-home-");
-    const repoRoot = makeTempDir("grok-repo-");
+    const home = makeTempDir("muonroi-home-");
+    const repoRoot = makeTempDir("muonroi-repo-");
     const cwd = path.join(repoRoot, "pkg", "feature");
     fs.mkdirSync(path.join(repoRoot, ".git"));
     fs.mkdirSync(cwd, { recursive: true });
@@ -68,8 +68,8 @@ describe("loadCustomInstructions", () => {
   });
 
   it("prefers AGENTS.override.md over AGENTS.md in the same directory", async () => {
-    const home = makeTempDir("grok-home-");
-    const repoRoot = makeTempDir("grok-repo-");
+    const home = makeTempDir("muonroi-home-");
+    const repoRoot = makeTempDir("muonroi-repo-");
     const cwd = path.join(repoRoot, "nested");
     fs.mkdirSync(path.join(repoRoot, ".git"));
     fs.mkdirSync(cwd, { recursive: true });

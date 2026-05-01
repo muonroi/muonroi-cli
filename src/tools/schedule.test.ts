@@ -82,12 +82,12 @@ describe("schedule helpers", () => {
   });
 
   it("creates, lists, and removes recurring schedules under ~/.muonroi-cli/schedules", async () => {
-    const home = makeTempDir("grok-schedule-home-");
-    const cwd = makeTempDir("grok-schedule-cwd-");
+    const home = makeTempDir("muonroi-schedule-home-");
+    const cwd = makeTempDir("muonroi-schedule-cwd-");
     const mod = await importScheduleModule({ home });
     const manager = new mod.ScheduleManager(
       () => cwd,
-      () => "grok-test-model",
+      () => "muonroi-test-model",
     );
     const name = `Daily Security Scan ${path.basename(home)}`;
     const id = mod.toScheduleId(name);
@@ -101,7 +101,7 @@ describe("schedule helpers", () => {
     expect(result.startedPid).toBeNull();
     expect(result.schedule).toMatchObject({
       id,
-      model: "grok-test-model",
+      model: "muonroi-test-model",
       directory: cwd,
       cron: "0 9 * * 1-5",
       enabled: true,
@@ -126,7 +126,7 @@ describe("schedule helpers", () => {
       mod.buildHeadlessCliArgs({
         directory: "/repo",
         instruction: "Summarize the repository status.",
-        model: "grok-test-model",
+        model: "muonroi-test-model",
         maxToolRounds: 123,
       }),
     ).toEqual([
@@ -135,7 +135,7 @@ describe("schedule helpers", () => {
       "--prompt",
       "Summarize the repository status.",
       "--model",
-      "grok-test-model",
+      "muonroi-test-model",
       "--max-tool-rounds",
       "123",
     ]);
