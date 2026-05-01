@@ -9,10 +9,10 @@ Requirements for closing the EE learning loop. Each maps to roadmap phases.
 
 ### Session Extraction
 
-- [ ] **EXTRACT-01**: CLI calls /api/extract with session transcript when session ends (cleanup/SIGINT)
-- [ ] **EXTRACT-02**: Transcript is compacted before sending to extract (reuse existing compaction logic)
-- [ ] **EXTRACT-03**: Extraction is fire-and-forget — does not block CLI shutdown beyond 2s
-- [ ] **EXTRACT-04**: Extraction skipped if session < 5 messages (no meaningful content)
+- [x] **EXTRACT-01**: CLI calls /api/extract with session transcript when session ends (cleanup/SIGINT)
+- [x] **EXTRACT-02**: Transcript is compacted before sending to extract (reuse existing compaction logic)
+- [x] **EXTRACT-03**: Extraction is fire-and-forget — does not block CLI shutdown beyond 2s
+- [x] **EXTRACT-04**: Extraction skipped if session < 5 messages (no meaningful content)
 
 ### Offline Queue
 
@@ -53,10 +53,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXTRACT-01 | Phase 08 | Pending |
-| EXTRACT-02 | Phase 08 | Pending |
-| EXTRACT-03 | Phase 08 | Pending |
-| EXTRACT-04 | Phase 08 | Pending |
+| EXTRACT-01 | Phase 08 | Complete |
+| EXTRACT-02 | Phase 08 | Complete |
+| EXTRACT-03 | Phase 08 | Complete |
+| EXTRACT-04 | Phase 08 | Complete |
 | QUEUE-01 | Phase 09 | Pending |
 | QUEUE-02 | Phase 09 | Pending |
 | QUEUE-03 | Phase 09 | Pending |
