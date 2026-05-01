@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
-status: planning
-stopped_at: Phase 08 context gathered
-last_updated: "2026-05-01T14:56:53.928Z"
-last_activity: 2026-05-01 -- Roadmap created for v1.2
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-05-01T17:46:59.809Z"
+last_activity: 2026-05-01
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  total_plans: 2
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2-3x further than any subscription-locked tool.
-**Current focus:** v1.2 Phase 08 - Session End Extraction
+**Current focus:** Phase 08 — session-end-extraction
 
 ## Current Position
 
-Phase: 08 of 10 (Session End Extraction) -- first phase of v1.2
-Plan: Not started -- needs `/gsd:plan-phase 08`
-Status: Ready to plan
-Last activity: 2026-05-01 -- Roadmap created for v1.2
+Phase: 08 (session-end-extraction) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
+Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0%
 | 08. Session End Extraction | TBD | - | - |
 | 09. Offline Queue | TBD | - | - |
 | 10. Prompt-stale Reconciliation | TBD | - | - |
+| Phase 08 P01 | 4 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -69,6 +70,8 @@ Recent decisions affecting v1.2 work:
 - [v1.2 roadmap]: Phase 08 extraction is fire-and-forget with 2s timeout, skip if <5 messages
 - [v1.2 roadmap]: Phase 09 queue persists to ~/.muonroi-cli/ee-offline-queue/, 100 entry cap
 - [v1.2 roadmap]: Phase 10 stale reconciliation is async, does not block next turn
+- [Phase 08]: buildExtractTranscript uses serializeConversation + regex truncation for tool results >500 chars (D-01/D-02)
+- [Phase 08]: extractSession counts total user messages including resumed sessions for D-07 threshold (D-06/D-07)
 
 ### Key Files for v1.2
 
@@ -88,6 +91,6 @@ None identified for v1.2.
 
 ## Session Continuity
 
-Last session: 2026-05-01T14:56:53.923Z
-Stopped at: Phase 08 context gathered
-Resume file: .planning/phases/08-session-end-extraction/08-CONTEXT.md
+Last session: 2026-05-01T17:46:59.806Z
+Stopped at: Completed 08-01-PLAN.md
+Resume file: None
