@@ -54,12 +54,9 @@ describe("handleCostSlash", () => {
     expect(result).toContain("Month:    $2.5000 / $15.00 (16.7%)");
   });
 
-  it("is synchronous — handleCostSlash returns a string, not a Promise", async () => {
-    // Import the handler directly
+  it("handleCostSlash returns a string (may be async for EE stats)", async () => {
     const { handleCostSlash } = await import("../cost.js");
-    const result = handleCostSlash([], makeCtx());
-    // If synchronous, result is a string (not a Promise)
+    const result = await handleCostSlash([], makeCtx());
     expect(typeof result).toBe("string");
-    expect(result).not.toBeInstanceOf(Promise);
   });
 });
