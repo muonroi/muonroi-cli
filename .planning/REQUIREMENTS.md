@@ -24,9 +24,9 @@ Requirements for closing the EE learning loop. Each maps to roadmap phases.
 
 ### Prompt-stale Reconciliation
 
-- [ ] **STALE-01**: PIL Layer 3 tracks suggestions injected into prompt
-- [ ] **STALE-02**: After each turn, call /api/prompt-stale for suggestions not used by agent
-- [ ] **STALE-03**: Reconciliation is async fire-and-forget (does not block next turn)
+- [x] **STALE-01**: PIL Layer 3 tracks suggestions injected into prompt
+- [x] **STALE-02**: After each turn, call /api/prompt-stale for suggestions not used by agent
+- [x] **STALE-03**: Reconciliation is async fire-and-forget (does not block next turn)
 
 ## v2 Requirements
 
@@ -62,9 +62,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUEUE-03 | Phase 09 | Complete |
 | QUEUE-04 | Phase 09 | Complete |
 | QUEUE-05 | Phase 09 | Complete |
-| STALE-01 | Phase 10 | Pending |
-| STALE-02 | Phase 10 | Pending |
-| STALE-03 | Phase 10 | Pending |
+| STALE-01 | Phase 10 | Complete |
+| STALE-02 | Phase 10 | Complete |
+| STALE-03 | Phase 10 | Complete |
 
 **Coverage:**
 - v1.2 requirements: 12 total
