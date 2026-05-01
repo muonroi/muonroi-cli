@@ -4,7 +4,7 @@
 
 ### Overview
 
-Grok CLI (`@vibe-kit/grok-cli`) is a single-package TypeScript CLI tool — no databases, Docker, or background services. See `README.md` for full documentation and usage.
+muonroi-cli is a single-package TypeScript CLI tool — no databases, Docker, or background services. See `README.md` for full documentation and usage.
 
 ### Quick reference
 
@@ -27,4 +27,4 @@ Grok CLI (`@vibe-kit/grok-cli`) is a single-package TypeScript CLI tool — no d
 ### Environment
 
 - **Bun** must be installed (not pre-installed on Cloud VMs). The update script handles this.
-- `GROK_API_KEY` environment variable is required for API calls. Set it as a secret.
+- `MUONROI_API_KEY` environment variable is required for API calls. Set it as a secret.

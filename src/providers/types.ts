@@ -2,7 +2,7 @@
  * src/providers/types.ts
  *
  * Shared streaming contracts for muonroi-cli providers.
- * Mirrors grok-cli's async-generator-of-StreamChunk pattern (per CONTEXT.md),
+ * Async-generator-of-StreamChunk pattern (per CONTEXT.md),
  * designed to be widened by the Phase 1 multi-provider Adapter interface.
  *
  * StreamChunk covers the AI SDK v6 fullStream event shapes we handle in Phase 0.

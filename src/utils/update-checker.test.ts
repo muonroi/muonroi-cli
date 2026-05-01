@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const RELEASE_URL = "https://api.github.com/repos/superagent-ai/grok-cli/releases/latest";
+const RELEASE_URL = "https://api.github.com/repos/muonroi/muonroi-cli/releases/latest";
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());

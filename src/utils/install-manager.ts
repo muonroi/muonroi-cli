@@ -7,15 +7,15 @@ import readline from "readline";
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
 
-export const GROK_GITHUB_REPO = "superagent-ai/grok-cli";
-export const GROK_RELEASES_API = `https://api.github.com/repos/${GROK_GITHUB_REPO}/releases`;
+export const GITHUB_REPO = "muonroi/muonroi-cli";
+export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
 export const SCRIPT_INSTALL_METHOD = "script";
 
 const FETCH_TIMEOUT_MS = 5_000;
 const INSTALL_SCHEMA_VERSION = 1;
-const PATH_MARKER = "# grok";
+const PATH_MARKER = "# muonroi-cli";
 const CONFIG_FILENAMES = ["user-settings.json", "AGENTS.md"];
-const DATA_ENTRIES = ["daemon.pid", "delegations", "grok.db", "models", "schedules"];
+const DATA_ENTRIES = ["daemon.pid", "delegations", "muonroi.db", "models", "schedules"];
 
 export interface ReleaseTarget {
   key: "darwin-arm64" | "linux-x64" | "windows-x64";
@@ -77,25 +77,25 @@ interface ReleaseDownload {
   checksums: GitHubReleaseAsset;
 }
 
-export function getGrokUserDir(homeDir = os.homedir()): string {
+export function getUserDir(homeDir = os.homedir()): string {
   return path.join(homeDir, ".muonroi-cli");
 }
 
 export function getScriptInstallDir(homeDir = os.homedir()): string {
-  return path.join(getGrokUserDir(homeDir), "bin");
+  return path.join(getUserDir(homeDir), "bin");
 }
 
 export function getInstallMetadataPath(homeDir = os.homedir()): string {
-  return path.join(getGrokUserDir(homeDir), "install.json");
+  return path.join(getUserDir(homeDir), "install.json");
 }
 
 export function getReleaseTargetForPlatform(platform = process.platform, arch = process.arch): ReleaseTarget | null {
   if (platform === "darwin" && (arch === "arm64" || arch === "x64"))
-    return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "grok" };
+    return { key: "darwin-arm64", assetName: "muonroi-cli-darwin-arm64", binaryName: "muonroi-cli" };
   if (platform === "linux" && arch === "x64")
-    return { key: "linux-x64", assetName: "grok-linux-x64", binaryName: "grok" };
+    return { key: "linux-x64", assetName: "muonroi-cli-linux-x64", binaryName: "muonroi-cli" };
   if (platform === "win32" && arch === "x64")
-    return { key: "windows-x64", assetName: "grok-windows-x64.exe", binaryName: "grok.exe" };
+    return { key: "windows-x64", assetName: "muonroi-cli-windows-x64.exe", binaryName: "muonroi-cli.exe" };
   return null;
 }
 
@@ -116,7 +116,7 @@ export function loadScriptInstallMetadata(homeDir = os.homedir()): ScriptInstall
       schemaVersion: INSTALL_SCHEMA_VERSION,
       installMethod: SCRIPT_INSTALL_METHOD,
       version: typeof parsed.version === "string" ? parsed.version : "unknown",
-      repo: typeof parsed.repo === "string" ? parsed.repo : GROK_GITHUB_REPO,
+      repo: typeof parsed.repo === "string" ? parsed.repo : GITHUB_REPO,
       binaryPath: parsed.binaryPath,
       installDir: parsed.installDir,
       assetName: parsed.assetName,
@@ -153,7 +153,7 @@ export function getScriptInstallContext(homeDir = os.homedir()): ScriptInstallCo
 }
 
 export async function fetchLatestReleaseVersion(): Promise<string | null> {
-  const release = await fetchReleaseJson(`${GROK_RELEASES_API}/latest`);
+  const release = await fetchReleaseJson(`${RELEASES_API}/latest`);
   return release ? normalizeReleaseVersion(release.tag_name) : null;
 }
 
@@ -187,7 +187,7 @@ export async function runScriptManagedUpdate(currentVersion: string): Promise<Sc
     return { success: true, output: `Already on the latest version (${normalizedCurrent}).` };
   }
 
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-update-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-cli-update-"));
   try {
     const downloadedPath = path.join(tempDir, release.asset.name);
     await downloadBinary(release.asset.browser_download_url, downloadedPath);
@@ -217,7 +217,7 @@ export async function runScriptManagedUpdate(currentVersion: string): Promise<Sc
       installedAt: new Date().toISOString(),
     });
 
-    return { success: true, output: `Updated to Grok ${release.version}.` };
+    return { success: true, output: `Updated to muonroi-cli ${release.version}.` };
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   } finally {
@@ -232,7 +232,7 @@ export function buildScriptUninstallPlan(
   const context = getScriptInstallContext(homeDir);
   if (!context) return null;
 
-  const userDir = getGrokUserDir(homeDir);
+  const userDir = getUserDir(homeDir);
   const removePaths = new Set<string>();
   const pruneDirs = new Set<string>();
 
@@ -267,7 +267,7 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       return { success: false, output: "Non-interactive terminal. Re-run with --force." };
     }
-    if (!(await confirm("Remove Grok from this machine?"))) {
+    if (!(await confirm("Remove muonroi-cli from this machine?"))) {
       return { success: false, output: "Uninstall cancelled." };
     }
   }
@@ -276,7 +276,7 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
     if (plan.pathCleanup) removePathLine(plan.pathCleanup.configFile, plan.pathCleanup.command);
     for (const p of plan.removePaths) fs.rmSync(p, { recursive: true, force: true });
     for (const d of plan.pruneDirs) removeDirIfEmpty(d);
-    return { success: true, output: "Grok uninstall complete." };
+    return { success: true, output: "muonroi-cli uninstall complete." };
   } catch (error) {
     return { success: false, output: error instanceof Error ? error.message : String(error) };
   }
@@ -285,27 +285,27 @@ export async function runScriptManagedUninstall(options: ScriptUninstallOptions 
 function notScriptManaged(action: string): ScriptUpdateRunResult {
   return {
     success: false,
-    output: `This install is not script-managed, so \`grok ${action}\` cannot proceed. Use the package manager you installed with, or reinstall via install.sh.`,
+    output: `This install is not script-managed, so \`muonroi-cli ${action}\` cannot proceed. Use the package manager you installed with, or reinstall via install.sh.`,
   };
 }
 
 function getReleaseTargetForPlatformKey(key: string): ReleaseTarget | null {
   switch (key) {
     case "darwin-arm64":
-      return { key, assetName: "grok-darwin-arm64", binaryName: "grok" };
+      return { key, assetName: "muonroi-cli-darwin-arm64", binaryName: "muonroi-cli" };
     case "darwin-x64":
-      return { key: "darwin-arm64", assetName: "grok-darwin-arm64", binaryName: "grok" };
+      return { key: "darwin-arm64", assetName: "muonroi-cli-darwin-arm64", binaryName: "muonroi-cli" };
     case "linux-x64":
-      return { key, assetName: "grok-linux-x64", binaryName: "grok" };
+      return { key, assetName: "muonroi-cli-linux-x64", binaryName: "muonroi-cli" };
     case "windows-x64":
-      return { key, assetName: "grok-windows-x64.exe", binaryName: "grok.exe" };
+      return { key, assetName: "muonroi-cli-windows-x64.exe", binaryName: "muonroi-cli.exe" };
     default:
       return null;
   }
 }
 
 async function resolveReleaseDownload(target: ReleaseTarget): Promise<ReleaseDownload | null> {
-  const release = await fetchReleaseJson(`${GROK_RELEASES_API}/latest`);
+  const release = await fetchReleaseJson(`${RELEASES_API}/latest`);
   if (!release) return null;
   const version = normalizeReleaseVersion(release.tag_name);
   if (!version) return null;
@@ -331,7 +331,7 @@ async function fetchReleaseJson(url: string): Promise<GitHubRelease | null> {
 
 function normalizeReleaseVersion(tagName: string): string | null {
   let version = tagName;
-  if (version.startsWith("grok-dev@")) version = version.slice("grok-dev@".length);
+  if (version.startsWith("muonroi-cli-dev@")) version = version.slice("muonroi-cli-dev@".length);
   if (version.startsWith("v")) version = version.slice(1);
   return semverValid(version);
 }
@@ -418,7 +418,7 @@ function applyWindowsUpdate(
   });
   child.unref();
 
-  return { success: true, output: `Updated to Grok ${release.version}. Restart the CLI to use the new version.` };
+  return { success: true, output: `Updated to muonroi-cli ${release.version}. Restart the CLI to use the new version.` };
 }
 
 function esc(s: string): string {

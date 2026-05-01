@@ -15,11 +15,19 @@ import { runPipeline, getPilLastResult } from '../../pil/index.js';
 import type { PipelineContext } from '../../pil/index.js';
 
 function formatPilTable(ctx: PipelineContext): string {
-  const header = `Enriched prompt: ${ctx.enriched}\n\nLayer breakdown:`;
+  const header = `Enriched prompt: ${ctx.enriched}`;
+  const style = `Output style: ${ctx.outputStyle ?? '(none)'}`;
   const table = ctx.layers
     .map((l) => `  ${l.name.padEnd(28)} applied=${l.applied ? 'yes' : 'no '}  delta=${l.delta ?? '(none)'}`)
     .join('\n');
-  return `${header}\n${table}`;
+
+  let metricsBlock = '';
+  if (ctx.metrics) {
+    const m = ctx.metrics;
+    metricsBlock = `\n\nMetrics:\n  total pipeline: ${m.totalMs}ms\n  input chars: ${m.inputChars}\n  output chars: ${m.outputChars}\n  est. tokens saved: ${m.estimatedTokensSaved}\n  layer timings:\n${m.layerTimings.map(t => `    ${t.name.padEnd(28)} ${t.ms}ms`).join('\n')}`;
+  }
+
+  return `${header}\n${style}\n\nLayer breakdown:\n${table}${metricsBlock}`;
 }
 
 export const handleOptimizeSlash: SlashHandler = async (args, _ctx) => {

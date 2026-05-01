@@ -53,7 +53,7 @@ export class DelegationManager {
   constructor(private readonly getCwd: () => string) {}
 
   async start(request: TaskRequest, options: StartDelegationOptions): Promise<ToolResult> {
-    if (process.env.GROK_BACKGROUND_CHILD === "1") {
+    if (process.env.MUONROI_BACKGROUND_CHILD === "1") {
       return {
         success: false,
         output: "Nested background delegations are disabled.",
@@ -107,7 +107,7 @@ export class DelegationManager {
         cwd,
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, GROK_BACKGROUND_CHILD: "1" },
+        env: { ...process.env, MUONROI_BACKGROUND_CHILD: "1" },
       },
     );
     child.unref();

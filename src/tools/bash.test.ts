@@ -180,19 +180,19 @@ describe("wrapHostBrowserCommand", () => {
     const result = wrapHostBrowserCommand(
       "agent-browser open http://127.0.0.1:3000 && agent-browser screenshot out.png",
     );
-    expect(result).toContain("__grok_ab()");
+    expect(result).toContain("__muonroi_ab()");
     expect(result).toContain("command agent-browser");
     expect(result).toContain("bunx agent-browser");
     expect(result).toContain("npx -y agent-browser");
-    expect(result).toContain("__grok_ab open http://127.0.0.1:3000");
-    expect(result).toContain("__grok_ab screenshot out.png");
+    expect(result).toContain("__muonroi_ab open http://127.0.0.1:3000");
+    expect(result).toContain("__muonroi_ab screenshot out.png");
   });
 
   it("handles session flags and screenshot paths correctly", () => {
     const result = wrapHostBrowserCommand(
       "agent-browser --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png",
     );
-    expect(result).toContain("__grok_ab --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png");
+    expect(result).toContain("__muonroi_ab --session verify screenshot .muonroi-cli/verify-artifacts/verify-smoke-home.png");
   });
 });
 

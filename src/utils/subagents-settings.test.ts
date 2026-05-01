@@ -2,10 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentMode } from "../types/index";
 import { getCurrentModel, loadUserSettings, parseSubAgentsRawList } from "./settings";
 
-// FORK-02 NOTE: getModelIds() is stubbed to return [] until plan 00-05 wires Anthropic provider.
-// All tests that validate known model IDs will return empty results until model list is populated.
-// These tests are updated to reflect the stub state — plan 00-05 will restore full behavior.
-
 describe("parseSubAgentsRawList", () => {
   it("returns empty for non-array or missing", () => {
     expect(parseSubAgentsRawList(undefined)).toEqual([]);
@@ -13,8 +9,7 @@ describe("parseSubAgentsRawList", () => {
     expect(parseSubAgentsRawList({})).toEqual([]);
   });
 
-  // FORK-02 stub: getModelIds() returns [] — all model IDs rejected until plan 00-05
-  it("returns empty when model list is not yet populated (FORK-02 stub state)", () => {
+  it("returns empty when model list is not yet populated", () => {
     expect(
       parseSubAgentsRawList([
         { name: "docs", model: "grok-4-1-fast-reasoning", instruction: "Focus on documentation." },
@@ -22,8 +17,7 @@ describe("parseSubAgentsRawList", () => {
     ).toEqual([]);
   });
 
-  // FORK-02 stub: normalizeModelId is pass-through; model validation returns empty
-  it("returns empty when model ids are not recognized (FORK-02 stub state)", () => {
+  it("returns empty when model ids are not recognized", () => {
     expect(
       parseSubAgentsRawList([
         { name: "research", model: "x-ai/grok-4.20-multi-agent-beta", instruction: "Focus on research." },
@@ -49,8 +43,7 @@ describe("parseSubAgentsRawList", () => {
     ).toEqual([]);
   });
 
-  // FORK-02 stub: deduplication logic is fine but model validation rejects all (stub state)
-  it("returns empty for deduplication when model list not populated (FORK-02 stub state)", () => {
+  it("returns empty for deduplication when model list not populated", () => {
     expect(
       parseSubAgentsRawList([
         { name: "Docs", model: "grok-4-1-fast", instruction: "first" },
@@ -59,8 +52,7 @@ describe("parseSubAgentsRawList", () => {
     ).toEqual([]);
   });
 
-  // FORK-02 stub: non-object rows are skipped, but valid entries still fail model check
-  it("ignores non-object rows (FORK-02 stub state: model check rejects all)", () => {
+  it("ignores non-object rows", () => {
     expect(parseSubAgentsRawList([null, "x", { name: "ok", model: "grok-3-mini", instruction: "" }])).toEqual([]);
   });
 });

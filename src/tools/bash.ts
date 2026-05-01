@@ -45,7 +45,7 @@ export class BashTool {
 
   private async ensureTmpDir(): Promise<string> {
     if (!this.tmpDir) {
-      this.tmpDir = await mkdtemp(path.join(os.tmpdir(), "grok-bg-"));
+      this.tmpDir = await mkdtemp(path.join(os.tmpdir(), "muonroi-bg-"));
     }
     return this.tmpDir;
   }
@@ -501,11 +501,11 @@ export function shouldRunOnHostInSandboxMode(command: string, settings: SandboxS
 
 export function wrapHostBrowserCommand(command: string): string {
   const normalized = command
-    .replace(/\bbunx\s+agent-browser\b/g, "__grok_ab")
-    .replace(/\bnpx(?:\s+-y)?\s+agent-browser\b/g, "__grok_ab")
-    .replace(/\bagent-browser\b/g, "__grok_ab");
+    .replace(/\bbunx\s+agent-browser\b/g, "__muonroi_ab")
+    .replace(/\bnpx(?:\s+-y)?\s+agent-browser\b/g, "__muonroi_ab")
+    .replace(/\bagent-browser\b/g, "__muonroi_ab");
   return [
-    "__grok_ab() {",
+    "__muonroi_ab() {",
     "  if command -v agent-browser >/dev/null 2>&1; then",
     '    command agent-browser "$@"',
     "  elif command -v bunx >/dev/null 2>&1; then",

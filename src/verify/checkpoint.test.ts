@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
+vi.mock("child_process", () => {
+  const actual = require("child_process");
   return {
     ...actual,
     execFile: vi.fn(),
@@ -101,7 +101,7 @@ describe("verify checkpoints", () => {
 
     expect(result.created).toBe(true);
     expect(result.checkpointName).toMatch(/^verify-nextjs-/);
-    expect(result.guestWorkdir).toBe("/grok/verify/worktree");
+    expect(result.guestWorkdir).toBe("/muonroi/verify/worktree");
     expect(execFileMock).toHaveBeenCalledTimes(1);
     expect(spawnMock).toHaveBeenCalledTimes(1);
     const spawnArgs = spawnMock.mock.calls[0];

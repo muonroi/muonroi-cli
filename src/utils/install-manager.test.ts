@@ -28,10 +28,10 @@ function createTempDir(prefix: string): string {
 
 describe("getReleaseTargetForPlatform", () => {
   it("maps supported platforms to release asset names", () => {
-    expect(getReleaseTargetForPlatform("darwin", "arm64")?.assetName).toBe("grok-darwin-arm64");
-    expect(getReleaseTargetForPlatform("darwin", "x64")?.assetName).toBe("grok-darwin-arm64");
-    expect(getReleaseTargetForPlatform("linux", "x64")?.assetName).toBe("grok-linux-x64");
-    expect(getReleaseTargetForPlatform("win32", "x64")?.assetName).toBe("grok-windows-x64.exe");
+    expect(getReleaseTargetForPlatform("darwin", "arm64")?.assetName).toBe("muonroi-cli-darwin-arm64");
+    expect(getReleaseTargetForPlatform("darwin", "x64")?.assetName).toBe("muonroi-cli-darwin-arm64");
+    expect(getReleaseTargetForPlatform("linux", "x64")?.assetName).toBe("muonroi-cli-linux-x64");
+    expect(getReleaseTargetForPlatform("win32", "x64")?.assetName).toBe("muonroi-cli-windows-x64.exe");
     expect(getReleaseTargetForPlatform("linux", "arm64")).toBeNull();
   });
 });
@@ -40,12 +40,12 @@ describe("parseChecksumsFile", () => {
   it("parses standard and BSD-style checksum entries", () => {
     const checksums = parseChecksumsFile(
       [
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  grok-darwin-arm64",
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *grok-windows-x64.exe",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  muonroi-cli-darwin-arm64",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *muonroi-cli-windows-x64.exe",
       ].join("\n"),
     );
-    expect(checksums.get("grok-darwin-arm64")).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    expect(checksums.get("grok-windows-x64.exe")).toBe(
+    expect(checksums.get("muonroi-cli-darwin-arm64")).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(checksums.get("muonroi-cli-windows-x64.exe")).toBe(
       "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     );
   });
@@ -53,16 +53,16 @@ describe("parseChecksumsFile", () => {
 
 describe("script install metadata", () => {
   it("round-trips metadata through write and load", () => {
-    const homeDir = createTempDir("grok-meta-");
+    const homeDir = createTempDir("muonroi-cli-meta-");
     const installDir = getScriptInstallDir(homeDir);
     const metadata = {
       schemaVersion: 1,
       installMethod: "script" as const,
       version: "1.2.3",
-      repo: "superagent-ai/grok-cli",
-      binaryPath: path.join(installDir, "grok"),
+      repo: "muonroi/muonroi-cli",
+      binaryPath: path.join(installDir, "muonroi-cli"),
       installDir,
-      assetName: "grok-darwin-arm64",
+      assetName: "muonroi-cli-darwin-arm64",
       target: "darwin-arm64" as const,
       installedAt: "2026-04-03T00:00:00.000Z",
       shellConfigPath: path.join(homeDir, ".zshrc"),
@@ -75,13 +75,13 @@ describe("script install metadata", () => {
   });
 
   it("returns null when no metadata file exists", () => {
-    expect(loadScriptInstallMetadata(createTempDir("grok-empty-"))).toBeNull();
+    expect(loadScriptInstallMetadata(createTempDir("muonroi-cli-empty-"))).toBeNull();
   });
 });
 
 describe("getScriptInstallContext", () => {
   it("returns context when metadata exists", () => {
-    const homeDir = createTempDir("grok-ctx-");
+    const homeDir = createTempDir("muonroi-cli-ctx-");
     const installDir = getScriptInstallDir(homeDir);
     const currentTarget = getReleaseTargetForPlatform();
     expect(currentTarget).not.toBeNull();
@@ -91,7 +91,7 @@ describe("getScriptInstallContext", () => {
         schemaVersion: 1,
         installMethod: "script" as const,
         version: "1.2.3",
-        repo: "superagent-ai/grok-cli",
+        repo: "muonroi/muonroi-cli",
         binaryPath: path.join(installDir, currentTarget!.binaryName),
         installDir,
         assetName: currentTarget!.assetName,
@@ -107,13 +107,13 @@ describe("getScriptInstallContext", () => {
   });
 
   it("returns null when no metadata exists", () => {
-    expect(getScriptInstallContext(createTempDir("grok-no-ctx-"))).toBeNull();
+    expect(getScriptInstallContext(createTempDir("muonroi-cli-no-ctx-"))).toBeNull();
   });
 });
 
 describe("buildScriptUninstallPlan", () => {
   it("removes the full ~/.muonroi-cli directory by default", () => {
-    const homeDir = createTempDir("grok-uninstall-");
+    const homeDir = createTempDir("muonroi-cli-uninstall-");
     const installDir = getScriptInstallDir(homeDir);
     const currentTarget = getReleaseTargetForPlatform()!;
     fs.mkdirSync(installDir, { recursive: true });
@@ -123,7 +123,7 @@ describe("buildScriptUninstallPlan", () => {
         schemaVersion: 1,
         installMethod: "script" as const,
         version: "1.2.3",
-        repo: "superagent-ai/grok-cli",
+        repo: "muonroi/muonroi-cli",
         binaryPath: path.join(installDir, currentTarget.binaryName),
         installDir,
         assetName: currentTarget.assetName,
@@ -138,7 +138,7 @@ describe("buildScriptUninstallPlan", () => {
   });
 
   it("keeps config and data when requested", () => {
-    const homeDir = createTempDir("grok-keep-");
+    const homeDir = createTempDir("muonroi-cli-keep-");
     const installDir = getScriptInstallDir(homeDir);
     const currentTarget = getReleaseTargetForPlatform()!;
     fs.mkdirSync(installDir, { recursive: true });
@@ -148,7 +148,7 @@ describe("buildScriptUninstallPlan", () => {
         schemaVersion: 1,
         installMethod: "script" as const,
         version: "1.2.3",
-        repo: "superagent-ai/grok-cli",
+        repo: "muonroi/muonroi-cli",
         binaryPath: path.join(installDir, currentTarget.binaryName),
         installDir,
         assetName: currentTarget.assetName,
