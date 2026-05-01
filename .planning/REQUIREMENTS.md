@@ -16,10 +16,10 @@
 
 ### PIL — Pipeline Migration to EE-Native
 
-- [ ] **PIL-01**: EE brain LLM (Ollama qwen2.5-coder via bridge.classifyViaBrain) replaces hot-path regex classifier in PIL Layer 1 — classification quality grows with EE model without CLI-side keyword maintenance
+- [x] **PIL-01**: EE brain LLM (Ollama qwen2.5-coder via bridge.classifyViaBrain) replaces hot-path regex classifier in PIL Layer 1 — classification quality grows with EE model without CLI-side keyword maintenance
 - [ ] **PIL-02**: /api/search endpoint implemented in EE source — accepts query, taskType, limit parameters; returns vector search results across collections; unblocks PIL Layer 3 EE injection (currently stub)
 - [ ] **PIL-03**: Output style detection via EE brain (bridge call) replaces hardcoded multilingual regex in PIL Layer 6 — returns language, formality, codeHeavy; handles arbitrary language mix including Vietnamese+code
-- [ ] **PIL-04**: respond_general response tool added as catch-all for unclassified tasks — permissive Zod schema, eliminates fallthrough where no typed tool matches
+- [x] **PIL-04**: respond_general response tool added as catch-all for unclassified tasks — permissive Zod schema, eliminates fallthrough where no typed tool matches
 
 ### ROUTE — Router & Feedback Loop
 
@@ -130,10 +130,10 @@ Mapping requirements to phases — updated by roadmapper.
 | BRIDGE-01 | Phase 5 | Complete |
 | BRIDGE-02 | Phase 5 | Complete |
 | BRIDGE-03 | Phase 5 | Complete |
-| PIL-01 | Phase 6 | Pending |
+| PIL-01 | Phase 6 | Complete |
 | PIL-02 | Phase 6 | Pending |
 | PIL-03 | Phase 6 | Pending |
-| PIL-04 | Phase 6 | Pending |
+| PIL-04 | Phase 6 | Complete |
 | ROUTE-11 | Phase 6 | Pending |
 | ROUTE-12 | Phase 7 | Pending |
 

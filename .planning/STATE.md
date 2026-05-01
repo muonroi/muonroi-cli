@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: EE-Native CLI
-status: verifying
-stopped_at: Completed 05-01-PLAN.md — EE Bridge Foundation
-last_updated: "2026-05-01T07:53:14.508Z"
+status: executing
+stopped_at: Completed 06-01-PLAN.md — respond_general + Layer 1 bridge migration
+last_updated: "2026-05-01T08:41:04.964Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  total_plans: 4
+  completed_plans: 2
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3x further than any subscription-locked tool.
-**Current focus:** Phase 05 — ee-bridge-foundation
+**Current focus:** Phase 06 — pil-router-migration
 
 ## Current Position
 
-Phase: 6
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 06 (pil-router-migration) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
@@ -55,6 +55,7 @@ Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
 
 *Updated after each plan completion*
 | Phase 05 P01 | 162 | 2 tasks | 3 files |
+| Phase 06 P01 | 7 | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,9 @@ Recent decisions affecting v1.1 work:
 - [Research v1.1]: posttool() must be awaited before routeFeedback fires — ordering race documented
 - [Phase 05]: EEPoint and EERouteResult exported as type-only from bridge.ts for Phase 6 callers
 - [Phase 05]: getEECore() is async (fs.access) matching established async PIL/router patterns
+- [Phase 06]: general is tool-only, NOT added to TaskType union — Layer 1 never classifies to general
+- [Phase 06]: outputStyle always null from Layer 1 — Layer 6 handles style detection via bridge
+- [Phase 06]: classifyViaBrain called with 100ms timeout to prevent blocking CLI hot path
 
 ### Pending Todos
 
@@ -85,6 +89,6 @@ None yet — captured during execution via `/gsd-add-todo`.
 
 ## Session Continuity
 
-Last session: 2026-05-01T07:13:13.783Z
-Stopped at: Completed 05-01-PLAN.md — EE Bridge Foundation
+Last session: 2026-05-01T08:41:04.960Z
+Stopped at: Completed 06-01-PLAN.md — respond_general + Layer 1 bridge migration
 Resume file: None
