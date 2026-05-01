@@ -75,7 +75,7 @@ Plans:
 **Plans**: 1 plan
 
 Plans:
-- [ ] 05-01-PLAN.md — TDD: bridge.ts typed CJS interop + graceful degradation + barrel wiring
+- [x] 05-01-PLAN.md — TDD: bridge.ts typed CJS interop + graceful degradation + barrel wiring
 
 #### Phase 6: PIL & Router Migration
 **Goal**: PIL layers 1, 3, 6 and route feedback loop use live EE bridge calls — stubs and local regex removed
@@ -116,6 +116,6 @@ Plans:
 | 1. Brain & Cap Chain | v1.0 | 8/8 | Complete | 2026-04-30 |
 | 2. Continuity & Slash Commands | v1.0 | 5/5 | Complete | 2026-04-30 |
 | 3. Polish, Headless, Cross-Platform Beta | v1.0 | 7/7 | Complete | 2026-04-30 |
-| 5. EE Bridge Foundation | v1.1 | 0/1 | Not started | - |
+| 5. EE Bridge Foundation | v1.1 | 1/1 | Complete   | 2026-05-01 |
 | 6. PIL & Router Migration | v1.1 | 0/TBD | Not started | - |
 | 7. Full Pipeline Validation | v1.1 | 0/TBD | Not started | - |

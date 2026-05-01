@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.1
-milestone_name: ee-native-cli
-status: ready-to-plan
-stopped_at: Roadmap created — Phase 5 ready to plan
-last_updated: "2026-05-01"
+milestone_name: EE-Native CLI
+status: verifying
+stopped_at: Completed 05-01-PLAN.md — EE Bridge Foundation
+last_updated: "2026-05-01T07:13:13.787Z"
 last_activity: 2026-05-01
 progress:
   total_phases: 3
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
+  completed_phases: 1
+  total_plans: 1
+  completed_plans: 1
   percent: 0
 ---
 
@@ -21,20 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-01)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2–3x further than any subscription-locked tool.
-**Current focus:** Milestone v1.1 — EE-Native CLI (Phase 5 ready to plan)
+**Current focus:** Phase 05 — ee-bridge-foundation
 
 ## Current Position
 
-Phase: 5 of 7 (EE Bridge Foundation)
-Plan: — (not yet planned)
-Status: Ready to plan
-Last activity: 2026-05-01 — Roadmap v1.1 created, Phase 5 ready for /gsd:plan-phase
+Phase: 05 (ee-bridge-foundation) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-05-01
 
 Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
 
 ## Performance Metrics
 
 **Velocity (v1.0 baseline):**
+
 - Total v1.0 plans completed: 32
 - Average duration: ~12 min/plan
 - Total execution time: ~6.4 hours
@@ -48,10 +49,12 @@ Progress: [░░░░░░░░░░] 0% (v1.1 phases only)
 | 7. Full Pipeline Validation | TBD | - | - |
 
 **Recent Trend:**
+
 - Last 5 plans (v1.0): 5, 15, 25, 15, 5 min
 - Trend: Stable
 
 *Updated after each plan completion*
+| Phase 05 P01 | 162 | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -68,6 +71,8 @@ Recent decisions affecting v1.1 work:
 - [Research v1.1]: AbortSignal.timeout required on all bridge brain calls — Ollama cold-start blocks hot path
 - [Research v1.1]: PIL taskTypes != EE tiers — mapping function needed in routeFeedback callsite (ROUTE-11)
 - [Research v1.1]: posttool() must be awaited before routeFeedback fires — ordering race documented
+- [Phase 05]: EEPoint and EERouteResult exported as type-only from bridge.ts for Phase 6 callers
+- [Phase 05]: getEECore() is async (fs.access) matching established async PIL/router patterns
 
 ### Pending Todos
 
@@ -80,6 +85,6 @@ None yet — captured during execution via `/gsd-add-todo`.
 
 ## Session Continuity
 
-Last session: 2026-05-01
-Stopped at: Roadmap v1.1 written — ready to plan Phase 5
+Last session: 2026-05-01T07:13:13.783Z
+Stopped at: Completed 05-01-PLAN.md — EE Bridge Foundation
 Resume file: None
