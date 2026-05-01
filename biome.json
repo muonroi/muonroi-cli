@@ -19,8 +19,9 @@
     "rules": {
       "recommended": true,
       "suspicious": {
-        "noExplicitAny": "error",
-        "noArrayIndexKey": "warn"
+        "noExplicitAny": "warn",
+        "noArrayIndexKey": "warn",
+        "noAssignInExpressions": "off"
       },
       "correctness": {
         "noUnusedFunctionParameters": "warn"

@@ -59,11 +59,7 @@ describe("normalizeSandboxSettings", () => {
   it("normalizes secrets", async () => {
     const { normalizeSandboxSettings } = await import("./settings");
     const result = normalizeSandboxSettings({
-      secrets: [
-        { name: "API_KEY", fromEnv: "MY_KEY", hosts: ["api.example.com"] },
-        { name: "", fromEnv: "BAD" },
-        null,
-      ],
+      secrets: [{ name: "API_KEY", fromEnv: "MY_KEY", hosts: ["api.example.com"] }, { name: "", fromEnv: "BAD" }, null],
     });
     expect(result.secrets).toHaveLength(1);
     expect(result.secrets![0].name).toBe("API_KEY");
@@ -85,10 +81,7 @@ describe("mergeSandboxSettings", () => {
 
   it("override takes precedence", async () => {
     const { mergeSandboxSettings } = await import("./settings");
-    const result = mergeSandboxSettings(
-      { allowNet: true, cpus: 2 },
-      { allowNet: false, memory: 1024 },
-    );
+    const result = mergeSandboxSettings({ allowNet: true, cpus: 2 }, { allowNet: false, memory: 1024 });
     expect(result.allowNet).toBe(false);
     expect(result.cpus).toBe(2);
     expect(result.memory).toBe(1024);
