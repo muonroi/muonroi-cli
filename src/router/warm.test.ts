@@ -11,10 +11,11 @@ describe("callWarmRoute", () => {
     stub = await startStubEEServer({
       routeModel: (_req) => ({
         model: "qwen2.5-coder",
-        provider: "ollama",
-        tier: "warm" as const,
+        tier: "balanced" as const,
         confidence: 0.7,
         reason: "remote",
+        source: "brain",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
@@ -32,7 +33,7 @@ describe("callWarmRoute", () => {
     expect(result).not.toBeNull();
     expect(result!.tier).toBe("warm");
     expect(result!.model).toBe("qwen2.5-coder");
-    expect(result!.provider).toBe("ollama");
+    expect(result!.provider).toBe("");
     expect(result!.reason).toContain("warm:");
     expect(result!.confidence).toBe(0.7);
   });
@@ -43,10 +44,11 @@ describe("callWarmRoute", () => {
       latencyMs: 500,
       routeModel: () => ({
         model: "qwen2.5-coder",
-        provider: "ollama",
-        tier: "warm" as const,
+        tier: "balanced" as const,
         confidence: 0.7,
         reason: "remote",
+        source: "brain",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${slowStub.port}` }));

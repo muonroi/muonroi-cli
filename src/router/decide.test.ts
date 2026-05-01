@@ -20,16 +20,17 @@ describe("decide()", () => {
     stub = await startStubEEServer({
       routeModel: (_req) => ({
         model: "qwen2.5-coder",
-        provider: "ollama",
-        tier: "warm" as const,
+        tier: "balanced" as const,
         confidence: 0.7,
         reason: "ee-warm",
+        source: "brain",
+        taskHash: "test-hash",
       }),
       coldRoute: (_req) => ({
         model: "deepseek-v3",
-        provider: "siliconflow",
-        tier: "cold" as const,
+        tier: "premium" as const,
         reason: "ee-cold",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
@@ -61,9 +62,9 @@ describe("decide()", () => {
       routeModel: undefined, // 500 -> null
       coldRoute: () => ({
         model: "deepseek-v3",
-        provider: "siliconflow",
-        tier: "cold" as const,
+        tier: "premium" as const,
         reason: "ee-cold",
+        taskHash: "test-hash",
       }),
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldOnlyStub.port}` }));
