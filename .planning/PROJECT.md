@@ -19,6 +19,7 @@ We do not sell tokens. We sell experience: memory that shrinks while capability 
 - [x] Prompt Intelligence Layer — 6-layer pre-send pipeline (intent detection + output optimization + 4 stubs), fail-open 200ms, `/optimize` slash command, DB migration v3 — Validated in Phase 01.1: prompt-intelligence-layer
 - [x] EE Bridge Foundation — typed CJS bridge via createRequire, 5 async functions, graceful degradation, zero config duplication — Validated in Phase 05: ee-bridge-foundation
 - [x] PIL & Router Migration — PIL layers 1, 3, 6 use live EE bridge calls, respond_general catch-all, routeFeedback wired — Validated in Phase 06: pil-router-migration
+- [x] Full Pipeline Validation — EE hook pipeline fires deterministically end-to-end with auto-judge tagging, no agent intervention — Validated in Phase 07: full-pipeline-validation
 
 ### Active
 
