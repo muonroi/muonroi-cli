@@ -40,11 +40,13 @@ describe("layer2Personality", () => {
     expect(layer!.applied).toBe(true);
   });
 
-  test("skips when outputStyle is null", async () => {
+  test("defaults to balanced when outputStyle is null (never skips)", async () => {
     const result = await layer2Personality(makeCtx({ outputStyle: null }));
     const layer = result.layers.find((l) => l.name === "personality-adaptation");
     expect(layer).toBeDefined();
-    expect(layer!.applied).toBe(false);
+    expect(layer!.applied).toBe(true);
+    expect(result.outputStyle).toBe("balanced");
+    expect(layer!.delta).toContain("source=default");
   });
 
   test("respects tokenBudget — hint stays within budget", async () => {

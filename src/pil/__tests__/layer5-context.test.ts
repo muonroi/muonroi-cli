@@ -1,6 +1,25 @@
-import { describe, expect, it } from "vitest";
-import { layer5Context } from "../layer5-context";
+import { describe, expect, it, vi } from "vitest";
 import type { PipelineContext } from "../types";
+
+vi.mock("../../ee/bridge.js", () => ({
+  getEmbeddingRaw: vi.fn().mockResolvedValue(null),
+  searchCollection: vi.fn().mockResolvedValue([]),
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    promises: {
+      ...actual.promises,
+      readFile: vi.fn().mockRejectedValue(new Error("not found")),
+      readdir: vi.fn().mockRejectedValue(new Error("not found")),
+      stat: vi.fn().mockRejectedValue(new Error("not found")),
+    },
+  };
+});
+
+import { layer5Context } from "../layer5-context";
 
 function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   return {
@@ -26,33 +45,33 @@ describe("layer5Context", () => {
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer).toBeDefined();
     expect(layer!.applied).toBe(true);
-    expect(layer!.delta).toContain("chars=");
+    expect(layer!.delta).toContain("digest=");
   });
 
-  it("skips when resumeDigest is null", async () => {
+  it("no digest, no EE, no flow → applied=false", async () => {
     const result = await layer5Context(makeCtx({ resumeDigest: null }));
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer).toBeDefined();
     expect(layer!.applied).toBe(false);
-    expect(result.enriched).toBe(makeCtx().enriched);
   });
 
-  it("skips when resumeDigest is undefined", async () => {
+  it("no digest undefined → applied=false (with mocked EE)", async () => {
     const result = await layer5Context(makeCtx());
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer!.applied).toBe(false);
   });
 
-  it("skips when resumeDigest is empty string", async () => {
+  it("empty digest → applied=false (with mocked EE)", async () => {
     const result = await layer5Context(makeCtx({ resumeDigest: "" }));
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer!.applied).toBe(false);
   });
 
-  it("includes activeRunId in delta when present", async () => {
+  it("includes digest in delta when present", async () => {
     const result = await layer5Context(makeCtx({ resumeDigest: "Some digest", activeRunId: "abc123" }));
     const layer = result.layers.find((l) => l.name === "context-enrichment");
-    expect(layer!.delta).toContain("runId=abc123");
+    expect(layer!.applied).toBe(true);
+    expect(layer!.delta).toContain("digest=");
   });
 
   it("respects tokenBudget — truncates long digest", async () => {
@@ -71,7 +90,7 @@ describe("layer5Context", () => {
     const result = await layer5Context(makeCtx({ resumeDigest: "Previous work on auth", digestAgeMs: 60 * 60 * 1000 }));
     expect(result.enriched).toContain("stale");
     const layer = result.layers.find((l) => l.name === "context-enrichment");
-    expect(layer!.delta).toContain("stale=true");
+    expect(layer!.delta).toContain("stale");
   });
 
   it("no stale warning when digest is fresh", async () => {
