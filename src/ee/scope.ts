@@ -8,6 +8,7 @@
  */
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { loadUserSettings } from "../utils/settings.js";
 import type { Scope } from "./types.js";
 
 let cached: Scope | null = null;
@@ -55,6 +56,17 @@ export async function buildScope(opts: { cwd: string }): Promise<Scope> {
   const cfg = await fs.readFile(path.join(root, ".git", "config"), "utf8").catch(() => "");
   const { remote } = parseGitConfig(cfg);
   const { branch } = parseHEAD(head);
+
+  // Ecosystem detection — check if remote matches any configured pattern
+  if (remote) {
+    const eco = loadUserSettings().ecosystem;
+    if (eco && eco.patterns.some((p) => remote.includes(p))) {
+      cached = { kind: "ecosystem", name: eco.name };
+      cachedFor = opts.cwd;
+      return cached;
+    }
+  }
+
   if (remote && branch) cached = { kind: "branch", remote, branch };
   else if (remote) cached = { kind: "repo", remote };
   else cached = { kind: "global" };
