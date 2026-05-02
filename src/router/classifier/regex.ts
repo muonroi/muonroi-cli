@@ -18,9 +18,8 @@ const PATTERNS: Array<{
   { re: /\b(architect|design|plan|strategy)\b/i, intent: "design", confidence: 0.7, tierHint: "premium" },
 ];
 
-const SHORT_SIMPLE_RE = /^[\w\s!?.,']{1,60}$/;
-
 export function matchRegex(prompt: string): ClassifierResult {
+  // Hot-path: catch obvious English CLI commands without brain call
   for (const p of PATTERNS) {
     if (p.re.test(prompt)) {
       return {
@@ -32,8 +31,11 @@ export function matchRegex(prompt: string): ClassifierResult {
     }
   }
 
-  if (SHORT_SIMPLE_RE.test(prompt.trim()) && prompt.trim().split(/\s+/).length <= 10) {
-    return { tier: "hot", confidence: 0.6, reason: "regex:short-simple", tierHint: "fast" };
+  // Short messages in any language — delegate tier choice to brain via warm path
+  // but mark as "hot" so we skip the cold path (expensive LLM)
+  const trimmed = prompt.trim();
+  if (trimmed.length <= 80 && trimmed.split(/\s+/).length <= 10) {
+    return { tier: "hot", confidence: 0.5, reason: "regex:short-message", tierHint: "fast" };
   }
 
   return { tier: "abstain", confidence: 0.0, reason: "regex:no-match" };
