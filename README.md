@@ -1,234 +1,164 @@
-# muonroi-cli — BYOK AI coding agent
+# muonroi-cli
 
 [![CI](https://github.com/muonroi/muonroi-cli/actions/workflows/typecheck.yml/badge.svg)](https://github.com/muonroi/muonroi-cli/actions/workflows/typecheck.yml)
 [![npm](https://img.shields.io/npm/v/muonroi-cli.svg)](https://www.npmjs.com/package/muonroi-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)](https://bun.sh/)
 
-A terminal-native BYOK AI coding agent with **multi-provider support** (Anthropic, OpenAI, Gemini, Ollama), **sub-agents on by default**, **remote control via Telegram** (pair once, drive the agent from your phone while the CLI runs), and a terminal UI that doesn’t feel like it was assembled in a hurry.
+An AI coding agent that costs **$5-8/month** instead of $100. Bring your own API keys, keep your data local, and let the built-in intelligence layer stretch every token 2-3x further.
 
-Open source. Terminal-native. Built with **Bun** and **OpenTUI**. If you want vibes *and* velocity, you’re in the right repo.
-
-[https://github.com/user-attachments/assets/7ca4f6df-50ca-4e9c-91b2-d4abad5c66cb](https://github.com/user-attachments/assets/7ca4f6df-50ca-4e9c-91b2-d4abad5c66cb)
+```
+You pay:     ~$5-8/mo  (BYOK, router handles 90% of calls at $0)
+Claude Max:   $100/mo  (fixed subscription, rate-limited)
+Cursor Pro:    $20/mo  (500 fast requests, then queued)
+```
 
 ---
 
-## Install
+## Why muonroi-cli
+
+**Smart routing saves money.** A 3-tier classifier (regex + AST locally, then Ollama, then cloud LLM) decides which model handles each request. Simple tasks like file reads and git commands never leave your machine. Complex reasoning escalates to Opus. Result: 90% of calls cost $0.
+
+**It learns from your mistakes.** The Experience Engine watches every tool call, captures failures, and evolves them into reusable principles. After a week, your agent knows not to repeat the same mistakes — no other coding CLI does this.
+
+**Your tokens go further.** A 6-layer Prompt Intelligence Layer enriches every request before it hits the model — better context in, fewer tokens out. Users report 60-80% reduction in output tokens.
+
+**You own everything.** No vendor lock-in. Switch between Anthropic, OpenAI, Gemini, or Ollama at any time. Your conversations, your data, your keys.
+
+---
+
+## Two ways to use it
+
+### Cloud (recommended) — Subscribe and start coding
+
+> *Coming soon — [join the waitlist](https://muonroi.dev/cloud)*
+
+Everything pre-configured. Experience Engine, vector database, smart routing, cross-project learning — all hosted. You install the CLI, enter your subscription key, and start coding. No Docker, no Qdrant, no setup.
+
+```bash
+curl -fsSL https://muonroi.dev/install | bash
+muonroi-cli                              # first run guides you through setup
+```
+
+**Cloud includes:**
+- Hosted Experience Engine (brain that learns across all your projects)
+- Managed vector database (Qdrant) for semantic search
+- Pre-tuned smart routing (hot/warm/cold model selection)
+- Cross-project principle sharing
+- Automatic backups and updates
+- Priority support
+
+### BYOK (self-hosted) — Bring your own keys
+
+Free and open source. You provide an API key from any supported provider. The CLI works immediately for coding tasks. The Experience Engine and smart routing are optional — powerful but require additional setup.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash
 ```
 
-**Alternative installs** (requires Bun on PATH):
+Or with Bun:
 
 ```bash
 bun add -g muonroi-cli
 ```
 
-**Self-management** (script-installed only):
-
-```bash
-muonroi-cli update
-muonroi-cli uninstall
-muonroi-cli uninstall --dry-run
-muonroi-cli uninstall --keep-config
-```
-
-**Prerequisites:** an **API key** from [Anthropic](https://console.anthropic.com) and a modern terminal emulator for the interactive OpenTUI experience. Headless `--prompt` mode does not depend on terminal UI support. If you want host desktop automation via the built-in computer sub-agent, also enable **Accessibility** permission for your terminal app on macOS.
-
 ---
 
-## Run it
+## Quick start (BYOK)
 
-**Interactive (default)** — launches the OpenTUI coding agent:
+**Step 1: Install** (see above)
+
+**Step 2: Run**
 
 ```bash
 muonroi-cli
 ```
 
-### Supported terminals
+On first run, the CLI asks for your API key and saves it. That's it — you're coding.
 
-For the most reliable interactive OpenTUI experience, use a modern terminal emulator. We currently document and recommend:
-
-- **WezTerm** (cross-platform)
-- **Alacritty** (cross-platform)
-- **Ghostty** (macOS and Linux)
-- **Kitty** (macOS and Linux)
-
-Other modern terminals may work, but these are the terminal apps we currently recommend and document for interactive use.
-
-**Pick a project directory:**
+If you prefer to set the key upfront:
 
 ```bash
+# Environment variable
+export MUONROI_API_KEY=sk-ant-your-key
+
+# Or pass it once
+muonroi-cli -k sk-ant-your-key
+```
+
+Get an API key from [Anthropic](https://console.anthropic.com), [OpenAI](https://platform.openai.com), or [Google AI](https://aistudio.google.com).
+
+**Step 3: Code**
+
+```bash
+# Interactive — opens the terminal UI
+muonroi-cli
+
+# With a starting prompt
+muonroi-cli fix the flaky test in src/auth.test.ts
+
+# In a specific directory
 muonroi-cli -d /path/to/your/repo
+
+# Headless — one prompt, then exit (CI, scripts)
+muonroi-cli --prompt "run tests and summarize failures"
 ```
 
-**Headless** — one prompt, then exit (scripts, CI, automation):
-
-```bash
-muonroi-cli --prompt "run the test suite and summarize failures"
-muonroi-cli -p "show me package.json" --directory /path/to/project
-muonroi-cli --prompt "refactor X" --max-tool-rounds 30
-muonroi-cli --prompt "summarize the repo state" --format json
-muonroi-cli --prompt "review the repo overnight" --batch-api
-muonroi-cli --verify
-```
-
-`--batch-api` uses the Batch API for lower-cost unattended runs. It is a good
-fit for scripts, CI, schedules, and other non-interactive workflows where a
-delayed result is fine.
-
-**Continue a saved session:**
-
-```bash
-muonroi-cli --session latest
-muonroi-cli -s <session-id>
-```
-
-Works in interactive mode too—same flag.
-
-**Structured headless output:**
-
-```bash
-muonroi-cli --prompt "summarize the repo state" --format json
-```
-
-`--format json` emits a newline-delimited JSON event stream instead of the
-default human-readable text output. Events are semantic, step-level records such
-as `step_start`, `text`, `tool_use`, `step_finish`, and `error`.
-
-### Computer sub-agent
-
-muonroi-cli ships a built-in `**computer**` sub-agent backed by `[agent-desktop](https://github.com/lahfir/agent-desktop)` for host desktop automation on macOS.
-
-Ask for it in natural language, for example:
-
-```bash
-muonroi-cli "Use the computer sub-agent to take a screenshot of my host desktop and tell me what is open."
-muonroi-cli "Use the computer sub-agent to launch Google Chrome, snapshot the UI, and tell me which refs correspond to the address bar and tabs."
-```
-
-Notes:
-
-- Screenshots are saved under `**.muonroi-cli/computer/**` by default.
-- The primary workflow is **snapshot -> refs -> action -> snapshot** using `agent-desktop` accessibility snapshots and stable refs like `@e1`.
-- `computer_screenshot` is available for visual confirmation, but the preferred path is `computer_snapshot` plus ref-based actions such as `computer_click`, `computer_type`, and `computer_scroll`.
-- macOS requires **System Settings → Privacy & Security → Accessibility** access for the terminal app running `muonroi-cli`.
-- `agent-desktop` currently targets **macOS**.
-- If Bun blocks the native binary download during install, run:
-
-```bash
-node ./node_modules/agent-desktop/scripts/postinstall.js
-```
-
-### Scheduling
-
-Schedules let muonroi-cli run a headless prompt on a recurring schedule or once. Ask
-for it in natural language, for example:
-
-```text
-Create a schedule named daily-changelog-update that runs every weekday at 9am
-and updates CHANGELOG.md from the latest merged commits.
-```
-
-Recurring schedules require the background daemon:
-
-```bash
-muonroi-cli daemon --background
-```
-
-Use `/schedule` in the TUI to browse saved schedules. One-time schedules start
-immediately in the background; recurring schedules keep running as long as the
-daemon is active.
-
-**List available models and pricing hints:**
-
-```bash
-muonroi-cli models
-```
-
-**Pass an opening message without another prompt:**
-
-```bash
-muonroi-cli fix the flaky test in src/foo.test.ts
-```
-
-**Generate images or short videos from chat:**
-
-```bash
-muonroi-cli "Generate a retro-futuristic logo for my CLI"
-muonroi-cli "Edit ./assets/hero.png into a watercolor poster"
-muonroi-cli "Animate ./assets/cover.jpg into a 6 second cinematic push-in"
-```
-
-Image and video generation are exposed as agent tools inside normal chat sessions.
-You keep using a text model for the session, and muonroi-cli saves generated media under
-`.muonroi-cli/generated-media/` by default unless you ask for a specific output path.
+That's the entire setup. Everything below is optional.
 
 ---
 
-## What you actually get
+## Features
 
+### Smart model routing
 
-| Thing | What it means |
-| --- | --- |
-| **Multi-provider BYOK** | Anthropic (Claude Opus, Sonnet, Haiku), OpenAI, Gemini, Ollama, and any OpenAI-compatible provider — bring your own keys, run `muonroi-cli models` for the full menu. |
-| **3-tier brain router** | Classifies every prompt locally (regex + tree-sitter), warm (Ollama/EE), or cold (SiliconFlow) to pick the cheapest model that can handle the task. |
-| **Experience Engine** | Learns from mistakes. PreToolUse warnings prevent repeated errors; PostToolUse captures outcomes; an async judge closes the feedback loop. Principles compress 500 lessons into 15 high-signal rules. See [experience-engine](https://github.com/muonroi/experience-engine). |
-| **Prompt Intelligence Layer** | 6-layer pipeline (intent detection, personality, EE injection, GSD workflow, context enrichment, output optimization) that enriches every prompt before it hits the model — reduces output tokens 60-80%. |
-| **Flow system** | Durable `.muonroi-flow/` artifacts for multi-session continuity. Resume where you left off with roadmap, state, and gray-area tracking. Based on [quick-codex](https://github.com/nicepkg/quick-codex) workflow design. |
-| **Hard usage cap** | Real-time token ledger with auto-downgrade (Opus -> Sonnet -> Haiku -> halt) so you never blow your budget. |
-| **Sub-agents** | Foreground `task` delegation (explore, general, verify, computer) plus background `delegate` for read-only deep dives — parallelize like you mean it. |
-| **Verify** | `/verify` or `--verify` — inspects your app, builds, tests, boots it, and runs browser smoke checks in a sandboxed environment. Screenshots and video included. |
-| **Computer use** | Built-in `computer` sub-agent for host desktop automation via `agent-desktop`. Semantic accessibility snapshots and stable refs. |
-| **Custom sub-agents** | Define named agents with `subAgents` in `~/.muonroi-cli/user-settings.json` and manage from the TUI with `/agents`. |
-| **Telegram remote control** | Pair from the TUI, DM your bot `/pair`, approve in-terminal. Keep the CLI running while you drive from your phone. |
-| **Skills & MCPs** | Agent Skills (`.agents/skills/`), Model Context Protocol servers (`/mcps`), extensible without touching core. |
-| **Sessions** | Conversations persist; `--session latest` picks up where you left off. |
-| **Headless** | `--prompt` / `-p` for non-interactive runs — pipe it, script it, bench it. Batch API supported. |
+Every prompt is classified before it reaches any LLM:
 
-### Core ecosystem
+| Tier | How | Latency | Cost | Handles |
+|------|-----|---------|------|---------|
+| **Hot** | Regex + tree-sitter AST (local) | <1ms | $0 | ~90% of calls — file reads, git, grep, simple edits |
+| **Warm** | Experience Engine in-process or Ollama | ~5-200ms | $0 | ~8% — needs context but not heavy reasoning |
+| **Cold** | Cloud LLM classification | ~800ms | ~$0.0001 | ~2% — complex architectural decisions |
 
-muonroi-cli is the orchestration brain. It integrates two companion projects:
+When you approach your budget, the CLI auto-downgrades: Opus → Sonnet → Haiku → halt. No bill shock.
 
-- **[experience-engine](https://github.com/muonroi/experience-engine)** — AI memory system that turns agent mistakes into evolving principles. Zero npm dependencies, REST API on port 8082. Provides the PreToolUse/PostToolUse hook pipeline, 4-tier knowledge architecture (principles -> behavioral -> semantic Q&A -> raw staging), and an async judge worker that auto-evaluates hint quality.
+Default monthly cap: **$15**. Configure in `~/.muonroi-cli/user-settings.json`.
 
-- **[quick-codex](https://github.com/nicepkg/quick-codex)** — Workflow layer for durable artifact-based execution. Provides the `.muonroi-flow/` artifact system: project roadmaps, phase checkpoints, gray-area registers, and session state that survives context resets. The flow resume system in muonroi-cli loads digests from these artifacts at boot.
+### Experience Engine integration
 
-### Coming soon
+The Experience Engine is a separate service that gives your agent persistent memory:
 
-**Deeper autonomous agent testing** — persistent sandbox sessions, richer browser workflows, and stronger “prove it works” evidence.
+- **PreToolUse warnings** — before the agent runs a command, EE checks if similar actions caused problems before
+- **PostToolUse learning** — after each tool call, outcomes are captured and evaluated by an async judge
+- **Principle evolution** — individual mistakes compress into reusable rules (T2 incident → T1 behavioral → T0 principle)
+- **Cross-project sharing** — principles learned in one project help all projects in your ecosystem
 
----
+Without EE, the CLI still works — you just don't get the learning loop. See [Experience Engine setup](#experience-engine-setup) for self-hosted instructions or use [Cloud](#cloud-recommended--subscribe-and-start-coding) for managed EE.
 
-## API key (pick one)
+### Prompt Intelligence Layer (PIL)
 
-**Environment (good for CI):**
+A 6-layer pipeline that enriches every prompt before sending it to the model:
 
-```bash
-export MUONROI_API_KEY=your_key_here
-```
+1. **Intent detection** — classify the task type (code, debug, docs, etc.)
+2. **Personality** — inject appropriate tone and style
+3. **EE principles** — embed relevant learned lessons
+4. **Workflow structuring** — add GSD phase hints when in a workflow
+5. **Context enrichment** — add relevant file context and code snippets
+6. **Output optimization** — guide response format and length
 
-`**.env**` in the project (see `.env.example` if present):
+Each layer adds signal and reduces the tokens the model needs to generate. The pipeline runs in <200ms and fails open — if any layer times out, the prompt goes through unchanged.
 
-```bash
-MUONROI_API_KEY=your_key_here
-```
+### Sub-agents
 
-**CLI once:**
+Built-in agents that the primary agent can delegate to:
 
-```bash
-muonroi-cli -k your_key_here
-```
+| Agent | Purpose | Mode |
+|-------|---------|------|
+| **general** | Multi-step tasks | Foreground (can edit files) |
+| **explore** | Codebase search and analysis | Background (read-only) |
+| **verify** | Build, test, and smoke-check your app | Foreground |
+| **computer** | Desktop automation via accessibility tree | Foreground (macOS only) |
 
-**Saved in user settings** — `~/.muonroi-cli/user-settings.json`:
-
-```json
-{ "apiKey": "your_key_here" }
-```
-
-Optional `**subAgents**` — custom foreground sub-agents. Each entry needs `**name**`, `**model**`, and `**instruction**`:
+Define custom sub-agents in `~/.muonroi-cli/user-settings.json`:
 
 ```json
 {
@@ -236,252 +166,231 @@ Optional `**subAgents**` — custom foreground sub-agents. Each entry needs `**n
     {
       "name": "security-review",
       "model": "claude-sonnet-4-6-20250514",
-      "instruction": "Prioritize security implications and suggest concrete fixes."
+      "instruction": "Focus on security implications. Suggest concrete fixes."
     }
   ]
 }
 ```
 
-Names cannot be `general`, `explore`, `vision`, `verify`, or `computer` because those are reserved for the built-in sub-agents.
+### Sessions and continuity
 
-Optional: `**MUONROI_BASE_URL**` (default `https://api.anthropic.com`), `**MUONROI_MODEL**`, `**MUONROI_MAX_TOKENS**`.
-
----
-
-## Telegram (remote control) — short version
-
-1. Create a bot with [@BotFather](https://t.me/BotFather), copy the token.
-2. Set `**TELEGRAM_BOT_TOKEN**` or add `**telegram.botToken**` in `~/.muonroi-cli/user-settings.json` (the TUI `**/remote-control**` flow can save it).
-3. Start `**muonroi-cli**`, open `**/remote-control**` → **Telegram** if needed, then in Telegram DM your bot: `**/pair`**, enter the **6-character code** in the terminal when asked.
-4. First user must be approved once; after that, it’s remembered. **Keep the CLI process running** while you use the bot (long polling lives in that process).
-
-### Voice & audio messages
-
-Send a voice note or audio attachment in Telegram and muonroi-cli will transcribe it via the **Speech-to-Text API** before passing the text to the agent. The endpoint accepts Telegram's OGG/Opus voice notes and common audio containers (MP3, WAV, M4A, FLAC, AAC) directly — no local model download, `whisper-cli`, or `ffmpeg` required.
-
-#### Prerequisites
-
-- A valid `MUONROI_API_KEY` (the same key used for the agent). Transcription reuses the CLI's `apiKey` / `baseURL` resolution, so if the agent can reach the API, transcription will too.
-
-#### Configure in `~/.muonroi-cli/user-settings.json`
-
-```json
-{
-  "telegram": {
-    "botToken": "YOUR_BOT_TOKEN",
-    "audioInput": {
-      "enabled": true,
-      "language": "en"
-    }
-  }
-}
-```
-
-
-| Setting    | Default | Description                                                                                                           |
-| ---------- | ------- | --------------------------------------------------------------------------------------------------------------------- |
-| `enabled`  | `true`  | Set to `false` to ignore voice/audio messages entirely.                                                               |
-| `language` | `en`    | Language code forwarded to `/v1/stt`. Enables Inverse Text Normalization (numbers, currencies, units → written form). |
-
-
-Optional headless flow when you do not want the TUI open:
+Conversations persist automatically. Resume anytime:
 
 ```bash
-muonroi-cli telegram-bridge
+muonroi-cli --session latest       # pick up where you left off
+muonroi-cli -s <session-id>        # resume a specific session
 ```
 
-Treat the bot token like a password.
+For multi-session workflows, the flow system (`.muonroi-flow/`) tracks roadmaps, decisions, and progress across context resets.
 
----
+### Headless mode
 
-## Hooks
+Run without the terminal UI — for scripts, CI, and automation:
 
-Hooks execute shell commands at key agent lifecycle events — enforce policies, run linters, trigger tests, or log activity.
+```bash
+muonroi-cli --prompt "refactor the auth module" --format text
+muonroi-cli --prompt "summarize repo state" --format json
+muonroi-cli --prompt "review overnight" --batch-api          # lower cost, async
+```
 
-Configure in `~/.muonroi-cli/user-settings.json`:
+### Slash commands
+
+In the interactive TUI:
+
+| Command | What it does |
+|---------|-------------|
+| `/plan` | Break a task into steps with decision points |
+| `/discuss` | Brainstorm with a sub-agent |
+| `/execute` | Run planned steps |
+| `/verify` | Build and test your app locally |
+| `/compact` | Compress conversation history |
+| `/cost` | View real-time token usage and budget |
+| `/ee` | Experience Engine panel — stats, principles, gates |
+| `/agents` | Browse and manage sub-agents |
+| `/mcps` | Configure Model Context Protocol servers |
+| `/schedule` | View and manage scheduled tasks |
+| `/remote-control` | Pair a Telegram bot for remote control |
+
+### Scheduling
+
+Run tasks on a schedule:
+
+```bash
+muonroi-cli daemon --background    # start the scheduler
+```
+
+Then ask in natural language: *"Create a schedule that runs every weekday at 9am and updates CHANGELOG.md from merged commits."*
+
+### Telegram remote control
+
+Drive the agent from your phone while the CLI runs on your machine:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather)
+2. Add the token to settings: `"telegram": { "botToken": "YOUR_TOKEN" }`
+3. Open `/remote-control` in the TUI, pair with the 6-character code
+4. Send messages and voice notes from Telegram
+
+### Model Context Protocol (MCP)
+
+Connect external tools — GitHub, Slack, Docker, databases — via MCP servers. Configure in settings, browse with `/mcps`.
+
+### Hooks
+
+Run custom commands at agent lifecycle events. Example — lint before every file edit:
 
 ```json
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./scripts/lint-before-edit.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
+    "PreToolUse": [{
+      "matcher": "bash",
+      "hooks": [{ "type": "command", "command": "./scripts/lint.sh", "timeout": 10 }]
+    }]
   }
 }
 ```
 
-Hook commands receive JSON on **stdin** (event details) and can return JSON on **stdout**. Exit code `0` = success, `2` = block the action, other = non-blocking error.
-
-**Supported events:** `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `Stop`, `StopFailure`, `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `PreCompact`, `PostCompact`, `Notification`, `InstructionsLoaded`, `CwdChanged`.
-
 ---
 
-## Instructions & project brain
+## Configuration
 
-- `**AGENTS.md**` — merged from git root down to your cwd (Codex-style; see repo docs). `**AGENTS.override.md**` wins per directory when present.
+### User settings
 
----
+`~/.muonroi-cli/user-settings.json` — applies to all projects:
 
-## Project settings
-
-Project file: `**.muonroi-cli/settings.json**` — e.g. the current model for this project.
-
----
-
-## Sandbox
-
-muonroi-cli can run shell commands inside a [Shuru](https://github.com/superhq-ai/shuru) microVM sandbox so the agent can't touch your host filesystem or network.
-
-**Requires macOS 14+ on Apple Silicon.**
-
-Enable it with `--sandbox` on the CLI, or toggle it from the TUI with `/sandbox`.
-
-When sandbox mode is active you can configure:
-
-- **Network** — off by default; enable with `--allow-net`, restrict with `--allow-host`
-- **Port forwards** — `--port 8080:80`
-- **Resource limits** — CPUs, memory, disk size (via settings or `/sandbox` panel)
-- **Checkpoints** — start from a saved environment snapshot
-- **Secrets** — inject API keys without exposing them inside the VM
-
-All settings are saved in `~/.muonroi-cli/user-settings.json` (user) and `.muonroi-cli/settings.json` (project).
-
-### Verify
-
-Run `**/verify`** in the TUI or `**--verify**` on the CLI to verify your app locally:
-
-```bash
-muonroi-cli --verify
-muonroi-cli -d /path/to/your/app --verify
+```json
+{
+  "apiKey": "sk-ant-...",
+  "defaultModel": "claude-sonnet-4-6-20250514",
+  "ecosystem": {
+    "name": "myorg",
+    "patterns": ["myorg"]
+  }
+}
 ```
 
-The agent inspects your project, figures out how to build and run it, spins up a sandbox, and produces a verification report with screenshots and video evidence. Works with any app type.
+### Project settings
+
+`.muonroi-cli/settings.json` — per-project overrides:
+
+```json
+{
+  "model": "claude-opus-4-6-20250514"
+}
+```
+
+### Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `MUONROI_API_KEY` | API key (overrides settings file) |
+| `MUONROI_MODEL` | Default model override |
+| `MUONROI_BASE_URL` | Custom API endpoint |
+| `MUONROI_MAX_TOKENS` | Max tokens per call |
+
+### Supported models
+
+```bash
+muonroi-cli models    # list all with pricing
+```
+
+| Model | Input/1M | Output/1M | Best for |
+|-------|----------|-----------|----------|
+| Claude Opus 4.7 | $15 | $75 | Complex reasoning, architecture |
+| Claude Sonnet 4.6 | $3 | $15 | Everyday coding tasks |
+| Claude Haiku 4.5 | $0.80 | $4 | Simple tasks, high volume |
+
+Plus OpenAI (GPT-4), Gemini, Ollama (local), and any OpenAI-compatible endpoint.
+
+---
+
+## Experience Engine setup
+
+> **Recommended:** Use [Cloud](#cloud-recommended--subscribe-and-start-coding) instead. The managed service handles all of this for you.
+
+For self-hosted EE, you need:
+
+1. **Vector database** — [Qdrant](https://qdrant.tech) (Docker or cloud)
+2. **Embedding model** — Ollama (local) or any OpenAI-compatible API
+3. **Brain model** — for classification and abstraction (Ollama or cloud)
+
+```bash
+# Install Experience Engine
+npm install -g experience-engine
+
+# Run the setup wizard
+experience-engine setup
+
+# Start the server
+experience-engine server
+```
+
+The setup wizard walks through provider selection and configuration. See [experience-engine docs](https://github.com/muonroi/experience-engine) for details.
+
+Once running, muonroi-cli auto-detects EE on localhost:8082. No additional CLI config needed.
+
+### Cross-project sharing
+
+If you run multiple projects on the same EE instance, configure ecosystem detection so principles flow between related repos:
+
+```json
+{
+  "ecosystem": {
+    "name": "myorg",
+    "patterns": ["myorg", "my-company"]
+  }
+}
+```
+
+Any project whose git remote URL contains a pattern gets `ecosystem:myorg` scope — principles from one project help all others in the ecosystem.
+
+---
+
+## Health check
+
+```bash
+muonroi-cli doctor
+```
+
+Checks: runtime version, API key presence, EE connectivity, disk space, and dependency health.
 
 ---
 
 ## Troubleshooting
 
-Common issues and solutions:
+**Install fails** — verify `curl` is available. On macOS, try: `bash -c "$(curl -fsSL .../install.sh)"`. The install script bundles Bun; to use your own: `curl -fsSL https://bun.sh/install | bash && bun add -g muonroi-cli`.
 
-### Installation issues
+**"Missing API key" error** — set `MUONROI_API_KEY` in environment or run `muonroi-cli -k your_key`. Get a key from [Anthropic](https://console.anthropic.com).
 
-**Install script fails on macOS**
+**TUI doesn't render** — use a modern terminal: WezTerm, Alacritty, Ghostty, or Kitty. Headless mode (`--prompt`) works in any terminal.
 
-Make sure you have a modern shell and `curl` available:
+**EE unreachable** — the CLI works without EE (no learning loop). To check: `muonroi-cli doctor`. To start EE: `experience-engine server`.
+
+**Slow responses** — check network to API provider. Try a smaller model (`-m claude-haiku-4-5-20251001`). Use `/compact` to reduce conversation size.
+
+**High memory** — long sessions accumulate context. Start fresh or use `/compact`.
+
+---
+
+## Updating
+
 ```bash
-# Verify curl is installed
-which curl
-
-# If using an outdated shell, try with bash explicitly
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh)"
+muonroi-cli update                # update to latest
+muonroi-cli uninstall             # remove CLI
+muonroi-cli uninstall --keep-config  # remove CLI, keep settings
 ```
-
-**Bun not found**
-
-The install script bundles Bun, but if you want to use your own:
-```bash
-curl -fsSL https://bun.sh/install | bash
-bun add -g muonroi-cli
-```
-
-### API key issues
-
-**"Missing MUONROI_API_KEY" error**
-
-Set your API key using one of these methods:
-```bash
-# Environment variable
-export MUONROI_API_KEY=your_key_here
-
-# Or save to user settings
-muonroi-cli -k your_key_here
-```
-
-Get your API key from [Anthropic](https://console.anthropic.com).
-
-### Terminal UI issues
-
-**UI doesn't render correctly**
-
-Try a different terminal emulator. Recommended:
-- WezTerm (cross-platform)
-- Alacritty (cross-platform)
-- Ghostty (macOS/Linux)
-- Kitty (macOS/Linux)
-
-**Screen flickering or artifacts**
-
-Ensure your terminal supports true color and Unicode. Update your terminal emulator to the latest version.
-
-### Telegram remote control
-
-**Bot doesn't respond**
-
-1. Verify `TELEGRAM_BOT_TOKEN` is set correctly
-2. Ensure the CLI process is still running (long polling lives in the process)
-3. Check that you've completed the `/pair` flow and been approved
-
-**Voice messages not transcribing**
-
-- Verify `MUONROI_API_KEY` is set (transcription uses the same key)
-- Check `~/.muonroi-cli/user-settings.json` has `telegram.audioInput.enabled: true`
-
-### Sandbox mode
-
-**Sandbox only works on macOS 14+ with Apple Silicon**
-
-If you're on Intel Mac or Linux, sandbox mode is not available. Use standard mode without `--sandbox`.
-
-### Performance issues
-
-**Slow response times**
-
-- Check your network connection to the Anthropic API
-- Try a smaller model (e.g. Claude Haiku) for faster responses
-- Reduce `--max-tool-rounds` for headless runs
-
-**High memory usage**
-
-- Long-running sessions accumulate context; start a fresh session periodically
-- Use `/compact` in TUI to compress conversation history
-
-### Getting help
-
-- Check existing [issues](https://github.com/muonroi/muonroi-cli/issues)
-- Open a new issue with:
-  - OS and terminal emulator version
-  - muonroi-cli version (`muonroi-cli --version`)
-  - Steps to reproduce
-  - Error messages or logs
 
 ---
 
 ## Development
 
-From a clone:
-
 ```bash
+git clone https://github.com/muonroi/muonroi-cli.git
+cd muonroi-cli
 bun install
-bun run build
-bun run start
-# or: node dist/index.js
-```
-
-Other useful commands:
-
-```bash
-bun run dev      # run from source (Bun)
-bun run typecheck
-bun run lint
+bun run dev          # run from source
+bun run typecheck    # type check
+bun run test         # run tests
+bun run lint         # lint
 ```
 
 ---
