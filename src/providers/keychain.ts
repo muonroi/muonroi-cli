@@ -20,6 +20,7 @@ const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
   google: "google",
   deepseek: "deepseek",
   siliconflow: "siliconflow",
+  xai: "xai",
   ollama: "ollama",
 };
 
@@ -29,6 +30,7 @@ const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   google: "GOOGLE_API_KEY",
   deepseek: "DEEPSEEK_API_KEY",
   siliconflow: "SILICONFLOW_API_KEY",
+  xai: "XAI_API_KEY",
   ollama: "OLLAMA_API_KEY",
 };
 

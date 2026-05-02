@@ -42,6 +42,7 @@ import {
   type SandboxMode,
   type SandboxSettings,
   saveUserSettings,
+  getProviderConfigs,
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
@@ -438,12 +439,8 @@ program
       }
     }
 
-    // Boot model registry — fetch available models from configured providers
-    if (config.apiKey) {
-      await refreshModels({
-        anthropic: { apiKey: config.apiKey, baseURL: config.baseURL },
-      }).catch(() => {});
-    }
+    // Boot model registry — fetch available models from all configured providers
+    await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
 
     if (options.verify) {
       const verifyError = getVerifyCliError({ hasPrompt: Boolean(options.prompt), hasMessageArgs: message.length > 0 });
@@ -504,13 +501,8 @@ program
   .command("models")
   .description("List available models")
   .action(async () => {
-    const apiKey = getApiKey();
-    if (!apiKey) {
-      console.error("API key required to list models. Set MUONROI_API_KEY or run muonroi-cli to configure.");
-      process.exit(1);
-    }
     console.log("\nFetching available models...\n");
-    await refreshModels({ anthropic: { apiKey } });
+    await refreshModels(getProviderConfigs());
     const { MODELS } = await import("./models/registry.js");
     for (const m of MODELS) {
       const tags = [

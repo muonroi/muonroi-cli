@@ -16,13 +16,14 @@ import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./
 const DEFAULT_BASE_URLS: Record<string, string> = {
   deepseek: "https://api.deepseek.com/v1",
   siliconflow: "https://api.siliconflow.cn/v1",
+  xai: "https://api.x.ai/v1",
 };
 
 /**
- * Create an OpenAI-compatible adapter (DeepSeek or SiliconFlow).
+ * Create an OpenAI-compatible adapter (DeepSeek, SiliconFlow, xAI/Grok, or custom).
  * The `id` field on config determines the ProviderId.
  */
-export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: "deepseek" | "siliconflow" }): Adapter {
+export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: string }): Adapter {
   if (config.apiKey) {
     redactor.enrollSecret(config.apiKey);
   }
@@ -35,7 +36,7 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: "de
   });
 
   return {
-    id: config.id,
+    id: config.id as import("./types.js").ProviderId,
     async *stream(req: AdapterRequest): ProviderStream {
       const result = streamText({
         model: provider(config.model),

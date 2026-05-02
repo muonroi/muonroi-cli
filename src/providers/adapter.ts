@@ -27,6 +27,8 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
       return createOpenAICompatibleAdapter({ ...config, id: "deepseek" });
     case "siliconflow":
       return createOpenAICompatibleAdapter({ ...config, id: "siliconflow" });
+    case "xai":
+      return createOpenAICompatibleAdapter({ ...config, id: "xai", baseURL: config.baseURL ?? "https://api.x.ai/v1" });
     case "ollama":
       return createOllamaAdapter(config);
   }
@@ -41,5 +43,6 @@ export const ALL_PROVIDER_IDS: ReadonlyArray<ProviderId> = [
   "google",
   "deepseek",
   "siliconflow",
+  "xai",
   "ollama",
 ];
