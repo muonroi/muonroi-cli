@@ -3,7 +3,7 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Close EE Learning Loop
 status: verifying
-stopped_at: Completed quick-260502-d8m
+stopped_at: Completed quick-260502-dvm
 last_updated: "2026-05-02T02:35:29.942Z"
 last_activity: 2026-05-01
 progress:
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-01)
 Phase: 10
 Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-05-02 - Completed quick task 260502-d8m: Auto-trigger evolve
+Last activity: 2026-05-02 - Completed quick task 260502-dvm: First-run wizard + doctor fix
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -112,9 +112,10 @@ None identified for v1.2.
 | 260502-d8m | Auto-trigger evolve after session extraction and add periodic evolve to daemon | 2026-05-02 | 3062d81 | [260502-d8m-auto-trigger-evolve-after-session-extrac](./quick/260502-d8m-auto-trigger-evolve-after-session-extrac/) |
 | 260502-dcx | Add bridge cascade to warm router tier (in-process first, HTTP fallback) | 2026-05-02 | 7e29291 | [260502-dcx-unify-cli-3-tier-router-with-ee-route-ta](./quick/260502-dcx-unify-cli-3-tier-router-with-ee-route-ta/) |
 | 260502-dk4 | Auto-share principles cross-project via ecosystem scope detection | 2026-05-02 | 45cbd93 | [260502-dk4-auto-share-principles-cross-project-via-](./quick/260502-dk4-auto-share-principles-cross-project-via-/) |
+| 260502-dvm | First-run wizard for BYOK onboarding + doctor key check fix | 2026-05-02 | 1650168 | [260502-dvm-first-run-wizard-and-doctor-command-for-](./quick/260502-dvm-first-run-wizard-and-doctor-command-for-/) |
 
 ## Session Continuity
 
 Last session: 2026-05-02T02:52:08Z
-Stopped at: Completed quick-260502-dk4
+Stopped at: Completed quick-260502-dvm
 Resume file: None
