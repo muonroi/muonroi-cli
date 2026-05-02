@@ -35,6 +35,7 @@ export type {
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
 import { interceptWithDefaults } from "../ee/intercept.js";
+import { getTenantId } from "../ee/tenant.js";
 import { type JudgeContext } from "../ee/judge.js";
 import { posttool } from "../ee/posttool.js";
 import { reconcilePromptStale } from "../ee/prompt-stale.js";
@@ -123,7 +124,7 @@ export async function executeEventHooks(
         outcome: { success: true },
         cwdMatchedAtPretool: _lastWarningResponse !== null,
         diffPresent: false,
-        tenantId: "local",
+        tenantId: getTenantId(),
       };
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
@@ -135,7 +136,7 @@ export async function executeEventHooks(
             success: true,
           },
           cwd,
-          tenantId: "local",
+          tenantId: getTenantId(),
           scope: _cachedScope,
         },
         judgeCtx,
@@ -154,7 +155,7 @@ export async function executeEventHooks(
         outcome: { success: false, error: failInput.error },
         cwdMatchedAtPretool: _lastWarningResponse !== null,
         diffPresent: false,
-        tenantId: "local",
+        tenantId: getTenantId(),
       };
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
@@ -166,7 +167,7 @@ export async function executeEventHooks(
             error: failInput.error,
           },
           cwd,
-          tenantId: "local",
+          tenantId: getTenantId(),
           scope: _cachedScope,
         },
         judgeCtx,

@@ -11,6 +11,7 @@
  */
 
 import { getDefaultEEClient, getLastSurfacedState, resetLastSurfacedState } from "./intercept.js";
+import { getTenantId } from "./tenant.js";
 
 /**
  * Fire-and-forget prompt-stale reconciliation.
@@ -20,7 +21,7 @@ import { getDefaultEEClient, getLastSurfacedState, resetLastSurfacedState } from
  * Resets surfaced state BEFORE dispatching the async HTTP call
  * to prevent double-reporting on rapid sequential PostToolUse events.
  */
-export function reconcilePromptStale(cwd: string, tenantId = "local"): void {
+export function reconcilePromptStale(cwd: string, tenantId = getTenantId()): void {
   const { surfacedIds, timestamp } = getLastSurfacedState();
   if (surfacedIds.length === 0) return;
 
