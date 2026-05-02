@@ -114,9 +114,10 @@ None identified for v1.2.
 | 260502-dk4 | Auto-share principles cross-project via ecosystem scope detection | 2026-05-02 | 45cbd93 | [260502-dk4-auto-share-principles-cross-project-via-](./quick/260502-dk4-auto-share-principles-cross-project-via-/) |
 | 260502-dvm | First-run wizard for BYOK onboarding + doctor key check fix | 2026-05-02 | 1650168 | [260502-dvm-first-run-wizard-and-doctor-command-for-](./quick/260502-dvm-first-run-wizard-and-doctor-command-for-/) |
 | 260502-edr | Pre-phase-4 cleanup: centralize tenantId, deprecate payment code, create cloud/billing stubs | 2026-05-02 | 5554b84 | [260502-edr-pre-phase-4-cleanup-centralize-tenantid-](./quick/260502-edr-pre-phase-4-cleanup-centralize-tenantid-/) |
+| 260502-kkd | Refactor model registry to centralized catalog with static JSON fallback | 2026-05-02 | 03a05b8 | [260502-kkd-refactor-model-registry-centralized-cata](./quick/260502-kkd-refactor-model-registry-centralized-cata/) |
 
 ## Session Continuity
 
-Last session: 2026-05-02T03:27:14Z
-Stopped at: Completed quick-260502-edr
+Last session: 2026-05-02T07:58:36Z
+Stopped at: Completed quick-260502-kkd
 Resume file: None
