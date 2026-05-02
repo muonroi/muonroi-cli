@@ -43,8 +43,11 @@ export async function refreshModels(
             }
           }
         }
-      } catch {
-        // Provider unreachable — skip silently
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/401|invalid.*key|authentication/i.test(msg)) {
+          console.error(`[muonroi-cli] ${providerId}: API key invalid or expired. Update your key and try again.`);
+        }
       }
     }
 
