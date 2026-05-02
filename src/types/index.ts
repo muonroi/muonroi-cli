@@ -231,6 +231,8 @@ export interface StreamChunk {
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
+export type ModelTier = "fast" | "balanced" | "premium";
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -239,6 +241,8 @@ export interface ModelInfo {
   outputPrice: number;
   reasoning: boolean;
   description: string;
+  tier?: ModelTier;
+  provider?: string;
   aliases?: string[];
   responsesOnly?: boolean;
   multiAgent?: boolean;
@@ -246,6 +250,7 @@ export interface ModelInfo {
   supportsMaxOutputTokens?: boolean;
   defaultReasoningEffort?: ReasoningEffort;
   supportsReasoningEffort?: boolean;
+  thinkingType?: "enabled" | "adaptive";
 }
 
 export type AgentMode = "agent" | "plan" | "ask";
