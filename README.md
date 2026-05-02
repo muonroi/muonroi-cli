@@ -52,13 +52,13 @@ muonroi-cli                              # first run guides you through setup
 Free and open source. You provide an API key from any supported provider. The CLI works immediately for coding tasks. The Experience Engine and smart routing are optional — powerful but require additional setup.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash
+bun add -g muonroi-cli
 ```
 
-Or with Bun:
+Or via install script (once published):
 
 ```bash
-bun add -g muonroi-cli
+curl -fsSL https://muonroi.dev/install | bash
 ```
 
 ---
