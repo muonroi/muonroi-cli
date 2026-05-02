@@ -2212,6 +2212,11 @@ export class Agent {
                 },
               }
             : baseProviderOpts;
+          // Use catalog's thinkingType field instead of regex matching
+          const thinkingModelInfo = getModelInfo(runtime.modelId);
+          if (providerOpts.anthropic?.thinking?.type === "enabled" && thinkingModelInfo?.thinkingType === "adaptive") {
+            providerOpts.anthropic.thinking = { type: "adaptive" as any };
+          }
 
           const result = streamText({
             model: runtime.model,
