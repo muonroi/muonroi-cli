@@ -1,9 +1,18 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
 import { type DecideOpts, decide } from "./decide.js";
 import { routerStore } from "./store.js";
+
+// Mock bridge to always return null so tests go through HTTP path
+vi.mock("../ee/bridge.js", () => ({
+  routeModel: vi.fn().mockResolvedValue(null),
+  classifyViaBrain: vi.fn().mockResolvedValue(null),
+  searchCollection: vi.fn().mockResolvedValue([]),
+  getEmbeddingRaw: vi.fn().mockResolvedValue(null),
+  routeTask: vi.fn().mockResolvedValue(null),
+}));
 
 const BASE_OPTS: DecideOpts = {
   tenantId: "default",
@@ -50,7 +59,7 @@ describe("decide()", () => {
   });
 
   it("falls through to warm when classifier abstains (stub classifier always abstains)", async () => {
-    const result = await decide("write a function", BASE_OPTS);
+    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
     expect(result.tier).toBe("warm");
     expect(result.model).toBe("qwen2.5-coder");
     expect(routerStore.getState().lastDecision).toEqual(result);
@@ -69,7 +78,7 @@ describe("decide()", () => {
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldOnlyStub.port}` }));
 
-    const result = await decide("write a function", BASE_OPTS);
+    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
     expect(result.tier).toBe("cold");
     expect(result.model).toBe("deepseek-v3");
 
@@ -83,7 +92,7 @@ describe("decide()", () => {
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
 
-    const result = await decide("write a function", BASE_OPTS);
+    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
     expect(result.model).toBe("claude-sonnet-4-20250514");
     expect(result.reason).toBe("fallback:ee-unreachable");
 
@@ -96,7 +105,7 @@ describe("decide()", () => {
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
     routerStore.setState({ degraded: true });
 
-    const result = await decide("write a function", BASE_OPTS);
+    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
     expect(result.tier).toBe("degraded");
     expect(result.reason).toBe("fallback:ee-unreachable");
 
