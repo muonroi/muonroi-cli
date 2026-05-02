@@ -16,26 +16,6 @@ const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";
-export type PaymentChain = "base" | "base-sepolia";
-
-export interface PaymentApprovalSettings {
-  autoApprove?: boolean;
-}
-
-export interface PaymentSettings {
-  enabled?: boolean;
-  chain?: PaymentChain;
-  approval?: PaymentApprovalSettings;
-}
-
-const DEFAULT_PAYMENT_SETTINGS: Required<PaymentSettings> = {
-  enabled: false,
-  chain: "base-sepolia",
-  approval: {
-    autoApprove: false,
-  },
-};
-
 const DEFAULT_LSP_SETTINGS: NormalizedLspSettings = {
   enabled: true,
   tool: true,
@@ -172,7 +152,6 @@ export interface UserSettings {
   mcp?: McpSettings;
   subAgents?: CustomSubagentConfig[];
   hooks?: HooksConfig;
-  payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
 }
@@ -268,18 +247,6 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
     ...(partial.lsp !== undefined
       ? {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
-        }
-      : {}),
-    ...(partial.payments !== undefined
-      ? {
-          payments: {
-            ...current.payments,
-            ...partial.payments,
-            approval: {
-              ...current.payments?.approval,
-              ...partial.payments?.approval,
-            },
-          },
         }
       : {}),
   };
@@ -647,20 +614,3 @@ export function saveMcpServers(servers: McpServerConfig[]): void {
   saveUserSettings({ mcp: { servers } });
 }
 
-export function loadPaymentSettings(): Required<PaymentSettings> {
-  const payments = loadUserSettings().payments;
-  return {
-    enabled: payments?.enabled ?? DEFAULT_PAYMENT_SETTINGS.enabled,
-    chain:
-      payments?.chain === "base" || payments?.chain === "base-sepolia"
-        ? payments.chain
-        : DEFAULT_PAYMENT_SETTINGS.chain,
-    approval: {
-      autoApprove: payments?.approval?.autoApprove ?? DEFAULT_PAYMENT_SETTINGS.approval.autoApprove,
-    },
-  };
-}
-
-export function savePaymentSettings(partial: PaymentSettings): void {
-  saveUserSettings({ payments: partial });
-}
