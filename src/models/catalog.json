@@ -3,7 +3,7 @@
   "updated_at": "2026-05-02",
   "models": [
     {
-      "id": "claude-opus-4-7-20250626",
+      "id": "claude-opus-4-7",
       "name": "Claude Opus 4.7",
       "provider": "anthropic",
       "tier": "premium",
@@ -16,10 +16,10 @@
       "supports_effort": true,
       "default_reasoning_effort": "medium",
       "description": "Most capable Anthropic model with adaptive thinking",
-      "aliases": ["claude-opus-4-7", "claude-opus-4-7-latest"]
+      "aliases": ["claude-opus-4-7-latest"]
     },
     {
-      "id": "claude-sonnet-4-6-20250514",
+      "id": "claude-sonnet-4-6",
       "name": "Claude Sonnet 4.6",
       "provider": "anthropic",
       "tier": "balanced",
@@ -31,11 +31,11 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "Balanced Anthropic model with extended thinking",
-      "aliases": ["claude-sonnet-4-6", "claude-sonnet-4-6-latest"]
+      "description": "Balanced Anthropic model for everyday coding",
+      "aliases": ["claude-sonnet-4-6-latest", "claude-sonnet-4-6-20250514"]
     },
     {
-      "id": "claude-opus-4-6-20250514",
+      "id": "claude-opus-4-6",
       "name": "Claude Opus 4.6",
       "provider": "anthropic",
       "tier": "premium",
@@ -48,42 +48,10 @@
       "supports_effort": true,
       "default_reasoning_effort": "medium",
       "description": "Premium Anthropic model with extended thinking",
-      "aliases": ["claude-opus-4-6", "claude-opus-4-6-latest"]
+      "aliases": ["claude-opus-4-6-latest", "claude-opus-4-6-20250514"]
     },
     {
-      "id": "claude-haiku-4-5-20250514",
-      "name": "Claude Haiku 4.5",
-      "provider": "anthropic",
-      "tier": "fast",
-      "context_window": 200000,
-      "max_output_tokens": 8000,
-      "input_price_per_million": 0.80,
-      "output_price_per_million": 4,
-      "reasoning": false,
-      "thinking_type": null,
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Fast and affordable Anthropic model",
-      "aliases": ["claude-haiku-4-5", "claude-haiku-4-5-latest"]
-    },
-    {
-      "id": "claude-sonnet-4-5-20250514",
-      "name": "Claude Sonnet 4.5",
-      "provider": "anthropic",
-      "tier": "balanced",
-      "context_window": 200000,
-      "max_output_tokens": 64000,
-      "input_price_per_million": 3,
-      "output_price_per_million": 15,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Balanced Anthropic model with extended thinking",
-      "aliases": ["claude-sonnet-4-5", "claude-sonnet-4-5-latest"]
-    },
-    {
-      "id": "claude-opus-4-5-20250414",
+      "id": "claude-opus-4-5-20251101",
       "name": "Claude Opus 4.5",
       "provider": "anthropic",
       "tier": "premium",
@@ -93,10 +61,42 @@
       "output_price_per_million": 75,
       "reasoning": true,
       "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Premium Anthropic model with extended thinking",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Previous-gen premium Anthropic model",
       "aliases": ["claude-opus-4-5", "claude-opus-4-5-latest"]
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "Claude Haiku 4.5",
+      "provider": "anthropic",
+      "tier": "fast",
+      "context_window": 200000,
+      "max_output_tokens": 8000,
+      "input_price_per_million": 0.80,
+      "output_price_per_million": 4,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Fast and affordable Anthropic model",
+      "aliases": ["claude-haiku-4-5", "claude-haiku-4-5-latest"]
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "name": "Claude Sonnet 4.5",
+      "provider": "anthropic",
+      "tier": "balanced",
+      "context_window": 1000000,
+      "max_output_tokens": 64000,
+      "input_price_per_million": 3,
+      "output_price_per_million": 15,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Previous-gen balanced Anthropic model",
+      "aliases": ["claude-sonnet-4-5", "claude-sonnet-4-5-latest"]
     },
     {
       "id": "gpt-4o",
