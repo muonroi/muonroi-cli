@@ -37,7 +37,7 @@ export function formatDoctorReport(results: CheckResult[], version?: string): st
   lines.push("");
   lines.push(`  Summary: ${passCount} pass, ${warnCount} warn, ${failCount} fail`);
   lines.push("");
-  lines.push("  For managed Experience Engine: https://muonroi.dev/cloud");
+  lines.push("  For managed Experience Engine: https://muonroi.com/cloud");
   return lines.join("\n");
 }
 
@@ -90,7 +90,7 @@ async function checkKeyPresence(): Promise<CheckResult> {
 
 async function checkOllamaHealth(): Promise<CheckResult> {
   try {
-    const resp = await fetch("http://100.79.164.25:11434/api/tags", {
+    const resp = await fetch("http://ollama.muonroi.com:11434/api/tags", {
       signal: AbortSignal.timeout(2000),
     });
     return {
