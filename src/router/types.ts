@@ -4,7 +4,7 @@ export interface ClassifierResult {
   tier: "hot" | "abstain";
   confidence: number; // 0..1
   reason: string; // 'regex:create-file' | 'tree-sitter:typescript' | 'low-confidence' etc
-  modelHint?: string; // optional preferred model id from heuristic
+  tierHint?: "fast" | "balanced" | "premium";
 }
 
 export interface RouteDecision {

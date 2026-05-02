@@ -58,3 +58,16 @@ export function getSupportedReasoningEfforts(modelId: string): ReasoningEffort[]
   if (!info?.reasoning) return [];
   return [...ALL_REASONING_EFFORTS];
 }
+
+/**
+ * Pick the first model matching a tier for a given provider.
+ * If no match for provider+tier, returns first model of that tier from any provider.
+ * Returns undefined if no models in that tier exist.
+ */
+export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
+  if (preferProvider) {
+    const providerMatch = MODELS.find((m) => m.tier === tier && m.provider === preferProvider);
+    if (providerMatch) return providerMatch;
+  }
+  return MODELS.find((m) => m.tier === tier);
+}

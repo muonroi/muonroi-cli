@@ -75,7 +75,7 @@ export function lazyTreeSitter(prompt: string): ClassifierResult {
       tier: conf >= 0.55 ? "hot" : "abstain",
       confidence: conf,
       reason: `tree-sitter:${id}`,
-      modelHint: "claude-3-5-sonnet-latest",
+      tierHint: "balanced",
     };
   } catch {
     return {
