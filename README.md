@@ -303,34 +303,206 @@ Plus OpenAI (GPT-4), Gemini, Ollama (local), and any OpenAI-compatible endpoint.
 
 ---
 
-## Experience Engine setup
+## Setup guides
 
-> **Recommended:** Use [Cloud](#cloud-recommended--subscribe-and-start-coding) instead. The managed service handles all of this for you.
+muonroi-cli has three setup tiers. Each one builds on the previous — start with BYOK, add Experience Engine when you're ready.
 
-For self-hosted EE, you need:
+### Tier 1: BYOK only (no Experience Engine)
 
-1. **Vector database** — [Qdrant](https://qdrant.tech) (Docker or cloud)
-2. **Embedding model** — Ollama (local) or any OpenAI-compatible API
-3. **Brain model** — for classification and abstraction (Ollama or cloud)
+The CLI works immediately with just an API key. No learning loop, no smart routing beyond the local hot-path classifier. Good for trying things out.
+
+```
+What you get: CLI + local hot-path router (regex + AST, 90% of calls at $0)
+What you skip: EE learning loop, warm/cold routing, cross-project principles
+Setup time: 2 minutes
+```
 
 ```bash
-# Install Experience Engine
+# 1. Install
+bun add -g muonroi-cli
+
+# 2. Run — the first-run wizard asks for your API key
+muonroi-cli
+
+# Done. Start coding.
+```
+
+Your key is saved to `~/.muonroi-cli/user-settings.json`. The CLI auto-detects that EE is not running and operates without it — all hooks fail open gracefully.
+
+---
+
+### Tier 2: BYOK + Experience Engine (self-hosted)
+
+Full learning loop running on your own infrastructure. Two sub-options depending on whether you already have a brain server.
+
+#### Option A: Full self-hosted setup (new brain)
+
+You run everything on one machine or a VPS: Qdrant (vector DB), embedding model, brain model, and the EE server.
+
+```
+What you get: Everything — learning loop, smart routing, principle evolution, cross-project sharing
+Prerequisites: Docker (for Qdrant), Node.js 18+, optionally Ollama for local models
+Setup time: 15-20 minutes
+```
+
+**Step 1: Install Qdrant (vector database)**
+
+```bash
+docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
+```
+
+Or use [Qdrant Cloud](https://cloud.qdrant.io) (free tier available).
+
+**Step 2: Install embedding + brain model (pick one)**
+
+Option A — Ollama (free, local):
+```bash
+# Install Ollama: https://ollama.com
+ollama pull nomic-embed-text    # embedding model
+ollama pull qwen2.5:3b          # brain model (classification + abstraction)
+```
+
+Option B — Cloud API (no local GPU needed):
+- [SiliconFlow](https://siliconflow.cn) — free tier, OpenAI-compatible
+- [OpenAI](https://platform.openai.com) — text-embedding-3-small + gpt-4o-mini
+- Any OpenAI-compatible embedding + chat API
+
+**Step 3: Install and configure Experience Engine**
+
+```bash
 npm install -g experience-engine
 
-# Run the setup wizard
+# Interactive wizard — asks for Qdrant URL, embed provider, brain provider
 experience-engine setup
 
 # Start the server
 experience-engine server
 ```
 
-The setup wizard walks through provider selection and configuration. See [experience-engine docs](https://github.com/muonroi/experience-engine) for details.
+The wizard writes `~/.experience/config.json`. Example config:
 
-Once running, muonroi-cli auto-detects EE on localhost:8082. No additional CLI config needed.
+```json
+{
+  "qdrantUrl": "http://localhost:6333",
+  "embedProvider": "ollama",
+  "embedModel": "nomic-embed-text",
+  "brainProvider": "ollama",
+  "brainModel": "qwen2.5:3b",
+  "ollamaUrl": "http://localhost:11434",
+  "server": { "port": 8082, "authToken": "your-secret-token" }
+}
+```
 
-### Cross-project sharing
+**Step 4: Install and run muonroi-cli**
 
-If you run multiple projects on the same EE instance, configure ecosystem detection so principles flow between related repos:
+```bash
+bun add -g muonroi-cli
+muonroi-cli          # first-run wizard asks for API key
+muonroi-cli doctor   # verify everything is connected
+```
+
+The CLI auto-detects EE on localhost:8082. You should see:
+
+```
+  [PASS] ee: Experience Engine healthy
+  [PASS] qdrant: Qdrant healthy
+```
+
+#### Option B: Thin-client setup (brain already on a VPS)
+
+Someone already set up the EE brain on a server (Qdrant + Ollama + experience-engine). You just need the CLI and a thin-client config pointing to that server.
+
+```
+What you get: Full EE features, brain runs remotely
+Prerequisites: Network access to the VPS, auth token
+Setup time: 5 minutes
+```
+
+```
+Your machine                      VPS (brain server)
+┌──────────────────────┐          ┌─────────────────────┐
+│ muonroi-cli          │          │ Qdrant (6333)       │
+│ ~/.experience/       │──HTTP──► │ Ollama (11434)      │
+│   config.json        │          │ experience-engine   │
+│   (thin client)      │          │   (8082)            │
+└──────────────────────┘          └─────────────────────┘
+```
+
+**Step 1: Install CLI + thin client**
+
+```bash
+bun add -g muonroi-cli
+npm install -g experience-engine
+```
+
+**Step 2: Configure thin client**
+
+```bash
+experience-engine setup-thin-client
+# → Enter server URL: http://your-vps-ip:8082
+# → Enter auth token: your-secret-token
+# → Saved to ~/.experience/config.json
+```
+
+Or create `~/.experience/config.json` manually:
+
+```json
+{
+  "serverBaseUrl": "http://your-vps-ip:8082",
+  "serverAuthToken": "your-secret-token",
+  "serverHookTimeoutMs": 1200
+}
+```
+
+**Step 3: Run**
+
+```bash
+muonroi-cli          # first-run wizard asks for LLM API key
+muonroi-cli doctor   # should show EE healthy via remote server
+```
+
+All hooks (intercept, posttool, extract, evolve) route to the remote brain. Offline queue handles network hiccups — requests queue locally and replay when the VPS is reachable again.
+
+---
+
+### Tier 3: Cloud subscription (recommended)
+
+> *Coming soon — [join the waitlist](https://muonroi.dev/cloud)*
+
+Everything from Tier 2, managed for you. No Docker, no Qdrant, no VPS, no maintenance.
+
+```
+What you get: Full EE, managed Qdrant, pre-tuned routing, cross-project sharing, backups, updates
+Prerequisites: None beyond an internet connection
+Setup time: 2 minutes
+```
+
+```bash
+# 1. Install
+bun add -g muonroi-cli
+
+# 2. Run — first-run wizard asks for your subscription key
+muonroi-cli
+
+# That's it. Brain is in the cloud, learning starts immediately.
+```
+
+Cloud config is injected automatically — no `~/.experience/config.json` to manage. The CLI detects your subscription and connects to the managed brain.
+
+**What Cloud handles for you:**
+- Hosted Qdrant cluster with automatic scaling
+- Managed embedding + brain models (no Ollama needed)
+- Automatic principle evolution (every 6 hours)
+- Cross-project principle sharing across your entire org
+- Session extraction and learning — every session makes the brain smarter
+- Backups, monitoring, and zero-downtime updates
+- Priority support
+
+---
+
+### Cross-project sharing (all tiers)
+
+If you run multiple projects on the same brain (self-hosted or Cloud), configure ecosystem detection so principles flow between related repos:
 
 ```json
 {
@@ -341,7 +513,22 @@ If you run multiple projects on the same EE instance, configure ecosystem detect
 }
 ```
 
-Any project whose git remote URL contains a pattern gets `ecosystem:myorg` scope — principles from one project help all others in the ecosystem.
+Add this to `~/.muonroi-cli/user-settings.json`. Any project whose git remote URL contains a pattern gets `ecosystem:myorg` scope — principles from one project surface in all others without penalty.
+
+---
+
+### Setup comparison
+
+| | Tier 1: BYOK | Tier 2A: Full self-hosted | Tier 2B: Thin client | Tier 3: Cloud |
+|---|---|---|---|---|
+| **Setup time** | 2 min | 15-20 min | 5 min | 2 min |
+| **Cost** | $5-8/mo (API only) | $5-8/mo + infra | $5-8/mo + VPS share | Subscription |
+| **Learning loop** | No | Yes | Yes | Yes |
+| **Smart routing** | Hot only (local) | Hot + Warm + Cold | Hot + Warm + Cold | Hot + Warm + Cold |
+| **Cross-project** | No | Yes | Yes | Yes |
+| **Maintenance** | None | You manage | VPS admin manages | Zero |
+| **Offline** | Always works | EE optional | Queue + replay | Queue + replay |
+| **Best for** | Trying it out | Power users, privacy | Teams with shared VPS | Everyone else |
 
 ---
 
