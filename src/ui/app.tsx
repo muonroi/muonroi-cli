@@ -115,7 +115,11 @@ function approvePairingCode(_code: string): { ok: true; userId: number } | { ok:
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createTurnCoordinator(): any {
-  return { reset: () => {}, handleEvent: () => {} };
+  return {
+    reset: () => {},
+    handleEvent: () => {},
+    run: async (fn: () => Promise<void>) => fn(),
+  };
 }
 
 function formatStructuredResponse(sr: StructuredResponse): string {
