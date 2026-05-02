@@ -12,7 +12,7 @@ import type {
 import { getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../models/registry.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";
