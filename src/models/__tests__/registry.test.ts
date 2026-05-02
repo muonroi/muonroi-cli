@@ -1,12 +1,17 @@
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import {
   getEffectiveReasoningEffort,
   getModelIds,
   getModelInfo,
   getSupportedReasoningEfforts,
+  loadCatalog,
   MODELS,
   normalizeModelId,
 } from "../registry";
+
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 describe("MODELS catalog", () => {
   test("has at least one model", () => {
@@ -44,7 +49,7 @@ describe("getModelInfo", () => {
     const info = getModelInfo("claude-sonnet-4-6-20250514");
     expect(info).toBeDefined();
     expect(info!.name).toBe("Claude Sonnet 4.6");
-    expect(info!.contextWindow).toBe(200_000);
+    expect(info!.contextWindow).toBe(1_000_000);
   });
 
   test("returns info via alias", () => {
