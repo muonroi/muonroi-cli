@@ -110,9 +110,10 @@ None identified for v1.2.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260502-d8m | Auto-trigger evolve after session extraction and add periodic evolve to daemon | 2026-05-02 | 3062d81 | [260502-d8m-auto-trigger-evolve-after-session-extrac](./quick/260502-d8m-auto-trigger-evolve-after-session-extrac/) |
+| 260502-dcx | Add bridge cascade to warm router tier (in-process first, HTTP fallback) | 2026-05-02 | 7e29291 | [260502-dcx-unify-cli-3-tier-router-with-ee-route-ta](./quick/260502-dcx-unify-cli-3-tier-router-with-ee-route-ta/) |
 
 ## Session Continuity
 
-Last session: 2026-05-02T02:35:25.668Z
-Stopped at: Completed quick-260502-d8m
+Last session: 2026-05-02T02:41:14Z
+Stopped at: Completed quick-260502-dcx
 Resume file: None
