@@ -53,11 +53,14 @@ const exitCleanlyOnSigterm = () => {
 process.on("SIGTERM", exitCleanlyOnSigterm);
 
 process.on("uncaughtException", (err) => {
+  try { require("fs").appendFileSync(require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"), `[${new Date().toISOString()}] UNCAUGHT: ${err.stack || err.message}\n`); } catch {}
   console.error("Fatal:", err.message);
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
+  try { require("fs").appendFileSync(require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"), `[${new Date().toISOString()}] REJECTION: ${msg}\n`); } catch {}
   console.error("Unhandled rejection:", reason);
   process.exit(1);
 });
