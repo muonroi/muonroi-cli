@@ -11,6 +11,9 @@ import { redactor } from "../utils/redactor.js";
 export interface ExperienceConfig {
   authToken?: string;
   embeddingModelVersion?: string;
+  serverBaseUrl?: string;
+  serverAuthToken?: string;
+  server?: { port?: number; authToken?: string };
 }
 
 function configPath(homeOverride?: string): string {
@@ -19,16 +22,19 @@ function configPath(homeOverride?: string): string {
 
 let _token: string | null = null;
 let _embeddingModelVersion: string | null = null;
+let _serverBaseUrl: string | null = null;
 
 export async function loadEEAuthToken(opts: { home?: string } = {}): Promise<string | null> {
   try {
     const txt = await fs.readFile(configPath(opts.home), "utf8");
     const cfg = JSON.parse(txt) as ExperienceConfig;
-    if (cfg.authToken) {
-      redactor.enrollSecret(cfg.authToken);
-      _token = cfg.authToken;
+    const token = cfg.serverAuthToken ?? cfg.server?.authToken ?? cfg.authToken;
+    if (token) {
+      redactor.enrollSecret(token);
+      _token = token;
     }
     if (cfg.embeddingModelVersion) _embeddingModelVersion = cfg.embeddingModelVersion;
+    if (cfg.serverBaseUrl) _serverBaseUrl = cfg.serverBaseUrl;
     return _token;
   } catch {
     return null;
@@ -46,4 +52,8 @@ export function getCachedAuthToken(): string | null {
 
 export function getEmbeddingModelVersion(): string {
   return _embeddingModelVersion ?? "nomic-embed-text-v1.5";
+}
+
+export function getCachedServerBaseUrl(): string | null {
+  return _serverBaseUrl;
 }

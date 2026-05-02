@@ -1,4 +1,4 @@
-import { getCachedAuthToken, loadEEAuthToken, refreshAuthToken } from "./auth.js";
+import { getCachedAuthToken, getCachedServerBaseUrl, loadEEAuthToken, refreshAuthToken } from "./auth.js";
 import type { CreateEEClientOpts } from "./client.js";
 import { createEEClient } from "./client.js";
 import { emitMatches } from "./render.js";
@@ -55,6 +55,7 @@ export function setDefaultEEClient(c: ReturnType<typeof createEEClient>): void {
 export function getDefaultEEClient(): ReturnType<typeof createEEClient> {
   if (!_defaultClient)
     _defaultClient = createEEClient({
+      baseUrl: getCachedServerBaseUrl() ?? undefined,
       authToken: getCachedAuthToken() ?? undefined,
     });
   return _defaultClient;
