@@ -2099,7 +2099,9 @@ export class Agent {
         defaultModel: this.modelId,
         defaultProvider: "anthropic",
       });
-      turnModelId = routeDecision.model;
+      if (routeDecision.model && routeDecision.model !== "HALT") {
+        turnModelId = routeDecision.model;
+      }
       taskHash = routeDecision.taskHash ?? null;
     } catch {
       // Router unavailable — use session default model
