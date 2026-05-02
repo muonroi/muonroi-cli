@@ -439,6 +439,10 @@ program
       }
     }
 
+    // Bootstrap EE auth (loads serverBaseUrl + token from ~/.experience/config.json)
+    const { loadEEAuthToken } = await import("./ee/auth.js");
+    await loadEEAuthToken().catch(() => {});
+
     // Boot model registry — load from centralized catalog (no provider API calls)
     await loadCatalog().catch(() => {});
 
@@ -613,6 +617,8 @@ program
   .command("doctor")
   .description("Run health checks for muonroi-cli dependencies and services")
   .action(async () => {
+    const { loadEEAuthToken } = await import("./ee/auth.js");
+    await loadEEAuthToken().catch(() => {});
     const { runDoctor, formatDoctorReport } = await import("./ops/doctor.js");
     const results = await runDoctor();
     console.log("\nmuonroi-cli doctor\n");
