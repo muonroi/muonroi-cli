@@ -13,7 +13,7 @@
 
 export type Scope =
   | { kind: "global" }
-  | { kind: "ecosystem"; name: "muonroi" }
+  | { kind: "ecosystem"; name: string }
   | { kind: "repo"; remote: string }
   | { kind: "branch"; remote: string; branch: string };
 

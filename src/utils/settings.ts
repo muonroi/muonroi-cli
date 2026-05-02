@@ -174,6 +174,7 @@ export interface UserSettings {
   hooks?: HooksConfig;
   payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
+  ecosystem?: { name: string; patterns: string[] };
 }
 
 export interface ProjectSettings {
