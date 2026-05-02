@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-05-01)
 Phase: 10
 Plan: Not started
 Status: Phase complete — ready for verification
-Last activity: 2026-05-01
+Last activity: 2026-05-02 - Completed quick task 260502-d8m: Auto-trigger evolve
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -104,6 +104,12 @@ None yet.
 ### Blockers/Concerns
 
 None identified for v1.2.
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260502-d8m | Auto-trigger evolve after session extraction and add periodic evolve to daemon | 2026-05-02 | 3062d81 | [260502-d8m-auto-trigger-evolve-after-session-extrac](./quick/260502-d8m-auto-trigger-evolve-after-session-extrac/) |
 
 ## Session Continuity
 
