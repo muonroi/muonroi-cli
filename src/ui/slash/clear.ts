@@ -10,6 +10,7 @@
 
 import * as path from "node:path";
 import { getDefaultEEClient, getLastSurfacedState } from "../../ee/intercept.js";
+import { getTenantId } from "../../ee/tenant.js";
 import { readArtifact } from "../../flow/artifact-io.js";
 import { getActiveRunId, loadRun } from "../../flow/run-manager.js";
 import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
@@ -76,7 +77,7 @@ export const handleClearSlash: SlashHandler = async (_args, ctx) => {
     getDefaultEEClient()
       .promptStale({
         state: { surfacedIds, timestamp },
-        nextPromptMeta: { trigger: "clear", cwd: ctx.cwd, tenantId: "local" },
+        nextPromptMeta: { trigger: "clear", cwd: ctx.cwd, tenantId: getTenantId() },
       })
       .catch(() => {});
   }

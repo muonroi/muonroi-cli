@@ -10,6 +10,7 @@
 
 import * as path from "node:path";
 import { getDefaultEEClient, getLastSurfacedState } from "../../ee/intercept.js";
+import { getTenantId } from "../../ee/tenant.js";
 import { getActiveRunId } from "../../flow/run-manager.js";
 import { FLOW_DIR_NAME } from "../../flow/scaffold.js";
 import type { SlashHandler } from "./registry.js";
@@ -30,7 +31,7 @@ export const handleCompactSlash: SlashHandler = async (_args, ctx) => {
     getDefaultEEClient()
       .promptStale({
         state: { surfacedIds, timestamp },
-        nextPromptMeta: { trigger: "compact", cwd: ctx.cwd, tenantId: "local" },
+        nextPromptMeta: { trigger: "compact", cwd: ctx.cwd, tenantId: getTenantId() },
       })
       .catch(() => {});
   }

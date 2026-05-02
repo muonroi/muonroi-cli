@@ -1,4 +1,5 @@
 import { getCachedAuthToken, getCachedServerBaseUrl, loadEEAuthToken, refreshAuthToken } from "./auth.js";
+import { getTenantId } from "./tenant.js";
 import type { CreateEEClientOpts } from "./client.js";
 import { createEEClient } from "./client.js";
 import { emitMatches } from "./render.js";
@@ -108,7 +109,7 @@ export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts
 export async function interceptWithDefaults(
   req: Omit<InterceptRequest, "tenantId" | "scope"> & Partial<Pick<InterceptRequest, "tenantId" | "scope">>,
 ): Promise<InterceptResponse> {
-  const tenantId = req.tenantId ?? "local";
+  const tenantId = req.tenantId ?? getTenantId();
   const scope: Scope = req.scope ?? (await buildScope({ cwd: req.cwd }));
   return intercept({
     toolName: req.toolName,

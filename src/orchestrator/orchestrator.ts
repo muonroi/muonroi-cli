@@ -9,6 +9,7 @@ import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
+import { getTenantId } from "../ee/tenant.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { routerStore } from "../router/store.js";
@@ -1735,7 +1736,7 @@ export class Agent {
       getDefaultEEClient()
         .promptStale({
           state: { surfacedIds, timestamp },
-          nextPromptMeta: { trigger: "auto-compact", cwd: this.bash.getCwd(), tenantId: "local" },
+          nextPromptMeta: { trigger: "auto-compact", cwd: this.bash.getCwd(), tenantId: getTenantId() },
         })
         .catch(() => {});
     }
