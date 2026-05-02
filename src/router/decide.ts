@@ -8,6 +8,7 @@
 
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
+import { getModelByTier } from "../models/registry.js";
 import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
@@ -157,10 +158,11 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
   if (c.tier === "hot") {
+    const tierModel = c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined;
     const d: RouteDecision = {
       tier: "hot",
-      model: c.modelHint ?? opts.defaultModel,
-      provider: opts.defaultProvider,
+      model: tierModel?.id ?? opts.defaultModel,
+      provider: tierModel?.provider ?? opts.defaultProvider,
       reason: c.reason,
       confidence: c.confidence,
     };
