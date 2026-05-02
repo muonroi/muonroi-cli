@@ -8,10 +8,11 @@ describe("matchRegex", () => {
     expect(result.reason).toMatch(/^regex:/);
   });
 
-  it('classifies "hi how are you" with confidence < 0.55', () => {
+  it('classifies "hi how are you" as short message with low confidence', () => {
     const result = matchRegex("hi how are you");
-    expect(result.confidence).toBeLessThan(0.55);
-    expect(result.reason).toBe("regex:no-match");
+    expect(result.confidence).toBeLessThanOrEqual(0.5);
+    expect(result.reason).toBe("regex:short-message");
+    expect(result.tierHint).toBe("fast");
   });
 
   describe("seed intents (>= 7 patterns at >= 0.55 confidence)", () => {
@@ -39,8 +40,8 @@ describe("matchRegex", () => {
     expect(result.tier).toBe("hot");
   });
 
-  it('returns tier "abstain" for no-match', () => {
-    const result = matchRegex("hi how are you");
+  it('returns tier "abstain" for long complex input', () => {
+    const result = matchRegex("I need you to analyze the distributed system architecture across all microservices and identify race conditions in the payment processing pipeline");
     expect(result.tier).toBe("abstain");
   });
 });

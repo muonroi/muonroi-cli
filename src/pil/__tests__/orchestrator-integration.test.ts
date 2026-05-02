@@ -11,9 +11,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PipelineContext } from "../types.js";
 
-// Mock classifier before importing pipeline
+// Mock classifier and EE bridge before importing pipeline
 vi.mock("../../router/classifier/index.js", () => ({
   classify: vi.fn().mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" }),
+}));
+vi.mock("../../ee/bridge.js", () => ({
+  classifyViaBrain: vi.fn().mockResolvedValue(null),
+  searchCollection: vi.fn().mockResolvedValue([]),
+  getEmbeddingRaw: vi.fn().mockResolvedValue(null),
+  routeTask: vi.fn().mockResolvedValue(null),
 }));
 
 import { applyPilSuffix, runPipeline } from "../index.js";

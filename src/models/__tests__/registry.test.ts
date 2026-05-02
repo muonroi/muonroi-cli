@@ -40,13 +40,13 @@ describe("getModelIds", () => {
   test("returns array of all model IDs", () => {
     const ids = getModelIds();
     expect(ids.length).toBe(MODELS.length);
-    expect(ids).toContain("claude-sonnet-4-6-20250514");
+    expect(ids).toContain("claude-sonnet-4-6");
   });
 });
 
 describe("getModelInfo", () => {
   test("returns info for known model", () => {
-    const info = getModelInfo("claude-sonnet-4-6-20250514");
+    const info = getModelInfo("claude-sonnet-4-6");
     expect(info).toBeDefined();
     expect(info!.name).toBe("Claude Sonnet 4.6");
     expect(info!.contextWindow).toBe(1_000_000);
@@ -55,7 +55,7 @@ describe("getModelInfo", () => {
   test("returns info via alias", () => {
     const info = getModelInfo("claude-sonnet-4-6-latest");
     expect(info).toBeDefined();
-    expect(info!.id).toBe("claude-sonnet-4-6-20250514");
+    expect(info!.id).toBe("claude-sonnet-4-6");
   });
 
   test("returns undefined for unknown model", () => {
@@ -65,7 +65,7 @@ describe("getModelInfo", () => {
 
 describe("normalizeModelId", () => {
   test("resolves alias to canonical ID", () => {
-    expect(normalizeModelId("claude-sonnet-4-6-latest")).toBe("claude-sonnet-4-6-20250514");
+    expect(normalizeModelId("claude-sonnet-4-6-latest")).toBe("claude-sonnet-4-6");
   });
 
   test("passes through unknown IDs unchanged", () => {
@@ -73,23 +73,23 @@ describe("normalizeModelId", () => {
   });
 
   test("passes through canonical IDs unchanged", () => {
-    expect(normalizeModelId("claude-sonnet-4-6-20250514")).toBe("claude-sonnet-4-6-20250514");
+    expect(normalizeModelId("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
   });
 });
 
 describe("getEffectiveReasoningEffort", () => {
   test("returns provided effort for reasoning model", () => {
-    expect(getEffectiveReasoningEffort("claude-sonnet-4-6-20250514", "high")).toBe("high");
+    expect(getEffectiveReasoningEffort("claude-sonnet-4-6", "high")).toBe("high");
   });
 
   test("returns undefined when no effort provided", () => {
-    expect(getEffectiveReasoningEffort("claude-sonnet-4-6-20250514", undefined)).toBeUndefined();
+    expect(getEffectiveReasoningEffort("claude-sonnet-4-6", undefined)).toBeUndefined();
   });
 });
 
 describe("getSupportedReasoningEfforts", () => {
   test("returns efforts for reasoning-capable model", () => {
-    const efforts = getSupportedReasoningEfforts("claude-sonnet-4-6-20250514");
+    const efforts = getSupportedReasoningEfforts("claude-sonnet-4-6");
     expect(efforts.length).toBeGreaterThan(0);
   });
 });

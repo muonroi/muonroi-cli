@@ -17,7 +17,11 @@
       "mcp__filesystem__read_text_file",
       "PowerShell(Get-ChildItem *)",
       "Skill(gsd:quick)",
-      "mcp__filesystem__list_allowed_directories"
+      "mcp__filesystem__list_allowed_directories",
+      "WebFetch(domain:docs.x.ai)",
+      "WebFetch(domain:api-docs.deepseek.com)",
+      "WebFetch(domain:platform.openai.com)",
+      "WebFetch(domain:developers.openai.com)"
     ]
   }
 }

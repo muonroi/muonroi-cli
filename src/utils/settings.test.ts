@@ -1,7 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadCatalog } from "../models/registry.js";
 
-beforeEach(() => {
-  vi.resetModules();
+beforeAll(async () => {
+  await loadCatalog();
+});
+
+beforeEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -123,8 +128,8 @@ describe("parseSubAgentsRawList", () => {
     const { parseSubAgentsRawList } = await import("./settings");
     const result = parseSubAgentsRawList([
       null,
-      { name: "", model: "claude-sonnet-4-6-20250514", instruction: "test" },
-      { name: "explore", model: "claude-sonnet-4-6-20250514", instruction: "reserved" },
+      { name: "", model: "claude-sonnet-4-6", instruction: "test" },
+      { name: "explore", model: "claude-sonnet-4-6", instruction: "reserved" },
     ]);
     expect(result).toEqual([]);
   });
@@ -132,8 +137,8 @@ describe("parseSubAgentsRawList", () => {
   it("deduplicates by lowercase name", async () => {
     const { parseSubAgentsRawList } = await import("./settings");
     const result = parseSubAgentsRawList([
-      { name: "MyAgent", model: "claude-sonnet-4-6-20250514", instruction: "first" },
-      { name: "myagent", model: "claude-sonnet-4-6-20250514", instruction: "dupe" },
+      { name: "MyAgent", model: "claude-sonnet-4-6", instruction: "first" },
+      { name: "myagent", model: "claude-sonnet-4-6", instruction: "dupe" },
     ]);
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("MyAgent");

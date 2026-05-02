@@ -25,6 +25,10 @@ const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
   "regex:install": "analyze",
   "tree-sitter:typescript": "refactor",
   "tree-sitter:python": "refactor",
+  "regex:read": "analyze",
+  "regex:git": "analyze",
+  "regex:short-message": undefined,
+  "regex:design": "plan",
   // no-match / error / cold / low-confidence → null (conversational passthrough)
   "regex:no-match": undefined,
   "tree-sitter:no-fenced-code": undefined,
