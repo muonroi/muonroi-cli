@@ -9,6 +9,7 @@ import {
   startDetachedHeadlessRun,
   writeScheduleDaemonPid,
 } from "../tools/schedule";
+import { getDefaultEEClient } from "../ee/intercept.js";
 
 export class SchedulerDaemon {
   private readonly schedules = new ScheduleManager();
@@ -16,6 +17,8 @@ export class SchedulerDaemon {
   private shuttingDown = false;
   private tickRunning = false;
   private signalHandlersInstalled = false;
+  private tickCount = 0;
+  private static readonly EVOLVE_INTERVAL_TICKS = 360; // 6 hours at 60s/tick
 
   async start(): Promise<void> {
     const status = await getScheduleDaemonStatus();
@@ -72,6 +75,19 @@ export class SchedulerDaemon {
     this.tickRunning = true;
 
     try {
+      this.tickCount++;
+      if (this.tickCount % SchedulerDaemon.EVOLVE_INTERVAL_TICKS === 0) {
+        getDefaultEEClient()
+          .evolve("daemon-periodic")
+          .then((res) => {
+            if (res) console.error("Daemon evolve completed.");
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`Daemon evolve failed: ${msg}`);
+          });
+      }
+
       const now = new Date();
       const schedules = await this.schedules.list();
 
