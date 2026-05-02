@@ -1,57 +1,26 @@
 import type { ModelInfo, ReasoningEffort } from "../types";
-import { createAdapter } from "../providers/adapter.js";
-import { ALL_PROVIDER_IDS } from "../providers/adapter.js";
-import type { ProviderId } from "../providers/types.js";
+import { fetchCatalog, catalogModelToModelInfo } from "./catalog-client.js";
 
 const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 
 // ---------------------------------------------------------------------------
-// Dynamic model registry — populated by refreshModels() at boot
+// Centralized model registry — populated by loadCatalog() at boot
 // ---------------------------------------------------------------------------
 
 export let MODELS: ModelInfo[] = [];
 export let isLoading = true;
 
 /**
- * Fetch models from provider APIs. Called once at boot before any user interaction.
- * Providers without an API key are silently skipped.
- * On total failure (no providers reachable), MODELS stays empty — callers must handle.
+ * Load models from centralized catalog (CP endpoint with static fallback).
+ * Called once at boot. No provider API keys needed.
  */
-export async function refreshModels(
-  configs: Partial<Record<ProviderId, { apiKey?: string; baseURL?: string; model?: string }>>,
-): Promise<void> {
+export async function loadCatalog(): Promise<void> {
   isLoading = true;
   try {
-    const allModels: ModelInfo[] = [];
-    const seen = new Set<string>();
-
-    for (const providerId of ALL_PROVIDER_IDS) {
-      const providerConfig = configs[providerId];
-      if (!providerConfig?.apiKey && providerId !== "ollama") continue;
-      try {
-        const adapter = createAdapter(providerId, {
-          apiKey: providerConfig?.apiKey,
-          baseURL: providerConfig?.baseURL,
-          model: providerConfig?.model ?? "placeholder",
-        });
-        if (adapter.listModels) {
-          const fetched = await adapter.listModels();
-          for (const m of fetched) {
-            if (!seen.has(m.id)) {
-              allModels.push(m);
-              seen.add(m.id);
-            }
-          }
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        if (/401|invalid.*key|authentication/i.test(msg)) {
-          console.error(`[muonroi-cli] ${providerId}: API key invalid or expired. Update your key and try again.`);
-        }
-      }
-    }
-
-    MODELS = allModels;
+    const catalog = await fetchCatalog();
+    MODELS = catalog.map(catalogModelToModelInfo);
+  } catch {
+    // On total failure, MODELS stays empty — callers must handle
   } finally {
     isLoading = false;
   }
