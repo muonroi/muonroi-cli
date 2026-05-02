@@ -90,16 +90,17 @@ async function checkKeyPresence(): Promise<CheckResult> {
 
 async function checkOllamaHealth(): Promise<CheckResult> {
   try {
-    const resp = await fetch("http://ollama.muonroi.com:11434/api/tags", {
+    const ollamaUrl = process.env.OLLAMA_URL ?? "http://localhost:11434";
+    const resp = await fetch(`${ollamaUrl.replace(/\/+$/, "")}/api/tags`, {
       signal: AbortSignal.timeout(2000),
     });
     return {
       name: "ollama",
       status: resp.ok ? "pass" : "warn",
-      detail: resp.ok ? "Ollama VPS reachable" : `Ollama responded ${resp.status}`,
+      detail: resp.ok ? `Ollama reachable (${ollamaUrl})` : `Ollama responded ${resp.status}`,
     };
   } catch {
-    return { name: "ollama", status: "warn", detail: "Ollama VPS unreachable (optional)" };
+    return { name: "ollama", status: "warn", detail: "Ollama not running (optional — needed for warm-path routing)" };
   }
 }
 
@@ -121,16 +122,17 @@ async function checkEE(): Promise<CheckResult> {
 
 async function checkQdrant(): Promise<CheckResult> {
   try {
-    const resp = await fetch("http://localhost:6333/healthz", {
+    const qdrantUrl = process.env.QDRANT_URL ?? "http://localhost:6333";
+    const resp = await fetch(`${qdrantUrl.replace(/\/+$/, "")}/healthz`, {
       signal: AbortSignal.timeout(1000),
     });
     return {
       name: "qdrant",
       status: resp.ok ? "pass" : "warn",
-      detail: resp.ok ? "Qdrant healthy" : `Qdrant responded ${resp.status}`,
+      detail: resp.ok ? `Qdrant healthy (${qdrantUrl})` : `Qdrant responded ${resp.status}`,
     };
   } catch {
-    return { name: "qdrant", status: "warn", detail: "Qdrant unreachable (optional for v1)" };
+    return { name: "qdrant", status: "warn", detail: "Qdrant not running locally (OK if EE is remote)" };
   }
 }
 
