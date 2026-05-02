@@ -428,7 +428,7 @@ program
 
     const config = resolveConfig(options);
 
-    // First-run wizard or key re-prompt (interactive only)
+    // First-run wizard (interactive only, before any TUI code)
     const isInteractive = !options.prompt && !options.verify && process.stdin.isTTY;
     if (!config.apiKey && isInteractive) {
       const wizardKey = await firstRunWizard();
@@ -441,20 +441,19 @@ program
     }
 
     // Boot model registry — fetch available models from all configured providers
-    const { MODELS: loadedModels } = await import("./models/registry.js");
     await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
 
-    // If key exists but models failed to load → key is likely invalid → re-prompt
-    if (config.apiKey && loadedModels.length === 0 && isInteractive) {
-      process.stderr.write("\n\x1b[33mAPI key appears invalid — no models loaded.\x1b[0m\n");
-      const newKey = await firstRunWizard();
-      if (newKey) {
-        saveUserSettings({ apiKey: newKey });
-        config.apiKey = newKey;
-        await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
-      } else {
-        process.exit(1);
-      }
+    // If key exists but no models loaded → key is likely invalid
+    const { MODELS: loadedModels } = await import("./models/registry.js");
+    if (config.apiKey && loadedModels.length === 0) {
+      console.error(
+        "\x1b[31mAPI key is invalid or expired. No models could be loaded.\x1b[0m\n" +
+        "Update your key:\n" +
+        "  muonroi-cli -k YOUR_NEW_KEY\n" +
+        "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
+        "\nGet a key at: https://console.anthropic.com/settings/keys",
+      );
+      process.exit(1);
     }
 
     if (options.verify) {
