@@ -163,6 +163,11 @@ export function loadValidSubAgents(): CustomSubagentConfig[] {
   return parseSubAgentsRawList(loadUserSettings().subAgents);
 }
 
+export interface ProviderKeyConfig {
+  apiKey: string;
+  baseURL?: string;
+}
+
 export interface UserSettings {
   apiKey?: string;
   defaultModel?: string;
@@ -178,6 +183,14 @@ export interface UserSettings {
   payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
+  providers?: {
+    openai?: ProviderKeyConfig;
+    google?: ProviderKeyConfig;
+    deepseek?: ProviderKeyConfig;
+    siliconflow?: ProviderKeyConfig;
+    xai?: ProviderKeyConfig;
+    ollama?: { baseURL?: string };
+  };
 }
 
 export interface ProjectSettings {
@@ -320,6 +333,69 @@ export function getApiKey(): string | undefined {
 
 export function getBaseURL(): string {
   return process.env.MUONROI_BASE_URL || "https://api.anthropic.com";
+}
+
+/**
+ * Build provider configs for refreshModels().
+ * Reads env vars + user-settings.json providers section.
+ * Anthropic uses the main apiKey; others use providers.* keys.
+ */
+export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey?: string; baseURL?: string; model?: string }> {
+  const settings = loadUserSettings();
+  const p = settings.providers ?? {};
+
+  const configs: Record<string, { apiKey?: string; baseURL?: string; model?: string }> = {};
+
+  // Anthropic — main API key
+  const anthropicKey = mainApiKey ?? getApiKey();
+  if (anthropicKey) {
+    configs.anthropic = { apiKey: anthropicKey, baseURL: getBaseURL() };
+  }
+
+  // OpenAI
+  const openaiKey = process.env.OPENAI_API_KEY ?? p.openai?.apiKey;
+  if (openaiKey) {
+    configs.openai = { apiKey: openaiKey, baseURL: p.openai?.baseURL };
+  }
+
+  // Google Gemini
+  const googleKey = process.env.GOOGLE_API_KEY ?? p.google?.apiKey;
+  if (googleKey) {
+    configs.google = { apiKey: googleKey, baseURL: p.google?.baseURL };
+  }
+
+  // DeepSeek
+  const deepseekKey = process.env.DEEPSEEK_API_KEY ?? p.deepseek?.apiKey;
+  if (deepseekKey) {
+    configs.deepseek = {
+      apiKey: deepseekKey,
+      baseURL: p.deepseek?.baseURL ?? "https://api.deepseek.com",
+    };
+  }
+
+  // SiliconFlow
+  const siliconflowKey = process.env.SILICONFLOW_API_KEY ?? p.siliconflow?.apiKey;
+  if (siliconflowKey) {
+    configs.siliconflow = {
+      apiKey: siliconflowKey,
+      baseURL: p.siliconflow?.baseURL ?? "https://api.siliconflow.cn/v1",
+    };
+  }
+
+  // xAI / Grok (OpenAI-compatible)
+  const xaiKey = process.env.XAI_API_KEY ?? p.xai?.apiKey;
+  if (xaiKey) {
+    configs.xai = {
+      apiKey: xaiKey,
+      baseURL: p.xai?.baseURL ?? "https://api.x.ai/v1",
+    };
+  }
+
+  // Ollama — no key needed, just baseURL
+  const ollamaURL = process.env.OLLAMA_URL ?? p.ollama?.baseURL ?? "http://localhost:11434";
+  configs.ollama = { baseURL: ollamaURL };
+
+  return configs;
 }
 
 export function getCurrentModel(mode?: AgentMode): string {

@@ -1,7 +1,23 @@
 {
   "permissions": {
     "allow": [
-      "Skill(gsd:execute-phase)"
+      "Skill(gsd:execute-phase)",
+      "Skill(gsd:new-milestone)",
+      "WebSearch",
+      "WebFetch(domain:bun.com)",
+      "WebFetch(domain:www.augmentcode.com)",
+      "WebFetch(domain:docs.bswen.com)",
+      "Skill(gsd:progress)",
+      "Skill(gsd:plan-phase)",
+      "Skill(gsd:plan-phase:*)",
+      "Skill(gsd:audit-milestone)",
+      "Skill(gsd:complete-milestone)",
+      "mcp__filesystem__directory_tree",
+      "mcp__filesystem__read_multiple_files",
+      "mcp__filesystem__read_text_file",
+      "PowerShell(Get-ChildItem *)",
+      "Skill(gsd:quick)",
+      "mcp__filesystem__list_allowed_directories"
     ]
   }
 }
