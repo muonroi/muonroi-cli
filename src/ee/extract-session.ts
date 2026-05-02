@@ -55,6 +55,9 @@ export async function extractSession(
       },
       AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
     );
+
+    // Trigger evolve after successful extraction — fire-and-forget
+    getDefaultEEClient().evolve("post-extract").catch(() => {});
   } catch {
     // D-05: swallow all errors silently
   }
