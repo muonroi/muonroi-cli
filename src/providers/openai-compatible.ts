@@ -6,7 +6,6 @@
  * Uses @ai-sdk/openai-compatible + AI SDK v6 streamText/fullStream.
  */
 
-import { fetchOpenAICompatibleModels } from "./model-utils.js";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { streamText } from "ai";
 import { redactor } from "../utils/redactor.js";
@@ -46,9 +45,6 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
         abortSignal: req.abortSignal,
       });
       yield* streamFromFullStream(result.fullStream);
-    },
-    async listModels(): Promise<import("../types").ModelInfo[]> {
-      return fetchOpenAICompatibleModels(baseURL, config.apiKey ?? "");
     },
   };
 }

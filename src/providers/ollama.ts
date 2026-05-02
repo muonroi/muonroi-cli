@@ -32,20 +32,5 @@ export function createOllamaAdapter(config: ProviderConfig): Adapter {
       });
       yield* streamFromFullStream(result.fullStream);
     },
-    async listModels(): Promise<import("../types").ModelInfo[]> {
-      const baseURL = (config.baseURL ?? "http://localhost:11434/api").replace(/\/api$/, "");
-      const response = await fetch(`${baseURL}/api/tags`);
-      if (!response.ok) return [];
-      const data = (await response.json()) as { models: any[] };
-      return data.models.map((m: any) => ({
-        id: m.name,
-        name: m.name,
-        contextWindow: 128000,
-        inputPrice: 0,
-        outputPrice: 0,
-        reasoning: false,
-        description: `Ollama model ${m.name}`,
-      }));
-    },
   };
 }

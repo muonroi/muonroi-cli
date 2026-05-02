@@ -33,8 +33,5 @@ export function createGeminiAdapter(config: ProviderConfig): Adapter {
       });
       yield* streamFromFullStream(result.fullStream);
     },
-    async listModels(): Promise<import("../types").ModelInfo[]> {
-      return [];
-    },
   };
 }
