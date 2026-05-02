@@ -2087,11 +2087,25 @@ export class Agent {
     this._pilEnrichmentDelta =
       pilCtx.metrics?.estimatedTokensSaved ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
-    // ROUTE-11: Capture turn start time and taskHash for feedback loop.
-    // routeModel is called here to get taskHash used by routeFeedback at turn completion.
+    // ROUTE-11: Per-turn model routing via decide() — picks cheapest capable model
     const turnStartMs = Date.now();
-    const eeRoute = await routeModel(userMessage, {}, "cli").catch(() => null);
-    const taskHash = eeRoute?.taskHash ?? null;
+    let turnModelId = this.modelId;
+    let taskHash: string | null = null;
+    try {
+      const { decide } = await import("../router/decide.js");
+      const routeDecision = await decide(userMessage, {
+        tenantId: "local",
+        cwd: this.bash.getCwd(),
+        defaultModel: this.modelId,
+        defaultProvider: "anthropic",
+      });
+      turnModelId = routeDecision.model;
+      taskHash = routeDecision.taskHash ?? null;
+    } catch {
+      // Router unavailable — use session default model
+      const eeRoute = await routeModel(userMessage, {}, "cli").catch(() => null);
+      taskHash = eeRoute?.taskHash ?? null;
+    }
 
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);
@@ -2114,9 +2128,9 @@ export class Agent {
         pilCtx,
         _hasResponseTools,
       ),
-      this.modelId,
+      turnModelId,
     );
-    const runtime = resolveModelRuntime(provider, this.modelId);
+    const runtime = resolveModelRuntime(provider, turnModelId);
     const modelInfo = runtime.modelInfo;
     this.planContext = null;
     let attemptedOverflowRecovery = false;
