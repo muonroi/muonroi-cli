@@ -18,7 +18,7 @@ import {
   renderHeadlessPrelude,
 } from "./headless/output";
 import {
-  refreshModels,
+  loadCatalog,
   normalizeModelId,
 } from "./models/registry.js";
 // Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
@@ -42,7 +42,6 @@ import {
   type SandboxMode,
   type SandboxSettings,
   saveUserSettings,
-  getProviderConfigs,
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
@@ -440,11 +439,11 @@ program
       }
     }
 
-    // Boot model registry — fetch available models from all configured providers
-    await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
+    // Boot model registry — load from centralized catalog (no provider API calls)
+    await loadCatalog().catch(() => {});
 
     // If key exists but no models loaded → key is likely invalid
-    const { MODELS: loadedModels } = await import("./models/registry.js");
+    const { MODELS: loadedModels, getModelInfo: lookupModel } = await import("./models/registry.js");
     if (config.apiKey && loadedModels.length === 0) {
       console.error(
         "\x1b[31mAPI key is invalid or expired. No models could be loaded.\x1b[0m\n" +
@@ -454,6 +453,31 @@ program
         "\nGet a key at: https://console.anthropic.com/settings/keys",
       );
       process.exit(1);
+    }
+
+    // Validate configured model exists in loaded registry — fallback to first available
+    if (loadedModels.length > 0) {
+      const { getCurrentModel } = await import("./utils/settings.js");
+      const effectiveModel = config.model || getCurrentModel();
+      if (effectiveModel && !lookupModel(effectiveModel)) {
+        console.error(
+          `\x1b[31mModel "${effectiveModel}" is not available (may be retired or not in your plan).\x1b[0m\n`,
+        );
+        console.error("Available models:\n");
+        for (const m of loadedModels.slice(0, 15)) {
+          console.error(`  \x1b[36m${m.id}\x1b[0m — ${m.name}`);
+        }
+        if (loadedModels.length > 15) {
+          console.error(`  ... and ${loadedModels.length - 15} more (run \`muonroi-cli models\` to see all)`);
+        }
+        console.error(
+          "\n\x1b[33mSet your model:\x1b[0m\n" +
+          "  muonroi-cli -m MODEL_ID\n" +
+          "  # or add to ~/.muonroi-cli/user-settings.json:\n" +
+          '  # { "defaultModel": "MODEL_ID" }\n',
+        );
+        process.exit(1);
+      }
     }
 
     if (options.verify) {
@@ -515,8 +539,8 @@ program
   .command("models")
   .description("List available models")
   .action(async () => {
-    console.log("\nFetching available models...\n");
-    await refreshModels(getProviderConfigs());
+    console.log("\nLoading model catalog...\n");
+    await loadCatalog();
     const { MODELS } = await import("./models/registry.js");
     for (const m of MODELS) {
       const tags = [

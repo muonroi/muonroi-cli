@@ -336,7 +336,7 @@ export function getBaseURL(): string {
 }
 
 /**
- * Build provider configs for refreshModels().
+ * Build provider configs for adapter creation.
  * Reads env vars + user-settings.json providers section.
  * Anthropic uses the main apiKey; others use providers.* keys.
  */
