@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 import { serializeConversation } from "../orchestrator/compaction.js";
 import { getDefaultEEClient } from "./intercept.js";
+import { buildScope, scopeLabel } from "./scope.js";
 
 const USER_MSG_THRESHOLD = 5;
 const EXTRACT_TIMEOUT_MS = 2000;
@@ -43,6 +44,9 @@ export async function extractSession(
     // D-01/D-02: compact transcript
     const transcript = buildExtractTranscript(messages);
 
+    // Resolve scope for ecosystem-aware extraction
+    const scope = await buildScope({ cwd: projectPath });
+
     // D-04: 2s hard deadline via signal override
     await getDefaultEEClient().extract(
       {
@@ -51,6 +55,7 @@ export async function extractSession(
         meta: {
           source,
           sessionId: sessionId ?? undefined,
+          scope: scopeLabel(scope),
         },
       },
       AbortSignal.timeout(EXTRACT_TIMEOUT_MS),
