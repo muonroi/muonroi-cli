@@ -6,6 +6,7 @@ import { redactor } from "./utils/redactor.js";
 
 redactor.installGlobalPatches();
 
+import { createInterface } from "readline";
 import { InvalidArgumentError, program } from "commander";
 
 import packageJson from "../package.json";
@@ -57,6 +58,38 @@ process.on("unhandledRejection", (reason) => {
   console.error("Unhandled rejection:", reason);
   process.exit(1);
 });
+
+/**
+ * First-run wizard: prompts for API key interactively when none is configured.
+ * Output goes to stderr so it doesn't pollute piped stdout.
+ * Returns the trimmed key or null if user cancels / stdin is not a TTY.
+ */
+async function firstRunWizard(): Promise<string | null> {
+  try {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    const ask = (q: string): Promise<string> =>
+      new Promise((resolve) => rl.question(q, (answer) => resolve(answer)));
+
+    process.stderr.write("\nWelcome to muonroi-cli!\n\n");
+    process.stderr.write("To get started, you need an API key from Anthropic.\n");
+    process.stderr.write("Get one at: https://console.anthropic.com/settings/keys\n\n");
+
+    const raw = await ask("Enter your API key: ");
+    rl.close();
+
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      process.stderr.write(
+        "No key provided. Set MUONROI_API_KEY env var or run again to enter key.\n",
+      );
+      return null;
+    }
+    return trimmed;
+  } catch {
+    // stdin is not a TTY or readline errors — fail silently
+    return null;
+  }
+}
 
 async function startInteractive(
   apiKey: string | undefined,
@@ -390,6 +423,17 @@ program
     }
 
     const config = resolveConfig(options);
+
+    // First-run wizard: prompt for API key if none configured (interactive only)
+    if (!config.apiKey && !options.prompt && !options.verify && process.stdin.isTTY) {
+      const wizardKey = await firstRunWizard();
+      if (wizardKey) {
+        saveUserSettings({ apiKey: wizardKey });
+        config.apiKey = wizardKey;
+      } else {
+        process.exit(1);
+      }
+    }
 
     if (options.verify) {
       const verifyError = getVerifyCliError({ hasPrompt: Boolean(options.prompt), hasMessageArgs: message.length > 0 });
