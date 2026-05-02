@@ -95,10 +95,11 @@ import {
   getModelInfo,
   getSupportedReasoningEfforts,
   MODELS,
+  isLoading,
   normalizeModelId,
 } from "../models/registry.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 // ---------------------------------------------------------------------------
 // Telegram stubs — removed feature, compile-only placeholders
@@ -918,14 +919,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   modeInfoRef.current = modeInfo;
   const modelInfo = getModelInfo(model);
   const contextStats = modelInfo ? agent.getContextStats(modelInfo.contextWindow, streamContent) : null;
-  const _flatModels = MODELS.map((m) => m.id);
+  
+  // UI Loading logic for dynamic models
+  const modelList = isLoading ? [] : MODELS;
+  
   const filteredModels = modelSearchQuery
-    ? MODELS.filter(
+    ? modelList.filter(
         (m) =>
           m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) ||
           m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()),
       )
-    : [...MODELS];
+    : [...modelList];
+    
   const filteredModelIds = filteredModels.map((m) => m.id);
   const filteredSlashItems = slashSearchQuery
     ? SLASH_MENU_ITEMS.filter(

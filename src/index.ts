@@ -17,7 +17,10 @@ import {
   renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
-import { MODELS, normalizeModelId } from "./models/registry.js";
+import {
+  refreshModels,
+  normalizeModelId,
+} from "./models/registry.js";
 // Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
 import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
@@ -435,6 +438,13 @@ program
       }
     }
 
+    // Boot model registry — fetch available models from configured providers
+    if (config.apiKey) {
+      await refreshModels({
+        anthropic: { apiKey: config.apiKey, baseURL: config.baseURL },
+      }).catch(() => {});
+    }
+
     if (options.verify) {
       const verifyError = getVerifyCliError({ hasPrompt: Boolean(options.prompt), hasMessageArgs: message.length > 0 });
       if (verifyError) {
@@ -493,8 +503,15 @@ program
 program
   .command("models")
   .description("List available models")
-  .action(() => {
-    console.log("\nAvailable Models:\n");
+  .action(async () => {
+    const apiKey = getApiKey();
+    if (!apiKey) {
+      console.error("API key required to list models. Set MUONROI_API_KEY or run muonroi-cli to configure.");
+      process.exit(1);
+    }
+    console.log("\nFetching available models...\n");
+    await refreshModels({ anthropic: { apiKey } });
+    const { MODELS } = await import("./models/registry.js");
     for (const m of MODELS) {
       const tags = [
         m.reasoning ? "reasoning" : "non-reasoning",

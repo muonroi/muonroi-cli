@@ -108,4 +108,5 @@ export interface AdapterRequest {
 export interface Adapter {
   readonly id: ProviderId;
   stream(req: AdapterRequest): ProviderStream;
+  listModels?(): Promise<import("../types").ModelInfo[]>;
 }

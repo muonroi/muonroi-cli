@@ -150,6 +150,41 @@ export function createAnthropicAdapter(config: ProviderConfig): Adapter {
       });
       yield* streamFromFullStream(result.fullStream);
     },
+    async listModels(): Promise<import("../types").ModelInfo[]> {
+      const baseUrl = config.baseURL ?? "https://api.anthropic.com";
+      const response = await fetch(`${baseUrl}/v1/models`, {
+        headers: {
+          "x-api-key": config.apiKey ?? "",
+          "anthropic-version": "2023-06-01",
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to list Anthropic models: ${response.statusText}`);
+      }
+      const data = (await response.json()) as { data: any[] };
+      return data.data.map((m: any) => {
+        const id: string = m.id;
+        const aliases: string[] = [];
+        // Generate short alias: claude-sonnet-4-6-20250514 → claude-sonnet-4-6
+        const dateStripped = id.replace(/-\d{8}$/, "");
+        if (dateStripped !== id) aliases.push(dateStripped);
+        // Generate -latest alias: claude-sonnet-4-6-latest
+        if (dateStripped !== id) aliases.push(`${dateStripped}-latest`);
+        return {
+          id,
+          name: m.display_name ?? id,
+          contextWindow: m.max_input_tokens || 200_000,
+          inputPrice: 0,
+          outputPrice: 0,
+          reasoning: !!m.capabilities?.thinking,
+          description: m.display_name ?? id,
+          aliases,
+          supportsReasoningEffort: !!m.capabilities?.thinking,
+          defaultReasoningEffort: m.capabilities?.thinking ? ("medium" as const) : undefined,
+        };
+      });
+    },
   };
 }
 
