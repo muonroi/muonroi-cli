@@ -209,7 +209,7 @@ function resolveModelRuntime(provider: LegacyProvider, modelId: string): Resolve
   };
 }
 
-const DEFAULT_MODEL = "claude-sonnet-4-6-20250514";
+const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
   // Batch API not supported with Anthropic in Phase 0. Phase 1 may add this.

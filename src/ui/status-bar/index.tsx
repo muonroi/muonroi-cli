@@ -53,7 +53,7 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
     joined.push(el);
   });
 
-  return React.createElement("row", { "data-testid": "status-bar" }, ...joined);
+  return React.createElement("box", { "data-testid": "status-bar", flexDirection: "row" }, ...joined);
 }
 
 /** React component with hook-based subscription -- used in app.tsx layout. */
