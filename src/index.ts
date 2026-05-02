@@ -428,8 +428,9 @@ program
 
     const config = resolveConfig(options);
 
-    // First-run wizard: prompt for API key if none configured (interactive only)
-    if (!config.apiKey && !options.prompt && !options.verify && process.stdin.isTTY) {
+    // First-run wizard or key re-prompt (interactive only)
+    const isInteractive = !options.prompt && !options.verify && process.stdin.isTTY;
+    if (!config.apiKey && isInteractive) {
       const wizardKey = await firstRunWizard();
       if (wizardKey) {
         saveUserSettings({ apiKey: wizardKey });
@@ -440,7 +441,21 @@ program
     }
 
     // Boot model registry — fetch available models from all configured providers
+    const { MODELS: loadedModels } = await import("./models/registry.js");
     await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
+
+    // If key exists but models failed to load → key is likely invalid → re-prompt
+    if (config.apiKey && loadedModels.length === 0 && isInteractive) {
+      process.stderr.write("\n\x1b[33mAPI key appears invalid — no models loaded.\x1b[0m\n");
+      const newKey = await firstRunWizard();
+      if (newKey) {
+        saveUserSettings({ apiKey: newKey });
+        config.apiKey = newKey;
+        await refreshModels(getProviderConfigs(config.apiKey)).catch(() => {});
+      } else {
+        process.exit(1);
+      }
+    }
 
     if (options.verify) {
       const verifyError = getVerifyCliError({ hasPrompt: Boolean(options.prompt), hasMessageArgs: message.length > 0 });
