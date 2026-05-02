@@ -12,12 +12,12 @@
 ### Locked Decisions
 - Auth provider: **Clerk** — JWT + org support, free tier covers beta, fastest solo-dev integration
 - Multi-tenancy isolation: **Collection-per-tenant on Qdrant** — each tenant gets `principles_{tenant_id}` collection, cross-query prevention by design
-- Cloud EE deployment: **Existing VPS (`cp.truyentm.xyz`)** — reuse control-plane infra, solo maintainer can't ops two servers
+- Cloud EE deployment: **Existing VPS (`cp.muonroi.com`)** — reuse control-plane infra, solo maintainer can't ops two servers
 - API transport: **REST over HTTPS** — same as local EE HTTP interface, add JWT auth header from Clerk
 - Billing provider: **LemonSqueezy** — Merchant of Record model, handles global tax/VAT, seller in Vietnam OK, checkout + customer portal + webhook built-in
 - Webhook idempotency: **`processed_events` table with unique constraint on `event_id`** — return 200 in <5s per ROADMAP spec
 - Tier changes: **Immediate proration for upgrades, end-of-period for downgrades** — principles preserved across tier changes
-- Remote pricing: **JSON endpoint on control-plane** (`cp.truyentm.xyz/api/pricing`), CLI fetches on startup (cached 24h), replaces Phase 1 hardcoded config
+- Remote pricing: **JSON endpoint on control-plane** (`cp.muonroi.com/api/pricing`), CLI fetches on startup (cached 24h), replaces Phase 1 hardcoded config
 - Dashboard stack: **React/Vite SPA** — deploy on same VPS behind Nginx, read-only API calls to cloud EE
 - Migration: **Mirror mode** — CLI syncs principles one-by-one with count + checksum verification, resumable per-principle, 30-day local archive per ROADMAP spec
 - Dashboard auth: **Same Clerk auth** — SSO with CLI account, dashboard shows principles + usage analytics
@@ -182,7 +182,7 @@ import { verifyToken } from "@clerk/backend";
 export async function verifyClerkToken(token: string): Promise<{ userId: string; orgId?: string }> {
   const payload = await verifyToken(token, {
     jwtKey: process.env.CLERK_JWT_KEY,          // PEM public key from Clerk Dashboard
-    authorizedParties: ["https://cp.truyentm.xyz"]
+    authorizedParties: ["https://cp.muonroi.com"]
   });
   return { userId: payload.sub, orgId: payload.org_id as string | undefined };
 }
@@ -192,7 +192,7 @@ export async function verifyClerkToken(token: string): Promise<{ userId: string;
 ```typescript
 // src/cloud/client.ts — mirrors EEClient interface
 export function createCloudEEClient(opts: { baseUrl: string; authToken: string }): EEClient {
-  // Same pattern as createEEClient() but baseUrl = "https://cp.truyentm.xyz/api/cloud-ee"
+  // Same pattern as createEEClient() but baseUrl = "https://cp.muonroi.com/api/cloud-ee"
   // All requests carry Authorization: Bearer <clerk_token>
   // tenantId derived from Clerk userId claim
 }
@@ -324,7 +324,7 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export async function fetchRemotePricing(): Promise<RemotePricingResponse | null> {
   if (_cache && Date.now() - _cache.fetchedAt < CACHE_TTL_MS) return _cache.data;
   try {
-    const resp = await fetch("https://cp.truyentm.xyz/api/pricing", {
+    const resp = await fetch("https://cp.muonroi.com/api/pricing", {
       signal: AbortSignal.timeout(3000) // 3s timeout — non-blocking on startup
     });
     if (!resp.ok) return null;
@@ -500,7 +500,7 @@ import { verifyToken } from "@clerk/backend";
 export async function verifyClerkJWT(token: string): Promise<{ sub: string; org_id?: string }> {
   const payload = await verifyToken(token, {
     jwtKey: process.env.CLERK_JWT_KEY, // PEM key, enables networkless verification
-    authorizedParties: ["https://cp.truyentm.xyz", "http://localhost:3000"]
+    authorizedParties: ["https://cp.muonroi.com", "http://localhost:3000"]
   });
   return { sub: payload.sub, org_id: payload.org_id as string | undefined };
 }
@@ -574,7 +574,7 @@ export function EEPrinciplesPage() {
 ## Open Questions
 
 1. **Qdrant instance on VPS — existing vs new**
-   - What we know: Control-plane VPS (`100.79.164.25`) hosts the existing experience-engine Qdrant.
+   - What we know: Control-plane VPS (`vps.muonroi.com`) hosts the existing experience-engine Qdrant.
    - What's unclear: Is the existing Qdrant instance the cloud EE Qdrant, or does Phase 4 spin up a second Qdrant? The `experience-engine` already runs Qdrant locally.
    - Recommendation: Reuse the VPS Qdrant instance. Create cloud EE collections in a separate namespace (`principles_*`) that doesn't conflict with experience-engine collections. Verify QDRANT_URL and QDRANT_API_KEY are available on the VPS.
 

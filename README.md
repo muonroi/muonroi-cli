@@ -30,12 +30,12 @@ Cursor Pro:    $20/mo  (500 fast requests, then queued)
 
 ### Cloud (recommended) — Subscribe and start coding
 
-> *Coming soon — [join the waitlist](https://muonroi.dev/cloud)*
+> *Coming soon — [join the waitlist](https://muonroi.com/cloud)*
 
 Everything pre-configured. Experience Engine, vector database, smart routing, cross-project learning — all hosted. You install the CLI, enter your subscription key, and start coding. No Docker, no Qdrant, no setup.
 
 ```bash
-curl -fsSL https://muonroi.dev/install | bash
+curl -fsSL https://muonroi.com/install | bash
 muonroi-cli                              # first run guides you through setup
 ```
 
@@ -58,7 +58,7 @@ bun add -g muonroi-cli
 Or via install script (once published):
 
 ```bash
-curl -fsSL https://muonroi.dev/install | bash
+curl -fsSL https://muonroi.com/install | bash
 ```
 
 ---
@@ -467,7 +467,7 @@ All hooks (intercept, posttool, extract, evolve) route to the remote brain. Offl
 
 ### Tier 3: Cloud subscription (recommended)
 
-> *Coming soon — [join the waitlist](https://muonroi.dev/cloud)*
+> *Coming soon — [join the waitlist](https://muonroi.com/cloud)*
 
 Everything from Tier 2, managed for you. No Docker, no Qdrant, no VPS, no maintenance.
 
