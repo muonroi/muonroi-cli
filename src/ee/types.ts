@@ -156,6 +156,7 @@ export interface ExtractRequest {
     sessionId?: string;
     tenantId?: string;
     source?: "cli-exit" | "cli-clear" | "hook-stop";
+    scope?: string;
   };
 }
 
