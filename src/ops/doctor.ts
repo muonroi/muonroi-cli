@@ -106,13 +106,16 @@ async function checkOllamaHealth(): Promise<CheckResult> {
 async function checkEE(): Promise<CheckResult> {
   try {
     const result = await eeHealth();
+    if (result.ok) return { name: "ee", status: "pass", detail: "Experience Engine healthy" };
     return {
       name: "ee",
-      status: result.ok ? "pass" : "warn",
-      detail: result.ok ? "Experience Engine healthy" : `EE status ${result.status}`,
+      status: "warn",
+      detail: result.status === 0
+        ? "Experience Engine not running (optional — CLI works without it)"
+        : `EE responded ${result.status} (optional)`,
     };
   } catch {
-    return { name: "ee", status: "warn", detail: "Experience Engine unreachable (optional)" };
+    return { name: "ee", status: "warn", detail: "Experience Engine not running (optional — CLI works without it)" };
   }
 }
 
