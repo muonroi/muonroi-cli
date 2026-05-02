@@ -12,6 +12,7 @@ import { readFile } from "fs/promises";
 import os from "os";
 import path from "path";
 import { health as eeHealth } from "../ee/health.js";
+import { loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
   name: string;
@@ -23,13 +24,20 @@ function icon(status: "pass" | "warn" | "fail"): string {
   return status === "pass" ? "[PASS]" : status === "warn" ? "[WARN]" : "[FAIL]";
 }
 
-export function formatDoctorReport(results: CheckResult[]): string {
-  const lines = results.map((r) => `  ${icon(r.status)} ${r.name}: ${r.detail}`);
+export function formatDoctorReport(results: CheckResult[], version?: string): string {
+  const lines: string[] = [];
+  lines.push(`  muonroi-cli v${version || "unknown"}`);
+  lines.push("");
+  for (const r of results) {
+    lines.push(`  ${icon(r.status)} ${r.name}: ${r.detail}`);
+  }
   const passCount = results.filter((r) => r.status === "pass").length;
   const warnCount = results.filter((r) => r.status === "warn").length;
   const failCount = results.filter((r) => r.status === "fail").length;
   lines.push("");
   lines.push(`  Summary: ${passCount} pass, ${warnCount} warn, ${failCount} fail`);
+  lines.push("");
+  lines.push("  For managed Experience Engine: https://muonroi.dev/cloud");
   return lines.join("\n");
 }
 
@@ -57,29 +65,26 @@ async function checkOS(): Promise<CheckResult> {
 }
 
 async function checkKeyPresence(): Promise<CheckResult> {
-  const envKey = process.env.ANTHROPIC_API_KEY;
+  const envKey = process.env.MUONROI_API_KEY;
   if (envKey && envKey.length > 0) {
     return {
       name: "key_presence",
       status: "pass",
-      detail: "ANTHROPIC_API_KEY set via env var",
+      detail: "MUONROI_API_KEY set via env var",
     };
   }
   try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const keytar = (await import("keytar")) as any;
-    const mod = keytar.default ?? keytar;
-    const stored = await mod.getPassword("muonroi-cli", "anthropic-api-key");
-    if (stored) {
-      return { name: "key_presence", status: "pass", detail: "API key found in OS keychain" };
+    const settings = loadUserSettings();
+    if (settings.apiKey && settings.apiKey.length > 0) {
+      return { name: "key_presence", status: "pass", detail: "API key found in user-settings.json" };
     }
   } catch {
-    /* keytar not available — fall through */
+    /* settings file unreadable — fall through */
   }
   return {
     name: "key_presence",
     status: "fail",
-    detail: "No API key found (set ANTHROPIC_API_KEY or store in keychain)",
+    detail: "No API key found (set MUONROI_API_KEY or run muonroi-cli to configure)",
   };
 }
 

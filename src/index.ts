@@ -569,7 +569,7 @@ program
     const { runDoctor, formatDoctorReport } = await import("./ops/doctor.js");
     const results = await runDoctor();
     console.log("\nmuonroi-cli doctor\n");
-    console.log(formatDoctorReport(results));
+    console.log(formatDoctorReport(results, packageJson.version));
     const hasFail = results.some((r) => r.status === "fail");
     process.exit(hasFail ? 1 : 0);
   });
