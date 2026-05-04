@@ -450,6 +450,10 @@ program
     const { loadEEAuthToken } = await import("./ee/auth.js");
     await loadEEAuthToken().catch(() => {});
 
+    // Patch zod-to-json-schema for Zod v4 compat (fixes tool calls for DeepSeek etc.)
+    const { patchZodToJsonSchema } = await import("./providers/patch-zod-schema.js");
+    patchZodToJsonSchema();
+
     // Boot model registry — load from centralized catalog (no provider API calls)
     await loadCatalog().catch(() => {});
 
