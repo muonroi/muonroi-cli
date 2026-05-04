@@ -21,7 +21,8 @@
       "WebFetch(domain:docs.x.ai)",
       "WebFetch(domain:api-docs.deepseek.com)",
       "WebFetch(domain:platform.openai.com)",
-      "WebFetch(domain:developers.openai.com)"
+      "WebFetch(domain:developers.openai.com)",
+      "PowerShell(New-Item *)"
     ]
   }
 }
