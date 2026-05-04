@@ -28,6 +28,14 @@ export interface DecideOpts {
   defaultProvider: string;
   /** Override home directory for ledger (testing). */
   homeOverride?: string;
+  /** PIL enrichment signals — forwarded to EE context. */
+  pil?: {
+    domain?: string | null;
+    taskType?: string | null;
+    confidence?: number;
+    gsdPhase?: string | null;
+    activeRunId?: string | null;
+  };
 }
 
 /** Default token estimates for cap projection (Phase 1). */
@@ -41,15 +49,18 @@ const ESTIMATE_OUTPUT = 1_000;
  * Pulls projectSlug from cwd basename, phase from flow state if available,
  * and recently touched files if provided.
  */
-function buildRouteContext(cwd: string, extra?: { phase?: string; files?: string[] }): Record<string, unknown> {
+function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string, unknown> {
   const ctx: Record<string, unknown> = {};
 
-  // projectSlug: basename of cwd as a reasonable default
   const slug = cwd.split(/[\\/]/).filter(Boolean).pop();
   if (slug) ctx.projectSlug = slug;
 
-  if (extra?.phase) ctx.phase = extra.phase;
-  if (extra?.files?.length) ctx.files = extra.files;
+  if (pil?.domain) ctx.domain = pil.domain;
+  if (pil?.gsdPhase) ctx.phase = pil.gsdPhase;
+  if (pil?.activeRunId) ctx.activeRun = pil.activeRunId;
+  if (pil?.taskType && pil.confidence > 0) {
+    ctx.localRoute = { tier: pil.taskType, confidence: pil.confidence };
+  }
 
   return ctx;
 }
@@ -153,7 +164,7 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
 }
 
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
-  const routeCtx = buildRouteContext(opts.cwd);
+  const routeCtx = buildRouteContext(opts.cwd, opts.pil);
 
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
