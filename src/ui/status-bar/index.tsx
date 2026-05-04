@@ -27,7 +27,7 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
       `${s.provider || "-"}/${s.model || "-"}`,
     ),
     React.createElement(TierBadge, { key: "tier", tier: s.tier }),
-    React.createElement("text", { key: "tok", "data-testid": "slot-tokens" }, `in:${s.in_tokens} out:${s.out_tokens}${s.cache_read_tokens ? ` cached:${s.cache_read_tokens}` : ""}`),
+    React.createElement("text", { key: "tok", "data-testid": "slot-tokens" }, `in:${s.in_tokens} out:${s.out_tokens}${s.cache_read_tokens ? ` cached:${s.cache_read_tokens}` : ""} cost:$${s.session_usd.toFixed(4)}`),
     React.createElement(UsdMeter, {
       key: "usd",
       session_usd: s.session_usd,

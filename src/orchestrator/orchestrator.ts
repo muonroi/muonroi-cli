@@ -1176,15 +1176,22 @@ export class Agent {
         this._pilEnrichmentDelta = 0;
       }
     }
-    // Update status bar token counters + provider/model + cache metrics
+    // Update status bar token counters + provider/model + cache metrics + cost
     try {
       const { statusBarStore } = require("../ui/status-bar/store.js");
+      const { getModelInfo: _getModelInfo } = require("../models/registry.js");
       const prev = statusBarStore.getState();
+      const info = _getModelInfo(model);
+      const inputCost = (usage.inputTokens ?? 0) * (info?.inputPrice ?? 0);
+      const cachedCost = (usage.cacheReadTokens ?? 0) * ((info?.cachedInputPrice ?? (info?.inputPrice ?? 0) * 0.1));
+      const outputCost = (usage.outputTokens ?? 0) * (info?.outputPrice ?? 0);
+      const turnCostMicros = inputCost - ((usage.cacheReadTokens ?? 0) * (info?.inputPrice ?? 0)) + cachedCost + outputCost;
       statusBarStore.setState({
         in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
         out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
         cache_read_tokens: (prev.cache_read_tokens ?? 0) + (usage.cacheReadTokens ?? 0),
         cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + (usage.cacheCreationTokens ?? 0),
+        session_usd: prev.session_usd + turnCostMicros / 1_000_000,
         provider: this.providerId,
         model,
       });
