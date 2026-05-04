@@ -30,6 +30,7 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { extractSession } from "../ee/extract-session.js";
 import { buildMcpToolSet } from "../mcp/runtime";
+import { createBuiltinTools } from "../tools/registry.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
@@ -240,9 +241,16 @@ function createTools(
     sessionId?: string;
   },
 ): ToolSet {
-  // Phase 0: tools infrastructure is the AI SDK ToolSet.
-  // Phase 1 will wire the full tool registry (bash, read_file, grep, lsp, etc.).
-  return {};
+  return createBuiltinTools(
+    _bash as BashTool,
+    (_mode ?? "agent") as AgentMode,
+    {
+      runTask: _opts?.runTask,
+      runDelegation: _opts?.runDelegation,
+      readDelegation: _opts?.readDelegation,
+      listDelegations: _opts?.listDelegations,
+    },
+  );
 }
 
 async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: AbortSignal): Promise<ModelMessage[]> {
