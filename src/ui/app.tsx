@@ -75,7 +75,7 @@ import {
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
-import { wireStatusBar } from "./status-bar/store.js";
+import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
 import "./slash/route.js";
@@ -712,7 +712,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const t = dark;
   const renderer = useRenderer();
   // Wire status bar subscriptions once at boot (Plan 06)
-  useEffect(() => wireStatusBar(), []);
+  useEffect(() => {
+    statusBarStore.setState({
+      provider: agent.getProviderId(),
+      model: agent.getModel(),
+    });
+    return wireStatusBar();
+  }, []);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -3138,6 +3144,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (sel) {
             agent.setModel(sel);
             setModel(sel);
+            statusBarStore.setState({ model: sel, provider: agent.getProviderId() });
             saveProjectSettings({ model: sel });
             saveUserSettings({ defaultModel: sel });
           }
