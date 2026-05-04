@@ -171,8 +171,16 @@ function formatStructuredResponse(sr: StructuredResponse): string {
 function buildAssistantEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
   return { type: "assistant", content, timestamp: new Date(), ...extra };
 }
-function buildToolResultEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
-  return { type: "tool_result", content, timestamp: new Date(), ...extra };
+function buildToolResultEntry(toolCall: ToolCall, toolResult: ToolResult, extra?: Partial<ChatEntry>): ChatEntry {
+  const output = toolResult.output ?? (toolResult.error ? `Error: ${toolResult.error}` : "");
+  return {
+    type: "tool_result",
+    content: typeof output === "string" ? output : String(output),
+    timestamp: new Date(),
+    toolCall,
+    toolResult,
+    ...extra,
+  };
 }
 function buildUserEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
   return { type: "user", content, timestamp: new Date(), ...extra };
