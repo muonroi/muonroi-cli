@@ -2121,6 +2121,13 @@ export class Agent {
         cwd: this.bash.getCwd(),
         defaultModel: this.modelId,
         defaultProvider: this.providerId,
+        pil: {
+          domain: pilCtx.domain,
+          taskType: pilCtx.taskType,
+          confidence: pilCtx.confidence,
+          gsdPhase: pilCtx.gsdPhase ?? null,
+          activeRunId: pilCtx.activeRunId ?? null,
+        },
       });
       if (routeDecision.model && routeDecision.model !== "HALT") {
         turnModelId = routeDecision.model;
