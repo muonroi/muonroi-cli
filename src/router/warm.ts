@@ -14,7 +14,7 @@ export async function callWarmRoute(
   opts: { tenantId: string; cwd: string; signal?: AbortSignal; context?: Record<string, unknown> },
 ): Promise<RouteDecision | null> {
   // ── Bridge cascade: try in-process first (~5ms) before HTTP (~250ms) ──
-  const bridgeResult = await bridgeRouteModel(prompt, opts.context ?? {}, "muonroi-cli");
+  const bridgeResult = await bridgeRouteModel(prompt, opts.context ?? {}, "claude");
   if (bridgeResult) {
     return {
       tier: bridgeResult.tier === "fast" ? "hot" : bridgeResult.tier === "premium" ? "cold" : "warm",
