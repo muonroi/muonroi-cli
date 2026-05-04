@@ -494,6 +494,12 @@ interface SystemPromptParts {
   dynamicSuffix: string;
 }
 
+const NON_ANTHROPIC_TOOL_PREAMBLE = `\n\nIMPORTANT — TOOL CALLING:
+You MUST invoke tools ONLY via the structured function calling API provided to you.
+NEVER output XML tags like <tool_name>, <bash>, <read_file>, or <delegate> as text.
+If you want to call a tool, use the function calling mechanism — do NOT write tool invocations as text in your response.
+Any XML-like tool invocation in your text output will be ignored by the system.\n`;
+
 /**
  * Strip the TOOLS: listing section from system prompt.
  * Non-Anthropic models receive tool definitions via the API's structured `tools` parameter;
@@ -524,7 +530,7 @@ function buildSystemPromptParts(
 
   let modePrompt = MODE_PROMPTS[mode];
   if (providerId && providerId !== "anthropic") {
-    modePrompt = stripToolsSection(modePrompt);
+    modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
   }
 
   const staticPrefix = `${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
