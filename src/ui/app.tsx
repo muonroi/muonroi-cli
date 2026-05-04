@@ -168,17 +168,14 @@ function formatStructuredResponse(sr: StructuredResponse): string {
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildAssistantEntry(..._args: any[]): any {
-  return {};
+function buildAssistantEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
+  return { type: "assistant", content, timestamp: new Date(), ...extra };
 }
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildToolResultEntry(..._args: any[]): any {
-  return {};
+function buildToolResultEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
+  return { type: "tool_result", content, timestamp: new Date(), ...extra };
 }
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function buildUserEntry(..._args: any[]): any {
-  return {};
+function buildUserEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
+  return { type: "user", content, timestamp: new Date(), ...extra };
 }
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function decorateTelegramEntries(_entries: any[], _userId: number, _remoteKey: string): any[] {
@@ -3573,7 +3570,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
               {messages.map((msg, i) => (
                 <MessageView
-                  key={`${msg.timestamp.getTime()}-${msg.type}-${msg.remoteKey ?? ""}-${msg.content.slice(0, 24)}`}
+                  key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${(msg.content ?? "").slice(0, 24)}`}
                   entry={msg}
                   index={i}
                   t={t}
