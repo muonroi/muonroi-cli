@@ -166,6 +166,31 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
   const routeCtx = buildRouteContext(opts.cwd, opts.pil);
 
+  // Step 0: PIL context override — trust local classifier when confidence is high
+  // Short/ambiguous messages ("fix it", "tiếp tục") can't be classified by text alone;
+  // PIL has conversation context that brain LLM doesn't.
+  const pilTier = opts.pil?.taskType as "fast" | "balanced" | "premium" | undefined;
+  const pilConf = opts.pil?.confidence ?? 0;
+  if (pilTier && pilConf >= 0.6) {
+    const tierModel = getModelByTier(pilTier, opts.defaultProvider);
+    const d: RouteDecision = {
+      tier: "hot",
+      model: tierModel?.id ?? opts.defaultModel,
+      provider: tierModel?.provider ?? opts.defaultProvider,
+      reason: `pil:${pilTier}(${pilConf.toFixed(2)})`,
+      confidence: pilConf,
+      source: "pil",
+    };
+    const checked = await capCheck(d, opts.homeOverride);
+    routerStore.setState({
+      tier: checked.tier,
+      lastDecision: checked,
+      taskHash: checked.taskHash ?? null,
+      source: checked.source ?? "pil",
+    });
+    return checked;
+  }
+
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
   if (c.tier === "hot") {
