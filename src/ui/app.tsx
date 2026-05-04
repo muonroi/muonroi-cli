@@ -3578,7 +3578,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
               {messages.map((msg, i) => (
                 <MessageView
-                  key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${(msg.content ?? "").slice(0, 24)}`}
+                  key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
                   entry={msg}
                   index={i}
                   t={t}
