@@ -494,6 +494,15 @@ interface SystemPromptParts {
   dynamicSuffix: string;
 }
 
+/**
+ * Strip the TOOLS: listing section from system prompt.
+ * Non-Anthropic models receive tool definitions via the API's structured `tools` parameter;
+ * keeping the text listing causes them to output raw XML instead of structured tool calls.
+ */
+function stripToolsSection(text: string): string {
+  return text.replace(/\nTOOLS:\n[\s\S]*?\n(?=WORKFLOW:|BEHAVIOR:|IMPORTANT:|DEFAULT DELEGATION|EXAMPLES:|$)/g, "\n");
+}
+
 function buildSystemPromptParts(
   cwd: string,
   mode: AgentMode,
@@ -501,6 +510,7 @@ function buildSystemPromptParts(
   planContext?: string | null,
   subagents?: CustomSubagentConfig[],
   sandboxSettings?: SandboxSettings,
+  providerId?: string,
 ): SystemPromptParts {
   const custom = loadCustomInstructions(cwd);
   const customSection = custom
@@ -512,7 +522,12 @@ function buildSystemPromptParts(
   const subagentsSection = formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
   const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
 
-  const staticPrefix = `${MODE_PROMPTS[mode]}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
+  let modePrompt = MODE_PROMPTS[mode];
+  if (providerId && providerId !== "anthropic") {
+    modePrompt = stripToolsSection(modePrompt);
+  }
+
+  const staticPrefix = `${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
 
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
@@ -530,8 +545,9 @@ function buildSystemPrompt(
   planContext?: string | null,
   subagents?: CustomSubagentConfig[],
   sandboxSettings?: SandboxSettings,
+  providerId?: string,
 ): string {
-  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(cwd, mode, sandboxMode, planContext, subagents, sandboxSettings);
+  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(cwd, mode, sandboxMode, planContext, subagents, sandboxSettings, providerId);
   return `${staticPrefix}${dynamicSuffix}`;
 }
 
@@ -542,6 +558,7 @@ function buildSubagentPrompt(
   sandboxMode: SandboxMode,
   subagents?: CustomSubagentConfig[],
   sandboxSettings?: SandboxSettings,
+  providerId?: string,
 ): string {
   const isExplore = request.agent === "explore";
   const isVision = request.agent === "vision";
@@ -662,7 +679,7 @@ function buildSubagentPrompt(
     "",
     `Delegated task: ${request.description}`,
     "",
-    buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings),
+    buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings, providerId),
   ].join("\n");
 }
 
@@ -960,6 +977,7 @@ export class Agent {
       this.planContext,
       undefined,
       this.bash.getSandboxSettings(),
+      this.providerId,
     );
     const usedTokens = Math.min(contextWindow, estimateConversationTokens(system, this.messages, inFlightText));
     const remainingTokens = Math.max(0, contextWindow - usedTokens);
@@ -1511,6 +1529,7 @@ export class Agent {
         childBash.getSandboxMode(),
         subagents,
         childBash.getSandboxSettings(),
+        childRuntime.modelInfo?.provider ?? this.providerId,
       ),
       childRuntime.modelId,
     );
@@ -2196,6 +2215,7 @@ export class Agent {
       this.planContext,
       subagents,
       this.bash.getSandboxSettings(),
+      this.providerId,
     );
     const system = applyModelConstraints(
       applyPilSuffix(
