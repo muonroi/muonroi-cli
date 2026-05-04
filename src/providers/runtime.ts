@@ -52,14 +52,7 @@ export function createProviderFactory(
       const p = createGoogleGenerativeAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
       return { id, factory: (modelId: string) => p(modelId) };
     }
-    case "deepseek": {
-      const defaultBase = "https://api.deepseek.com/v1";
-      const p = createOpenAI({
-        apiKey: opts.apiKey,
-        baseURL: opts.baseURL ?? defaultBase,
-      });
-      return { id, factory: (modelId: string) => p(modelId) };
-    }
+    case "deepseek":
     case "siliconflow":
     case "xai": {
       const p = createOpenAICompatible({
