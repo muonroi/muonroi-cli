@@ -35,7 +35,7 @@ export function matchRegex(prompt: string): ClassifierResult {
   // but mark as "hot" so we skip the cold path (expensive LLM)
   const trimmed = prompt.trim();
   if (trimmed.length <= 80 && trimmed.split(/\s+/).length <= 10) {
-    return { tier: "hot", confidence: 0.5, reason: "regex:short-message", tierHint: "fast" };
+    return { tier: "hot", confidence: 0.6, reason: "regex:short-message", tierHint: "fast" };
   }
 
   return { tier: "abstain", confidence: 0.0, reason: "regex:no-match" };

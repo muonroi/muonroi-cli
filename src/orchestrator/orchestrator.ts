@@ -2128,7 +2128,7 @@ export class Agent {
       taskHash = routeDecision.taskHash ?? null;
     } catch {
       // Router unavailable — use session default model
-      const eeRoute = await routeModel(userMessage, {}, "cli").catch(() => null);
+      const eeRoute = await routeModel(userMessage, {}, "claude").catch(() => null);
       taskHash = eeRoute?.taskHash ?? null;
     }
 
