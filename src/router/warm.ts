@@ -6,6 +6,7 @@
  */
 import { routeModel as bridgeRouteModel } from "../ee/bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import type { RouteDecision } from "./types.js";
 
 export async function callWarmRoute(
@@ -18,7 +19,7 @@ export async function callWarmRoute(
     return {
       tier: bridgeResult.tier === "fast" ? "hot" : bridgeResult.tier === "premium" ? "cold" : "warm",
       model: bridgeResult.model,
-      provider: "",
+      provider: detectProviderForModel(bridgeResult.model),
       reason: `warm:bridge:${bridgeResult.reason}`,
       confidence: bridgeResult.confidence,
       taskHash: bridgeResult.taskHash ?? undefined,

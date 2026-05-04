@@ -5,6 +5,7 @@
  * Returns null on timeout/5xx/network error (graceful degradation).
  */
 import { getDefaultEEClient } from "../ee/intercept.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import type { RouteDecision } from "./types.js";
 
 export async function callColdRoute(
@@ -19,7 +20,7 @@ export async function callColdRoute(
   return {
     tier: "cold",
     model: r.model,
-    provider: "",
+    provider: detectProviderForModel(r.model),
     reason: `cold:${r.reason}`,
     taskHash: r.taskHash,
   };

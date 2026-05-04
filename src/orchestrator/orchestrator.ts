@@ -1122,6 +1122,15 @@ export class Agent {
         this._pilEnrichmentDelta = 0;
       }
     }
+    // Update status bar token counters
+    try {
+      const { statusBarStore } = require("../ui/status-bar/store.js");
+      const prev = statusBarStore.getState();
+      statusBarStore.setState({
+        in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
+        out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
+      });
+    } catch { /* status bar may not be mounted */ }
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {
