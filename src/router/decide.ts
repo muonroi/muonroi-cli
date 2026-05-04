@@ -35,6 +35,10 @@ export interface DecideOpts {
     confidence?: number;
     gsdPhase?: string | null;
     activeRunId?: string | null;
+    recentTurnsSummary?: string | null;
+    projectSize?: "small" | "medium" | "large" | null;
+    filesTouched?: number;
+    mode?: string | null;
   };
 }
 
@@ -61,6 +65,10 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
   if (pil?.taskType && pil.confidence > 0) {
     ctx.localRoute = { tier: pil.taskType, confidence: pil.confidence };
   }
+  if (pil?.recentTurnsSummary) ctx.recentTurns = pil.recentTurnsSummary;
+  if (pil?.projectSize) ctx.projectSize = pil.projectSize;
+  if (pil?.filesTouched && pil.filesTouched > 0) ctx.filesTouched = pil.filesTouched;
+  if (pil?.mode) ctx.mode = pil.mode;
 
   return ctx;
 }

@@ -72,6 +72,10 @@ export interface RouteModelRequest {
     domain?: string;
     activeRun?: string;
     localRoute?: { tier: string; confidence: number };
+    recentTurns?: string;
+    projectSize?: "small" | "medium" | "large";
+    filesTouched?: number;
+    mode?: string;
   };
   runtime?: "claude" | "gemini" | "codex" | "opencode";
 }

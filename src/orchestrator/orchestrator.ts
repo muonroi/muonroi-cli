@@ -2127,6 +2127,10 @@ export class Agent {
           confidence: pilCtx.confidence,
           gsdPhase: pilCtx.gsdPhase ?? null,
           activeRunId: pilCtx.activeRunId ?? null,
+          recentTurnsSummary: this._buildRecentTurnsSummary(),
+          projectSize: this._estimateProjectSize(),
+          filesTouched: this._countFilesTouched(),
+          mode: this.mode,
         },
       });
       if (routeDecision.model && routeDecision.model !== "HALT") {
@@ -2680,6 +2684,63 @@ export class Agent {
         this.abortController = null;
       }
     }
+  }
+
+  private _buildRecentTurnsSummary(): string | null {
+    if (this.messages.length < 2) return null;
+    const recent = this.messages.slice(-6);
+    const parts: string[] = [];
+    for (const msg of recent) {
+      if (msg.role !== "user" && msg.role !== "assistant") continue;
+      const text = typeof msg.content === "string"
+        ? msg.content
+        : Array.isArray(msg.content)
+          ? msg.content.filter((p: { type: string }) => p.type === "text").map((p: { type: string; text?: string }) => p.text ?? "").join("")
+          : "";
+      if (!text) continue;
+      const snippet = text.length > 80 ? `${text.slice(0, 77)}...` : text;
+      parts.push(`[${msg.role}]: ${snippet}`);
+    }
+    return parts.length > 0 ? parts.join(" | ") : null;
+  }
+
+  private _estimateProjectSize(): "small" | "medium" | "large" | null {
+    try {
+      const fs = require("fs");
+      const path = require("path");
+      const cwd = this.bash.getCwd();
+      const srcDir = path.join(cwd, "src");
+      if (!fs.existsSync(srcDir)) return null;
+      let count = 0;
+      const walk = (dir: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.name === "node_modules" || entry.name === ".git") continue;
+          if (entry.isDirectory()) walk(path.join(dir, entry.name));
+          else if (/\.(ts|tsx|js|jsx|py|go|rs)$/.test(entry.name)) count++;
+          if (count > 200) return;
+        }
+      };
+      walk(srcDir);
+      if (count <= 20) return "small";
+      if (count <= 100) return "medium";
+      return "large";
+    } catch {
+      return null;
+    }
+  }
+
+  private _countFilesTouched(): number {
+    let count = 0;
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+      for (const part of msg.content) {
+        if ((part as { type: string }).type === "tool-call") {
+          const tc = part as { type: string; toolName?: string; args?: Record<string, unknown> };
+          if (tc.toolName === "write_file" || tc.toolName === "edit_file" || tc.toolName === "bash") count++;
+        }
+      }
+    }
+    return count;
   }
 
   private requireProvider(): LegacyProvider {
