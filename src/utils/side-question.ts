@@ -1,10 +1,6 @@
 import { generateText } from "ai";
-import type { LegacyProvider, ResolvedModelRuntime } from "../orchestrator/orchestrator";
-
-// Stub — resolveModelRuntime not yet wired
-function resolveModelRuntime(_provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
-  throw new Error(`resolveModelRuntime not yet wired for model ${modelId}. Anthropic adapter pending.`);
-}
+import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
+import { resolveModelRuntime } from "../providers/runtime.js";
 
 export interface SideQuestionResult {
   response: string;
