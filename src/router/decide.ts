@@ -107,6 +107,22 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
   return ctx;
 }
 
+// ─── Provider constraint: never route to a provider the user lacks a key for ─
+
+function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
+  if (!decision.provider || decision.provider === opts.defaultProvider) return decision;
+  const sameProviderModel = getModelByTier(
+    decision.tier === "hot" ? "fast" : decision.tier === "cold" ? "premium" : "balanced",
+    opts.defaultProvider,
+  );
+  return {
+    ...decision,
+    model: sameProviderModel?.id ?? opts.defaultModel,
+    provider: sameProviderModel?.provider ?? opts.defaultProvider,
+    reason: `${decision.reason}|provider-constrained`,
+  };
+}
+
 // ─── Route feedback (HTTP path) ─────────────────────────────────────────────
 
 /**
@@ -273,7 +289,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 2: Warm path (EE /api/route-model, 250ms timeout)
   const w = await callWarmRoute(prompt, { ...opts, context: routeCtx });
   if (w) {
-    const checked = await capCheck(w, opts.homeOverride);
+    const checked = await capCheck(constrainToProvider(w, opts), opts.homeOverride);
     routerStore.setState({
       tier: checked.tier,
       lastDecision: checked,
@@ -287,7 +303,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 3: Cold path (EE /api/cold-route, 1s timeout)
   const cd = await callColdRoute(prompt, { ...opts, context: routeCtx });
   if (cd) {
-    const checked = await capCheck(cd, opts.homeOverride);
+    const checked = await capCheck(constrainToProvider(cd, opts), opts.homeOverride);
     routerStore.setState({
       tier: "cold",
       lastDecision: checked,
