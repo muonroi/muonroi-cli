@@ -30,6 +30,7 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { extractSession } from "../ee/extract-session.js";
 import { buildMcpToolSet } from "../mcp/runtime";
+import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
 import {
@@ -1547,6 +1548,7 @@ export class Agent {
         const mcpBundle = await buildMcpToolSet(loadMcpServers());
         closeMcp = mcpBundle.close;
         childTools = { ...childBaseTools, ...mcpBundle.tools };
+        captureToolSchemas(childTools);
         if (mcpBundle.errors.length > 0) {
           lastActivity = `MCP unavailable: ${mcpBundle.errors.join(" | ")}`;
           onActivity?.(lastActivity);
@@ -2297,6 +2299,7 @@ export class Agent {
             const mcpBundle = await buildMcpToolSet(loadMcpServers());
             closeMcp = mcpBundle.close;
             tools = { ...baseTools, ...mcpBundle.tools };
+            captureToolSchemas(tools);
             if (mcpBundle.errors.length > 0) {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
@@ -2305,6 +2308,7 @@ export class Agent {
           // PIL response tools: inject structured output tool when taskType detected
           if (_hasResponseTools && runtime.modelInfo?.supportsClientTools !== false) {
             tools = { ...tools, ..._pilResponseTools };
+            captureToolSchemas(_pilResponseTools);
           }
           let responseToolCalled = false;
 
