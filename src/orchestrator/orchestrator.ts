@@ -281,6 +281,8 @@ export interface ProcessMessageUsage {
   outputTokens?: number;
   totalTokens?: number;
   costUsdTicks?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 export interface ProcessMessageStepStart {
@@ -487,14 +489,19 @@ function formatCustomSubagentsPromptSection(subagents: CustomSubagentConfig[]): 
   return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.muonroi-cli/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
 }
 
-function buildSystemPrompt(
+interface SystemPromptParts {
+  staticPrefix: string;
+  dynamicSuffix: string;
+}
+
+function buildSystemPromptParts(
   cwd: string,
   mode: AgentMode,
   sandboxMode: SandboxMode,
   planContext?: string | null,
   subagents?: CustomSubagentConfig[],
   sandboxSettings?: SandboxSettings,
-): string {
+): SystemPromptParts {
   const custom = loadCustomInstructions(cwd);
   const customSection = custom
     ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
@@ -505,13 +512,27 @@ function buildSystemPrompt(
   const subagentsSection = formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
   const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
 
+  const staticPrefix = `${MODE_PROMPTS[mode]}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
+
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
     : "";
 
-  return `${MODE_PROMPTS[mode]}${sandboxSection}${customSection}${skillsSection}${subagentsSection}${planSection}
+  const dynamicSuffix = `${planSection}\n\nCurrent working directory: ${cwd}`;
 
-Current working directory: ${cwd}`;
+  return { staticPrefix, dynamicSuffix };
+}
+
+function buildSystemPrompt(
+  cwd: string,
+  mode: AgentMode,
+  sandboxMode: SandboxMode,
+  planContext?: string | null,
+  subagents?: CustomSubagentConfig[],
+  sandboxSettings?: SandboxSettings,
+): string {
+  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(cwd, mode, sandboxMode, planContext, subagents, sandboxSettings);
+  return `${staticPrefix}${dynamicSuffix}`;
 }
 
 function buildSubagentPrompt(
@@ -1108,7 +1129,7 @@ export class Agent {
   }
 
   private recordUsage(
-    usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number },
+    usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number },
     source: UsageSource = "message",
     model = this.modelId,
   ): void {
@@ -1122,13 +1143,15 @@ export class Agent {
         this._pilEnrichmentDelta = 0;
       }
     }
-    // Update status bar token counters + provider/model
+    // Update status bar token counters + provider/model + cache metrics
     try {
       const { statusBarStore } = require("../ui/status-bar/store.js");
       const prev = statusBarStore.getState();
       statusBarStore.setState({
         in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
         out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
+        cache_read_tokens: (prev.cache_read_tokens ?? 0) + (usage.cacheReadTokens ?? 0),
+        cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + (usage.cacheCreationTokens ?? 0),
         provider: this.providerId,
         model,
       });
@@ -1541,8 +1564,11 @@ export class Agent {
           ? {}
           : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
-        onFinish: ({ totalUsage }) => {
-          this.recordUsage(totalUsage, "task", childRuntime.modelId);
+        onFinish: ({ totalUsage, providerMetadata }) => {
+          const anthropicMeta = providerMetadata?.anthropic as Record<string, unknown> | undefined;
+          const cacheReadTokens = asNumber(anthropicMeta?.cacheReadInputTokens) ?? 0;
+          const cacheCreationTokens = asNumber(anthropicMeta?.cacheCreationInputTokens) ?? 0;
+          this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
         },
       });
 
@@ -2163,16 +2189,17 @@ export class Agent {
     const subagents = loadValidSubAgents();
     const _pilResponseTools = getResponseToolSet(pilCtx);
     const _hasResponseTools = Object.keys(_pilResponseTools).length > 0;
+    const systemParts = buildSystemPromptParts(
+      this.bash.getCwd(),
+      this.mode,
+      this.bash.getSandboxMode(),
+      this.planContext,
+      subagents,
+      this.bash.getSandboxSettings(),
+    );
     const system = applyModelConstraints(
       applyPilSuffix(
-        buildSystemPrompt(
-          this.bash.getCwd(),
-          this.mode,
-          this.bash.getSandboxMode(),
-          this.planContext,
-          subagents,
-          this.bash.getSandboxSettings(),
-        ),
+        `${systemParts.staticPrefix}${systemParts.dynamicSuffix}`,
         pilCtx,
         _hasResponseTools,
       ),
@@ -2280,11 +2307,22 @@ export class Agent {
             providerOpts.anthropic.thinking = { type: "adaptive" as any };
           }
 
+          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache
+          const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
+          if (turnProvider === "openai") {
+            providerOpts.openai = { ...(providerOpts.openai ?? {}), store: true };
+          }
+
+          const systemForModel = runtime.modelId.startsWith("claude")
+            ? [
+                { role: "system" as const, content: systemParts.staticPrefix, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } },
+                { role: "system" as const, content: system.slice(systemParts.staticPrefix.length) },
+              ]
+            : system;
+
           const result = streamText({
             model: runtime.model,
-            system: runtime.modelId.startsWith("claude")
-              ? { role: "system" as const, content: system, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } }
-              : system,
+            system: systemForModel,
             messages: this.messages,
             tools,
             toolChoice:
@@ -2316,8 +2354,11 @@ export class Agent {
                 usage: getUsage(event),
               });
             },
-            onFinish: ({ totalUsage }) => {
-              this.recordUsage(totalUsage, "message", runtime.modelId);
+            onFinish: ({ totalUsage, providerMetadata }) => {
+              const anthropicMeta = providerMetadata?.anthropic as Record<string, unknown> | undefined;
+              const cacheReadTokens = asNumber(anthropicMeta?.cacheReadInputTokens) ?? 0;
+              const cacheCreationTokens = asNumber(anthropicMeta?.cacheCreationInputTokens) ?? 0;
+              this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "message", runtime.modelId);
             },
           });
 
@@ -2987,11 +3028,14 @@ function getBatchUsage(response: BatchChatCompletionResponse): ProcessMessageUsa
   const inputTokens = asNumber(usage?.input_tokens) ?? asNumber(usage?.prompt_tokens);
   const outputTokens = asNumber(usage?.output_tokens) ?? asNumber(usage?.completion_tokens);
   const totalTokens = asNumber(usage?.total_tokens) ?? sumDefined(inputTokens, outputTokens);
+  const u = usage as Record<string, unknown> | undefined;
   return {
     inputTokens,
     outputTokens,
     totalTokens,
     costUsdTicks: asNumber(usage?.cost_in_usd_ticks),
+    cacheReadTokens: asNumber(u?.cache_read_input_tokens),
+    cacheCreationTokens: asNumber(u?.cache_creation_input_tokens),
   };
 }
 
@@ -3000,6 +3044,8 @@ function accumulateUsage(target: ProcessMessageUsage, usage: ProcessMessageUsage
   target.outputTokens = (target.outputTokens ?? 0) + (usage.outputTokens ?? 0);
   target.totalTokens = (target.totalTokens ?? 0) + (usage.totalTokens ?? 0);
   target.costUsdTicks = (target.costUsdTicks ?? 0) + (usage.costUsdTicks ?? 0);
+  target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0);
+  target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
 }
 
 function hasUsage(usage: ProcessMessageUsage): boolean {
@@ -3164,6 +3210,8 @@ function getUsage(event: unknown): ProcessMessageUsage {
     inputTokens: typeof u.inputTokens === "number" ? u.inputTokens : undefined,
     outputTokens: typeof u.outputTokens === "number" ? u.outputTokens : undefined,
     totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : undefined,
+    cacheReadTokens: typeof u.cacheReadTokens === "number" ? u.cacheReadTokens : undefined,
+    cacheCreationTokens: typeof u.cacheCreationTokens === "number" ? u.cacheCreationTokens : undefined,
   };
 }
 

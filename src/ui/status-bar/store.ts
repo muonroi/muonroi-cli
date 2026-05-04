@@ -16,6 +16,8 @@ export interface StatusBarState {
   tier: "hot" | "warm" | "cold" | "degraded";
   in_tokens: number;
   out_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   session_usd: number;
   month_usd: number;
   cap_usd: number;
@@ -32,6 +34,8 @@ function makeStore() {
     tier: "hot",
     in_tokens: 0,
     out_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
     session_usd: 0,
     month_usd: 0,
     cap_usd: 0,
@@ -108,6 +112,8 @@ export function __resetStatusBarStoreForTests(): void {
     tier: "hot",
     in_tokens: 0,
     out_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
     session_usd: 0,
     month_usd: 0,
     cap_usd: 0,

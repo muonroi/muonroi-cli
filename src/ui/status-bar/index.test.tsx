@@ -29,6 +29,8 @@ function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
     tier: "hot",
     in_tokens: 0,
     out_tokens: 0,
+    cache_read_tokens: 0,
+    cache_creation_tokens: 0,
     session_usd: 0,
     month_usd: 0,
     cap_usd: 0,

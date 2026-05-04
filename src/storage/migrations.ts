@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 3;
+const LATEST_DB_VERSION = 4;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -21,6 +21,13 @@ export function applyMigrations(db: SQLiteDatabase): void {
         ALTER TABLE usage_events ADD COLUMN enrichment_delta INTEGER NOT NULL DEFAULT 0;
       `);
       db.pragma("user_version = 3");
+    }
+    if (version < 4) {
+      db.exec(`
+        ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+      `);
+      db.pragma("user_version = 4");
     }
   });
 
@@ -92,7 +99,9 @@ function createInitialSchema(db: SQLiteDatabase): void {
       output_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
       cost_micros INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0
     ) STRICT;
 
     CREATE TABLE IF NOT EXISTS compactions (

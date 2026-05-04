@@ -13,12 +13,16 @@ interface UsageRow {
   total_tokens: number;
   cost_micros: number;
   created_at: string;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
 }
 
 export interface TokenUsageLike {
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 export function recordUsageEvent(
@@ -37,13 +41,15 @@ export function recordUsageEvent(
   const totalTokens = usage.totalTokens ?? inputTokens + outputTokens;
   if (inputTokens <= 0 && outputTokens <= 0 && totalTokens <= 0) return;
 
-  const costMicros = estimateCostMicros(model, inputTokens, outputTokens);
+  const cacheReadTokens = usage.cacheReadTokens ?? 0;
+  const cacheCreationTokens = usage.cacheCreationTokens ?? 0;
+  const costMicros = estimateCostMicros(model, inputTokens, outputTokens, cacheReadTokens);
   getDatabase()
     .prepare(`
     INSERT INTO usage_events (
       session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at,
-      pil_active, enrichment_delta
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      pil_active, enrichment_delta, cache_read_tokens, cache_creation_tokens
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       sessionId,
@@ -57,6 +63,8 @@ export function recordUsageEvent(
       new Date().toISOString(),
       pilActive ? 1 : 0,
       enrichmentDelta,
+      cacheReadTokens,
+      cacheCreationTokens,
     );
 }
 
@@ -75,7 +83,7 @@ export function getSessionTotalTokens(sessionId: string): number {
 export function listSessionUsage(sessionId: string): UsageEvent[] {
   const rows = getDatabase()
     .prepare(`
-    SELECT id, session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at
+    SELECT id, session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at, cache_read_tokens, cache_creation_tokens
     FROM usage_events
     WHERE session_id = ?
     ORDER BY id ASC
@@ -93,11 +101,15 @@ export function listSessionUsage(sessionId: string): UsageEvent[] {
     totalTokens: row.total_tokens,
     costMicros: row.cost_micros,
     createdAt: new Date(row.created_at),
+    cacheReadTokens: row.cache_read_tokens ?? 0,
+    cacheCreationTokens: row.cache_creation_tokens ?? 0,
   }));
 }
 
-function estimateCostMicros(model: string, inputTokens: number, outputTokens: number): number {
+function estimateCostMicros(model: string, inputTokens: number, outputTokens: number, cacheReadTokens = 0): number {
   const info = getModelInfo(model);
   if (!info) return 0;
-  return Math.round(inputTokens * info.inputPrice + outputTokens * info.outputPrice);
+  const cachedPrice = info.cachedInputPrice ?? info.inputPrice * 0.1;
+  const nonCachedInput = Math.max(0, inputTokens - cacheReadTokens);
+  return Math.round(nonCachedInput * info.inputPrice + cacheReadTokens * cachedPrice + outputTokens * info.outputPrice);
 }

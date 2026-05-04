@@ -223,13 +223,20 @@ export async function routeTask(
 
 /**
  * Get the raw embedding vector for a text string.
+ * Uses LRU cache (200 entries, 1h TTL) to avoid redundant SiliconFlow calls.
  * Returns null when core is absent or embedding fails.
  */
 export async function getEmbeddingRaw(text: string, signal?: AbortSignal): Promise<number[] | null> {
+  const { getCachedEmbedding, setCachedEmbedding } = await import("./embedding-cache.js");
+  const cached = getCachedEmbedding(text);
+  if (cached) return cached;
+
   const core = await getEECore();
   if (!core) return null;
   try {
-    return await core.getEmbeddingRaw(text, signal);
+    const vector = await core.getEmbeddingRaw(text, signal);
+    if (vector) setCachedEmbedding(text, vector);
+    return vector;
   } catch {
     return null;
   }
