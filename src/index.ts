@@ -26,7 +26,8 @@ import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
-import { loadAnthropicKey } from "./providers/index.js";
+import { loadKeyForProvider } from "./providers/keychain.js";
+import { detectProviderForModel } from "./providers/runtime.js";
 import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
@@ -36,6 +37,7 @@ import type { PermissionMode } from "./utils/permission-mode.js";
 import {
   getApiKey,
   getBaseURL,
+  getCurrentModel,
   getCurrentSandboxMode,
   getCurrentSandboxSettings,
   mergeSandboxSettings,
@@ -116,9 +118,11 @@ async function startInteractive(
   void config; // Phase 0: plumbed but not yet surfaced in TUI status bar (TUI-05, Phase 1).
   void usage; // Phase 0: same — cap guard will gate on this in plan 00-06+ / Phase 1.
 
-  // 3. loadAnthropicKey — enrolls key into redactor; falls back to env var.
-  const anthropicKey = await loadAnthropicKey().catch(() => undefined);
-  void anthropicKey; // Agent also calls loadAnthropicKey internally; this run is for redactor enrollment.
+  // 3. Load API key for the active provider — enrolls into redactor.
+  const activeModel = getCurrentModel();
+  const activeProvider = detectProviderForModel(activeModel);
+  const providerKey = await loadKeyForProvider(activeProvider).catch(() => undefined);
+  void providerKey; // Agent also loads key internally; this run is for early redactor enrollment.
 
   // 5-6. createPendingCallsLog + createAbortContext — wired before Agent so
   //       the Agent receives them via AgentOptions (Pitfall 9, TUI-04).
@@ -407,7 +411,7 @@ program
   .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access")
   .action(async (message: string[], options) => {
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
-    // Deliberately exits BEFORE loadAnthropicKey() — CI runners have no keychain configured.
+    // Deliberately exits BEFORE provider key loading — CI runners have no keychain configured.
     if (options.smokeBootOnly) {
       const [_cfg, _usg] = await Promise.all([loadConfig(), loadUsage()]);
       console.log("[muonroi-cli] smoke-boot-only — config + usage loaded; exiting 0.");
