@@ -24,7 +24,7 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
     case "google":
       return createGeminiAdapter(config);
     case "deepseek":
-      return createOpenAICompatibleAdapter({ ...config, id: "deepseek" });
+      return createOpenAIAdapter({ ...config, baseURL: config.baseURL ?? "https://api.deepseek.com" });
     case "siliconflow":
       return createOpenAICompatibleAdapter({ ...config, id: "siliconflow" });
     case "xai":
