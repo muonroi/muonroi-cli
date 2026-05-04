@@ -46,6 +46,40 @@ export interface DecideOpts {
 const ESTIMATE_INPUT = 4_000;
 const ESTIMATE_OUTPUT = 1_000;
 
+// ─── Routing decision cache (per session) ───────────────────────────────────
+
+const ROUTE_CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+
+interface CachedRoute {
+  decision: RouteDecision;
+  timestamp: number;
+}
+
+const routeCache = new Map<string, CachedRoute>();
+
+function routeCacheKey(pil?: DecideOpts["pil"]): string | null {
+  if (!pil?.domain && !pil?.taskType) return null;
+  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}`;
+}
+
+function getCachedRoute(key: string): RouteDecision | null {
+  const entry = routeCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.timestamp > ROUTE_CACHE_TTL_MS) {
+    routeCache.delete(key);
+    return null;
+  }
+  return entry.decision;
+}
+
+function setCachedRoute(key: string, decision: RouteDecision): void {
+  routeCache.set(key, { decision, timestamp: Date.now() });
+}
+
+export function clearRouteCache(): void {
+  routeCache.clear();
+}
+
 // ─── Rich context builder for EE routing ────────────────────────────────────
 
 /**
@@ -172,6 +206,20 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
 }
 
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
+  const cacheKey = routeCacheKey(opts.pil);
+  if (cacheKey) {
+    const cached = getCachedRoute(cacheKey);
+    if (cached) {
+      routerStore.setState({
+        tier: cached.tier,
+        lastDecision: cached,
+        taskHash: cached.taskHash ?? null,
+        source: cached.source ?? "cache",
+      });
+      return cached;
+    }
+  }
+
   const routeCtx = buildRouteContext(opts.cwd, opts.pil);
 
   // Step 0: PIL context override — trust local classifier when confidence is high
@@ -196,6 +244,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       taskHash: checked.taskHash ?? null,
       source: checked.source ?? "pil",
     });
+    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
     return checked;
   }
 
@@ -217,6 +266,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       taskHash: checked.taskHash ?? null,
       source: checked.source ?? null,
     });
+    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
     return checked;
   }
 
@@ -230,6 +280,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       taskHash: checked.taskHash ?? null,
       source: checked.source ?? null,
     });
+    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
     return checked;
   }
 
@@ -243,6 +294,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       taskHash: checked.taskHash ?? null,
       source: checked.source ?? null,
     });
+    if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
     return checked;
   }
 
@@ -259,5 +311,6 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     taskHash: null,
     source: null,
   });
+  // Don't cache fallback decisions
   return checked;
 }

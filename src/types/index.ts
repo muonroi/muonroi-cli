@@ -239,6 +239,7 @@ export interface ModelInfo {
   contextWindow: number;
   inputPrice: number;
   outputPrice: number;
+  cachedInputPrice?: number;
   reasoning: boolean;
   description: string;
   tier?: ModelTier;
@@ -290,6 +291,8 @@ export interface UsageEvent {
   totalTokens: number;
   costMicros: number;
   createdAt: Date;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
 }
 
 export interface SessionSnapshot {

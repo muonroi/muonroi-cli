@@ -13,6 +13,7 @@ export interface CatalogModel {
   max_output_tokens: number;
   input_price_per_million: number;
   output_price_per_million: number;
+  cached_input_price_per_million?: number;
   reasoning: boolean;
   thinking_type?: string | null;
   supports_effort?: boolean;
@@ -67,6 +68,7 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     contextWindow: m.context_window,
     inputPrice: m.input_price_per_million,
     outputPrice: m.output_price_per_million,
+    cachedInputPrice: m.cached_input_price_per_million,
     reasoning: m.reasoning,
     description: m.description,
     tier: m.tier as ModelTier | undefined,
