@@ -1,6 +1,5 @@
-// Anthropic provider wired — real provider calls.
+// Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
-import { createAnthropic } from "@ai-sdk/anthropic";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
@@ -93,26 +92,25 @@ import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { stableCallId } from "./pending-calls.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import {
+  createProviderFactory,
+  resolveModelRuntime as resolveRuntime,
+  detectProviderForModel,
+  type ProviderFactory,
+  type ResolvedModelRuntime as RuntimeResult,
+} from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
 
 // ---------------------------------------------------------------------------
-// Provider type stubs — compile-only placeholders until full provider
-// integration ships (PROV-03, TUI-02).
+// Re-export types from shared runtime module for back-compat
 // ---------------------------------------------------------------------------
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type LegacyProvider = any;
+export type { ProviderFactory as LegacyProvider, ResolvedModelRuntime } from "../providers/runtime.js";
+type LegacyProvider = ProviderFactory;
+type ResolvedModelRuntime = RuntimeResult;
 
 /** @deprecated Use ModelInfo from "../types/index" instead. */
 export type ModelInfoStub = ModelInfo;
-
-export interface ResolvedModelRuntime {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  model: any;
-  modelId: string;
-  modelInfo?: ModelInfo;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  providerOptions?: any;
-}
 
 // Batch API type stubs
 export interface BatchClientOptions {
@@ -171,12 +169,10 @@ export interface BatchChatCompletionResponse {
 // ---------------------------------------------------------------------------
 
 /**
- * Create an Anthropic provider instance for use with AI SDK v6 streamText.
- * Returns an @ai-sdk/anthropic provider object for multi-provider routing.
+ * Create a provider factory for the given provider ID using the shared runtime module.
  */
-function createProvider(apiKey: string, _baseURL?: string): LegacyProvider {
-  // Returns the real Anthropic provider factory for use by resolveModelRuntime.
-  return createAnthropic({ apiKey });
+function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string): LegacyProvider {
+  return createProviderFactory(providerId, { apiKey, baseURL }).factory;
 }
 
 /**
@@ -198,15 +194,7 @@ function genTitle(
  * Uses the Anthropic provider factory created by createProvider().
  */
 function resolveModelRuntime(provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
-  // provider is an @ai-sdk/anthropic provider factory; call it with modelId to get a LanguageModel.
-  // This is the pattern used by AI SDK v6: provider(modelId) → LanguageModel.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const model = (provider as any)(modelId);
-  return {
-    model,
-    modelId,
-    modelInfo: getModelInfo(modelId),
-  };
+  return resolveRuntime(provider, modelId);
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
@@ -709,6 +697,7 @@ function applyModelConstraints(system: string, modelId: string): string {
 
 export class Agent {
   private provider: LegacyProvider | null = null;
+  private providerId: ProviderId = "anthropic";
   private apiKey: string | null = null;
   private baseURL: string | null = null;
   private bash: BashTool;
@@ -753,9 +742,6 @@ export class Agent {
     options: AgentOptions = {},
   ) {
     this.baseURL = baseURL || null;
-    if (apiKey) {
-      this.setApiKey(apiKey, baseURL);
-    }
     this.bash = new BashTool(process.cwd(), {
       sandboxMode: options.sandboxMode ?? "off",
       sandboxSettings: options.sandboxSettings,
@@ -764,6 +750,10 @@ export class Agent {
 
     const initialMode: AgentMode = "agent";
     this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
+    this.providerId = detectProviderForModel(this.modelId);
+    if (apiKey) {
+      this.setApiKey(apiKey, baseURL);
+    }
     this.schedules = new ScheduleManager(
       () => this.bash.getCwd(),
       () => this.modelId,
@@ -830,6 +820,11 @@ export class Agent {
 
   setModel(model: string): void {
     this.modelId = normalizeModelId(model);
+    const newProviderId = detectProviderForModel(this.modelId);
+    if (newProviderId !== this.providerId && this.apiKey) {
+      this.providerId = newProviderId;
+      this.provider = createProvider(this.providerId, this.apiKey, this.baseURL ?? undefined);
+    }
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
       this.session = this.sessionStore.getRequiredSession(this.session.id);
@@ -883,10 +878,19 @@ export class Agent {
     return !!this.apiKey;
   }
 
-  setApiKey(apiKey: string, baseURL = this.baseURL ?? undefined): void {
+  setApiKey(apiKey: string, baseURL?: string): void {
     this.apiKey = apiKey;
     this.baseURL = baseURL || null;
-    this.provider = createProvider(apiKey, baseURL);
+    this.provider = createProvider(this.providerId, apiKey, baseURL);
+  }
+
+  setProviderAndKey(providerId: ProviderId, apiKey: string, baseURL?: string): void {
+    this.providerId = providerId;
+    this.setApiKey(apiKey, baseURL);
+  }
+
+  getProviderId(): ProviderId {
+    return this.providerId;
   }
 
   getCwd(): string {
@@ -1443,7 +1447,7 @@ export class Agent {
               : this.modelId,
     );
     const childRuntime = isVision
-      ? { ...resolveModelRuntime(provider, childModelId), model: provider.responses(childModelId) }
+      ? { ...resolveModelRuntime(provider, childModelId), model: provider.responses?.(childModelId) ?? provider(childModelId) }
       : resolveModelRuntime(provider, childModelId);
     if (isComputer && childRuntime.modelInfo?.supportsClientTools === false) {
       return {
