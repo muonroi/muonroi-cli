@@ -711,14 +711,15 @@ interface ActiveTurnState {
 export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
   const t = dark;
   const renderer = useRenderer();
-  // Wire status bar subscriptions once at boot (Plan 06)
-  useEffect(() => {
+  // Set initial status bar values synchronously before first render
+  React.useMemo(() => {
     statusBarStore.setState({
       provider: agent.getProviderId(),
       model: agent.getModel(),
     });
-    return wireStatusBar();
   }, []);
+  // Wire status bar subscriptions once at boot (Plan 06)
+  useEffect(() => wireStatusBar(), []);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());

@@ -1122,13 +1122,15 @@ export class Agent {
         this._pilEnrichmentDelta = 0;
       }
     }
-    // Update status bar token counters
+    // Update status bar token counters + provider/model
     try {
       const { statusBarStore } = require("../ui/status-bar/store.js");
       const prev = statusBarStore.getState();
       statusBarStore.setState({
         in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
         out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
+        provider: this.providerId,
+        model,
       });
     } catch { /* status bar may not be mounted */ }
   }
