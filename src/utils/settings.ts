@@ -331,8 +331,19 @@ export function getApiKey(): string | undefined {
   return process.env.MUONROI_API_KEY || loadUserSettings().apiKey;
 }
 
-export function getBaseURL(): string {
-  return process.env.MUONROI_BASE_URL || "https://api.anthropic.com";
+const DEFAULT_BASE_URLS: Record<string, string> = {
+  anthropic: "https://api.anthropic.com",
+  openai: "https://api.openai.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+  deepseek: "https://api.deepseek.com",
+  siliconflow: "https://api.siliconflow.cn/v1",
+  xai: "https://api.x.ai/v1",
+  ollama: "http://localhost:11434",
+};
+
+export function getBaseURL(provider?: string): string {
+  if (process.env.MUONROI_BASE_URL) return process.env.MUONROI_BASE_URL;
+  return DEFAULT_BASE_URLS[provider ?? "anthropic"] ?? "https://api.anthropic.com";
 }
 
 /**
