@@ -2101,7 +2101,7 @@ export class Agent {
         tenantId: "local",
         cwd: this.bash.getCwd(),
         defaultModel: this.modelId,
-        defaultProvider: "anthropic",
+        defaultProvider: this.providerId,
       });
       if (routeDecision.model && routeDecision.model !== "HALT") {
         turnModelId = routeDecision.model;
@@ -2113,11 +2113,20 @@ export class Agent {
       taskHash = eeRoute?.taskHash ?? null;
     }
 
+    // Re-detect provider if router picked a model from a different provider
+    const turnProviderId = detectProviderForModel(turnModelId);
+    let turnProvider: LegacyProvider;
+    if (turnProviderId !== this.providerId && this.apiKey) {
+      turnProvider = createProvider(turnProviderId, this.apiKey, this.baseURL ?? undefined);
+    } else {
+      turnProvider = this.requireProvider();
+    }
+
     const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
 
-    const provider = this.requireProvider();
+    const provider = turnProvider;
     const subagents = loadValidSubAgents();
     const _pilResponseTools = getResponseToolSet(pilCtx);
     const _hasResponseTools = Object.keys(_pilResponseTools).length > 0;
