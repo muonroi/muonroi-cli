@@ -53,9 +53,10 @@ export function createProviderFactory(
       return { id, factory: (modelId: string) => p(modelId) };
     }
     case "deepseek": {
+      const defaultBase = "https://api.deepseek.com/v1";
       const p = createOpenAI({
         apiKey: opts.apiKey,
-        baseURL: opts.baseURL ?? OPENAI_COMPATIBLE_BASE_URLS[id],
+        baseURL: opts.baseURL ?? defaultBase,
       });
       return { id, factory: (modelId: string) => p(modelId) };
     }
