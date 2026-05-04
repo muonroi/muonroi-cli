@@ -712,7 +712,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const t = dark;
   const renderer = useRenderer();
   // Set initial status bar values synchronously before first render
-  React.useMemo(() => {
+  useMemo(() => {
     statusBarStore.setState({
       provider: agent.getProviderId(),
       model: agent.getModel(),
