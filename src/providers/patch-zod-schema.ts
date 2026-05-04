@@ -1,14 +1,14 @@
 /**
  * Patch tool schema serialization for Zod v4 + AI SDK v6 compatibility.
  *
- * AI SDK v6 uses zod-to-json-schema v3 which strips Zod v4 schemas to
- * empty `{ properties: {}, additionalProperties: false }`. This breaks
- * tool calls on DeepSeek and other strict OpenAI-compatible APIs.
+ * AI SDK v6 uses `asSchema()` which handles Zod v4 Standard Schema correctly,
+ * but tools created via `tool()` helper have `parameters` (not `inputSchema`),
+ * causing `asSchema(undefined)` → empty schema `{ properties: {}, additionalProperties: false }`.
  *
  * Two-phase fix:
  * 1. `captureToolSchemas()` — called when ToolSet is built, stores the
- *    original JSON Schema (from tool description + jsonSchema() helper)
- *    keyed by tool name.
+ *    original JSON Schema keyed by tool name. Handles both `parameters`
+ *    (tool() helper) and `inputSchema` (dynamicTool/MCP) properties.
  * 2. `patchZodToJsonSchema()` — wraps global fetch to intercept
  *    /chat/completions requests and replace broken schemas with the
  *    captured originals.
@@ -19,30 +19,52 @@ const schemaRegistry = new Map<string, Record<string, unknown>>();
 /**
  * Capture original tool schemas before AI SDK processes them.
  * Call this after building the ToolSet, before any streamText() call.
+ *
+ * Handles both tool() tools (which have `parameters`) and dynamicTool/MCP
+ * tools (which have `inputSchema`).
  */
 export function captureToolSchemas(tools: Record<string, unknown>): void {
   for (const [name, def] of Object.entries(tools)) {
     if (!def || typeof def !== "object") continue;
     const t = def as Record<string, unknown>;
-    const params = t.parameters as Record<string, unknown> | undefined;
-    if (!params) continue;
+
+    // Try `inputSchema` first (dynamicTool / MCP tools), then `parameters` (tool() helper)
+    const schemaSource = t.inputSchema ?? t.parameters;
+    if (!schemaSource) continue;
+
+    const src = schemaSource as Record<string, unknown>;
 
     // jsonSchema() helper stores original at .jsonSchema
-    const raw = (params as any).jsonSchema;
-    if (raw && typeof raw === "object" && raw.type) {
-      schemaRegistry.set(name, { ...raw });
+    const raw = src.jsonSchema;
+    if (raw && typeof raw === "object" && (raw as any).type) {
+      schemaRegistry.set(name, { ...(raw as Record<string, unknown>) });
       continue;
     }
 
     // Zod v4 schema — convert via z.toJSONSchema if available
     try {
       const z = require("zod");
-      if (typeof z.toJSONSchema === "function" && params._def) {
-        const converted = z.toJSONSchema(params);
+      if (typeof z.toJSONSchema === "function" && (src as any)._def) {
+        const converted = z.toJSONSchema(src);
         delete converted.$schema;
         schemaRegistry.set(name, converted);
       }
     } catch {}
+
+    // Standard Schema — extract via ~standard
+    if ("~standard" in src) {
+      try {
+        const std = (src as any)["~standard"];
+        if (std?.jsonSchema?.input) {
+          const jsonSch = std.jsonSchema.input({ target: "draft-07" });
+          if (jsonSch && typeof jsonSch === "object" && jsonSch.type) {
+            const clean = { ...jsonSch };
+            delete clean.$schema;
+            schemaRegistry.set(name, clean);
+          }
+        }
+      } catch {}
+    }
   }
 }
 
@@ -80,6 +102,13 @@ function fixBrokenToolSchemas(body: Record<string, unknown>): boolean {
   for (const tool of tools) {
     const params = tool?.function?.parameters;
     if (!params) continue;
+
+    // Remove $schema field — some providers (DeepSeek) don't like it
+    if (params.$schema) {
+      delete params.$schema;
+      modified = true;
+    }
+
     // Check if schema is broken (empty properties or missing type)
     const isBroken = !params.type || (
       params.properties &&
