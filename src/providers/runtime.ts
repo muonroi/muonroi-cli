@@ -28,7 +28,7 @@ export interface ResolvedModelRuntime {
 }
 
 const OPENAI_COMPATIBLE_BASE_URLS: Record<string, string> = {
-  deepseek: "https://api.deepseek.com/v1",
+  deepseek: "https://api.deepseek.com",
   siliconflow: "https://api.siliconflow.cn/v1",
   xai: "https://api.x.ai/v1",
 };

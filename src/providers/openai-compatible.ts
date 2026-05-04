@@ -13,7 +13,7 @@ import { streamFromFullStream } from "./stream-loop.js";
 import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
 
 const DEFAULT_BASE_URLS: Record<string, string> = {
-  deepseek: "https://api.deepseek.com/v1",
+  deepseek: "https://api.deepseek.com",
   siliconflow: "https://api.siliconflow.cn/v1",
   xai: "https://api.x.ai/v1",
 };
