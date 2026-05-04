@@ -823,7 +823,10 @@ export class Agent {
     const newProviderId = detectProviderForModel(this.modelId);
     if (newProviderId !== this.providerId && this.apiKey) {
       this.providerId = newProviderId;
-      this.provider = createProvider(this.providerId, this.apiKey, this.baseURL ?? undefined);
+      const effectiveBaseURL = this.providerId !== "anthropic" && this.baseURL === "https://api.anthropic.com"
+        ? undefined
+        : (this.baseURL ?? undefined);
+      this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
     }
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
@@ -881,7 +884,12 @@ export class Agent {
   setApiKey(apiKey: string, baseURL?: string): void {
     this.apiKey = apiKey;
     this.baseURL = baseURL || null;
-    this.provider = createProvider(this.providerId, apiKey, baseURL);
+    // Only pass baseURL to provider factory if it's an explicit override,
+    // not the default Anthropic URL (which would break non-Anthropic providers).
+    const effectiveBaseURL = this.providerId !== "anthropic" && baseURL === "https://api.anthropic.com"
+      ? undefined
+      : baseURL;
+    this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
   }
 
   setProviderAndKey(providerId: ProviderId, apiKey: string, baseURL?: string): void {
@@ -2117,7 +2125,10 @@ export class Agent {
     const turnProviderId = detectProviderForModel(turnModelId);
     let turnProvider: LegacyProvider;
     if (turnProviderId !== this.providerId && this.apiKey) {
-      turnProvider = createProvider(turnProviderId, this.apiKey, this.baseURL ?? undefined);
+      const turnBaseURL = turnProviderId !== "anthropic" && this.baseURL === "https://api.anthropic.com"
+        ? undefined
+        : (this.baseURL ?? undefined);
+      turnProvider = createProvider(turnProviderId, this.apiKey, turnBaseURL);
     } else {
       turnProvider = this.requireProvider();
     }
