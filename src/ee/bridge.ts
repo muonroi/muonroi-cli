@@ -114,6 +114,18 @@ async function getEECore(): Promise<EECore | null> {
   return _core;
 }
 
+// ─── Suppress stdout noise from experience-core.js ───────────────────────────
+
+async function silentCall<T>(fn: () => Promise<T>): Promise<T> {
+  const origWrite = process.stdout.write;
+  process.stdout.write = (() => true) as typeof process.stdout.write;
+  try {
+    return await fn();
+  } finally {
+    process.stdout.write = origWrite;
+  }
+}
+
 // ─── Public bridge API (BRIDGE-01) ────────────────────────────────────────────
 
 /**
@@ -125,7 +137,7 @@ export async function classifyViaBrain(prompt: string, timeoutMs = 5000): Promis
   const core = await getEECore();
   if (!core) return null;
   try {
-    return await core.classifyViaBrain(prompt, timeoutMs);
+    return await silentCall(() => core.classifyViaBrain(prompt, timeoutMs));
   } catch {
     return null;
   }
@@ -163,7 +175,7 @@ export async function routeModel(
   const core = await getEECore();
   if (!core) return null;
   try {
-    return await core.routeModel(task, context, runtime);
+    return await silentCall(() => core.routeModel(task, context, runtime));
   } catch {
     return null;
   }
@@ -203,7 +215,7 @@ export async function routeTask(
   const core = await getEECore();
   if (!core?.routeTask) return null;
   try {
-    return await core.routeTask(task, context, runtime);
+    return await silentCall(() => core.routeTask(task, context, runtime));
   } catch {
     return null;
   }
