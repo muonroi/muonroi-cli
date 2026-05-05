@@ -18,7 +18,7 @@ const PATTERNS: Array<{
   { re: /\brefactor\b/i, intent: "refactor", confidence: 0.75, tierHint: "balanced" },
   { re: /\b(architect|design|plan|strategy)\b/i, intent: "design", confidence: 0.7, tierHint: "premium" },
   // Vietnamese patterns — higher tiers first to avoid premature fast-match
-  { re: /(thiết kế|kiến trúc|architect|design|xây dựng hệ thống|chiến lược)/i, intent: "design", confidence: 0.7, tierHint: "premium" },
+  { re: /(thiết kế|kiến trúc|\barchitect\b|\bdesign\b|xây dựng hệ thống|chiến lược)/i, intent: "design", confidence: 0.7, tierHint: "premium" },
   { re: /(tái cấu trúc|refactor|cấu trúc lại|tổ chức lại)/i, intent: "refactor", confidence: 0.75, tierHint: "balanced" },
   { re: /(thêm tính năng|thêm chức năng|bổ sung|implement)/i, intent: "add-feature", confidence: 0.75, tierHint: "balanced" },
   { re: /(tạo|tạo mới|sinh|generate)\s+.*(file|component|module|class|hàm|function)/i, intent: "create-file", confidence: 0.85, tierHint: "fast" },

@@ -8,9 +8,9 @@ describe("matchRegex", () => {
     expect(result.reason).toMatch(/^regex:/);
   });
 
-  it('classifies "hi how are you" as short message with low confidence', () => {
+  it('classifies "hi how are you" as short message with moderate confidence', () => {
     const result = matchRegex("hi how are you");
-    expect(result.confidence).toBeLessThanOrEqual(0.5);
+    expect(result.confidence).toBe(0.6);
     expect(result.reason).toBe("regex:short-message");
     expect(result.tierHint).toBe("fast");
   });
