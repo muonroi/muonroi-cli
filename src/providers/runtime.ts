@@ -99,5 +99,13 @@ export function detectProviderForModel(modelId: string): ProviderId {
   if (info?.provider) {
     return info.provider as ProviderId;
   }
+  // Prefix-based fallback for models not in the static catalog
+  const id = modelId.toLowerCase();
+  if (id.startsWith("deepseek")) return "deepseek";
+  if (id.startsWith("gpt-") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")) return "openai";
+  if (id.startsWith("gemini") || id.startsWith("models/gemini")) return "google";
+  if (id.startsWith("grok")) return "xai";
+  if (id.includes("qwen") || id.includes("glm") || id.includes("internlm")) return "siliconflow";
+  if (id.startsWith("llama") || id.startsWith("mistral") || id.startsWith("phi-")) return "ollama";
   return "anthropic";
 }

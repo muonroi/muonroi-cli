@@ -30,6 +30,7 @@ const MIN_KEPT_TOKENS_ON_RETRY = 4000;
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+export const POST_TURN_MIN_TOKENS = 2_000;
 export const COMPACTION_SUMMARY_HEADER = "[Context checkpoint summary]";
 
 const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant.

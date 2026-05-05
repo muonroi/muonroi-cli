@@ -23,7 +23,7 @@ export function TierBadge({ tier }: TierBadgeProps): React.ReactElement {
   const blink = tier === "degraded";
   return React.createElement(
     "text",
-    { color, blink: blink || undefined, "data-testid": "tier-badge", "data-tier": tier },
+    { fg: color, blink: blink || undefined, "data-testid": "tier-badge", "data-tier": tier },
     tier,
   );
 }

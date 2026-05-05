@@ -18,5 +18,5 @@ export function UsdMeter({ session_usd, month_usd, current_pct }: UsdMeterProps)
 
   const text = `session: $${session_usd.toFixed(2)} | month: $${month_usd.toFixed(2)}`;
 
-  return React.createElement("text", { color, "data-testid": "usd-meter", "data-pct": current_pct }, text);
+  return React.createElement("text", { fg: color, "data-testid": "usd-meter", "data-pct": current_pct }, text);
 }
