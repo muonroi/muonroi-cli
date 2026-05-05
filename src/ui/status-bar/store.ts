@@ -23,6 +23,8 @@ export interface StatusBarState {
   cap_usd: number;
   current_pct: number;
   degraded: boolean;
+  routed_from: string | null;
+  ee_status: "ok" | "warn" | "down" | "unknown";
 }
 
 type Listener = (s: StatusBarState) => void;
@@ -41,6 +43,8 @@ function makeStore() {
     cap_usd: 0,
     current_pct: 0,
     degraded: false,
+    routed_from: null,
+    ee_status: "unknown",
   };
   const listeners = new Set<Listener>();
   return {
@@ -96,10 +100,46 @@ export function wireStatusBar(): () => void {
     });
   });
 
+  // EE health polling (every 30s) — reads config.json for server URL
+  let eeTimer: ReturnType<typeof setInterval> | null = null;
+  let eeBaseUrl = "http://127.0.0.1:8082";
+  let eeAuthToken = "";
+  try {
+    const fs = require("node:fs");
+    const os = require("node:os");
+    const path = require("node:path");
+    const cfgPath = path.join(os.homedir(), ".experience", "config.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
+    if (cfg.serverBaseUrl) eeBaseUrl = cfg.serverBaseUrl;
+    eeAuthToken = cfg.serverReadAuthToken || cfg.serverAuthToken || "";
+  } catch { /* config unreadable — try localhost */ }
+
+  async function checkEEHealth() {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const headers: Record<string, string> = {};
+      if (eeAuthToken) headers["Authorization"] = `Bearer ${eeAuthToken}`;
+      const res = await fetch(`${eeBaseUrl}/health`, { signal: controller.signal, headers });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = (await res.json()) as { status?: string };
+        statusBarStore.setState({ ee_status: data.status === "ok" ? "ok" : "warn" });
+      } else {
+        statusBarStore.setState({ ee_status: "warn" });
+      }
+    } catch {
+      statusBarStore.setState({ ee_status: "down" });
+    }
+  }
+  checkEEHealth();
+  eeTimer = setInterval(checkEEHealth, 30_000);
+
   return () => {
     offRouter();
     offThresholds();
     offDowngrade();
+    if (eeTimer) clearInterval(eeTimer);
     wired = false;
   };
 }
@@ -119,6 +159,8 @@ export function __resetStatusBarStoreForTests(): void {
     cap_usd: 0,
     current_pct: 0,
     degraded: false,
+    routed_from: null,
+    ee_status: "unknown",
   });
   wired = false;
 }

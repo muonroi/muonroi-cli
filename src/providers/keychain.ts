@@ -5,12 +5,21 @@
  * Extends the Phase 0 loadAnthropicKey pattern to all 6 providers.
  * PROV-02 / PROV-03 requirements.
  *
- * Priority: OS keychain (keytar) > environment variable > ProviderKeyMissingError.
+ * Priority: OS keychain (keytar) > environment variable > settings.json > ProviderKeyMissingError.
  * Exception: ollama is keyless by default.
  */
 
 import { redactor } from "../utils/redactor.js";
 import type { ProviderId } from "./types.js";
+
+const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
+  anthropic: "anthropic",
+  openai: "openai",
+  google: "google",
+  deepseek: "deepseek",
+  siliconflow: "siliconflow",
+  xai: "xai",
+};
 
 const KEYCHAIN_SERVICE = "muonroi-cli";
 
@@ -81,6 +90,22 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
   if (envKey && envKey.length >= 20) {
     redactor.enrollSecret(envKey);
     return envKey;
+  }
+
+  // Fallback: check user-settings.json providers config (lazy import to avoid circular deps)
+  const settingsField = SETTINGS_KEY_MAP[provider];
+  if (settingsField) {
+    try {
+      const { loadUserSettings } = await import("../utils/settings.js");
+      const providers = loadUserSettings().providers as Record<string, { apiKey?: string }> | undefined;
+      const settingsKey = providers?.[settingsField]?.apiKey;
+      if (settingsKey && settingsKey.length >= 20) {
+        redactor.enrollSecret(settingsKey);
+        return settingsKey;
+      }
+    } catch {
+      /* settings load failed — continue to error */
+    }
   }
 
   // Ollama may be keyless

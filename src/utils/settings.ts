@@ -12,6 +12,8 @@ import type {
 import { getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../models/registry.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 
+export type ModelRole = "leader" | "implement" | "verify" | "research";
+
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 export type TelegramStreamingMode = "off" | "partial";
@@ -183,7 +185,12 @@ export interface UserSettings {
   payments?: PaymentSettings;
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
+  autoCompactAfterTurn?: boolean;
+  roleModels?: Partial<Record<ModelRole, string>>;
+  councilRounds?: number;
+  autoCouncil?: boolean;
   providers?: {
+    anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;
     google?: ProviderKeyConfig;
     deepseek?: ProviderKeyConfig;
@@ -755,5 +762,26 @@ export function loadPaymentSettings(): Required<PaymentSettings> {
 /** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
 export function savePaymentSettings(partial: PaymentSettings): void {
   saveUserSettings({ payments: partial });
+}
+
+export function isAutoCompactAfterTurnEnabled(): boolean {
+  return loadUserSettings().autoCompactAfterTurn ?? true;
+}
+
+export function getRoleModel(role: ModelRole): string | undefined {
+  return loadUserSettings().roleModels?.[role];
+}
+
+export function getRoleModels(): Partial<Record<ModelRole, string>> {
+  return loadUserSettings().roleModels ?? {};
+}
+
+export function getCouncilRounds(): number {
+  const r = loadUserSettings().councilRounds;
+  return typeof r === "number" && r >= 1 ? Math.min(r, 5) : 3;
+}
+
+export function isAutoCouncilEnabled(): boolean {
+  return loadUserSettings().autoCouncil ?? true;
 }
 

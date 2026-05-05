@@ -36,6 +36,8 @@ function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
     cap_usd: 0,
     current_pct: 0,
     degraded: false,
+    routed_from: null,
+    ee_status: "unknown",
     ...overrides,
   };
 }

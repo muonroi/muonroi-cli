@@ -10,6 +10,8 @@
  * - premium: High-stakes planning tasks requiring deep reasoning
  */
 
+import type { ModelRole } from "../utils/settings.js";
+
 export type EETier = "fast" | "balanced" | "premium";
 
 const MAP: Record<string, EETier> = {
@@ -71,4 +73,18 @@ export function taskTypeToReasoningEffort(taskType: string | null): "low" | "med
     default:
       return "low"; // conversational — minimal reasoning
   }
+}
+
+const ROLE_MAP: Record<string, ModelRole> = {
+  plan: "leader",
+  analyze: "leader",
+  generate: "implement",
+  refactor: "implement",
+  debug: "verify",
+  documentation: "research",
+};
+
+export function taskTypeToRole(taskType: string | null): ModelRole | null {
+  if (!taskType) return null;
+  return ROLE_MAP[taskType] ?? null;
 }

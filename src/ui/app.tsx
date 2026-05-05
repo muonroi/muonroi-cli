@@ -89,6 +89,8 @@ import "./slash/expand.js";
 import "./slash/clear.js";
 import "./slash/cost.js";
 import "./slash/ee.js";
+import "./slash/debug.js";
+import "./slash/council.js";
 
 import {
   getEffectiveReasoningEffort,
@@ -406,6 +408,8 @@ interface SlashMenuItem {
 const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "exit", label: "exit", description: "Quit the CLI" },
   { id: "help", label: "help", description: "Show available commands" },
+  { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
+  { id: "compact", label: "compact", description: "Compact conversation context" },
   { id: "remote-control", label: "remote-control", description: "Remote control" },
   { id: "agents", label: "agents", description: "Manage custom sub-agents" },
   { id: "schedule", label: "schedule", description: "View scheduled runs" },
@@ -421,6 +425,16 @@ const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "skills", label: "skills", description: "Manage skills" },
   { id: "btw", label: "btw", description: "Ask a side question without interrupting" },
   { id: "update", label: "update", description: "Update muonroi-cli to the latest version" },
+  { id: "cost", label: "cost", description: "Show session cost breakdown" },
+  { id: "ee", label: "ee", description: "Experience Engine status and controls" },
+  { id: "route", label: "route", description: "Show current model routing info" },
+  { id: "plan", label: "plan", description: "Show active GSD plan" },
+  { id: "execute", label: "execute", description: "Execute active GSD plan" },
+  { id: "discuss", label: "discuss", description: "Discuss phase gray areas" },
+  { id: "expand", label: "expand", description: "Expand last compacted context" },
+  { id: "optimize", label: "optimize", description: "Optimize prompt for token savings" },
+  { id: "debug", label: "debug", description: "Toggle debug trace mode" },
+  { id: "council", label: "council", description: "Multi-model adversarial debate" },
 ];
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
@@ -2506,6 +2520,32 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             return;
           }
 
+          if (result.startsWith("__COUNCIL__")) {
+            const lines = result.split("\n");
+            const roundsStr = lines[1] ?? "";
+            const rounds = roundsStr ? parseInt(roundsStr, 10) : undefined;
+            const topic = lines.slice(2).join("\n");
+            setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
+            try {
+              const gen = agent.runCouncilRound(topic, undefined, rounds || undefined);
+              for await (const chunk of gen) {
+                if (chunk.type === "content") {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
+                    }
+                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                  });
+                }
+                if (chunk.type === "done") break;
+              }
+            } catch (e: unknown) {
+              setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
+            }
+            return;
+          }
+
           setMessages((prev) => [...prev, buildAssistantEntry(result)]);
         });
         return true;
@@ -2608,11 +2648,79 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setUpdateOutput(result.success ? result.output : `Update failed: ${result.output}`);
           });
           break;
+        case "clear":
+          agent.clearHistory();
+          resetToNewSession();
+          break;
+        default: {
+          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
+          dispatchSlash(item.id, [], {
+            cwd: agent.getCwd(),
+            tenantId: "local",
+            defaultProvider: "anthropic",
+            defaultModel: model,
+            lastPrompt: messages[messages.length - 1]?.content,
+          }).then(async (result) => {
+            if (result === null) return;
+            if (result.startsWith("__COMPACT__")) {
+              const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+              try {
+                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                setMessages((prev) => [
+                  ...prev,
+                  buildAssistantEntry(
+                    `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                  ),
+                ]);
+              } catch (e: unknown) {
+                setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+              }
+              return;
+            }
+            if (result.startsWith("__EXPAND__")) {
+              const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
+              setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
+              return;
+            }
+            if (result.startsWith("__CLEAR__")) {
+              const summary = result.replace(/^__CLEAR__\n/, "");
+              agent.clearHistory();
+              setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
+              return;
+            }
+            if (result.startsWith("__COUNCIL__")) {
+              const topic = result.replace(/^__COUNCIL__\n/, "");
+              setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
+              try {
+                const gen = agent.runCouncilRound(topic);
+                for await (const chunk of gen) {
+                  if (chunk.type === "content") {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
+                      }
+                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                    });
+                  }
+                  if (chunk.type === "done") break;
+                }
+              } catch (e: unknown) {
+                setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
+              }
+              return;
+            }
+            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+          });
+          break;
+        }
       }
     },
     [
       agent,
       handleExit,
+      model,
+      messages,
       openAgentsModal,
       openMcpModal,
       openSandboxPicker,

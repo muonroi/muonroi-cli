@@ -12,22 +12,22 @@ describe("UsdMeter", () => {
 
   it("renders white color when current_pct < 50", () => {
     const el = UsdMeter({ session_usd: 0, month_usd: 0, current_pct: 20 }) as any;
-    expect(el.props.color).toBe("white");
+    expect(el.props.fg).toBe("white");
   });
 
   it("renders cyan color when current_pct >= 50 and < 80", () => {
     const el = UsdMeter({ session_usd: 0, month_usd: 0, current_pct: 55 }) as any;
-    expect(el.props.color).toBe("cyan");
+    expect(el.props.fg).toBe("cyan");
   });
 
   it("renders yellow color when current_pct >= 80 and < 100", () => {
     const el = UsdMeter({ session_usd: 0, month_usd: 0, current_pct: 80 }) as any;
-    expect(el.props.color).toBe("yellow");
+    expect(el.props.fg).toBe("yellow");
   });
 
   it("renders red color when current_pct >= 100", () => {
     const el = UsdMeter({ session_usd: 0, month_usd: 0, current_pct: 100 }) as any;
-    expect(el.props.color).toBe("red");
+    expect(el.props.fg).toBe("red");
   });
 
   it("has data-testid usd-meter", () => {
