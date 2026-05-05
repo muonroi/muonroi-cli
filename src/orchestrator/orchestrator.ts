@@ -35,6 +35,7 @@ import { buildMcpToolSet } from "../mcp/runtime";
 import { createBuiltinTools } from "../tools/registry.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getModelInfo, normalizeModelId } from "../models/registry.js";
+import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
 import {
   appendCompaction,
@@ -2129,6 +2130,7 @@ export class Agent {
   async *processMessage(
     userMessage: string,
     observer?: ProcessMessageObserver,
+    images?: Array<{ path: string; mediaType: string; base64: string }>,
   ): AsyncGenerator<StreamChunk, void, unknown> {
     // TUI-04: prefer the external AbortContext (from SIGINT handler) so that
     // Ctrl+C mid-tool-call triggers a single, unified abort across all I/O.
@@ -2244,7 +2246,33 @@ export class Agent {
       turnProvider = this.requireProvider();
     }
 
-    const userModelMessage: ModelMessage = { role: "user", content: enrichedMessage };
+    let userModelMessage: ModelMessage;
+    if (images?.length) {
+      const parts: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
+        { type: "text", text: enrichedMessage },
+      ];
+      for (const img of images) {
+        parts.push({ type: "image", image: img.base64, mediaType: img.mediaType });
+      }
+      userModelMessage = { role: "user", content: parts };
+    } else {
+      userModelMessage = { role: "user", content: enrichedMessage };
+    }
+
+    // Vision proxy: convert images to text for models that don't support vision
+    if (images?.length && needsVisionProxy(turnModelId)) {
+      try {
+        const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
+        if (proxyResult.proxied) {
+          userModelMessage = proxyResult.messages[0];
+          yield { type: "content", content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n` };
+        }
+      } catch {
+        yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
+        userModelMessage = { role: "user", content: enrichedMessage };
+      }
+    }
+
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
 

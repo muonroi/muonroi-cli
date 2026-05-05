@@ -20,6 +20,14 @@ interface ToolRegistryOpts {
   listDelegations?: () => Promise<ToolResult>;
 }
 
+const MAX_TOOL_OUTPUT_CHARS = 12_000;
+
+function truncateOutput(text: string, maxChars = MAX_TOOL_OUTPUT_CHARS): string {
+  if (text.length <= maxChars) return text;
+  const half = Math.floor(maxChars / 2);
+  return `${text.slice(0, half)}\n\n... [${text.length - maxChars} chars truncated] ...\n\n${text.slice(-half)}`;
+}
+
 function formatResult(result: ToolResult): string {
   if (result.success) {
     return result.output ?? "OK";
@@ -156,7 +164,12 @@ export function createBuiltinTools(
       }),
       execute: async (input: any) => {
         const result = await writeFile(input.file_path, input.content, bash.getCwd());
-        return formatResult(result);
+        return {
+          success: result.success,
+          output: truncateOutput(result.output ?? ""),
+          diff: result.diff,
+          lspDiagnostics: result.lspDiagnostics,
+        };
       },
     });
 
@@ -174,7 +187,12 @@ export function createBuiltinTools(
       }),
       execute: async (input: any) => {
         const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd());
-        return formatResult(result);
+        return {
+          success: result.success,
+          output: truncateOutput(result.output ?? ""),
+          diff: result.diff,
+          lspDiagnostics: result.lspDiagnostics,
+        };
       },
     });
 

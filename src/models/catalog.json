@@ -192,7 +192,8 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "DeepSeek V3 general-purpose model (legacy, deprecated 2026/07/24)",
-      "aliases": ["deepseek-v3"]
+      "aliases": ["deepseek-v3"],
+      "supports_vision": false
     },
     {
       "id": "deepseek-reasoner",
@@ -208,7 +209,8 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "DeepSeek R1 reasoning model (legacy, deprecated 2026/07/24)",
-      "aliases": ["deepseek-r1"]
+      "aliases": ["deepseek-r1"],
+      "supports_vision": false
     },
     {
       "id": "deepseek-v4-flash",
@@ -224,7 +226,8 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Fast and affordable DeepSeek model",
-      "aliases": ["deepseek-flash"]
+      "aliases": ["deepseek-flash"],
+      "supports_vision": false
     },
     {
       "id": "deepseek-v4-pro",
@@ -240,7 +243,8 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Most capable DeepSeek reasoning model",
-      "aliases": ["deepseek-pro"]
+      "aliases": ["deepseek-pro"],
+      "supports_vision": false
     },
     {
       "id": "gemini-2.5-pro",

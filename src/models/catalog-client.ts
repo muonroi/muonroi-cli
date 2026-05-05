@@ -20,6 +20,7 @@ export interface CatalogModel {
   description: string;
   aliases?: string[];
   default_reasoning_effort?: string | null;
+  supports_vision?: boolean;
 }
 
 interface CatalogResponse {
@@ -77,5 +78,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     supportsReasoningEffort: m.supports_effort ?? false,
     defaultReasoningEffort: (m.default_reasoning_effort as ReasoningEffort) ?? undefined,
     thinkingType: m.thinking_type as ModelInfo["thinkingType"],
+    supportsVision: m.supports_vision ?? true,
   };
 }
