@@ -1,19 +1,29 @@
 import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import {
+  StdioClientTransport,
+  getDefaultEnvironment,
+} from "@modelcontextprotocol/sdk/client/stdio.js";
+import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { ToolSet } from "ai";
-import type { McpServerConfig } from "../utils/settings";
-import { validateMcpServerConfig } from "./validate";
+import type { McpServerConfig } from "../utils/settings.js";
+import { validateMcpServerConfig } from "./validate.js";
+import { createOAuthProviderWithCallback } from "./oauth-provider.js";
 
 function mcpToolPrefix(server: McpServerConfig): string {
   return `mcp_${server.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-function toTransport(server: McpServerConfig) {
+function toTransport(
+  server: McpServerConfig,
+  authProvider?: OAuthClientProvider,
+) {
   if (server.transport === "stdio") {
     return new StdioClientTransport({
       command: server.command ?? "",
       args: server.args,
-      env: server.env,
+      env: server.env
+        ? { ...getDefaultEnvironment(), ...server.env }
+        : undefined,
       cwd: server.cwd,
       stderr: "pipe",
     });
@@ -23,6 +33,7 @@ function toTransport(server: McpServerConfig) {
     type: server.transport,
     url: server.url ?? "",
     headers: server.headers,
+    ...(authProvider ? { authProvider: authProvider as any } : {}),
   } as const;
 }
 
@@ -32,10 +43,18 @@ export interface McpToolBundle {
   close(): Promise<void>;
 }
 
-export async function buildMcpToolSet(servers: McpServerConfig[]): Promise<McpToolBundle> {
+export interface McpBuildOptions {
+  onOAuthRequired?: (serverId: string, url: URL) => void;
+}
+
+export async function buildMcpToolSet(
+  servers: McpServerConfig[],
+  opts?: McpBuildOptions,
+): Promise<McpToolBundle> {
   const tools: ToolSet = {};
   const errors: string[] = [];
   const clients: MCPClient[] = [];
+  const cleanups: (() => void)[] = [];
 
   for (const server of servers) {
     if (!server.enabled) continue;
@@ -47,8 +66,19 @@ export async function buildMcpToolSet(servers: McpServerConfig[]): Promise<McpTo
     }
 
     try {
+      let authProvider: OAuthClientProvider | undefined;
+
+      if (server.transport !== "stdio" && opts?.onOAuthRequired) {
+        const oauthResult = await createOAuthProviderWithCallback({
+          serverId: server.id,
+          onAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url),
+        });
+        authProvider = oauthResult.provider;
+        cleanups.push(oauthResult.close);
+      }
+
       const client = await createMCPClient({
-        transport: toTransport(server),
+        transport: toTransport(server, authProvider),
         name: `muonroi-cli-${server.id}`,
         version: "1.0.0",
       });
@@ -74,7 +104,10 @@ export async function buildMcpToolSet(servers: McpServerConfig[]): Promise<McpTo
     tools,
     errors,
     async close() {
-      await Promise.all(clients.map((client) => client.close().catch(() => {})));
+      for (const fn of cleanups) fn();
+      await Promise.all(
+        clients.map((client) => client.close().catch(() => {})),
+      );
     },
   };
 }

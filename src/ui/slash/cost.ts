@@ -9,6 +9,7 @@
  */
 
 import { getDefaultEEClient } from "../../ee/intercept.js";
+import { healthDetailed } from "../../ee/health.js";
 import { statusBarStore } from "../status-bar/store.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
@@ -24,11 +25,26 @@ export const handleCostSlash: SlashHandler = async (_args, _ctx) => {
     `Month:    $${s.month_usd.toFixed(4)} / $${s.cap_usd.toFixed(2)} (${s.current_pct.toFixed(1)}%)`,
   ];
 
-  // EE activity pulse
+  // EE health + activity pulse
+  try {
+    const h = await healthDetailed();
+    const modeLabel = h.mode === "thin-client" ? "Thin Client → VPS" : "Local";
+    const statusIcon = h.ok ? "✓" : "✗";
+    lines.push("");
+    lines.push("**EE Health**");
+    lines.push(`  ${statusIcon} Mode: ${modeLabel}  |  Circuit: ${h.circuit}  |  Server: ${h.components.server.ok ? "UP" : `DOWN (${h.components.server.status})`}`);
+    if (h.components.gates) {
+      lines.push(`  Gates: ${h.components.gates.ok ? "UP" : `DOWN (${h.components.gates.status})`}`);
+    }
+  } catch {
+    lines.push("");
+    lines.push("**EE Health**");
+    lines.push("  ✗ Unreachable");
+  }
+
   try {
     const ee = await getDefaultEEClient().stats();
     if (ee) {
-      lines.push("");
       lines.push("**EE Activity**");
       lines.push(`  Intercepts: ${ee.totalIntercepts}  |  Suggestions: ${ee.suggestions}  |  Lessons: ${ee.lessonsStored ?? 0}`);
     }

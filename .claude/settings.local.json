@@ -22,7 +22,8 @@
       "WebFetch(domain:api-docs.deepseek.com)",
       "WebFetch(domain:platform.openai.com)",
       "WebFetch(domain:developers.openai.com)",
-      "PowerShell(New-Item *)"
+      "PowerShell(New-Item *)",
+      "PowerShell(Stop-Process *)"
     ]
   }
 }

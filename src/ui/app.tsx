@@ -4481,7 +4481,7 @@ function MessageView({
       }
 
       if (name === "write_file" || name === "edit_file") {
-        const filePath = diff?.filePath || tryParseArg(entry.toolCall, "path") || args;
+        const filePath = diff?.filePath || tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
         const label = name === "write_file" ? `Write ${filePath}` : `Edit ${filePath}`;
         return (
           <box gap={0}>
@@ -4518,7 +4518,13 @@ function MessageView({
           <InlineTool
             t={t}
             pending={false}
-          >{`Read ${trunc(tryParseArg(entry.toolCall, "path") || args, 60)}`}</InlineTool>
+          >{`Read ${trunc(tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args, 60)}`}</InlineTool>
+        );
+      if (name === "grep")
+        return (
+          <InlineTool t={t} pending={false}>
+            {`Grep ${trunc(args, 60)}`}
+          </InlineTool>
         );
       if (name === "search_web" || name === "search_x")
         return (
@@ -6028,7 +6034,11 @@ function toolArgs(tc?: ToolCall): string {
     const a = JSON.parse(tc.function.arguments);
     if (tc.function.name === "bash") return a.command || "";
     if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
-      return a.path || "";
+      return a.file_path || a.path || "";
+    if (tc.function.name === "grep") {
+      const path = a.path ? ` in ${a.path}` : "";
+      return `"${a.pattern || ""}"${path}`;
+    }
     if (tc.function.name === "generate_image" || tc.function.name === "generate_video") return a.prompt || "";
     if (tc.function.name === "task") return a.description || "";
     if (tc.function.name === "lsp") return `${a.operation || "query"} ${a.filePath || ""}`.trim();
@@ -6063,6 +6073,7 @@ function toolLabel(tc: ToolCall): string {
   if (tc.function.name === "read_file") return `Read ${trunc(args, 60)}`;
   if (tc.function.name === "write_file") return `Write ${trunc(args, 60)}`;
   if (tc.function.name === "edit_file") return `Edit ${trunc(args, 60)}`;
+  if (tc.function.name === "grep") return `Grep ${trunc(args, 60)}`;
   if (tc.function.name === "search_web") return `Web Search "${trunc(args, 60)}"`;
   if (tc.function.name === "search_x") return `X Search "${trunc(args, 60)}"`;
   if (tc.function.name === "generate_image") return `Generate image "${trunc(args, 60)}"`;
