@@ -11,9 +11,12 @@ import type { ModelMessage } from "ai";
 import { getModelInfo } from "../models/registry.js";
 import { loadKeyForProvider } from "./keychain.js";
 
-const VISION_MODEL = "Qwen/Qwen2.5-VL-32B-Instruct";
+const VISION_MODELS = [
+  "Qwen/Qwen2.5-VL-32B-Instruct",
+  "Qwen/Qwen3-VL-30B-A3B-Instruct",
+] as const;
 const SILICONFLOW_BASE = "https://api.siliconflow.com/v1";
-const REQUEST_TIMEOUT_MS = 30_000;
+const REQUEST_TIMEOUT_MS = 45_000;
 
 interface ImagePart {
   type: "image";
@@ -117,52 +120,61 @@ async function describeImages(
     });
   }
 
-  const body = {
-    model: VISION_MODEL,
-    messages: [{ role: "user", content: visionContent }],
-    max_tokens: 2048,
-    temperature: 0.1,
+  // Try each vision model with fallback
+  for (const model of VISION_MODELS) {
+    try {
+      const result = await callVisionModel(model, visionContent, apiKey, signal);
+      if (result) return formatVisionResult(result, images.length, model);
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      console.warn(`[vision-proxy] ${model} failed, trying next...`);
+    }
+  }
+
+  return buildFallbackDescription(images);
+}
+
+async function callVisionModel(
+  model: string,
+  content: Array<Record<string, unknown>>,
+  apiKey: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  if (signal) {
+    signal.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+
+  const res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: "user", content }],
+      max_tokens: 2048,
+      temperature: 0.1,
+    }),
+    signal: controller.signal,
+  });
+
+  clearTimeout(timeout);
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "unknown error");
+    console.warn(`[vision-proxy] ${model} returned ${res.status}: ${errText}`);
+    return null;
+  }
+
+  const data = (await res.json()) as {
+    choices: Array<{ message: { content: string } }>;
   };
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    if (signal) {
-      signal.addEventListener("abort", () => controller.abort(), { once: true });
-    }
-
-    const res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeout);
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "unknown error");
-      console.warn(`[vision-proxy] SiliconFlow API error ${res.status}: ${errText}`);
-      return buildFallbackDescription(images);
-    }
-
-    const data = (await res.json()) as {
-      choices: Array<{ message: { content: string } }>;
-    };
-
-    const description = data.choices?.[0]?.message?.content;
-    if (!description) return buildFallbackDescription(images);
-
-    return formatVisionResult(description, images.length);
-  } catch (err) {
-    if (signal?.aborted) throw err;
-    console.warn(`[vision-proxy] request failed: ${err}`);
-    return buildFallbackDescription(images);
-  }
+  return data.choices?.[0]?.message?.content ?? null;
 }
 
 function buildAnalysisPrompt(userContext: string, imageCount: number): string {
@@ -182,10 +194,11 @@ function buildAnalysisPrompt(userContext: string, imageCount: number): string {
   ].join("\n");
 }
 
-function formatVisionResult(description: string, imageCount: number): string {
+function formatVisionResult(description: string, imageCount: number, model?: string): string {
+  const usedModel = model ?? VISION_MODELS[0];
   const header = imageCount > 1
-    ? `[Vision Proxy — ${imageCount} images analyzed via ${VISION_MODEL}]`
-    : `[Vision Proxy — image analyzed via ${VISION_MODEL}]`;
+    ? `[Vision Proxy — ${imageCount} images analyzed via ${usedModel}]`
+    : `[Vision Proxy — image analyzed via ${usedModel}]`;
   return `\n${header}\n${description}\n[/Vision Proxy]\n`;
 }
 
