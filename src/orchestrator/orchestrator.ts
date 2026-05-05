@@ -265,7 +265,7 @@ async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: 
 // END Plan 00-05 provider implementations
 // ---------------------------------------------------------------------------
 
-const MAX_TOOL_ROUNDS = 400;
+const MAX_TOOL_ROUNDS = 75;
 const VISION_MODEL = "grok-4-1-fast-reasoning";
 const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 
@@ -2431,9 +2431,7 @@ export class Agent {
             tools,
             toolChoice:
               _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false
-                ? pilCtx.taskType
-                  ? "required"
-                  : "auto"
+                ? "auto"
                 : undefined,
             stopWhen: stepCountIs(this.maxToolRounds),
             maxRetries: 0,

@@ -26,6 +26,7 @@ import type {
 import { MODES } from "../types/index";
 import { processAtMentions } from "../utils/at-mentions.js";
 import { FileIndex } from "../utils/file-index.js";
+import { readClipboardImage } from "../utils/clipboard-image";
 import { copyTextToHostClipboard } from "../utils/host-clipboard";
 import {
   type CustomSubagentConfig,
@@ -218,7 +219,7 @@ type ContextStats = {
   ratioUsed: number;
   ratioRemaining: number;
 };
-type PasteBlock = { id: number; content: string; lines: number; isImage?: boolean };
+type PasteBlock = { id: number; content: string; lines: number; isImage?: boolean; clipboardBase64?: string; clipboardMediaType?: string };
 type FileMentionBlock = { id: number; path: string };
 type QueuedMessage = { text: string; displayText: string };
 
@@ -3382,6 +3383,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return;
         }
       }
+      // Alt+V: paste image from clipboard (like Claude Code / Codex / Gemini CLI)
+      if (key.name === "v" && (key.meta || key.option)) {
+        const clip = readClipboardImage();
+        if (clip) {
+          const id = ++pasteCounterRef.current;
+          const block = { id, content: `__clipboard_image_${id}__`, lines: 1, isImage: true, clipboardBase64: clip.base64, clipboardMediaType: clip.mediaType } satisfies PasteBlock;
+          replacePasteBlocks([...pasteBlocksRef.current, block]);
+          inputRef.current?.insertText(getPasteBlockToken(block));
+        }
+        key.preventDefault();
+        key.stopPropagation();
+        return;
+      }
       if (key.name === "c" && key.ctrl) {
         if (copyTuiSelectionToHost()) {
           key.preventDefault();
@@ -3552,9 +3566,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       message = message.replace(getPasteBlockToken(block), block.content);
     }
 
-    // Load image files into base64 for multimodal messages
+    // Load images into base64 for multimodal messages
     const images: Array<{ path: string; mediaType: string; base64: string }> = [];
     for (const block of imageBlocks) {
+      // Clipboard image (Alt+V): already has base64 data
+      if (block.clipboardBase64) {
+        message = message.replace(getPasteBlockToken(block), "[clipboard image]");
+        images.push({ path: "clipboard", mediaType: block.clipboardMediaType ?? "image/png", base64: block.clipboardBase64 });
+        continue;
+      }
+      // File path image: read from disk
       const filePath = block.content.trim();
       message = message.replace(getPasteBlockToken(block), `[image: ${filePath}]`);
       try {

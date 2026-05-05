@@ -59,7 +59,7 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   if (responseToolsActive) {
     return (
       systemPrompt +
-      `\nOUTPUT FORMAT: Use the respond_${ctx.taskType} tool to structure your final response. Do NOT write free-form text for your answer — use the tool's structured fields. You may still use action tools (bash, read_file, edit_file, etc.) during your work, but your final answer MUST go through respond_${ctx.taskType}.`
+      `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then summarize your result via respond_${ctx.taskType}.`
     );
   }
   const style: OutputStyle = ctx.outputStyle ?? "concise";
