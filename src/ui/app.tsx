@@ -1886,7 +1886,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleRootMouseUp = useCallback(() => {
     copyTuiSelectionToHost();
+    inputRef.current?.focus();
   }, [copyTuiSelectionToHost]);
+
+  const handleRootMouseDown = useCallback(() => {
+    setTimeout(() => inputRef.current?.focus(), 0);
+  }, []);
 
   useEffect(() => {
     if (copyFlashId === 0) return;
@@ -2166,7 +2171,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   }, [agent, clearLiveTurnUi, replacePasteBlocks]);
 
   const processMessage = useCallback(
-    async (text: string, displayText?: string) => {
+    async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
       if (!text.trim() || isProcessingRef.current) return;
       const runId = ++activeRunIdRef.current;
       const isStale = () => activeRunIdRef.current !== runId;
@@ -2186,7 +2191,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         let turnHadError = false;
         let turnHadAuthError = false;
         try {
-          for await (const chunk of agent.processMessage(text.trim())) {
+          for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
             if (isStale()) {
               break;
             }
@@ -3540,9 +3545,35 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     let message = raw;
     const blocks = [...pasteBlocksRef.current];
     replacePasteBlocks([]);
-    for (const block of blocks) {
+
+    const imageBlocks = blocks.filter((b) => b.isImage);
+    const textBlocks = blocks.filter((b) => !b.isImage);
+    for (const block of textBlocks) {
       message = message.replace(getPasteBlockToken(block), block.content);
     }
+
+    // Load image files into base64 for multimodal messages
+    const images: Array<{ path: string; mediaType: string; base64: string }> = [];
+    for (const block of imageBlocks) {
+      const filePath = block.content.trim();
+      message = message.replace(getPasteBlockToken(block), `[image: ${filePath}]`);
+      try {
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const resolved = path.isAbsolute(filePath) ? filePath : path.resolve(agent.getCwd(), filePath);
+        const buf = fs.readFileSync(resolved);
+        const ext = path.extname(resolved).toLowerCase().replace(".", "");
+        const mimeMap: Record<string, string> = {
+          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+          gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+          bmp: "image/bmp", ico: "image/x-icon", tif: "image/tiff", tiff: "image/tiff",
+        };
+        images.push({ path: resolved, mediaType: mimeMap[ext] ?? "image/png", base64: buf.toString("base64") });
+      } catch {
+        // File unreadable — keep path as text fallback
+      }
+    }
+
     const displayText = message.trim();
     const fileBlocks = [...fileMentionBlocksRef.current];
     fileMentionBlocksRef.current = [];
@@ -3562,7 +3593,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setTimeout(scrollToBottom, 10);
       return;
     }
-    processMessage(enhancedMessage, displayText);
+    processMessage(enhancedMessage, displayText, images.length > 0 ? images : undefined);
   }, [agent, clearLiveTurnUi, handleCommand, openApiKeyModal, processMessage, replacePasteBlocks, scrollToBottom]);
 
   const hasMessages = messages.length > 0 || streamContent || isProcessing;
@@ -3575,6 +3606,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       backgroundColor={t.background}
       flexDirection="column"
       onMouseUp={handleRootMouseUp}
+      onMouseDown={handleRootMouseDown}
     >
       {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
       {hasMessages ? (
@@ -6032,7 +6064,7 @@ function toolArgs(tc?: ToolCall): string {
   if (!tc) return "";
   try {
     const a = JSON.parse(tc.function.arguments);
-    if (tc.function.name === "bash") return a.command || "";
+    if (tc.function.name === "bash") return (a.command || "").replace(/\n/g, " ").trim();
     if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
       return a.file_path || a.path || "";
     if (tc.function.name === "grep") {

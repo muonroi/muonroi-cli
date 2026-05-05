@@ -252,6 +252,7 @@ export interface ModelInfo {
   defaultReasoningEffort?: ReasoningEffort;
   supportsReasoningEffort?: boolean;
   thinkingType?: "enabled" | "adaptive";
+  supportsVision?: boolean;
 }
 
 export type AgentMode = "agent" | "plan" | "ask";
