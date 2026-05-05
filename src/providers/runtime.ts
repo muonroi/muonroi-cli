@@ -41,7 +41,7 @@ export function createProviderFactory(
     case "anthropic": {
       const p = createAnthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL });
       const factory: ProviderFactory = (modelId: string) => p(modelId);
-      factory.responses = (modelId: string) => p.responses(modelId);
+      factory.responses = (modelId: string) => (p as any).responses(modelId);
       return { id, factory };
     }
     case "openai": {

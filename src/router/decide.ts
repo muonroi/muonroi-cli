@@ -96,7 +96,7 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
   if (pil?.domain) ctx.domain = pil.domain;
   if (pil?.gsdPhase) ctx.phase = pil.gsdPhase;
   if (pil?.activeRunId) ctx.activeRun = pil.activeRunId;
-  if (pil?.taskType && pil.confidence > 0) {
+  if (pil?.taskType && (pil.confidence ?? 0) > 0) {
     ctx.localRoute = { tier: pil.taskType, confidence: pil.confidence };
   }
   if (pil?.recentTurnsSummary) ctx.recentTurns = pil.recentTurnsSummary;

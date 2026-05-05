@@ -12,6 +12,7 @@ import { getTenantId } from "../ee/tenant.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { routerStore } from "../router/store.js";
+import { statusBarStore } from "../ui/status-bar/store.js";
 import { taskTypeToTier, taskTypeToMaxTokens, taskTypeToReasoningEffort } from "../pil/task-tier-map.js";
 import type {
   NotificationHookInput,
@@ -29,6 +30,7 @@ import type {
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { extractSession } from "../ee/extract-session.js";
+import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { createBuiltinTools } from "../tools/registry.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
@@ -819,6 +821,7 @@ export class Agent {
     this.externalAbortContext = options.abortContext ?? null;
     this.pendingCalls = options.pendingCalls ?? null;
     this.permissionMode = options.permissionMode ?? "safe";
+    ensureDefaultMcpServers();
 
     if (options.persistSession !== false) {
       this.sessionStore = new SessionStore(this.bash.getCwd());
@@ -1177,25 +1180,21 @@ export class Agent {
       }
     }
     // Update status bar token counters + provider/model + cache metrics + cost
-    try {
-      const { statusBarStore } = require("../ui/status-bar/store.js");
-      const { getModelInfo: _getModelInfo } = require("../models/registry.js");
-      const prev = statusBarStore.getState();
-      const info = _getModelInfo(model);
-      const inputCost = (usage.inputTokens ?? 0) * (info?.inputPrice ?? 0);
-      const cachedCost = (usage.cacheReadTokens ?? 0) * ((info?.cachedInputPrice ?? (info?.inputPrice ?? 0) * 0.1));
-      const outputCost = (usage.outputTokens ?? 0) * (info?.outputPrice ?? 0);
-      const turnCostMicros = inputCost - ((usage.cacheReadTokens ?? 0) * (info?.inputPrice ?? 0)) + cachedCost + outputCost;
-      statusBarStore.setState({
-        in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
-        out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
-        cache_read_tokens: (prev.cache_read_tokens ?? 0) + (usage.cacheReadTokens ?? 0),
-        cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + (usage.cacheCreationTokens ?? 0),
-        session_usd: prev.session_usd + turnCostMicros / 1_000_000,
-        provider: this.providerId,
-        model,
-      });
-    } catch { /* status bar may not be mounted */ }
+    const prev = statusBarStore.getState();
+    const info = getModelInfo(model);
+    const inputCost = (usage.inputTokens ?? 0) * (info?.inputPrice ?? 0);
+    const cachedCost = (usage.cacheReadTokens ?? 0) * ((info?.cachedInputPrice ?? (info?.inputPrice ?? 0) * 0.1));
+    const outputCost = (usage.outputTokens ?? 0) * (info?.outputPrice ?? 0);
+    const turnCostMicros = inputCost - ((usage.cacheReadTokens ?? 0) * (info?.inputPrice ?? 0)) + cachedCost + outputCost;
+    statusBarStore.setState({
+      in_tokens: prev.in_tokens + (usage.inputTokens ?? 0),
+      out_tokens: prev.out_tokens + (usage.outputTokens ?? 0),
+      cache_read_tokens: (prev.cache_read_tokens ?? 0) + (usage.cacheReadTokens ?? 0),
+      cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + (usage.cacheCreationTokens ?? 0),
+      session_usd: prev.session_usd + turnCostMicros / 1_000_000,
+      provider: this.providerId,
+      model,
+    });
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {
@@ -1560,7 +1559,17 @@ export class Agent {
 
     try {
       if (childMode === "agent" && childRuntime.modelInfo?.supportsClientTools !== false) {
-        const mcpBundle = await buildMcpToolSet(loadMcpServers());
+        const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+          onOAuthRequired: (_serverId, url) => {
+            const urlStr = url.toString();
+            import("child_process").then(({ exec }) => {
+              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
+                : process.platform === "darwin" ? `open "${urlStr}"`
+                : `xdg-open "${urlStr}"`;
+              exec(cmd);
+            });
+          },
+        });
         closeMcp = mcpBundle.close;
         childTools = { ...childBaseTools, ...mcpBundle.tools };
         captureToolSchemas(childTools);
@@ -1909,7 +1918,17 @@ export class Agent {
         });
         let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
         if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
-          const mcpBundle = await buildMcpToolSet(loadMcpServers());
+          const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+          onOAuthRequired: (_serverId, url) => {
+            const urlStr = url.toString();
+            import("child_process").then(({ exec }) => {
+              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
+                : process.platform === "darwin" ? `open "${urlStr}"`
+                : `xdg-open "${urlStr}"`;
+              exec(cmd);
+            });
+          },
+        });
           closeMcp = mcpBundle.close;
           tools = { ...baseTools, ...mcpBundle.tools };
           if (mcpBundle.errors.length > 0) {
@@ -2172,6 +2191,8 @@ export class Agent {
       tokenBudget: 500,
       metrics: null,
       layers: [],
+      gsdPhase: null,
+      activeRunId: null,
     }));
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
@@ -2311,7 +2332,17 @@ export class Agent {
           });
           let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
           if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
-            const mcpBundle = await buildMcpToolSet(loadMcpServers());
+            const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+          onOAuthRequired: (_serverId, url) => {
+            const urlStr = url.toString();
+            import("child_process").then(({ exec }) => {
+              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
+                : process.platform === "darwin" ? `open "${urlStr}"`
+                : `xdg-open "${urlStr}"`;
+              exec(cmd);
+            });
+          },
+        });
             closeMcp = mcpBundle.close;
             tools = { ...baseTools, ...mcpBundle.tools };
             captureToolSchemas(tools);

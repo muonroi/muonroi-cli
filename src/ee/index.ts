@@ -1,6 +1,6 @@
 export { getCachedAuthToken, getEmbeddingModelVersion, loadEEAuthToken, refreshAuthToken } from "./auth.js";
 export { type CreateEEClientOpts, createEEClient } from "./client.js";
-export { health } from "./health.js";
+export { health, healthDetailed, type EEHealthResult } from "./health.js";
 export {
   bootstrapEEClient,
   getDefaultEEClient,

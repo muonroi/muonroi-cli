@@ -1,4 +1,4 @@
-import type { McpRemoteTransport } from "../utils/settings";
+import type { McpRemoteTransport } from "../utils/settings.js";
 
 export interface McpCatalogEntry {
   id: string;
@@ -11,11 +11,39 @@ export interface McpCatalogEntry {
 
 export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
+    id: "filesystem",
+    name: "Filesystem",
+    description:
+      "Read/write access to the local filesystem with safety controls.",
+    directoryUrl:
+      "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers",
+    starterTransport: "stdio",
+  },
+  {
+    id: "playwright",
+    name: "Playwright",
+    description: "Browser automation and web testing via Playwright.",
+    directoryUrl: "https://github.com/microsoft/playwright-mcp",
+    sourceUrl: "https://github.com/microsoft/playwright-mcp",
+    starterTransport: "stdio",
+  },
+  {
+    id: "memory",
+    name: "Memory",
+    description: "Persistent knowledge graph memory for context recall.",
+    directoryUrl:
+      "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers",
+    starterTransport: "stdio",
+  },
+  {
     id: "github",
     name: "GitHub",
     description: "Integration with GitHub issues and related workflows.",
     directoryUrl: "https://cursor.directory/plugins/mcp-github",
-    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+    sourceUrl:
+      "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
     starterTransport: "stdio",
   },
   {
@@ -45,7 +73,8 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "notion",
     name: "Notion",
-    description: "Databases, pages, blocks, and search inside Notion workspaces.",
+    description:
+      "Databases, pages, blocks, and search inside Notion workspaces.",
     directoryUrl: "https://cursor.directory/plugins/mcp-notion",
   },
   {
@@ -57,7 +86,8 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "sentry",
     name: "Sentry",
-    description: "Issue analysis and debugging workflows for Sentry projects.",
+    description:
+      "Issue analysis and debugging workflows for Sentry projects.",
     directoryUrl: "https://cursor.directory/plugins/mcp-sentry",
   },
   {
@@ -88,7 +118,8 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "mongodb",
     name: "MongoDB",
-    description: "Read-only exploration, queries, and aggregation for MongoDB.",
+    description:
+      "Read-only exploration, queries, and aggregation for MongoDB.",
     directoryUrl: "https://cursor.directory/plugins/mcp-mongodb",
   },
   {
