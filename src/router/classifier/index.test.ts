@@ -6,11 +6,11 @@ describe("classify orchestrator", () => {
     await warm();
   }, 30_000);
 
-  it("returns abstain for generic greeting with low confidence", () => {
+  it("returns hot for generic greeting (short message fast path)", () => {
     const result = classify("hi");
-    expect(result.tier).toBe("abstain");
-    expect(result.confidence).toBeLessThan(0.55);
-    expect(result.reason).toBe("low-confidence");
+    expect(result.tier).toBe("hot");
+    expect(result.confidence).toBe(0.6);
+    expect(result.reason).toBe("regex:short-message");
   });
 
   it("returns hot for regex-matchable prompts", () => {

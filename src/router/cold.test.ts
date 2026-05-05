@@ -3,11 +3,13 @@ import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
 import { callColdRoute } from "./cold.js";
+import { loadCatalog } from "../models/registry.js";
 
 describe("callColdRoute", () => {
   let stub: StubHandle;
 
   beforeAll(async () => {
+    await loadCatalog();
     stub = await startStubEEServer({
       coldRoute: (_req) => ({
         model: "deepseek-v3",
@@ -31,7 +33,8 @@ describe("callColdRoute", () => {
     expect(result).not.toBeNull();
     expect(result!.tier).toBe("cold");
     expect(result!.model).toBe("deepseek-v3");
-    expect(result!.provider).toBe("");
+    // provider is resolved by detectProviderForModel; deepseek-v3 aliases to deepseek-chat (provider: deepseek)
+    expect(result!.provider).toBe("deepseek");
     expect(result!.reason).toContain("cold:");
   });
 
