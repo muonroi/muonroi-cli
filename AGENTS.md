@@ -1,30 +1,40 @@
 # AGENTS.md
 
-## Cursor Cloud specific instructions
+## Overview
 
-### Overview
+muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 19 + OpenTUI + AI SDK v6. It supports role-based multi-model orchestration, multi-model council debates, auto-compaction, and an optional Experience Engine for persistent learning.
 
-muonroi-cli is a single-package TypeScript CLI tool — no databases, Docker, or background services. See `README.md` for full documentation and usage.
+## Quick reference
 
-### Quick reference
+| Action | Command |
+|--------|---------|
+| Install deps | `bun install` |
+| Typecheck | `bun run typecheck` or `npx tsc --noEmit` |
+| Build | `bun run build` |
+| Run from source | `bun run dev` |
+| Run built CLI | `node dist/index.js` |
+| Headless mode | `node dist/index.js --prompt "..." --max-tool-rounds N` |
+| Run tests | `bun test` |
 
+## Key directories
 
-| Action        | Command                                                               |
-| ------------- | --------------------------------------------------------------------- |
-| Install deps  | `bun install` (installs Husky; pre-commit runs Biome on staged files) |
-| Typecheck     | `bun run typecheck`                                                   |
-| Build         | `bun run build`                                                       |
-| Run built CLI | `node dist/index.js`                                                  |
-| Headless mode | `node dist/index.js --prompt "..." --max-tool-rounds N`               |
-| CLI help      | `node dist/index.js --help`                                           |
+| Path | Purpose |
+|------|---------|
+| `src/orchestrator/` | Agent class, compaction, delegations, council |
+| `src/providers/` | Multi-provider factory, keychain, vision proxy |
+| `src/router/` | Per-turn model routing with role-based resolution |
+| `src/pil/` | Prompt Intelligence Layer (6-layer pipeline) |
+| `src/ui/` | React TUI, status bar, slash commands |
+| `src/storage/` | SQLite session/message persistence |
+| `src/tools/` | Builtin tools (bash, file ops, grep, LSP) |
+| `src/mcp/` | Model Context Protocol server integration |
+| `src/models/` | Model catalog and pricing registry |
+| `src/ee/` | Experience Engine client and hooks |
 
+## Architecture notes
 
-### Known issues
-
-- **ESLint config is broken**: The repo has `.eslintrc.js` (legacy format) but uses ESLint 9 (`^9.31.0`) + `@typescript-eslint` v8, which require flat config (`eslint.config.js`). Additionally, `.eslintrc.js` uses `module.exports` (CJS) but `package.json` has `"type": "module"` (ESM). Running `bun run lint` will fail. Use `bun run typecheck` as the primary code quality check (this is also what CI enforces).
-- **Dev mode (`bun run dev` / `bun run dev:node`) fails at runtime**: `src/utils/model-config.ts` imports TypeScript interfaces (`UserSettings`, `ProjectSettings`) as value imports from `settings-manager.ts`. These type-only exports are erased at runtime by Bun and tsx, causing `SyntaxError: export '...' not found`. The fix is to use `import type` syntax, but this is a pre-existing repo issue. **Workaround**: build first (`bun run build`), then run the compiled version (`node dist/index.js`).
-
-### Environment
-
-- **Bun** must be installed (not pre-installed on Cloud VMs). The update script handles this.
-- `MUONROI_API_KEY` environment variable is required for API calls. Set it as a secret.
+- Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)
+- Role-based routing: PIL detects task type -> maps to role (leader/implement/verify/research) -> routes to configured model
+- Council: `/council` triggers multi-model debate with dynamic prompts and convergence detection
+- Auto-compact: after every turn, context is silently compressed to keep token costs flat
+- Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)
