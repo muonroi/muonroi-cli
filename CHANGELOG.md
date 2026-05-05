@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Multi-model council with adversarial debate (`/council`) — dynamic prompts, convergence detection, leader synthesis
+- Role-based model routing — PIL task type maps to roles (leader/implement/verify/research), auto-routes to configured model
+- Auto-compact after every turn — silent context compression keeps token costs flat across long sessions
+- Auto-council trigger — `plan`/`analyze` tasks with high confidence automatically run multi-model debate
+- Per-provider API key loading from settings.json — `providers.{name}.apiKey` fallback in keychain
+- Prefix-based provider detection — models not in static catalog detected by ID prefix (deepseek-*, gpt-*, grok-*, etc.)
+- `councilRounds`, `autoCouncil`, `autoCompactAfterTurn`, `roleModels` user settings
 - Dedicated grep tool powered by npm ripgrep WASM (#263)
 - `/btw` command for side questions (#264)
 
@@ -17,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release workflow publishes Sigstore build-provenance attestations (#271)
 
 ### Fixed
+- Vision proxy now loads SiliconFlow API key from settings.json (previously only checked keychain + env var)
+- Provider switching no longer reuses wrong API key when routing to a different provider
 - RC version tags are published as GitHub prereleases (#268)
 
 ## [1.1.5-rc5] - 2026-04-15

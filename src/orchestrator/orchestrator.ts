@@ -1911,6 +1911,8 @@ export class Agent {
     );
   }
 
+  private _councilStats = { calls: 0, startMs: 0 };
+
   private async _councilGenerate(
     modelId: string,
     system: string,
@@ -1929,6 +1931,7 @@ export class Agent {
       temperature: 0.7,
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
+    this._councilStats.calls++;
     return text;
   }
 
@@ -2000,144 +2003,178 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const maxRounds = rounds ?? getCouncilRounds();
     const ALL_ROLES: ModelRole[] = ["implement", "verify", "research"];
-    const active: Array<{ role: ModelRole; model: string; position: string }> = [];
+    this._councilStats = { calls: 0, startMs: Date.now() };
 
-    // ── Phase 1: Opening — each participant shares their analysis ──
-    yield { type: "content", content: "\n## Phase 1 — Opening Analysis\n" };
-
+    // Resolve available role models upfront
+    const candidates: Array<{ role: ModelRole; model: string }> = [];
     for (const role of ALL_ROLES) {
       const modelId = getRoleModel(role);
       if (!modelId) continue;
-      yield { type: "content", content: `\n### [${role}] ${modelId}\n` };
-      try {
-        const { system, prompt } = this._buildDiscussPrompt("open", {
-          speakerRole: role,
-          partnerRole: ALL_ROLES.find((r) => r !== role) ?? "colleague",
-          topic,
-        });
-        const text = await this._councilGenerate(modelId, system, prompt);
-        active.push({ role, model: modelId, position: text });
-        yield { type: "content", content: text + "\n" };
-      } catch (err: unknown) {
-        yield { type: "content", content: `[Error: ${err instanceof Error ? err.message : err}]\n` };
-      }
+      const canReach = await loadKeyForProvider(detectProviderForModel(modelId)).then(() => true).catch(() => false);
+      if (canReach) candidates.push({ role, model: modelId });
     }
 
-    if (active.length < 2) {
-      yield { type: "content", content: "\nNeed at least 2 role models for discussion. Configure `roleModels` in user-settings.json.\n" };
+    if (candidates.length < 2) {
+      yield { type: "content", content: "\nNeed at least 2 reachable role models. Configure `roleModels` + provider keys in user-settings.json.\n" };
       yield { type: "done" };
       return;
     }
 
-    // ── Phase 2: Discussion rounds — pairs exchange views until convergence ──
+    // ── Phase 1: Parallel opening statements ──
+    const p1Start = Date.now();
+    yield { type: "content", content: "\n## Phase 1 — Opening Analysis\n" };
+
+    const openingPromises = candidates.map(({ role, model }) => {
+      const { system, prompt } = this._buildDiscussPrompt("open", {
+        speakerRole: role,
+        partnerRole: candidates.find((c) => c.role !== role)?.role ?? "colleague",
+        topic,
+      });
+      return this._councilGenerate(model, system, prompt)
+        .then((text) => ({ role, model, position: text, error: null as string | null }))
+        .catch((err: unknown) => ({
+          role,
+          model,
+          position: "",
+          error: err instanceof Error ? err.message : String(err),
+        }));
+    });
+
+    const openings = await Promise.all(openingPromises);
+    const active: Array<{ role: ModelRole; model: string; position: string }> = [];
+
+    for (const o of openings) {
+      yield { type: "content", content: `\n### [${o.role}] ${o.model}\n` };
+      if (o.error) {
+        yield { type: "content", content: `[Error: ${o.error}]\n` };
+      } else {
+        active.push({ role: o.role, model: o.model, position: o.position });
+        yield { type: "content", content: o.position + "\n" };
+      }
+    }
+
+    yield { type: "content", content: `\n> Phase 1: ${active.length} participants, ${((Date.now() - p1Start) / 1000).toFixed(1)}s (parallel)\n` };
+
+    if (active.length < 2) {
+      yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
+      yield { type: "done" };
+      return;
+    }
+
+    // ── Phase 2: Discussion rounds with parallel pair debates ──
     const exchangeLogs: Map<string, string[]> = new Map();
+    const pairConverged: Map<string, boolean> = new Map();
 
     for (let round = 1; round <= maxRounds; round++) {
+      const p2Start = Date.now();
       yield { type: "content", content: `\n## Phase 2 — Discussion Round ${round}/${maxRounds}\n` };
-      let allConverged = true;
 
+      // Build independent pairs
+      const pairs: Array<{ a: (typeof active)[0]; b: (typeof active)[0]; key: string }> = [];
       for (let i = 0; i < active.length; i++) {
         const a = active[i];
         const b = active[(i + 1) % active.length];
-        const pairKey = `${a.role}<>${b.role}`;
-        if (!exchangeLogs.has(pairKey)) exchangeLogs.set(pairKey, []);
-        const log = exchangeLogs.get(pairKey)!;
+        const key = `${a.role}<>${b.role}`;
+        if (pairConverged.get(key)) continue;
+        if (!exchangeLogs.has(key)) exchangeLogs.set(key, []);
+        pairs.push({ a, b, key });
+      }
 
-        try {
-          if (round === 1) {
-            // First round: A responds to B's opening analysis
-            yield { type: "content", content: `\n### [${a.role}] → [${b.role}]\n` };
-            const { system, prompt } = this._buildDiscussPrompt("respond", {
-              speakerRole: a.role,
-              partnerRole: b.role,
-              topic,
-              speakerPosition: a.position,
-              partnerPosition: b.position,
-            });
-            const aResponse = await this._councilGenerate(a.model, system, prompt);
-            log.push(`[${a.role}]: ${aResponse}`);
-            yield { type: "content", content: aResponse + "\n" };
+      if (pairs.length === 0) break;
 
-            // B responds back to A
-            yield { type: "content", content: `\n### [${b.role}] → [${a.role}]\n` };
-            const bPrompt = this._buildDiscussPrompt("respond", {
-              speakerRole: b.role,
-              partnerRole: a.role,
-              topic,
-              speakerPosition: b.position,
-              partnerPosition: aResponse,
-            });
-            const bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
-            log.push(`[${b.role}]: ${bResponse}`);
-            b.position = bResponse;
-            a.position = aResponse;
-            yield { type: "content", content: bResponse + "\n" };
-          } else {
-            // Subsequent rounds: followup with full exchange history
-            const historyText = log.join("\n\n");
+      // Run pair debates in parallel
+      const pairResults = await Promise.all(
+        pairs.map(async ({ a, b, key }) => {
+          const log = exchangeLogs.get(key)!;
+          const chunks: Array<{ label: string; text: string }> = [];
 
-            yield { type: "content", content: `\n### [${a.role}] → [${b.role}]\n` };
-            const aPrompt = this._buildDiscussPrompt("followup", {
-              speakerRole: a.role,
-              partnerRole: b.role,
-              topic,
-              partnerPosition: b.position,
-              exchangeHistory: historyText,
-              round,
-            });
-            const aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
-            log.push(`[${a.role}] (round ${round}): ${aResponse}`);
-            yield { type: "content", content: aResponse + "\n" };
-
-            yield { type: "content", content: `\n### [${b.role}] → [${a.role}]\n` };
-            const bPrompt = this._buildDiscussPrompt("followup", {
-              speakerRole: b.role,
-              partnerRole: a.role,
-              topic,
-              partnerPosition: aResponse,
-              exchangeHistory: historyText,
-              round,
-            });
-            const bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
-            log.push(`[${b.role}] (round ${round}): ${bResponse}`);
-            b.position = bResponse;
-            a.position = aResponse;
-            yield { type: "content", content: bResponse + "\n" };
-          }
-
-          // Check convergence for this pair
-          const convergencePrompt = this._buildDiscussPrompt("convergence-check", {
-            speakerRole: a.role,
-            partnerRole: b.role,
-            topic,
-            exchangeHistory: log.slice(-4).join("\n\n"),
-          });
           try {
-            const checkResult = await this._councilGenerate(
-              a.model,
-              convergencePrompt.system,
-              convergencePrompt.prompt,
-              256,
-            );
-            const match = checkResult.match(/\{[\s\S]*\}/);
-            if (match) {
-              const parsed = JSON.parse(match[0]) as { converged?: boolean; reason?: string };
-              if (parsed.converged) {
-                yield { type: "content", content: `\n> ✓ [${a.role}] ↔ [${b.role}] converged: ${parsed.reason ?? "agreement reached"}\n` };
-              } else {
-                allConverged = false;
-              }
+            let aResponse: string;
+            let bResponse: string;
+
+            if (round === 1) {
+              const aPrompt = this._buildDiscussPrompt("respond", {
+                speakerRole: a.role, partnerRole: b.role, topic,
+                speakerPosition: a.position, partnerPosition: b.position,
+              });
+              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
+              log.push(`[${a.role}]: ${aResponse}`);
+              chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
+
+              const bPrompt = this._buildDiscussPrompt("respond", {
+                speakerRole: b.role, partnerRole: a.role, topic,
+                speakerPosition: b.position, partnerPosition: aResponse,
+              });
+              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
+              log.push(`[${b.role}]: ${bResponse}`);
+              chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
             } else {
-              allConverged = false;
+              const historyText = log.join("\n\n");
+              const aPrompt = this._buildDiscussPrompt("followup", {
+                speakerRole: a.role, partnerRole: b.role, topic,
+                partnerPosition: b.position, exchangeHistory: historyText, round,
+              });
+              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
+              log.push(`[${a.role}] (round ${round}): ${aResponse}`);
+              chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
+
+              const bPrompt = this._buildDiscussPrompt("followup", {
+                speakerRole: b.role, partnerRole: a.role, topic,
+                partnerPosition: aResponse, exchangeHistory: historyText, round,
+              });
+              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
+              log.push(`[${b.role}] (round ${round}): ${bResponse}`);
+              chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
             }
-          } catch {
-            allConverged = false;
+
+            b.position = bResponse;
+            a.position = aResponse;
+
+            // Convergence check
+            const convPrompt = this._buildDiscussPrompt("convergence-check", {
+              speakerRole: a.role, partnerRole: b.role, topic,
+              exchangeHistory: log.slice(-4).join("\n\n"),
+            });
+            let converged = false;
+            let convReason = "";
+            try {
+              const raw = await this._councilGenerate(a.model, convPrompt.system, convPrompt.prompt, 256);
+              const match = raw.match(/\{[\s\S]*\}/);
+              if (match) {
+                const parsed = JSON.parse(match[0]) as { converged?: boolean; reason?: string };
+                converged = parsed.converged === true;
+                convReason = parsed.reason ?? "";
+              }
+            } catch { /* not converged */ }
+
+            return { key, chunks, converged, convReason, error: null as string | null };
+          } catch (err: unknown) {
+            return {
+              key, chunks, converged: false, convReason: "",
+              error: err instanceof Error ? err.message : String(err),
+            };
           }
-        } catch (err: unknown) {
-          yield { type: "content", content: `[Discussion error: ${err instanceof Error ? err.message : err}]\n` };
+        }),
+      );
+
+      // Emit results (sequential yield — maintains readable order)
+      let allConverged = true;
+      for (const pr of pairResults) {
+        for (const chunk of pr.chunks) {
+          yield { type: "content", content: `\n### ${chunk.label}\n${chunk.text}\n` };
+        }
+        if (pr.error) {
+          yield { type: "content", content: `[Discussion error: ${pr.error}]\n` };
+          allConverged = false;
+        } else if (pr.converged) {
+          pairConverged.set(pr.key, true);
+          yield { type: "content", content: `\n> ✓ ${pr.key.replace("<>", " ↔ ")} converged: ${pr.convReason}\n` };
+        } else {
           allConverged = false;
         }
       }
+
+      yield { type: "content", content: `\n> Round ${round}: ${((Date.now() - p2Start) / 1000).toFixed(1)}s (${pairs.length} pairs parallel)\n` };
 
       if (allConverged) {
         yield { type: "content", content: `\n> All pairs converged at round ${round}. Moving to synthesis.\n` };
@@ -2146,6 +2183,7 @@ export class Agent {
     }
 
     // ── Phase 3: Leader synthesis ──
+    const p3Start = Date.now();
     yield { type: "content", content: "\n## Phase 3 — Leader Synthesis\n" };
 
     const leaderModelId = getRoleModel("leader") ?? this.modelId;
@@ -2159,8 +2197,9 @@ export class Agent {
       .map((p) => `**${p.role}** (${p.model}): ${p.position.slice(0, 500)}...`)
       .join("\n\n");
 
+    let synthesisText = "";
     try {
-      const synthesis = await this._councilGenerate(
+      synthesisText = await this._councilGenerate(
         leaderModelId,
         "You are the team lead. Multiple specialists just had a structured discussion. Synthesize:\n" +
         "1. What everyone agreed on — these are your strongest foundations\n" +
@@ -2171,9 +2210,35 @@ export class Agent {
         `Topic: ${topic}\n\nFinal positions:\n${finalPositions}\n\nFull discussion:\n${allExchanges}`,
         4096,
       );
-      yield { type: "content", content: synthesis + "\n" };
+      yield { type: "content", content: synthesisText + "\n" };
     } catch (err: unknown) {
       yield { type: "content", content: `[Synthesis error: ${err instanceof Error ? err.message : err}]\n` };
+    }
+
+    // ── Stats + Memory ──
+    const totalMs = Date.now() - this._councilStats.startMs;
+    yield {
+      type: "content",
+      content:
+        `\n---\n` +
+        `> Council stats: ${this._councilStats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
+        `${active.length} participants, synthesis ${((Date.now() - p3Start) / 1000).toFixed(1)}s\n`,
+    };
+
+    // Save council result to session for memory across conversations
+    if (this.session && this.sessionStore) {
+      const councilRecord = {
+        topic,
+        participants: active.map((a) => ({ role: a.role, model: a.model })),
+        finalPositions: active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
+        synthesis: synthesisText.slice(0, 2000),
+        convergedPairs: [...pairConverged.entries()].filter(([, v]) => v).map(([k]) => k),
+        stats: { calls: this._councilStats.calls, durationMs: totalMs },
+        timestamp: new Date().toISOString(),
+      };
+      try {
+        appendSystemMessage(this.session.id, `[Council Memory] ${JSON.stringify(councilRecord)}`);
+      } catch { /* non-critical */ }
     }
 
     yield { type: "done" };

@@ -1,6 +1,0 @@
-[0m[1mbun test [0m[2mv1.3.13 (bf2e2cec)[0m
-Input: I need you to analyze the distributed system architecture across all microservices and identify race conditions in the payment processing pipeline
-Length: [0m[33m146[0m
-Words: [0m[33m21[0m
-Result: {"tier":"hot","confidence":0.7,"reason":"regex:design","tierHint":"premium"}
-Short msg result: {"tier":"hot","confidence":0.5,"reason":"regex:short-message","tierHint":"fast"}
