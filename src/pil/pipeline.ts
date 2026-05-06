@@ -83,6 +83,7 @@ export interface PipelineOptions {
   gsdPhase?: string | null;
   resumeDigest?: string | null;
   activeRunId?: string | null;
+  sessionId?: string | null;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
@@ -99,6 +100,7 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     gsdPhase: options?.gsdPhase ?? null,
     resumeDigest: options?.resumeDigest ?? null,
     activeRunId: options?.activeRunId ?? null,
+    sessionId: options?.sessionId ?? null,
   };
   try {
     const result = await Promise.race([runLayers({ ...fallback }), resolveAfter(200, fallback)]);

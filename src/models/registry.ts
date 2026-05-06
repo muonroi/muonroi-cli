@@ -71,3 +71,7 @@ export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProv
   }
   return MODELS.find((m) => m.tier === tier);
 }
+
+export function getModelsForProvider(providerId: string): ModelInfo[] {
+  return MODELS.filter((m) => m.provider === providerId);
+}

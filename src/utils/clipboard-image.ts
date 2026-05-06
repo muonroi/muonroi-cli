@@ -31,15 +31,27 @@ function readWin32(): ClipboardImage | null {
   const tmpFile = path.join(os.tmpdir(), `muonroi-clip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
   try {
     const escaped = tmpFile.replace(/\\/g, "\\\\");
+    // Run in STA thread with retry — clipboard can be locked by other processes
     const ps = `
       Add-Type -AssemblyName System.Windows.Forms
-      $img = [System.Windows.Forms.Clipboard]::GetImage()
+      Add-Type -AssemblyName System.Drawing
+      $maxRetries = 3
+      $img = $null
+      for ($i = 0; $i -lt $maxRetries; $i++) {
+        try {
+          $img = [System.Windows.Forms.Clipboard]::GetImage()
+          if ($img -ne $null) { break }
+        } catch {
+          # clipboard locked — wait and retry
+        }
+        Start-Sleep -Milliseconds 100
+      }
       if ($img -ne $null) {
         $img.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png)
         $img.Dispose()
       }
     `;
-    const result = spawnSync("powershell", ["-NoProfile", "-Command", ps], { timeout: 5000 });
+    const result = spawnSync("powershell", ["-NoProfile", "-STA", "-Command", ps], { timeout: 8000 });
     if (result.error || result.status !== 0) return null;
     if (!fs.existsSync(tmpFile)) return null;
     const buf = fs.readFileSync(tmpFile);

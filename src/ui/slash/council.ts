@@ -1,4 +1,3 @@
-import { getRoleModels } from "../../utils/settings.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -12,13 +11,9 @@ export const handleCouncilSlash: SlashHandler = async (args, ctx) => {
 
   const topic = args.join(" ") || ctx.lastPrompt || "";
   if (!topic) {
-    return "/council [rounds] <topic> — multi-model adversarial debate\nExample: /council 3 REST vs gRPC for our microservices";
-  }
-
-  const roles = getRoleModels();
-  if (Object.keys(roles).length === 0) {
-    return "/council: no roleModels configured. Add to ~/.muonroi-cli/user-settings.json:\n" +
-      '  "roleModels": { "leader": "claude-sonnet-4-6", "implement": "deepseek-chat", "verify": "gpt-4o", "research": "grok-3" }';
+    return "/council [rounds] <topic> — multi-model discussion\n" +
+      "Default: uses models from the same provider. Set councilPreferMultiProvider + roleModels for cross-provider.\n" +
+      "Example: /council 3 REST vs gRPC for our microservices";
   }
 
   return `__COUNCIL__\n${rounds ?? ""}\n${topic}`;

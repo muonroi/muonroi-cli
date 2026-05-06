@@ -96,6 +96,52 @@ describe("judge() deterministic classifier", () => {
     const ctx = makeCtx({ warningResponse: null });
     expect(judge(ctx)).toBe("IRRELEVANT");
   });
+
+  it("all matches below noise threshold returns IRRELEVANT", () => {
+    const ctx = makeCtx({
+      warningResponse: {
+        decision: "allow",
+        matches: [
+          makeMatch({ confidence: 0.1 }),
+          makeMatch({ confidence: 0.2 }),
+        ],
+      },
+    });
+    expect(judge(ctx)).toBe("IRRELEVANT");
+  });
+
+  it("mix of low and high confidence returns FOLLOWED", () => {
+    const ctx = makeCtx({
+      warningResponse: {
+        decision: "allow",
+        matches: [
+          makeMatch({ confidence: 0.1 }),
+          makeMatch({ confidence: 0.8 }),
+        ],
+      },
+    });
+    expect(judge(ctx)).toBe("FOLLOWED");
+  });
+
+  it("match exactly at noise threshold returns FOLLOWED", () => {
+    const ctx = makeCtx({
+      warningResponse: {
+        decision: "allow",
+        matches: [makeMatch({ confidence: 0.3 })],
+      },
+    });
+    expect(judge(ctx)).toBe("FOLLOWED");
+  });
+
+  it("match just below noise threshold returns IRRELEVANT", () => {
+    const ctx = makeCtx({
+      warningResponse: {
+        decision: "allow",
+        matches: [makeMatch({ confidence: 0.29 })],
+      },
+    });
+    expect(judge(ctx)).toBe("IRRELEVANT");
+  });
 });
 
 describe("fireFeedback()", () => {
@@ -153,5 +199,21 @@ describe("fireFeedback()", () => {
     expect(mockTouch).toHaveBeenCalledTimes(2);
     expect(mockTouch).toHaveBeenCalledWith("P1", "local");
     expect(mockTouch).toHaveBeenCalledWith("P2", "local");
+  });
+
+  it("noise matches (all below threshold): sends IRRELEVANT feedback, no touch", () => {
+    const ctx = makeCtx({
+      warningResponse: {
+        decision: "allow",
+        matches: [
+          makeMatch({ principle_uuid: "P1", confidence: 0.1 }),
+          makeMatch({ principle_uuid: "P2", confidence: 0.2 }),
+        ],
+      },
+    });
+    fireFeedback(ctx);
+    expect(mockFeedback).toHaveBeenCalledTimes(2);
+    expect(mockFeedback).toHaveBeenCalledWith(expect.objectContaining({ classification: "IRRELEVANT" }));
+    expect(mockTouch).not.toHaveBeenCalled();
   });
 });

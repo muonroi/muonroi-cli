@@ -10,6 +10,7 @@
 import { getEmbeddingRaw, searchCollection } from "../ee/bridge.js";
 import type { EEPoint } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
+import { logInteraction } from "../storage/interaction-log.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -47,6 +48,20 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   const { points } = result;
 
   if (result.error) {
+    // EE detail log: injection failed
+    try {
+      if (ctx.sessionId) {
+        logInteraction(ctx.sessionId, "ee_injection", {
+          eventSubtype: "error",
+          data: {
+            phase: "pil_enrichment",
+            role: "knowledge_retriever",
+            error: result.error,
+            queryLength: ctx.raw.length,
+          },
+        });
+      }
+    } catch { /* fail-open */ }
     return {
       ...ctx,
       layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: `error=${result.error}` }],
@@ -54,6 +69,20 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   }
 
   if (points.length === 0) {
+    // EE detail log: no relevant experience found
+    try {
+      if (ctx.sessionId) {
+        logInteraction(ctx.sessionId, "ee_injection", {
+          eventSubtype: "no_match",
+          data: {
+            phase: "pil_enrichment",
+            role: "knowledge_retriever",
+            queryLength: ctx.raw.length,
+            taskType: ctx.taskType ?? null,
+          },
+        });
+      }
+    } catch { /* fail-open */ }
     return {
       ...ctx,
       layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: "no-points" }],
@@ -67,6 +96,25 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   const hint = formatExperienceHints(points);
   const budgetShare = Math.floor(ctx.tokenBudget * 0.3);
   const trimmed = truncateToBudget(hint, budgetShare);
+
+  // EE detail log: experience points injected into agent context
+  try {
+    if (ctx.sessionId) {
+      logInteraction(ctx.sessionId, "ee_injection", {
+        eventSubtype: "injected",
+        data: {
+          phase: "pil_enrichment",
+          role: "knowledge_retriever",
+          pointCount: points.length,
+          pointIds: points.map((p) => String(p.id)),
+          budgetShare,
+          injectedChars: trimmed.length,
+          taskType: ctx.taskType ?? null,
+          domain: ctx.domain ?? null,
+        },
+      });
+    }
+  } catch { /* fail-open */ }
 
   return {
     ...ctx,

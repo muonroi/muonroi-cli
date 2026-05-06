@@ -7,6 +7,7 @@ vi.mock("../../ee/bridge.js", () => ({
   searchCollection: vi.fn().mockResolvedValue([]),
 }));
 
+
 import { getEmbeddingRaw, searchCollection } from "../../ee/bridge.js";
 
 function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {

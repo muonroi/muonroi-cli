@@ -22,12 +22,19 @@ export interface JudgeContext {
 }
 
 /**
+ * Noise threshold: matches below this confidence are treated as noise
+ * and should not strengthen the principle via FOLLOWED classification.
+ */
+export const NOISE_CONFIDENCE_THRESHOLD = 0.3;
+
+/**
  * Deterministic classification rules (from RESEARCH Auto-Judge Deterministic Rules):
  *
  * 1. No matches or cwd mismatch → IRRELEVANT
  * 2. Outcome failed → IGNORED
  * 3. Any match has expectedBehavior='should-not-edit' AND diff present → IGNORED
- * 4. Otherwise → FOLLOWED
+ * 4. All matches below noise threshold → IRRELEVANT (prevents noise reinforcement)
+ * 5. Otherwise → FOLLOWED
  */
 export function judge(ctx: JudgeContext): Classification {
   if (!ctx.warningResponse?.matches?.length || !ctx.cwdMatchedAtPretool) {
@@ -38,6 +45,9 @@ export function judge(ctx: JudgeContext): Classification {
   }
   if (ctx.warningResponse.matches.some((m) => m.expectedBehavior === "should-not-edit" && ctx.diffPresent)) {
     return "IGNORED";
+  }
+  if (ctx.warningResponse.matches.every((m) => m.confidence < NOISE_CONFIDENCE_THRESHOLD)) {
+    return "IRRELEVANT";
   }
   return "FOLLOWED";
 }

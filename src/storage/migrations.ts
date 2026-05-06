@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 4;
+const LATEST_DB_VERSION = 5;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -28,6 +28,28 @@ export function applyMigrations(db: SQLiteDatabase): void {
         ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
       `);
       db.pragma("user_version = 4");
+    }
+    if (version < 5) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS interaction_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+          event_type TEXT NOT NULL,
+          event_subtype TEXT,
+          model TEXT,
+          duration_ms INTEGER,
+          input_tokens INTEGER,
+          output_tokens INTEGER,
+          metadata_json TEXT,
+          created_at TEXT NOT NULL
+        ) STRICT;
+
+        CREATE INDEX IF NOT EXISTS idx_interaction_logs_session
+          ON interaction_logs(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_interaction_logs_event_type
+          ON interaction_logs(event_type, created_at DESC);
+      `);
+      db.pragma("user_version = 5");
     }
   });
 

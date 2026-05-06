@@ -25,12 +25,14 @@ export interface PreparedCompaction {
   settings: CompactionSettings;
 }
 
-const TOOL_RESULT_MAX_CHARS = 2000;
+const TOOL_RESULT_MAX_CHARS = 8000;
 const MIN_KEPT_TOKENS_ON_RETRY = 4000;
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const POST_TURN_MIN_TOKENS = 2_000;
+export const COMPACTION_MAX_OUTPUT_TOKENS = 4_096;
+export const TOOL_RESULT_MAX_CHARS_CONFIGURABLE = 8000;
 export const COMPACTION_SUMMARY_HEADER = "[Context checkpoint summary]";
 
 const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant.
@@ -69,6 +71,12 @@ Use this exact format:
 - [Important details needed to continue]
 - [(none) if not applicable]
 
+## Critical Data
+- **File paths mentioned**: [list all file paths exactly as they appear]
+- **Function/method names**: [list all function/method names]
+- **Error messages**: [copy verbatim any error messages]
+- **Key numbers/results**: [list important numbers, query results, or metrics]
+
 Keep it concise, but preserve exact file paths, function names, and error messages.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are new conversation messages to incorporate into the existing summary provided below.
@@ -79,6 +87,9 @@ Update the existing structured summary with new information. Rules:
 - Move completed items from "In Progress" to "Done" when appropriate
 - Update "Next Steps" based on the current state
 - Preserve exact file paths, function names, and error messages
+
+## Critical Data
+- Preserve exact file paths, function names, error messages (verbatim), and key numbers/results
 
 Use the exact same section structure as the existing summary format.`;
 
@@ -141,7 +152,7 @@ function truncateForSummary(text: string, maxChars = TOOL_RESULT_MAX_CHARS): str
   return `${text.slice(0, maxChars)}\n\n[... ${text.length - maxChars} more characters truncated]`;
 }
 
-function extractUserContent(content: unknown): string {
+export function extractUserContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
 
@@ -369,15 +380,25 @@ export function serializeConversation(messages: ModelMessage[]): string {
     if (message.role === "assistant") {
       const text = extractAssistantText(message.content).trim();
       const toolCalls = extractToolCallText(message.content);
-      if (text) parts.push(`[Assistant]: ${text}`);
-      if (toolCalls.length > 0) parts.push(`[Assistant tool calls]: ${toolCalls.join("; ")}`);
+      if (text) parts.push(`[Assistant response]: ${text}`);
+      if (toolCalls.length > 0) parts.push(`[Tool call]: ${toolCalls.join("; ")}`);
       continue;
     }
 
     if (message.role === "tool") {
-      const results = extractToolResultText(message.content);
-      for (const result of results) {
-        if (result.trim()) parts.push(`[Tool result]: ${result}`);
+      if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (!isRecord(part)) continue;
+          const r = part as Record<string, unknown>;
+          if (r.type !== "tool-result") continue;
+          const toolName = typeof r.toolName === "string" ? r.toolName : "unknown";
+          const result = truncateForSummary(stringifyForSummary(r.output));
+          if (result.trim()) parts.push(`[Tool result from ${toolName}]: ${result}`);
+        }
+      } else {
+        // Fallback for string content
+        const text = String(message.content).trim();
+        if (text) parts.push(`[Tool result]: ${text}`);
       }
       continue;
     }
@@ -426,7 +447,7 @@ async function summarizeConversation(
     temperature: 0.2,
     ...(runtime.modelInfo?.supportsMaxOutputTokens === false
       ? {}
-      : { maxOutputTokens: Math.max(512, Math.floor(reserveTokens * 0.8)) }),
+      : { maxOutputTokens: Math.min(COMPACTION_MAX_OUTPUT_TOKENS, Math.max(512, Math.floor(reserveTokens * 0.8))) }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
   });
 

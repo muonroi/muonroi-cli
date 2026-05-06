@@ -36,11 +36,12 @@ export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
 import { interceptWithDefaults } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
-import { type JudgeContext } from "../ee/judge.js";
+import { judge, type JudgeContext } from "../ee/judge.js";
 import { posttool } from "../ee/posttool.js";
 import { reconcilePromptStale } from "../ee/prompt-stale.js";
 import { buildScope } from "../ee/scope.js";
 import type { InterceptResponse, Scope } from "../ee/types.js";
+import { logInteraction } from "../storage/interaction-log.js";
 import type {
   AggregatedHookResult,
   HookInput,
@@ -95,6 +96,33 @@ export async function executeEventHooks(
       });
       // Thread the warning response to PostToolUse via module-level latch
       _lastWarningResponse = r;
+
+      // EE detail log: what EE decided and what warnings were surfaced
+      try {
+        const sid = (input as PreToolUseHookInput).session_id;
+        if (sid) {
+          const matches = r.matches ?? [];
+          logInteraction(sid, "ee_intercept", {
+            eventSubtype: r.decision,
+            data: {
+              phase: "pre_tool",
+              role: "guardian",
+              toolName: input.tool_name,
+              decision: r.decision,
+              matchCount: matches.length,
+              matches: matches.map((m) => ({
+                id: m.principle_uuid,
+                confidence: m.confidence,
+                message: m.message.slice(0, 120),
+                expectedBehavior: m.expectedBehavior ?? null,
+              })),
+              reason: r.reason ?? null,
+              noise_risk: matches.length > 0 && matches.every((m) => m.confidence < 0.5),
+            },
+          });
+        }
+      } catch { /* fail-open */ }
+
       if (r.decision === "block") {
         return {
           blocked: true,
@@ -126,6 +154,43 @@ export async function executeEventHooks(
         diffPresent: false,
         tenantId: getTenantId(),
       };
+
+      // EE detail log: judge classification and agent feedback behavior
+      try {
+        const sid = (input as PostToolUseHookInput).session_id;
+        if (sid) {
+          const classification = judge(judgeCtx);
+          const matches = _lastWarningResponse?.matches ?? [];
+          const hadWarnings = matches.length > 0;
+          logInteraction(sid, "ee_judge", {
+            eventSubtype: classification,
+            data: {
+              phase: "post_tool",
+              role: "judge",
+              toolName: input.tool_name,
+              classification,
+              hadWarnings,
+              matchCount: matches.length,
+              cwdMatched: judgeCtx.cwdMatchedAtPretool,
+              outcomeSuccess: true,
+              agent_response_to_ee: hadWarnings
+                ? classification === "FOLLOWED"
+                  ? "agent_complied"
+                  : classification === "IGNORED"
+                    ? "agent_overrode"
+                    : "no_relevant_warning"
+                : "no_warning_present",
+              noise_analysis: hadWarnings
+                ? {
+                    all_low_confidence: matches.every((m) => m.confidence < 0.5),
+                    forced_feedback_on_noise: matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                  }
+                : null,
+            },
+          });
+        }
+      } catch { /* fail-open */ }
+
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
         {
@@ -157,6 +222,40 @@ export async function executeEventHooks(
         diffPresent: false,
         tenantId: getTenantId(),
       };
+
+      // EE detail log: judge classification on tool failure
+      try {
+        const sid = failInput.session_id;
+        if (sid) {
+          const classification = judge(judgeCtx);
+          const matches = _lastWarningResponse?.matches ?? [];
+          const hadWarnings = matches.length > 0;
+          logInteraction(sid, "ee_judge", {
+            eventSubtype: classification,
+            data: {
+              phase: "post_tool_failure",
+              role: "judge",
+              toolName: failInput.tool_name,
+              classification,
+              hadWarnings,
+              matchCount: matches.length,
+              cwdMatched: judgeCtx.cwdMatchedAtPretool,
+              outcomeSuccess: false,
+              errorPreview: failInput.error?.slice(0, 120) ?? null,
+              agent_response_to_ee: hadWarnings
+                ? "tool_failed_after_warning"
+                : "tool_failed_no_warning",
+              noise_analysis: hadWarnings
+                ? {
+                    all_low_confidence: matches.every((m) => m.confidence < 0.5),
+                    forced_feedback_on_noise: matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                  }
+                : null,
+            },
+          });
+        }
+      } catch { /* fail-open */ }
+
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
         {

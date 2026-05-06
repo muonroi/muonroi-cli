@@ -7,5 +7,6 @@ export default defineConfig({
       "tests/perf/**/*.bench.ts",
     ],
     exclude: ["dist/**", "node_modules/**", "tmp/**", ".claude/**", ".cursor/**"],
+    setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
   },
 });

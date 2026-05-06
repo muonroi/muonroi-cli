@@ -186,11 +186,12 @@ export interface UserSettings {
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
   autoCompactAfterTurn?: boolean;
-  /** Minimum % of context window to trigger post-turn auto-compact (default 0.02 = 2%, range 0.01-0.10). */
+  /** Minimum % of context window to trigger post-turn auto-compact (default 0.15 = 15%, range 0.05-0.50). */
   autoCompactThresholdPct?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
   autoCouncil?: boolean;
+  councilPreferMultiProvider?: boolean;
   providers?: {
     anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;
@@ -772,8 +773,8 @@ export function isAutoCompactAfterTurnEnabled(): boolean {
 
 export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
-  if (typeof val === "number" && val >= 0.01 && val <= 0.10) return val;
-  return 0.02; // default 2%
+  if (typeof val === "number" && val >= 0.05 && val <= 0.50) return val;
+  return 0.15; // default 15%
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
@@ -791,5 +792,9 @@ export function getCouncilRounds(): number {
 
 export function isAutoCouncilEnabled(): boolean {
   return loadUserSettings().autoCouncil ?? true;
+}
+
+export function isCouncilMultiProviderPreferred(): boolean {
+  return loadUserSettings().councilPreferMultiProvider ?? false;
 }
 

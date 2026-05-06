@@ -35,8 +35,9 @@ import { buildMcpToolSet } from "../mcp/runtime";
 import { createBuiltinTools } from "../tools/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
-import { getModelInfo, normalizeModelId } from "../models/registry.js";
+import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
+import { bridgeMcpToolResult, getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js";
 import { isDebugEnabled, recordTurnTrace, type PipelineStep, type TurnTrace } from "../ui/slash/debug.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
 import {
@@ -50,6 +51,7 @@ import {
   loadTranscriptState,
   recordUsageEvent,
   SessionStore,
+  logInteraction,
 } from "../storage/index";
 import { BashTool } from "../tools/bash";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
@@ -81,6 +83,7 @@ import {
   getAutoCompactThresholdPct,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
+  isCouncilMultiProviderPreferred,
   loadMcpServers,
   loadValidSubAgents,
   type ModelRole,
@@ -98,7 +101,10 @@ import {
   DEFAULT_RESERVE_TOKENS,
   POST_TURN_MIN_TOKENS,
   estimateConversationTokens,
+  extractUserContent,
   generateCompactionSummary,
+  getCompactionSummaryText,
+  isCompactionSummaryMessage,
   prepareCompaction,
   relaxCompactionSettings,
   shouldCompactContext,
@@ -133,6 +139,32 @@ export interface BatchClientOptions {
   baseURL?: string;
   signal?: AbortSignal;
 }
+
+interface CouncilOutcome {
+  type: "decision" | "action_items" | "plan_update" | "resolve_question";
+  summary: string;
+  agreed: string[];
+  tradeoffs: string[];
+  recommendation: string;
+  actionItems?: string[];
+  planUpdate?: string;
+  resolvedQuestion?: { question: string; answer: string };
+}
+
+// Council role ANSI color codes for terminal UI
+const COUNCIL_ROLE_COLORS: Record<string, string> = {
+  implement: "\x1b[36m",    // Cyan
+  verify: "\x1b[33m",       // Yellow
+  research: "\x1b[35m",     // Magenta
+  leader: "\x1b[32m",       // Green
+};
+const COUNCIL_COLOR_RESET = "\x1b[0m";
+const COUNCIL_COLOR_BG: Record<string, string> = {
+  implement: "\x1b[46m",    // Cyan background
+  verify: "\x1b[43m",       // Yellow background
+  research: "\x1b[45m",     // Magenta background
+  leader: "\x1b[42m",       // Green background
+};
 
 export interface BatchChatMessage {
   role: string;
@@ -252,6 +284,7 @@ function createTools(
     subagents?: unknown[];
     sendTelegramFile?: (filePath: string) => Promise<ToolResult>;
     sessionId?: string;
+    modelId?: string;
   },
 ): ToolSet {
   return createBuiltinTools(
@@ -262,6 +295,7 @@ function createTools(
       runDelegation: _opts?.runDelegation,
       readDelegation: _opts?.readDelegation,
       listDelegations: _opts?.listDelegations,
+      modelId: _opts?.modelId,
     },
   );
 }
@@ -1559,12 +1593,13 @@ export class Agent {
         ? VISION_MODEL
         : isComputer
           ? COMPUTER_MODEL
-          : isExplore
-            ? DEFAULT_MODEL
-            : custom
-              ? custom.model
-              : this.modelId,
+          : custom
+            ? custom.model
+            : this._resolveModelForTask(isExplore ? "explore" : "general"),
     );
+    if (childModelId !== this.modelId) {
+      statusBarStore.setState({ routed_from: this.modelId, model: childModelId });
+    }
     const childRuntime = isVision
       ? { ...resolveModelRuntime(provider, childModelId), model: provider.responses?.(childModelId) ?? provider(childModelId) }
       : resolveModelRuntime(provider, childModelId);
@@ -1653,10 +1688,14 @@ export class Agent {
           ? {}
           : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
-        onFinish: ({ totalUsage, providerMetadata }) => {
-          const anthropicMeta = providerMetadata?.anthropic as Record<string, unknown> | undefined;
-          const cacheReadTokens = asNumber(anthropicMeta?.cacheReadInputTokens) ?? 0;
-          const cacheCreationTokens = asNumber(anthropicMeta?.cacheCreationInputTokens) ?? 0;
+        onFinish: ({ totalUsage }) => {
+          const tu = totalUsage as Record<string, unknown>;
+          const details = tu.inputTokenDetails as Record<string, unknown> | undefined;
+          const raw = tu.raw as Record<string, unknown> | undefined;
+          const cacheReadTokens = asNumber(tu.cachedInputTokens) ?? asNumber(details?.cacheReadTokens)
+            ?? asNumber(raw?.prompt_cache_hit_tokens) ?? 0;
+          const cacheCreationTokens = asNumber(details?.cacheWriteTokens)
+            ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
           this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
         },
       });
@@ -1843,11 +1882,41 @@ export class Agent {
     }
   }
 
-  private getCompactionSettings(): CompactionSettings {
+  private getCompactionSettings(contextWindow?: number): CompactionSettings {
+    let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
+
+    // For models with very large context windows, keep more recent tokens
+    if (contextWindow && contextWindow > 200_000) {
+      keepRecentTokens = Math.min(100_000, Math.max(20_000, Math.floor(contextWindow * 0.1)));
+    }
+
+    // Compact more aggressively for long sessions to prevent runaway token growth
+    if (this._compactionStats.count >= 2) {
+      keepRecentTokens = Math.floor(keepRecentTokens * 0.75);
+    }
+
     return {
       reserveTokens: Math.max(this.maxTokens, DEFAULT_RESERVE_TOKENS),
-      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+      keepRecentTokens,
     };
+  }
+
+  private _resolveCompactModel(): string {
+    return this._resolveModelForTask("compact");
+  }
+
+  private _resolveModelForTask(task: "compact" | "explore" | "general" | "title"): string {
+    const tierPrefs: Record<string, Array<"fast" | "balanced" | "premium">> = {
+      compact: ["fast", "balanced"],
+      title: ["fast", "balanced"],
+      explore: ["balanced", "fast"],
+      general: ["premium", "balanced"],
+    };
+    for (const tier of (tierPrefs[task] ?? ["balanced"])) {
+      const m = getModelByTier(tier, this.providerId);
+      if (m?.provider === this.providerId) return m.id;
+    }
+    return this.modelId;
   }
 
   private async compactForContext(
@@ -1855,7 +1924,7 @@ export class Agent {
     system: string,
     contextWindow: number,
     signal: AbortSignal,
-    settings = this.getCompactionSettings(),
+    settings = this.getCompactionSettings(contextWindow),
     force = false,
   ): Promise<boolean> {
     if (!this.session) return false;
@@ -1889,7 +1958,8 @@ export class Agent {
 
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
-    const summary = await generateCompactionSummary(provider, this.modelId, preparation, undefined, signal);
+    const compactModelId = this._resolveCompactModel();
+    const summary = await generateCompactionSummary(provider, compactModelId, preparation, undefined, signal);
 
     appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
     this.messages = [createCompactionSummaryMessage(summary), ...preparation.keptMessages];
@@ -1904,7 +1974,11 @@ export class Agent {
 
     // Update status bar with current context size and compaction summary
     const fmtCompact = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
-    const compactLabel = `${this._compactionStats.count} cmp, ${fmtCompact(this._compactionStats.totalSaved)} saved`;
+    const modelSuffix = compactModelId !== this.modelId ? ` via ${compactModelId}` : "";
+    const userMsgCount = this.messages.filter((m) => m.role === "user").length;
+    const isLongSession = this._compactionStats.count >= 3 || userMsgCount >= 200;
+    const sessionHint = isLongSession ? " ⚠ long session — consider /clear" : "";
+    const compactLabel = `${this._compactionStats.count} cmp, ${fmtCompact(this._compactionStats.totalSaved)} saved${modelSuffix}${sessionHint}`;
     statusBarStore.setState({ ctx_tokens: tokensAfter, compaction_summary: compactLabel });
 
     const postCompactInput: PostCompactHookInput = {
@@ -1914,6 +1988,22 @@ export class Agent {
       cwd: this.bash.getCwd(),
     };
     await this.fireHook(postCompactInput, signal).catch(() => {});
+
+    // Interaction log: compaction
+    try {
+      if (this.session) {
+        logInteraction(this.session.id, "compaction", {
+          data: {
+            count: this._compactionStats.count,
+            tokensBefore: preparation.tokensBefore,
+            tokensAfter,
+            saved,
+            pct,
+            isLongSession,
+          },
+        });
+      }
+    } catch { /* fail-open */ }
 
     this._compactedThisTurn = true;
     return true;
@@ -1931,7 +2021,7 @@ export class Agent {
     const thresholdPct = getAutoCompactThresholdPct();
     const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
     if (tokens < minMeaningfulTokens) return;
-    await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(), true).catch(
+    await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(contextWindow), true).catch(
       (err) => console.warn("[compact] failed:", (err as Error)?.message),
     );
   }
@@ -1960,6 +2050,69 @@ export class Agent {
     return text;
   }
 
+  /**
+   * Research phase for council: runs a model with tools (bash, grep, read_file, search_web)
+   * to gather real data about the topic before discussion.
+   * Returns a structured research findings string.
+   */
+  private async _councilResearch(
+    modelId: string,
+    topic: string,
+    conversationContext: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const providerId = detectProviderForModel(modelId);
+    const key = await loadKeyForProvider(providerId);
+    const provider = createProvider(providerId, key);
+    const runtime = resolveModelRuntime(provider, modelId);
+
+    // Build tool set with bash, grep, read_file for codebase research
+    const researchTools = createTools(this.bash, provider, this.mode, {
+      sessionId: this.session?.id ?? undefined,
+    });
+
+    const systemPrompt =
+      `You are a research specialist. Your job is to gather FACTS about the topic below.\n\n` +
+      `## Instructions\n` +
+      `- Use available tools (bash, read_file, grep) to investigate the codebase and find relevant files, code, or configurations\n` +
+      `- Search for existing patterns, implementations, or decisions related to the topic\n` +
+      `- Report EXACT findings: file paths, function names, error messages, code snippets\n` +
+      `- Do NOT make assumptions or speculate — only report what you find\n` +
+      `- If you can't find anything relevant, say so explicitly\n\n` +
+      `## Output Format\n` +
+      `After your investigation, produce a research report with:\n` +
+      `## Research Findings\n` +
+      `- [fact 1 with source]\n` +
+      `- [fact 2 with source]\n\n` +
+      `## Key Evidence\n` +
+      `- [code snippets or file paths that are most relevant]\n\n` +
+      `## Gaps\n` +
+      `- [what we don't know yet or couldn't verify]\n`;
+
+    const userPrompt = conversationContext
+      ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`
+      : `## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`;
+
+    try {
+      const { text } = await generateText({
+        model: runtime.model,
+        system: systemPrompt,
+        prompt: userPrompt,
+        tools: researchTools,
+        stopWhen: stepCountIs(10),
+        maxOutputTokens: 4096,
+        temperature: 0.3,
+        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        ...(signal ? { abortSignal: signal } : {}),
+      });
+      this._councilStats.calls++;
+      return text;
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      return `## Research Findings\n[Research failed: ${errMsg}]\n\n## Gaps\n- Could not complete research due to error`;
+    }
+  }
+
   private _buildDiscussPrompt(
     phase: "open" | "respond" | "followup" | "convergence-check",
     ctx: {
@@ -1970,6 +2123,8 @@ export class Agent {
       partnerPosition?: string;
       exchangeHistory?: string;
       round?: number;
+      conversationContext?: string;
+      runningSummary?: string;
     },
   ): { system: string; prompt: string } {
     switch (phase) {
@@ -1977,6 +2132,7 @@ export class Agent {
         return {
           system:
             `You are a ${ctx.speakerRole} specialist. You are entering a discussion with a ${ctx.partnerRole} specialist about a technical topic.\n\n` +
+            (ctx.conversationContext ? `## Conversation Context (before this discussion)\n${ctx.conversationContext}\n\n---\n\n` : "") +
             `Share your analysis naturally — explain your reasoning, the trade-offs you see, and what concerns you.\n` +
             `End by asking the ${ctx.partnerRole} for their perspective on your analysis. What do they see differently?`,
           prompt: `Topic for discussion:\n${ctx.topic}`,
@@ -2000,11 +2156,15 @@ export class Agent {
         return {
           system:
             `You are a ${ctx.speakerRole} specialist continuing a discussion (round ${ctx.round}) with a ${ctx.partnerRole} specialist.\n\n` +
+            (ctx.runningSummary
+              ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` +
+                `Focus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
+              : "") +
             `Read their latest response and the exchange so far. Then:\n` +
             `- If they raised valid points, acknowledge them and update your thinking\n` +
             `- If you still disagree on something, explain why — bring new evidence or a different angle, not the same argument again\n` +
             `- If you've changed your mind on something, say so explicitly\n\n` +
-            `End with: do you agree with where we've landed? Or is there something we're still seeing differently?`,
+            `Be concise. End with: do you agree with where we've landed? Or is there something we're still seeing differently?`,
           prompt:
             `Discussion so far:\n${ctx.exchangeHistory}\n\n` +
             `Their latest response (${ctx.partnerRole}):\n${ctx.partnerPosition}`,
@@ -2021,29 +2181,303 @@ export class Agent {
     }
   }
 
+  private async _generateRoundSummary(
+    exchangeLogs: Map<string, string[]>,
+    topic: string,
+    round: number,
+    modelId: string,
+  ): Promise<string> {
+    const allExchanges = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
+    return this._councilGenerate(
+      modelId,
+      "Summarize this discussion in 3-5 bullet points. Focus on:\n" +
+        "1. Points where participants AGREE\n" +
+        "2. Points still in DISPUTE (with each side's core argument)\n" +
+        "3. New EVIDENCE or perspectives raised this round\n" +
+        "Be concise — one line per bullet. No preamble.",
+      `Round ${round} discussion on: ${topic}\n\n${allExchanges}`,
+      512,
+    );
+  }
+
+  /**
+   * Build conversation context for council discussion from current session messages.
+   * Extracts: compaction summary, recent user messages, key decisions.
+   * Limited to ~3000 tokens to avoid excessive cost.
+   */
+  private _buildCouncilContext(): string {
+    const parts: string[] = [];
+
+    // 1. Compaction summary (first message if it's a summary)
+    if (this.messages.length > 0) {
+      const first = this.messages[0];
+      if (isCompactionSummaryMessage(first)) {
+        const summary = getCompactionSummaryText(first);
+        if (summary) {
+          parts.push(`## Session Context (from compaction summary)\n${summary}`);
+        }
+      }
+    }
+
+    // 2. Recent user messages (last 3-5 user turns)
+    const userMessages: string[] = [];
+    for (let i = this.messages.length - 1; i >= 0 && userMessages.length < 5; i--) {
+      const msg = this.messages[i];
+      if (msg.role === "user") {
+        const text = typeof msg.content === "string" ? msg.content : extractUserContent(msg.content);
+        if (text.trim()) {
+          userMessages.unshift(`- ${text.slice(0, 2000).trim()}`);
+        }
+      }
+    }
+    if (userMessages.length > 0) {
+      parts.push(`## Recent User Messages\n${userMessages.join("\n")}`);
+    }
+
+    // 3. Key decisions from council memory if available
+    const councilMemories: string[] = [];
+    for (const msg of this.messages) {
+      if (msg.role === "system" && typeof msg.content === "string" && msg.content.includes("[Council Memory]")) {
+        councilMemories.push(msg.content);
+      }
+    }
+    if (councilMemories.length > 0) {
+      parts.push(`## Previous Council Outcomes\n${councilMemories.slice(-2).join("\n\n")}`);
+    }
+
+    const combined = parts.join("\n\n---\n\n");
+    // Rough token estimate: char/4
+    if (combined.length > 12000) {
+      return combined.slice(0, 12000) + "\n\n[... context truncated to fit token budget]";
+    }
+    return combined;
+  }
+
+  private _parseCouncilOutcome(synthesisText: string, _topic: string): CouncilOutcome | null {
+    try {
+      const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      const parsed = JSON.parse(jsonMatch[0]) as Partial<CouncilOutcome>;
+      if (!parsed.type || !parsed.summary) return null;
+      return {
+        type: parsed.type,
+        summary: parsed.summary,
+        agreed: parsed.agreed ?? [],
+        tradeoffs: parsed.tradeoffs ?? [],
+        recommendation: parsed.recommendation ?? "",
+        actionItems: parsed.actionItems,
+        planUpdate: parsed.planUpdate,
+        resolvedQuestion: parsed.resolvedQuestion,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async *_executeCouncilOutcome(
+    outcome: CouncilOutcome,
+    topic: string,
+  ): AsyncGenerator<StreamChunk, void, unknown> {
+    switch (outcome.type) {
+      case "decision":
+        if (this.session) {
+          try {
+            appendSystemMessage(
+              this.session.id,
+              `[Council Decision]\nTopic: ${topic}\n${outcome.summary}\nAgreed: ${outcome.agreed.join("; ")}\nRecommendation: ${outcome.recommendation}`,
+            );
+          } catch { /* non-critical */ }
+        }
+        yield { type: "content", content: `\n> Decision recorded.\n` };
+        break;
+
+      case "action_items":
+        if (outcome.actionItems?.length) {
+          const itemsText = outcome.actionItems.map((item, i) => `${i + 1}. ${item}`).join("\n");
+          yield { type: "content", content: `\n### Action Items\n${itemsText}\n` };
+          if (this.session) {
+            try {
+              appendSystemMessage(this.session.id, `[Council Action Items]\nTopic: ${topic}\n${itemsText}`);
+            } catch { /* non-critical */ }
+          }
+        }
+        break;
+
+      case "plan_update":
+        if (outcome.planUpdate) {
+          try {
+            const { ensureFlowDir } = await import("../flow/scaffold.js");
+            const { getActiveRunId, updateRunFile } = await import("../flow/run-manager.js");
+            const { readArtifact } = await import("../flow/artifact-io.js");
+            const nodePath = await import("node:path");
+            const flowDir = await ensureFlowDir(this.bash.getCwd());
+            const runId = await getActiveRunId(flowDir);
+            if (runId) {
+              const currentPlan = await readArtifact(nodePath.join(flowDir, "runs", runId), "roadmap.md");
+              if (currentPlan) {
+                currentPlan.sections.set("Council Update", outcome.planUpdate);
+                await updateRunFile(flowDir, runId, "roadmap.md", currentPlan);
+                yield { type: "content", content: `\n> Plan updated with council recommendations.\n` };
+              }
+            }
+          } catch { /* flow dir may not exist — non-critical */ }
+          if (this.session) {
+            try {
+              appendSystemMessage(this.session.id, `[Council Plan Update]\nTopic: ${topic}\n${outcome.planUpdate}`);
+            } catch { /* non-critical */ }
+          }
+        }
+        break;
+
+      case "resolve_question":
+        if (outcome.resolvedQuestion) {
+          yield { type: "content", content: `\n> Question resolved: ${outcome.resolvedQuestion.question}\n` };
+          if (this.session) {
+            try {
+              appendSystemMessage(
+                this.session.id,
+                `[Council Resolution]\nQ: ${outcome.resolvedQuestion.question}\nA: ${outcome.resolvedQuestion.answer}`,
+              );
+            } catch { /* non-critical */ }
+          }
+        }
+        break;
+    }
+  }
+
+  private _hasMultiProviderConfig(roleModels: Partial<Record<ModelRole, string>>): boolean {
+    const providers = new Set<string>();
+    for (const modelId of Object.values(roleModels)) {
+      if (modelId) providers.add(detectProviderForModel(modelId));
+    }
+    return providers.size >= 2;
+  }
+
+  private async _resolveSameProviderCandidates(
+    providerId: ProviderId,
+    roles: ModelRole[],
+  ): Promise<Array<{ role: ModelRole; model: string }>> {
+    const canReach = await loadKeyForProvider(providerId).then(() => true).catch(() => false);
+    if (!canReach) return [];
+
+    const providerModels = getModelsForProvider(providerId);
+    if (providerModels.length === 0) {
+      return roles.map((role) => ({ role, model: this.modelId }));
+    }
+
+    const tierPreference: Record<string, Array<"fast" | "balanced" | "premium">> = {
+      implement: ["balanced", "premium", "fast"],
+      verify: ["premium", "balanced", "fast"],
+      research: ["fast", "balanced", "premium"],
+    };
+
+    const usedModels = new Set<string>();
+    const candidates: Array<{ role: ModelRole; model: string }> = [];
+
+    for (const role of roles) {
+      const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
+      let picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
+      if (!picked) picked = providerModels.find((m) => !usedModels.has(m.id));
+      if (!picked) picked = providerModels[0];
+
+      candidates.push({ role, model: picked.id });
+      usedModels.add(picked.id);
+    }
+
+    return candidates;
+  }
+
   async *runCouncilRound(
     topic: string,
     observer?: ProcessMessageObserver,
     rounds?: number,
+    userModelMessage?: ModelMessage,
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const maxRounds = rounds ?? getCouncilRounds();
     const ALL_ROLES: ModelRole[] = ["implement", "verify", "research"];
     this._councilStats = { calls: 0, startMs: Date.now() };
 
-    // Resolve available role models upfront
+    // Resolve council participants: same-provider by default, multi-provider only when configured
     const candidates: Array<{ role: ModelRole; model: string }> = [];
-    for (const role of ALL_ROLES) {
-      const modelId = getRoleModel(role);
-      if (!modelId) continue;
-      const canReach = await loadKeyForProvider(detectProviderForModel(modelId)).then(() => true).catch(() => false);
-      if (canReach) candidates.push({ role, model: modelId });
+    const configuredRoleModels = getRoleModels();
+    const hasExplicitMultiProvider = this._hasMultiProviderConfig(configuredRoleModels);
+
+    if (hasExplicitMultiProvider && isCouncilMultiProviderPreferred()) {
+      // Multi-provider path: use explicitly configured role models across providers
+      for (const role of ALL_ROLES) {
+        const modelId = getRoleModel(role);
+        if (!modelId) continue;
+        const canReach = await loadKeyForProvider(detectProviderForModel(modelId)).then(() => true).catch(() => false);
+        if (canReach) candidates.push({ role, model: modelId });
+      }
+      if (candidates.length >= 2) {
+        const providers = new Set(candidates.map((c) => detectProviderForModel(c.model)));
+        yield {
+          type: "content",
+          content: `\n[Multi-provider mode: ${candidates.length} roles across ${providers.size} provider(s)]\n`,
+        };
+      }
+    }
+
+    // Default: same-provider mode — pick diverse models from the session's provider
+    if (candidates.length < 2) {
+      const mainProviderId = detectProviderForModel(this.modelId);
+      const sameCandidates = await this._resolveSameProviderCandidates(mainProviderId, ALL_ROLES);
+      if (sameCandidates.length >= 2) {
+        candidates.length = 0;
+        candidates.push(...sameCandidates);
+        const uniqueModels = new Set(sameCandidates.map((c) => c.model));
+        yield {
+          type: "content",
+          content: `\n[Same-provider mode: ${uniqueModels.size} ${mainProviderId} model(s) for ${sameCandidates.length} roles]\n`,
+        };
+      }
+    }
+
+    // Final fallback: use main model for all roles
+    if (candidates.length < 2) {
+      const mainCanReach = await loadKeyForProvider(detectProviderForModel(this.modelId)).then(() => true).catch(() => false);
+      if (mainCanReach) {
+        candidates.length = 0;
+        for (const role of ALL_ROLES) {
+          candidates.push({ role, model: this.modelId });
+        }
+        yield {
+          type: "content",
+          content: `\n[Fallback: using \x1b[36m${this.modelId}\x1b[0m for all roles]\n`,
+        };
+      }
     }
 
     if (candidates.length < 2) {
-      yield { type: "content", content: "\nNeed at least 2 reachable role models. Configure `roleModels` + provider keys in user-settings.json.\n" };
+      yield { type: "content", content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n" };
       yield { type: "done" };
       return;
     }
+
+    // Build conversation context for all participants
+    const conversationContext = this._buildCouncilContext();
+
+    // ── Phase 0: Research — gather facts from codebase before discussion ──
+    const p0Start = Date.now();
+    yield { type: "content", content: `\n## Phase 0 — Codebase Research\n` };
+
+    // Find the research candidate (prefer configured research role, fallback to first available)
+    const researchCandidate = candidates.find((c) => c.role === "research") ?? candidates[0];
+    yield { type: "content", content: `\n### \x1b[35m[research]\x1b[0m ${researchCandidate.model}\n` };
+
+    const researchFindings = await this._councilResearch(
+      researchCandidate.model,
+      topic,
+      conversationContext,
+    );
+    yield { type: "content", content: `${researchFindings}\n` };
+    yield { type: "content", content: `\n> Phase 0: ${((Date.now() - p0Start) / 1000).toFixed(1)}s\n` };
+
+    // Inject research findings into conversation context for subsequent phases
+    const enrichedContext = conversationContext
+      ? `${conversationContext}\n\n---\n\n## Research Findings (Phase 0)\n${researchFindings}`
+      : `## Research Findings (Phase 0)\n${researchFindings}`;
 
     // ── Phase 1: Parallel opening statements ──
     const p1Start = Date.now();
@@ -2054,6 +2488,7 @@ export class Agent {
         speakerRole: role,
         partnerRole: candidates.find((c) => c.role !== role)?.role ?? "colleague",
         topic,
+        conversationContext: enrichedContext,
       });
       return this._councilGenerate(model, system, prompt)
         .then((text) => ({ role, model, position: text, error: null as string | null }))
@@ -2069,12 +2504,14 @@ export class Agent {
     const active: Array<{ role: ModelRole; model: string; position: string }> = [];
 
     for (const o of openings) {
-      yield { type: "content", content: `\n### [${o.role}] ${o.model}\n` };
+      const roleColor = COUNCIL_ROLE_COLORS[o.role] ?? "";
+      yield { type: "content", content: `\n### ${roleColor}[${o.role}]${COUNCIL_COLOR_RESET} ${o.model}\n` };
       if (o.error) {
         yield { type: "content", content: `[Error: ${o.error}]\n` };
       } else {
         active.push({ role: o.role, model: o.model, position: o.position });
-        yield { type: "content", content: o.position + "\n" };
+        const bgColor = COUNCIL_COLOR_BG[o.role] ?? "";
+        yield { type: "content", content: `${bgColor} ${o.role.toUpperCase()} ${COUNCIL_COLOR_RESET} ${o.position}\n` };
       }
     }
 
@@ -2089,6 +2526,7 @@ export class Agent {
     // ── Phase 2: Discussion rounds with parallel pair debates ──
     const exchangeLogs: Map<string, string[]> = new Map();
     const pairConverged: Map<string, boolean> = new Map();
+    let runningSummary = "";
 
     for (let round = 1; round <= maxRounds; round++) {
       const p2Start = Date.now();
@@ -2121,6 +2559,7 @@ export class Agent {
               const aPrompt = this._buildDiscussPrompt("respond", {
                 speakerRole: a.role, partnerRole: b.role, topic,
                 speakerPosition: a.position, partnerPosition: b.position,
+                conversationContext: enrichedContext,
               });
               aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
               log.push(`[${a.role}]: ${aResponse}`);
@@ -2129,6 +2568,7 @@ export class Agent {
               const bPrompt = this._buildDiscussPrompt("respond", {
                 speakerRole: b.role, partnerRole: a.role, topic,
                 speakerPosition: b.position, partnerPosition: aResponse,
+                conversationContext: enrichedContext,
               });
               bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
               log.push(`[${b.role}]: ${bResponse}`);
@@ -2138,16 +2578,20 @@ export class Agent {
               const aPrompt = this._buildDiscussPrompt("followup", {
                 speakerRole: a.role, partnerRole: b.role, topic,
                 partnerPosition: b.position, exchangeHistory: historyText, round,
+                conversationContext: enrichedContext,
+                runningSummary,
               });
-              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
+              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt, 1024);
               log.push(`[${a.role}] (round ${round}): ${aResponse}`);
               chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
 
               const bPrompt = this._buildDiscussPrompt("followup", {
                 speakerRole: b.role, partnerRole: a.role, topic,
                 partnerPosition: aResponse, exchangeHistory: historyText, round,
+                conversationContext: enrichedContext,
+                runningSummary,
               });
-              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
+              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt, 1024);
               log.push(`[${b.role}] (round ${round}): ${bResponse}`);
               chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
             }
@@ -2159,6 +2603,7 @@ export class Agent {
             const convPrompt = this._buildDiscussPrompt("convergence-check", {
               speakerRole: a.role, partnerRole: b.role, topic,
               exchangeHistory: log.slice(-4).join("\n\n"),
+              conversationContext: enrichedContext,
             });
             let converged = false;
             let convReason = "";
@@ -2186,7 +2631,14 @@ export class Agent {
       let allConverged = true;
       for (const pr of pairResults) {
         for (const chunk of pr.chunks) {
-          yield { type: "content", content: `\n### ${chunk.label}\n${chunk.text}\n` };
+          const labelParts = chunk.label.match(/\[(\w+)\] → \[(\w+)\]/);
+          let coloredLabel = chunk.label;
+          if (labelParts) {
+            const fromColor = COUNCIL_ROLE_COLORS[labelParts[1]] ?? "";
+            const toColor = COUNCIL_ROLE_COLORS[labelParts[2]] ?? "";
+            coloredLabel = `${fromColor}[${labelParts[1]}]${COUNCIL_COLOR_RESET} → ${toColor}[${labelParts[2]}]${COUNCIL_COLOR_RESET}`;
+          }
+          yield { type: "content", content: `\n### ${coloredLabel}\n${chunk.text}\n` };
         }
         if (pr.error) {
           yield { type: "content", content: `[Discussion error: ${pr.error}]\n` };
@@ -2205,6 +2657,16 @@ export class Agent {
         yield { type: "content", content: `\n> All pairs converged at round ${round}. Moving to synthesis.\n` };
         break;
       }
+
+      // Generate inter-round summary for next round's focus
+      if (round < maxRounds) {
+        try {
+          runningSummary = await this._generateRoundSummary(exchangeLogs, topic, round, active[0].model);
+          yield { type: "content", content: `\n> **Discussion state:** ${runningSummary.split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ")}\n` };
+        } catch {
+          // Non-critical — continue without summary
+        }
+      }
     }
 
     // ── Phase 3: Leader synthesis ──
@@ -2212,7 +2674,7 @@ export class Agent {
     yield { type: "content", content: "\n## Phase 3 — Leader Synthesis\n" };
 
     const leaderModelId = getRoleModel("leader") ?? this.modelId;
-    yield { type: "content", content: `\n### [leader] ${leaderModelId}\n` };
+    yield { type: "content", content: `\n### \x1b[32m[leader]\x1b[0m ${leaderModelId}\n` };
 
     const allExchanges = [...exchangeLogs.entries()]
       .map(([pair, log]) => `### Discussion: ${pair}\n${log.join("\n\n")}`)
@@ -2226,16 +2688,50 @@ export class Agent {
     try {
       synthesisText = await this._councilGenerate(
         leaderModelId,
-        "You are the team lead. Multiple specialists just had a structured discussion. Synthesize:\n" +
-        "1. What everyone agreed on — these are your strongest foundations\n" +
-        "2. Where genuine disagreement remains — these are real trade-offs, not resolvable by more discussion\n" +
-        "3. Your decisive recommendation based on the full discussion\n" +
-        "4. Specific next steps and risks to watch\n\n" +
-        "Be decisive. The discussion has happened — now it's time to decide.",
+        "You are the team lead. Multiple specialists just had a structured discussion about a topic.\n\n" +
+        "Output TWO parts separated by the exact line `---READABLE---`:\n\n" +
+        "**Part 1: JSON** — a single JSON object:\n" +
+        "```\n" +
+        '{ "type": "decision"|"action_items"|"plan_update"|"resolve_question",\n' +
+        '  "summary": "1-2 sentence executive summary",\n' +
+        '  "agreed": ["point 1", "point 2"],\n' +
+        '  "tradeoffs": ["trade-off 1"],\n' +
+        '  "recommendation": "Your decisive recommendation",\n' +
+        '  "actionItems": ["step 1", "step 2"],\n' +
+        '  "planUpdate": "paragraph for plan update (only if type=plan_update)",\n' +
+        '  "resolvedQuestion": {"question": "...", "answer": "..."} }\n' +
+        "```\n" +
+        "Choose type: decision (general), action_items (concrete steps), plan_update (modify active plan), resolve_question (answer a specific question).\n\n" +
+        "**Part 2: Human-readable** — after `---READABLE---`, write the synthesis in markdown:\n" +
+        "## AGREED\n## TRADE-OFFS\n## RECOMMENDATION\n## NEXT STEPS\n\n" +
+        "Be decisive. Output Part 1 JSON first, then ---READABLE---, then Part 2.",
         `Topic: ${topic}\n\nFinal positions:\n${finalPositions}\n\nFull discussion:\n${allExchanges}`,
         4096,
       );
-      yield { type: "content", content: synthesisText + "\n" };
+
+      // Display human-readable part
+      const readablePart = synthesisText.includes("---READABLE---")
+        ? synthesisText.split("---READABLE---")[1]?.trim()
+        : synthesisText;
+      yield { type: "content", content: (readablePart || synthesisText) + "\n" };
+
+      // Parse structured outcome and execute actions
+      const structuredOutcome = this._parseCouncilOutcome(synthesisText, topic);
+      if (structuredOutcome) {
+        yield* this._executeCouncilOutcome(structuredOutcome, topic);
+        if (this.session) {
+          try {
+            appendSystemMessage(this.session.id, `[Council Outcome]\n${JSON.stringify(structuredOutcome)}`);
+          } catch { /* non-critical */ }
+        }
+      } else {
+        // Fallback: store text-only outcome (backward compatible)
+        if (this.session) {
+          try {
+            appendSystemMessage(this.session.id, `[Council Outcome]\nTopic: ${topic}\n${synthesisText.slice(0, 2000)}`);
+          } catch { /* non-critical */ }
+        }
+      }
     } catch (err: unknown) {
       yield { type: "content", content: `[Synthesis error: ${err instanceof Error ? err.message : err}]\n` };
     }
@@ -2266,6 +2762,13 @@ export class Agent {
       } catch { /* non-critical */ }
     }
 
+    // Store council output as assistant message so the conversation history
+    // stays valid (user→assistant alternation required by most APIs).
+    if (userModelMessage) {
+      const councilResponse = synthesisText || "[Council completed — see discussion above]";
+      this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: councilResponse }]);
+    }
+
     yield { type: "done" };
   }
 
@@ -2290,8 +2793,8 @@ export class Agent {
 
       try {
         const settings = attemptedOverflowRecovery
-          ? relaxCompactionSettings(this.getCompactionSettings())
-          : this.getCompactionSettings();
+          ? relaxCompactionSettings(this.getCompactionSettings(modelInfo?.contextWindow))
+          : this.getCompactionSettings(modelInfo?.contextWindow);
         if (modelInfo?.contextWindow) {
           await this.compactForContext(
             provider,
@@ -2592,6 +3095,7 @@ export class Agent {
     const pilCtx = await runPipeline(userMessage, {
       resumeDigest: this._resumeDigest,
       activeRunId: this._activeRunId,
+      sessionId: this.session?.id ?? null,
     }).catch(() => ({
       raw: userMessage,
       enriched: userMessage,
@@ -2620,6 +3124,32 @@ export class Agent {
         tokens_saved: this._pilEnrichmentDelta > 0 ? this._pilEnrichmentDelta : undefined,
       });
     }
+
+    // Interaction log: PIL classification
+    try {
+      if (this.session) {
+        const pilDurationMs = Date.now() - _pilStart;
+        logInteraction(this.session.id, "pil", {
+          eventSubtype: pilCtx.taskType ?? "none",
+          durationMs: pilDurationMs,
+          data: {
+            layers: pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [],
+            domain: pilCtx.domain,
+            confidence: pilCtx.confidence,
+            outputStyle: pilCtx.outputStyle,
+          },
+        });
+        logInteraction(this.session.id, "user_message", {
+          data: {
+            raw_length: userMessage.length,
+            enriched_length: enrichedMessage.length,
+            taskType: pilCtx.taskType,
+            confidence: pilCtx.confidence,
+            pilActive: this._pilActive,
+          },
+        });
+      }
+    } catch { /* fail-open */ }
 
     // ROUTE-11: Per-turn model routing via decide() — picks cheapest capable model
     const turnStartMs = Date.now();
@@ -2666,6 +3196,16 @@ export class Agent {
       const eeRoute = await routeModel(userMessage, {}, "claude").catch(() => null);
       taskHash = eeRoute?.taskHash ?? null;
     }
+
+    // Interaction log: model routing
+    try {
+      if (this.session) {
+        logInteraction(this.session.id, "routing", {
+          model: turnModelId,
+          data: { defaultModel: this.modelId, routedModel: turnModelId, taskHash },
+        });
+      }
+    } catch { /* fail-open */ }
 
     // Re-detect provider if router picked a model from a different provider
     const turnProviderId = detectProviderForModel(turnModelId);
@@ -2725,9 +3265,10 @@ export class Agent {
       this.bash.getSandboxSettings(),
       this.providerId,
     );
+    const playwrightGuidance = getVisionGuidanceForTextOnly(turnModelId);
     const system = applyModelConstraints(
       applyPilSuffix(
-        `${systemParts.staticPrefix}${systemParts.dynamicSuffix}`,
+        `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
         pilCtx,
         _hasResponseTools,
       ),
@@ -2747,10 +3288,10 @@ export class Agent {
       pilCtx.taskType &&
       autoCouncilTypes.has(pilCtx.taskType) &&
       pilCtx.confidence >= 0.75 &&
-      configuredRoleCount >= 2
+      configuredRoleCount >= 1
     ) {
       yield { type: "content", content: `\n[Auto-council triggered: ${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence]\n` };
-      yield* this.runCouncilRound(userMessage, observer);
+      yield* this.runCouncilRound(userMessage, observer, undefined, userModelMessage);
       return;
     }
 
@@ -2787,8 +3328,8 @@ export class Agent {
 
         try {
           const settings = attemptedOverflowRecovery
-            ? relaxCompactionSettings(this.getCompactionSettings())
-            : this.getCompactionSettings();
+            ? relaxCompactionSettings(this.getCompactionSettings(modelInfo?.contextWindow))
+            : this.getCompactionSettings(modelInfo?.contextWindow);
           if (modelInfo?.contextWindow) {
             await this.compactForContext(
               provider,
@@ -2810,6 +3351,7 @@ export class Agent {
             subagents,
             sendTelegramFile: this.sendTelegramFile ?? undefined,
             sessionId: this.session?.id ?? undefined,
+            modelId: turnModelId,
           });
           let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
           if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
@@ -2914,19 +3456,7 @@ export class Agent {
                 this.recordUsage(stepUsage, "message", runtime.modelId);
               }
             },
-            onFinish: ({ providerMetadata }) => {
-              // Cache metrics only available in onFinish (Anthropic provider metadata)
-              const anthropicMeta = providerMetadata?.anthropic as Record<string, unknown> | undefined;
-              const cacheReadTokens = asNumber(anthropicMeta?.cacheReadInputTokens) ?? 0;
-              const cacheCreationTokens = asNumber(anthropicMeta?.cacheCreationInputTokens) ?? 0;
-              if (cacheReadTokens || cacheCreationTokens) {
-                const prev = statusBarStore.getState();
-                statusBarStore.setState({
-                  cache_read_tokens: (prev.cache_read_tokens ?? 0) + cacheReadTokens,
-                  cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + cacheCreationTokens,
-                });
-              }
-            },
+            onFinish: () => {},
           });
 
           for await (const part of result.fullStream) {
@@ -2992,6 +3522,18 @@ export class Agent {
                   toolCall: tc,
                   timestamp: Date.now(),
                 });
+                // Interaction log: tool call start
+                try {
+                  if (this.session) {
+                    logInteraction(this.session.id, "tool_call", {
+                      eventSubtype: tc.function.name,
+                      data: {
+                        toolCallId: tc.id,
+                        argsPreview: tc.function.arguments.slice(0, 200),
+                      },
+                    });
+                  }
+                } catch { /* fail-open */ }
                 yield { type: "tool_calls", toolCalls: [tc] };
                 break;
               }
@@ -3002,7 +3544,17 @@ export class Agent {
                   type: "function",
                   function: { name: part.toolName, arguments: JSON.stringify(part.input ?? {}) },
                 };
-                const tr = toToolResult(part.output);
+                let tr = toToolResult(part.output);
+
+                // Vision Bridge: proxy image-bearing tool results for text-only models (any tool, not just MCP)
+                try {
+                  const bridgeResult = await bridgeMcpToolResult(part.toolName, tr.output, turnModelId, signal);
+                  if (bridgeResult.proxied) {
+                    tr = { ...tr, output: typeof bridgeResult.output === "string" ? bridgeResult.output : JSON.stringify(bridgeResult.output) };
+                    yield { type: "content", content: `[Vision Bridge: image → text for ${turnModelId}]\n` };
+                  }
+                } catch { /* fail-open */ }
+
                 // Pitfall 9: settle the pending call log entry.
                 if (this.pendingCalls) {
                   const pending = activeToolCalls.find((t) => t.id === part.toolCallId);
@@ -3045,6 +3597,16 @@ export class Agent {
                   toolResult: tr,
                   timestamp: Date.now(),
                 });
+                // Interaction log: tool result
+                try {
+                  if (this.session) {
+                    const outputPreview = typeof tr.output === "string" ? tr.output.slice(0, 200) : JSON.stringify(tr.output).slice(0, 200);
+                    logInteraction(this.session.id, "tool_result", {
+                      eventSubtype: tc.function.name,
+                      data: { success: tr.success, outputPreview },
+                    });
+                  }
+                } catch { /* fail-open */ }
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
                 break;
               }
@@ -3093,6 +3655,15 @@ export class Agent {
                   message: friendly,
                   timestamp: Date.now(),
                 });
+                // Interaction log: error
+                try {
+                  if (this.session) {
+                    logInteraction(this.session.id, "error", {
+                      eventSubtype: authError ? "auth" : "api",
+                      data: { message: friendly.slice(0, 200) },
+                    });
+                  }
+                } catch { /* fail-open */ }
                 yield {
                   type: "error",
                   content: friendly,
@@ -3194,6 +3765,25 @@ export class Agent {
               reportRouteOutcome(storeHash, "success", turnDuration);
             }
           }
+
+          // Interaction log: agent response complete
+          try {
+            if (this.session) {
+              const sb = statusBarStore.getState();
+              const turnDurationMs = Date.now() - turnStartMs;
+              logInteraction(this.session.id, "agent_response", {
+                model: turnModelId,
+                inputTokens: sb.in_tokens,
+                outputTokens: sb.out_tokens,
+                durationMs: turnDurationMs,
+                data: {
+                  textLength: assistantText.length,
+                  toolCallCount: activeToolCalls.length,
+                  compacted: this._compactedThisTurn,
+                },
+              });
+            }
+          } catch { /* fail-open */ }
 
           const stopInput: StopHookInput = {
             hook_event_name: "Stop",
@@ -3657,7 +4247,7 @@ function getBatchUsage(response: BatchChatCompletionResponse): ProcessMessageUsa
     outputTokens,
     totalTokens,
     costUsdTicks: asNumber(usage?.cost_in_usd_ticks),
-    cacheReadTokens: asNumber(u?.cache_read_input_tokens),
+    cacheReadTokens: asNumber(u?.cache_read_input_tokens) ?? asNumber(u?.prompt_cache_hit_tokens),
     cacheCreationTokens: asNumber(u?.cache_creation_input_tokens),
   };
 }
@@ -3829,12 +4419,27 @@ function getUsage(event: unknown): ProcessMessageUsage {
   }
 
   const u = usage as Record<string, unknown>;
+  const details = u.inputTokenDetails as Record<string, unknown> | undefined;
+  const raw = u.raw as Record<string, unknown> | undefined;
+
+  // AI SDK v6: cachedInputTokens (legacy alias) or inputTokenDetails.cacheReadTokens
+  let cacheRead = asNumber(u.cachedInputTokens) ?? asNumber(details?.cacheReadTokens);
+  // DeepSeek: prompt_cache_hit_tokens in raw usage (SDK doesn't normalize this)
+  if (cacheRead == null && raw) {
+    cacheRead = asNumber(raw.prompt_cache_hit_tokens);
+  }
+
+  let cacheCreation = asNumber(details?.cacheWriteTokens);
+  if (cacheCreation == null && raw) {
+    cacheCreation = asNumber(raw.cache_creation_input_tokens);
+  }
+
   return {
     inputTokens: typeof u.inputTokens === "number" ? u.inputTokens : undefined,
     outputTokens: typeof u.outputTokens === "number" ? u.outputTokens : undefined,
     totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : undefined,
-    cacheReadTokens: typeof u.cacheReadTokens === "number" ? u.cacheReadTokens : undefined,
-    cacheCreationTokens: typeof u.cacheCreationTokens === "number" ? u.cacheCreationTokens : undefined,
+    cacheReadTokens: cacheRead ?? undefined,
+    cacheCreationTokens: cacheCreation ?? undefined,
   };
 }
 
@@ -3974,7 +4579,16 @@ function humanizeApiError(error: unknown): string {
   }
 
   const raw = error instanceof Error ? error.message : String(error);
-  return raw.replace(/^AI_\w+Error:\s*/i, "").trim() || raw;
+  const stripped = raw.replace(/^AI_\w+Error:\s*/i, "").trim() || raw;
+  if (/NoSuchTool|no such tool/i.test(raw)) {
+    const toolMatch = raw.match(/Tool\s+"?(\w+)"?\s+(?:is\s+)?not\s+found/i) ?? raw.match(/tool\s+(\w+)/i);
+    const toolName = toolMatch?.[1] ?? "that tool";
+    if (toolName === "search_web") {
+      return `"search_web" is not available. Use bash with curl for web requests, or delegate to an explore agent for research.`;
+    }
+    return `Tool "${toolName}" is not available. Check the TOOLS list in the system prompt for supported tools.`;
+  }
+  return stripped;
 }
 
 function extractResponseDetail(body: string | undefined): string | null {

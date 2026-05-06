@@ -16,7 +16,7 @@ export function buildExtractTranscript(messages: ModelMessage[]): string {
   const serialized = serializeConversation(messages);
   // Truncate [Tool result] entries that exceed TOOL_OUTPUT_MAX_CHARS
   return serialized.replace(
-    /(\[Tool result\]: )([\s\S]{500,}?)(?=\n\n\[(?:User|Assistant|Tool|System|Previous)|$)/g,
+    /(\[Tool result(?: from [^\]]+)?\]: )([\s\S]{500,}?)(?=\n\n\[(?:User|Assistant|Tool|System|Previous)|$)/g,
     (_, prefix, body) => `${prefix}${body.slice(0, TOOL_OUTPUT_MAX_CHARS)}... [truncated]`,
   );
 }

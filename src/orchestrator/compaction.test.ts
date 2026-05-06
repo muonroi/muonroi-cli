@@ -97,9 +97,9 @@ describe("compaction helpers", () => {
   });
 
   it("serializes tool results with truncation markers", () => {
-    const transcript = serializeConversation([user("Read the output"), toolResult("call-1", "bash", "x".repeat(2105))]);
+    const transcript = serializeConversation([user("Read the output"), toolResult("call-1", "bash", "x".repeat(8105))]);
 
-    expect(transcript).toContain("[Tool result]:");
+    expect(transcript).toContain("[Tool result from bash]:");
     expect(transcript).toContain("more characters truncated");
   });
 
