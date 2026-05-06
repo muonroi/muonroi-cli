@@ -4,7 +4,8 @@
 
 - v1.0 MVP (Phases 00-04) - shipped
 - v1.1 EE-Native CLI (Phases 05-07) - shipped 2026-05-01
-- v1.2 Close EE Learning Loop (Phases 08-10) - in progress
+- v1.2 Close EE Learning Loop (Phases 08-10) - shipped
+- v1.3 Quality of Life (Phase 11) - planned
 
 ## Phases
 
@@ -24,13 +25,17 @@ See milestone archive for details.
 
 </details>
 
-### v1.2 Close EE Learning Loop (In Progress)
+### v1.2 Close EE Learning Loop — SHIPPED
 
-**Milestone Goal:** Fix 3 critical EE integration gaps that prevent the CLI from closing the learning feedback loop -- session extraction, offline resilience, and stale suggestion cleanup.
+- [x] **Phase 08: Session End Extraction** — completed 2026-05-01
+- [x] **Phase 09: Offline Queue** — completed 2026-05-01
+- [x] **Phase 10: Prompt-stale Reconciliation** — completed 2026-05-01
 
-- [x] **Phase 08: Session End Extraction** - Wire /api/extract on session end so EE brain learns from CLI sessions (completed 2026-05-01)
-- [x] **Phase 09: Offline Queue** - Buffer EE requests when server unreachable, replay on reconnect (completed 2026-05-01)
-- [x] **Phase 10: Prompt-stale Reconciliation** - Clean up stale PIL Layer 3 suggestions via /api/prompt-stale (completed 2026-05-01)
+### v1.3 Quality of Life (Planned)
+
+**Milestone Goal:** Give users visibility into auto-compact savings (ctx_tokens, log messages), eliminate wasteful LLM calls on small contexts, and add warning logs on compaction failure.
+
+- [ ] **Phase 11: Auto-Compact Visibility & Efficiency**
 
 ## Phase Details
 
@@ -78,10 +83,11 @@ Plans:
 
 ## Progress
 
-**Execution Order:** Phase 08 -> Phase 09 -> Phase 10
+**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete    | 2026-05-01 |
+| 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |

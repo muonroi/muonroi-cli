@@ -25,6 +25,7 @@ export interface StatusBarState {
   degraded: boolean;
   routed_from: string | null;
   ee_status: "ok" | "warn" | "down" | "unknown";
+  ctx_tokens?: number;
 }
 
 type Listener = (s: StatusBarState) => void;
@@ -45,6 +46,7 @@ function makeStore() {
     degraded: false,
     routed_from: null,
     ee_status: "unknown",
+    ctx_tokens: undefined,
   };
   const listeners = new Set<Listener>();
   return {
@@ -161,6 +163,7 @@ export function __resetStatusBarStoreForTests(): void {
     degraded: false,
     routed_from: null,
     ee_status: "unknown",
+    ctx_tokens: undefined,
   });
   wired = false;
 }
