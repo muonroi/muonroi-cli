@@ -395,7 +395,7 @@ export class Agent {
    * Fail-open: any error sets _activeRunId = null silently.
    */
   private async _initFlow(): Promise<void> {
-    bootstrapEEClient().catch(() => {});
+    await bootstrapEEClient().catch(() => {});
     try {
       const flowDir = await ensureFlowDir(this.bash.getCwd());
       const existing = await getActiveRunId(flowDir);

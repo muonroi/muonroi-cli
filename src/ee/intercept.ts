@@ -127,8 +127,11 @@ export async function interceptWithDefaults(
  */
 export async function bootstrapEEClient(home?: string): Promise<void> {
   await loadEEAuthToken({ home });
+  const baseUrl = getCachedServerBaseUrl();
+  const token = getCachedAuthToken();
+  console.warn(`[muonroi-cli] EE bootstrap: baseUrl=${baseUrl ?? "localhost:8082"} token=${token ? "present" : "missing"}`);
   _defaultClient = createEEClient({
-    baseUrl: getCachedServerBaseUrl() ?? undefined,
-    authToken: getCachedAuthToken() ?? undefined,
+    baseUrl: baseUrl ?? undefined,
+    authToken: token ?? undefined,
   });
 }

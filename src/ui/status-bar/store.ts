@@ -9,6 +9,7 @@
 import { routerStore } from "../../router/store.js";
 import { subscribeDowngrade } from "../../usage/downgrade.js";
 import { subscribeThresholds } from "../../usage/thresholds.js";
+import { getCircuitState } from "../../ee/client.js";
 
 export interface StatusBarState {
   provider: string;
@@ -119,8 +120,8 @@ export function wireStatusBar(): () => void {
 
   async function checkEEHealth() {
     try {
-      const { getCircuitState } = await import("../../ee/client.js");
       const circuit = getCircuitState();
+      // Circuit open → EE integration is effectively down in CLI
       if (circuit === "open") {
         statusBarStore.setState({ ee_status: "down" });
         return;
@@ -133,8 +134,12 @@ export function wireStatusBar(): () => void {
       const res = await fetch(`${eeBaseUrl}/health`, { signal: controller.signal, headers });
       clearTimeout(timeout);
       if (res.ok) {
-        const data = (await res.json()) as { status?: string };
-        statusBarStore.setState({ ee_status: circuit === "half-open" ? "warn" : (data.status === "ok" ? "ok" : "warn") });
+        // EE /health returns { ok: boolean } — treat undefined as ok on 200
+        const data = (await res.json()) as { ok?: boolean };
+        const serverOk = data.ok !== false;
+        // Green only if: server healthy AND circuit closed (integration fully working)
+        // Half-open means the circuit is probing again — if health passes, treat as ok
+        statusBarStore.setState({ ee_status: serverOk && (circuit === "closed" || circuit === "half-open") ? "ok" : "warn" });
       } else {
         statusBarStore.setState({ ee_status: "warn" });
       }
