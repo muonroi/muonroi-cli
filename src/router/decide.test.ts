@@ -66,12 +66,13 @@ describe("decide()", () => {
   });
 
   it("falls through to cold when warm returns null", async () => {
-    // Stub that returns null for warm but succeeds for cold
+    // Stub that returns null for warm but succeeds for cold.
+    // Use defaultModel as cold-route model to avoid cap-driven downgrade for unknown models.
     const coldOnlyStub = await startStubEEServer({
       routeModel: undefined, // 500 -> null
       coldRoute: () => ({
-        model: "deepseek-v3",
-        tier: "premium" as const,
+        model: BASE_OPTS.defaultModel,
+        tier: "cold" as const,
         reason: "ee-cold",
         taskHash: "test-hash",
       }),
@@ -80,7 +81,7 @@ describe("decide()", () => {
 
     const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
     expect(result.tier).toBe("cold");
-    expect(result.model).toBe("deepseek-v3");
+    expect(result.model).toBe(BASE_OPTS.defaultModel);
 
     // Restore
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
