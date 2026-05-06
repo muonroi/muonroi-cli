@@ -434,7 +434,19 @@ const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "expand", label: "expand", description: "Expand last compacted context" },
   { id: "optimize", label: "optimize", description: "Optimize prompt for token savings" },
   { id: "debug", label: "debug", description: "Toggle debug trace mode" },
+  { id: "debug-on", label: "debug on", description: "Enable pipeline debug tracing" },
+  { id: "debug-off", label: "debug off", description: "Disable pipeline debug tracing" },
+  { id: "debug-status", label: "debug status", description: "Show session debug summary" },
+  { id: "debug-last", label: "debug last", description: "Show last recorded trace" },
   { id: "council", label: "council", description: "Multi-model adversarial debate" },
+  { id: "ee-stats", label: "ee stats", description: "Knowledge base statistics" },
+  { id: "ee-gates", label: "ee gates", description: "Quality gate checklist" },
+  { id: "ee-evolve", label: "ee evolve", description: "Trigger EE evolution cycle" },
+  { id: "ee-user", label: "ee user", description: "Current EE user identity" },
+  { id: "ee-search", label: "ee search", description: "Semantic search across knowledge base" },
+  { id: "ee-timeline", label: "ee timeline", description: "Principle evolution for a topic" },
+  { id: "ee-graph", label: "ee graph", description: "Principle relationship graph" },
+  { id: "ee-route", label: "ee route", description: "Route task to workflow" },
 ];
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
@@ -780,6 +792,22 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     asset: string;
     approvalId?: string;
     selected: number;
+  } | null>(null);
+  const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<{
+    questionId: string;
+    question: string;
+    context?: string;
+    suggestions?: string[];
+    isRequired: boolean;
+  } | null>(null);
+  const [pendingCouncilPreflight, setPendingCouncilPreflight] = useState<{
+    preflightId: string;
+    problemStatement: string;
+    constraints: string[];
+    successCriteria: string[];
+    scope: string;
+    participants: Array<{ role: string; model: string }>;
+    researchNeeded: boolean;
   } | null>(null);
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCall[]>([]);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
@@ -2274,6 +2302,24 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   });
                 }
                 break;
+              case "council_question":
+                if (chunk.councilQuestion) {
+                  const cq = chunk.councilQuestion;
+                  applyLocalAssistantDelta(chunk.content || "");
+                  // Render suggestions if any
+                  if (cq.suggestions?.length) {
+                    applyLocalAssistantDelta(`\n> Suggestions: ${cq.suggestions.join(" | ")}\n`);
+                  }
+                  // Yield control back to input — user types answer, we route it back
+                  setPendingCouncilQuestion(cq);
+                }
+                break;
+              case "council_preflight":
+                if (chunk.councilPreflight) {
+                  applyLocalAssistantDelta(chunk.content || "");
+                  setPendingCouncilPreflight(chunk.councilPreflight);
+                }
+                break;
               case "error":
                 turnHadError = true;
                 if (chunk.isAuthError) {
@@ -2529,12 +2575,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
           if (result.startsWith("__COUNCIL__")) {
             const lines = result.split("\n");
-            const roundsStr = lines[1] ?? "";
-            const rounds = roundsStr ? parseInt(roundsStr, 10) : undefined;
             const topic = lines.slice(2).join("\n");
             setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
             try {
-              const gen = agent.runCouncilRound(topic, undefined, rounds || undefined);
+              const gen = agent.runCouncilV2(topic);
               for await (const chunk of gen) {
                 if (chunk.type === "content") {
                   setMessages((prev) => {
@@ -2544,6 +2588,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     }
                     return [...prev, buildAssistantEntry(chunk.content ?? "")];
                   });
+                }
+                if (chunk.type === "council_question" && chunk.councilQuestion) {
+                  const cq = chunk.councilQuestion;
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
+                    }
+                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                  });
+                  if (cq.suggestions?.length) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + `\n> Suggestions: ${cq.suggestions!.join(" | ")}\n` }];
+                      }
+                      return prev;
+                    });
+                  }
+                  setPendingCouncilQuestion(cq);
+                }
+                if (chunk.type === "council_preflight" && chunk.councilPreflight) {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
+                    }
+                    return prev;
+                  });
+                  setPendingCouncilPreflight(chunk.councilPreflight);
                 }
                 if (chunk.type === "done") break;
               }
@@ -2647,6 +2721,58 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           inputRef.current?.clear();
           inputRef.current?.insertText("/btw ");
           break;
+        case "council":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/council ");
+          break;
+        case "debug-on":
+        case "debug-off":
+        case "debug-status":
+        case "debug-last": {
+          const sub = item.id.replace("debug-", "");
+          dispatchSlash("debug", [sub], {
+            cwd: agent.getCwd(),
+            tenantId: "local",
+            defaultProvider: "anthropic",
+            defaultModel: model,
+            lastPrompt: messages[messages.length - 1]?.content,
+          }).then((result) => {
+            if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+          });
+          break;
+        }
+        case "ee-stats":
+        case "ee-gates":
+        case "ee-evolve":
+        case "ee-user": {
+          const sub = item.id.replace("ee-", "");
+          dispatchSlash("ee", [sub], {
+            cwd: agent.getCwd(),
+            tenantId: "local",
+            defaultProvider: "anthropic",
+            defaultModel: model,
+            lastPrompt: messages[messages.length - 1]?.content,
+          }).then((result) => {
+            if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+          });
+          break;
+        }
+        case "ee-search":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/ee search ");
+          break;
+        case "ee-timeline":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/ee timeline ");
+          break;
+        case "ee-graph":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/ee graph ");
+          break;
+        case "ee-route":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/ee route ");
+          break;
         case "update":
           setIsUpdating(true);
           setUpdateOutput(null);
@@ -2660,7 +2786,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           resetToNewSession();
           break;
         default: {
-          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
+          // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug, council)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
             tenantId: "local",
@@ -3317,6 +3443,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
+      if (pendingCouncilPreflight) {
+        if (isEscapeKey(key)) {
+          const pid = pendingCouncilPreflight.preflightId;
+          setPendingCouncilPreflight(null);
+          agent.respondToCouncilPreflight(pid, false);
+          return;
+        }
+        if (key.name === "return" || key.sequence === "y" || key.sequence === "Y") {
+          const pid = pendingCouncilPreflight.preflightId;
+          setPendingCouncilPreflight(null);
+          agent.respondToCouncilPreflight(pid, true);
+          return;
+        }
+        if (key.sequence === "n" || key.sequence === "N") {
+          const pid = pendingCouncilPreflight.preflightId;
+          setPendingCouncilPreflight(null);
+          agent.respondToCouncilPreflight(pid, false);
+          return;
+        }
+        return;
+      }
       if (showWalletPicker) {
         if (isEscapeKey(key)) {
           setShowWalletPicker(false);
@@ -3732,6 +3879,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       openApiKeyModal();
       return;
     }
+    // Council question response — route answer back to council generator
+    if (pendingCouncilQuestion) {
+      const qid = pendingCouncilQuestion.questionId;
+      setPendingCouncilQuestion(null);
+      agent.respondToCouncilQuestion(qid, message.trim());
+      setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
+      return;
+    }
     if (handleCommand(message)) return;
     const { enhancedMessage } = processAtMentions(message.trim(), agent.getCwd());
     if (isProcessingRef.current) {
@@ -3841,6 +3996,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 queuedCount={queuedMessages.length}
                 queuedMessages={queuedMessages}
                 typeahead={typeahead}
+                slashItems={filteredSlashItems}
+                slashSelectedIndex={slashMenuIndex}
               />
             </box>
           </box>
@@ -3883,6 +4040,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 contextStats={contextStats}
                 placeholder={"What are we building?"}
                 typeahead={typeahead}
+                slashItems={filteredSlashItems}
+                slashSelectedIndex={slashMenuIndex}
               />
             </box>
             <box height={2} minHeight={0} flexShrink={1} />
@@ -3940,16 +4099,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           height={height}
           currentVersion={startupConfig.version}
           latestVersion={updateInfo.latestVersion}
-        />
-      )}
-      {showSlashMenu && (
-        <SlashMenuModal
-          t={t}
-          selectedIndex={slashMenuIndex}
-          width={width}
-          height={height}
-          searchQuery={slashSearchQuery}
-          filteredItems={filteredSlashItems}
         />
       )}
       {showMcpModal && !showMcpEditor && (
@@ -4144,6 +4293,46 @@ function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
   );
 }
 
+function SlashInlineMenu({
+  t,
+  items,
+  selectedIndex,
+}: {
+  t: Theme;
+  items: SlashMenuItem[];
+  selectedIndex: number;
+}) {
+  const MAX_VISIBLE = 8;
+  const visible = items.slice(0, MAX_VISIBLE);
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingTop={1} flexShrink={0} flexDirection="column">
+      {visible.map((item, i) => {
+        const isSelected = i === selectedIndex;
+        return (
+          <box
+            key={item.id}
+            height={1}
+            backgroundColor={isSelected ? t.selectedBg : undefined}
+            flexDirection="row"
+            justifyContent="space-between"
+            paddingLeft={1}
+            paddingRight={1}
+          >
+            <text fg={isSelected ? t.selected : t.text}>
+              {"/"}
+              {item.label}
+            </text>
+            <text fg={t.textMuted}>{item.description}</text>
+          </box>
+        );
+      })}
+      {items.length > MAX_VISIBLE && (
+        <text fg={t.textDim}>{`  +${items.length - MAX_VISIBLE} more`}</text>
+      )}
+    </box>
+  );
+}
+
 function PromptBox({
   t,
   inputRef,
@@ -4166,6 +4355,8 @@ function PromptBox({
   queuedCount,
   queuedMessages,
   typeahead,
+  slashItems,
+  slashSelectedIndex,
 }: {
   t: Theme;
   inputRef: React.RefObject<TextareaRenderable | null>;
@@ -4188,6 +4379,8 @@ function PromptBox({
   queuedCount?: number;
   queuedMessages?: string[];
   typeahead?: TypeaheadState;
+  slashItems?: SlashMenuItem[];
+  slashSelectedIndex?: number;
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
@@ -4223,6 +4416,9 @@ function PromptBox({
               <span style={{ fg: t.textMuted }}>{"cancel"}</span>
             </text>
           </box>
+        )}
+        {showSlashMenu && slashItems && slashItems.length > 0 && (
+          <SlashInlineMenu t={t} items={slashItems} selectedIndex={slashSelectedIndex ?? 0} />
         )}
         {showSuggestions && typeahead && (
           <SuggestionOverlay t={t} suggestions={typeahead.suggestions} selectedIndex={typeahead.selectedIndex} />
@@ -4290,6 +4486,21 @@ function PromptBox({
               <text fg={t.text}>
                 {"esc "}
                 <span style={{ fg: t.textMuted }}>{(queuedCount ?? 0) > 0 ? "clear queue" : "interrupt"}</span>
+              </text>
+            </box>
+          ) : showSlashMenu ? (
+            <box flexDirection="row" gap={1}>
+              <text fg={t.text}>
+                {"↑↓ "}
+                <span style={{ fg: t.textMuted }}>{"navigate"}</span>
+              </text>
+              <text fg={t.text}>
+                {"enter "}
+                <span style={{ fg: t.textMuted }}>{"select"}</span>
+              </text>
+              <text fg={t.text}>
+                {"esc "}
+                <span style={{ fg: t.textMuted }}>{"dismiss"}</span>
               </text>
             </box>
           ) : showSuggestions ? (

@@ -217,8 +217,26 @@ export interface StructuredResponse {
   data: Record<string, unknown>;
 }
 
+export interface CouncilQuestionData {
+  questionId: string;
+  question: string;
+  context?: string;
+  suggestions?: string[];
+  isRequired: boolean;
+}
+
+export interface CouncilPreflightData {
+  preflightId: string;
+  problemStatement: string;
+  constraints: string[];
+  successCriteria: string[];
+  scope: string;
+  participants: Array<{ role: string; model: string }>;
+  researchNeeded: boolean;
+}
+
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "done" | "error" | "reasoning" | "structured_response";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "done" | "error" | "reasoning" | "structured_response";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -227,6 +245,8 @@ export interface StreamChunk {
   paymentPrecheck?: PaymentPrecheck;
   isAuthError?: boolean;
   structuredResponse?: StructuredResponse;
+  councilQuestion?: CouncilQuestionData;
+  councilPreflight?: CouncilPreflightData;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";

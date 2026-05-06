@@ -336,6 +336,10 @@ export class Agent {
   private _lastCouncilSynthesis: string | null = null;
   /** Guard: prevent recursive council auto-continue from triggering another council. */
   private _isCouncilContinuation = false;
+  /** Pending council question resolvers (questionId → resolve callback). */
+  private _councilQuestionResolvers = new Map<string, (answer: string) => void>();
+  /** Pending council preflight resolvers (preflightId → resolve callback). */
+  private _councilPreflightResolvers = new Map<string, (approved: boolean) => void>();
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
   /** Compaction statistics tracking count and total tokens saved. */
@@ -728,8 +732,13 @@ export class Agent {
   private discardAbortedTurn(userMessage: ModelMessage): void {
     const idx = this.messages.lastIndexOf(userMessage);
     if (idx >= 0) {
-      this.messages.splice(idx, 1);
-      this.messageSeqs.splice(idx, 1);
+      // Keep the user message but add a stub assistant response so the
+      // conversation remains valid for follow-up messages after ESC.
+      const alreadyHasResponse = idx < this.messages.length - 1 && this.messages[idx + 1]?.role === "assistant";
+      if (!alreadyHasResponse) {
+        this.messages.splice(idx + 1, 0, { role: "assistant", content: "[Interrupted]" });
+        this.messageSeqs.splice(idx + 1, 0, null);
+      }
     }
   }
 
@@ -1894,6 +1903,90 @@ export class Agent {
     return candidates;
   }
 
+  // ========================================================================
+  // Council v2 — Clarify → Confirm → Debate → Plan → Execute
+  // ========================================================================
+
+  respondToCouncilQuestion(questionId: string, answer: string): void {
+    const resolver = this._councilQuestionResolvers.get(questionId);
+    if (resolver) {
+      resolver(answer);
+      this._councilQuestionResolvers.delete(questionId);
+    }
+  }
+
+  respondToCouncilPreflight(preflightId: string, approved: boolean): void {
+    const resolver = this._councilPreflightResolvers.get(preflightId);
+    if (resolver) {
+      resolver(approved);
+      this._councilPreflightResolvers.delete(preflightId);
+    }
+  }
+
+  private _createQuestionResponder(): (questionId: string) => Promise<string> {
+    return (questionId: string) =>
+      new Promise<string>((resolve) => {
+        this._councilQuestionResolvers.set(questionId, resolve);
+      });
+  }
+
+  private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
+    return (preflightId: string) =>
+      new Promise<boolean>((resolve) => {
+        this._councilPreflightResolvers.set(preflightId, resolve);
+      });
+  }
+
+  async *runCouncilV2(
+    topic: string,
+    options?: {
+      skipClarification?: boolean;
+      observer?: ProcessMessageObserver;
+      userModelMessage?: ModelMessage;
+    },
+  ): AsyncGenerator<StreamChunk, void, unknown> {
+    const { runCouncil } = await import("../council/index.js");
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
+
+    const processMessageFn = (message: string) => this.processMessage(message, options?.observer);
+
+    const gen = runCouncil(
+      topic,
+      this.modelId,
+      this.messages as Array<{ role: string; content: string | unknown }>,
+      this.session?.id,
+      llm,
+      this._createQuestionResponder(),
+      this._createPreflightResponder(),
+      processMessageFn,
+      {
+        skipClarification: options?.skipClarification,
+        userModelMessage: options?.userModelMessage,
+      },
+    );
+
+    let result: IteratorResult<StreamChunk, string | null>;
+    do {
+      result = await gen.next();
+      if (!result.done && result.value) {
+        yield result.value;
+      }
+    } while (!result.done);
+
+    const synthesis = result.value;
+    this._lastCouncilSynthesis = synthesis;
+
+    if (options?.userModelMessage && synthesis) {
+      this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+    }
+  }
+
+  // ========================================================================
+  // Legacy council — kept for backward compatibility, will be removed
+  // ========================================================================
+
   async *runCouncilRound(
     topic: string,
     observer?: ProcessMessageObserver,
@@ -2812,7 +2905,7 @@ export class Agent {
       configuredRoleCount >= 1
     ) {
       yield { type: "content", content: `\n[Auto-council triggered: ${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence]\n` };
-      yield* this.runCouncilRound(userMessage, observer, undefined, userModelMessage);
+      yield* this.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
       const synthesis = this._lastCouncilSynthesis;
       this._lastCouncilSynthesis = null;
       if (synthesis) {

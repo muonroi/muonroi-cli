@@ -209,6 +209,14 @@ async function startInteractive(
     }
   }
 
+  // WezTerm closes the pane/window when the foreground process exits.
+  // Detect WezTerm via env vars and hold the process open briefly so the
+  // user can see the terminal before the window disappears.
+  const isWezTerm =
+    !!process.env.WEZTERM_PANE ||
+    process.env.TERM_PROGRAM === "WezTerm" ||
+    process.env.TERM_PROGRAM === "wezterm";
+
   const onExit = () => {
     void agent.cleanup().finally(() => {
       // Restore terminal state from JS before the native destroyRenderer runs
@@ -226,8 +234,25 @@ async function startInteractive(
         // best-effort
       }
 
-      // Give the OS a tick to flush stdout before we exit.
-      setTimeout(() => process.exit(0), 16);
+      if (isWezTerm) {
+        // WezTerm closes the window when the process exits. Hold stdin open
+        // so the user can see the terminal and press a key to confirm exit.
+        try {
+          process.stdout.write("\nSession ended. Press any key to close.\n");
+          process.stdin.setRawMode(true);
+          process.stdin.resume();
+          process.stdin.once("data", () => {
+            process.stdin.setRawMode(false);
+            process.exit(0);
+          });
+        } catch {
+          // stdin may not be a TTY in some launch modes — fall through
+          setTimeout(() => process.exit(0), 16);
+        }
+      } else {
+        // Give the OS a tick to flush stdout before we exit.
+        setTimeout(() => process.exit(0), 16);
+      }
     });
   };
 
