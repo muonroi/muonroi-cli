@@ -27,7 +27,7 @@ const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
   "tree-sitter:python": "refactor",
   "regex:read": "analyze",
   "regex:git": "analyze",
-  "regex:short-message": undefined,
+  "regex:short-message": "general",
   "regex:design": "plan",
   // no-match / error / cold / low-confidence → null (conversational passthrough)
   "regex:no-match": undefined,
@@ -95,7 +95,7 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
 
     // Pass 3: EE brain fallback — detect taskType AND outputStyle in one call
     let outputStyle: OutputStyle | null = null;
-    if (taskType === null && confidence < 0.55) {
+    if (taskType === null) {
       const brainRaw = await classifyViaBrain(
         `Classify this prompt. Reply with TWO words separated by comma: <category>,<style>
 Category: refactor, debug, plan, analyze, documentation, generate, or none

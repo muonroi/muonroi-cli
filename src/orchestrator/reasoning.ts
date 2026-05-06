@@ -56,6 +56,11 @@ export function sanitizeModelMessages(messages: ModelMessage[]): ModelMessage[] 
       continue;
     }
 
+    if (typeof content === "string" && !content.trim()) {
+      changed = true;
+      continue;
+    }
+
     const nextMessage: ModelMessage = content === message.content ? message : { ...message, content };
     sanitized.push(nextMessage);
   }

@@ -10,6 +10,8 @@ import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { BashTool } from "./bash.js";
 import { readFile, writeFile, editFile } from "./file.js";
 import { executeGrep } from "./grep.js";
+import { askVisionProxy, analyzeImageFromSource, listCachedImages } from "../providers/mcp-vision-bridge.js";
+import { needsVisionProxy } from "../providers/vision-proxy.js";
 import type { ToolResult, TaskRequest } from "../types/index.js";
 import type { AgentMode } from "../types/index.js";
 
@@ -18,6 +20,7 @@ interface ToolRegistryOpts {
   runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   readDelegation?: (id: string) => Promise<ToolResult>;
   listDelegations?: () => Promise<ToolResult>;
+  modelId?: string;
 }
 
 const MAX_TOOL_OUTPUT_CHARS = 12_000;
@@ -276,6 +279,80 @@ export function createBuiltinTools(
         },
       });
     }
+  }
+
+  // Vision proxy tools — only for text-only models (DeepSeek, etc.)
+  if (opts?.modelId && needsVisionProxy(opts.modelId)) {
+    const cwd = bash.getCwd();
+
+    tools.analyze_image = dynamicTool({
+      description:
+        "Proactively analyze an image file via the vision proxy. " +
+        "Use this IMMEDIATELY when you encounter any image file (.png, .jpg, .gif, .webp, .svg, etc.) " +
+        "or when the user references an image. You CANNOT see images — this tool is your eyes. " +
+        "Accepts file paths, data URIs, or base64 strings. " +
+        "Optionally provide a question to focus the analysis.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          image_source: {
+            type: "string",
+            description: "File path to the image, a data URI (data:image/...), or raw base64 string",
+          },
+          question: {
+            type: "string",
+            description: "Optional specific question to focus the analysis (e.g. 'what text is in this image?', 'describe the layout')",
+          },
+        },
+        required: ["image_source"],
+      }),
+      execute: async (input: any) => {
+        return analyzeImageFromSource(input.image_source, input.question, cwd);
+      },
+    });
+
+    tools.ask_vision_proxy = dynamicTool({
+      description:
+        "Ask a follow-up question about a previously analyzed image, or analyze a new image with a specific question. " +
+        "Use this when you need to clarify visual details, compare elements, check colors, read text, etc. " +
+        "You can reference a cached image by ID, or provide a file path to analyze a new image.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "Your specific question about the image",
+          },
+          image_id_or_path: {
+            type: "string",
+            description: "Cached image ID (e.g. img_1) OR a file path to a new image. If omitted, uses the most recent image.",
+          },
+        },
+        required: ["question"],
+      }),
+      execute: async (input: any) => {
+        return askVisionProxy(input.question, input.image_id_or_path, cwd);
+      },
+    });
+
+    tools.list_vision_cache = dynamicTool({
+      description:
+        "List all cached images available for ask_vision_proxy queries. " +
+        "Shows image IDs, sources, labels, and ages.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {},
+      }),
+      execute: async () => {
+        const cached = listCachedImages();
+        if (cached.length === 0) {
+          return "No cached images. Use analyze_image to analyze an image file, or take a screenshot with browser_take_screenshot.";
+        }
+        return cached.map((c) =>
+          `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`,
+        ).join("\n");
+      },
+    });
   }
 
   return tools;

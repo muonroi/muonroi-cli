@@ -170,6 +170,10 @@ async function startInteractive(
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
+    // We manage SIGINT ourselves (orchestrator abort → agent cleanup → renderer destroy).
+    // Prevent OpenTUI from registering its own SIGINT/SIGTERM handler which would
+    // call renderer.destroy() prematurely and race with our orderly shutdown.
+    exitSignals: [],
     // Lets terminals (Kitty, iTerm2, WezTerm, …) report Command as `super` on KeyEvent — needed for ⌘C in the TUI.
     useKittyKeyboard: {
       disambiguate: true,
@@ -177,10 +181,53 @@ async function startInteractive(
     },
   });
 
+  /**
+   * Restore terminal to main-screen mode before the process exits.
+   *
+   * On some terminals (WezTerm, especially under MINGW64/Git Bash), the native
+   * destroyRenderer() call inside renderer.destroy() does not reliably flush
+   * the Kitty-keyboard-disable and alternate-screen-exit escape sequences
+   * before process.exit() kills the runtime.  This leaves the terminal in a
+   * half-restored state where subsequent shell output is interpreted as raw
+   * escape codes, producing the "jumping numbers" effect.
+   *
+   * The fix explicitly writes the restore sequences from JS and adds a brief
+   * flush delay before process.exit().
+   */
+  function restoreTerminalSync(): void {
+    try {
+      // 1. Disable Kitty keyboard protocol if enabled.
+      if (typeof (renderer as any).disableKittyKeyboard === "function") {
+        (renderer as any).disableKittyKeyboard();
+      }
+      // 2. Restore terminal modes (bracketed paste, cursor, etc.).
+      if (typeof (renderer as any).lib?.restoreTerminalModes === "function") {
+        (renderer as any).lib.restoreTerminalModes((renderer as any).rendererPtr);
+      }
+    } catch {
+      // best-effort — terminal restore must never throw
+    }
+  }
+
   const onExit = () => {
     void agent.cleanup().finally(() => {
+      // Restore terminal state from JS before the native destroyRenderer runs
+      restoreTerminalSync();
+
       renderer.destroy();
-      process.exit(0);
+
+      // Write the alternate-screen-exit sequence directly to stdout as a
+      // safety net in case the native code path didn't flush it.
+      try {
+        process.stdout.write("\x1B[?1049l\x1B[0m");
+        process.stdout.write("\x1B[?1000l\x1B[?1002l\x1B[?1003l\x1B[?1006l");
+        process.stdout.write("\x1B[?2004l"); // disable bracketed paste
+      } catch {
+        // best-effort
+      }
+
+      // Give the OS a tick to flush stdout before we exit.
+      setTimeout(() => process.exit(0), 16);
     });
   };
 
@@ -226,6 +273,15 @@ async function runHeadless(
   if (prelude.stdout) process.stdout.write(prelude.stdout);
   if (prelude.stderr) process.stderr.write(prelude.stderr);
 
+  function writeSafe(stream: NodeJS.WriteStream, data: string): void {
+    try {
+      stream.write(data);
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === "EPIPE") process.exit(0);
+      throw e;
+    }
+  }
+
   try {
     const { enhancedMessage } = processAtMentions(prompt, process.cwd());
 
@@ -233,19 +289,19 @@ async function runHeadless(
       const { observer, consumeChunk, flush } = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
       for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
         const writes = consumeChunk(chunk);
-        if (writes.stdout) process.stdout.write(writes.stdout);
-        if (writes.stderr) process.stderr.write(writes.stderr ?? "");
+        if (writes.stdout) writeSafe(process.stdout, writes.stdout);
+        if (writes.stderr) writeSafe(process.stderr, writes.stderr ?? "");
       }
       const tail = flush();
-      if (tail.stdout) process.stdout.write(tail.stdout);
-      if (tail.stderr) process.stderr.write(tail.stderr ?? "");
+      if (tail.stdout) writeSafe(process.stdout, tail.stdout);
+      if (tail.stderr) writeSafe(process.stderr, tail.stderr ?? "");
       return;
     }
 
     for await (const chunk of agent.processMessage(enhancedMessage)) {
       const writes = renderHeadlessChunk(chunk);
-      if (writes.stdout) process.stdout.write(writes.stdout);
-      if (writes.stderr) process.stderr.write(writes.stderr);
+      if (writes.stdout) writeSafe(process.stdout, writes.stdout);
+      if (writes.stderr) writeSafe(process.stderr, writes.stderr);
     }
   } finally {
     await agent.cleanup();

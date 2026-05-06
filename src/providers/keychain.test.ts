@@ -9,6 +9,11 @@ vi.mock("keytar", () => ({
   getPassword: vi.fn().mockResolvedValue(null),
 }));
 
+// Mock settings so the settings.json providers fallback doesn't interfere
+vi.mock("../utils/settings.js", () => ({
+  loadUserSettings: () => ({ providers: {} }),
+}));
+
 import { firstAvailableProvider, loadKeyForProvider, ProviderKeyMissingError } from "./keychain.js";
 
 describe("loadKeyForProvider", () => {

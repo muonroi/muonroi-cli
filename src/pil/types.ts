@@ -4,7 +4,7 @@
  * Core type definitions for the Prompt Intelligence Layer (PIL) pipeline.
  */
 
-export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate";
+export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "general";
 
 export type OutputStyle = "concise" | "detailed" | "balanced";
 
@@ -39,4 +39,5 @@ export interface PipelineContext {
   resumeDigest?: string | null;
   activeRunId?: string | null;
   digestAgeMs?: number | null;
+  sessionId?: string | null;
 }

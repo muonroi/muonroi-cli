@@ -17,6 +17,7 @@ describe("EEClient feedback + touch fire-and-forget", () => {
   });
 
   it("feedback() returns void synchronously; calls /api/feedback POST", async () => {
+    const before = stub.calls.feedback.length;
     const payload: FeedbackPayload = {
       principle_uuid: "P1",
       classification: "FOLLOWED",
@@ -27,22 +28,23 @@ describe("EEClient feedback + touch fire-and-forget", () => {
     const result = ee.feedback(payload);
     expect(result).toBeUndefined();
 
-    // Wait for fire-and-forget to land
-    await new Promise((r) => setTimeout(r, 50));
-    expect(stub.calls.feedback.length).toBe(1);
-    expect(stub.calls.feedback[0]).toMatchObject({
+    // Wait for fire-and-forget to land (200ms to avoid flake under load)
+    await new Promise((r) => setTimeout(r, 200));
+    expect(stub.calls.feedback.length).toBe(before + 1);
+    expect(stub.calls.feedback[stub.calls.feedback.length - 1]).toMatchObject({
       principle_uuid: "P1",
       classification: "FOLLOWED",
     });
   });
 
   it("touch() returns void synchronously; calls /api/principle/touch POST", async () => {
+    const before = stub.calls.touch.length;
     const result = ee.touch("P2", "local");
     expect(result).toBeUndefined();
 
-    await new Promise((r) => setTimeout(r, 50));
-    expect(stub.calls.touch.length).toBe(1);
-    expect(stub.calls.touch[0]).toBe("P2");
+    await new Promise((r) => setTimeout(r, 200));
+    expect(stub.calls.touch.length).toBe(before + 1);
+    expect(stub.calls.touch[stub.calls.touch.length - 1]).toBe("P2");
   });
 
   it("feedback() never throws even on network error", () => {

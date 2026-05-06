@@ -100,7 +100,7 @@ export async function editFile(
     const count = before.split(oldString).length - 1;
 
     if (count === 0) {
-      return { success: false, output: `old_string not found in ${filePath}` };
+      return { success: false, output: `old_string not found in ${filePath}. Re-read the file with read_file before retrying to get the current content.` };
     }
     if (count > 1) {
       return {

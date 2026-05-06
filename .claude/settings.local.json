@@ -23,7 +23,8 @@
       "WebFetch(domain:platform.openai.com)",
       "WebFetch(domain:developers.openai.com)",
       "PowerShell(New-Item *)",
-      "PowerShell(Stop-Process *)"
+      "PowerShell(Stop-Process *)",
+      "PowerShell(Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage\\(\\); if \\($img -ne $null\\) { Write-Host \"Image found: $\\($img.Width\\)x$\\($img.Height\\)\"; $img.Dispose\\(\\) } else { Write-Host \"No image in clipboard\" })"
     ]
   }
 }

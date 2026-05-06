@@ -17,3 +17,4 @@ export {
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { getSessionTotalTokens, listSessionUsage, recordUsageEvent, type TokenUsageLike } from "./usage";
 export { loadUsage, saveUsage, type UsageState } from "./usage-cap.js";
+export { logInteraction, type InteractionEventType } from "./interaction-log.js";

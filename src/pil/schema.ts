@@ -46,4 +46,5 @@ export const PipelineContextSchema = z.object({
   resumeDigest: z.string().nullable().optional(),
   activeRunId: z.string().nullable().optional(),
   digestAgeMs: z.number().nullable().optional(),
+  sessionId: z.string().nullable().optional(),
 });
