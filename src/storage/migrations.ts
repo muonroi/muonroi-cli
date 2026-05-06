@@ -23,10 +23,17 @@ export function applyMigrations(db: SQLiteDatabase): void {
       db.pragma("user_version = 3");
     }
     if (version < 4) {
-      db.exec(`
-        ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0;
-        ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
-      `);
+      // cache_read_tokens / cache_creation_tokens may already exist if the DB
+      // was created with the v1 schema that includes them inline.  Only add
+      // when missing to avoid "duplicate column name" errors.
+      const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has("cache_read_tokens")) {
+        db.exec("ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!colNames.has("cache_creation_tokens")) {
+        db.exec("ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0");
+      }
       db.pragma("user_version = 4");
     }
     if (version < 5) {
