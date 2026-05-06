@@ -455,18 +455,40 @@ program
     patchZodToJsonSchema();
 
     // Boot model registry — load from centralized catalog (no provider API calls)
-    await loadCatalog().catch(() => {});
+    let catalogLoadFailed = false;
+    await loadCatalog().catch(() => { catalogLoadFailed = true; });
 
-    // If key exists but no models loaded → key is likely invalid
     const { MODELS: loadedModels, getModelInfo: lookupModel } = await import("./models/registry.js");
-    if (config.apiKey && loadedModels.length === 0) {
-      console.error(
-        "\x1b[31mAPI key is invalid or expired. No models could be loaded.\x1b[0m\n" +
-        "Update your key:\n" +
-        "  muonroi-cli -k YOUR_NEW_KEY\n" +
-        "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
-        "\nGet a key at: https://console.anthropic.com/settings/keys",
-      );
+
+    // No models loaded — check root cause
+    if (loadedModels.length === 0) {
+      if (catalogLoadFailed) {
+        console.error(
+          "\x1b[31mCould not load the model catalog. The installation may be corrupted.\x1b[0m\n" +
+          "  The file \x1b[33mdist/models/catalog.json\x1b[0m was not found.\n" +
+          "\nTry reinstalling:\n" +
+          "  \x1b[33mnpm install -g muonroi-cli\x1b[0m\n" +
+          "  # or: \x1b[33mbun install -g muonroi-cli\x1b[0m\n" +
+          "\nIf building from source:\n" +
+          "  \x1b[33mbun run build\x1b[0m\n",
+        );
+      } else if (config.apiKey) {
+        console.error(
+          "\x1b[31mAPI key is invalid or expired. No models could be loaded.\x1b[0m\n" +
+          "Update your key:\n" +
+          "  muonroi-cli -k YOUR_NEW_KEY\n" +
+          "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
+          "\nGet a key at: https://console.anthropic.com/settings/keys",
+        );
+      } else {
+        console.error(
+          "\x1b[31mNo API key configured and no models could be loaded.\x1b[0m\n" +
+          "Set your key:\n" +
+          "  muonroi-cli -k YOUR_API_KEY\n" +
+          "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
+          "\nGet a key at: https://console.anthropic.com/settings/keys",
+        );
+      }
       process.exit(1);
     }
 

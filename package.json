@@ -15,7 +15,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"require('fs').cpSync('src/models/catalog.json', 'dist/models/catalog.json')\"",
     "build:binary": "bun build --compile --outfile ./dist/muonroi-cli-standalone ./src/index.ts",
     "start": "bun run dist/index.js",
     "typecheck": "tsc --noEmit",
