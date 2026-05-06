@@ -9,6 +9,7 @@ import type {
   PreflightResponder,
 } from "./types.js";
 import { buildSynthesisPrompt } from "./prompts.js";
+import { tracedGenerate } from "./llm.js";
 
 export async function* runPlanning(
   debateState: DebateState,
@@ -35,7 +36,14 @@ export async function* runPlanning(
 
   try {
     const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges });
-    synthesisText = await llm.generate(leaderModelId, system, prompt, 4096);
+    synthesisText = yield* tracedGenerate(llm, {
+      phase: "synthesis",
+      label: "Synthesizing action plan",
+      modelId: leaderModelId,
+      system,
+      prompt,
+      maxTokens: 4096,
+    });
 
     const readablePart = synthesisText.includes("---READABLE---")
       ? synthesisText.split("---READABLE---")[1]?.trim()
