@@ -217,12 +217,51 @@ export interface StructuredResponse {
   data: Record<string, unknown>;
 }
 
+export type CouncilQuestionPhase = "clarify" | "preflight" | "plan-confirm";
+
+export type CouncilOptionKind = "choice" | "freetext" | "chat";
+
+export interface CouncilQuestionOption {
+  label: string;
+  description?: string;
+  value: string;
+  kind: CouncilOptionKind;
+}
+
 export interface CouncilQuestionData {
   questionId: string;
   question: string;
   context?: string;
+  /** @deprecated use options[] */
   suggestions?: string[];
   isRequired: boolean;
+  phase?: CouncilQuestionPhase;
+  options?: CouncilQuestionOption[];
+  defaultIndex?: number;
+}
+
+export type CouncilStatusPhase =
+  | "clarify"
+  | "research"
+  | "opening"
+  | "exchange"
+  | "evaluate"
+  | "synthesis"
+  | "summary";
+
+export type CouncilStatusState = "start" | "tick" | "done" | "error";
+
+export interface CouncilStatusData {
+  statusId: string;
+  state: CouncilStatusState;
+  phase: CouncilStatusPhase;
+  label: string;
+  detail?: string;
+  role?: string;
+  elapsedMs?: number;
+  tokensIn?: number;
+  tokensOut?: number;
+  errorMessage?: string;
 }
 
 export interface CouncilPreflightData {
@@ -236,7 +275,7 @@ export interface CouncilPreflightData {
 }
 
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "done" | "error" | "reasoning" | "structured_response";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "done" | "error" | "reasoning" | "structured_response";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -247,6 +286,7 @@ export interface StreamChunk {
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;
   councilPreflight?: CouncilPreflightData;
+  councilStatus?: CouncilStatusData;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
