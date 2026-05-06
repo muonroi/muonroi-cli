@@ -1,6 +1,6 @@
 {
   "name": "muonroi-cli",
-  "version": "1.2.0",
+  "version": "1.2.2",
   "description": "BYOK AI coding agent with multi-model council debate, role-based routing, and auto-compact.",
   "type": "module",
   "main": "dist/index.js",
