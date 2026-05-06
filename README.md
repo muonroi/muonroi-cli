@@ -11,7 +11,7 @@
     <a href="#experience-engine">Experience Engine</a>
   </p>
   <p align="center">
-    <a href="https://github.com/muonroi/muonroi-cli/actions/workflows/typecheck.yml"><img alt="CI" src="https://github.com/muonroi/muonroi-cli/actions/workflows/typecheck.yml/badge.svg"></a>
+    <a href="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml"><img alt="CI" src="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml/badge.svg"></a>
     <a href="https://www.npmjs.com/package/muonroi-cli"><img alt="npm" src="https://img.shields.io/npm/v/muonroi-cli.svg"></a>
     <img alt="Multi-Provider" src="https://img.shields.io/badge/providers-7%20supported-blue">
     <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow">
