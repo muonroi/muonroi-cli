@@ -15,6 +15,7 @@ import type {
   ExtractResponse,
   FeedbackPayload,
   InterceptRequest,
+  InterceptMatch,
   InterceptResponse,
   PostToolPayload,
   PromptStaleRequest,
@@ -32,10 +33,10 @@ const DEFAULT_BASE = "http://localhost:8082";
 /**
  * Intercept timeout budget.
  * Local: 100ms (localhost p99 is <10ms, 100ms catches wedged server).
- * Thin-client: 1500ms (VPS round-trip across internet needs more headroom).
+ * Thin-client: 10000ms (VPS needs embedding + Qdrant + brain route via external API).
  */
 const DEFAULT_LOCAL_TIMEOUT_MS = 100;
-const DEFAULT_REMOTE_TIMEOUT_MS = 1500;
+const DEFAULT_REMOTE_TIMEOUT_MS = 10_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 3000;
 
 function isRemoteUrl(url: string): boolean {
@@ -176,6 +177,40 @@ export function resetEEClientState(): void {
   lastUnreachableLogMs = 0;
 }
 
+// ─── Server response normalizer ──────────────────────────────────────────────
+
+/**
+ * Normalize server response into InterceptResponse.
+ * Server returns: { suggestions, hasSuggestions, surfacedIds, route }
+ * Client expects: { decision, matches?, suggestions?, surfacedIds?, reason? }
+ */
+function normalizeInterceptResponse(raw: Record<string, unknown>): InterceptResponse {
+  if (raw.decision === "allow" || raw.decision === "block") {
+    return raw as unknown as InterceptResponse;
+  }
+  const suggestions = raw.suggestions as string | null;
+  const surfacedIds = Array.isArray(raw.surfacedIds)
+    ? (raw.surfacedIds as Array<Record<string, unknown>>).map((s) => String(s.id ?? s))
+    : [];
+  const matches: InterceptMatch[] = Array.isArray(raw.surfacedIds)
+    ? (raw.surfacedIds as Array<Record<string, unknown>>).map((s) => ({
+        principle_uuid: String(s.id ?? ""),
+        embedding_model_version: "unknown",
+        confidence: typeof s.hitCount === "number" ? Math.min(1, s.hitCount / 10) : 0.5,
+        why: String(s.solution ?? ""),
+        message: String(s.solution ?? ""),
+        scope_label: String(s.scope?.toString() ?? "global"),
+        last_matched_at: String(s.lastHitAt ?? new Date().toISOString()),
+      }))
+    : [];
+  return {
+    decision: "allow",
+    matches: matches.length > 0 ? matches : undefined,
+    suggestions: suggestions ? [suggestions] : undefined,
+    surfacedIds: surfacedIds.length > 0 ? surfacedIds : undefined,
+  };
+}
+
 // ─── Client factory ───────────────────────────────────────────────────────────
 
 export interface CreateEEClientOpts {
@@ -230,7 +265,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         const resp = await f(`${baseUrl}/api/intercept`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(req),
+          body: JSON.stringify({ ...req, skipRoute: true }),
           signal: AbortSignal.timeout(interceptTimeoutMs),
         });
         if (!resp.ok) {
@@ -241,7 +276,8 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           recordCircuitFailure();
           return { decision: "allow", reason: "ee-unreachable" };
         }
-        const result = (await resp.json()) as InterceptResponse;
+        const raw = (await resp.json()) as Record<string, unknown>;
+        const result = normalizeInterceptResponse(raw);
         recordCircuitSuccess({ fetchImpl: f, headers: headers(), baseUrl });
         setCached(req, result);
         return result;

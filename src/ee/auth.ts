@@ -13,6 +13,7 @@ export interface ExperienceConfig {
   embeddingModelVersion?: string;
   serverBaseUrl?: string;
   serverAuthToken?: string;
+  serverTimeoutMs?: number;
   server?: { port?: number; authToken?: string };
 }
 
@@ -23,6 +24,7 @@ function configPath(homeOverride?: string): string {
 let _token: string | null = null;
 let _embeddingModelVersion: string | null = null;
 let _serverBaseUrl: string | null = null;
+let _serverTimeoutMs: number | null = null;
 
 export async function loadEEAuthToken(opts: { home?: string } = {}): Promise<string | null> {
   try {
@@ -35,6 +37,7 @@ export async function loadEEAuthToken(opts: { home?: string } = {}): Promise<str
     }
     if (cfg.embeddingModelVersion) _embeddingModelVersion = cfg.embeddingModelVersion;
     if (cfg.serverBaseUrl) _serverBaseUrl = cfg.serverBaseUrl;
+    if (cfg.serverTimeoutMs && cfg.serverTimeoutMs > 0) _serverTimeoutMs = cfg.serverTimeoutMs;
     return _token;
   } catch {
     return null;
@@ -56,4 +59,8 @@ export function getEmbeddingModelVersion(): string {
 
 export function getCachedServerBaseUrl(): string | null {
   return _serverBaseUrl;
+}
+
+export function getCachedServerTimeoutMs(): number | null {
+  return _serverTimeoutMs;
 }

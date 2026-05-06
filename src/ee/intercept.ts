@@ -1,4 +1,4 @@
-import { getCachedAuthToken, getCachedServerBaseUrl, loadEEAuthToken, refreshAuthToken } from "./auth.js";
+import { getCachedAuthToken, getCachedServerBaseUrl, getCachedServerTimeoutMs, loadEEAuthToken, refreshAuthToken } from "./auth.js";
 import { getTenantId } from "./tenant.js";
 import type { CreateEEClientOpts } from "./client.js";
 import { createEEClient } from "./client.js";
@@ -80,6 +80,7 @@ export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts
     _defaultClient = createEEClient({
       baseUrl: getCachedServerBaseUrl() ?? undefined,
       authToken: getCachedAuthToken() ?? undefined,
+      timeoutMs: getCachedServerTimeoutMs() ?? undefined,
     });
     resp = await getDefaultEEClient().intercept(req);
   }
@@ -127,11 +128,9 @@ export async function interceptWithDefaults(
  */
 export async function bootstrapEEClient(home?: string): Promise<void> {
   await loadEEAuthToken({ home });
-  const baseUrl = getCachedServerBaseUrl();
-  const token = getCachedAuthToken();
-  console.warn(`[muonroi-cli] EE bootstrap: baseUrl=${baseUrl ?? "localhost:8082"} token=${token ? "present" : "missing"}`);
   _defaultClient = createEEClient({
-    baseUrl: baseUrl ?? undefined,
-    authToken: token ?? undefined,
+    baseUrl: getCachedServerBaseUrl() ?? undefined,
+    authToken: getCachedAuthToken() ?? undefined,
+    timeoutMs: getCachedServerTimeoutMs() ?? undefined,
   });
 }
