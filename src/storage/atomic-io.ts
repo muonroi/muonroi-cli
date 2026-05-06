@@ -21,6 +21,17 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
     await fs.writeFile(tmpPath, serialized, "utf8");
     await fs.rename(tmpPath, filePath);
   } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    // ENOENT on rename means another writer already completed the atomic swap.
+    // Verify the final file exists before treating as success.
+    if (e.code === "ENOENT") {
+      try {
+        await fs.access(filePath);
+        return; // race loser — final file written by another process
+      } catch {
+        // final file does not exist — real failure
+      }
+    }
     // Clean up the .tmp if rename failed mid-flight
     await fs.unlink(tmpPath).catch(() => {
       /* ignore */
@@ -40,6 +51,13 @@ export async function atomicWriteText(filePath: string, content: string): Promis
     await fs.writeFile(tmpPath, content, "utf8");
     await fs.rename(tmpPath, filePath);
   } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e.code === "ENOENT") {
+      try {
+        await fs.access(filePath);
+        return;
+      } catch {}
+    }
     await fs.unlink(tmpPath).catch(() => {
       /* ignore */
     });
