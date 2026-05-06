@@ -30,14 +30,21 @@ import { enqueue, drainQueue } from "./offline-queue.js";
 const DEFAULT_BASE = "http://localhost:8082";
 
 /**
- * Intercept timeout budget (Phase 0 default: 100ms).
- *
- * B-4 rationale: intercept is on the hot-path of every tool call. A degraded EE
- * must NOT silently add 5s/call. 100ms is fast enough to detect a wedged EE
- * immediately, and slow enough to absorb normal localhost p99 jitter on Windows ConPTY.
+ * Intercept timeout budget.
+ * Local: 100ms (localhost p99 is <10ms, 100ms catches wedged server).
+ * Thin-client: 1500ms (VPS round-trip across internet needs more headroom).
  */
-const DEFAULT_TIMEOUT_MS = 100;
-const DEFAULT_HEALTH_TIMEOUT_MS = 1000;
+const DEFAULT_LOCAL_TIMEOUT_MS = 100;
+const DEFAULT_REMOTE_TIMEOUT_MS = 1500;
+const DEFAULT_HEALTH_TIMEOUT_MS = 3000;
+
+function isRemoteUrl(url: string): boolean {
+  return !url.includes("localhost") && !url.includes("127.0.0.1") && !url.includes("[::1]");
+}
+
+function defaultTimeoutForBase(baseUrl: string): number {
+  return isRemoteUrl(baseUrl) ? DEFAULT_REMOTE_TIMEOUT_MS : DEFAULT_LOCAL_TIMEOUT_MS;
+}
 
 // ─── Rate-limited unreachable log ─────────────────────────────────────────────
 let lastUnreachableLogMs = 0;
@@ -188,7 +195,7 @@ export interface CreateEEClientOpts {
 export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const authToken = opts.authToken;
-  const interceptTimeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const interceptTimeoutMs = opts.timeoutMs ?? defaultTimeoutForBase(baseUrl);
   const f = opts.fetchImpl ?? fetch;
 
   function headers(): Record<string, string> {

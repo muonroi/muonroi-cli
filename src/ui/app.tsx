@@ -2116,9 +2116,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       if (!isProcessingRef.current) return false;
       key?.preventDefault();
       key?.stopPropagation();
+
+      // Stage 1: queue has items → clear queue only, keep process running
+      if (queuedMessagesRef.current.length > 0) {
+        queuedMessagesRef.current = [];
+        setQueuedMessages([]);
+        return true;
+      }
+
+      // Stage 2: queue empty → abort current process
       interruptedRunIdRef.current = activeRunIdRef.current;
-      queuedMessagesRef.current = [];
-      setQueuedMessages([]);
       const activeAgent = activeTurnRef.current?.agent ?? agent;
       activeTurnRef.current = null;
       clearLiveTurnUi();
@@ -3436,6 +3443,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       }
 
       if (isEscapeKey(key) && interruptActiveRun(key)) {
+        return;
+      }
+
+      // ↑ arrow while processing with queue → pop last queued message into input for editing
+      if (key.name === "up" && isProcessingRef.current && queuedMessagesRef.current.length > 0) {
+        const popped = queuedMessagesRef.current.pop()!;
+        setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+        inputRef.current?.clear();
+        inputRef.current?.insertText(popped.displayText);
+        key.preventDefault();
+        key.stopPropagation();
         return;
       }
 

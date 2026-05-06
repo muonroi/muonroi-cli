@@ -119,6 +119,13 @@ export function wireStatusBar(): () => void {
 
   async function checkEEHealth() {
     try {
+      const { getCircuitState } = await import("../../ee/client.js");
+      const circuit = getCircuitState();
+      if (circuit === "open") {
+        statusBarStore.setState({ ee_status: "down" });
+        return;
+      }
+
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
       const headers: Record<string, string> = {};
@@ -127,7 +134,7 @@ export function wireStatusBar(): () => void {
       clearTimeout(timeout);
       if (res.ok) {
         const data = (await res.json()) as { status?: string };
-        statusBarStore.setState({ ee_status: data.status === "ok" ? "ok" : "warn" });
+        statusBarStore.setState({ ee_status: circuit === "half-open" ? "warn" : (data.status === "ok" ? "ok" : "warn") });
       } else {
         statusBarStore.setState({ ee_status: "warn" });
       }

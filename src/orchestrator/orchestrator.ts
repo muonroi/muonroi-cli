@@ -112,6 +112,76 @@ import {
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { stableCallId } from "./pending-calls.js";
+import {
+  type AgentOptions,
+  type ProcessMessageObserver,
+  type ProcessMessageUsage,
+  type ProcessMessageStepStart,
+  type ProcessMessageStepFinish,
+  type ProcessMessageToolStart,
+  type ProcessMessageToolFinish,
+  type ProcessMessageError,
+  type ProcessMessageFinishReason,
+  type CouncilOutcome,
+  type BatchClientOptions,
+  type BatchChatMessage,
+  type BatchFunctionTool,
+  type BatchToolCall,
+  type BatchChatCompletionRequest,
+  type BatchChatCompletionResponse,
+  type ModelInfoStub,
+  COUNCIL_ROLE_COLORS,
+  COUNCIL_COLOR_RESET,
+  COUNCIL_COLOR_BG,
+  type LegacyProvider,
+  type ResolvedModelRuntime,
+} from "./agent-options";
+import {
+  MAX_TOOL_ROUNDS,
+  VISION_MODEL,
+  COMPUTER_MODEL,
+  type SystemPromptParts,
+  findCustomSubagent,
+  formatCustomSubagentsPromptSection,
+  buildSystemPromptParts,
+  buildSystemPrompt,
+  buildSubagentPrompt,
+  applyModelConstraints,
+} from "./prompts";
+import { isContextLimitError, isAuthenticationError, humanizeApiError } from "./error-utils";
+import {
+  toToolCall,
+  toToolResult,
+  formatSubagentActivity,
+  parseToolArgs,
+  firstLine,
+  truncate,
+  notifyObserver,
+  combineAbortSignals,
+  getStepNumber,
+  getFinishReason,
+  getUsage,
+} from "./tool-utils";
+import {
+  type ExecutedBatchTool,
+  extractJsonObject,
+  buildBatchName,
+  buildBatchChatCompletionRequest,
+  toBatchChatMessages,
+  toBase64DataContent,
+  toolOutputToText,
+  getBatchUsage,
+  accumulateUsage,
+  hasUsage,
+  getBatchFinishReason,
+  toLocalToolCall,
+  buildAssistantBatchMessage,
+  buildToolBatchMessage,
+  parseToolArgumentsOrRaw,
+  toSerializableValue,
+  asNumber,
+  sumDefined,
+} from "./batch-utils";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import {
   createProviderFactory,
@@ -121,95 +191,6 @@ import {
   type ResolvedModelRuntime as RuntimeResult,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
-
-// ---------------------------------------------------------------------------
-// Re-export types from shared runtime module for back-compat
-// ---------------------------------------------------------------------------
-
-export type { ProviderFactory as LegacyProvider, ResolvedModelRuntime } from "../providers/runtime.js";
-type LegacyProvider = ProviderFactory;
-type ResolvedModelRuntime = RuntimeResult;
-
-/** @deprecated Use ModelInfo from "../types/index" instead. */
-export type ModelInfoStub = ModelInfo;
-
-// Batch API type stubs
-export interface BatchClientOptions {
-  apiKey: string;
-  baseURL?: string;
-  signal?: AbortSignal;
-}
-
-interface CouncilOutcome {
-  type: "decision" | "action_items" | "plan_update" | "resolve_question";
-  summary: string;
-  agreed: string[];
-  tradeoffs: string[];
-  recommendation: string;
-  actionItems?: string[];
-  planUpdate?: string;
-  resolvedQuestion?: { question: string; answer: string };
-}
-
-// Council role ANSI color codes for terminal UI
-const COUNCIL_ROLE_COLORS: Record<string, string> = {
-  implement: "\x1b[36m",    // Cyan
-  verify: "\x1b[33m",       // Yellow
-  research: "\x1b[35m",     // Magenta
-  leader: "\x1b[32m",       // Green
-};
-const COUNCIL_COLOR_RESET = "\x1b[0m";
-const COUNCIL_COLOR_BG: Record<string, string> = {
-  implement: "\x1b[46m",    // Cyan background
-  verify: "\x1b[43m",       // Yellow background
-  research: "\x1b[45m",     // Magenta background
-  leader: "\x1b[42m",       // Green background
-};
-
-export interface BatchChatMessage {
-  role: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  content: any;
-  tool_call_id?: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  tool_calls?: any[];
-  name?: string;
-}
-
-export interface BatchFunctionTool {
-  type: "function";
-  function: { name: string; description?: string; parameters?: unknown };
-}
-
-export interface BatchToolCall {
-  id: string;
-  type: "function";
-  function: { name: string; arguments: string };
-}
-
-export interface BatchChatCompletionRequest {
-  model: string;
-  messages: BatchChatMessage[];
-  tools?: BatchFunctionTool[];
-  temperature?: number;
-  max_tokens?: number;
-  reasoning_effort?: string;
-}
-
-export interface BatchChatCompletionResponse {
-  choices: Array<{
-    message: { role: string; content: string | null; tool_calls?: BatchToolCall[] };
-    finish_reason: string;
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-    input_tokens?: number;
-    output_tokens?: number;
-    cost_in_usd_ticks?: number;
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -309,491 +290,9 @@ async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: 
 // END Plan 00-05 provider implementations
 // ---------------------------------------------------------------------------
 
-const MAX_TOOL_ROUNDS = 75;
-const VISION_MODEL = "grok-4-1-fast-reasoning";
-const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
-
-interface AgentOptions {
-  persistSession?: boolean;
-  session?: string;
-  sandboxMode?: SandboxMode;
-  sandboxSettings?: SandboxSettings;
-  batchApi?: boolean;
-  /** Optional external AbortContext (from src/index.ts SIGINT handler). When provided,
-   *  the orchestrator uses its signal instead of creating a new AbortController per turn.
-   *  TUI-04: Ctrl+C mid-tool-call abort safety. */
-  abortContext?: import("./abort.js").AbortContext;
-  /** Optional PendingCallsLog for Pitfall 9 staged-write tracking per tool call. */
-  pendingCalls?: import("./pending-calls.js").PendingCallsLog;
-  /** Permission mode controlling which tool calls require manual approval.
-   *  safe (default) = confirm all; auto-edit = auto-approve file ops; yolo = auto-approve all. */
-  permissionMode?: PermissionMode;
-}
-
-type ProcessMessageFinishReason = "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other";
-
-export interface ProcessMessageUsage {
-  inputTokens?: number;
-  outputTokens?: number;
-  totalTokens?: number;
-  costUsdTicks?: number;
-  cacheReadTokens?: number;
-  cacheCreationTokens?: number;
-}
-
-export interface ProcessMessageStepStart {
-  stepNumber: number;
-  timestamp: number;
-}
-
-export interface ProcessMessageStepFinish {
-  stepNumber: number;
-  timestamp: number;
-  finishReason: ProcessMessageFinishReason;
-  usage: ProcessMessageUsage;
-}
-
-export interface ProcessMessageToolStart {
-  toolCall: ToolCall;
-  timestamp: number;
-}
-
-export interface ProcessMessageToolFinish {
-  toolCall: ToolCall;
-  toolResult: ToolResult;
-  timestamp: number;
-}
-
-export interface ProcessMessageError {
-  message: string;
-  timestamp: number;
-}
-
-export interface ProcessMessageObserver {
-  onStepStart?(info: ProcessMessageStepStart): void;
-  onStepFinish?(info: ProcessMessageStepFinish): void;
-  onToolStart?(info: ProcessMessageToolStart): void;
-  onToolFinish?(info: ProcessMessageToolFinish): void;
-  onError?(info: ProcessMessageError): void;
-}
-
-const ENVIRONMENT = `ENVIRONMENT:
-You are running inside a terminal (CLI). Your text output is rendered in a plain terminal — not a browser, not a rich text editor.
-- Use plain text only. No markdown tables, no HTML, no images, no colored text.
-- Use simple markers like dashes (-) or asterisks (*) for lists.
-- Use indentation and blank lines for structure.
-- Keep lines under 100 characters when possible.
-- Use backticks for inline code and triple backticks for code blocks — these are rendered.
-- Never use unicode box-drawing, fancy borders, or ASCII art in your responses.`;
-
-const MODE_PROMPTS: Record<AgentMode, string> = {
-  agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
-
-${ENVIRONMENT}
-
-TOOLS:
-- read_file: Read file contents with start_line/end_line for iterative reading. Use for examining code.
-- grep: Fast regex content search across the codebase. Prefer this over bash for finding patterns in files. Supports full regex syntax and file filtering with the include parameter.
-- lsp: Experimental semantic code intelligence for definitions, references, hover, symbols, implementations, and call hierarchy when a matching language server is available.
-- write_file: Create new files or overwrite existing ones with full content.
-- edit_file: Replace a unique string in a file with new content. The old_string must be unique — include enough context lines.
-- bash: Execute shell commands. Set background=true for long-running processes (dev servers, watchers, builds). Returns a process ID immediately.
-- process_logs: View recent output from a background process by ID.
-- process_stop: Stop a background process by ID.
-- process_list: List all background processes with status and uptime.
-- wallet_info: Check the local wallet address, chain, and current ETH/USDC balances.
-- wallet_history: Show recent x402 payment history from the audit log.
-- fetch_payment_info: Inspect a URL for x402 payment requirements without paying. Returns payment options and a brin security score. Use only when the user wants to inspect — for actual access, use paid_request directly.
-- paid_request: Access an x402-protected URL using the local wallet. Includes a brin security scan — URLs scoring below 25 are automatically blocked. The user will be prompted to approve the payment before it executes. Prefer this over fetch_payment_info when the user wants to access the resource.
-- task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, verify for sandbox-aware validation, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.
-- delegate: Launch a read-only background agent for longer research while you continue working.
-- delegation_read: Retrieve a completed background delegation result by ID.
-- delegation_list: List running and completed background delegations. Do not poll it repeatedly.
-- schedule_create: Create a recurring or one-time scheduled headless run.
-- schedule_list: List saved schedules and their status.
-- schedule_remove: Remove a saved schedule.
-- schedule_read_log: Read recent log output from a schedule.
-- schedule_daemon_status: Check whether the schedule daemon is running.
-- schedule_daemon_start: Start the schedule daemon in the background.
-- schedule_daemon_stop: Stop the schedule daemon.
-- search_web: Search the web for current information, documentation, APIs, tutorials, etc.
-- search_x: Search X/Twitter for real-time posts, discussions, opinions, and trends.
-- generate_image: Generate a new image or edit an existing image. It saves image files locally and returns their paths.
-- generate_video: Generate a new video or animate an existing image. It saves video files locally and returns their paths.
-- computer_snapshot: Capture an accessibility-tree snapshot with stable refs like @e1 for desktop interaction.
-- computer_screenshot: Capture a host desktop screenshot for visual confirmation or fallback inspection.
-- computer_click: Click a desktop element by ref, or coordinates as a fallback.
-- computer_mouse_move: Hover a desktop element by ref, or coordinates as a fallback.
-- computer_type: Type text into a specific desktop element ref.
-- computer_press: Press a key or key chord in the focused host application.
-- computer_scroll: Scroll a desktop element by ref.
-- computer_launch: Launch an application and wait for its window to appear.
-- computer_list_windows: List visible windows and their ids.
-- computer_focus_window: Bring a target window to the front.
-- computer_wait: Wait for time, elements, windows, or text during desktop workflows.
-- computer_get: Read a property from a desktop element ref.
-- MCP tools: Enabled servers appear as tools named like mcp_<server>__<tool>.
-
-WORKFLOW:
-1. Understand the request
-2. Decide whether a sub-agent should handle the first investigation pass
-3. Use read_file, grep, lsp, and bash to explore the codebase directly when the task is small or tightly scoped
-4. Use bash with background=true for dev servers, watchers, or any long-running process — then continue working
-5. Use delegate for read-only work that can run in parallel, then continue productive work
-6. Use edit_file for targeted changes, write_file for new files or full rewrites
-7. Verify changes by reading modified files
-8. Run tests or builds with bash to confirm correctness
-9. Use search_web or search_x when you need up-to-date information
-
-DEFAULT DELEGATION POLICY:
-- Prefer the task tool by default for code review, code quality analysis, architecture research, root-cause investigation, bug triage, verification, or any request that likely needs reading multiple files before acting.
-- Prefer delegate for longer-running read-only exploration when you can keep making progress without blocking.
-- Use the explore sub-agent for read-only investigation, reviews, research, and "how does this work?" tasks.
-- Use the general sub-agent for delegated work that may need editing files, running commands, or producing a concrete implementation.
-- Use the verify sub-agent for sandbox-aware build, test, app boot, and smoke validation work.
-- Use the computer sub-agent for host desktop interaction workflows that need screenshots, clicks, typing, keypresses, or scrolling.
-- Use a matching custom sub-agent when the task fits one of the configured specializations.
-- Never use delegate for tasks that should edit files or make shell changes.
-- When a background delegation is running, do not wait idly and do not spam delegation_list(). Continue useful work.
-- Do not wait for the user to explicitly ask for a sub-agent when delegation would clearly help.
-- Skip delegation only when the task is trivial, single-file, or you already have the exact answer.
-
-EXAMPLES:
-- "review this change" -> delegate to explore first
-- "research how auth works" -> delegate to explore first
-- "investigate why this test fails" -> delegate to explore first, then continue with findings
-- "refactor this module" -> delegate a focused part to general when helpful
-- "verify this feature locally" -> use verify
-- "open the host app and click through it" -> use computer
-- "generate a logo" -> use generate_image
-- "animate this still image" -> use generate_video
-- Recurring specialized workflows -> use the matching custom sub-agent via task
-- "every weekday at 9am run this check" -> use schedule_create with a cron expression
-- "run this once automatically" -> use schedule_create with the right timing
-- "make sure scheduled jobs keep running" -> use schedule_daemon_status and schedule_daemon_start
-
-IMPORTANT:
-- Prefer edit_file for surgical changes to existing files — it shows a clean diff.
-- Prefer grep over bash for searching file contents. Use bash only for find, ls, git, and other shell commands.
-- Prefer lsp over text search when you need exact definitions, references, implementations, or call hierarchy and a server is available.
-- Use write_file only for new files or when most of the file is changing.
-- Use read_file instead of cat/head/tail for reading files.
-- When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
-- After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
-
-Be direct. Execute, don't just describe. Show results, not plans.`,
-
-  plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
-
-${ENVIRONMENT}
-
-TOOLS:
-- read_file: Read file contents for analysis.
-- grep: Fast regex content search across the codebase. Prefer this over bash for finding patterns in files.
-- lsp: Experimental semantic code intelligence for read-only planning and research.
-- bash: ONLY for searching (find, ls), git inspection — NEVER modify files.
-- task: Delegate a focused task to a sub-agent when deeper research or specialized analysis would help.
-- generate_plan: ALWAYS use this to present your plan. Creates an interactive UI with steps and questions.
-
-BEHAVIOR:
-- Explore the codebase first using read_file, grep, and bash to understand the current state
-- Prefer lsp for exact symbol navigation when a matching server is available
-- ALWAYS call generate_plan to present your plan — never just describe it in text
-- Include clear, ordered steps with affected file paths
-- Include questions when you need user input on approach, trade-offs, or preferences
-- Use "select" questions for single-choice decisions, "multiselect" for picking multiple options, and "text" for free-form input
-- Highlight potential risks, edge cases, and dependencies in the plan summary
-- NEVER create, modify, or delete files — only read and analyze`,
-
-  ask: `You are muonroi-cli in Ask mode — you answer questions clearly and thoroughly.
-
-${ENVIRONMENT}
-
-TOOLS:
-- read_file: Read file contents for context.
-- grep: Fast regex content search across the codebase. Prefer this over bash for finding patterns in files.
-- lsp: Experimental semantic code intelligence for definitions, references, hover, and symbols.
-- bash: ONLY for searching (find, ls), git inspection — NEVER modify.
-- task: Delegate a focused task to a sub-agent when specialized analysis or deeper investigation would help.
-
-BEHAVIOR:
-- Answer the user's question directly and thoroughly
-- Use tools to gather context when needed, preferring lsp for exact symbol questions when available
-- Provide code examples when helpful
-- NEVER create, modify, or delete files
-- Focus on explanation, not execution`,
-};
-
-function findCustomSubagent(
-  agent: string,
-  subagents: CustomSubagentConfig[] = loadValidSubAgents(),
-): CustomSubagentConfig | undefined {
-  return (
-    subagents.find((item) => item.name === agent) ??
-    subagents.find((item) => item.name.toLowerCase() === agent.toLowerCase())
-  );
-}
-
-function formatCustomSubagentsPromptSection(subagents: CustomSubagentConfig[]): string {
-  if (subagents.length === 0) return "";
-
-  const lines = subagents.map((agent) => {
-    const instruction = agent.instruction.trim() || "(none)";
-    return `### ${agent.name}\n- model: ${agent.model}\n- instruction:\n${instruction}`;
-  });
-
-  return `\n\nCUSTOM SUB-AGENTS:\nUser-defined foreground sub-agents from ~/.muonroi-cli/user-settings.json. When one matches the task, call the task tool with agent set to the exact name.\n\n${lines.join("\n\n")}\n`;
-}
-
-interface SystemPromptParts {
-  staticPrefix: string;
-  dynamicSuffix: string;
-}
-
-const NON_ANTHROPIC_TOOL_PREAMBLE = `\n\nIMPORTANT — TOOL CALLING:
-You MUST invoke tools ONLY via the structured function calling API provided to you.
-NEVER output XML tags like <tool_name>, <bash>, <read_file>, or <delegate> as text.
-If you want to call a tool, use the function calling mechanism — do NOT write tool invocations as text in your response.
-Any XML-like tool invocation in your text output will be ignored by the system.\n`;
-
-/**
- * Strip the TOOLS: listing section from system prompt.
- * Non-Anthropic models receive tool definitions via the API's structured `tools` parameter;
- * keeping the text listing causes them to output raw XML instead of structured tool calls.
- */
-function stripToolsSection(text: string): string {
-  return text.replace(/\nTOOLS:\n[\s\S]*?\n(?=WORKFLOW:|BEHAVIOR:|IMPORTANT:|DEFAULT DELEGATION|EXAMPLES:|$)/g, "\n");
-}
-
-function buildSystemPromptParts(
-  cwd: string,
-  mode: AgentMode,
-  sandboxMode: SandboxMode,
-  planContext?: string | null,
-  subagents?: CustomSubagentConfig[],
-  sandboxSettings?: SandboxSettings,
-  providerId?: string,
-): SystemPromptParts {
-  const custom = loadCustomInstructions(cwd);
-  const customSection = custom
-    ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
-    : "";
-
-  const skillsText = formatSkillsForPrompt(discoverSkills(cwd));
-  const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
-  const subagentsSection = formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
-  const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
-
-  let modePrompt = MODE_PROMPTS[mode];
-  if (providerId && providerId !== "anthropic") {
-    modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
-  }
-
-  const staticPrefix = `${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
-
-  const planSection = planContext
-    ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
-    : "";
-
-  const dynamicSuffix = `${planSection}\n\nCurrent working directory: ${cwd}`;
-
-  return { staticPrefix, dynamicSuffix };
-}
-
-function buildSystemPrompt(
-  cwd: string,
-  mode: AgentMode,
-  sandboxMode: SandboxMode,
-  planContext?: string | null,
-  subagents?: CustomSubagentConfig[],
-  sandboxSettings?: SandboxSettings,
-  providerId?: string,
-): string {
-  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(cwd, mode, sandboxMode, planContext, subagents, sandboxSettings, providerId);
-  return `${staticPrefix}${dynamicSuffix}`;
-}
-
-function buildSubagentPrompt(
-  request: TaskRequest,
-  cwd: string,
-  custom: CustomSubagentConfig | null,
-  sandboxMode: SandboxMode,
-  subagents?: CustomSubagentConfig[],
-  sandboxSettings?: SandboxSettings,
-  providerId?: string,
-): string {
-  const isExplore = request.agent === "explore";
-  const isVision = request.agent === "vision";
-  const isVerify = request.agent === "verify";
-  const isVerifyDetect = request.agent === "verify-detect";
-  const isVerifyManifest = request.agent === "verify-manifest";
-  const isComputer = request.agent === "computer";
-  const mode: AgentMode = isExplore || isVerifyDetect ? "ask" : "agent";
-  const role = custom
-    ? `You are the custom sub-agent "${custom.name}". You can investigate, edit files, and run commands unless the delegated task says otherwise.`
-    : request.agent === "explore"
-      ? "You are the Explore sub-agent. You are read-only and focus on fast codebase research."
-      : isVision
-        ? "You are the Vision sub-agent."
-        : isVerifyDetect
-          ? "You are the Verify Detect sub-agent. You inspect a repository to produce a structured verification recipe. You are read-only."
-          : isVerifyManifest
-            ? "You are the Verify Manifest sub-agent. You inspect a repository and create or update .muonroi-cli/environment.json so verification can run reproducibly."
-            : isVerify
-              ? "You are the Verify sub-agent. You specialize in sandbox-aware local verification using builds, tests, app boot checks, and optional browser smoke tests."
-              : isComputer
-                ? "You are the Computer sub-agent. You specialize in host desktop automation using accessibility snapshots, semantic element refs, screenshots, and careful mouse and keyboard actions."
-                : "You are the General sub-agent. You can investigate, edit files, and run commands to complete delegated work.";
-
-  const rules = isExplore
-    ? [
-        "Do not create, modify, or delete files.",
-        "Prefer `read_file` and search commands over broad shell exploration.",
-        "Return concise findings for the parent agent.",
-      ]
-    : isVerifyDetect
-      ? [
-          "Do not create, modify, or delete files.",
-          "Read config files, package manifests, scripts, and source layout to understand the project.",
-          "Return ONLY a valid JSON object with the VerifyRecipe schema. No markdown, no prose, no explanation outside the JSON.",
-        ]
-      : isVerifyManifest
-        ? [
-            "Focus on creating or updating .muonroi-cli/environment.json as the primary verification contract for this repository.",
-            "Read package.json and key config files to understand the project, then write .muonroi-cli/environment.json.",
-            "Prefer editing only .muonroi-cli/environment.json unless the delegated task explicitly requires something else.",
-            "",
-            "SANDBOX ENVIRONMENT (Shuru):",
-            "- OS: Debian GNU/Linux 13 (trixie)",
-            "- Architecture: aarch64 (ARM64)",
-            "- Pre-installed: NOTHING. No node, npm, npx, bun, python3, pip, go, cargo, java, or any runtime.",
-            "- Only basic system tools exist (sh, apt-get, curl, etc).",
-            "- Network access is available during bootstrap and install.",
-            "- The workspace is mounted at /workspace.",
-            "",
-            "MANIFEST REQUIREMENTS:",
-            "- bootstrapCommands: MUST install every runtime and build tool the project needs from scratch via apt-get or curl.",
-            "- For Node.js/Next.js/Vite/etc: `apt-get update && apt-get install -y curl unzip ca-certificates git python3 make g++ pkg-config nodejs npm`",
-            "- For Bun projects: also `curl -fsSL https://bun.sh/install | bash` and shellInitCommands with BUN_INSTALL/PATH exports.",
-            "- For Python: `apt-get update && apt-get install -y python3 python3-pip python3-venv ca-certificates git`",
-            "- For Go: `apt-get update && apt-get install -y golang ca-certificates git`",
-            "- For Rust: `apt-get update && apt-get install -y curl ca-certificates git build-essential && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`",
-            "- installCommands: The package install command (npm install, pip install, etc).",
-            "- buildCommands: Build commands if applicable.",
-            "- testCommands: Test/lint commands if applicable.",
-            "- startCommand + startPort: How to start the app for smoke testing.",
-            "- smokeKind: 'http' if the app has a web UI, 'cli' for CLI tools, 'none' otherwise.",
-            "- Do NOT leave bootstrapCommands empty. The sandbox has nothing.",
-            "",
-            "Return a concise summary of what you wrote and why.",
-          ]
-        : isVision
-          ? ["Validate the image."]
-          : isComputer
-            ? [
-                "Operate carefully on the HOST desktop, not inside the shell sandbox.",
-                "Start with `computer_snapshot` when possible. It returns stable refs like @e1 that remain valid until the next snapshot.",
-                "Prefer accessibility refs over coordinates. Use `computer_click`, `computer_type`, `computer_scroll`, and `computer_get` with refs from the latest snapshot.",
-                "After any meaningful UI transition, launch, dialog open, or menu change, take another `computer_snapshot` before reusing old refs.",
-                "Use `computer_launch`, `computer_list_windows`, `computer_focus_window`, and `computer_wait` to manage apps and window state.",
-                "Use `computer_press` for shortcuts like Enter or cmd+k. Use `computer_screenshot` only for visual confirmation or when the accessibility tree is insufficient.",
-                "If `agent-desktop` is unavailable, permissions are missing, refs go stale, or the state is ambiguous, stop and return the blocker clearly to the parent agent.",
-                "Do not perform destructive or high-risk desktop actions unless the delegated task explicitly requires them.",
-              ]
-            : isVerify
-              ? [
-                  "You are a QA engineer. Your job is to prove the app works end-to-end, not just that it builds.",
-                  "Do not make durable source edits unless the delegated task explicitly asks for fixes.",
-                  "",
-                  "MANDATORY VERIFICATION STEPS (do ALL of these in order):",
-                  "1. Install dependencies (run installCommands from the recipe).",
-                  "2. Build the project (run buildCommands from the recipe).",
-                  "3. Run tests/lint if available (run testCommands from the recipe).",
-                  "4. Start the app (run startCommand from the recipe in the background).",
-                  "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
-                  "6. Run browser smoke tests like a real human QA tester:",
-                  "   - Open the app in the browser, record a video, take screenshots.",
-                  "   - Navigate the app: click links, buttons, menus. Verify pages load.",
-                  "   - Check for JavaScript console errors.",
-                  "   - Spend 3-5 interactions testing the critical path.",
-                  "7. Stop recording, close browser, then stop the dev server.",
-                  "",
-                  "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
-                  "agent-browser commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.",
-                  "Return a concise verification report. Keep it compact but always include Evidence with artifact file paths.",
-                ]
-              : [
-                  "Work only on the delegated task below.",
-                  "Use tools directly instead of narrating your intent.",
-                  "Return a concise summary for the parent agent with key outcomes and any open risks.",
-                ];
-
-  const instructionLines = custom?.instruction.trim() ? ["", "SUB-AGENT INSTRUCTIONS:", custom.instruction.trim()] : [];
-
-  return [
-    role,
-    ...instructionLines,
-    "",
-    "You are helping a parent agent. Do not address the end user directly.",
-    "Focus tightly on the delegated scope and summarize what matters back to the parent agent.",
-    "",
-    ...rules,
-    "",
-    `Delegated task: ${request.description}`,
-    "",
-    buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings, providerId),
-  ].join("\n");
-}
-
-function formatSandboxPromptSection(sandboxMode: SandboxMode, settings?: SandboxSettings): string {
-  if (sandboxMode === "off") return "";
-
-  const s = settings ?? {};
-  let networkLine: string;
-  if (s.allowNet) {
-    networkLine = s.allowedHosts?.length
-      ? `- Network access is restricted to: ${s.allowedHosts.join(", ")}.`
-      : "- Network access is enabled.";
-  } else {
-    networkLine = "- Network is disabled.";
-  }
-
-  const lines = [
-    "",
-    "SANDBOX MODE:",
-    "- Bash commands run inside a Shuru sandbox.",
-    networkLine,
-    "- The current workspace is mounted inside the sandbox at `/workspace`.",
-    "- Shell-side workspace file changes do not persist back to the host in this version.",
-    "- Use `read_file`, `edit_file`, and `write_file` for durable source edits.",
-    "- If a task needs a host-persistent shell mutation, explain that sandbox mode blocks that workflow and ask whether to disable sandbox mode.",
-  ];
-
-  if (s.ports?.length) {
-    lines.push(`- Port forwards: ${s.ports.join(", ")}.`);
-  }
-  if (s.from) {
-    lines.push(`- Starting from checkpoint: ${s.from}.`);
-  }
-
-  return lines.join("\n");
-}
-
-function applyModelConstraints(system: string, modelId: string): string {
-  const modelInfo = getModelInfo(modelId);
-  if (modelInfo?.supportsClientTools !== false) {
-    return system;
-  }
-
-  return [
-    system,
-    "",
-    "MODEL CONSTRAINTS:",
-    "- The selected model does not support client-side CLI tool calls in this environment.",
-    "- Do not call bash, read_file, lsp, write_file, edit_file, task, delegate, delegation, or MCP tools.",
-    "- Answer directly using only the conversation context already provided.",
-  ].join("\n");
-}
+// ============================================================================
+// Agent class — fields, constructor, session management, core processing loop
+// ============================================================================
 
 export class Agent {
   private provider: LegacyProvider | null = null;
@@ -833,6 +332,10 @@ export class Agent {
   private _activeRunId: string | null = null;
   /** Resume digest loaded from active flow run state.md. */
   private _resumeDigest: string | null = null;
+  /** Last council synthesis text for auto-continue after debate. */
+  private _lastCouncilSynthesis: string | null = null;
+  /** Guard: prevent recursive council auto-continue from triggering another council. */
+  private _isCouncilContinuation = false;
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
   /** Compaction statistics tracking count and total tokens saved. */
@@ -2026,6 +1529,10 @@ export class Agent {
     );
   }
 
+  // ========================================================================
+  // Council system — multi-model debate rounds
+  // ========================================================================
+
   private _councilStats = { calls: 0, startMs: 0 };
 
   private async _councilGenerate(
@@ -2764,13 +2271,18 @@ export class Agent {
 
     // Store council output as assistant message so the conversation history
     // stays valid (user→assistant alternation required by most APIs).
+    const councilResponse = synthesisText || "[Council completed — see discussion above]";
     if (userModelMessage) {
-      const councilResponse = synthesisText || "[Council completed — see discussion above]";
       this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: councilResponse }]);
     }
+    this._lastCouncilSynthesis = councilResponse;
 
     yield { type: "done" };
   }
+
+  // ========================================================================
+  // processMessageBatchTurn — batch API message processing loop
+  // ========================================================================
 
   private async *processMessageBatchTurn(args: {
     userModelMessage: ModelMessage;
@@ -3034,6 +2546,11 @@ export class Agent {
     return executeEventHooks(input, this.bash.getCwd(), signal);
   }
 
+  // ========================================================================
+  // processMessage — main streaming turn loop (PIL enrichment, routing, LLM
+  // stream, tool execution, compaction, hooks, observer notifications)
+  // ========================================================================
+
   async *processMessage(
     userMessage: string,
     observer?: ProcessMessageObserver,
@@ -3264,7 +2781,9 @@ export class Agent {
       subagents,
       this.bash.getSandboxSettings(),
       this.providerId,
+      this._resumeDigest,
     );
+    if (this._resumeDigest) this._resumeDigest = null;
     const playwrightGuidance = getVisionGuidanceForTextOnly(turnModelId);
     const system = applyModelConstraints(
       applyPilSuffix(
@@ -3280,10 +2799,12 @@ export class Agent {
     let attemptedOverflowRecovery = false;
 
     // Auto-council: for plan/analyze tasks with high confidence, run multi-model debate
+    // Skip if this is already a council continuation turn (prevent infinite recursion)
     const autoCouncilTypes = new Set(["plan", "analyze"]);
     const councilRoles = getRoleModels();
     const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
     if (
+      !this._isCouncilContinuation &&
       isAutoCouncilEnabled() &&
       pilCtx.taskType &&
       autoCouncilTypes.has(pilCtx.taskType) &&
@@ -3292,6 +2813,20 @@ export class Agent {
     ) {
       yield { type: "content", content: `\n[Auto-council triggered: ${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence]\n` };
       yield* this.runCouncilRound(userMessage, observer, undefined, userModelMessage);
+      const synthesis = this._lastCouncilSynthesis;
+      this._lastCouncilSynthesis = null;
+      if (synthesis) {
+        yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
+        this._isCouncilContinuation = true;
+        try {
+          yield* this.processMessage(
+            `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`,
+            observer,
+          );
+        } finally {
+          this._isCouncilContinuation = false;
+        }
+      }
       return;
     }
 
@@ -3940,6 +3475,10 @@ export class Agent {
     }
   }
 
+  // ========================================================================
+  // Private helper methods — summary, estimation, verify
+  // ========================================================================
+
   private _buildRecentTurnsSummary(): string | null {
     if (this.messages.length < 2) return null;
     const recent = this.messages.slice(-6);
@@ -4051,554 +3590,8 @@ export class Agent {
   }
 }
 
-interface ExecutedBatchTool {
-  toolCall: ToolCall;
-  input: unknown;
-  toolResult: ToolResult;
-}
 
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
-function extractJsonObject(text: string): string | null {
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end < start) return null;
-  return text.slice(start, end + 1);
-}
 
-function buildBatchName(prefix: string, label: string): string {
-  const compact =
-    label
-      .replace(/\s+/g, "-")
-      .replace(/[^a-zA-Z0-9._-]+/g, "")
-      .slice(0, 48) || "run";
-  return `muonroi-cli-${prefix}-${compact}`;
-}
 
-function buildBatchChatCompletionRequest(args: {
-  modelId: string;
-  system: string;
-  messages: ModelMessage[];
-  temperature: number;
-  maxOutputTokens?: number;
-  reasoningEffort?: BatchChatCompletionRequest["reasoning_effort"];
-  tools: BatchFunctionTool[];
-}): BatchChatCompletionRequest {
-  return {
-    model: args.modelId,
-    messages: toBatchChatMessages(args.system, args.messages),
-    temperature: args.temperature,
-    ...(args.maxOutputTokens != null ? { max_completion_tokens: args.maxOutputTokens } : {}),
-    ...(args.reasoningEffort ? { reasoning_effort: args.reasoningEffort } : {}),
-    ...(args.tools.length > 0 ? { tools: args.tools } : {}),
-  };
-}
 
-function toBatchChatMessages(system: string, messages: ModelMessage[]): BatchChatMessage[] {
-  const batchMessages: BatchChatMessage[] = [{ role: "system", content: system }];
-
-  for (const message of messages) {
-    const { role, content } = message;
-
-    switch (role) {
-      case "system":
-        batchMessages.push({ role: "system", content });
-        break;
-
-      case "user": {
-        if (typeof content === "string") {
-          batchMessages.push({ role: "user", content });
-          break;
-        }
-
-        if (!Array.isArray(content)) {
-          break;
-        }
-
-        if (content.length === 1 && content[0]?.type === "text") {
-          batchMessages.push({ role: "user", content: content[0].text });
-          break;
-        }
-
-        const userContent: Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }> =
-          [];
-        for (const part of content) {
-          switch (part.type) {
-            case "text":
-              userContent.push({ type: "text", text: part.text });
-              break;
-
-            case "image": {
-              const mediaType = part.mediaType === "image/*" || !part.mediaType ? "image/jpeg" : part.mediaType;
-              const data =
-                part.image instanceof URL
-                  ? part.image.toString()
-                  : `data:${mediaType};base64,${toBase64DataContent(part.image)}`;
-              userContent.push({ type: "image_url", image_url: { url: data } });
-              break;
-            }
-
-            case "file": {
-              if (!part.mediaType.startsWith("image/")) {
-                break;
-              }
-              const mediaType = part.mediaType === "image/*" ? "image/jpeg" : part.mediaType;
-              const data =
-                part.data instanceof URL
-                  ? part.data.toString()
-                  : `data:${mediaType};base64,${toBase64DataContent(part.data)}`;
-              userContent.push({ type: "image_url", image_url: { url: data } });
-              break;
-            }
-          }
-        }
-        batchMessages.push({
-          role: "user",
-          content: userContent,
-        });
-        break;
-      }
-
-      case "assistant": {
-        if (typeof content === "string") {
-          batchMessages.push({ role: "assistant", content });
-          break;
-        }
-
-        if (!Array.isArray(content)) {
-          break;
-        }
-
-        let assistantText = "";
-        const toolCalls: BatchToolCall[] = [];
-        for (const part of content) {
-          if (part.type === "text") {
-            assistantText += part.text;
-          } else if (part.type === "tool-call") {
-            toolCalls.push({
-              id: part.toolCallId,
-              type: "function",
-              function: {
-                name: part.toolName,
-                arguments: JSON.stringify(part.input),
-              },
-            });
-          }
-        }
-
-        if (assistantText || toolCalls.length > 0) {
-          batchMessages.push({
-            role: "assistant",
-            content: assistantText,
-            ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
-          });
-        }
-        break;
-      }
-
-      case "tool":
-        for (const part of content) {
-          if (part.type === "tool-approval-response") {
-            continue;
-          }
-          batchMessages.push({
-            role: "tool",
-            tool_call_id: part.toolCallId,
-            content: toolOutputToText(part.output),
-          });
-        }
-        break;
-    }
-  }
-
-  return batchMessages;
-}
-
-function toBase64DataContent(value: string | Uint8Array | ArrayBuffer): string {
-  return convertToBase64(value instanceof ArrayBuffer ? new Uint8Array(value) : value);
-}
-
-function toolOutputToText(output: {
-  type: "text" | "json" | "execution-denied" | "error-text" | "error-json" | "content";
-  value?: unknown;
-  reason?: string;
-}): string {
-  switch (output.type) {
-    case "text":
-    case "error-text":
-      return String(output.value ?? "");
-    case "execution-denied":
-      return output.reason ?? "Tool execution denied.";
-    case "json":
-    case "error-json":
-    case "content":
-      return JSON.stringify(output.value ?? null);
-  }
-}
-
-function getBatchUsage(response: BatchChatCompletionResponse): ProcessMessageUsage {
-  const usage = response.usage as BatchChatCompletionResponse["usage"] | undefined;
-  const inputTokens = asNumber(usage?.input_tokens) ?? asNumber(usage?.prompt_tokens);
-  const outputTokens = asNumber(usage?.output_tokens) ?? asNumber(usage?.completion_tokens);
-  const totalTokens = asNumber(usage?.total_tokens) ?? sumDefined(inputTokens, outputTokens);
-  const u = usage as Record<string, unknown> | undefined;
-  return {
-    inputTokens,
-    outputTokens,
-    totalTokens,
-    costUsdTicks: asNumber(usage?.cost_in_usd_ticks),
-    cacheReadTokens: asNumber(u?.cache_read_input_tokens) ?? asNumber(u?.prompt_cache_hit_tokens),
-    cacheCreationTokens: asNumber(u?.cache_creation_input_tokens),
-  };
-}
-
-function accumulateUsage(target: ProcessMessageUsage, usage: ProcessMessageUsage): void {
-  target.inputTokens = (target.inputTokens ?? 0) + (usage.inputTokens ?? 0);
-  target.outputTokens = (target.outputTokens ?? 0) + (usage.outputTokens ?? 0);
-  target.totalTokens = (target.totalTokens ?? 0) + (usage.totalTokens ?? 0);
-  target.costUsdTicks = (target.costUsdTicks ?? 0) + (usage.costUsdTicks ?? 0);
-  target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0);
-  target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
-}
-
-function hasUsage(usage: ProcessMessageUsage): boolean {
-  return Boolean(
-    (usage.inputTokens ?? 0) || (usage.outputTokens ?? 0) || (usage.totalTokens ?? 0) || (usage.costUsdTicks ?? 0),
-  );
-}
-
-function getBatchFinishReason(finishReason: string | null | undefined): ProcessMessageFinishReason {
-  switch (finishReason) {
-    case "stop":
-    case "length":
-    case "content-filter":
-    case "tool-calls":
-    case "error":
-    case "other":
-      return finishReason;
-    case "tool_calls":
-      return "tool-calls";
-    default:
-      return "other";
-  }
-}
-
-function toLocalToolCall(toolCall: BatchToolCall): ToolCall {
-  return {
-    id: toolCall.id,
-    type: "function",
-    function: {
-      name: toolCall.function.name,
-      arguments: toolCall.function.arguments,
-    },
-  };
-}
-
-function buildAssistantBatchMessage(content: string, toolCalls: ToolCall[]): ModelMessage | null {
-  if (toolCalls.length === 0) {
-    return content ? { role: "assistant", content } : null;
-  }
-
-  const parts: Array<
-    { type: "text"; text: string } | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
-  > = [];
-  if (content) {
-    parts.push({ type: "text", text: content });
-  }
-  for (const toolCall of toolCalls) {
-    parts.push({
-      type: "tool-call",
-      toolCallId: toolCall.id,
-      toolName: toolCall.function.name,
-      input: parseToolArgumentsOrRaw(toolCall.function.arguments),
-    });
-  }
-  return { role: "assistant", content: parts };
-}
-
-function buildToolBatchMessage(toolParts: ExecutedBatchTool[]): ModelMessage | null {
-  if (toolParts.length === 0) {
-    return null;
-  }
-
-  return {
-    role: "tool",
-    content: toolParts.map((part) => ({
-      type: "tool-result" as const,
-      toolCallId: part.toolCall.id,
-      toolName: part.toolCall.function.name,
-      output: part.toolResult.success
-        ? ({ type: "json", value: toSerializableValue(part.toolResult) } as const)
-        : ({ type: "error-json", value: toSerializableValue(part.toolResult) } as const),
-    })),
-  };
-}
-
-function parseToolArgumentsOrRaw(raw: string): unknown {
-  try {
-    return raw.trim() ? JSON.parse(raw) : {};
-  } catch {
-    return raw;
-  }
-}
-
-function toSerializableValue(value: unknown): JsonValue {
-  try {
-    return JSON.parse(JSON.stringify(value ?? null)) as JsonValue;
-  } catch {
-    return String(value);
-  }
-}
-
-function asNumber(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
-}
-
-function sumDefined(left?: number, right?: number): number | undefined {
-  if (left == null && right == null) {
-    return undefined;
-  }
-  return (left ?? 0) + (right ?? 0);
-}
-
-function toToolCall(part: { toolCallId: string; toolName: string; args?: unknown; input?: unknown }): ToolCall {
-  return {
-    id: part.toolCallId,
-    type: "function",
-    function: {
-      name: part.toolName,
-      arguments: JSON.stringify(part.input ?? part.args ?? {}),
-    },
-  };
-}
-
-function notifyObserver<T>(listener: ((payload: T) => void) | undefined, payload: T): void {
-  if (!listener) {
-    return;
-  }
-
-  try {
-    listener(payload);
-  } catch {
-    // Observer failures should never break generation.
-  }
-}
-
-function getStepNumber(event: unknown, fallback: number): number {
-  if (event && typeof event === "object" && "stepNumber" in event && typeof event.stepNumber === "number") {
-    return event.stepNumber;
-  }
-
-  return fallback;
-}
-
-function getFinishReason(event: unknown): ProcessMessageFinishReason {
-  if (event && typeof event === "object" && "finishReason" in event) {
-    switch (event.finishReason) {
-      case "stop":
-      case "length":
-      case "content-filter":
-      case "tool-calls":
-      case "error":
-      case "other":
-        return event.finishReason;
-    }
-  }
-
-  return "other";
-}
-
-function getUsage(event: unknown): ProcessMessageUsage {
-  if (!(event && typeof event === "object" && "usage" in event)) {
-    return {};
-  }
-
-  const usage = event.usage;
-  if (!usage || typeof usage !== "object") {
-    return {};
-  }
-
-  const u = usage as Record<string, unknown>;
-  const details = u.inputTokenDetails as Record<string, unknown> | undefined;
-  const raw = u.raw as Record<string, unknown> | undefined;
-
-  // AI SDK v6: cachedInputTokens (legacy alias) or inputTokenDetails.cacheReadTokens
-  let cacheRead = asNumber(u.cachedInputTokens) ?? asNumber(details?.cacheReadTokens);
-  // DeepSeek: prompt_cache_hit_tokens in raw usage (SDK doesn't normalize this)
-  if (cacheRead == null && raw) {
-    cacheRead = asNumber(raw.prompt_cache_hit_tokens);
-  }
-
-  let cacheCreation = asNumber(details?.cacheWriteTokens);
-  if (cacheCreation == null && raw) {
-    cacheCreation = asNumber(raw.cache_creation_input_tokens);
-  }
-
-  return {
-    inputTokens: typeof u.inputTokens === "number" ? u.inputTokens : undefined,
-    outputTokens: typeof u.outputTokens === "number" ? u.outputTokens : undefined,
-    totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : undefined,
-    cacheReadTokens: cacheRead ?? undefined,
-    cacheCreationTokens: cacheCreation ?? undefined,
-  };
-}
-
-function toToolResult(output: unknown): ToolResult {
-  if (output && typeof output === "object" && "success" in output) {
-    const r = output as {
-      success: boolean;
-      output?: string;
-      error?: string;
-      diff?: ToolResult["diff"];
-      plan?: Plan;
-      task?: ToolResult["task"];
-      delegation?: ToolResult["delegation"];
-      backgroundProcess?: ToolResult["backgroundProcess"];
-      media?: ToolResult["media"];
-      computer?: ToolResult["computer"];
-      lspDiagnostics?: ToolResult["lspDiagnostics"];
-    };
-    return {
-      success: r.success,
-      output: r.output,
-      error: r.error ?? (r.success ? undefined : r.output),
-      diff: r.diff,
-      plan: r.plan,
-      task: r.task,
-      delegation: r.delegation,
-      backgroundProcess: r.backgroundProcess,
-      media: r.media,
-      computer: r.computer,
-      lspDiagnostics: r.lspDiagnostics,
-    };
-  }
-  return { success: true, output: String(output) };
-}
-
-function formatSubagentActivity(toolName: string, args?: unknown): string {
-  const parsed = parseToolArgs(args);
-  if (toolName === "read_file") return `Read ${parsed.path || "file"}`;
-  if (toolName === "lsp") return `LSP ${parsed.operation || "query"} ${parsed.filePath || ""}`.trim();
-  if (toolName === "write_file") return `Write ${parsed.path || "file"}`;
-  if (toolName === "edit_file") return `Edit ${parsed.path || "file"}`;
-  if (toolName === "search_web") return `Web search "${truncate(parsed.query || "", 50)}"`;
-  if (toolName === "search_x") return `X search "${truncate(parsed.query || "", 50)}"`;
-  if (toolName === "generate_image") return `Generate image "${truncate(parsed.prompt || "", 50)}"`;
-  if (toolName === "generate_video") return `Generate video "${truncate(parsed.prompt || "", 50)}"`;
-  if (toolName === "computer_snapshot") return `Snapshot ${parsed.app || "desktop"}`;
-  if (toolName === "computer_screenshot") return "Capture desktop screenshot";
-  if (toolName === "computer_click")
-    return parsed.ref ? `Click ${parsed.ref}` : `Click at ${parsed.x || "?"},${parsed.y || "?"}`;
-  if (toolName === "computer_mouse_move")
-    return parsed.ref ? `Hover ${parsed.ref}` : `Move mouse to ${parsed.x || "?"},${parsed.y || "?"}`;
-  if (toolName === "computer_type") return `Type into ${parsed.ref || "element"}`;
-  if (toolName === "computer_press") return `Press ${parsed.key || "key"}`;
-  if (toolName === "computer_scroll") return `Scroll ${parsed.ref || "element"} ${parsed.direction || "down"}`;
-  if (toolName === "computer_launch") return `Launch ${parsed.app || "app"}`;
-  if (toolName === "computer_list_windows") return `List windows${parsed.app ? ` for ${parsed.app}` : ""}`;
-  if (toolName === "computer_focus_window")
-    return `Focus window ${parsed.window_id || parsed.title || parsed.app || ""}`.trim();
-  if (toolName === "computer_wait") return "Wait for desktop state";
-  if (toolName === "computer_get") return `Read ${parsed.property || "text"} from ${parsed.ref || "element"}`;
-  if (toolName === "bash") return truncate(parsed.command || "Run command", 70);
-  return truncate(`${toolName}`, 70);
-}
-
-function parseToolArgs(args: unknown): Record<string, string> {
-  if (!args || typeof args !== "object") return {};
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(args)) {
-    result[key] = typeof value === "string" ? value : JSON.stringify(value);
-  }
-  return result;
-}
-
-function firstLine(text: string): string {
-  return text.trim().split("\n").find(Boolean)?.trim() || "Task completed.";
-}
-
-function truncate(text: string, max: number): string {
-  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
-}
-
-function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
-  const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal));
-  if (activeSignals.length === 0) return undefined;
-  if (activeSignals.length === 1) return activeSignals[0];
-
-  if (typeof AbortSignal.any === "function") {
-    return AbortSignal.any(activeSignals);
-  }
-
-  const controller = new AbortController();
-  for (const signal of activeSignals) {
-    if (signal.aborted) {
-      controller.abort();
-      break;
-    }
-
-    signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-
-  return controller.signal;
-}
-
-function isContextLimitError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /(context|token|prompt).*(limit|length|large|window|overflow)|too many tokens|maximum context/i.test(message);
-}
-
-function isAuthenticationError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /\b(401|403)\b|unauthori[sz]ed|invalid.*(api[_ ]?key|token|credential)|authentication failed|forbidden|access denied/i.test(
-    message,
-  );
-}
-
-const STATUS_MESSAGES: Record<number, string> = {
-  400: "The request was invalid. This may be caused by an unsupported parameter or model.",
-  401: "Authentication failed. Your API key may be invalid or expired.",
-  403: "Access denied. Your API key does not have permission for this request.",
-  404: "The requested model or endpoint was not found. Check your model name and base URL.",
-  408: "The request timed out. Please try again.",
-  422: "The request could not be processed. Check your message format or parameters.",
-  429: "Rate limit exceeded. Please wait a moment and try again.",
-  500: "The API server encountered an internal error. Please try again later.",
-  502: "The API server is temporarily unavailable. Please try again later.",
-  503: "The API service is temporarily overloaded. Please try again later.",
-  529: "The API service is overloaded. Please try again later.",
-};
-
-function humanizeApiError(error: unknown): string {
-  if (APICallError.isInstance(error)) {
-    const detail = extractResponseDetail(error.responseBody);
-    if (detail) return detail;
-    if (error.statusCode && STATUS_MESSAGES[error.statusCode]) {
-      return STATUS_MESSAGES[error.statusCode];
-    }
-  }
-
-  const raw = error instanceof Error ? error.message : String(error);
-  const stripped = raw.replace(/^AI_\w+Error:\s*/i, "").trim() || raw;
-  if (/NoSuchTool|no such tool/i.test(raw)) {
-    const toolMatch = raw.match(/Tool\s+"?(\w+)"?\s+(?:is\s+)?not\s+found/i) ?? raw.match(/tool\s+(\w+)/i);
-    const toolName = toolMatch?.[1] ?? "that tool";
-    if (toolName === "search_web") {
-      return `"search_web" is not available. Use bash with curl for web requests, or delegate to an explore agent for research.`;
-    }
-    return `Tool "${toolName}" is not available. Check the TOOLS list in the system prompt for supported tools.`;
-  }
-  return stripped;
-}
-
-function extractResponseDetail(body: string | undefined): string | null {
-  if (!body) return null;
-  try {
-    const parsed = JSON.parse(body);
-    const msg = parsed?.error?.message ?? parsed?.message ?? parsed?.detail;
-    if (typeof msg === "string" && msg.trim()) return msg.trim();
-  } catch {
-    /* not JSON */
-  }
-  return null;
-}

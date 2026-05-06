@@ -31,11 +31,18 @@ See milestone archive for details.
 - [x] **Phase 09: Offline Queue** — completed 2026-05-01
 - [x] **Phase 10: Prompt-stale Reconciliation** — completed 2026-05-01
 
-### v1.3 Quality of Life (Planned)
+### v1.3 Quality of Life
 
 **Milestone Goal:** Give users visibility into auto-compact savings (ctx_tokens, log messages), eliminate wasteful LLM calls on small contexts, and add warning logs on compaction failure.
 
 - [ ] **Phase 11: Auto-Compact Visibility & Efficiency**
+- [ ] **Phase 12: Quality & Efficiency Improvements from DB Stats Analysis**
+
+### v1.4 Architecture Quality
+
+**Milestone Goal:** Eliminate tech debt in the orchestrator and improve codebase maintainability through modular extraction.
+
+- [ ] **Phase 12.1: Orchestrator.ts Refactor** — Split 4605-line orchestrator.ts into 7 focused modules
 
 ## Phase Details
 
@@ -83,7 +90,7 @@ Plans:
 
 ## Progress
 
-**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11
+**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -91,3 +98,5 @@ Plans:
 | 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete    | 2026-05-01 |
 | 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |
+| 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
+| 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
