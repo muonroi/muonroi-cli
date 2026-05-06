@@ -28,14 +28,19 @@ export function readClipboardImage(): ClipboardImage | null {
 }
 
 function readWin32(): ClipboardImage | null {
-  const tmpFile = path.join(os.tmpdir(), `muonroi-clip-${Date.now()}.png`);
+  const tmpFile = path.join(os.tmpdir(), `muonroi-clip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`);
   try {
+    const escaped = tmpFile.replace(/\\/g, "\\\\");
     const ps = `
       Add-Type -AssemblyName System.Windows.Forms
       $img = [System.Windows.Forms.Clipboard]::GetImage()
-      if ($img) { $img.Save('${tmpFile.replace(/\\/g, "\\\\")}', [System.Drawing.Imaging.ImageFormat]::Png) }
+      if ($img -ne $null) {
+        $img.Save('${escaped}', [System.Drawing.Imaging.ImageFormat]::Png)
+        $img.Dispose()
+      }
     `;
-    spawnSync("powershell", ["-NoProfile", "-Command", ps], { timeout: 5000 });
+    const result = spawnSync("powershell", ["-NoProfile", "-Command", ps], { timeout: 5000 });
+    if (result.error || result.status !== 0) return null;
     if (!fs.existsSync(tmpFile)) return null;
     const buf = fs.readFileSync(tmpFile);
     if (buf.length < 100) return null;
