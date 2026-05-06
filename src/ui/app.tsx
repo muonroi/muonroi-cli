@@ -14,6 +14,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  CouncilQuestionData,
   CouncilStatusData,
   FileDiff,
   ModelInfo,
@@ -25,6 +26,13 @@ import type {
   ToolResult,
 } from "../types/index";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
+import {
+  CouncilQuestionCard,
+  initialCardState,
+  reduceCardKey,
+  type CouncilCardKey,
+  type CouncilCardState,
+} from "./components/council-question-card.js";
 import { MODES } from "../types/index";
 import { processAtMentions } from "../utils/at-mentions.js";
 import { FileIndex } from "../utils/file-index.js";
@@ -187,6 +195,25 @@ function buildToolResultEntry(toolCall: ToolCall, toolResult: ToolResult, extra?
     ...extra,
   };
 }
+function mapCouncilCardKey(key: KeyEvent): CouncilCardKey | null {
+  if (key.name === "up") return { kind: "up" };
+  if (key.name === "down") return { kind: "down" };
+  if (key.name === "return") return { kind: "enter" };
+  if (key.name === "escape") return { kind: "escape" };
+  if (key.name === "backspace" || key.name === "delete") return { kind: "backspace" };
+  // Printable single character (letters, digits, space, etc.).
+  if (typeof key.sequence === "string" && key.sequence.length === 1 && key.sequence >= " " && key.sequence !== "\x7f") {
+    return { kind: "char", ch: key.sequence };
+  }
+  return null;
+}
+
+function formatAnswerForLog(ans: { kind: string; text: string }): string {
+  if (ans.kind === "freetext") return ans.text || "(empty)";
+  if (ans.kind === "chat") return "[Chat about this]";
+  return ans.text;
+}
+
 function buildUserEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
   return { type: "user", content, timestamp: new Date(), ...extra };
 }
@@ -795,13 +822,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     approvalId?: string;
     selected: number;
   } | null>(null);
-  const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<{
-    questionId: string;
-    question: string;
-    context?: string;
-    suggestions?: string[];
-    isRequired: boolean;
-  } | null>(null);
+  const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
+  const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
   const [pendingCouncilPreflight, setPendingCouncilPreflight] = useState<{
     preflightId: string;
     problemStatement: string;
@@ -2324,13 +2346,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               case "council_question":
                 if (chunk.councilQuestion) {
                   const cq = chunk.councilQuestion;
-                  applyLocalAssistantDelta(chunk.content || "");
-                  // Render suggestions if any
-                  if (cq.suggestions?.length) {
-                    applyLocalAssistantDelta(`\n> Suggestions: ${cq.suggestions.join(" | ")}\n`);
-                  }
-                  // Yield control back to input — user types answer, we route it back
+                  // Render the card via dedicated state — do NOT bleed text into
+                  // the assistant stream (that caused the freetext-soup look).
                   setPendingCouncilQuestion(cq);
+                  setCouncilCardState(initialCardState(cq));
                 }
                 break;
               case "council_preflight":
@@ -2619,23 +2638,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 }
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
                   const cq = chunk.councilQuestion;
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
-                    }
-                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                  });
-                  if (cq.suggestions?.length) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + `\n> Suggestions: ${cq.suggestions!.join(" | ")}\n` }];
-                      }
-                      return prev;
-                    });
-                  }
                   setPendingCouncilQuestion(cq);
+                  setCouncilCardState(initialCardState(cq));
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setMessages((prev) => {
@@ -2988,6 +2992,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           dismissBtw();
         }
         return;
+      }
+      if (pendingCouncilQuestion && councilCardState) {
+        const cardKey = mapCouncilCardKey(key);
+        if (cardKey) {
+          const result = reduceCardKey(pendingCouncilQuestion, councilCardState, cardKey);
+          setCouncilCardState(result.state);
+          if (result.emit?.type === "answer") {
+            const qid = pendingCouncilQuestion.questionId;
+            const ans = result.emit.answer;
+            setPendingCouncilQuestion(null);
+            setCouncilCardState(null);
+            agent.respondToCouncilQuestion(qid, ans.text);
+            setMessages((prev) => [...prev, buildUserEntry(formatAnswerForLog(ans))]);
+          } else if (result.emit?.type === "cancel") {
+            const qid = pendingCouncilQuestion.questionId;
+            setPendingCouncilQuestion(null);
+            setCouncilCardState(null);
+            agent.respondToCouncilQuestion(qid, "");
+          }
+          return;
+        }
       }
       if (showPlanPanel) {
         const q = planQuestions[pqs.tab];
@@ -3818,6 +3843,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       toggleSavedMcp,
       messages,
       startupConfig.version,
+      pendingCouncilQuestion,
+      councilCardState,
+      agent,
     ],
   );
   useKeyboard(handleKey);
@@ -3915,10 +3943,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       openApiKeyModal();
       return;
     }
-    // Council question response — route answer back to council generator
+    // Council question response — route answer back to council generator.
+    // The card now owns keyboard input; this branch survives only for the
+    // legacy code path where the user typed an answer in the main prompt
+    // before the card was wired up.
     if (pendingCouncilQuestion) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestion(null);
+      setCouncilCardState(null);
       agent.respondToCouncilQuestion(qid, message.trim());
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
@@ -4000,6 +4032,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
               {councilStatuses.length > 0 && (
                 <CouncilStatusList statuses={councilStatuses} theme={t} />
+              )}
+              {pendingCouncilQuestion && councilCardState && (
+                <CouncilQuestionCard
+                  question={pendingCouncilQuestion}
+                  theme={t}
+                  state={councilCardState}
+                />
               )}
               {/* Streaming assistant content */}
               {streamContent && (
