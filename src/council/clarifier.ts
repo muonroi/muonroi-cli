@@ -1,7 +1,37 @@
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import { tracedGenerate } from "./llm.js";
+
+/**
+ * Convert legacy `suggestions: string[]` into the new options schema with
+ * standard "Type something" / "Chat about this" escape-hatches appended.
+ *
+ * The card UI uses `kind` to decide how to handle each option:
+ *  - choice   → submit value as-is
+ *  - freetext → open inline text input
+ *  - chat     → pause council and let user discuss before answering
+ */
+export function buildClarifyOptions(suggestions: string[] | undefined): CouncilQuestionOption[] {
+  const choices: CouncilQuestionOption[] = (suggestions ?? [])
+    .filter((s) => typeof s === "string" && s.trim().length > 0)
+    .map((s) => ({ label: s.trim(), value: s.trim(), kind: "choice" as const }));
+  return [
+    ...choices,
+    {
+      label: "Type something",
+      description: "Nhập câu trả lời tự do",
+      value: "",
+      kind: "freetext" as const,
+    },
+    {
+      label: "Chat about this",
+      description: "Thảo luận thêm trước khi trả lời",
+      value: "",
+      kind: "chat" as const,
+    },
+  ];
+}
 
 const MAX_CLARIFICATION_ROUNDS = 3;
 
@@ -52,16 +82,20 @@ export async function* runClarification(
 
     for (const q of questions) {
       const questionId = crypto.randomUUID();
+      const options = buildClarifyOptions(q.suggestions);
 
       yield {
         type: "council_question" as StreamChunk["type"],
         content: `**${q.question}**\n${q.why ? `> ${q.why}` : ""}`,
         councilQuestion: {
           questionId,
+          phase: "clarify",
           question: q.question,
           context: q.why,
           suggestions: q.suggestions,
+          options,
           isRequired: q.isRequired,
+          defaultIndex: 0,
         },
       };
 
