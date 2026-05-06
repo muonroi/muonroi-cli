@@ -14,97 +14,120 @@ Fix 4 weaknesses in auto-compact to give users visibility into compaction saving
 - Reality: those are **accumulated** lifetime tokens, not current context
 - User doesn't know if compact happened, how many tokens were saved, or what current context size is
 
-**Current code path:**
-- `orchestrator.ts:1881` — `generateCompactionSummary()` succeeds
-- `orchestrator.ts:1883-1884` — messages replaced silently
-- No log, no status bar update, no conversation output
-
 ### Weakness 2 — `force=true` wastes LLM calls (Impact: HIGH)
 `postTurnCompact()` always calls `compactForContext(..., true)`.
-- Guard: `tokens < 2000` only (dòng 1908)
+- Guard: `tokens < 2000` only
 - With context window 200K, if tokens = 3000, still calls LLM to summarize
 - Summarization costs $ + latency for near-zero benefit
 
-**Current code:**
-```ts
-private async postTurnCompact(provider, system, contextWindow, signal) {
-    if (this._compactedThisTurn) return;
-    if (!isAutoCompactAfterTurnEnabled()) return;
-    const tokens = estimateConversationTokens(system, this.messages);
-    if (tokens < POST_TURN_MIN_TOKENS) return;  // 2000 tokens — too low
-    await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(), true).catch(() => {});
-}
-```
-
 ### Weakness 3 — Status bar shows accumulated only (Impact: MEDIUM)
-- `in_tokens` / `out_tokens` / `session_usd` are **accumulated** (dòng 1216-1224)
+- `in_tokens` / `out_tokens` / `session_usd` are **accumulated**
 - No `ctx_tokens` field showing current context size
 - User can't verify compact is working from status bar alone
 
 ### Weakness 4 — Errors swallowed silently (Impact: LOW)
-- `.catch(() => {})` nuốt mọi lỗi
-- Tuy nhiên `_compactedThisTurn` không được set khi fail → retry ở turn sau
-- OK, nhưng có thể cải thiện bằng warning log
+- `.catch(() => {})` swallows all errors
+- `_compactedThisTurn` not set on failure → retry on next turn (acceptable)
 
-## Solutions
+### Weakness 5 — Stats leak across sessions (Impact: MEDIUM, found by council)
+- `/clear` does NOT reset `ctx_tokens` or `_compactionStats`
+- After starting a new session, stale values remain until next compaction
 
-### Fix 1: Show compaction savings as conversation log
-**File:** `src/orchestrator/orchestrator.ts` — `compactForContext()`
+### Weakness 6 — Threshold not configurable (Impact: LOW, found by council)
+- 2% hardcoded in `postTurnCompact()`
+- Users who want more/less aggressive compaction cannot tune it
 
-After dòng 1884 (messages replaced), thêm:
-```ts
-const tokensAfter = estimateConversationTokens(system, this.messages);
-const saved = preparation.tokensBefore - tokensAfter;
-// Stats tracking
-if (!this._compactionStats) this._compactionStats = { count: 0, totalSaved: 0 };
-this._compactionStats.count++;
-this._compactionStats.totalSaved += saved;
-```
+---
 
-Cần thêm field `_compactionStats` trong class property và type.
+## Solutions (Upgraded via Council Discussion)
 
-### Fix 2: Smart threshold for post-turn compact
-**File:** `src/orchestrator/orchestrator.ts` — `postTurnCompact()`
+### Fix 1: `ctx_tokens` + `compaction_summary` in status bar
+**Files:** `orchestrator.ts`, `store.ts`, `index.tsx`
 
-Thay `tokens < POST_TURN_MIN_TOKENS` bằng:
-```ts
-const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * 0.02));
-if (tokens < minMeaningfulTokens) return;
-```
-Lý do: 2% của context window (ví dụ 4K/200K) là threshold tối thiểu có ý nghĩa — nếu context nhỏ hơn, compact không đáng chi phí LLM call.
+After compaction, push to status bar store:
+- `ctx_tokens` — current context size (e.g., `[ctx: 15K]`)
+- `compaction_summary` — string like `"3 cmp, 45K saved"` → shown as `[3 cmp, 45K saved]`
 
-### Fix 3: Add `ctx_tokens` to status bar
-**File:** `src/ui/status-bar/store.ts` — thêm field `ctx_tokens?: number`
-**File:** `src/ui/status-bar/index.tsx` — hiển thị `[ctx: 15K]` bên cạnh accumulated tokens
-**File:** `src/orchestrator/orchestrator.ts` — `recordUsage()` hoặc sau compact gọi `statusBarStore.setState({ ctx_tokens: ... })`
+### Fix 2: Smart threshold with configurable percentage
+**Files:** `settings.ts`, `orchestrator.ts`
 
-### Fix 4: Warning log on compaction failure
-**File:** `src/orchestrator/orchestrator.ts` — thay `.catch(() => {})` bằng `.catch((err) => console.warn("[compact] failed:", err?.message))`
+- New setting `autoCompactThresholdPct` in `UserSettings` (default 0.02, range 0.01-0.10)
+- Getter `getAutoCompactThresholdPct()` with validation + clamping
+- `postTurnCompact()` reads from getter instead of hardcoded `0.02`
+
+### Fix 3: Reset state on new session
+**Files:** `orchestrator.ts`
+
+`startNewSession()` now also resets:
+- `ctx_tokens: 0`
+- `compaction_summary: undefined`
+- `this._compactionStats = { count: 0, totalSaved: 0 }`
+
+### Fix 4: Warning log on failure
+**File:** `orchestrator.ts`
+
+Replace `.catch(() => {})` with `.catch((err) => console.warn("[compact] failed:", ...))`
+at `postTurnCompact()` call site.
+
+### Fix 5: Public getter for stats
+**File:** `orchestrator.ts`
+
+`getCompactionStats(): { count: number; totalSaved: number }` — returns a copy of `_compactionStats`.
+
+---
 
 ## Implementation Plan
 
-### Wave 1 — Core logic changes (orchestrator.ts)
-1. Thêm property `_compactionStats: { count: number; totalSaved: number }` trong class Agent
-2. Sửa `compactForContext()`: tính `tokensAfter`, cập nhật stats
-3. Sửa `postTurnCompact()`: smart threshold
-4. Thêm status bar update sau compact
+### Wave 1 — Settings (settings.ts)
+1. Add `autoCompactThresholdPct?: number` to `UserSettings`
+2. Add `getAutoCompactThresholdPct()` getter with validation (0.01-0.10, default 0.02)
 
-### Wave 2 — Status bar display (status-bar/ files)
-5. Thêm `ctx_tokens: number` vào `StatusBarState`
-6. Cập nhật `renderStatusBar()` hiển thị ctx tokens
-7. Reset `ctx_tokens` khi session mới
+### Wave 2 — Core logic (orchestrator.ts)
+3. Add `_compactionStats` property to Agent class
+4. Add stats tracking in `compactForContext()` (tokensAfter, saved, update `_compactionStats`)
+5. Push `ctx_tokens` and `compaction_summary` to status bar store after compaction
+6. Update `postTurnCompact()`: read threshold from getter, warning log on failure
+7. Import `getAutoCompactThresholdPct` from settings
 
-### Wave 3 — Error logging
-8. Sửa `.catch(() => {})` thành `.catch((err) => console.warn(...))` ở compact call sites
+### Wave 3 — Session lifecycle (orchestrator.ts)
+8. Reset `ctx_tokens`, `compaction_summary`, `_compactionStats` in `startNewSession()`
 
-## Files Changed
+### Wave 4 — Status bar UI (store.ts + index.tsx)
+9. Add `ctx_tokens?: number` and `compaction_summary?: string` to `StatusBarState`
+10. Display `[ctx: 15K] [3 cmp, 45K saved]` alongside accumulated tokens
+
+### Wave 5 — Public API (orchestrator.ts)
+11. Add `getCompactionStats()` public getter
+
+---
+
+## Council Verdict (per fix)
+
+| Fix | Research | Implement | Verify | Final |
+|-----|----------|-----------|--------|-------|
+| ctx_tokens in status bar | Identified gap | Proposed | ACCEPT | DONE |
+| compaction_summary in status bar | Identified missing | Proposed | MODIFY to single string | DONE |
+| Smart threshold (configurable) | Recommended | Proposed with validation | ACCEPT | DONE |
+| Reset on new session | Found bug | Proposed exact code | ACCEPT | DONE |
+| Warning log on failure | Recommended | Proposed | ACCEPT | DONE |
+| Proactive notification (console.log) | Recommended | Proposed | REJECT (TUI clash) → debug trace | SKIPPED (trace not accessible from compactForContext) |
+| Public getter for stats | Not discussed | Proposed | Not reviewed | DONE |
+
+## Files Changed (Final)
 | File | Change |
 |------|--------|
-| `src/orchestrator/orchestrator.ts` | Smart threshold, stats tracking, status bar update |
-| `src/ui/status-bar/store.ts` | New `ctx_tokens` field |
-| `src/ui/status-bar/index.tsx` | Display `ctx_tokens` in status bar |
+| `src/orchestrator/orchestrator.ts` | 5 changes: stats tracking, threshold, reset, warning log, getter |
+| `src/ui/status-bar/store.ts` | New `ctx_tokens` + `compaction_summary` fields |
+| `src/ui/status-bar/index.tsx` | Display `[ctx: ...]` + `[compaction summary]` |
+| `src/utils/settings.ts` | New `autoCompactThresholdPct` setting + getter |
+
+## Final status bar output
+```
+claude/sonnet | [balanced] | ↑1.2K ↓3.4K [ctx: 15K] [3 cmp, 45K saved] $0.0123 | ▓░░░░░░░░░ 7% | ●
+```
 
 ## Test Plan
-- Unit test: `estimateConversationTokens` đúng sau compact
-- Unit test: `postTurnCompact` không gọi compact khi tokens < 2% contextWindow
-- Integration: verify status bar `ctx_tokens` thay đổi sau compact
+- Unit test: `getAutoCompactThresholdPct()` with valid/invalid/omitted values
+- Unit test: `startNewSession()` resets `ctx_tokens`, `compaction_summary`, `_compactionStats`
+- Unit test: `getCompactionStats()` returns a copy of stats
+- Integration: status bar display after compaction

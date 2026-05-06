@@ -78,6 +78,7 @@ import {
   getCouncilRounds,
   getRoleModel,
   getRoleModels,
+  getAutoCompactThresholdPct,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   loadMcpServers,
@@ -1115,14 +1116,18 @@ export class Agent {
       this.sessionStartHookFired = false;
     }
 
-    // Reset token counters and cost for the new session
+    // Reset token counters, cost, and compaction state for the new session
     statusBarStore.setState({
       in_tokens: 0,
       out_tokens: 0,
       cache_read_tokens: 0,
       cache_creation_tokens: 0,
       session_usd: 0,
+      ctx_tokens: 0,
+      compaction_summary: undefined,
     });
+
+    this._compactionStats = { count: 0, totalSaved: 0 };
 
     if (!this.sessionStore) {
       this.messages = [];
@@ -1148,6 +1153,10 @@ export class Agent {
 
   getSessionTitle(): string | null {
     return this.session?.title || null;
+  }
+
+  getCompactionStats(): { count: number; totalSaved: number } {
+    return { ...this._compactionStats };
   }
 
   getChatEntries(): ChatEntry[] {
@@ -1888,12 +1897,15 @@ export class Agent {
 
     // Track compaction stats
     const tokensAfter = estimateConversationTokens(system, this.messages);
-    const saved = preparation.tokensBefore - tokensAfter;
+    const saved = Math.max(0, preparation.tokensBefore - tokensAfter);
+    const pct = preparation.tokensBefore > 0 ? ((saved / preparation.tokensBefore) * 100).toFixed(1) : "0.0";
     this._compactionStats.count++;
     this._compactionStats.totalSaved += saved;
 
-    // Update status bar with current context size
-    statusBarStore.setState({ ctx_tokens: tokensAfter });
+    // Update status bar with current context size and compaction summary
+    const fmtCompact = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+    const compactLabel = `${this._compactionStats.count} cmp, ${fmtCompact(this._compactionStats.totalSaved)} saved`;
+    statusBarStore.setState({ ctx_tokens: tokensAfter, compaction_summary: compactLabel });
 
     const postCompactInput: PostCompactHookInput = {
       hook_event_name: "PostCompact",
@@ -1916,7 +1928,8 @@ export class Agent {
     if (this._compactedThisTurn) return;
     if (!isAutoCompactAfterTurnEnabled()) return;
     const tokens = estimateConversationTokens(system, this.messages);
-    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * 0.02));
+    const thresholdPct = getAutoCompactThresholdPct();
+    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
     if (tokens < minMeaningfulTokens) return;
     await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(), true).catch(
       (err) => console.warn("[compact] failed:", (err as Error)?.message),

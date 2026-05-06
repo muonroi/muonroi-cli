@@ -53,7 +53,7 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
       modelLabel,
     ),
     React.createElement(TierBadge, { key: "tier", tier: s.tier }),
-    React.createElement("text", { key: "tok", fg: "cyan", "data-testid": "slot-tokens" }, `${tokenStr}${s.ctx_tokens !== undefined ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]` : ""} ${fmtCost(s.session_usd)}`),
+    React.createElement("text", { key: "tok", fg: "cyan", "data-testid": "slot-tokens" }, `${tokenStr}${s.ctx_tokens !== undefined ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]` : ""}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`),
     React.createElement(UsdMeter, {
       key: "usd",
       session_usd: s.session_usd,

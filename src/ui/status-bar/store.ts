@@ -26,6 +26,7 @@ export interface StatusBarState {
   routed_from: string | null;
   ee_status: "ok" | "warn" | "down" | "unknown";
   ctx_tokens?: number;
+  compaction_summary?: string;
 }
 
 type Listener = (s: StatusBarState) => void;
