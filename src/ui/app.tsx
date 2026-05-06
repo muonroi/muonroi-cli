@@ -195,6 +195,25 @@ function buildToolResultEntry(toolCall: ToolCall, toolResult: ToolResult, extra?
     ...extra,
   };
 }
+function buildPreflightQuestion(pf: {
+  preflightId: string;
+  problemStatement: string;
+  participants: Array<{ role: string; model: string }>;
+}): CouncilQuestionData {
+  return {
+    questionId: pf.preflightId,
+    phase: "preflight",
+    question: `Approve discussion plan for: ${pf.problemStatement.slice(0, 200)}`,
+    context: pf.participants.length > 0 ? `Participants: ${pf.participants.map((p) => p.role).join(", ")}` : undefined,
+    options: [
+      { label: "Approve", value: "approve", kind: "choice", description: "Start the debate now" },
+      { label: "Reject", value: "reject", kind: "choice", description: "Cancel and rewrite the topic" },
+    ],
+    isRequired: true,
+    defaultIndex: 0,
+  };
+}
+
 function mapCouncilCardKey(key: KeyEvent): CouncilCardKey | null {
   if (key.name === "up") return { kind: "up" };
   if (key.name === "down") return { kind: "down" };
@@ -824,6 +843,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   } | null>(null);
   const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
   const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
+  const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
   const [pendingCouncilPreflight, setPendingCouncilPreflight] = useState<{
     preflightId: string;
     problemStatement: string;
@@ -2356,6 +2376,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.councilPreflight) {
                   applyLocalAssistantDelta(chunk.content || "");
                   setPendingCouncilPreflight(chunk.councilPreflight);
+                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 break;
               case "council_status":
@@ -2650,6 +2671,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     return prev;
                   });
                   setPendingCouncilPreflight(chunk.councilPreflight);
+                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 if (chunk.type === "council_status" && chunk.councilStatus) {
                   const cs = chunk.councilStatus;
@@ -3504,22 +3526,38 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
-      if (pendingCouncilPreflight) {
-        if (isEscapeKey(key)) {
-          const pid = pendingCouncilPreflight.preflightId;
-          setPendingCouncilPreflight(null);
-          agent.respondToCouncilPreflight(pid, false);
+      if (pendingCouncilPreflight && preflightCardState) {
+        const cardKey = mapCouncilCardKey(key);
+        if (cardKey) {
+          const synthetic = buildPreflightQuestion(pendingCouncilPreflight);
+          const result = reduceCardKey(synthetic, preflightCardState, cardKey);
+          setPreflightCardState(result.state);
+          if (result.emit?.type === "answer") {
+            const pid = pendingCouncilPreflight.preflightId;
+            const value = result.emit.answer.text;
+            setPendingCouncilPreflight(null);
+            setPreflightCardState(null);
+            agent.respondToCouncilPreflight(pid, value === "approve");
+          } else if (result.emit?.type === "cancel") {
+            const pid = pendingCouncilPreflight.preflightId;
+            setPendingCouncilPreflight(null);
+            setPreflightCardState(null);
+            agent.respondToCouncilPreflight(pid, false);
+          }
           return;
         }
-        if (key.name === "return" || key.sequence === "y" || key.sequence === "Y") {
+        // Y/N quick-keys preserved for muscle memory
+        if (key.sequence === "y" || key.sequence === "Y") {
           const pid = pendingCouncilPreflight.preflightId;
           setPendingCouncilPreflight(null);
+          setPreflightCardState(null);
           agent.respondToCouncilPreflight(pid, true);
           return;
         }
         if (key.sequence === "n" || key.sequence === "N") {
           const pid = pendingCouncilPreflight.preflightId;
           setPendingCouncilPreflight(null);
+          setPreflightCardState(null);
           agent.respondToCouncilPreflight(pid, false);
           return;
         }
@@ -3845,6 +3883,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       startupConfig.version,
       pendingCouncilQuestion,
       councilCardState,
+      pendingCouncilPreflight,
+      preflightCardState,
       agent,
     ],
   );
@@ -4038,6 +4078,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   question={pendingCouncilQuestion}
                   theme={t}
                   state={councilCardState}
+                />
+              )}
+              {pendingCouncilPreflight && preflightCardState && (
+                <CouncilQuestionCard
+                  question={buildPreflightQuestion(pendingCouncilPreflight)}
+                  theme={t}
+                  state={preflightCardState}
                 />
               )}
               {/* Streaming assistant content */}
