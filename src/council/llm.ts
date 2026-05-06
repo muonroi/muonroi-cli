@@ -3,7 +3,7 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { BashTool } from "../tools/bash.js";
-import type { AgentMode } from "../types/index.js";
+import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import type { CouncilLLM, CouncilStats } from "./types.js";
 
 export function createCouncilLLM(
@@ -80,4 +80,120 @@ export function createCouncilLLM(
       }
     },
   };
+}
+
+interface TracedGenerateArgs {
+  phase: CouncilStatusPhase;
+  label: string;
+  detail?: string;
+  role?: string;
+  modelId: string;
+  system: string;
+  prompt: string;
+  maxTokens?: number;
+  /** Tick interval in ms. Default 1000. Set 0 to disable ticks. */
+  tickIntervalMs?: number;
+}
+
+/**
+ * Wraps `llm.generate` with start/tick/done status chunks so the UI can show
+ * a live spinner row (e.g. `● Researching codebase... (12s)`).
+ *
+ * Returns the generated text via the AsyncGenerator return value.
+ */
+export async function* tracedGenerate(
+  llm: CouncilLLM,
+  args: TracedGenerateArgs,
+): AsyncGenerator<StreamChunk, string, unknown> {
+  const statusId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `status-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const start = Date.now();
+  const tickInterval = args.tickIntervalMs ?? 1000;
+
+  yield {
+    type: "council_status",
+    councilStatus: {
+      statusId,
+      state: "start",
+      phase: args.phase,
+      label: args.label,
+      detail: args.detail,
+      role: args.role,
+      elapsedMs: 0,
+    },
+  };
+
+  // Race generate vs ticks: drain ticks between generate slices using Promise.race.
+  let resolved = false;
+  let resultText = "";
+  let resultErr: unknown = null;
+
+  const generatePromise = (async () => {
+    try {
+      resultText = await llm.generate(args.modelId, args.system, args.prompt, args.maxTokens);
+    } catch (err) {
+      resultErr = err;
+    } finally {
+      resolved = true;
+    }
+  })();
+
+  while (!resolved) {
+    if (tickInterval <= 0) {
+      await generatePromise;
+      break;
+    }
+    const tickPromise = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+    await Promise.race([generatePromise, tickPromise]);
+    if (resolved) break;
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "tick",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+      },
+    };
+  }
+
+  await generatePromise;
+
+  if (resultErr) {
+    const errMsg = resultErr instanceof Error ? resultErr.message : String(resultErr);
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "error",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+        errorMessage: errMsg,
+      },
+    };
+    throw resultErr;
+  }
+
+  yield {
+    type: "council_status",
+    councilStatus: {
+      statusId,
+      state: "done",
+      phase: args.phase,
+      label: args.label,
+      detail: args.detail,
+      role: args.role,
+      elapsedMs: Date.now() - start,
+    },
+  };
+
+  return resultText;
 }
