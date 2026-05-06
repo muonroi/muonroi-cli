@@ -800,6 +800,8 @@ export class Agent {
   private _resumeDigest: string | null = null;
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
+  /** Compaction statistics tracking count and total tokens saved. */
+  private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
 
   constructor(
     apiKey: string | undefined,
@@ -1884,6 +1886,15 @@ export class Agent {
     this.messages = [createCompactionSummaryMessage(summary), ...preparation.keptMessages];
     this.messageSeqs = [null, ...keptSeqs];
 
+    // Track compaction stats
+    const tokensAfter = estimateConversationTokens(system, this.messages);
+    const saved = preparation.tokensBefore - tokensAfter;
+    this._compactionStats.count++;
+    this._compactionStats.totalSaved += saved;
+
+    // Update status bar with current context size
+    statusBarStore.setState({ ctx_tokens: tokensAfter });
+
     const postCompactInput: PostCompactHookInput = {
       hook_event_name: "PostCompact",
       trigger,
@@ -1905,9 +1916,10 @@ export class Agent {
     if (this._compactedThisTurn) return;
     if (!isAutoCompactAfterTurnEnabled()) return;
     const tokens = estimateConversationTokens(system, this.messages);
-    if (tokens < POST_TURN_MIN_TOKENS) return;
+    const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * 0.02));
+    if (tokens < minMeaningfulTokens) return;
     await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(), true).catch(
-      () => {},
+      (err) => console.warn("[compact] failed:", (err as Error)?.message),
     );
   }
 
