@@ -15,6 +15,7 @@ import {
   buildLeaderEvaluationPrompt,
   buildRoundSummaryPrompt,
 } from "./prompts.js";
+import { tracedAsync, tracedGenerate } from "./llm.js";
 
 const ABSOLUTE_MAX_ROUNDS = 8;
 
@@ -30,7 +31,7 @@ export async function* runDebate(
   let researchFindings: string | undefined;
 
   // ── Leader decides: research needed? ───────────────────────────────────────
-  const needsResearch = await evaluateResearchNeed(spec, leaderModelId, conversationContext, llm);
+  const needsResearch = yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm);
 
   if (needsResearch) {
     const p0Start = Date.now();
@@ -38,11 +39,14 @@ export async function* runDebate(
     const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
     yield { type: "content", content: `\n### \x1b[35m[research]\x1b[0m ${researchCandidate.model}\n` };
 
-    researchFindings = await llm.research(
-      researchCandidate.model,
-      spec.problemStatement,
-      conversationContext,
-      signal,
+    researchFindings = yield* tracedAsync(
+      () => llm.research(researchCandidate.model, spec.problemStatement, conversationContext, signal),
+      {
+        phase: "research",
+        label: "Researching codebase",
+        detail: spec.problemStatement.slice(0, 80),
+        role: "research",
+      },
     );
     yield { type: "content", content: `${researchFindings}\n` };
     yield { type: "content", content: `\n> Research: ${((Date.now() - p0Start) / 1000).toFixed(1)}s\n` };
@@ -75,7 +79,11 @@ export async function* runDebate(
       }));
   });
 
-  const openings = await Promise.all(openingPromises);
+  const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
+    phase: "opening",
+    label: `Generating opening statements (${participants.length} participants in parallel)`,
+    detail: participants.map((p) => p.role).join(", "),
+  });
 
   for (const o of openings) {
     const roleColor = COUNCIL_ROLE_COLORS[o.role] ?? "";
@@ -113,8 +121,9 @@ export async function* runDebate(
       pairs.push({ a, b, key });
     }
 
-    const pairResults = await Promise.all(
-      pairs.map(async ({ a, b, key }) => {
+    const pairResults = yield* tracedAsync(
+      () => Promise.all(
+        pairs.map(async ({ a, b, key }) => {
         const log = exchangeLogs.get(key)!;
         const chunks: Array<{ label: string; text: string }> = [];
 
@@ -168,6 +177,12 @@ export async function* runDebate(
           return { key, chunks, error: err instanceof Error ? err.message : String(err) };
         }
       }),
+      ),
+      {
+        phase: "exchange",
+        label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
+        detail: pairs.map((p) => `${p.a.role}↔${p.b.role}`).join(", "),
+      },
     );
 
     for (const pr of pairResults) {
@@ -190,7 +205,7 @@ export async function* runDebate(
 
     // ── Leader evaluation (replaces self-evaluated convergence) ──────────────
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
-    const evaluation = await evaluateDebate(spec, allExchangeText, round, leaderModelId, llm);
+    const evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm);
 
     if (evaluation) {
       const metCount = evaluation.criteriaStatus.filter((c) => c.met).length;
@@ -200,7 +215,15 @@ export async function* runDebate(
       if (evaluation.needsResearch && evaluation.researchQuery) {
         yield { type: "content", content: `\n> Leader requested mid-debate research: ${evaluation.researchQuery}\n` };
         const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
-        const findings = await llm.research(researchCandidate.model, evaluation.researchQuery, enrichedContext, signal);
+        const findings = yield* tracedAsync(
+          () => llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal),
+          {
+            phase: "research",
+            label: "Mid-debate research",
+            detail: evaluation.researchQuery.slice(0, 80),
+            role: "research",
+          },
+        );
         yield { type: "content", content: `\n### Mid-debate Research\n${findings}\n` };
         for (const log of exchangeLogs.values()) {
           log.push(`[research findings]: ${findings}`);
@@ -218,7 +241,14 @@ export async function* runDebate(
       try {
         const allEx = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
         const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round);
-        runningSummary = await llm.generate(active[0].model, system, prompt, 512);
+        runningSummary = yield* tracedGenerate(llm, {
+          phase: "summary",
+          label: `Summarizing round ${round}`,
+          modelId: active[0].model,
+          system,
+          prompt,
+          maxTokens: 512,
+        });
         yield { type: "content", content: `\n> **Discussion state:** ${runningSummary.split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ")}\n` };
       } catch {
         // Non-critical
@@ -229,22 +259,25 @@ export async function* runDebate(
   return { spec, exchangeLogs, runningSummary, roundCount, researchFindings };
 }
 
-async function evaluateResearchNeed(
+async function* evaluateResearchNeed(
   spec: ClarifiedSpec,
   leaderModelId: string,
   conversationContext: string,
   llm: CouncilLLM,
-): Promise<boolean> {
+): AsyncGenerator<StreamChunk, boolean, unknown> {
   try {
-    const raw = await llm.generate(
-      leaderModelId,
-      `You are deciding whether a codebase research phase is needed before a multi-expert discussion.\n` +
+    const raw = yield* tracedGenerate(llm, {
+      phase: "evaluate",
+      label: "Leader deciding if research is needed",
+      modelId: leaderModelId,
+      system:
+        `You are deciding whether a codebase research phase is needed before a multi-expert discussion.\n` +
         `If the discussion topic requires knowledge of specific files, functions, errors, or configurations in the codebase, answer true.\n` +
         `If the discussion is about general strategy, architecture concepts, or trade-offs that don't need codebase data, answer false.\n` +
         `Output ONLY: {"needsResearch": true/false, "reason": "one sentence"}`,
-      `Topic: ${spec.problemStatement}\nConstraints: ${spec.constraints.join("; ")}\nContext: ${conversationContext.slice(0, 3000)}`,
-      256,
-    );
+      prompt: `Topic: ${spec.problemStatement}\nConstraints: ${spec.constraints.join("; ")}\nContext: ${conversationContext.slice(0, 3000)}`,
+      maxTokens: 256,
+    });
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as { needsResearch?: boolean };
@@ -256,16 +289,23 @@ async function evaluateResearchNeed(
   return true;
 }
 
-async function evaluateDebate(
+async function* evaluateDebate(
   spec: ClarifiedSpec,
   exchangeText: string,
   round: number,
   leaderModelId: string,
   llm: CouncilLLM,
-): Promise<LeaderEvaluation | null> {
+): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({ spec, exchangeLogs: exchangeText, round });
-    const raw = await llm.generate(leaderModelId, system, prompt, 1024);
+    const raw = yield* tracedGenerate(llm, {
+      phase: "evaluate",
+      label: `Leader evaluating round ${round}`,
+      modelId: leaderModelId,
+      system,
+      prompt,
+      maxTokens: 1024,
+    });
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<LeaderEvaluation>;

@@ -197,3 +197,111 @@ export async function* tracedGenerate(
 
   return resultText;
 }
+
+interface TracedAsyncArgs {
+  phase: CouncilStatusPhase;
+  label: string;
+  detail?: string;
+  role?: string;
+  tickIntervalMs?: number;
+}
+
+/**
+ * Generic version of {@link tracedGenerate} for arbitrary async work
+ * (e.g. `llm.research`, `Promise.all` over multiple model calls).
+ */
+export async function* tracedAsync<T>(
+  fn: () => Promise<T>,
+  args: TracedAsyncArgs,
+): AsyncGenerator<StreamChunk, T, unknown> {
+  const statusId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `status-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const start = Date.now();
+  const tickInterval = args.tickIntervalMs ?? 1000;
+
+  yield {
+    type: "council_status",
+    councilStatus: {
+      statusId,
+      state: "start",
+      phase: args.phase,
+      label: args.label,
+      detail: args.detail,
+      role: args.role,
+      elapsedMs: 0,
+    },
+  };
+
+  let resolved = false;
+  let result: T | undefined;
+  let err: unknown = null;
+
+  const work = (async () => {
+    try {
+      result = await fn();
+    } catch (e) {
+      err = e;
+    } finally {
+      resolved = true;
+    }
+  })();
+
+  while (!resolved) {
+    if (tickInterval <= 0) {
+      await work;
+      break;
+    }
+    const tick = new Promise<void>((resolve) => setTimeout(resolve, tickInterval));
+    await Promise.race([work, tick]);
+    if (resolved) break;
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "tick",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+      },
+    };
+  }
+
+  await work;
+
+  if (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    yield {
+      type: "council_status",
+      councilStatus: {
+        statusId,
+        state: "error",
+        phase: args.phase,
+        label: args.label,
+        detail: args.detail,
+        role: args.role,
+        elapsedMs: Date.now() - start,
+        errorMessage: errMsg,
+      },
+    };
+    throw err;
+  }
+
+  yield {
+    type: "council_status",
+    councilStatus: {
+      statusId,
+      state: "done",
+      phase: args.phase,
+      label: args.label,
+      detail: args.detail,
+      role: args.role,
+      elapsedMs: Date.now() - start,
+    },
+  };
+
+  return result as T;
+}

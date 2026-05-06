@@ -1,6 +1,7 @@
 import type { StreamChunk } from "../types/index.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
+import { tracedGenerate } from "./llm.js";
 
 const MAX_CLARIFICATION_ROUNDS = 3;
 
@@ -21,7 +22,14 @@ export async function* runClarification(
 
     let questionsRaw: string;
     try {
-      questionsRaw = await llm.generate(leaderModelId, system, prompt, 2048);
+      questionsRaw = yield* tracedGenerate(llm, {
+        phase: "clarify",
+        label: `Generating clarification questions (round ${round + 1})`,
+        modelId: leaderModelId,
+        system,
+        prompt,
+        maxTokens: 2048,
+      });
     } catch (err) {
       yield { type: "content", content: `[Clarification error: ${err instanceof Error ? err.message : err}]\n` };
       break;
@@ -63,7 +71,7 @@ export async function* runClarification(
     }
   }
 
-  const spec = await synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm);
+  const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm);
 
   yield { type: "content", content: `\n### Clarified Spec\n` };
   yield { type: "content", content: `**Problem:** ${spec.problemStatement}\n` };
@@ -84,13 +92,13 @@ export function buildSpecFromTopic(topic: string, conversationContext: string): 
   };
 }
 
-async function synthesizeSpec(
+async function* synthesizeSpec(
   topic: string,
   conversationContext: string,
   qa: Array<{ question: string; answer: string }>,
   leaderModelId: string,
   llm: CouncilLLM,
-): Promise<ClarifiedSpec> {
+): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   if (qa.length === 0) {
     return buildSpecFromTopic(topic, conversationContext);
   }
@@ -98,7 +106,14 @@ async function synthesizeSpec(
   const { system, prompt } = buildSpecSynthesisPrompt(topic, conversationContext, qa);
 
   try {
-    const raw = await llm.generate(leaderModelId, system, prompt, 2048);
+    const raw = yield* tracedGenerate(llm, {
+      phase: "synthesis",
+      label: "Synthesizing clarified spec",
+      modelId: leaderModelId,
+      system,
+      prompt,
+      maxTokens: 2048,
+    });
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<ClarifiedSpec>;
