@@ -78,6 +78,7 @@ export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts
   if ((resp as any).reason === "auth-required") {
     await refreshAuthToken();
     _defaultClient = createEEClient({
+      baseUrl: getCachedServerBaseUrl() ?? undefined,
       authToken: getCachedAuthToken() ?? undefined,
     });
     resp = await getDefaultEEClient().intercept(req);
@@ -127,6 +128,7 @@ export async function interceptWithDefaults(
 export async function bootstrapEEClient(home?: string): Promise<void> {
   await loadEEAuthToken({ home });
   _defaultClient = createEEClient({
+    baseUrl: getCachedServerBaseUrl() ?? undefined,
     authToken: getCachedAuthToken() ?? undefined,
   });
 }

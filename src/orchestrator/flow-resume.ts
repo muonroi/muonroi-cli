@@ -11,7 +11,6 @@
  * loadTranscript(). If a digest is returned, prepend it as:
  *   "[Flow State Resume]\n${digest}"
  *
- * TODO: Wire into orchestrator.ts boot sequence after openSession()
  */
 
 import { promises as fs } from "node:fs";

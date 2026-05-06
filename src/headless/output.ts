@@ -2,7 +2,7 @@ import type {
   ProcessMessageObserver,
   ProcessMessageStepFinish,
   ProcessMessageStepStart,
-} from "../orchestrator/orchestrator";
+} from "../orchestrator/agent-options";
 import type { StreamChunk, ToolCall, ToolResult } from "../types";
 
 export type HeadlessOutputFormat = "text" | "json";
