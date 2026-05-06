@@ -14,6 +14,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  CouncilStatusData,
   FileDiff,
   ModelInfo,
   Plan,
@@ -23,6 +24,7 @@ import type {
   ToolCall,
   ToolResult,
 } from "../types/index";
+import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { MODES } from "../types/index";
 import { processAtMentions } from "../utils/at-mentions.js";
 import { FileIndex } from "../utils/file-index.js";
@@ -809,6 +811,23 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     participants: Array<{ role: string; model: string }>;
     researchNeeded: boolean;
   } | null>(null);
+  const [councilStatuses, setCouncilStatuses] = useState<CouncilStatusData[]>([]);
+  const councilDoneAtRef = useRef<Map<string, number>>(new Map());
+  // Reap completed status rows after their hold window so the row clears.
+  useEffect(() => {
+    if (councilStatuses.length === 0) return;
+    const id = setInterval(() => {
+      setCouncilStatuses((prev) => {
+        const next = reapStatuses(prev, councilDoneAtRef.current, Date.now());
+        if (next.length === prev.length) return prev;
+        for (const s of prev) {
+          if (!next.includes(s)) councilDoneAtRef.current.delete(s.statusId);
+        }
+        return next;
+      });
+    }, 500);
+    return () => clearInterval(id);
+  }, [councilStatuses.length]);
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCall[]>([]);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
   const [sessionId, setSessionId] = useState<string | null>(() => agent.getSessionId());
@@ -2320,6 +2339,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setPendingCouncilPreflight(chunk.councilPreflight);
                 }
                 break;
+              case "council_status":
+                if (chunk.councilStatus) {
+                  const cs = chunk.councilStatus;
+                  if (cs.state === "done" || cs.state === "error") {
+                    councilDoneAtRef.current.set(cs.statusId, Date.now());
+                  }
+                  setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                }
+                break;
               case "error":
                 turnHadError = true;
                 if (chunk.isAuthError) {
@@ -2618,6 +2646,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     return prev;
                   });
                   setPendingCouncilPreflight(chunk.councilPreflight);
+                }
+                if (chunk.type === "council_status" && chunk.councilStatus) {
+                  const cs = chunk.councilStatus;
+                  if (cs.state === "done" || cs.state === "error") {
+                    councilDoneAtRef.current.set(cs.statusId, Date.now());
+                  }
+                  setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
                 if (chunk.type === "done") break;
               }
@@ -3353,7 +3388,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return;
         }
         if (key.name === "down") {
-          setSlashMenuIndex((i) => Math.min(filteredSlashItems.length - 1, i + 1));
+          if (filteredSlashItems.length > 0)
+            setSlashMenuIndex((i) => Math.min(filteredSlashItems.length - 1, i + 1));
           return;
         }
         if (key.name === "return") {
@@ -3887,7 +3923,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
     }
-    if (handleCommand(message)) return;
+    if (handleCommand(message)) {
+      setShowSlashMenu(false);
+      setSlashSearchQuery("");
+      return;
+    }
     const { enhancedMessage } = processAtMentions(message.trim(), agent.getCwd());
     if (isProcessingRef.current) {
       queuedMessagesRef.current.push({ text: enhancedMessage, displayText });
@@ -3958,6 +3998,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 ),
               )}
               {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+              {councilStatuses.length > 0 && (
+                <CouncilStatusList statuses={councilStatuses} theme={t} />
+              )}
               {/* Streaming assistant content */}
               {streamContent && (
                 <box paddingLeft={3} marginTop={1} flexShrink={0}>
@@ -4293,6 +4336,8 @@ function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
   );
 }
 
+const SLASH_MENU_MAX_VISIBLE = 8;
+
 function SlashInlineMenu({
   t,
   items,
@@ -4302,8 +4347,18 @@ function SlashInlineMenu({
   items: SlashMenuItem[];
   selectedIndex: number;
 }) {
-  const MAX_VISIBLE = 8;
-  const visible = items.slice(0, MAX_VISIBLE);
+  const visible = items.slice(0, SLASH_MENU_MAX_VISIBLE);
+
+  if (visible.length === 0) {
+    return (
+      <box paddingLeft={2} paddingRight={2} paddingTop={1} flexShrink={0} flexDirection="column">
+        <box height={1} paddingLeft={1}>
+          <text fg={t.textMuted}>{"No commands match"}</text>
+        </box>
+      </box>
+    );
+  }
+
   return (
     <box paddingLeft={2} paddingRight={2} paddingTop={1} flexShrink={0} flexDirection="column">
       {visible.map((item, i) => {
@@ -4326,8 +4381,8 @@ function SlashInlineMenu({
           </box>
         );
       })}
-      {items.length > MAX_VISIBLE && (
-        <text fg={t.textDim}>{`  +${items.length - MAX_VISIBLE} more`}</text>
+      {items.length > SLASH_MENU_MAX_VISIBLE && (
+        <text fg={t.textDim}>{`  +${items.length - SLASH_MENU_MAX_VISIBLE} more`}</text>
       )}
     </box>
   );
@@ -4417,7 +4472,7 @@ function PromptBox({
             </text>
           </box>
         )}
-        {showSlashMenu && slashItems && slashItems.length > 0 && (
+        {showSlashMenu && slashItems && (
           <SlashInlineMenu t={t} items={slashItems} selectedIndex={slashSelectedIndex ?? 0} />
         )}
         {showSuggestions && typeahead && (
