@@ -186,6 +186,8 @@ export interface UserSettings {
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
   autoCompactAfterTurn?: boolean;
+  /** Minimum % of context window to trigger post-turn auto-compact (default 0.02 = 2%, range 0.01-0.10). */
+  autoCompactThresholdPct?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
   autoCouncil?: boolean;
@@ -766,6 +768,12 @@ export function savePaymentSettings(partial: PaymentSettings): void {
 
 export function isAutoCompactAfterTurnEnabled(): boolean {
   return loadUserSettings().autoCompactAfterTurn ?? true;
+}
+
+export function getAutoCompactThresholdPct(): number {
+  const val = loadUserSettings().autoCompactThresholdPct;
+  if (typeof val === "number" && val >= 0.01 && val <= 0.10) return val;
+  return 0.02; // default 2%
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
