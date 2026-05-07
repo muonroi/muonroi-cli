@@ -78,7 +78,7 @@ export interface ProductStatusCardData {
   currentStage: string;
 }
 
-export type Stage = "idle" | "gather" | "research" | "scoping" | "approved" | "halted" | "error";
+export type Stage = "idle" | "discover" | "gather" | "research" | "scoping" | "approved" | "halted" | "error";
 
 export interface DriverContext {
   runId: string;
