@@ -14,6 +14,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilStatusData,
   FileDiff,
@@ -26,6 +27,7 @@ import type {
   ToolResult,
 } from "../types/index";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
+import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
 import {
   CouncilQuestionCard,
   initialCardState,
@@ -89,6 +91,7 @@ import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
+import { detectLang, tokenize, type Lang } from "./syntax-highlight.js";
 import "./slash/route.js";
 import "./slash/optimize.js";
 import "./slash/discuss.js";
@@ -855,6 +858,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   } | null>(null);
   const [councilStatuses, setCouncilStatuses] = useState<CouncilStatusData[]>([]);
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
+  const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -2388,6 +2392,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
                 break;
+              case "council_phase":
+                if (chunk.councilPhase) {
+                  const cp = chunk.councilPhase;
+                  setCouncilPhases((prev) => upsertPhase(prev, cp));
+                }
+                break;
               case "error":
                 turnHadError = true;
                 if (chunk.isAuthError) {
@@ -2645,6 +2655,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const lines = result.split("\n");
             const topic = lines.slice(2).join("\n");
             setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
+            // Fresh council run — clear any persisted phase timeline so old runs
+            // don't bleed into the new one (phaseIds collide across runs).
+            setCouncilPhases([]);
+            setCouncilStatuses([]);
+            councilDoneAtRef.current.clear();
             try {
               const gen = agent.runCouncilV2(topic);
               for await (const chunk of gen) {
@@ -2680,10 +2695,22 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
+                if (chunk.type === "council_phase" && chunk.councilPhase) {
+                  const cp = chunk.councilPhase;
+                  setCouncilPhases((prev) => upsertPhase(prev, cp));
+                }
                 if (chunk.type === "done") break;
               }
             } catch (e: unknown) {
               setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
+            } finally {
+              // Clear council ephemeral UI so the assistant message (containing
+              // synthesis output + stats) becomes the bottommost visible content.
+              // Without this, the persisted timeline hides the final result and
+              // makes the council look stuck.
+              setCouncilPhases([]);
+              setCouncilStatuses([]);
+              councilDoneAtRef.current.clear();
             }
             return;
           }
@@ -4070,6 +4097,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 ),
               )}
               {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+              {councilPhases.length > 0 && (
+                <CouncilPhaseTimeline phases={councilPhases} theme={t} />
+              )}
               {councilStatuses.length > 0 && (
                 <CouncilStatusList statuses={councilStatuses} theme={t} />
               )}
@@ -5044,13 +5074,15 @@ function MessageView({
         );
       }
 
-      if (name === "read_file")
+      if (name === "read_file") {
+        const readPath = tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
         return (
-          <InlineTool
-            t={t}
-            pending={false}
-          >{`Read ${trunc(tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args, 60)}`}</InlineTool>
+          <box gap={0}>
+            <InlineTool t={t} pending={false}>{`Read ${trunc(readPath, 60)}`}</InlineTool>
+            <ReadFilePreviewView t={t} filePath={readPath} content={entry.content} />
+          </box>
         );
+      }
       if (name === "grep")
         return (
           <InlineTool t={t} pending={false}>
@@ -5285,12 +5317,31 @@ function parsePatch(patch: string): DiffRow[] {
   return rows;
 }
 
+function renderHighlighted(text: string, lang: Lang, t: Theme, fallback: string) {
+  if (lang === "plain" || text.length === 0) {
+    return <span style={{ fg: fallback }}>{text}</span>;
+  }
+  const tokens = tokenize(text, lang, t);
+  if (tokens.length === 0) return <span style={{ fg: fallback }}>{text}</span>;
+  return (
+    <>
+      {tokens.map((tok, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: token positions are stable per render
+        <span key={`tk-${i}`} style={{ fg: tok.fg }}>
+          {tok.text}
+        </span>
+      ))}
+    </>
+  );
+}
+
 function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
   const rows = parsePatch(diff.patch);
   if (rows.length === 0) return null;
 
   const truncated = rows.length > MAX_DIFF_ROWS;
   const visible = truncated ? rows.slice(0, MAX_DIFF_ROWS) : rows;
+  const lang = detectLang(diff.filePath);
 
   const pad = (n: number | undefined) =>
     n !== undefined ? String(n).padStart(LINE_NUM_WIDTH) : " ".repeat(LINE_NUM_WIDTH);
@@ -5327,7 +5378,10 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
             return (
               <box key={`rm-${row.oldNum}`} backgroundColor={t.diffRemoved} flexDirection="row">
                 <text fg={t.diffRemovedLineNum}>{pad(row.oldNum)}</text>
-                <text fg={t.diffRemovedFg}>{` ${row.text}`}</text>
+                <text>
+                  <span style={{ fg: t.diffRemovedFg }}>{" "}</span>
+                  {renderHighlighted(row.text, lang, t, t.diffRemovedFg)}
+                </text>
               </box>
             );
           }
@@ -5335,14 +5389,20 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
             return (
               <box key={`add-${row.newNum}`} backgroundColor={t.diffAdded} flexDirection="row">
                 <text fg={t.diffAddedLineNum}>{pad(row.newNum)}</text>
-                <text fg={t.diffAddedFg}>{` ${row.text}`}</text>
+                <text>
+                  <span style={{ fg: t.diffAddedFg }}>{" "}</span>
+                  {renderHighlighted(row.text, lang, t, t.diffAddedFg)}
+                </text>
               </box>
             );
           }
           return (
             <box key={`ctx-${row.oldNum}`} backgroundColor={t.diffContext} flexDirection="row">
               <text fg={t.diffLineNumber}>{pad(row.oldNum)}</text>
-              <text fg={t.diffContextFg}>{` ${row.text}`}</text>
+              <text>
+                <span style={{ fg: t.diffContextFg }}>{" "}</span>
+                {renderHighlighted(row.text, lang, t, t.diffContextFg)}
+              </text>
             </box>
           );
         })}
@@ -5352,6 +5412,72 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
             <text fg={t.diffSeparatorFg}>
               {"⌃  "}
               {rows.length - MAX_DIFF_ROWS}
+              {" more lines"}
+            </text>
+          </box>
+        )}
+      </box>
+    </box>
+  );
+}
+
+const MAX_READ_PREVIEW_LINES = 10;
+const READ_LINE_NUM_WIDTH = 4;
+
+function ReadFilePreviewView({ t, filePath, content }: { t: Theme; filePath: string; content: string }) {
+  const body = (content ?? "").trimEnd();
+  if (!body) return null;
+  if (body.startsWith("File not found:") || body.startsWith("Failed to read file:")) {
+    return (
+      <box paddingLeft={5} marginTop={0} flexShrink={0}>
+        <text fg={t.diffRemovedFg}>{body}</text>
+      </box>
+    );
+  }
+
+  const allLines = body.split("\n");
+  let header = "";
+  let codeLines = allLines;
+  if (allLines[0]?.startsWith("[") && allLines[0].endsWith("]")) {
+    header = allLines[0].slice(1, -1);
+    codeLines = allLines.slice(1);
+  }
+
+  const truncated = codeLines.length > MAX_READ_PREVIEW_LINES;
+  const visible = truncated ? codeLines.slice(0, MAX_READ_PREVIEW_LINES) : codeLines;
+  const lang = detectLang(filePath);
+
+  const parsed = visible.map((raw) => {
+    const m = /^(\s*\d+)\s\|\s(.*)$/.exec(raw);
+    if (m) return { num: m[1].trimStart(), text: m[2] };
+    return { num: "", text: raw };
+  });
+
+  const padNum = (s: string) => s.padStart(READ_LINE_NUM_WIDTH);
+
+  return (
+    <box paddingLeft={5} marginTop={0} flexShrink={0}>
+      <box flexDirection="column">
+        {header && (
+          <box backgroundColor={t.diffHeader} paddingLeft={1} paddingRight={1}>
+            <text fg={t.diffHeaderFg}>{header}</text>
+          </box>
+        )}
+        <box backgroundColor={t.mdCodeBlockBg} paddingLeft={1} paddingRight={1} flexDirection="column">
+          {parsed.map((row, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: read preview rows are positional
+            <text key={`rd-${i}`}>
+              <span style={{ fg: t.diffLineNumber }}>{padNum(row.num)}</span>
+              <span style={{ fg: t.mdCodeBlockFg }}>{"  "}</span>
+              {renderHighlighted(row.text, lang, t, t.mdCodeBlockFg)}
+            </text>
+          ))}
+        </box>
+        {truncated && (
+          <box backgroundColor={t.diffSeparator} paddingLeft={1}>
+            <text fg={t.diffSeparatorFg}>
+              {"⌃  "}
+              {codeLines.length - MAX_READ_PREVIEW_LINES}
               {" more lines"}
             </text>
           </box>
@@ -5379,8 +5505,9 @@ function LspResultView({
   const body = content.trim();
   const lines = body.split("\n");
   const truncated = lines.length > MAX_LSP_RESULT_LINES;
-  const visible = truncated ? lines.slice(0, MAX_LSP_RESULT_LINES).join("\n") : body;
+  const visibleLines = truncated ? lines.slice(0, MAX_LSP_RESULT_LINES) : lines;
   const label = `${operation} ${filePath}${position}`;
+  const lang = detectLang(filePath);
 
   return (
     <box paddingLeft={5} marginTop={0} flexShrink={0}>
@@ -5392,8 +5519,11 @@ function LspResultView({
             <span style={{ fg: t.diffHeaderFg }}>{label}</span>
           </text>
         </box>
-        <box backgroundColor={t.mdCodeBlockBg} paddingLeft={1} paddingRight={1}>
-          <text fg={t.mdCodeBlockFg}>{visible}</text>
+        <box backgroundColor={t.mdCodeBlockBg} paddingLeft={1} paddingRight={1} flexDirection="column">
+          {visibleLines.map((line, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: lsp output lines are positional
+            <text key={`lsp-${i}`}>{renderHighlighted(line, lang, t, t.mdCodeBlockFg)}</text>
+          ))}
         </box>
         {truncated && (
           <box backgroundColor={t.diffSeparator} paddingLeft={1}>
