@@ -50,7 +50,7 @@ See milestone archive for details.
 
 **Milestone Goal:** Ship `/ideal` slash command — takes free-text idea + cost cap, runs full Agile cycle (gather → research → scope → sprint × N) with deterministic 5-condition Definition-of-Done and 3 circuit breakers. Differentiator vs Aider/Cursor/Continue.
 
-- [ ] **Phase 13: Product Ideal Loop** — `src/product-loop/` module + `/ideal` CLI + role registry + done-gate + circuit breakers + per-product cost scoping
+- [x] **Phase 13: Product Ideal Loop** — `src/product-loop/` module + `/ideal` CLI + role registry + done-gate + circuit breakers + per-product cost scoping
 
 ## Phase Details
 
@@ -111,14 +111,14 @@ Plans:
   8. EE integration: phase-tracker auto-posts `phase-outcome` on each sprint boundary; PIL Layer 5 reads Resume Digest from `state.md`
   9. Council, verify, ee/* invoked as callers — zero edits to those modules; orchestrator wires `runProductLoopV1` mirroring `runCouncilV2`
   10. `MUONROI_DEV=1` env var enables `--no-customer-debate` for internal testing; not exposed in `--help`
-**Plans:** 0/6 plans complete
+**Plans:** 6/6 plans complete
 Plans:
-- [ ] 13-01-PLAN.md — Types + run-manager + manifest/iterations IO + StreamChunk extension + VerifyRecipe.coverage field
-- [ ] 13-02-PLAN.md — Role registry (cross-tier resolution) + per-role memory (2KB cap)
-- [ ] 13-03-PLAN.md — Loop driver FSM (gather/research/scoping) + clarifier maxRounds parameterization + 6 seed dimensions
-- [ ] 13-04-PLAN.md — Done-gate (5 conditions) + reality-anchor + circuit breakers + verify-result + coverage parsers (bun/vitest/jest/pytest)
-- [ ] 13-05-PLAN.md — Cost-scoper + per-product JSONL ledger + commitToProduct + EE phase-tracker bridge + PhaseOutcomeKind extension
-- [ ] 13-06-PLAN.md — /ideal slash + orchestrator runProductLoopV1 + sprint-runner + feedback-routing + product_status_card TUI + integration tests
+- [x] 13-01-PLAN.md — Types + run-manager + manifest/iterations IO + StreamChunk extension + VerifyRecipe.coverage field
+- [x] 13-02-PLAN.md — Role registry (cross-tier resolution) + per-role memory (2KB cap)
+- [x] 13-03-PLAN.md — Loop driver FSM (gather/research/scoping) + clarifier maxRounds parameterization + 6 seed dimensions
+- [x] 13-04-PLAN.md — Done-gate (5 conditions) + reality-anchor + circuit breakers + verify-result + coverage parsers (bun/vitest/jest/pytest)
+- [x] 13-05-PLAN.md — Cost-scoper + per-product JSONL ledger + commitToProduct + EE phase-tracker bridge + PhaseOutcomeKind extension
+- [x] 13-06-PLAN.md — /ideal slash + orchestrator runProductLoopV1 + sprint-runner + feedback-routing + product_status_card TUI + integration tests
 
 ## Progress
 
@@ -132,4 +132,4 @@ Plans:
 | 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
-| 13. Product Ideal Loop | v1.5 | 0/6 | Planned     | — |
+| 13. Product Ideal Loop | v1.5 | 6/6 | Complete    | 2026-05-07 |
