@@ -6,6 +6,8 @@
 - v1.1 EE-Native CLI (Phases 05-07) - shipped 2026-05-01
 - v1.2 Close EE Learning Loop (Phases 08-10) - shipped
 - v1.3 Quality of Life (Phase 11) - planned
+- v1.4 Architecture Quality (Phase 12.1) - active
+- v1.5 Self-Driving Product Loop (Phase 13) - planned
 
 ## Phases
 
@@ -43,6 +45,12 @@ See milestone archive for details.
 **Milestone Goal:** Eliminate tech debt in the orchestrator and improve codebase maintainability through modular extraction.
 
 - [ ] **Phase 12.1: Orchestrator.ts Refactor** — Split 4605-line orchestrator.ts into 7 focused modules
+
+### v1.5 Self-Driving Product Loop
+
+**Milestone Goal:** Ship `/ideal` slash command — takes free-text idea + cost cap, runs full Agile cycle (gather → research → scope → sprint × N) with deterministic 5-condition Definition-of-Done and 3 circuit breakers. Differentiator vs Aider/Cursor/Continue.
+
+- [ ] **Phase 13: Product Ideal Loop** — `src/product-loop/` module + `/ideal` CLI + role registry + done-gate + circuit breakers + per-product cost scoping
 
 ## Phase Details
 
@@ -88,9 +96,26 @@ Plans:
 - [x] 10-01-PLAN.md — Core prompt-stale primitives (setter/resetter, reconcilePromptStale module, tests)
 - [x] 10-02-PLAN.md — Wire into PIL Layer 3 and PostToolUse/PostToolUseFailure hooks
 
+### Phase 13: Product Ideal Loop
+**Goal**: Ship a self-driving product loop (`/ideal "<idea>"`) that gathers context, debates feasibility, produces a ProductSpec, and runs sprint iterations until a strict 5-condition Definition-of-Done passes — or a deterministic circuit breaker halts the run.
+**Depends on**: Phase 07 (EE pipeline live), Phase 10 (prompt-stale reconciliation), Phase 12.1 (clean orchestrator). Reuses council, verify, ee/phase-tracker, ee/judge, pil/pipeline, flow/run-manager, usage/ledger.
+**Canonical Spec**: `docs/superpowers/specs/2026-05-07-product-ideal-loop-design.md`
+**Success Criteria** (what must be TRUE):
+  1. `/ideal "<idea>"` creates a GSD run at `.muonroi-flow/runs/<runId>/` with all 6 artifact files (roadmap.md, state.md, delegations.md, gray-areas.md, iterations.md, manifest.md)
+  2. Gather stage refuses to advance until ≥5/6 seed dimensions are resolved (≥85%) within 6 rounds
+  3. Done-gate evaluates 5 AND conditions in cost-ascending order (verify floor → evidence regex → weighted score ≥ threshold → PO↔Customer cross-model debate → user approval); short-circuits on first fail
+  4. PO and Customer slots resolve to distinct models (cross-provider preferred); same-model assignment is a hard refuse at run start
+  5. All 3 circuit breakers fire deterministically (CB-1 cost EWMA, CB-2 oscillation 2-sprint streak, CB-3 verify-blank on sprint 1)
+  6. Per-product cost ledger at `~/.muonroi/usage/products/<runId>.jsonl` writes alongside monthly ledger; halt on first cap hit
+  7. `muonroi ideal resume <runId>` reconstructs state from the 6 artifact files and re-enters the correct stage
+  8. EE integration: phase-tracker auto-posts `phase-outcome` on each sprint boundary; PIL Layer 5 reads Resume Digest from `state.md`
+  9. Council, verify, ee/* invoked as callers — zero edits to those modules; orchestrator wires `runProductLoopV1` mirroring `runCouncilV2`
+  10. `MUONROI_DEV=1` env var enables `--no-customer-debate` for internal testing; not exposed in `--help`
+**Plans:** 0/N (planning in progress)
+
 ## Progress
 
-**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1
+**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1 -> Phase 13
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -100,3 +125,4 @@ Plans:
 | 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
+| 13. Product Ideal Loop | v1.5 | 0/N | Planning    | — |
