@@ -1,8 +1,73 @@
 import type { ModelMessage } from "ai";
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 
 interface MessageLike {
   role: string;
   content: string | unknown;
+}
+
+/**
+ * Read a file at most `maxBytes` long; return null on any error.
+ * Used to pull lightweight project context without blowing the prompt budget.
+ */
+async function readSafe(filePath: string, maxBytes = 2000): Promise<string | null> {
+  try {
+    const buf = await fs.readFile(filePath, { encoding: "utf8" });
+    if (buf.length <= maxBytes) return buf;
+    return buf.slice(0, maxBytes) + "\n[... truncated]";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Snapshot of the workspace the user is currently in. Injected into the
+ * clarification prompt so the council leader does not ask "which project?"
+ * when the user obviously means the repo they are working in.
+ */
+export async function buildProjectSnapshot(cwd: string): Promise<string> {
+  if (!cwd) return "";
+  const parts: string[] = [];
+  const baseName = path.basename(cwd);
+  parts.push(`### Working directory\n\`${cwd}\` (basename: ${baseName})`);
+
+  // package.json — name, description, keywords
+  const pkgRaw = await readSafe(path.join(cwd, "package.json"), 4000);
+  if (pkgRaw) {
+    try {
+      const pkg = JSON.parse(pkgRaw) as {
+        name?: string;
+        description?: string;
+        version?: string;
+        keywords?: string[];
+      };
+      const lines: string[] = [];
+      if (pkg.name) lines.push(`- name: \`${pkg.name}\``);
+      if (pkg.version) lines.push(`- version: \`${pkg.version}\``);
+      if (pkg.description) lines.push(`- description: ${pkg.description}`);
+      if (pkg.keywords?.length) lines.push(`- keywords: ${pkg.keywords.join(", ")}`);
+      if (lines.length > 0) parts.push(`### package.json\n${lines.join("\n")}`);
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  // REPO_DEEP_MAP.md (Muonroi convention) — first 1500 chars
+  const deepMap = await readSafe(path.join(cwd, "REPO_DEEP_MAP.md"), 1500);
+  if (deepMap) {
+    parts.push(`### REPO_DEEP_MAP.md\n${deepMap.trim()}`);
+  } else {
+    // Fall back to README first paragraph
+    const readme =
+      (await readSafe(path.join(cwd, "README.md"), 1200)) ??
+      (await readSafe(path.join(cwd, "README"), 1200));
+    if (readme) {
+      parts.push(`### README.md (head)\n${readme.trim()}`);
+    }
+  }
+
+  return parts.join("\n\n");
 }
 
 function isCompactionSummary(msg: MessageLike): boolean {

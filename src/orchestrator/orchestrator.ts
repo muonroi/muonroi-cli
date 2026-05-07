@@ -1964,6 +1964,7 @@ export class Agent {
       {
         skipClarification: options?.skipClarification,
         userModelMessage: options?.userModelMessage,
+        cwd: this.bash.getCwd(),
       },
     );
 

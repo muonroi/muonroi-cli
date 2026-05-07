@@ -11,7 +11,7 @@ import type {
   QuestionResponder,
 } from "./types.js";
 import { resolveLeaderModel, resolveParticipants } from "./leader.js";
-import { buildCouncilContext } from "./context.js";
+import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { runClarification, buildSpecFromTopic } from "./clarifier.js";
 import { runPreflight } from "./preflight.js";
 import { runDebate } from "./debate.js";
@@ -23,6 +23,8 @@ export interface RunCouncilOptions {
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
   signal?: AbortSignal;
+  /** Working directory used to resolve the "current project" snapshot. */
+  cwd?: string;
 }
 
 export async function* runCouncil(
@@ -50,7 +52,11 @@ export async function* runCouncil(
 
   yield { type: "content", content: `\n[Leader: \x1b[32m${leaderModelId}${COUNCIL_COLOR_RESET} | Participants: ${participants.map((p) => `${p.role}:${p.model}`).join(", ")}]\n` };
 
-  const conversationContext = buildCouncilContext(messages);
+  const baseContext = buildCouncilContext(messages);
+  const projectSnapshot = options?.cwd ? await buildProjectSnapshot(options.cwd) : "";
+  const conversationContext = projectSnapshot
+    ? `## Current Project\n${projectSnapshot}\n\n---\n\n${baseContext}`
+    : baseContext;
   const active: CouncilParticipant[] = participants.map((p) => ({ ...p, position: "" }));
 
   // ── Phase A + B loop: Clarify → Confirm ─────────────────────────────────────
