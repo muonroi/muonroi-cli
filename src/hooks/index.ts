@@ -38,6 +38,7 @@ import { interceptWithDefaults } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
 import { judge, type JudgeContext } from "../ee/judge.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
+import * as phaseTracker from "../ee/phase-tracker.js";
 import { posttool } from "../ee/posttool.js";
 import { reconcilePromptStale } from "../ee/prompt-stale.js";
 import { buildScope } from "../ee/scope.js";
@@ -100,6 +101,15 @@ export async function executeEventHooks(
       });
       // Thread the warning response to PostToolUse via module-level latch
       _lastWarningResponse = r;
+
+      // P1 Item 3 wiring: feed surfaced principles into the phase tracker.
+      // Tracker is no-op when no phase is active.
+      try {
+        const refs = (r.matches ?? [])
+          .map((m) => ({ collection: m.collection ?? "", pointId: m.principle_uuid }))
+          .filter((ref) => ref.collection && ref.pointId);
+        if (refs.length > 0) phaseTracker.recordIntercept(refs);
+      } catch { /* fail-open */ }
 
       // P0 native observation: record into mistake-detector ring buffer,
       // then check for file-revert against the prior batch (across-turn
@@ -304,6 +314,13 @@ export async function executeEventHooks(
           ...(richOutcome.buildResult ? { buildExitCode: richOutcome.buildResult.exitCode } : {}),
         });
       }
+      // P1 Item 3 wiring: feed posttool signal into phase tracker.
+      try {
+        phaseTracker.recordPostTool({
+          success: true,
+          ...(richOutcome.verifyResult ? { verifyResult: richOutcome.verifyResult } : {}),
+        });
+      } catch { /* fail-open */ }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
@@ -392,6 +409,13 @@ export async function executeEventHooks(
           ...(failOutcome.buildResult ? { buildExitCode: failOutcome.buildResult.exitCode } : {}),
         });
       }
+      // P1 Item 3 wiring: feed posttool failure signal into phase tracker.
+      try {
+        phaseTracker.recordPostTool({
+          success: false,
+          ...(failOutcome.verifyResult ? { verifyResult: failOutcome.verifyResult } : {}),
+        });
+      } catch { /* fail-open */ }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();

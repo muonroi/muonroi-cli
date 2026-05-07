@@ -11,6 +11,8 @@ import { getDefaultEEClient as getEEClientForVeto } from "../ee/intercept.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
+import * as phaseTracker from "../ee/phase-tracker.js";
+import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
@@ -2706,6 +2708,13 @@ export class Agent {
     {
       const aborter = () => {
         try {
+          // P1 Item 3 wiring: mark current phase aborted so the next setPhase
+          // call drains an "abandoned" outcome.
+          phaseTracker.markAborted(
+            this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined,
+          );
+        } catch { /* fail-open */ }
+        try {
           const det = getMistakeDetector();
           const events = det.detectAbort(this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined);
           if (events.length === 0) return;
@@ -2792,6 +2801,34 @@ export class Agent {
     this._pilEnrichmentDelta =
       pilCtx.metrics?.estimatedTokensSaved ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
+    // P1 Item 3 wiring: phase-boundary detection. setPhase returns a snapshot
+    // of the prior phase iff the phase NAME just changed. We classify the
+    // outcome (pass/fail/abandoned/null) and fire phase-outcome to the EE
+    // server when there is a high-SNR verdict. Endpoint is feature-flagged
+    // server-side; 404 is silently swallowed by the client wrapper.
+    try {
+      const drained = phaseTracker.setPhase(pilCtx.gsdPhase ?? null);
+      if (drained && drained.principleRefs.length > 0 && this.session?.id) {
+        const outcome = phaseTracker.classifyOutcome(drained);
+        if (outcome) {
+          fireAndForgetPhaseOutcome({
+            sessionId: this.session.id,
+            phaseName: drained.phaseName,
+            outcome,
+            toolEventIds: drained.principleRefs,
+            evidence: {
+              durationMs: drained.endedAt - drained.startedAt,
+              toolCount: drained.toolCount,
+              cwd: this.bash.getCwd(),
+              ...(drained.verifyResult ? { verifyResult: drained.verifyResult } : {}),
+              ...(drained.aborted ? { aborted: true } : {}),
+              ...(drained.abortReason ? { abortReason: drained.abortReason } : {}),
+            },
+          });
+        }
+      }
+    } catch { /* fail-open: phase-outcome must never block a turn */ }
+
     if (_debugOn) {
       const appliedLayers = pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [];
       _debugSteps.push({
@@ -2854,7 +2891,19 @@ export class Agent {
         },
       });
       if (routeDecision.model && routeDecision.model !== "HALT") {
-        turnModelId = routeDecision.model;
+        // Respect user's default model when it has a vision proxy and the
+        // current turn (or history) has images — the proxy will convert
+        // images to text, so there's no need to switch to a vision-capable
+        // (and usually pricier / rate-limited) model.
+        const defaultHasVisionProxy = needsVisionProxy(this.modelId);
+        const historyHasImages = this.messages.some(
+          (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
+        );
+        const turnHasImages = (images?.length ?? 0) > 0;
+        const skipVisionRoute = defaultHasVisionProxy && (turnHasImages || historyHasImages);
+        if (!skipVisionRoute) {
+          turnModelId = routeDecision.model;
+        }
       }
       taskHash = routeDecision.taskHash ?? null;
       // Update status bar with router switch info
@@ -2913,17 +2962,45 @@ export class Agent {
       userModelMessage = { role: "user", content: enrichedMessage };
     }
 
-    // Vision proxy: convert images to text for models that don't support vision
-    if (images?.length && needsVisionProxy(turnModelId)) {
-      try {
-        const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
-        if (proxyResult.proxied) {
-          userModelMessage = proxyResult.messages[0];
-          yield { type: "content", content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n` };
+    // Vision proxy: convert images to text for models that don't support vision.
+    // Process BOTH the current user message and any historical messages that
+    // still carry image parts — otherwise sending the conversation back to a
+    // text-only provider (e.g. DeepSeek) fails with "unknown variant
+    // `image_url`" once history contains an image from a prior turn.
+    if (needsVisionProxy(turnModelId)) {
+      const historyHasImages = this.messages.some(
+        (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
+      );
+      const turnHasImages = (images?.length ?? 0) > 0;
+      if (turnHasImages || historyHasImages) {
+        try {
+          if (historyHasImages) {
+            const historyResult = await proxyVision(this.messages, turnModelId, signal);
+            if (historyResult.proxied) {
+              this.messages = historyResult.messages;
+              yield { type: "content", content: `[Vision proxy: ${historyResult.imageCount} historical image(s) → text]\n` };
+            }
+          }
+          if (turnHasImages) {
+            const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
+            if (proxyResult.proxied) {
+              userModelMessage = proxyResult.messages[0];
+              yield { type: "content", content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n` };
+            }
+          }
+        } catch {
+          yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
+          if (turnHasImages) {
+            userModelMessage = { role: "user", content: enrichedMessage };
+          }
+          // Strip image parts from history as a last-resort fallback so the
+          // request doesn't blow up at the provider serialization layer.
+          this.messages = this.messages.map((m) => {
+            if (!Array.isArray(m.content)) return m;
+            const filtered = (m.content as Array<{ type: string }>).filter((p) => p.type !== "image");
+            return { ...m, content: filtered } as typeof m;
+          });
         }
-      } catch {
-        yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
-        userModelMessage = { role: "user", content: enrichedMessage };
       }
     }
 
