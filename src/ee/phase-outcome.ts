@@ -18,7 +18,7 @@
 
 import type { Scope } from "./types.js";
 
-export type PhaseOutcomeKind = "pass" | "fail" | "abandoned";
+export type PhaseOutcomeKind = "pass" | "fail" | "abandoned" | "aborted" | "resumed";
 
 export interface PrincipleRef {
   collection: string;
