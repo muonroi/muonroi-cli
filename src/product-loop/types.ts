@@ -40,6 +40,10 @@ export interface IterationState {
   criteriaUnmet: number;
   costUsd: number;
   lastVerifyResult: string;
+  /** Alias of costUsd kept for circuit-breaker history adapters (CB-1 reads actualCost). */
+  actualCost?: number;
+  /** Alias of scoreAfter for CB-2 history adapters. */
+  score?: number;
   crashed?: boolean;
   retryOf?: number;
 }
@@ -89,6 +93,26 @@ export interface DriverContext {
   };
   respondToQuestion: import("../council/types.js").QuestionResponder;
   respondToPreflight: import("../council/types.js").PreflightResponder;
+  /**
+   * Working directory of the host project. Used by sprint-runner to detect
+   * the verify recipe and to anchor council planning context.
+   */
+  cwd?: string;
+  /**
+   * Bridge into the orchestrator's tool-execution loop. Sprint-runner pipes
+   * the council plan through this fn during the implement stage so the same
+   * tools / EE intercept / posttool hooks fire as for ordinary chat turns.
+   *
+   * Optional because legacy tests for the FSM driver still construct ctx
+   * without it; sprint-runner enforces presence at call time.
+   */
+  processMessageFn?: (message: string) => AsyncGenerator<import("../types/index.js").StreamChunk, void, unknown>;
+  /**
+   * Optional bridge for verify-recipe detection. Mirrors `Orchestrator.detectVerifyRecipe`.
+   * If absent, sprint-runner uses a deterministic fallback based on the inferVerifyProjectProfile
+   * heuristic.
+   */
+  detectVerifyRecipe?: () => Promise<import("../types/index.js").VerifyRecipe | null>;
 }
 
 export interface DriverResult {
