@@ -111,7 +111,14 @@ Plans:
   8. EE integration: phase-tracker auto-posts `phase-outcome` on each sprint boundary; PIL Layer 5 reads Resume Digest from `state.md`
   9. Council, verify, ee/* invoked as callers — zero edits to those modules; orchestrator wires `runProductLoopV1` mirroring `runCouncilV2`
   10. `MUONROI_DEV=1` env var enables `--no-customer-debate` for internal testing; not exposed in `--help`
-**Plans:** 0/N (planning in progress)
+**Plans:** 0/6 plans complete
+Plans:
+- [ ] 13-01-PLAN.md — Types + run-manager + manifest/iterations IO + StreamChunk extension + VerifyRecipe.coverage field
+- [ ] 13-02-PLAN.md — Role registry (cross-tier resolution) + per-role memory (2KB cap)
+- [ ] 13-03-PLAN.md — Loop driver FSM (gather/research/scoping) + clarifier maxRounds parameterization + 6 seed dimensions
+- [ ] 13-04-PLAN.md — Done-gate (5 conditions) + reality-anchor + circuit breakers + verify-result + coverage parsers (bun/vitest/jest/pytest)
+- [ ] 13-05-PLAN.md — Cost-scoper + per-product JSONL ledger + commitToProduct + EE phase-tracker bridge + PhaseOutcomeKind extension
+- [ ] 13-06-PLAN.md — /ideal slash + orchestrator runProductLoopV1 + sprint-runner + feedback-routing + product_status_card TUI + integration tests
 
 ## Progress
 
@@ -125,4 +132,4 @@ Plans:
 | 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
-| 13. Product Ideal Loop | v1.5 | 0/N | Planning    | — |
+| 13. Product Ideal Loop | v1.5 | 0/6 | Planned     | — |
