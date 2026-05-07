@@ -19,6 +19,8 @@ export interface ClarifiedSpec {
   successCriteria: string[];
   scope: string;
   rawQA: Array<{ question: string; answer: string }>;
+  /** Maps dimension IDs to their resolution status. Used by Product Loop. */
+  resolved?: Record<string, "answered" | "unspecified" | "skipped">;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────

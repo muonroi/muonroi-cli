@@ -83,8 +83,6 @@ export function buildClarifyOptions(
   return { options, defaultIndex };
 }
 
-const MAX_CLARIFICATION_ROUNDS = 3;
-
 export async function* runClarification(
   topic: string,
   leaderModelId: string,
@@ -93,15 +91,17 @@ export async function* runClarification(
   llm: CouncilLLM,
   signal?: AbortSignal,
   seedQuestions?: GrayAreaQuestion[],
+  maxRounds?: number,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
-  const allQA: Array<{ question: string; answer: string }> = [];
+  const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : 3;
+  const allQA: Array<{ id?: string; question: string; answer: string }> = [];
 
   const phaseStartedAt = Date.now();
   yield phaseStart({ phaseId: "phase:clarification", kind: "clarification", label: "Clarification" });
 
   const seeded = (seedQuestions ?? []).map(grayAreaToRoundQuestion);
 
-  for (let round = 0; round < MAX_CLARIFICATION_ROUNDS; round++) {
+  for (let round = 0; round < max; round++) {
     const useSeed = round === 0 && seeded.length > 0;
     const roundId = `phase:clarification-round-${round + 1}`;
     const roundStart = Date.now();
@@ -111,10 +111,13 @@ export async function* runClarification(
       label: useSeed ? `Clarification round ${round + 1} (PIL-seeded)` : `Clarification round ${round + 1}`,
     });
 
-    let questions: Array<{ question: string; why: string; suggestions?: string[]; recommended?: string; isRequired: boolean }>;
+    let questions: Array<{ id?: string; question: string; why: string; suggestions?: string[]; recommended?: string; isRequired: boolean }>;
 
     if (useSeed) {
-      questions = seeded;
+      questions = (seedQuestions ?? []).map(g => ({
+        id: g.id,
+        ...grayAreaToRoundQuestion(g)
+      }));
     } else {
       const { system, prompt } = buildClarificationPrompt(topic, conversationContext, allQA.length > 0 ? allQA : undefined);
 
@@ -182,7 +185,7 @@ export async function* runClarification(
       };
 
       const answer = await respondToQuestion(questionId);
-      allQA.push({ question: q.question, answer });
+      allQA.push({ id: q.id, question: q.question, answer });
       yield { type: "content", content: `\n  ↳ ${answer}\n` };
     }
   }
@@ -219,7 +222,7 @@ export function buildSpecFromTopic(topic: string, conversationContext: string): 
 async function* synthesizeSpec(
   topic: string,
   conversationContext: string,
-  qa: Array<{ question: string; answer: string }>,
+  qa: Array<{ id?: string; question: string; answer: string }>,
   leaderModelId: string,
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
@@ -228,6 +231,12 @@ async function* synthesizeSpec(
   }
 
   const { system, prompt } = buildSpecSynthesisPrompt(topic, conversationContext, qa);
+  const resolved: Record<string, "answered" | "unspecified" | "skipped"> = {};
+  for (const item of qa) {
+    if (item.id) {
+      resolved[item.id] = "answered";
+    }
+  }
 
   try {
     const raw = yield* tracedGenerate(llm, {
@@ -247,11 +256,12 @@ async function* synthesizeSpec(
         successCriteria: parsed.successCriteria ?? [`Address: ${topic.slice(0, 100)}`],
         scope: parsed.scope ?? "",
         rawQA: qa,
+        resolved,
       };
     }
   } catch {
     // Fall through to default
   }
 
-  return { problemStatement: topic, constraints: [], successCriteria: [`Address: ${topic.slice(0, 100)}`], scope: "", rawQA: qa };
+  return { problemStatement: topic, constraints: [], successCriteria: [`Address: ${topic.slice(0, 100)}`], scope: "", rawQA: qa, resolved };
 }
