@@ -2082,6 +2082,60 @@ export class Agent {
   }
 
   // ========================================================================
+  // Product Ideal Loop (Phase 13) — mirror of runCouncilV2 wiring.
+  // ========================================================================
+
+  async *runProductLoopV1(
+    payload: {
+      subcommand: "start" | "status" | "resume" | "abort" | "ship";
+      idea?: string;
+      runId?: string;
+      flags: {
+        maxCost: number;
+        maxSprints: number;
+        doneThreshold: number;
+        stack?: string;
+        noCustomerDebate?: boolean;
+      };
+    },
+    options?: {
+      observer?: ProcessMessageObserver;
+      userModelMessage?: ModelMessage;
+    },
+  ): AsyncGenerator<StreamChunk, void, unknown> {
+    const { runProductLoop } = await import("../product-loop/index.js");
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const nodePath = await import("node:path");
+
+    const productStats = {
+      calls: 0,
+      startMs: Date.now(),
+      phases: [] as Array<{ name: string; durationMs: number }>,
+    };
+    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, productStats);
+    const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
+    const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
+
+    const gen = runProductLoop({
+      idea: payload.idea ?? "",
+      flowDir,
+      llm,
+      flags: {
+        maxCost: payload.flags.maxCost,
+        maxSprints: payload.flags.maxSprints,
+        doneThreshold: payload.flags.doneThreshold,
+        stack: payload.flags.stack,
+      },
+      respondToQuestion: this._createQuestionResponder(),
+      respondToPreflight: this._createPreflightResponder(),
+    } as Parameters<typeof runProductLoop>[0]);
+
+    for await (const chunk of gen) {
+      yield chunk;
+    }
+  }
+
+  // ========================================================================
   // Legacy council — kept for backward compatibility, will be removed
   // ========================================================================
 
