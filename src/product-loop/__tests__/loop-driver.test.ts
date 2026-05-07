@@ -40,6 +40,7 @@ describe("runLoopDriver", () => {
       runId: "test-run",
       flowDir: os.tmpdir(),
       idea: "Test Idea",
+      sessionModelId: "claude-sonnet-4-6",
       llm: mockLLM,
       flags: {
         maxCost: 100,

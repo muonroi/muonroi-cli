@@ -39,6 +39,7 @@ async function tmpFlowDir(): Promise<string> {
 function makeOpts(overrides: any = {}): any {
   return {
     flowDir: overrides.flowDir,
+    sessionModelId: "claude-sonnet-4-6",
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9 },
     respondToQuestion: vi.fn(async () => "answer"),

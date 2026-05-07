@@ -32,6 +32,8 @@ export interface ProductLoopOptions {
   subcommand?: "start" | "status" | "resume" | "abort" | "ship";
 
   flowDir: string;
+  /** Session model id from the orchestrator (this.modelId). Used to resolve real council models. */
+  sessionModelId: string;
   llm: CouncilLLM;
   flags: ProductLoopFlags;
   respondToQuestion: QuestionResponder;
@@ -108,6 +110,7 @@ async function* runStart(
     runId,
     flowDir,
     idea,
+    sessionModelId: opts.sessionModelId,
     llm,
     flags,
     respondToQuestion,
@@ -418,6 +421,7 @@ async function* runResume(
     runId: opts.runId,
     flowDir: opts.flowDir,
     idea: manifest.idea,
+    sessionModelId: opts.sessionModelId,
     llm: opts.llm,
     flags: opts.flags,
     respondToQuestion: opts.respondToQuestion,
