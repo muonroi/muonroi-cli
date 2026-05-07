@@ -242,6 +242,66 @@ export async function getEmbeddingRaw(text: string, signal?: AbortSignal): Promi
   }
 }
 
+// ─── Thin-client aware search ─────────────────────────────────────────────────
+
+/**
+ * Resolve top-K experience points for a free-text query, honouring thin-client
+ * mode: when `serverBaseUrl` is configured the call is routed to the EE
+ * `/api/search` endpoint (single round-trip — server embeds + searches Qdrant
+ * server-side). When no server is configured, falls back to the in-process
+ * `experience-core.js` flow (`getEmbeddingRaw` + `searchCollection`).
+ *
+ * Multi-collection support: when `collections.length > 1` the remote path is a
+ * single HTTP call; the in-process path issues one search per collection in
+ * parallel after a single embed.
+ *
+ * Returned points carry `collection` so callers can route principles vs
+ * behavioral hints.
+ */
+export async function searchByText(
+  text: string,
+  collections: string[],
+  topK: number,
+  signal?: AbortSignal,
+): Promise<Array<EEPoint & { collection: string }>> {
+  if (!text || collections.length === 0) return [];
+
+  // Remote path — thin or thin-degraded clients route through /api/search.
+  // Mode is detected once at boot via detectEEClientMode(); fall back to a raw
+  // `serverBaseUrl` config check when boot detection has not yet run (tests,
+  // headless tools). Fat / disabled clients skip the HTTP path entirely.
+  const { getCachedEEClientMode } = await import("./client-mode.js");
+  const modeInfo = getCachedEEClientMode();
+  const useRemote = modeInfo
+    ? modeInfo.mode === "thin" || modeInfo.mode === "thin-degraded"
+    : !!(await import("./auth.js")).getCachedServerBaseUrl();
+  if (useRemote) {
+    try {
+      const { getDefaultEEClient } = await import("./intercept.js");
+      const resp = await getDefaultEEClient().search(text, { collections, limit: topK, signal });
+      if (!resp || !Array.isArray(resp.points)) return [];
+      return resp.points.map((p) => ({
+        id: p.id,
+        score: p.score,
+        payload: { text: p.text },
+        collection: p.collection,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  // In-process fallback — embed once, search each collection in parallel.
+  const vector = await getEmbeddingRaw(text, signal);
+  if (!vector) return [];
+  const perCollection = await Promise.all(
+    collections.map((c) =>
+      searchCollection(c, vector, topK, signal).then((points) => points.map((p) => ({ ...p, collection: c }))),
+    ),
+  );
+  return perCollection.flat();
+}
+
 // ─── Test isolation ────────────────────────────────────────────────────────────
 
 /**

@@ -177,6 +177,7 @@ const HELP = [
   "  /ee route <task>         — Route task to workflow (discuss/execute/direct)",
   "  /ee search <query>       — Semantic search across knowledge base",
   "  /ee user                 — Current EE user identity",
+  "  /ee mode                 — Show detected client mode (thin/fat/disabled)",
 ].join("\n");
 
 // ─── Handler ─────────────────────────────────────────────────────────────────
@@ -257,6 +258,22 @@ export const handleEESlash: SlashHandler = async (args, _ctx) => {
       const r = await client.user();
       if (!r) return UNREACHABLE;
       return `**EE User:** ${r.user}`;
+    }
+
+    case "mode": {
+      const { detectEEClientMode, describeMode } = await import("../../ee/client-mode.js");
+      const info = await detectEEClientMode({ force: true });
+      const lines = [
+        `**EE Client Mode:** ${info.mode}`,
+        `  ${describeMode(info)}`,
+        "",
+        `  serverBaseUrl: ${info.serverBaseUrl ?? "(none)"}`,
+        `  hasAuthToken: ${info.hasAuthToken}`,
+        `  hasLocalCore: ${info.hasLocalCore}`,
+      ];
+      if (info.probeMs != null) lines.push(`  /health probe: ${info.probeMs}ms`);
+      if (info.reason) lines.push(`  reason: ${info.reason}`);
+      return lines.join("\n");
     }
 
     case "help":

@@ -2,6 +2,17 @@ import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import { tracedGenerate } from "./llm.js";
+import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
+
+export interface ClarifyOptionsResult {
+  options: CouncilQuestionOption[];
+  /**
+   * Index of the agent's recommended option, or undefined when the agent did
+   * not provide a recommendation. The card uses this to decide whether to
+   * show the "(Recommended)" tag — it stays hidden when undefined.
+   */
+  defaultIndex?: number;
+}
 
 /**
  * Convert legacy `suggestions: string[]` into the new options schema with
@@ -11,12 +22,20 @@ import { tracedGenerate } from "./llm.js";
  *  - choice   → submit value as-is
  *  - freetext → open inline text input
  *  - chat     → pause council and let user discuss before answering
+ *
+ * If `recommended` is provided AND matches one of the suggestions, the
+ * returned `defaultIndex` points to it. Otherwise `defaultIndex` is omitted
+ * so the UI knows to suppress the "(Recommended)" tag.
  */
-export function buildClarifyOptions(suggestions: string[] | undefined): CouncilQuestionOption[] {
+export function buildClarifyOptions(
+  suggestions: string[] | undefined,
+  recommended?: string,
+): ClarifyOptionsResult {
   const choices: CouncilQuestionOption[] = (suggestions ?? [])
     .filter((s) => typeof s === "string" && s.trim().length > 0)
     .map((s) => ({ label: s.trim(), value: s.trim(), kind: "choice" as const }));
-  return [
+
+  const options: CouncilQuestionOption[] = [
     ...choices,
     {
       label: "Type something",
@@ -31,6 +50,15 @@ export function buildClarifyOptions(suggestions: string[] | undefined): CouncilQ
       kind: "chat" as const,
     },
   ];
+
+  let defaultIndex: number | undefined;
+  if (typeof recommended === "string" && recommended.trim().length > 0) {
+    const target = recommended.trim().toLowerCase();
+    const idx = choices.findIndex((opt) => opt.value.toLowerCase() === target);
+    if (idx !== -1) defaultIndex = idx;
+  }
+
+  return { options, defaultIndex };
 }
 
 const MAX_CLARIFICATION_ROUNDS = 3;
@@ -45,10 +73,19 @@ export async function* runClarification(
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   const allQA: Array<{ question: string; answer: string }> = [];
 
-  yield { type: "content", content: "\n## Phase A — Clarification\n" };
+  const phaseStartedAt = Date.now();
+  yield phaseStart({ phaseId: "phase:clarification", kind: "clarification", label: "Clarification" });
 
   for (let round = 0; round < MAX_CLARIFICATION_ROUNDS; round++) {
     const { system, prompt } = buildClarificationPrompt(topic, conversationContext, allQA.length > 0 ? allQA : undefined);
+
+    const roundId = `phase:clarification-round-${round + 1}`;
+    const roundStart = Date.now();
+    yield phaseStart({
+      phaseId: roundId,
+      kind: "clarification_round",
+      label: `Clarification round ${round + 1}`,
+    });
 
     let questionsRaw: string;
     try {
@@ -61,11 +98,13 @@ export async function* runClarification(
         maxTokens: 2048,
       });
     } catch (err) {
-      yield { type: "content", content: `[Clarification error: ${err instanceof Error ? err.message : err}]\n` };
+      const msg = err instanceof Error ? err.message : String(err);
+      yield phaseError({ phaseId: roundId, kind: "clarification_round", label: `Clarification round ${round + 1}`, startedAt: roundStart, errorMessage: msg });
+      yield { type: "content", content: `[Clarification error: ${msg}]\n` };
       break;
     }
 
-    let questions: Array<{ question: string; why: string; suggestions?: string[]; isRequired: boolean }>;
+    let questions: Array<{ question: string; why: string; suggestions?: string[]; recommended?: string; isRequired: boolean }>;
     try {
       const match = questionsRaw.match(/\[[\s\S]*\]/);
       questions = match ? JSON.parse(match[0]) : [];
@@ -74,15 +113,27 @@ export async function* runClarification(
     }
 
     if (questions.length === 0) {
-      yield { type: "content", content: `> No further clarification needed.\n` };
+      yield phaseDone({
+        phaseId: roundId,
+        kind: "clarification_round",
+        label: `Clarification round ${round + 1}`,
+        startedAt: roundStart,
+        detail: "no further clarification needed",
+      });
       break;
     }
 
-    yield { type: "content", content: `\n### Clarification Round ${round + 1}\n` };
+    yield phaseDone({
+      phaseId: roundId,
+      kind: "clarification_round",
+      label: `Clarification round ${round + 1}`,
+      startedAt: roundStart,
+      detail: `${questions.length} question${questions.length === 1 ? "" : "s"}`,
+    });
 
     for (const q of questions) {
       const questionId = crypto.randomUUID();
-      const options = buildClarifyOptions(q.suggestions);
+      const { options, defaultIndex } = buildClarifyOptions(q.suggestions, q.recommended);
 
       yield {
         type: "council_question" as StreamChunk["type"],
@@ -95,23 +146,31 @@ export async function* runClarification(
           suggestions: q.suggestions,
           options,
           isRequired: q.isRequired,
-          defaultIndex: 0,
+          defaultIndex,
         },
       };
 
       const answer = await respondToQuestion(questionId);
       allQA.push({ question: q.question, answer });
-      yield { type: "content", content: `\n> **Q:** ${q.question}\n> **A:** ${answer}\n` };
+      yield { type: "content", content: `\n  ↳ ${answer}\n` };
     }
   }
+
+  yield phaseDone({
+    phaseId: "phase:clarification",
+    kind: "clarification",
+    label: "Clarification",
+    startedAt: phaseStartedAt,
+    detail: allQA.length > 0 ? `${allQA.length} Q&A` : "no clarification needed",
+  });
 
   const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm);
 
   yield { type: "content", content: `\n### Clarified Spec\n` };
-  yield { type: "content", content: `**Problem:** ${spec.problemStatement}\n` };
-  yield { type: "content", content: `**Constraints:** ${spec.constraints.join(", ")}\n` };
-  yield { type: "content", content: `**Success Criteria:** ${spec.successCriteria.join(", ")}\n` };
-  yield { type: "content", content: `**Scope:** ${spec.scope}\n` };
+  yield { type: "content", content: `\n#### Problem\n${spec.problemStatement}\n` };
+  yield { type: "content", content: `\n#### Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n` };
+  yield { type: "content", content: `\n#### Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n` };
+  yield { type: "content", content: `\n#### Scope\n${spec.scope || "(unspecified)"}\n` };
 
   return spec;
 }

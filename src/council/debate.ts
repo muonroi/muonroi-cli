@@ -1,5 +1,4 @@
 import type { StreamChunk } from "../types/index.js";
-import { COUNCIL_ROLE_COLORS, COUNCIL_COLOR_RESET, COUNCIL_COLOR_BG } from "../orchestrator/agent-options.js";
 import type {
   ClarifiedSpec,
   CouncilConfig,
@@ -16,6 +15,7 @@ import {
   buildRoundSummaryPrompt,
 } from "./prompts.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
+import { phaseDone, phaseStart } from "./phase-events.js";
 
 const ABSOLUTE_MAX_ROUNDS = 8;
 
@@ -24,7 +24,7 @@ export async function* runDebate(
   config: CouncilConfig,
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
-  const { leaderModelId, participants, conversationContext, signal } = config;
+  const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
   const active: CouncilParticipant[] = [];
   const exchangeLogs: Map<string, string[]> = new Map();
   let runningSummary = "";
@@ -35,9 +35,13 @@ export async function* runDebate(
 
   if (needsResearch) {
     const p0Start = Date.now();
-    yield { type: "content", content: "\n## Research Phase\n" };
     const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
-    yield { type: "content", content: `\n### \x1b[35m[research]\x1b[0m ${researchCandidate.model}\n` };
+    yield phaseStart({
+      phaseId: "phase:research",
+      kind: "research",
+      label: "Research",
+      detail: `via ${researchCandidate.model}`,
+    });
 
     researchFindings = yield* tracedAsync(
       () => llm.research(researchCandidate.model, spec.problemStatement, conversationContext, signal),
@@ -48,8 +52,14 @@ export async function* runDebate(
         role: "research",
       },
     );
-    yield { type: "content", content: `${researchFindings}\n` };
-    yield { type: "content", content: `\n> Research: ${((Date.now() - p0Start) / 1000).toFixed(1)}s\n` };
+    yield phaseDone({
+      phaseId: "phase:research",
+      kind: "research",
+      label: "Research",
+      startedAt: p0Start,
+      detail: `via ${researchCandidate.model}`,
+    });
+    yield { type: "content", content: `\n### Research findings\n${researchFindings}\n` };
   }
 
   const enrichedContext = researchFindings
@@ -58,22 +68,31 @@ export async function* runDebate(
 
   // ── Phase 1: Parallel opening statements ───────────────────────────────────
   const p1Start = Date.now();
-  yield { type: "content", content: "\n## Opening Analysis\n" };
+  yield phaseStart({
+    phaseId: "phase:opening",
+    kind: "opening",
+    label: "Opening analysis",
+    detail: `${participants.length} participants in parallel`,
+  });
 
-  const openingPromises = participants.map(({ role, model }) => {
-    const partner = participants.find((c) => c.role !== role)?.role ?? "colleague";
+  const openingPromises = participants.map((self) => {
+    const partner = participants.find((c) => c.role !== self.role) ?? participants[0];
     const { system, prompt } = buildOpeningPrompt({
-      speakerRole: role,
-      partnerRole: partner,
+      speakerRole: self.role,
+      partnerRole: partner.role,
+      speakerStance: self.stance,
+      partnerStance: partner.stance,
       spec,
+      outputShape: debatePlan?.outputShape,
       conversationContext: enrichedContext,
     });
     return llm
-      .generate(model, system, prompt)
-      .then((text) => ({ role, model, position: text, error: null as string | null }))
+      .generate(self.model, system, prompt)
+      .then((text) => ({ role: self.role, model: self.model, stance: self.stance, position: text, error: null as string | null }))
       .catch((err: unknown) => ({
-        role,
-        model,
+        role: self.role,
+        model: self.model,
+        stance: self.stance,
         position: "",
         error: err instanceof Error ? err.message : String(err),
       }));
@@ -85,19 +104,25 @@ export async function* runDebate(
     detail: participants.map((p) => p.role).join(", "),
   });
 
+  yield { type: "content", content: "\n## Opening Analysis\n" };
   for (const o of openings) {
-    const roleColor = COUNCIL_ROLE_COLORS[o.role] ?? "";
-    yield { type: "content", content: `\n### ${roleColor}[${o.role}]${COUNCIL_COLOR_RESET} ${o.model}\n` };
+    const heading = o.stance ? `${o.stance.name} (\`${o.role}\` · ${o.model})` : `\`[${o.role}]\` ${o.model}`;
+    yield { type: "content", content: `\n### ${heading}\n` };
     if (o.error) {
       yield { type: "content", content: `[Error: ${o.error}]\n` };
     } else {
-      active.push({ role: o.role as any, model: o.model, position: o.position });
-      const bgColor = COUNCIL_COLOR_BG[o.role] ?? "";
-      yield { type: "content", content: `${bgColor} ${o.role.toUpperCase()} ${COUNCIL_COLOR_RESET} ${o.position}\n` };
+      active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
+      yield { type: "content", content: `${o.position}\n` };
     }
   }
 
-  yield { type: "content", content: `\n> Openings: ${active.length} participants, ${((Date.now() - p1Start) / 1000).toFixed(1)}s (parallel)\n` };
+  yield phaseDone({
+    phaseId: "phase:opening",
+    kind: "opening",
+    label: "Opening analysis",
+    startedAt: p1Start,
+    detail: `${active.length}/${participants.length} participants succeeded`,
+  });
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
@@ -110,7 +135,12 @@ export async function* runDebate(
   for (let round = 1; round <= ABSOLUTE_MAX_ROUNDS; round++) {
     roundCount = round;
     const p2Start = Date.now();
-    yield { type: "content", content: `\n## Discussion Round ${round}\n` };
+    const roundPhaseId = `phase:round-${round}`;
+    yield phaseStart({
+      phaseId: roundPhaseId,
+      kind: "round",
+      label: `Discussion round ${round}`,
+    });
 
     const pairs: Array<{ a: CouncilParticipant; b: CouncilParticipant; key: string }> = [];
     for (let i = 0; i < active.length; i++) {
@@ -131,43 +161,49 @@ export async function* runDebate(
           let aResponse: string;
           let bResponse: string;
 
+          const aLabel = a.stance?.name ?? a.role;
+          const bLabel = b.stance?.name ?? b.role;
           if (round === 1) {
             const aPrompt = buildResponsePrompt({
               speakerRole: a.role, partnerRole: b.role,
+              speakerStance: a.stance, partnerStance: b.stance,
               speakerPosition: a.position, partnerPosition: b.position,
               spec,
             });
             aResponse = await llm.generate(a.model, aPrompt.system, aPrompt.prompt);
-            log.push(`[${a.role}]: ${aResponse}`);
-            chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
+            log.push(`[${aLabel}]: ${aResponse}`);
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse });
 
             const bPrompt = buildResponsePrompt({
               speakerRole: b.role, partnerRole: a.role,
+              speakerStance: b.stance, partnerStance: a.stance,
               speakerPosition: b.position, partnerPosition: aResponse,
               spec,
             });
             bResponse = await llm.generate(b.model, bPrompt.system, bPrompt.prompt);
-            log.push(`[${b.role}]: ${bResponse}`);
-            chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
+            log.push(`[${bLabel}]: ${bResponse}`);
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse });
           } else {
             const historyText = log.join("\n\n");
             const aPrompt = buildFollowupPrompt({
               speakerRole: a.role, partnerRole: b.role,
+              speakerStance: a.stance, partnerStance: b.stance,
               partnerPosition: b.position, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
             aResponse = await llm.generate(a.model, aPrompt.system, aPrompt.prompt, 1536);
-            log.push(`[${a.role}] (round ${round}): ${aResponse}`);
-            chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
+            log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse });
 
             const bPrompt = buildFollowupPrompt({
               speakerRole: b.role, partnerRole: a.role,
+              speakerStance: b.stance, partnerStance: a.stance,
               partnerPosition: aResponse, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
             bResponse = await llm.generate(b.model, bPrompt.system, bPrompt.prompt, 1536);
-            log.push(`[${b.role}] (round ${round}): ${bResponse}`);
-            chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
+            log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse });
           }
 
           b.position = bResponse;
@@ -185,35 +221,63 @@ export async function* runDebate(
       },
     );
 
+    yield { type: "content", content: `\n## Discussion Round ${round}\n` };
     for (const pr of pairResults) {
       for (const chunk of pr.chunks) {
         const labelParts = chunk.label.match(/\[(\w+)\] → \[(\w+)\]/);
-        let coloredLabel = chunk.label;
-        if (labelParts) {
-          const fromColor = COUNCIL_ROLE_COLORS[labelParts[1]] ?? "";
-          const toColor = COUNCIL_ROLE_COLORS[labelParts[2]] ?? "";
-          coloredLabel = `${fromColor}[${labelParts[1]}]${COUNCIL_COLOR_RESET} → ${toColor}[${labelParts[2]}]${COUNCIL_COLOR_RESET}`;
-        }
-        yield { type: "content", content: `\n### ${coloredLabel}\n${chunk.text}\n` };
+        const cleanLabel = labelParts
+          ? `\`[${labelParts[1]}]\` → \`[${labelParts[2]}]\``
+          : chunk.label;
+        yield { type: "content", content: `\n### ${cleanLabel}\n${chunk.text}\n` };
       }
       if (pr.error) {
         yield { type: "content", content: `[Discussion error: ${pr.error}]\n` };
       }
     }
 
-    yield { type: "content", content: `\n> Round ${round}: ${((Date.now() - p2Start) / 1000).toFixed(1)}s (${pairs.length} pairs)\n` };
+    yield phaseDone({
+      phaseId: roundPhaseId,
+      kind: "round",
+      label: `Discussion round ${round}`,
+      startedAt: p2Start,
+      detail: `${pairs.length} pair${pairs.length === 1 ? "" : "s"} exchanged`,
+    });
 
     // ── Leader evaluation (replaces self-evaluated convergence) ──────────────
+    const evalPhaseId = `phase:evaluation-${round}`;
+    const evalStart = Date.now();
+    yield phaseStart({
+      phaseId: evalPhaseId,
+      kind: "evaluation",
+      label: `Leader evaluation (round ${round})`,
+    });
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
     const evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm);
 
     if (evaluation) {
       const metCount = evaluation.criteriaStatus.filter((c) => c.met).length;
       const total = evaluation.criteriaStatus.length;
-      yield { type: "content", content: `\n> **Leader evaluation:** ${metCount}/${total} criteria met — ${evaluation.reason}\n` };
+      yield phaseDone({
+        phaseId: evalPhaseId,
+        kind: "evaluation",
+        label: `Leader evaluation (round ${round})`,
+        startedAt: evalStart,
+        detail: `${metCount}/${total} criteria met · ${evaluation.reason.slice(0, 80)}`,
+      });
+      yield {
+        type: "content",
+        content: `\n> **Leader evaluation:** ${metCount}/${total} criteria met — ${evaluation.reason}\n`,
+      };
 
       if (evaluation.needsResearch && evaluation.researchQuery) {
-        yield { type: "content", content: `\n> Leader requested mid-debate research: ${evaluation.researchQuery}\n` };
+        const midPhaseId = `phase:mid-research-${round}`;
+        const midStart = Date.now();
+        yield phaseStart({
+          phaseId: midPhaseId,
+          kind: "mid_research",
+          label: "Mid-debate research",
+          detail: evaluation.researchQuery.slice(0, 80),
+        });
         const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
         const findings = yield* tracedAsync(
           () => llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal),
@@ -224,6 +288,13 @@ export async function* runDebate(
             role: "research",
           },
         );
+        yield phaseDone({
+          phaseId: midPhaseId,
+          kind: "mid_research",
+          label: "Mid-debate research",
+          startedAt: midStart,
+          detail: evaluation.researchQuery.slice(0, 80),
+        });
         yield { type: "content", content: `\n### Mid-debate Research\n${findings}\n` };
         for (const log of exchangeLogs.values()) {
           log.push(`[research findings]: ${findings}`);
@@ -231,13 +302,31 @@ export async function* runDebate(
       }
 
       if (!evaluation.shouldContinue) {
-        yield { type: "content", content: `\n> Leader decided: debate sufficient at round ${round}.\n` };
+        yield {
+          type: "content",
+          content: `\n> Leader decided: debate sufficient at round ${round}.\n`,
+        };
         break;
       }
+    } else {
+      yield phaseDone({
+        phaseId: evalPhaseId,
+        kind: "evaluation",
+        label: `Leader evaluation (round ${round})`,
+        startedAt: evalStart,
+        detail: "evaluation unavailable — continuing",
+      });
     }
 
     // Generate inter-round summary
     if (round < ABSOLUTE_MAX_ROUNDS) {
+      const sumPhaseId = `phase:summary-${round}`;
+      const sumStart = Date.now();
+      yield phaseStart({
+        phaseId: sumPhaseId,
+        kind: "summary",
+        label: `Round ${round} summary`,
+      });
       try {
         const allEx = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
         const { system, prompt } = buildRoundSummaryPrompt(allEx, spec.problemStatement, round);
@@ -249,9 +338,22 @@ export async function* runDebate(
           prompt,
           maxTokens: 512,
         });
-        yield { type: "content", content: `\n> **Discussion state:** ${runningSummary.split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ")}\n` };
+        const headline = runningSummary.split("\n").filter((l) => l.trim()).slice(0, 1).join(" ").slice(0, 100);
+        yield phaseDone({
+          phaseId: sumPhaseId,
+          kind: "summary",
+          label: `Round ${round} summary`,
+          startedAt: sumStart,
+          detail: headline,
+        });
       } catch {
-        // Non-critical
+        yield phaseDone({
+          phaseId: sumPhaseId,
+          kind: "summary",
+          label: `Round ${round} summary`,
+          startedAt: sumStart,
+          detail: "skipped",
+        });
       }
     }
   }

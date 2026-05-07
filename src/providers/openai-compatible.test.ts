@@ -27,7 +27,7 @@ describe("createOpenAICompatibleAdapter", () => {
   it('sets id to "deepseek" when configured as deepseek', () => {
     const adapter = createOpenAICompatibleAdapter({
       id: "deepseek",
-      model: "deepseek-chat",
+      model: "deepseek-v4-flash",
       apiKey: "test-key-xxxxxxxxxxxxxxxxxxxx",
       baseURL: "https://api.deepseek.com/v1",
     });
@@ -49,7 +49,7 @@ describe("createOpenAICompatibleAdapter", () => {
 
     const adapter = createOpenAICompatibleAdapter({
       id: "deepseek",
-      model: "deepseek-chat",
+      model: "deepseek-v4-flash",
       apiKey: "test-key-xxxxxxxxxxxxxxxxxxxx",
     });
     const collected: StreamChunk[] = [];

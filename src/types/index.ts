@@ -242,6 +242,7 @@ export interface CouncilQuestionData {
 
 export type CouncilStatusPhase =
   | "clarify"
+  | "plan_debate"
   | "research"
   | "opening"
   | "exchange"
@@ -264,6 +265,36 @@ export interface CouncilStatusData {
   errorMessage?: string;
 }
 
+/** High-level lifecycle event for a council phase. Drives the phase timeline UI. */
+export type CouncilPhaseKind =
+  | "clarification"
+  | "clarification_round"
+  | "preflight"
+  | "debate_plan"
+  | "research"
+  | "opening"
+  | "round"
+  | "evaluation"
+  | "mid_research"
+  | "summary"
+  | "synthesis"
+  | "action_plan";
+
+export type CouncilPhaseState = "active" | "done" | "error";
+
+export interface CouncilPhaseEvent {
+  /** Stable id for upserts; e.g. "phase:research", "phase:round-1". */
+  phaseId: string;
+  kind: CouncilPhaseKind;
+  state: CouncilPhaseState;
+  label: string;
+  detail?: string;
+  elapsedMs?: number;
+  errorMessage?: string;
+  /** Monotonic ordering hint; ties broken by insertion order. */
+  sequence?: number;
+}
+
 export interface CouncilPreflightData {
   preflightId: string;
   problemStatement: string;
@@ -275,7 +306,7 @@ export interface CouncilPreflightData {
 }
 
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "done" | "error" | "reasoning" | "structured_response";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -287,6 +318,7 @@ export interface StreamChunk {
   councilQuestion?: CouncilQuestionData;
   councilPreflight?: CouncilPreflightData;
   councilStatus?: CouncilStatusData;
+  councilPhase?: CouncilPhaseEvent;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";

@@ -49,6 +49,22 @@ export const dark = {
   planInputText: "#e0e0e0",
   planHint: "#555555",
   queueBg: "#222222",
+  syntaxKeyword: "#c586c0",
+  syntaxControl: "#c586c0",
+  syntaxString: "#ce9178",
+  syntaxNumber: "#b5cea8",
+  syntaxBoolean: "#569cd6",
+  syntaxComment: "#6a9955",
+  syntaxFunction: "#dcdcaa",
+  syntaxType: "#4ec9b0",
+  syntaxBuiltin: "#4ec9b0",
+  syntaxProperty: "#9cdcfe",
+  syntaxVariable: "#9cdcfe",
+  syntaxOperator: "#d4d4d4",
+  syntaxPunct: "#808080",
+  syntaxRegex: "#d16969",
+  syntaxTag: "#569cd6",
+  syntaxAttr: "#9cdcfe",
 } as const;
 
 export type Theme = typeof dark;

@@ -53,10 +53,26 @@ export interface DebateState {
   researchFindings?: string;
 }
 
+/**
+ * A debate stance is the lens a participant adopts for a SPECIFIC topic.
+ * Decoupled from {@link ModelRole} (which only picks a model slot from config).
+ * Leader LLM proposes stances per topic at planning time.
+ */
+export interface DebateStance {
+  /** Short label, e.g. "Comparative Analyst", "Cost Skeptic". */
+  name: string;
+  /** One-sentence lens, e.g. "How does the subject compare to alternatives?" */
+  lens: string;
+  /** Optional concrete focus, e.g. "Cite numbers with sources only". */
+  focus?: string;
+}
+
 export interface CouncilParticipant {
   role: ModelRole;
   model: string;
   position: string;
+  /** Set after debate planning — leader-proposed stance for this topic. */
+  stance?: DebateStance;
 }
 
 // ── Planning Phase ───────────────────────────────────────────────────────────
@@ -73,12 +89,48 @@ export interface ActionPlan {
 
 // ── Council Outcome (extends existing for backward compat) ───────────────────
 
+/**
+ * Output shape proposed by the leader LLM per topic.
+ * Drives both the synthesis JSON schema and the human-readable Markdown sections.
+ */
+export interface OutputSection {
+  /** JSON key in the final outcome, e.g. "strengths", "actionItems". */
+  key: string;
+  /** Markdown heading rendered to the user, e.g. "Strengths". */
+  heading: string;
+  /** Hint to the synthesizer LLM about what belongs in this section. */
+  prompt: string;
+  /** "list" → array of strings; "text" → free-form string; "objectList" → array of objects. */
+  shape: "list" | "text" | "objectList";
+}
+
+export interface OutputShape {
+  /** Free-form label (e.g. "evaluation", "implementation_plan", "decision"). */
+  kind: string;
+  sections: OutputSection[];
+  /** Behavioural rules the synthesizer must obey. */
+  guardrails: string[];
+}
+
+export interface DebatePlan {
+  /** Leader's one-sentence read of what the user actually asked for. */
+  intentSummary: string;
+  /** Leader-proposed stances. Length usually 2-4. */
+  stances: DebateStance[];
+  /** Leader-proposed output schema for the synthesis step. */
+  outputShape: OutputShape;
+}
+
 export interface EnhancedCouncilOutcome {
-  type: "decision" | "action_items" | "plan_update" | "resolve_question";
+  /** Free-form (drives by leader plan). Common: decision, action_items, plan_update, evaluation, resolve_question. */
+  type: string;
   summary: string;
-  agreed: string[];
-  tradeoffs: string[];
-  recommendation: string;
+  /** Dynamic sections — keys mirror {@link OutputShape.sections}. */
+  sections?: Record<string, unknown>;
+  // Back-compat fields. Synthesizer fills whichever match the shape.
+  agreed?: string[];
+  tradeoffs?: string[];
+  recommendation?: string;
   actionItems?: string[];
   planUpdate?: string;
   resolvedQuestion?: { question: string; answer: string };
@@ -92,6 +144,8 @@ export interface CouncilConfig {
   conversationContext: string;
   leaderModelId: string;
   participants: CouncilParticipant[];
+  /** Leader-proposed plan; if absent, debate falls back to role-only prompts. */
+  debatePlan?: DebatePlan;
   signal?: AbortSignal;
   observer?: ProcessMessageObserver;
   skipClarification?: boolean;

@@ -27,6 +27,7 @@ export {
   resetBridge,
   routeFeedback,
   routeModel,
+  searchByText,
   searchCollection,
 } from "./bridge.js";
 export type { EEPoint, EERouteResult } from "./bridge.js";

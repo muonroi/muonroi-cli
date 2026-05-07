@@ -12,7 +12,7 @@ describe("callColdRoute", () => {
     await loadCatalog();
     stub = await startStubEEServer({
       coldRoute: (_req) => ({
-        model: "deepseek-v3",
+        model: "deepseek-v4-flash",
         tier: "premium" as const,
         reason: "fallback",
         taskHash: "test-hash",
@@ -32,8 +32,8 @@ describe("callColdRoute", () => {
     });
     expect(result).not.toBeNull();
     expect(result!.tier).toBe("cold");
-    expect(result!.model).toBe("deepseek-v3");
-    // provider is resolved by detectProviderForModel; deepseek-v3 aliases to deepseek-chat (provider: deepseek)
+    expect(result!.model).toBe("deepseek-v4-flash");
+    // provider is resolved by detectProviderForModel; catalog maps deepseek-v4-flash → provider: deepseek
     expect(result!.provider).toBe("deepseek");
     expect(result!.reason).toContain("cold:");
   });
@@ -42,7 +42,7 @@ describe("callColdRoute", () => {
     const slowStub = await startStubEEServer({
       latencyMs: 1500,
       coldRoute: () => ({
-        model: "deepseek-v3",
+        model: "deepseek-v4-flash",
         tier: "premium" as const,
         reason: "fallback",
         taskHash: "test-hash",

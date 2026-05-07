@@ -3473,13 +3473,31 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return;
         }
         if (key.name === "backspace") {
+          // Delete from input (mirrors the slash + query) and from the
+          // search query state. When everything (including the leading "/")
+          // is gone, dismiss the overlay instead of leaving it stuck open.
+          const ta = inputRef.current;
+          const current = ta?.plainText ?? "";
+          if (current.length > 0) {
+            ta?.setText(current.slice(0, -1));
+            if (ta) ta.cursorOffset = current.length - 1;
+          }
+          const nextInput = current.slice(0, -1);
           setSlashSearchQuery((q) => q.slice(0, -1));
           setSlashMenuIndex(0);
+          if (nextInput.length === 0 || !nextInput.startsWith("/")) {
+            setShowSlashMenu(false);
+            setSlashSearchQuery("");
+            inputRef.current?.clear();
+          }
           return;
         }
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
           setSlashSearchQuery((q) => q + key.sequence);
           setSlashMenuIndex(0);
+          // Keep the input field visually in sync so the user sees what they
+          // are typing (the textarea is unfocused while the overlay is open).
+          inputRef.current?.insertText(key.sequence);
           return;
         }
         return;
@@ -3740,6 +3758,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           setShowSlashMenu(true);
           setSlashMenuIndex(0);
           setSlashSearchQuery("");
+          // Mirror the leading "/" into the input field so the cursor stays
+          // visible to the user. Without this, the textarea is unfocused and
+          // the menu's filter keystrokes happen "invisibly".
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/");
+          key.preventDefault?.();
           return;
         }
       }

@@ -9,6 +9,7 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { BashTool } from "./bash.js";
 import { readFile, writeFile, editFile } from "./file.js";
+import { FileTracker } from "./file-tracker.js";
 import { executeGrep } from "./grep.js";
 import { askVisionProxy, analyzeImageFromSource, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
@@ -44,6 +45,9 @@ export function createBuiltinTools(
   opts?: ToolRegistryOpts,
 ): ToolSet {
   const tools: ToolSet = {};
+  // One tracker per tool registry instance — shared across read/write/edit
+  // calls in the same session. Enforces "must read before edit/overwrite".
+  const fileTracker = new FileTracker();
 
   // read_file
   tools.read_file = dynamicTool({
@@ -58,7 +62,7 @@ export function createBuiltinTools(
       required: ["file_path"],
     }),
     execute: async (input: any) => {
-      const result = readFile(input.file_path, bash.getCwd(), input.start_line, input.end_line);
+      const result = readFile(input.file_path, bash.getCwd(), input.start_line, input.end_line, fileTracker);
       return formatResult(result);
     },
   });
@@ -156,7 +160,7 @@ export function createBuiltinTools(
   if (mode === "agent") {
     // write_file
     tools.write_file = dynamicTool({
-      description: "Create a new file or overwrite an existing file with full content.",
+      description: "Create a new file or overwrite an existing file with full content. SAFETY: overwriting an existing file requires you to call read_file on it first in the same session. New-file creation does not.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -166,7 +170,7 @@ export function createBuiltinTools(
         required: ["file_path", "content"],
       }),
       execute: async (input: any) => {
-        const result = await writeFile(input.file_path, input.content, bash.getCwd());
+        const result = await writeFile(input.file_path, input.content, bash.getCwd(), fileTracker);
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),
@@ -178,7 +182,7 @@ export function createBuiltinTools(
 
     // edit_file
     tools.edit_file = dynamicTool({
-      description: "Replace a unique string in a file with new content. The old_string must appear exactly once.",
+      description: "Replace a unique string in a file with new content. The old_string must appear exactly once. SAFETY: you must call read_file on the target in the same session before editing; if the file changed on disk after your read, re-read it first.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -189,7 +193,7 @@ export function createBuiltinTools(
         required: ["file_path", "old_string", "new_string"],
       }),
       execute: async (input: any) => {
-        const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd());
+        const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd(), fileTracker);
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),

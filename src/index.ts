@@ -535,6 +535,16 @@ program
     const { loadEEAuthToken } = await import("./ee/auth.js");
     await loadEEAuthToken().catch(() => {});
 
+    // Auto-detect EE client mode (thin / thin-degraded / fat / disabled).
+    // Result is cached for downstream callsites (PIL layers, bridge.searchByText)
+    // so each request doesn't re-probe.
+    const { detectEEClientMode, describeMode } = await import("./ee/client-mode.js");
+    detectEEClientMode().then((info) => {
+      if (process.env.MUONROI_EE_DEBUG === "1") {
+        console.error(`[muonroi-cli] ${describeMode(info)}`);
+      }
+    }).catch(() => {});
+
     // Patch zod-to-json-schema for Zod v4 compat (fixes tool calls for DeepSeek etc.)
     const { patchZodToJsonSchema } = await import("./providers/patch-zod-schema.js");
     patchZodToJsonSchema();

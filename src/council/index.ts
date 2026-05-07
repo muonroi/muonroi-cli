@@ -10,14 +10,15 @@ import type {
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
-import { resolveLeaderModel, resolveParticipants } from "./leader.js";
+import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { runClarification, buildSpecFromTopic } from "./clarifier.js";
 import { runPreflight } from "./preflight.js";
 import { runDebate } from "./debate.js";
 import { runPlanning } from "./planner.js";
 import { runExecution } from "./executor.js";
-import { COUNCIL_COLOR_RESET } from "../orchestrator/agent-options.js";
+import { planDebate } from "./debate-planner.js";
+import { phaseDone, phaseStart } from "./phase-events.js";
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -41,7 +42,8 @@ export async function* runCouncil(
   const stats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
 
   // ── Resolve models ──────────────────────────────────────────────────────────
-  const leaderModelId = resolveLeaderModel(sessionModelId);
+  const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
+  const leaderModelId = leaderResolution.modelId;
   const participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
 
   if (participants.length < 2) {
@@ -50,7 +52,17 @@ export async function* runCouncil(
     return null;
   }
 
-  yield { type: "content", content: `\n[Leader: \x1b[32m${leaderModelId}${COUNCIL_COLOR_RESET} | Participants: ${participants.map((p) => `${p.role}:${p.model}`).join(", ")}]\n` };
+  if (leaderResolution.promotedFrom) {
+    yield {
+      type: "content",
+      content:
+        `\n> Leader auto-promoted within session provider: \`${leaderResolution.promotedFrom.modelId}\`` +
+        `${leaderResolution.promotedFrom.tier ? ` (${leaderResolution.promotedFrom.tier})` : ""}` +
+        ` → \`${leaderModelId}\`. Synthesis benefits from the highest tier available on the same provider. ` +
+        `Set \`roleModels.leader\` to override.\n`,
+    };
+  }
+  yield { type: "content", content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}\n` };
 
   const baseContext = buildCouncilContext(messages);
   const projectSnapshot = options?.cwd ? await buildProjectSnapshot(options.cwd) : "";
@@ -94,6 +106,54 @@ export async function* runCouncil(
 
   stats.phases.push({ name: "clarify+preflight", durationMs: Date.now() - phaseAStart });
 
+  // ── Phase B.5: Leader plans the debate (stances + output shape) ─────────────
+  const planStartMs = Date.now();
+  yield phaseStart({
+    phaseId: "phase:debate-plan",
+    kind: "debate_plan",
+    label: "Debate plan",
+    detail: "stances + output shape",
+  });
+  const planGenerator = planDebate(spec, leaderModelId, llm);
+  let planStep: IteratorResult<StreamChunk, import("./types.js").DebatePlan>;
+  do {
+    planStep = await planGenerator.next();
+    if (!planStep.done && planStep.value) yield planStep.value;
+  } while (!planStep.done);
+  const debatePlan = planStep.value;
+  yield phaseDone({
+    phaseId: "phase:debate-plan",
+    kind: "debate_plan",
+    label: "Debate plan",
+    startedAt: planStartMs,
+    detail: `${debatePlan.stances.length} stances · shape: ${debatePlan.outputShape.kind}`,
+  });
+  yield { type: "content", content: `\n## Debate Plan\n` };
+  yield { type: "content", content: `\n#### Intent\n${debatePlan.intentSummary}\n` };
+  yield {
+    type: "content",
+    content:
+      `\n#### Proposed Stances\n` +
+      debatePlan.stances.map((s) => `- **${s.name}** — ${s.lens}${s.focus ? ` _(focus: ${s.focus})_` : ""}`).join("\n") +
+      "\n",
+  };
+  yield {
+    type: "content",
+    content:
+      `\n#### Output Shape (\`${debatePlan.outputShape.kind}\`)\n` +
+      debatePlan.outputShape.sections.map((s) => `- \`${s.key}\` → ${s.heading}`).join("\n") +
+      "\n",
+  };
+  // Assign stances to active participants in proposal order; extras keep no stance.
+  for (let i = 0; i < active.length && i < debatePlan.stances.length; i++) {
+    active[i] = { ...active[i], stance: debatePlan.stances[i] };
+  }
+  // Trim active to the number of stances proposed (avoid orphan participants).
+  if (debatePlan.stances.length >= 2 && debatePlan.stances.length < active.length) {
+    active.length = debatePlan.stances.length;
+  }
+  stats.phases.push({ name: "plan_debate", durationMs: Date.now() - planStartMs });
+
   // ── Phase C: Dynamic Debate ─────────────────────────────────────────────────
   const debateStart = Date.now();
   const debateGen = runDebate(spec, {
@@ -101,6 +161,7 @@ export async function* runCouncil(
     conversationContext,
     leaderModelId,
     participants: active,
+    debatePlan,
     signal: options?.signal,
   }, llm);
 
@@ -116,7 +177,7 @@ export async function* runCouncil(
 
   // ── Phase D: Plan ───────────────────────────────────────────────────────────
   const planStart = Date.now();
-  const planGen = runPlanning(debateState, spec, active, leaderModelId, respondToPreflight, llm);
+  const planGen = runPlanning(debateState, spec, active, leaderModelId, respondToPreflight, llm, debatePlan);
 
   let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string }>;
   do {
@@ -132,13 +193,16 @@ export async function* runCouncil(
   if (sessionId) {
     try {
       if (outcome) {
-        appendSystemMessage(sessionId, `[Council Decision]\nTopic: ${topic}\n${outcome.summary}\nAgreed: ${outcome.agreed.join("; ")}\nRecommendation: ${outcome.recommendation}`);
+        const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
+        const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
+        appendSystemMessage(sessionId, `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`);
         appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
       }
       const councilRecord = {
         topic,
         spec,
-        participants: active.map((a) => ({ role: a.role, model: a.model })),
+        debatePlan,
+        participants: active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
         finalPositions: active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
         synthesis: synthesisText.slice(0, 2000),
         stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },

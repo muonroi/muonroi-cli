@@ -41,7 +41,7 @@ describe("callWarmRoute bridge cascade", () => {
   it("returns bridge result without calling HTTP when bridge succeeds", async () => {
     mockBridgeRouteModel.mockResolvedValue({
       tier: "balanced",
-      model: "deepseek-v3",
+      model: "deepseek-v4-flash",
       reasoningEffort: "medium",
       confidence: 0.95,
       source: "brain",
@@ -55,7 +55,7 @@ describe("callWarmRoute bridge cascade", () => {
     });
 
     expect(result).not.toBeNull();
-    expect(result!.model).toBe("deepseek-v3");
+    expect(result!.model).toBe("deepseek-v4-flash");
     expect(result!.reason).toMatch(/^warm:bridge:/);
     expect(result!.confidence).toBe(0.95);
     expect(result!.taskHash).toBe("bridge-hash");

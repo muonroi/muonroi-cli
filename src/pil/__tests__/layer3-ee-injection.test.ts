@@ -3,12 +3,10 @@ import { layer3EeInjection } from "../layer3-ee-injection";
 import type { PipelineContext } from "../types";
 
 vi.mock("../../ee/bridge.js", () => ({
-  getEmbeddingRaw: vi.fn().mockResolvedValue(null),
-  searchCollection: vi.fn().mockResolvedValue([]),
+  searchByText: vi.fn().mockResolvedValue([]),
 }));
 
-
-import { getEmbeddingRaw, searchCollection } from "../../ee/bridge.js";
+import { searchByText } from "../../ee/bridge.js";
 
 function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   return {
@@ -27,15 +25,13 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 
 describe("layer3EeInjection (bridge-based)", () => {
   beforeEach(() => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue(null);
-    vi.mocked(searchCollection).mockResolvedValue([]);
+    vi.mocked(searchByText).mockResolvedValue([]);
   });
 
-  test("Test 1: returns enriched context with hints when getEmbeddingRaw returns vector and searchCollection returns points with payload.text", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue([0.1, 0.2, 0.3]);
-    vi.mocked(searchCollection).mockResolvedValue([
-      { id: "abc1", score: 0.92, payload: { text: "Always check null before accessing .user" } },
-      { id: "def2", score: 0.88, payload: { text: "Use try-catch around DB calls" } },
+  test("Test 1: returns enriched context with hints when searchByText returns points with payload.text", async () => {
+    vi.mocked(searchByText).mockResolvedValue([
+      { id: "abc1", score: 0.92, payload: { text: "Always check null before accessing .user" }, collection: "experience-behavioral" },
+      { id: "def2", score: 0.88, payload: { text: "Use try-catch around DB calls" }, collection: "experience-behavioral" },
     ]);
 
     const result = await layer3EeInjection(makeCtx());
@@ -46,8 +42,8 @@ describe("layer3EeInjection (bridge-based)", () => {
     expect(layer!.applied).toBe(true);
   });
 
-  test("Test 2: returns ctx unchanged with applied=false and delta=no-embedding when getEmbeddingRaw returns null", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue(null);
+  test("Test 2: returns ctx unchanged with applied=false and delta=no-points when searchByText throws", async () => {
+    vi.mocked(searchByText).mockRejectedValue(new Error("network down"));
 
     const ctx = makeCtx();
     const result = await layer3EeInjection(ctx);
@@ -55,12 +51,11 @@ describe("layer3EeInjection (bridge-based)", () => {
     const layer = result.layers.find((l) => l.name === "ee-experience-injection");
     expect(layer).toBeDefined();
     expect(layer!.applied).toBe(false);
-    expect(layer!.delta).toContain("no-embedding");
+    expect(layer!.delta).toContain("error=");
   });
 
-  test("Test 3: returns ctx unchanged with applied=false and delta=no-points when searchCollection returns []", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue([0.1, 0.2, 0.3]);
-    vi.mocked(searchCollection).mockResolvedValue([]);
+  test("Test 3: returns ctx unchanged with applied=false and delta=no-points when searchByText returns []", async () => {
+    vi.mocked(searchByText).mockResolvedValue([]);
 
     const ctx = makeCtx();
     const result = await layer3EeInjection(ctx);
@@ -72,9 +67,8 @@ describe("layer3EeInjection (bridge-based)", () => {
   });
 
   test("Test 4: extracts text from payload.json containing solution field", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue([0.1, 0.2, 0.3]);
-    vi.mocked(searchCollection).mockResolvedValue([
-      { id: "xyz9", score: 0.75, payload: { json: JSON.stringify({ solution: "Always validate inputs at boundary" }) } },
+    vi.mocked(searchByText).mockResolvedValue([
+      { id: "xyz9", score: 0.75, payload: { json: JSON.stringify({ solution: "Always validate inputs at boundary" }) }, collection: "experience-behavioral" },
     ]);
 
     const result = await layer3EeInjection(makeCtx());
@@ -84,10 +78,9 @@ describe("layer3EeInjection (bridge-based)", () => {
   });
 
   test("Test 5: hints are truncated via truncateToBudget at 30% of tokenBudget", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue([0.1, 0.2, 0.3]);
     const longText = "A".repeat(2000);
-    vi.mocked(searchCollection).mockResolvedValue([
-      { id: "x", score: 0.9, payload: { text: longText } },
+    vi.mocked(searchByText).mockResolvedValue([
+      { id: "x", score: 0.9, payload: { text: longText }, collection: "experience-behavioral" },
     ]);
 
     const result = await layer3EeInjection(makeCtx({ tokenBudget: 100 }));
@@ -104,13 +97,12 @@ describe("layer3EeInjection (bridge-based)", () => {
   });
 
   test("Test 6: collection name is always 'experience-behavioral' regardless of taskType", async () => {
-    vi.mocked(getEmbeddingRaw).mockResolvedValue([0.1, 0.2, 0.3]);
-    vi.mocked(searchCollection).mockResolvedValue([]);
+    vi.mocked(searchByText).mockResolvedValue([]);
 
     await layer3EeInjection(makeCtx({ taskType: "refactor" }));
-    expect(vi.mocked(searchCollection)).toHaveBeenCalledWith(
-      "experience-behavioral",
-      expect.any(Array),
+    expect(vi.mocked(searchByText)).toHaveBeenCalledWith(
+      expect.any(String),
+      ["experience-behavioral"],
       expect.any(Number),
       expect.any(Object),
     );
