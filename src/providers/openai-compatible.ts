@@ -9,14 +9,9 @@
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { streamText } from "ai";
 import { redactor } from "../utils/redactor.js";
+import { OPENAI_COMPATIBLE_BASE_URLS as DEFAULT_BASE_URLS } from "./endpoints.js";
 import { streamFromFullStream } from "./stream-loop.js";
 import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
-
-const DEFAULT_BASE_URLS: Record<string, string> = {
-  deepseek: "https://api.deepseek.com",
-  siliconflow: "https://api.siliconflow.cn/v1",
-  xai: "https://api.x.ai/v1",
-};
 
 /**
  * Create an OpenAI-compatible adapter (DeepSeek, SiliconFlow, xAI/Grok, or custom).
@@ -27,7 +22,7 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
     redactor.enrollSecret(config.apiKey);
   }
 
-  const baseURL = config.baseURL ?? DEFAULT_BASE_URLS[config.id];
+  const baseURL = config.baseURL ?? DEFAULT_BASE_URLS[config.id as keyof typeof DEFAULT_BASE_URLS];
   const provider = createOpenAICompatible({
     name: config.id,
     baseURL,

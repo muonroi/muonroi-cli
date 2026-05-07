@@ -10,7 +10,10 @@ import type {
   NormalizedLspSettings,
 } from "../lsp/types";
 import { MODELS, getEffectiveReasoningEffort, getModelIds, getModelInfo, normalizeModelId } from "../models/registry.js";
+import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
+import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+import { type ShellSettings, normalizeShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
 
@@ -175,6 +178,8 @@ export interface UserSettings {
   defaultModel?: string;
   sandboxMode?: SandboxMode;
   sandbox?: SandboxSettings;
+  /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
+  shell?: ShellSettings;
   lsp?: LspSettings;
   reasoningEffortByModel?: Record<string, ReasoningEffort>;
   telegram?: TelegramSettings;
@@ -207,6 +212,7 @@ export interface ProjectSettings {
   model?: string;
   sandboxMode?: SandboxMode;
   sandbox?: SandboxSettings;
+  shell?: ShellSettings;
   lsp?: LspSettings;
 }
 
@@ -291,6 +297,9 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
     ...(partial.sandbox !== undefined
       ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
       : {}),
+    ...(partial.shell !== undefined
+      ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) }
+      : {}),
     ...(partial.lsp !== undefined
       ? {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
@@ -329,6 +338,9 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
     ...(partial.sandbox !== undefined
       ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
       : {}),
+    ...(partial.shell !== undefined
+      ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) }
+      : {}),
     ...(partial.lsp !== undefined
       ? {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
@@ -341,19 +353,10 @@ export function getApiKey(): string | undefined {
   return process.env.MUONROI_API_KEY || loadUserSettings().apiKey;
 }
 
-const DEFAULT_BASE_URLS: Record<string, string> = {
-  anthropic: "https://api.anthropic.com",
-  openai: "https://api.openai.com/v1",
-  google: "https://generativelanguage.googleapis.com/v1beta",
-  deepseek: "https://api.deepseek.com",
-  siliconflow: "https://api.siliconflow.cn/v1",
-  xai: "https://api.x.ai/v1",
-  ollama: "http://localhost:11434",
-};
-
 export function getBaseURL(provider?: string): string {
   if (process.env.MUONROI_BASE_URL) return process.env.MUONROI_BASE_URL;
-  return DEFAULT_BASE_URLS[provider ?? "anthropic"] ?? "https://api.anthropic.com";
+  const id = (provider ?? "anthropic") as ProviderId;
+  return PROVIDER_ENDPOINTS[id]?.apiBase ?? PROVIDER_ENDPOINTS.anthropic.apiBase;
 }
 
 /**
@@ -390,7 +393,7 @@ export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey
   if (deepseekKey) {
     configs.deepseek = {
       apiKey: deepseekKey,
-      baseURL: p.deepseek?.baseURL ?? "https://api.deepseek.com",
+      baseURL: p.deepseek?.baseURL ?? apiBaseFor("deepseek"),
     };
   }
 
@@ -399,7 +402,7 @@ export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey
   if (siliconflowKey) {
     configs.siliconflow = {
       apiKey: siliconflowKey,
-      baseURL: p.siliconflow?.baseURL ?? "https://api.siliconflow.cn/v1",
+      baseURL: p.siliconflow?.baseURL ?? apiBaseFor("siliconflow"),
     };
   }
 
@@ -408,7 +411,7 @@ export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey
   if (xaiKey) {
     configs.xai = {
       apiKey: xaiKey,
-      baseURL: p.xai?.baseURL ?? "https://api.x.ai/v1",
+      baseURL: p.xai?.baseURL ?? apiBaseFor("xai"),
     };
   }
 
@@ -692,6 +695,12 @@ export function getCurrentSandboxSettings(): SandboxSettings {
   const user = loadUserSettings();
   const project = loadProjectSettings();
   return mergeSandboxSettings(user.sandbox, project.sandbox);
+}
+
+export function getCurrentShellSettings(): ShellSettings {
+  const user = loadUserSettings();
+  const project = loadProjectSettings();
+  return { ...(user.shell ?? {}), ...(project.shell ?? {}) };
 }
 
 export function getCurrentLspSettings(): NormalizedLspSettings {

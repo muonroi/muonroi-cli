@@ -85,7 +85,7 @@ export function CouncilQuestionCard({
         const labelColor = selected ? t.accent : t.text;
         return (
           <box key={i} flexDirection="column">
-            <box>
+            <box flexDirection="row">
               <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
               <text fg={labelColor}>{opt.label}</text>
               {isRecommended && (

@@ -5,6 +5,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOllama } from "ollama-ai-provider-v2";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
+import { OPENAI_COMPATIBLE_BASE_URLS } from "./endpoints.js";
 import type { ProviderId } from "./types.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,12 +27,6 @@ export interface ResolvedModelRuntime {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: any;
 }
-
-const OPENAI_COMPATIBLE_BASE_URLS: Record<string, string> = {
-  deepseek: "https://api.deepseek.com",
-  siliconflow: "https://api.siliconflow.com/v1",
-  xai: "https://api.x.ai/v1",
-};
 
 export function createProviderFactory(
   id: ProviderId,

@@ -39,8 +39,32 @@ interface EffectiveMessageRecord {
   timestamp: Date;
 }
 
+/**
+ * On resume, scrub raw base64 image payloads from historical tool results.
+ * Older sessions may have multi-MB Playwright screenshots inlined in tool
+ * outputs (the vision bridge used to leave them in place when the proxy
+ * failed). Loading them back into context causes provider calls to overflow
+ * the model's max context. We replace each oversized base64 blob with a
+ * stable placeholder so the resumed conversation stays under the limit.
+ */
+function sanitizeBase64InMessageJson(json: string): string {
+  if (json.length < 50_000) return json;
+  // Strip data URIs first (`data:image/png;base64,...`).
+  let scrubbed = json.replace(
+    /data:image\/[a-z+]+;base64,[A-Za-z0-9+/]{1000,}={0,2}/g,
+    "[image data removed on resume]",
+  );
+  // Then strip any remaining oversized base64 string literals — likely raw
+  // image payloads in MCP tool result fields (e.g. {"data":"iVBORw0KGgo..."}).
+  scrubbed = scrubbed.replace(
+    /"[A-Za-z0-9+/]{2000,}={0,2}"/g,
+    '"[image data removed on resume]"',
+  );
+  return scrubbed;
+}
+
 function loadMessageRows(sessionId: string): MessageRow[] {
-  return getDatabase()
+  const rows = getDatabase()
     .prepare(`
     SELECT session_id, seq, role, message_json, created_at
     FROM messages
@@ -48,6 +72,10 @@ function loadMessageRows(sessionId: string): MessageRow[] {
     ORDER BY seq ASC
   `)
     .all(sessionId) as MessageRow[];
+  for (const row of rows) {
+    row.message_json = sanitizeBase64InMessageJson(row.message_json);
+  }
+  return rows;
 }
 
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {

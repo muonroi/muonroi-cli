@@ -13,15 +13,17 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, extname } from "node:path";
+import { apiBaseFor } from "./endpoints.js";
 import { needsVisionProxy } from "./vision-proxy.js";
 import { loadKeyForProvider } from "./keychain.js";
 
 const VISION_MODELS = [
-  "Qwen/Qwen2.5-VL-32B-Instruct",
+  "Qwen/Qwen3-VL-8B-Instruct",
   "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "Qwen/Qwen3-VL-32B-Instruct",
 ] as const;
-const SILICONFLOW_BASE = "https://api.siliconflow.com/v1";
-const REQUEST_TIMEOUT_MS = 45_000;
+const SILICONFLOW_BASE = apiBaseFor("siliconflow");
+const REQUEST_TIMEOUT_MS = 90_000;
 const IMAGE_CACHE_MAX = 20;
 const IMAGE_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -162,9 +164,15 @@ export async function bridgeMcpToolResult(
   const context = detectImageContext(toolName, toolOutput);
   const description = await analyzeImages(images, context, signal);
   if (!description) {
+    // Even when the vision proxy fails (no API key / network error), we MUST
+    // still strip the base64 payload from the tool output. Otherwise a single
+    // Playwright screenshot (~1.5MB of base64) lands in conversation history
+    // and blows up the next turn's context window — the failure surfaces as
+    // "maximum context length is 1048576 tokens" at the provider call.
+    const stripped = stripBase64FromOutput(toolOutput);
     return {
-      output: wrapWithFallback(toolOutput, images.length),
-      proxied: false,
+      output: wrapWithFallback(stripped, images.length),
+      proxied: true,
     };
   }
 
@@ -620,6 +628,18 @@ function guessMediaType(base64: string): string {
   return "image/png";
 }
 
+/**
+ * Walk an arbitrary message tree and replace any oversized base64 string
+ * leaves (typically Playwright screenshot payloads) with a stable placeholder.
+ * Used by the orchestrator to scrub `response.messages` BEFORE persisting,
+ * so 1.5MB image bytes don't end up baked into the conversation history
+ * (which would overflow the next turn's context window).
+ */
+export function scrubImagePayloadsInMessages<T>(messages: T[]): T[] {
+  if (!Array.isArray(messages) || messages.length === 0) return messages;
+  return messages.map((m) => stripBase64FromOutput(m) as T);
+}
+
 function stripBase64FromOutput(output: unknown): unknown {
   if (typeof output === "string") {
     let cleaned = output.replace(
@@ -663,33 +683,53 @@ async function callVisionModel(
   signal?: AbortSignal,
 ): Promise<string | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
   if (signal) {
     signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content }],
-      max_tokens: 3072,
-      temperature: 0.1,
-    }),
-    signal: controller.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content }],
+        max_tokens: 3072,
+        temperature: 0.1,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (timedOut) {
+      console.warn(`[vision-bridge] ${model} timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      return null;
+    }
+    if (signal?.aborted) throw err;
+    console.warn(`[vision-bridge] ${model} network error: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 
   clearTimeout(timeout);
-  if (!res.ok) return null;
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.warn(`[vision-bridge] ${model} HTTP ${res.status}: ${errText.slice(0, 200)}`);
+    return null;
+  }
 
-  const data = (await res.json()) as {
-    choices: Array<{ message: { content: string } }>;
-  };
-  return data.choices?.[0]?.message?.content ?? null;
+  const data = (await res.json().catch(() => null)) as {
+    choices?: Array<{ message?: { content?: string } }>;
+  } | null;
+  return data?.choices?.[0]?.message?.content ?? null;
 }
 
 function formatBridgeResult(description: string, imageCount: number, model: string, contextType: string): string {

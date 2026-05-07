@@ -26,8 +26,10 @@ import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
-import { loadKeyForProvider } from "./providers/keychain.js";
+import { consoleUrlFor } from "./providers/endpoints.js";
+import { KEYCHAIN_PROVIDER_IDS, listStoredProviders, loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
 import { detectProviderForModel } from "./providers/runtime.js";
+import type { ProviderId } from "./providers/types.js";
 import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
@@ -72,29 +74,118 @@ process.on("unhandledRejection", (reason) => {
  * Output goes to stderr so it doesn't pollute piped stdout.
  * Returns the trimmed key or null if user cancels / stdin is not a TTY.
  */
-async function firstRunWizard(): Promise<string | null> {
+// Provider console URLs are sourced from providers/endpoints.ts via consoleUrlFor().
+
+/**
+ * Try to find an API key for the model the CLI is about to run with.
+ * Resolution: env (legacy MUONROI_API_KEY) → OS keychain → settings.json.
+ * Returns null if nothing usable is configured anywhere.
+ */
+async function resolveKeyForModel(modelId: string): Promise<string | null> {
+  const provider = detectProviderForModel(modelId);
+  try {
+    const k = await loadKeyForProvider(provider);
+    if (k) return k;
+  } catch { /* fall through to wizard */ }
+  return null;
+}
+
+/**
+ * First-run wizard. If the keychain already has keys, prints a hint
+ * (model probably doesn't match any stored provider). Otherwise prompts
+ * for provider + key and persists to the OS keychain.
+ */
+async function firstRunWizard(currentModel?: string): Promise<string | null> {
   try {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const ask = (q: string): Promise<string> =>
       new Promise((resolve) => rl.question(q, (answer) => resolve(answer)));
 
     process.stderr.write("\nWelcome to muonroi-cli!\n\n");
-    process.stderr.write("To get started, you need an API key from Anthropic.\n");
-    process.stderr.write("Get one at: https://console.anthropic.com/settings/keys\n\n");
 
-    const raw = await ask("Enter your API key: ");
+    const stored = await listStoredProviders();
+    if (stored.length > 0) {
+      process.stderr.write(`Keys already in keychain for: ${stored.join(", ")}\n`);
+      if (currentModel) {
+        const provider = detectProviderForModel(currentModel);
+        process.stderr.write(
+          `Current model '${currentModel}' uses provider '${provider}', which has no stored key.\n`,
+        );
+      }
+      process.stderr.write(
+        "\nOptions:\n" +
+          "  1. Run with a model that matches a stored provider:\n" +
+          "       muonroi-cli --model <model-id>\n" +
+          "  2. Add a key for the missing provider:\n" +
+          "       muonroi-cli keys set <provider>\n" +
+          "  3. Edit ~/.muonroi-cli/user-settings.json and set defaultModel.\n\n",
+      );
+      rl.close();
+      return null;
+    }
+
+    const providers = KEYCHAIN_PROVIDER_IDS;
+    process.stderr.write(
+      "Pick a provider to set up first (more can be added later via 'muonroi-cli keys set'):\n\n",
+    );
+    providers.forEach((p, i) => {
+      process.stderr.write(`  ${i + 1}. ${p.padEnd(12)}  ${consoleUrlFor(p)}\n`);
+    });
+    process.stderr.write("\n");
+
+    const choice = (await ask(`Provider [1-${providers.length}, default 1]: `)).trim();
+    const idx = choice ? Number.parseInt(choice, 10) - 1 : 0;
+    if (!Number.isFinite(idx) || idx < 0 || idx >= providers.length) {
+      process.stderr.write("Invalid choice — aborted.\n");
+      rl.close();
+      return null;
+    }
+    const provider = providers[idx];
+    if (!provider) {
+      process.stderr.write("Invalid choice — aborted.\n");
+      rl.close();
+      return null;
+    }
+
+    process.stderr.write(`\nGet a key here: ${consoleUrlFor(provider)}\n`);
+    const raw = await ask(`Paste your ${provider} API key: `);
     rl.close();
 
     const trimmed = raw.trim();
     if (!trimmed) {
-      process.stderr.write(
-        "No key provided. Set MUONROI_API_KEY env var or run again to enter key.\n",
-      );
+      process.stderr.write("No key provided. Aborted.\n");
       return null;
     }
+    if (trimmed.length < 20) {
+      process.stderr.write("Key looks too short (< 20 chars). Aborted.\n");
+      return null;
+    }
+
+    try {
+      const ok = await setKeyForProvider(provider, trimmed);
+      if (ok) {
+        process.stderr.write(`\nStored ${provider} key in OS keychain.\n`);
+        if (currentModel) {
+          const currentProvider = detectProviderForModel(currentModel);
+          if (currentProvider !== provider) {
+            process.stderr.write(
+              `\nNote: defaultModel '${currentModel}' is on '${currentProvider}'. ` +
+                `Edit ~/.muonroi-cli/user-settings.json or rerun with --model to use ${provider}.\n`,
+            );
+          }
+        }
+      } else {
+        process.stderr.write(
+          "\nOS keychain unavailable on this platform. Key will be used for this session only.\n" +
+            `For persistence, set env var: ${provider.toUpperCase()}_API_KEY\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(`\nWarning: failed to store key in keychain: ${(err as Error).message}\n`);
+    }
+
     return trimmed;
   } catch {
-    // stdin is not a TTY or readline errors — fail silently
     return null;
   }
 }
@@ -214,8 +305,12 @@ async function startInteractive(
   // user can see the terminal before the window disappears.
   const isWezTerm =
     !!process.env.WEZTERM_PANE ||
+    !!process.env.WEZTERM_EXECUTABLE ||
+    !!process.env.WEZTERM_CONFIG_FILE ||
+    !!process.env.WEZTERM_UNIX_SOCKET ||
     process.env.TERM_PROGRAM === "WezTerm" ||
-    process.env.TERM_PROGRAM === "wezterm";
+    process.env.TERM_PROGRAM === "wezterm" ||
+    process.env.MUONROI_FORCE_SHELL_HOLD === "1";
 
   const onExit = () => {
     void agent.cleanup().finally(() => {
@@ -224,12 +319,33 @@ async function startInteractive(
 
       renderer.destroy();
 
-      // Write the alternate-screen-exit sequence directly to stdout as a
-      // safety net in case the native code path didn't flush it.
+      // Restore terminal modes BEFORE spawning child shell. Use synchronous
+      // writes to stdout's underlying fd so escape codes flush before the
+      // child inherits stdin — async process.stdout.write() can buffer past
+      // the spawn() boundary, leaving the terminal in mouse-tracking mode.
+      const writeSync = (seq: string) => {
+        try {
+          const fs = require("node:fs") as typeof import("node:fs");
+          fs.writeSync(1, seq);
+        } catch { /* fall back to async */
+          try { process.stdout.write(seq); } catch { /* noop */ }
+        }
+      };
       try {
-        process.stdout.write("\x1B[?1049l\x1B[0m");
-        process.stdout.write("\x1B[?1000l\x1B[?1002l\x1B[?1003l\x1B[?1006l");
-        process.stdout.write("\x1B[?2004l"); // disable bracketed paste
+        // 1. Take stdin out of raw mode + pause it so no buffered keystrokes
+        //    (or in-flight mouse-event bytes) hit the child shell.
+        if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+          try { process.stdin.setRawMode(false); } catch { /* noop */ }
+        }
+        try { process.stdin.pause(); } catch { /* noop */ }
+        try { (process.stdin as unknown as { unref?: () => void }).unref?.(); } catch { /* noop */ }
+        // 2. Disable extended-coords first (1006/1015/1005), then the basic
+        //    tracking modes (1003→1002→1000). Wrong order leaves the terminal
+        //    emitting SGR-formatted events after the base modes are off.
+        writeSync("\x1B[?1006l\x1B[?1015l\x1B[?1005l");
+        writeSync("\x1B[?1003l\x1B[?1002l\x1B[?1000l");
+        writeSync("\x1B[?2004l\x1B[?25h");           // bracketed paste off, cursor on
+        writeSync("\x1B[?1049l\x1B[0m\x1B[!p");      // exit alt-screen, reset SGR, soft reset
       } catch {
         // best-effort
       }
@@ -240,19 +356,26 @@ async function startInteractive(
       // Disable with MUONROI_NO_SHELL_HOLD=1.
       const holdMode = process.env.MUONROI_NO_SHELL_HOLD === "1" ? "exit" : isWezTerm ? "shell" : "exit";
       if (holdMode === "shell") {
-        try {
-          const { spawn } = require("node:child_process") as typeof import("node:child_process");
-          const isWin = process.platform === "win32";
-          const shellCmd = process.env.MUONROI_EXIT_SHELL
-            || process.env.SHELL
-            || (isWin ? (process.env.COMSPEC || "cmd.exe") : "/bin/bash");
-          process.stdout.write("\nSession ended. Returning to shell — type `exit` to close this pane.\n\n");
-          const child = spawn(shellCmd, [], { stdio: "inherit", shell: false });
-          child.on("exit", (code) => process.exit(code ?? 0));
-          child.on("error", () => process.exit(0));
-        } catch {
-          setTimeout(() => process.exit(0), 16);
-        }
+        // Defer spawn so the disable sequences are processed by the terminal
+        // BEFORE the child shell takes over stdin. Without this, the child
+        // can race with the in-flight disable codes and inherit a still-
+        // mouse-tracking terminal (visible as "35;145;26M" garbage at the
+        // shell prompt when the user moves the mouse).
+        setTimeout(() => {
+          try {
+            const { spawn } = require("node:child_process") as typeof import("node:child_process");
+            const isWin = process.platform === "win32";
+            const shellCmd = process.env.MUONROI_EXIT_SHELL
+              || process.env.SHELL
+              || (isWin ? (process.env.COMSPEC || "cmd.exe") : "/bin/bash");
+            writeSync("\nSession ended. Returning to shell — type `exit` to close this pane.\n\n");
+            const child = spawn(shellCmd, [], { stdio: "inherit", shell: false });
+            child.on("exit", (code) => process.exit(code ?? 0));
+            child.on("error", () => process.exit(0));
+          } catch {
+            setTimeout(() => process.exit(0), 16);
+          }
+        }, 80);
       } else {
         // Give the OS a tick to flush stdout before we exit.
         setTimeout(() => process.exit(0), 16);
@@ -519,12 +642,25 @@ program
 
     const config = resolveConfig(options);
 
+    // No legacy key in env / settings — try the OS keychain for the resolved
+    // model's provider before falling back to the wizard.
+    if (!config.apiKey) {
+      const modelForResolve = config.model ?? getCurrentModel("agent");
+      const keychainKey = await resolveKeyForModel(modelForResolve);
+      if (keychainKey) {
+        config.apiKey = keychainKey;
+      }
+    }
+
     // First-run wizard (interactive only, before any TUI code)
     const isInteractive = !options.prompt && !options.verify && process.stdin.isTTY;
     if (!config.apiKey && isInteractive) {
-      const wizardKey = await firstRunWizard();
+      const modelForWizard = config.model ?? getCurrentModel("agent");
+      const wizardKey = await firstRunWizard(modelForWizard);
       if (wizardKey) {
-        saveUserSettings({ apiKey: wizardKey });
+        // Key is already persisted to the OS keychain by the wizard. We DO NOT
+        // write it back to settings.json (avoids resurrecting plaintext that
+        // 'keys cleanup-settings' just removed).
         config.apiKey = wizardKey;
       } else {
         process.exit(1);
@@ -573,7 +709,7 @@ program
           "Update your key:\n" +
           "  muonroi-cli -k YOUR_NEW_KEY\n" +
           "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
-          "\nGet a key at: https://console.anthropic.com/settings/keys",
+          `\nGet a key at: ${consoleUrlFor("anthropic")}`,
         );
       } else {
         console.error(
@@ -581,7 +717,7 @@ program
           "Set your key:\n" +
           "  muonroi-cli -k YOUR_API_KEY\n" +
           "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
-          "\nGet a key at: https://console.anthropic.com/settings/keys",
+          `\nGet a key at: ${consoleUrlFor("anthropic")}`,
         );
       }
       process.exit(1);
@@ -762,6 +898,51 @@ program
     const { buildBugReport, formatBugReport } = await import("./ops/bug-report.js");
     const bundle = await buildBugReport();
     console.log(formatBugReport(bundle));
+  });
+
+const keys = program
+  .command("keys")
+  .description("Manage provider API keys via the OS keychain (set, list, delete, import-bw)");
+
+keys
+  .command("set <provider>")
+  .description("Prompt for a provider API key and store it in the OS keychain")
+  .action(async (provider: string) => {
+    const { runKeysSet } = await import("./cli/keys.js");
+    await runKeysSet(provider);
+  });
+
+keys
+  .command("list")
+  .description("Show provider keys currently stored in the OS keychain (masked)")
+  .action(async () => {
+    const { runKeysList } = await import("./cli/keys.js");
+    await runKeysList();
+  });
+
+keys
+  .command("delete <provider>")
+  .description("Delete a stored provider key from the OS keychain")
+  .action(async (provider: string) => {
+    const { runKeysDelete } = await import("./cli/keys.js");
+    await runKeysDelete(provider);
+  });
+
+keys
+  .command("import-bw [providers...]")
+  .description("Import keys from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)")
+  .option("--prefix <prefix>", "Vault item name prefix (default: 'muonroi-cli/')", "muonroi-cli/")
+  .action(async (providers: string[], opts: { prefix: string }) => {
+    const { runKeysImportBw } = await import("./cli/keys.js");
+    await runKeysImportBw({ providers, itemPrefix: opts.prefix });
+  });
+
+keys
+  .command("cleanup-settings")
+  .description("Strip plaintext API keys out of ~/.muonroi-cli/user-settings.json after migrating to keychain")
+  .action(async () => {
+    const { runKeysCleanupSettings } = await import("./cli/keys.js");
+    await runKeysCleanupSettings();
   });
 
 program.parse();

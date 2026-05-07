@@ -39,7 +39,7 @@ import { MODES } from "../types/index";
 import { processAtMentions } from "../utils/at-mentions.js";
 import { FileIndex } from "../utils/file-index.js";
 import { readClipboardImage } from "../utils/clipboard-image";
-import { copyTextToHostClipboard } from "../utils/host-clipboard";
+import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/host-clipboard";
 import {
   type CustomSubagentConfig,
   getApiKey,
@@ -100,6 +100,7 @@ import "./slash/execute.js";
 import "./slash/compact.js";
 import "./slash/expand.js";
 import "./slash/clear.js";
+import "./slash/pin.js";
 import "./slash/cost.js";
 import "./slash/ee.js";
 import "./slash/debug.js";
@@ -469,6 +470,7 @@ const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "wallet", label: "wallet", description: "Wallet and payment settings" },
   { id: "models", label: "models", description: "Select a model" },
   { id: "new", label: "new session", description: "Start a new session" },
+  { id: "sessions", label: "sessions", description: "List recent sessions to resume" },
   { id: "commit-push", label: "commit & push", description: "Commit and push" },
   { id: "commit-pr", label: "commit & pr", description: "Commit and open PR" },
   { id: "review", label: "review", description: "Review recent changes" },
@@ -904,6 +906,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const pasteBlocksRef = useRef<PasteBlock[]>([]);
   const apiKeyInputRef = useRef<TextareaRenderable>(null);
   const inputRef = useRef<TextareaRenderable>(null);
+  // Per-session input history: ArrowUp recalls earlier submitted prompts when
+  // the prompt buffer is empty. Lives only in component state, so each session
+  // (process) starts with a clean slate — no rác history bleeding between sessions.
+  const inputHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number>(-1);
+  const historyDraftRef = useRef<string>("");
   const scrollRef = useRef<ScrollBoxRenderable>(null);
   const { width, height } = useTerminalDimensions();
   const processedInitial = useRef(false);
@@ -1992,7 +2000,28 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     return true;
   }, [renderer, showCopyBanner]);
 
-  const handleRootMouseUp = useCallback(() => {
+  const handleRootMouseUp = useCallback((event?: { button?: number }) => {
+    // Right-click semantics:
+    //   - With selection → copy (same as left).
+    //   - Without selection → paste clipboard text into the input buffer.
+    // Left/middle-click keep the prior copy-on-release-with-selection behavior.
+    const isRightClick = event?.button === 2;
+    if (isRightClick) {
+      const copied = copyTuiSelectionToHost();
+      if (!copied) {
+        const ta = inputRef.current;
+        const text = readTextFromHostClipboard();
+        if (ta && text) {
+          const current = ta.plainText || "";
+          const insertAt = (typeof ta.cursorOffset === "number") ? ta.cursorOffset : current.length;
+          const next = current.slice(0, insertAt) + text + current.slice(insertAt);
+          ta.setText(next);
+          try { ta.cursorOffset = insertAt + text.length; } catch { /* noop */ }
+        }
+      }
+      inputRef.current?.focus();
+      return;
+    }
     copyTuiSelectionToHost();
     inputRef.current?.focus();
   }, [copyTuiSelectionToHost]);
@@ -2651,6 +2680,41 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             return;
           }
 
+          if (result === "__PIN_LAST__") {
+            const seq = agent.pinLastUserMessage();
+            setMessages((prev) => [
+              ...prev,
+              buildAssistantEntry(seq === null ? "No user message to pin." : `Pinned user message (seq=${seq}). It will survive compaction.`),
+            ]);
+            return;
+          }
+          if (result.startsWith("__PIN_SEQ__")) {
+            const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+            const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
+            setMessages((prev) => [
+              ...prev,
+              buildAssistantEntry(ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`),
+            ]);
+            return;
+          }
+          if (result.startsWith("__UNPIN_SEQ__")) {
+            const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+            const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
+            setMessages((prev) => [
+              ...prev,
+              buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+            ]);
+            return;
+          }
+          if (result === "__PINS_LIST__") {
+            const seqs = agent.getPinnedSeqs();
+            setMessages((prev) => [
+              ...prev,
+              buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+            ]);
+            return;
+          }
+
           if (result.startsWith("__COUNCIL__")) {
             const lines = result.split("\n");
             const topic = lines.slice(2).join("\n");
@@ -2873,6 +2937,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           agent.clearHistory();
           resetToNewSession();
           break;
+        case "sessions": {
+          // List recent sessions in this workspace so the user can pick one
+          // to resume on next launch (`muonroi-cli --session <id>`).
+          let body = "No prior sessions found in this workspace.";
+          try {
+            const { SessionStore } = require("../storage/sessions.js") as typeof import("../storage/sessions.js");
+            const store = new SessionStore(agent.getCwd());
+            const sessions = store.listRecentSessions(15);
+            if (sessions.length > 0) {
+              const lines = sessions.map((s, idx) => {
+                const ts = new Date(s.updatedAt).toLocaleString();
+                const title = s.title?.trim() || "(untitled)";
+                const truncTitle = title.length > 80 ? title.slice(0, 77) + "..." : title;
+                return `${String(idx + 1).padStart(2)}. [${s.id}] ${ts}  ${s.model}\n    ${truncTitle}`;
+              });
+              body = [
+                "Recent sessions in this workspace:",
+                "",
+                ...lines,
+                "",
+                "Resume on next launch:  muonroi-cli --session <id>",
+                "Or:                     muonroi-cli --session latest",
+              ].join("\n");
+            }
+          } catch (err) {
+            body = `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`;
+          }
+          setMessages((p) => [
+            ...p,
+            { type: "assistant", content: body, timestamp: new Date() },
+          ]);
+          break;
+        }
         default: {
           // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug, council)
           dispatchSlash(item.id, [], {
@@ -2907,6 +3004,40 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               const summary = result.replace(/^__CLEAR__\n/, "");
               agent.clearHistory();
               setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
+              return;
+            }
+            if (result === "__PIN_LAST__") {
+              const seq = agent.pinLastUserMessage();
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(seq === null ? "No user message to pin." : `Pinned user message (seq=${seq}). It will survive compaction.`),
+              ]);
+              return;
+            }
+            if (result.startsWith("__PIN_SEQ__")) {
+              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+              const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`),
+              ]);
+              return;
+            }
+            if (result.startsWith("__UNPIN_SEQ__")) {
+              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+              const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+              ]);
+              return;
+            }
+            if (result === "__PINS_LIST__") {
+              const seqs = agent.getPinnedSeqs();
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+              ]);
               return;
             }
             if (result.startsWith("__COUNCIL__")) {
@@ -3858,6 +3989,55 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         cycleMode();
         return;
       }
+      // Per-session input history: ArrowUp/ArrowDown navigate previously
+      // submitted prompts when the buffer is empty (or when we're already
+      // browsing history). A non-empty draft falls through so the textarea
+      // can still move the cursor between lines.
+      if ((key.name === "up" || key.name === "down") && !key.ctrl && !key.meta) {
+        const ta = inputRef.current;
+        if (!ta) return;
+        const hist = inputHistoryRef.current;
+        if (hist.length === 0) return;
+        const browsing = historyIndexRef.current !== -1;
+        const buffer = ta.plainText || "";
+        if (!browsing && buffer.length > 0) return;
+        if (key.name === "up") {
+          if (!browsing) {
+            historyDraftRef.current = buffer;
+            historyIndexRef.current = hist.length - 1;
+          } else if (historyIndexRef.current > 0) {
+            historyIndexRef.current -= 1;
+          } else {
+            key.preventDefault();
+            key.stopPropagation();
+            return;
+          }
+          const entry = hist[historyIndexRef.current] ?? "";
+          ta.setText(entry);
+          try { ta.cursorOffset = entry.length; } catch { /* opentui versions vary */ }
+          key.preventDefault();
+          key.stopPropagation();
+          return;
+        }
+        if (key.name === "down") {
+          if (!browsing) return;
+          if (historyIndexRef.current < hist.length - 1) {
+            historyIndexRef.current += 1;
+            const entry = hist[historyIndexRef.current] ?? "";
+            ta.setText(entry);
+            try { ta.cursorOffset = entry.length; } catch { /* noop */ }
+          } else {
+            historyIndexRef.current = -1;
+            const draft = historyDraftRef.current;
+            historyDraftRef.current = "";
+            ta.setText(draft);
+            try { ta.cursorOffset = draft.length; } catch { /* noop */ }
+          }
+          key.preventDefault();
+          key.stopPropagation();
+          return;
+        }
+      }
     },
     [
       agent,
@@ -3973,6 +4153,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleSubmit = useCallback(() => {
     const raw = inputRef.current?.plainText || "";
+    if (raw.trim()) {
+      const hist = inputHistoryRef.current;
+      const last = hist[hist.length - 1];
+      if (raw !== last) hist.push(raw);
+      // Keep history bounded — 200 most recent entries is plenty for one session.
+      if (hist.length > 200) hist.splice(0, hist.length - 200);
+    }
+    historyIndexRef.current = -1;
+    historyDraftRef.current = "";
     if (!raw.trim() && pasteBlocksRef.current.length === 0) {
       if (queuedMessagesRef.current.length > 0 && isProcessingRef.current) {
         interruptedRunIdRef.current = activeRunIdRef.current;
@@ -4081,16 +4270,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             {/* Scrollable messages */}
             {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
             <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
-              {messages.map((msg, i) => (
-                <MessageView
-                  key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
-                  entry={msg}
-                  index={i}
-                  t={t}
-                  modeColor={modeInfo.color}
-                  expandedMessages={expandedMessages}
-                />
-              ))}
+              {(() => {
+                const mcpRuns = computeMcpRunInfo(messages);
+                return messages.map((msg, i) => (
+                  <MessageView
+                    key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
+                    entry={msg}
+                    index={i}
+                    t={t}
+                    modeColor={modeInfo.color}
+                    expandedMessages={expandedMessages}
+                    mcpRun={mcpRuns[i]}
+                  />
+                ));
+              })()}
               {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
                 <box paddingLeft={3} marginTop={1} flexShrink={0}>
                   <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
@@ -4962,19 +5155,79 @@ function UserMessageContent({ content, t, expanded }: { content: string; t: Them
   );
 }
 
+/** Per-index instructions for collapsing consecutive identical MCP fs calls. */
+export interface McpRunInfo {
+  /** True when this entry should NOT render (it's a continuation of an earlier run). */
+  hidden: boolean;
+  /** When set, this entry IS the head of a run with N entries — show the count badge. */
+  count?: number;
+  /** Extracted paths for the run (head only), used to render a compact list under the header. */
+  paths?: string[];
+}
+
+/**
+ * Walks the messages array once and computes a McpRunInfo per index. Two
+ * consecutive `tool_result` entries belong to the same run iff their tool name
+ * is the same MCP filesystem call. The first index in a run carries the count
+ * and the path list; subsequent indices are marked hidden so they don't render.
+ */
+export function computeMcpRunInfo(messages: ChatEntry[]): McpRunInfo[] {
+  const out: McpRunInfo[] = messages.map(() => ({ hidden: false }));
+  let runStart = -1;
+  let runName: string | null = null;
+  const runPaths: string[] = [];
+
+  const finalizeRun = () => {
+    if (runStart >= 0 && runPaths.length > 1) {
+      out[runStart] = { hidden: false, count: runPaths.length, paths: [...runPaths] };
+      for (let k = runStart + 1; k < runStart + runPaths.length; k++) {
+        out[k] = { hidden: true };
+      }
+    }
+    runStart = -1;
+    runName = null;
+    runPaths.length = 0;
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const tc = m.toolCall;
+    const isMcpFsResult = m.type === "tool_result" && tc && describeMcpFsTool(tc.function.name) !== null;
+    if (isMcpFsResult) {
+      const name = tc!.function.name;
+      const path = toolArgs(tc) || "";
+      if (runName === name) {
+        runPaths.push(path);
+      } else {
+        finalizeRun();
+        runStart = i;
+        runName = name;
+        runPaths.push(path);
+      }
+    } else {
+      finalizeRun();
+    }
+  }
+  finalizeRun();
+  return out;
+}
+
 function MessageView({
   entry,
   index,
   t,
   modeColor,
   expandedMessages,
+  mcpRun,
 }: {
   entry: ChatEntry;
   index: number;
   t: Theme;
   modeColor: string;
   expandedMessages?: Set<number>;
+  mcpRun?: McpRunInfo;
 }) {
+  if (mcpRun?.hidden) return null;
   switch (entry.type) {
     case "user":
       return (
@@ -5120,6 +5373,39 @@ function MessageView({
             {` Search "${trunc(args, 60)}"`}
           </InlineTool>
         );
+
+      // MCP filesystem tools — render a friendly label, and collapse consecutive
+      // identical calls into a single header line + compact path list.
+      const mcpDesc = entry.toolCall ? describeMcpFsTool(name) : null;
+      if (mcpDesc) {
+        if (mcpRun?.count && mcpRun.count > 1 && mcpRun.paths) {
+          const PREVIEW = 4;
+          const head = mcpRun.paths.slice(0, PREVIEW);
+          const rest = mcpRun.paths.length - head.length;
+          return (
+            <box flexDirection="column" gap={0}>
+              <InlineTool t={t} pending={false}>
+                {`MCP ${mcpDesc.ns} ${mcpDesc.verb} × ${mcpRun.count}`}
+              </InlineTool>
+              {head.map((p, i) => (
+                <box key={`mcprun-${index}-${i}`} paddingLeft={5}>
+                  <text fg={t.textDim}>{`· ${trunc(p || "(no path)", 80)}`}</text>
+                </box>
+              ))}
+              {rest > 0 && (
+                <box paddingLeft={5}>
+                  <text fg={t.textDim}>{`· … +${rest} more`}</text>
+                </box>
+              )}
+            </box>
+          );
+        }
+        return (
+          <InlineTool t={t} pending={false}>
+            {`MCP ${mcpDesc.ns} ${mcpDesc.verb}${args ? ` ${trunc(args, 60)}` : ""}`}
+          </InlineTool>
+        );
+      }
 
       return (
         <InlineTool t={t} pending={false}>
@@ -6713,6 +6999,33 @@ function isEscapeKey(key: KeyEvent): boolean {
   );
 }
 
+/**
+ * Maps MCP tool names like `mcp_filesystem__read_text_file` to a short verb
+ * + namespace pair we can render in a compact line. Returns null when the
+ * tool is not an MCP filesystem call we have a friendly label for.
+ */
+function describeMcpFsTool(name: string): { verb: string; ns: string } | null {
+  if (!name.startsWith("mcp_filesystem__") && !name.startsWith("mcp__filesystem__")) return null;
+  const op = name.replace(/^mcp_+filesystem__/, "");
+  const verbMap: Record<string, string> = {
+    read_text_file: "read",
+    read_file: "read",
+    read_media_file: "read media",
+    read_multiple_files: "read multi",
+    write_file: "write",
+    edit_file: "edit",
+    create_directory: "mkdir",
+    list_directory: "ls",
+    list_directory_with_sizes: "ls -s",
+    directory_tree: "tree",
+    move_file: "mv",
+    search_files: "search",
+    get_file_info: "stat",
+    list_allowed_directories: "list-allowed",
+  };
+  return { verb: verbMap[op] ?? op.replace(/_/g, " "), ns: "fs" };
+}
+
 function toolArgs(tc?: ToolCall): string {
   if (!tc) return "";
   try {
@@ -6720,6 +7033,12 @@ function toolArgs(tc?: ToolCall): string {
     if (tc.function.name === "bash") return (a.command || "").replace(/\n/g, " ").trim();
     if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
       return a.file_path || a.path || "";
+    if (describeMcpFsTool(tc.function.name)) {
+      // Most MCP fs tools take `path`; some take `paths` (read_multiple_files) or `source`/`destination` (move_file).
+      if (Array.isArray(a.paths)) return a.paths.join(", ");
+      if (a.source && a.destination) return `${a.source} → ${a.destination}`;
+      return a.path || a.pattern || "";
+    }
     if (tc.function.name === "grep") {
       const path = a.path ? ` in ${a.path}` : "";
       return `"${a.pattern || ""}"${path}`;
@@ -6771,6 +7090,8 @@ function toolLabel(tc: ToolCall): string {
   if (tc.function.name === "process_stop") return `Stop process ${args}`;
   if (tc.function.name === "process_list") return "List processes";
   if (tc.function.name === "generate_plan") return "Generating plan...";
+  const mcp = describeMcpFsTool(tc.function.name);
+  if (mcp) return `MCP ${mcp.ns} ${mcp.verb}${args ? ` ${trunc(args, 60)}` : ""}`;
   return trunc(`${tc.function.name} ${args}`, 80);
 }
 function sanitizeContent(raw: string): string {

@@ -1,5 +1,5 @@
 import type { ModelMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildEffectiveTranscript, type PersistedCompaction } from "../storage/transcript-view";
 import {
   COMPACTION_SUMMARY_HEADER,
@@ -9,6 +9,12 @@ import {
   serializeConversation,
   shouldCompactContext,
 } from "./compaction";
+import { __forceFallbackForTests } from "./token-counter";
+
+// Pin token counts to the chars/4 fallback so cut-point assertions remain stable.
+// The real BPE tokenizer is exercised by token-counter's own tests.
+beforeAll(() => __forceFallbackForTests(true));
+afterAll(() => __forceFallbackForTests(false));
 
 function user(text: string): ModelMessage {
   return { role: "user", content: text } as ModelMessage;
@@ -101,6 +107,47 @@ describe("compaction helpers", () => {
 
     expect(transcript).toContain("[Tool result from bash]:");
     expect(transcript).toContain("more characters truncated");
+  });
+
+  it("preserves both head and tail of long tool results", () => {
+    // Distinctive head and tail tokens — head-only truncation would lose the tail.
+    const head = "HEAD_MARKER_START";
+    const tail = "TAIL_MARKER_END";
+    const filler = "x".repeat(10_000);
+    const payload = `${head}${filler}${tail}`;
+    const transcript = serializeConversation([user("read"), toolResult("call-1", "bash", payload)]);
+
+    expect(transcript).toContain(head);
+    expect(transcript).toContain(tail);
+    expect(transcript).toContain("more characters truncated");
+  });
+
+  it("dedupes identical large tool-result payloads across history + turn-prefix slices", () => {
+    const bigOutput = "y".repeat(2000); // > DEDUP_MIN_CHARS (500)
+    const messages = [
+      user("read it"),
+      assistantToolCall("c1", "read_file", { path: "src/a.ts" }),
+      toolResult("c1", "read_file", bigOutput),
+      assistantText("ok"),
+      user("read it again"),
+      assistantToolCall("c2", "read_file", { path: "src/a.ts" }),
+      toolResult("c2", "read_file", bigOutput),
+      assistantText("done"),
+      user("latest"),
+      assistantText("recent reply"),
+    ];
+
+    const preparation = prepareCompaction(messages, "system", {
+      reserveTokens: 100,
+      keepRecentTokens: 50,
+    });
+
+    expect(preparation).not.toBeNull();
+    const fullSlice = [...(preparation?.messagesToSummarize ?? []), ...(preparation?.turnPrefixMessages ?? [])];
+    const serialized = serializeConversation(fullSlice);
+    // First occurrence kept verbatim, second replaced with the elision marker.
+    expect(serialized).toContain("Identical to earlier read_file result");
+    expect(serialized.match(/y{2000}/g) ?? []).toHaveLength(1);
   });
 
   it("builds the effective transcript from the latest persisted checkpoint", () => {

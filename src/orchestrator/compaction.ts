@@ -2,6 +2,7 @@ import { generateText, type ModelMessage } from "ai";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
 import { containsEncryptedReasoning } from "./reasoning";
+import { countTokens } from "./token-counter.js";
 
 export interface CompactionSettings {
   reserveTokens: number;
@@ -149,7 +150,52 @@ function stringifyForSummary(value: unknown): string {
 
 function truncateForSummary(text: string, maxChars = TOOL_RESULT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}\n\n[... ${text.length - maxChars} more characters truncated]`;
+  // Keep head + tail. Errors, exit codes, and summaries usually live at the end of long
+  // tool outputs; head-only truncation routinely drops the most diagnostic lines.
+  const headChars = Math.floor(maxChars * 0.6);
+  const tailChars = maxChars - headChars;
+  const omitted = text.length - maxChars;
+  return `${text.slice(0, headChars)}\n\n[... ${omitted} more characters truncated ...]\n\n${text.slice(-tailChars)}`;
+}
+
+function hashString(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) - h + s.charCodeAt(i)) | 0;
+  }
+  return h.toString(36);
+}
+
+const DEDUP_MIN_CHARS = 500;
+
+/**
+ * Dedup identical tool-result payloads inside a slice destined for summarization.
+ * Repeated reads of an unchanged file inflate the summarize prompt with
+ * (truncated) duplicates that cost tokens and add zero new context.
+ */
+function dedupToolResultsWithState(messages: ModelMessage[], seenHashes: Set<string>): ModelMessage[] {
+  return messages.map((msg) => {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) return msg;
+    const parts = msg.content as unknown[];
+    const newContent = parts.map((part) => {
+      if (!isRecord(part) || part.type !== "tool-result") return part;
+      const serialized = stringifyForSummary((part as Record<string, unknown>).output);
+      if (serialized.length < DEDUP_MIN_CHARS) return part;
+      const hash = hashString(serialized);
+      if (seenHashes.has(hash)) {
+        const toolName = typeof (part as Record<string, unknown>).toolName === "string"
+          ? ((part as Record<string, unknown>).toolName as string)
+          : "tool";
+        return {
+          ...(part as Record<string, unknown>),
+          output: `[Identical to earlier ${toolName} result; ${serialized.length} chars elided]`,
+        };
+      }
+      seenHashes.add(hash);
+      return part;
+    });
+    return { ...msg, content: newContent as typeof msg.content };
+  });
 }
 
 export function extractUserContent(content: unknown): string {
@@ -226,34 +272,32 @@ export function getCompactionSummaryText(message: ModelMessage | undefined): str
   return message.content.slice(COMPACTION_SUMMARY_HEADER.length).trim();
 }
 
-export function estimateMessageTokens(message: ModelMessage): number {
-  let chars = 0;
-
+function messageToString(message: ModelMessage): string {
   switch (message.role) {
     case "user":
-      chars += extractUserContent(message.content).length;
-      break;
-    case "assistant":
-      chars += extractAssistantText(message.content).length;
-      chars += extractToolCallText(message.content).join("; ").length;
-      break;
+      return extractUserContent(message.content);
+    case "assistant": {
+      const text = extractAssistantText(message.content);
+      const toolCalls = extractToolCallText(message.content).join("; ");
+      return toolCalls ? `${text}\n${toolCalls}` : text;
+    }
     case "tool":
-      chars += extractToolResultText(message.content).join("\n").length;
-      break;
+      return extractToolResultText(message.content).join("\n");
     case "system":
-      chars +=
-        typeof message.content === "string" ? message.content.length : getTextParts(message.content).join("\n").length;
-      break;
+      return typeof message.content === "string"
+        ? message.content
+        : getTextParts(message.content).join("\n");
     default:
-      chars += stringifyForSummary((message as { content?: unknown }).content).length;
-      break;
+      return stringifyForSummary((message as { content?: unknown }).content);
   }
+}
 
-  return Math.ceil(chars / 4);
+export function estimateMessageTokens(message: ModelMessage): number {
+  return countTokens(messageToString(message));
 }
 
 export function estimateConversationTokens(systemPrompt: string, messages: ModelMessage[], inFlightText = ""): number {
-  const systemTokens = Math.ceil((systemPrompt.length + inFlightText.length) / 4);
+  const systemTokens = countTokens(systemPrompt) + (inFlightText ? countTokens(inFlightText) : 0);
   return systemTokens + messages.reduce((sum, message) => sum + estimateMessageTokens(message), 0);
 }
 
@@ -325,10 +369,16 @@ export function prepareCompaction(
 
   const cutPoint = findCutPoint(messages, boundaryStart, settings.keepRecentTokens);
   const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptIndex;
-  const messagesToSummarize = messages.slice(boundaryStart, Math.max(boundaryStart, historyEnd));
-  const turnPrefixMessages = cutPoint.isSplitTurn
+  const rawHistory = messages.slice(boundaryStart, Math.max(boundaryStart, historyEnd));
+  const rawTurnPrefix = cutPoint.isSplitTurn
     ? messages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptIndex)
     : [];
+  // Shared dedup state — second occurrence of a duplicate tool-result gets stubbed
+  // even when the first occurrence is in the history slice and the second in the prefix.
+  const dedupState = new Set<string>();
+  const messagesToSummarize = dedupToolResultsWithState(rawHistory, dedupState);
+  const turnPrefixMessages = dedupToolResultsWithState(rawTurnPrefix, dedupState);
+  // keptMessages stay verbatim — they live in the active conversation, not the summarize prompt.
   const keptMessages = messages.slice(cutPoint.firstKeptIndex);
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
@@ -413,6 +463,31 @@ export function serializeConversation(messages: ModelMessage[]): string {
   return parts.join("\n\n");
 }
 
+export interface CompactionUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+export interface CompactionSummaryResult {
+  summary: string;
+  usage: CompactionUsage;
+}
+
+function readUsage(usage: unknown): CompactionUsage {
+  if (!isRecord(usage)) return { promptTokens: 0, completionTokens: 0 };
+  const prompt = typeof usage.inputTokens === "number"
+    ? usage.inputTokens
+    : typeof (usage as Record<string, unknown>).promptTokens === "number"
+      ? (usage as { promptTokens: number }).promptTokens
+      : 0;
+  const completion = typeof usage.outputTokens === "number"
+    ? usage.outputTokens
+    : typeof (usage as Record<string, unknown>).completionTokens === "number"
+      ? (usage as { completionTokens: number }).completionTokens
+      : 0;
+  return { promptTokens: prompt, completionTokens: completion };
+}
+
 async function summarizeConversation(
   provider: LegacyProvider,
   modelId: string,
@@ -422,7 +497,7 @@ async function summarizeConversation(
   previousSummary?: string,
   promptOverride?: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<CompactionSummaryResult> {
   const serialized = serializeConversation(messages);
   const promptParts = [serialized];
 
@@ -438,7 +513,7 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(provider, modelId);
-  const { text } = await generateText({
+  const result = await generateText({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
     prompt: promptParts.filter(Boolean).join("\n\n"),
@@ -451,7 +526,18 @@ async function summarizeConversation(
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
   });
 
-  return text.trim();
+  return { summary: result.text.trim(), usage: readUsage(result.usage) };
+}
+
+function emptyUsage(): CompactionUsage {
+  return { promptTokens: 0, completionTokens: 0 };
+}
+
+function addUsage(a: CompactionUsage, b: CompactionUsage): CompactionUsage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+  };
 }
 
 export async function generateCompactionSummary(
@@ -460,11 +546,11 @@ export async function generateCompactionSummary(
   preparation: PreparedCompaction,
   customInstructions?: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<CompactionSummaryResult> {
   const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, settings } = preparation;
 
   if (isSplitTurn && turnPrefixMessages.length > 0) {
-    const [historySummary, prefixSummary] = await Promise.all([
+    const [historyResult, prefixResult] = await Promise.all([
       messagesToSummarize.length > 0
         ? summarizeConversation(
             provider,
@@ -476,7 +562,7 @@ export async function generateCompactionSummary(
             undefined,
             signal,
           )
-        : Promise.resolve(previousSummary?.trim() || ""),
+        : Promise.resolve<CompactionSummaryResult>({ summary: previousSummary?.trim() || "", usage: emptyUsage() }),
       summarizeConversation(
         provider,
         modelId,
@@ -489,10 +575,11 @@ export async function generateCompactionSummary(
       ),
     ]);
 
-    if (historySummary && prefixSummary) {
-      return `${historySummary}\n\n---\n\n${prefixSummary}`;
+    const usage = addUsage(historyResult.usage, prefixResult.usage);
+    if (historyResult.summary && prefixResult.summary) {
+      return { summary: `${historyResult.summary}\n\n---\n\n${prefixResult.summary}`, usage };
     }
-    return (historySummary || prefixSummary).trim();
+    return { summary: (historyResult.summary || prefixResult.summary).trim(), usage };
   }
 
   return summarizeConversation(

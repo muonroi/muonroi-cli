@@ -35,7 +35,7 @@ export const PRICING: Record<string, Record<string, PricePerMillion>> = {
     "deepseek-v4-pro": { input_per_million_usd: 2.0, output_per_million_usd: 8.0 }, // api-docs.deepseek.com
   },
   siliconflow: {
-    "Qwen/Qwen2.5-Coder-32B-Instruct": { input_per_million_usd: 0.18, output_per_million_usd: 0.18 }, // siliconflow.cn/pricing
+    "Qwen/Qwen2.5-Coder-32B-Instruct": { input_per_million_usd: 0.18, output_per_million_usd: 0.18 }, // siliconflow.com/pricing
   },
   ollama: {
     // local-only — zero variable cost

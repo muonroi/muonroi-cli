@@ -15,6 +15,15 @@ vi.mock("./keychain.js", () => ({
   loadKeyForProvider: vi.fn().mockResolvedValue("sk-test-key-12345678901234567890"),
 }));
 
+// Bun's test runner doesn't ship vi.stubGlobal — swap globalThis.fetch manually.
+const realFetch = globalThis.fetch;
+function setFetch(impl: typeof globalThis.fetch): void {
+  globalThis.fetch = impl;
+}
+function restoreFetch(): void {
+  globalThis.fetch = realFetch;
+}
+
 describe("needsVisionProxy", () => {
   it("returns true for deepseek models", () => {
     expect(needsVisionProxy("deepseek-v4-flash")).toBe(true);
@@ -38,11 +47,11 @@ describe("proxyVision", () => {
   const fakeBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
 
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn());
+    setFetch(vi.fn() as unknown as typeof globalThis.fetch);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    restoreFetch();
   });
 
   it("passes through when model supports vision", async () => {
@@ -67,7 +76,7 @@ describe("proxyVision", () => {
           choices: [{ message: { content: "A screenshot showing a login form with email and password fields." } }],
         }),
     });
-    vi.stubGlobal("fetch", mockFetch);
+    setFetch(mockFetch as unknown as typeof globalThis.fetch);
 
     const messages = [
       {
@@ -99,13 +108,14 @@ describe("proxyVision", () => {
     );
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.model).toBe("Qwen/Qwen2.5-VL-32B-Instruct");
+    // Primary model: lightest first so the fast-path returns quickly when the
+    // 8B endpoint is healthy. Fallback chain handles the heavier variants.
+    expect(body.model).toBe("Qwen/Qwen3-VL-8B-Instruct");
   });
 
   it("returns fallback description on API error", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("server error") }),
+    setFetch(
+      vi.fn().mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("server error") }) as unknown as typeof globalThis.fetch,
     );
 
     const messages = [
@@ -122,18 +132,20 @@ describe("proxyVision", () => {
     expect(result.proxied).toBe(true);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
     expect(content.some((p) => p.text.includes("unavailable"))).toBe(true);
+    // New behaviour: fallback message surfaces the underlying HTTP error so
+    // callers can distinguish "missing key" from "API down".
+    expect(content.some((p) => p.text.includes("HTTP 500"))).toBe(true);
   });
 
   it("handles multiple images in one message", async () => {
-    vi.stubGlobal(
-      "fetch",
+    setFetch(
       vi.fn().mockResolvedValue({
         ok: true,
         json: () =>
           Promise.resolve({
             choices: [{ message: { content: "Image 1: header. Image 2: footer." } }],
           }),
-      }),
+      }) as unknown as typeof globalThis.fetch,
     );
 
     const messages = [

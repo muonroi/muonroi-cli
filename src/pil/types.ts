@@ -4,9 +4,14 @@
  * Core type definitions for the Prompt Intelligence Layer (PIL) pipeline.
  */
 
+import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import type { ComplexityTier } from "../gsd/complexity.js";
+
 export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "general";
 
 export type OutputStyle = "concise" | "detailed" | "balanced";
+
+export type { GrayAreaQuestion, ComplexityTier };
 
 export interface LayerResult {
   name: string;
@@ -40,4 +45,8 @@ export interface PipelineContext {
   activeRunId?: string | null;
   digestAgeMs?: number | null;
   sessionId?: string | null;
+  /** GSD-native triage tier (set by layer4). */
+  complexityTier?: ComplexityTier | null;
+  /** Heuristic gray-area questions surfaced by layer4 when tier === "heavy". */
+  grayAreas?: GrayAreaQuestion[];
 }

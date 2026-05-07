@@ -59,6 +59,7 @@
     "ai": "6.0.169",
     "commander": "^12.1.0",
     "diff": "^8.0.3",
+    "gpt-tokenizer": "^3.4.0",
     "keytar": "^7.9.0",
     "ollama-ai-provider-v2": "1.5.5",
     "proper-lockfile": "^4.1.2",
