@@ -37,10 +37,12 @@ export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 import { interceptWithDefaults } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
 import { judge, type JudgeContext } from "../ee/judge.js";
+import { getMistakeDetector } from "../ee/mistake-detector.js";
 import { posttool } from "../ee/posttool.js";
 import { reconcilePromptStale } from "../ee/prompt-stale.js";
 import { buildScope } from "../ee/scope.js";
-import type { InterceptResponse, Scope } from "../ee/types.js";
+import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
+import type { InterceptResponse, PostToolOutcome, Scope } from "../ee/types.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import type {
   AggregatedHookResult,
@@ -89,13 +91,46 @@ export async function executeEventHooks(
 ): Promise<AggregatedHookResult> {
   try {
     if (input.hook_event_name === "PreToolUse") {
+      const preInput = input as PreToolUseHookInput;
       const r = await interceptWithDefaults({
         toolName: input.tool_name,
         toolInput: input.tool_input,
         cwd,
+        ...(preInput.intent_context ? { context: preInput.intent_context } : {}),
       });
       // Thread the warning response to PostToolUse via module-level latch
       _lastWarningResponse = r;
+
+      // P0 native observation: record into mistake-detector ring buffer.
+      const matchCount = r.matches?.length ?? 0;
+      const matchIds = r.matches?.map((m) => m.principle_uuid) ?? [];
+      try {
+        getMistakeDetector().recordPreTool(input.tool_name, input.tool_input, matchCount > 0);
+      } catch { /* fail-open */ }
+
+      // P0 trajectory log — append-only, fire-and-forget.
+      const sid = preInput.session_id;
+      if (sid) {
+        fireTrajectoryEvent({
+          ts: new Date().toISOString(),
+          sessionId: sid,
+          kind: "intercept",
+          toolName: input.tool_name,
+          decision: r.decision,
+          matchCount,
+          matchIds,
+          ...(r.reason ? { reason: r.reason } : {}),
+        });
+        if (matchCount > 0) {
+          fireTrajectoryEvent({
+            ts: new Date().toISOString(),
+            sessionId: sid,
+            kind: "warning_surfaced",
+            toolName: input.tool_name,
+            principleIds: matchIds,
+          });
+        }
+      }
 
       // EE detail log: what EE decided and what warnings were surfaced
       try {
@@ -145,11 +180,32 @@ export async function executeEventHooks(
     }
 
     if (input.hook_event_name === "PostToolUse") {
+      const postInput = input as PostToolUseHookInput;
       if (!_cachedScope) _cachedScope = await buildScope({ cwd });
+
+      // P0 native observation: mark detector entry, then look for retry-pattern.
+      let mistakeOutcomeOverlay: Partial<PostToolOutcome> = {};
+      try {
+        const det = getMistakeDetector();
+        det.recordPostTool(input.tool_name, true);
+        const retry = det.detectRetryPattern();
+        if (retry) {
+          mistakeOutcomeOverlay = {
+            mistakeKind: retry.kind,
+            evidence: retry.evidence,
+          };
+        }
+      } catch { /* fail-open */ }
+
+      const richOutcome: PostToolOutcome = {
+        success: true,
+        ...(postInput.rich_outcome ?? {}),
+        ...mistakeOutcomeOverlay,
+      };
       const judgeCtx: JudgeContext = {
         warningResponse: _lastWarningResponse,
         toolName: input.tool_name,
-        outcome: { success: true },
+        outcome: richOutcome,
         cwdMatchedAtPretool: _lastWarningResponse !== null,
         diffPresent: false,
         tenantId: getTenantId(),
@@ -196,16 +252,29 @@ export async function executeEventHooks(
         {
           toolName: input.tool_name,
           toolInput: input.tool_input,
-          outcome: {
-            // PostToolUse always means success — failure goes to PostToolUseFailure
-            success: true,
-          },
+          outcome: richOutcome,
           cwd,
           tenantId: getTenantId(),
           scope: _cachedScope,
         },
         judgeCtx,
       );
+
+      // P0 trajectory log
+      const sidPost = postInput.session_id;
+      if (sidPost) {
+        fireTrajectoryEvent({
+          ts: new Date().toISOString(),
+          sessionId: sidPost,
+          kind: "posttool",
+          toolName: input.tool_name,
+          success: true,
+          ...(richOutcome.durationMs !== undefined ? { durationMs: richOutcome.durationMs } : {}),
+          ...(richOutcome.mistakeKind ? { mistakeKind: richOutcome.mistakeKind } : {}),
+          ...(richOutcome.verifyResult ? { verifyResult: richOutcome.verifyResult } : {}),
+          ...(richOutcome.buildResult ? { buildExitCode: richOutcome.buildResult.exitCode } : {}),
+        });
+      }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
@@ -214,10 +283,21 @@ export async function executeEventHooks(
     if (input.hook_event_name === "PostToolUseFailure") {
       const failInput = input as PostToolUseFailureHookInput;
       if (!_cachedScope) _cachedScope = await buildScope({ cwd });
+
+      // P0 native observation: mark detector entry as failure (no retry detection on failure).
+      try {
+        getMistakeDetector().recordPostTool(failInput.tool_name, false);
+      } catch { /* fail-open */ }
+
+      const failOutcome: PostToolOutcome = {
+        success: false,
+        error: failInput.error,
+        ...(failInput.rich_outcome ?? {}),
+      };
       const judgeCtx: JudgeContext = {
         warningResponse: _lastWarningResponse,
         toolName: failInput.tool_name,
-        outcome: { success: false, error: failInput.error },
+        outcome: failOutcome,
         cwdMatchedAtPretool: _lastWarningResponse !== null,
         diffPresent: false,
         tenantId: getTenantId(),
@@ -261,16 +341,28 @@ export async function executeEventHooks(
         {
           toolName: failInput.tool_name,
           toolInput: failInput.tool_input,
-          outcome: {
-            success: false,
-            error: failInput.error,
-          },
+          outcome: failOutcome,
           cwd,
           tenantId: getTenantId(),
           scope: _cachedScope,
         },
         judgeCtx,
       );
+
+      // P0 trajectory log
+      const sidFail = failInput.session_id;
+      if (sidFail) {
+        fireTrajectoryEvent({
+          ts: new Date().toISOString(),
+          sessionId: sidFail,
+          kind: "posttool",
+          toolName: failInput.tool_name,
+          success: false,
+          ...(failOutcome.durationMs !== undefined ? { durationMs: failOutcome.durationMs } : {}),
+          ...(failOutcome.verifyResult ? { verifyResult: failOutcome.verifyResult } : {}),
+          ...(failOutcome.buildResult ? { buildExitCode: failOutcome.buildResult.exitCode } : {}),
+        });
+      }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
@@ -293,6 +385,7 @@ export async function executePreToolHooks(
   cwd: string,
   sessionId?: string,
   signal?: AbortSignal,
+  intentContext?: import("./types.js").PreToolIntentContext,
 ): Promise<AggregatedHookResult> {
   const input: PreToolUseHookInput = {
     hook_event_name: "PreToolUse",
@@ -300,6 +393,7 @@ export async function executePreToolHooks(
     tool_input: toolInput,
     session_id: sessionId,
     cwd,
+    ...(intentContext ? { intent_context: intentContext } : {}),
   };
   return executeEventHooks(input, cwd, signal);
 }
@@ -314,6 +408,7 @@ export async function executePostToolHooks(
   cwd: string,
   sessionId?: string,
   signal?: AbortSignal,
+  richOutcome?: import("./types.js").PostToolRichOutcome,
 ): Promise<AggregatedHookResult> {
   const input: PostToolUseHookInput = {
     hook_event_name: "PostToolUse",
@@ -322,6 +417,7 @@ export async function executePostToolHooks(
     tool_output: toolOutput,
     session_id: sessionId,
     cwd,
+    ...(richOutcome ? { rich_outcome: richOutcome } : {}),
   };
   return executeEventHooks(input, cwd, signal);
 }
@@ -336,6 +432,7 @@ export async function executePostToolFailureHooks(
   cwd: string,
   sessionId?: string,
   signal?: AbortSignal,
+  richOutcome?: import("./types.js").PostToolRichOutcome,
 ): Promise<AggregatedHookResult> {
   const input: PostToolUseFailureHookInput = {
     hook_event_name: "PostToolUseFailure",
@@ -344,6 +441,7 @@ export async function executePostToolFailureHooks(
     error,
     session_id: sessionId,
     cwd,
+    ...(richOutcome ? { rich_outcome: richOutcome } : {}),
   };
   return executeEventHooks(input, cwd, signal);
 }

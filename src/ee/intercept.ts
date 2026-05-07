@@ -119,6 +119,7 @@ export async function interceptWithDefaults(
     cwd: req.cwd,
     tenantId,
     scope,
+    ...(req.context ? { context: req.context } : {}),
   });
 }
 

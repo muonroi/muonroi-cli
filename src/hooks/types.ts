@@ -32,10 +32,38 @@ export interface BaseHookInput {
   cwd: string;
 }
 
+/**
+ * P0 native observation: optional intent context populated by the orchestrator
+ * before the EE intercept call. Hooks in foreign CLIs can't supply this — only
+ * muonroi-cli can. Forwarded to /api/intercept as `request.context`.
+ */
+export interface PreToolIntentContext {
+  assistantReasoningExcerpt?: string;
+  priorWarningIdsInSession?: string[];
+  gsdPhase?: string;
+  userGoalExcerpt?: string;
+}
+
 export interface PreToolUseHookInput extends BaseHookInput {
   hook_event_name: "PreToolUse";
   tool_name: string;
   tool_input: Record<string, unknown>;
+  /** P0 native observation: optional intent context. */
+  intent_context?: PreToolIntentContext;
+}
+
+/**
+ * P0 rich outcome surfacing — verifier/build/test/typecheck signals computed
+ * by the CLI before the hook fires. Mirrors {@link import("../ee/types.js").PostToolOutcome}
+ * extras and is merged into the EE posttool payload.
+ */
+export interface PostToolRichOutcome {
+  durationMs?: number;
+  exitCode?: number;
+  verifyResult?: "pass" | "fail" | "skip";
+  buildResult?: { exitCode: number; durationMs: number };
+  typeCheckResult?: "pass" | "fail";
+  testResult?: { passed: number; failed: number };
 }
 
 export interface PostToolUseHookInput extends BaseHookInput {
@@ -43,6 +71,8 @@ export interface PostToolUseHookInput extends BaseHookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   tool_output: Record<string, unknown>;
+  /** P0 rich outcome — optional, merged into outgoing posttool payload. */
+  rich_outcome?: PostToolRichOutcome;
 }
 
 export interface PostToolUseFailureHookInput extends BaseHookInput {
@@ -50,6 +80,8 @@ export interface PostToolUseFailureHookInput extends BaseHookInput {
   tool_name: string;
   tool_input: Record<string, unknown>;
   error: string;
+  /** P0 rich outcome — optional, merged into outgoing posttool payload. */
+  rich_outcome?: PostToolRichOutcome;
 }
 
 export interface UserPromptSubmitHookInput extends BaseHookInput {
