@@ -2,6 +2,8 @@ export const GSD_PHASES = ["discuss", "plan", "execute", "verify", "review"] as 
 
 export type GsdPhase = (typeof GSD_PHASES)[number];
 
+export type WorkflowKind = "task" | "product";
+
 export function isGsdPhase(value: string): value is GsdPhase {
   return (GSD_PHASES as readonly string[]).includes(value);
 }

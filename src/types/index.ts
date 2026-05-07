@@ -110,6 +110,7 @@ export interface VerifyRecipe {
   smokeTarget?: string;
   evidence: string[];
   notes: string[];
+  coverage?: number | null;
 }
 
 export interface VerifyEnvironmentManifest {
@@ -306,7 +307,7 @@ export interface CouncilPreflightData {
 }
 
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response" | "product_status_card";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -319,6 +320,7 @@ export interface StreamChunk {
   councilPreflight?: CouncilPreflightData;
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;
+  productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
