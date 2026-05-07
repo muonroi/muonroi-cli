@@ -47,11 +47,40 @@ function directoryChain(fromRoot: string, toCwd: string): string[] {
   return chain;
 }
 
+/**
+ * Filenames the loader treats as agent-instructions, in the order they are
+ * concatenated for a given directory. AGENTS.md stays first as the canonical
+ * source; the rest exist so projects already maintaining tool-specific
+ * instructions (CLAUDE.md, GEMINI.md, DEEPSEEK.md, COPILOT.md) get auto-loaded
+ * without duplicating content into AGENTS.md.
+ *
+ * AGENTS.override.md remains a wholesale replacement that short-circuits the
+ * rest of the per-directory loop.
+ */
+const INSTRUCTION_FILENAMES = [
+  "AGENTS.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  "DEEPSEEK.md",
+  "COPILOT.md",
+  "CURSOR.md",
+] as const;
+
+function readSegmentWithHeader(dir: string, filename: string, label?: string): string | null {
+  const text = readNonEmptyFile(path.join(dir, filename));
+  if (!text) return null;
+  if (filename === "AGENTS.md") return text; // keep AGENTS.md unannotated for backcompat
+  return `<!-- ${label ?? filename} -->\n${text}`;
+}
+
 function loadAgentsSegments(canonicalCwd: string): string[] {
   const segments: string[] = [];
 
-  const globalAgents = readNonEmptyFile(path.join(os.homedir(), ".muonroi-cli", "AGENTS.md"));
-  if (globalAgents) segments.push(globalAgents);
+  const homeDir = path.join(os.homedir(), ".muonroi-cli");
+  for (const fname of INSTRUCTION_FILENAMES) {
+    const seg = readSegmentWithHeader(homeDir, fname, `~/.muonroi-cli/${fname}`);
+    if (seg) segments.push(seg);
+  }
 
   const root = findGitRoot(canonicalCwd) ?? canonicalCwd;
   for (const dir of directoryChain(root, canonicalCwd)) {
@@ -61,8 +90,12 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
       if (text) segments.push(text);
       continue;
     }
-    const text = readNonEmptyFile(path.join(dir, "AGENTS.md"));
-    if (text) segments.push(text);
+    for (const fname of INSTRUCTION_FILENAMES) {
+      const rel = path.relative(canonicalCwd, dir);
+      const label = rel === "" ? fname : path.join(rel, fname);
+      const seg = readSegmentWithHeader(dir, fname, label);
+      if (seg) segments.push(seg);
+    }
   }
 
   return segments;
