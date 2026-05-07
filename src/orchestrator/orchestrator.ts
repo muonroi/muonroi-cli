@@ -2682,43 +2682,56 @@ export class Agent {
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
 
-    // P0 native observation: detect user-veto on the PREVIOUS tool batch
-    // BEFORE resetting it. Veto is the highest-quality mistake oracle — fire
-    // posttool mistakes for each tool in the prior batch, then reset.
+    // P0 native observation: turn boundary. Capture the prior batch via
+    // resetBatch — file-revert detection (in the hook layer) reads it on
+    // the first edit of the new turn. No language-based veto matching.
     try {
-      const det = getMistakeDetector();
-      const vetoEvents = det.detectUserVeto(userMessage);
-      if (vetoEvents.length > 0) {
-        const tenantId = getTenantIdForVeto();
-        const scope = await buildScopeForVeto({ cwd: this.bash.getCwd() });
-        for (const ev of vetoEvents) {
-          void getEEClientForVeto()
-            .posttool({
-              toolName: ev.toolName,
-              toolInput: ev.toolInput,
-              outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
-              cwd: this.bash.getCwd(),
-              tenantId,
-              scope,
-            })
-            .catch(() => {
-              /* fire-and-forget */
-            });
-        }
-      }
-      det.resetBatch();
-      // Trajectory: log the user turn (with vetoDetected flag for replay analysis).
+      getMistakeDetector().resetBatch();
       if (this.session?.id) {
         fireTrajectoryEvent({
           ts: new Date().toISOString(),
           sessionId: this.session.id,
           kind: "user_turn",
           excerpt: userMessage.slice(0, 200),
-          vetoDetected: vetoEvents.length > 0,
+          vetoDetected: false,
         });
       }
     } catch {
-      /* fail-open: veto detection must never block the turn */
+      /* fail-open: detector state must never block the turn */
+    }
+
+    // P0 native observation: AbortSignal → fire user-veto for any in-flight
+    // batch tools that had warnings. Listener attaches here and self-removes
+    // after fire so it can't double-fire on later aborts in the same turn.
+    {
+      const aborter = () => {
+        try {
+          const det = getMistakeDetector();
+          const events = det.detectAbort(this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined);
+          if (events.length === 0) return;
+          const cwd = this.bash.getCwd();
+          const tenantId = getTenantIdForVeto();
+          void buildScopeForVeto({ cwd })
+            .then((scope) => {
+              for (const ev of events) {
+                void getEEClientForVeto()
+                  .posttool({
+                    toolName: ev.toolName,
+                    toolInput: ev.toolInput,
+                    outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+                    cwd,
+                    tenantId,
+                    scope,
+                  })
+                  .catch(() => { /* fire-and-forget */ });
+              }
+            })
+            .catch(() => { /* fire-and-forget */ });
+        } catch {
+          /* fail-open */
+        }
+      };
+      signal.addEventListener("abort", aborter, { once: true });
     }
 
     // P0 native observation: cache turn-level intent fields for PreToolUse.

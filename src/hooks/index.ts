@@ -101,11 +101,40 @@ export async function executeEventHooks(
       // Thread the warning response to PostToolUse via module-level latch
       _lastWarningResponse = r;
 
-      // P0 native observation: record into mistake-detector ring buffer.
+      // P0 native observation: record into mistake-detector ring buffer,
+      // then check for file-revert against the prior batch (across-turn
+      // re-edit of a file the agent just touched with warnings).
       const matchCount = r.matches?.length ?? 0;
       const matchIds = r.matches?.map((m) => m.principle_uuid) ?? [];
       try {
-        getMistakeDetector().recordPreTool(input.tool_name, input.tool_input, matchCount > 0);
+        const det = getMistakeDetector();
+        det.recordPreTool(input.tool_name, input.tool_input, matchCount > 0);
+        const revertEvents = det.detectFileRevert(input.tool_name, input.tool_input);
+        if (revertEvents.length > 0) {
+          if (!_cachedScope) _cachedScope = await buildScope({ cwd });
+          const tenantId = getTenantId();
+          const scope = _cachedScope;
+          for (const ev of revertEvents) {
+            void posttool(
+              {
+                toolName: ev.toolName,
+                toolInput: ev.toolInput,
+                outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+                cwd,
+                tenantId,
+                scope,
+              },
+              {
+                warningResponse: null,
+                toolName: ev.toolName,
+                outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+                cwdMatchedAtPretool: true,
+                diffPresent: false,
+                tenantId,
+              },
+            );
+          }
+        }
       } catch { /* fail-open */ }
 
       // P0 trajectory log — append-only, fire-and-forget.
