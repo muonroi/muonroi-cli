@@ -6,6 +6,11 @@ import { generateText, type ModelMessage, stepCountIs, streamText, type ToolSet 
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
+import { getMistakeDetector } from "../ee/mistake-detector.js";
+import { getDefaultEEClient as getEEClientForVeto } from "../ee/intercept.js";
+import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { buildScope as buildScopeForVeto } from "../ee/scope.js";
+import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
@@ -342,6 +347,12 @@ export class Agent {
   private _councilPreflightResolvers = new Map<string, (approved: boolean) => void>();
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
+  /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
+  private _priorWarningIdsInSession = new Set<string>();
+  /** P0 native observation: rolling buffer of assistant reasoning text in current turn — last 200 chars sent as intent_context.assistantReasoningExcerpt. */
+  private _turnAssistantReasoning = "";
+  /** P0 native observation: cached user goal for current turn — first 200 chars of userMessage. */
+  private _turnUserGoalExcerpt = "";
   /** Compaction statistics tracking count and total tokens saved. */
   private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
 
@@ -2671,6 +2682,49 @@ export class Agent {
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
 
+    // P0 native observation: detect user-veto on the PREVIOUS tool batch
+    // BEFORE resetting it. Veto is the highest-quality mistake oracle — fire
+    // posttool mistakes for each tool in the prior batch, then reset.
+    try {
+      const det = getMistakeDetector();
+      const vetoEvents = det.detectUserVeto(userMessage);
+      if (vetoEvents.length > 0) {
+        const tenantId = getTenantIdForVeto();
+        const scope = await buildScopeForVeto({ cwd: this.bash.getCwd() });
+        for (const ev of vetoEvents) {
+          void getEEClientForVeto()
+            .posttool({
+              toolName: ev.toolName,
+              toolInput: ev.toolInput,
+              outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+              cwd: this.bash.getCwd(),
+              tenantId,
+              scope,
+            })
+            .catch(() => {
+              /* fire-and-forget */
+            });
+        }
+      }
+      det.resetBatch();
+      // Trajectory: log the user turn (with vetoDetected flag for replay analysis).
+      if (this.session?.id) {
+        fireTrajectoryEvent({
+          ts: new Date().toISOString(),
+          sessionId: this.session.id,
+          kind: "user_turn",
+          excerpt: userMessage.slice(0, 200),
+          vetoDetected: vetoEvents.length > 0,
+        });
+      }
+    } catch {
+      /* fail-open: veto detection must never block the turn */
+    }
+
+    // P0 native observation: cache turn-level intent fields for PreToolUse.
+    this._turnUserGoalExcerpt = userMessage.slice(0, 200);
+    this._turnAssistantReasoning = "";
+
     // Ensure flow run is ready before processing (fail-open).
     await this._flowReady?.catch(() => {});
 
@@ -3109,6 +3163,9 @@ export class Agent {
                   }
                   break;
                 }
+                // P0 native observation: accumulate reasoning for intent context.
+                this._turnAssistantReasoning =
+                  (this._turnAssistantReasoning + part.text).slice(-400);
                 yield { type: "reasoning", content: part.text };
                 break;
 
@@ -3118,12 +3175,25 @@ export class Agent {
 
                 // EE PreToolUse hook: fire intercept before tool execution.
                 {
+                  const intentContext: import("../hooks/types.js").PreToolIntentContext = {
+                    ...(this._turnAssistantReasoning
+                      ? { assistantReasoningExcerpt: this._turnAssistantReasoning.slice(-200) }
+                      : {}),
+                    ...(this._priorWarningIdsInSession.size > 0
+                      ? {
+                          priorWarningIdsInSession: Array.from(this._priorWarningIdsInSession).slice(-20),
+                        }
+                      : {}),
+                    ...(pilCtx.gsdPhase ? { gsdPhase: pilCtx.gsdPhase } : {}),
+                    ...(this._turnUserGoalExcerpt ? { userGoalExcerpt: this._turnUserGoalExcerpt } : {}),
+                  };
                   const preInput: PreToolUseHookInput = {
                     hook_event_name: "PreToolUse",
                     tool_name: tc.function.name,
                     tool_input: JSON.parse(tc.function.arguments || "{}"),
                     session_id: this.session?.id,
                     cwd: this.bash.getCwd(),
+                    ...(Object.keys(intentContext).length > 0 ? { intent_context: intentContext } : {}),
                   };
                   const preResult = await this.fireHook(preInput, signal).catch(() => ({
                     blocked: false,
@@ -3135,6 +3205,18 @@ export class Agent {
                   for (const ctx of preResult.additionalContexts ?? []) {
                     yield { type: "content", content: `${ctx}\n` };
                   }
+                  // P0 native observation: track which principle IDs surfaced
+                  // this turn so the next intercept can dedup server-side.
+                  try {
+                    const { getLastSurfacedState } = await import("../ee/intercept.js");
+                    const { surfacedIds } = getLastSurfacedState();
+                    for (const id of surfacedIds) this._priorWarningIdsInSession.add(id);
+                    // Cap memory: keep only most-recent 100 IDs.
+                    if (this._priorWarningIdsInSession.size > 100) {
+                      const arr = Array.from(this._priorWarningIdsInSession);
+                      this._priorWarningIdsInSession = new Set(arr.slice(-100));
+                    }
+                  } catch { /* fail-open */ }
                 }
 
                 // Pitfall 9: log the pending call so reconcile() can recover any
