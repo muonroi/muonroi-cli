@@ -105,6 +105,7 @@ import "./slash/cost.js";
 import "./slash/ee.js";
 import "./slash/debug.js";
 import "./slash/council.js";
+import "./slash/ideal.js";
 
 import {
   getEffectiveReasoningEffort,
@@ -2712,6 +2713,66 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               ...prev,
               buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
             ]);
+            return;
+          }
+
+          if (result.startsWith("__PRODUCT_LOOP__") || result.includes("\n__PRODUCT_LOOP__\n")) {
+            const sentinelIdx = result.indexOf("__PRODUCT_LOOP__\n");
+            const warningPrefix = sentinelIdx > 0 ? result.slice(0, sentinelIdx) : "";
+            const json = result.slice(sentinelIdx + "__PRODUCT_LOOP__\n".length);
+            let payload: any;
+            try {
+              payload = JSON.parse(json);
+            } catch (e) {
+              setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
+              return;
+            }
+            const heading = payload.subcommand === "start"
+              ? `/ideal "${payload.idea ?? ""}"`
+              : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
+            setMessages((prev) => [
+              ...prev,
+              buildUserEntry(heading),
+              buildAssistantEntry(warningPrefix ? `${warningPrefix}\nProduct loop starting…\n` : "Product loop starting…\n"),
+            ]);
+            try {
+              const gen = (agent as any).runProductLoopV1(payload);
+              for await (const chunk of gen) {
+                if (chunk.type === "content") {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
+                    }
+                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                  });
+                }
+                if (chunk.type === "council_question" && chunk.councilQuestion) {
+                  setPendingCouncilQuestion(chunk.councilQuestion);
+                  setCouncilCardState(initialCardState(chunk.councilQuestion));
+                }
+                if (chunk.type === "council_preflight" && chunk.councilPreflight) {
+                  setPendingCouncilPreflight(chunk.councilPreflight);
+                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                }
+                if (chunk.type === "product_status_card" && chunk.productStatusCard) {
+                  // Snapshot rendering is handled by <ProductStatusCard /> consumers.
+                  // Keep last-known data on the message log for now.
+                  const d = chunk.productStatusCard;
+                  setMessages((prev) => [
+                    ...prev,
+                    buildAssistantEntry(
+                      `[product] sprint ${d.sprintN}/${d.totalSprints} · ` +
+                        `cost $${d.costSpent.toFixed(2)}/$${d.costCap.toFixed(2)} · ` +
+                        `criteria ✓${d.criteriaMet} ◐${d.criteriaPartial} ✗${d.criteriaUnmet} · ${d.currentStage}`,
+                    ),
+                  ]);
+                }
+                if (chunk.type === "done") break;
+              }
+            } catch (e: unknown) {
+              setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
+            }
             return;
           }
 
