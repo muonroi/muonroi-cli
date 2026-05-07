@@ -8,6 +8,7 @@ import { resolveLeaderModelDetailed, resolveParticipants } from "../council/lead
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { discoverProject, formatDiscoverySummary, type DiscoveryResult } from "./discover.js";
 import type { DriverContext, DriverResult, Stage, ProductSpec } from "./types.js";
 import type { ClarifiedSpec, DebateState, CouncilParticipant } from "../council/types.js";
 
@@ -15,6 +16,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   let state: Stage = "idle";
   let clarifiedSpec: ClarifiedSpec | undefined;
   let debateState: DebateState | undefined;
+  let discovery: DiscoveryResult | undefined;
 
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
 
@@ -31,6 +33,34 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   while (true) {
     switch (state) {
       case "idle": {
+        state = "discover";
+        break;
+      }
+
+      case "discover": {
+        yield phaseStart({
+          phaseId: "loop:discover",
+          kind: "research",
+          label: "Project discovery",
+        });
+
+        discovery = await discoverProject(ctx.cwd);
+
+        const summary = formatDiscoverySummary(discovery);
+        if (summary) {
+          yield { type: "content", content: `\n${summary}\n` } as StreamChunk;
+        }
+
+        // Persist discovery evidence so resume can replay decisions.
+        if (discovery.evidence.length > 0) {
+          const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
+          stateMap.sections.set(
+            "Discovery",
+            discovery.evidence.map((e) => `- ${e.dim}: ${e.value} (source: ${e.source})`).join("\n"),
+          );
+          await writeArtifact(runDir, "state.md", stateMap);
+        }
+
         state = "gather";
         break;
       }
@@ -55,7 +85,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           ctx.llm,
           undefined,
           SEED_DIMENSIONS,
-          6 // maxRounds
+          6, // maxRounds
+          discovery?.prefilled,
         );
         
         while (true) {

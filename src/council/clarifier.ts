@@ -92,6 +92,14 @@ export async function* runClarification(
   signal?: AbortSignal,
   seedQuestions?: GrayAreaQuestion[],
   maxRounds?: number,
+  /**
+   * Optional pre-filled answers keyed by seed-question id. When the loop's
+   * discover phase has already proven a dimension from the project (e.g.
+   * tech-constraints from package.json), the matching seed question is
+   * skipped: its answer is appended to allQA without prompting the user, and
+   * a confirmation chunk is emitted instead.
+   */
+  prefillAnswers?: Map<string, string>,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : 3;
   const allQA: Array<{ id?: string; question: string; answer: string }> = [];
@@ -166,6 +174,19 @@ export async function* runClarification(
     });
 
     for (const q of questions) {
+      // Skip seed questions whose dimension was proven by project discovery.
+      // The auto-filled answer is recorded as a normal Q&A so synthesizeSpec
+      // and the resolved-map see it as answered.
+      if (q.id && prefillAnswers?.has(q.id)) {
+        const answer = prefillAnswers.get(q.id)!;
+        allQA.push({ id: q.id, question: q.question, answer });
+        yield {
+          type: "content",
+          content: `\n**${q.question}**\n  ↳ _${answer}_ (auto-filled from project)\n`,
+        };
+        continue;
+      }
+
       const questionId = crypto.randomUUID();
       const { options, defaultIndex } = buildClarifyOptions(q.suggestions, q.recommended);
 
