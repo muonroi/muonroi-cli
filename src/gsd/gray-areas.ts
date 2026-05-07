@@ -17,7 +17,13 @@ export type GrayAreaDimension =
   | "format"
   | "convention"
   | "depth"
-  | "audience";
+  | "audience"
+  | "persona"
+  | "core-features"
+  | "non-functional"
+  | "tech-constraints"
+  | "success-metric"
+  | "cost-tolerance";
 
 export interface GrayAreaQuestion {
   dimension: GrayAreaDimension;
@@ -27,6 +33,8 @@ export interface GrayAreaQuestion {
   question: string;
   /** 2-3 candidate answers; the first is the recommended default. */
   options: string[];
+  /** Whether an answer is mandatory before proceeding. */
+  isRequired?: boolean;
 }
 
 interface DimensionRule {
