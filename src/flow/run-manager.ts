@@ -17,9 +17,18 @@ export interface RunState {
   state: SectionMap;
   delegations: SectionMap;
   grayAreas: SectionMap;
+  iterations: SectionMap;
+  manifest: SectionMap;
 }
 
-const RUN_FILES = ["roadmap.md", "state.md", "delegations.md", "gray-areas.md"] as const;
+const RUN_FILES = [
+  "roadmap.md",
+  "state.md",
+  "delegations.md",
+  "gray-areas.md",
+  "iterations.md",
+  "manifest.md",
+] as const;
 
 /**
  * Generate a sortable, human-readable, collision-safe run ID.
@@ -53,6 +62,20 @@ export async function createRun(flowDir: string): Promise<RunState> {
   };
   await writeArtifact(path.join(flowDir, "runs", id), "state.md", stateMap);
 
+  // Initialize iterations.md
+  const iterationsMap: SectionMap = {
+    preamble: "",
+    sections: new Map([["Iterations", ""]]),
+  };
+  await writeArtifact(path.join(flowDir, "runs", id), "iterations.md", iterationsMap);
+
+  // Initialize manifest.md
+  const manifestMap: SectionMap = {
+    preamble: "",
+    sections: new Map([["Manifest", ""]]),
+  };
+  await writeArtifact(path.join(flowDir, "runs", id), "manifest.md", manifestMap);
+
   // Return the initial RunState
   const emptyMap: SectionMap = { preamble: "", sections: new Map() };
   return {
@@ -61,6 +84,8 @@ export async function createRun(flowDir: string): Promise<RunState> {
     state: stateMap,
     delegations: emptyMap,
     grayAreas: emptyMap,
+    iterations: iterationsMap,
+    manifest: manifestMap,
   };
 }
 
@@ -92,8 +117,16 @@ export async function loadRun(flowDir: string, runId: string): Promise<RunState 
     preamble: "",
     sections: new Map(),
   };
+  const iterations = (await readArtifact(runDir, "iterations.md")) ?? {
+    preamble: "",
+    sections: new Map(),
+  };
+  const manifest = (await readArtifact(runDir, "manifest.md")) ?? {
+    preamble: "",
+    sections: new Map(),
+  };
 
-  return { id: runId, roadmap, state, delegations, grayAreas };
+  return { id: runId, roadmap, state, delegations, grayAreas, iterations, manifest };
 }
 
 /**
