@@ -21,6 +21,7 @@ import lockfile from "proper-lockfile";
 import { atomicReadJSON, atomicWriteJSON } from "../storage/atomic-io.js";
 import type { UsageState } from "../storage/usage-cap.js";
 import { projectCostUSD } from "./estimator.js";
+import { appendProductLedger } from "./product-ledger.js";
 import { emit, evaluateThresholds } from "./thresholds.js";
 import { CapBreachError, type ReservationToken } from "./types.js";
 
@@ -209,5 +210,39 @@ export async function release(token: ReservationToken, homeOverride?: string): P
   await withLock(filePath, async (state) => {
     const reservations = state.reservations.filter((r) => r.id !== token.id);
     return { next: { ...state, reservations }, result: undefined };
+  });
+}
+
+/**
+ * Commit actual spend to both the monthly ledger and the per-product ledger.
+ * The monthly ledger remains the source of truth for overall caps.
+ */
+export async function commitToProduct(
+  token: ReservationToken,
+  productRunId: string,
+  actualInputTokens: number,
+  actualOutputTokens: number,
+  homeOverride?: string,
+): Promise<void> {
+  // 1. Monthly commit
+  await commit(token, actualInputTokens, actualOutputTokens, homeOverride);
+
+  // 2. Product-specific ledger append
+  const actual = projectCostUSD(token.provider, token.model, actualInputTokens, actualOutputTokens);
+  await appendProductLedger(
+    productRunId,
+    {
+      ts: Date.now(),
+      productRunId,
+      reservationId: token.id,
+      actualUsd: actual,
+      model: token.model,
+      provider: token.provider,
+    },
+    homeOverride,
+  ).catch((err) => {
+    // Non-blocking: if product append fails, log and continue. Monthly is truth.
+    // eslint-disable-next-line no-console
+    console.warn(`[ledger] failed to append to product ledger ${productRunId}: ${err.message}`);
   });
 }

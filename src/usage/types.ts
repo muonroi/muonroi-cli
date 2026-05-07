@@ -13,6 +13,7 @@ export interface ReservationToken {
   est_input_tokens: number;
   est_output_tokens: number;
   createdAtMs: number;
+  productRunId?: string;
 }
 
 export class CapBreachError extends Error {
