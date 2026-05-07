@@ -13,6 +13,7 @@ import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import * as phaseTracker from "../ee/phase-tracker.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
+import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
@@ -2811,20 +2812,26 @@ export class Agent {
       if (drained && drained.principleRefs.length > 0 && this.session?.id) {
         const outcome = phaseTracker.classifyOutcome(drained);
         if (outcome) {
-          fireAndForgetPhaseOutcome({
-            sessionId: this.session.id,
-            phaseName: drained.phaseName,
-            outcome,
-            toolEventIds: drained.principleRefs,
-            evidence: {
-              durationMs: drained.endedAt - drained.startedAt,
-              toolCount: drained.toolCount,
-              cwd: this.bash.getCwd(),
-              ...(drained.verifyResult ? { verifyResult: drained.verifyResult } : {}),
-              ...(drained.aborted ? { aborted: true } : {}),
-              ...(drained.abortReason ? { abortReason: drained.abortReason } : {}),
+          fireAndForgetPhaseOutcome(
+            {
+              sessionId: this.session.id,
+              phaseName: drained.phaseName,
+              outcome,
+              toolEventIds: drained.principleRefs,
+              evidence: {
+                durationMs: drained.endedAt - drained.startedAt,
+                toolCount: drained.toolCount,
+                cwd: this.bash.getCwd(),
+                ...(drained.verifyResult ? { verifyResult: drained.verifyResult } : {}),
+                ...(drained.aborted ? { aborted: true } : {}),
+                ...(drained.abortReason ? { abortReason: drained.abortReason } : {}),
+              },
             },
-          });
+            {
+              ...(getCachedServerBaseUrl() ? { baseUrl: getCachedServerBaseUrl()! } : {}),
+              ...(getCachedAuthToken() ? { authToken: getCachedAuthToken()! } : {}),
+            },
+          );
         }
       }
     } catch { /* fail-open: phase-outcome must never block a turn */ }
