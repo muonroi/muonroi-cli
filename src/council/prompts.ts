@@ -21,6 +21,11 @@ export function buildClarificationPrompt(topic: string, conversationContext: str
       `- SUCCESS CRITERIA: How will we know the discussion produced a good result?\n` +
       `- CONTEXT: What existing decisions, code, or patterns are relevant?\n\n` +
       `If the topic is already specific enough (has clear scope, constraints, and criteria), return an empty array.\n\n` +
+      `IMPORTANT — defaults from the workspace:\n` +
+      `- If the topic refers to "this project", "current project", "repo này", "dự án hiện tại" or similar, ` +
+      `the project IS the one described in the "## Current Project" section of the context. DO NOT ask which project.\n` +
+      `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
+      `- Prefer using the project's package.json name and description as implicit context for follow-up questions.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
       `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "isRequired": true}]\n` +
       `Return [] if no clarification needed.`,
