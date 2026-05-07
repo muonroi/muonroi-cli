@@ -26,7 +26,9 @@
       "PowerShell(Stop-Process *)",
       "PowerShell(Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage\\(\\); if \\($img -ne $null\\) { Write-Host \"Image found: $\\($img.Width\\)x$\\($img.Height\\)\"; $img.Dispose\\(\\) } else { Write-Host \"No image in clipboard\" })",
       "Skill(gsd-quick)",
-      "PowerShell(Out-Null *)"
+      "PowerShell(Out-Null *)",
+      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__list_pages",
+      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__navigate_page"
     ]
   }
 }
