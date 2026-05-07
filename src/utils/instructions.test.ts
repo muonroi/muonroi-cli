@@ -67,6 +67,34 @@ describe("loadCustomInstructions", () => {
     );
   });
 
+  it("auto-loads CLAUDE/GEMINI/DEEPSEEK/COPILOT/CURSOR alongside AGENTS.md", async () => {
+    const home = makeTempDir("muonroi-home-");
+    const repoRoot = makeTempDir("muonroi-repo-");
+    const cwd = repoRoot;
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+
+    writeFile(path.join(repoRoot, "AGENTS.md"), "agents body");
+    writeFile(path.join(repoRoot, "CLAUDE.md"), "claude body");
+    writeFile(path.join(repoRoot, "GEMINI.md"), "gemini body");
+    writeFile(path.join(repoRoot, "DEEPSEEK.md"), "deepseek body");
+
+    const loadCustomInstructions = await importLoadCustomInstructions(home);
+    const out = loadCustomInstructions(cwd);
+    expect(out).not.toBeNull();
+    // AGENTS.md first, others tagged with comment headers, in declared order
+    expect(out).toContain("agents body");
+    expect(out).toContain("<!-- CLAUDE.md -->\nclaude body");
+    expect(out).toContain("<!-- GEMINI.md -->\ngemini body");
+    expect(out).toContain("<!-- DEEPSEEK.md -->\ndeepseek body");
+    const idxAgents = out!.indexOf("agents body");
+    const idxClaude = out!.indexOf("claude body");
+    const idxGemini = out!.indexOf("gemini body");
+    const idxDeepseek = out!.indexOf("deepseek body");
+    expect(idxAgents).toBeLessThan(idxClaude);
+    expect(idxClaude).toBeLessThan(idxGemini);
+    expect(idxGemini).toBeLessThan(idxDeepseek);
+  });
+
   it("prefers AGENTS.override.md over AGENTS.md in the same directory", async () => {
     const home = makeTempDir("muonroi-home-");
     const repoRoot = makeTempDir("muonroi-repo-");
