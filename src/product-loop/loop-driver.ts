@@ -145,14 +145,29 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           ctx.llm
         );
 
+        // Suppress raw debate content so the user is not confused by inter-role
+        // monologue ("Researcher → Architect ... Question back to you?") which
+        // is NOT addressed to them. We still pass through phase/status events
+        // so the UI keeps a live progress indicator. After the debate completes
+        // we emit a single condensed summary.
         while (true) {
           const { value, done } = await debateGen.next();
           if (done) {
             debateState = value as DebateState;
             break;
           }
-          yield value as StreamChunk;
+          const chunk = value as StreamChunk;
+          if (chunk.type === "content") continue;
+          yield chunk;
         }
+
+        const summaryText =
+          (debateState?.runningSummary && debateState.runningSummary.trim()) ||
+          "(debate produced no summary — using empty research findings)";
+        yield {
+          type: "content",
+          content: `\n### Research summary\n${summaryText}\n`,
+        } as StreamChunk;
 
         // Append research summary to delegations.md
         const delegationsMap = (await readArtifact(runDir, "delegations.md")) ?? { preamble: "", sections: new Map() };

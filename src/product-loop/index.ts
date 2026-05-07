@@ -15,6 +15,11 @@ import { runSprint } from "./sprint-runner.js";
 import type { ProductSpec, IterationState, RoleSlot } from "./types.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
+import { resolveRoles } from "./role-registry.js";
+import { getModelsForProvider } from "../models/registry.js";
+import { loadKeyForProvider } from "../providers/keychain.js";
+import type { ProviderId } from "../providers/types.js";
+import type { ModelInfo } from "../types/index.js";
 
 export interface ProductLoopFlags {
   maxCost: number;
@@ -144,7 +149,8 @@ async function* runStart(
 
   // Phase 2: sprint loop until done or halted.
   const productSpec = await loadProductSpec(flowDir, runId, idea, opts.flags.stack);
-  const roleAssignments = opts.roleAssignments ?? new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
+  const roleAssignments =
+    opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
   return yield* drainSprints({
     ctx,
     productSpec,
@@ -431,7 +437,7 @@ async function* runResume(
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
   const roleAssignments =
-    opts.roleAssignments ?? new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
+    opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
   return yield* drainSprints({
     ctx,
     productSpec,
@@ -439,6 +445,45 @@ async function* runResume(
     history: iters.filter((i) => !i.crashed),
     flags: opts.flags,
   });
+}
+
+/**
+ * Build the inventory of models reachable in this session (= every provider
+ * that has a key on the keychain) and let role-registry assign one model per
+ * RoleSlot. The resulting Map is consumed by sprint-runner → done-gate Cond #4
+ * (PO ↔ Customer cross-model debate). Without this, the Map is empty and the
+ * gate immediately returns "missing_roles".
+ *
+ * On refusal (no keys, single-provider with too few models, or PO/Customer
+ * collision) we return an empty Map; done-gate's R5 short-circuit (skip Cond
+ * #4 when score < 0.85) keeps early sprints unblocked, and the user-approval
+ * gate (Cond #5) still runs so the loop can ship via /ship.
+ */
+async function resolveRoleAssignments(
+  sessionModelId: string,
+): Promise<Map<RoleSlot, { modelId: string; provider: string; tier?: string }>> {
+  const out = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
+  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "ollama"];
+  const inventory: ModelInfo[] = [];
+  for (const p of order) {
+    try {
+      await loadKeyForProvider(p);
+    } catch {
+      continue;
+    }
+    inventory.push(...getModelsForProvider(p));
+  }
+  if (inventory.length === 0) return out;
+
+  const result = await resolveRoles({ inventory });
+  if (result.kind !== "ok") return out;
+  for (const [slot, a] of Object.entries(result.roles)) {
+    out.set(slot as RoleSlot, { modelId: a.model, provider: a.provider, tier: a.tier });
+  }
+  // sessionModelId is preserved by callers via DriverContext; we just need it
+  // here to anchor the parameter signature for symmetry with resolveLeader*.
+  void sessionModelId;
+  return out;
 }
 
 async function* runShip(
