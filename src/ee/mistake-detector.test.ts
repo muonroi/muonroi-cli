@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "bun:test";
+import { describe, expect, it, beforeEach } from "vitest";
 import { MistakeDetector, _internals } from "./mistake-detector.js";
 
 describe("mistake-detector / tokenize + jaccard", () => {
