@@ -2117,8 +2117,11 @@ export class Agent {
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
     const gen = runProductLoop({
+      subcommand: payload.subcommand,
       idea: payload.idea ?? "",
+      runId: payload.runId,
       flowDir,
+      sessionModelId: this.modelId,
       llm,
       flags: {
         maxCost: payload.flags.maxCost,
@@ -2128,6 +2131,8 @@ export class Agent {
       },
       respondToQuestion: this._createQuestionResponder(),
       respondToPreflight: this._createPreflightResponder(),
+      cwd: this.bash.getCwd(),
+      processMessageFn,
     } as Parameters<typeof runProductLoop>[0]);
 
     for await (const chunk of gen) {

@@ -179,9 +179,10 @@ async function runUserApproval(ctx: DoneGateContext, score: number): Promise<boo
     scope: "Final Project Approval"
   };
 
+  const poModelId = ctx.roleAssignments.get("PO")?.modelId ?? "(unresolved)";
   const preflightGen = runPreflight(
     spec,
-    [{ role: "PO", model: "leader" }],
+    [{ role: "PO", model: poModelId }],
     false, // researchAlreadyDone
     ctx.respondToPreflight
   );

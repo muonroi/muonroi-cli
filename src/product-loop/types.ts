@@ -84,6 +84,12 @@ export interface DriverContext {
   runId: string;
   flowDir: string;
   idea: string;
+  /**
+   * The session's model id (this.modelId from orchestrator). Used to resolve
+   * the council leader model and participant roster via resolveLeaderModelDetailed
+   * + resolveParticipants. MUST NOT be a role string like "leader".
+   */
+  sessionModelId: string;
   llm: import("../council/types.js").CouncilLLM;
   flags: {
     maxCost: number;

@@ -125,7 +125,7 @@ export async function* runSprint(
   const sessionModelId =
     roleAssignments.get("Architect")?.modelId ??
     roleAssignments.get("PO")?.modelId ??
-    "leader";
+    ctx.sessionModelId;
 
   const noopProcess: NonNullable<DriverContext["processMessageFn"]> =
     async function* () { /* no host orchestrator wired during planning */ };

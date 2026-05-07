@@ -4,17 +4,29 @@ import { runClarification } from "../council/clarifier.js";
 import { runDebate } from "../council/debate.js";
 import { runPreflight } from "../council/preflight.js";
 import { phaseStart } from "../council/phase-events.js";
+import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
+import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { DriverContext, DriverResult, Stage, ProductSpec } from "./types.js";
-import type { ClarifiedSpec, DebateState } from "../council/types.js";
+import type { ClarifiedSpec, DebateState, CouncilParticipant } from "../council/types.js";
 
 export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamChunk, DriverResult, unknown> {
   let state: Stage = "idle";
   let clarifiedSpec: ClarifiedSpec | undefined;
   let debateState: DebateState | undefined;
-  
+
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
+
+  // Resolve real model IDs from the session's provider. Without this, every
+  // LLM call below would receive the literal string "leader" as a model id
+  // and the provider would reject the request.
+  const leaderResolution = await resolveLeaderModelDetailed(ctx.sessionModelId);
+  const leaderModelId = leaderResolution.modelId;
+  const councilParticipants = await resolveParticipants(
+    ctx.sessionModelId,
+    isCouncilMultiProviderPreferred(),
+  );
 
   while (true) {
     switch (state) {
@@ -37,7 +49,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         const clarifierGen = runClarification(
           ctx.idea,
-          "leader", 
+          leaderModelId,
           "",
           ctx.respondToQuestion,
           ctx.llm,
@@ -108,19 +120,26 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           { name: "Architect", lens: "Focus on high-level structure, scalability, and long-term maintainability" },
         ];
 
-        const participants = stances.map(s => ({
-          role: (s.name === "Researcher" ? "research" : "leader") as any,
-          model: "leader", // TODO: resolve real model
-          position: "",
-          stance: s
-        }));
+        // Map 4 stances onto resolved council participants. If we have fewer
+        // resolved participants than stances, repeat the leader model so every
+        // stance has a valid model id. runCouncil uses the same trim-or-repeat
+        // pattern (council/index.ts:166-173).
+        const participants: CouncilParticipant[] = stances.map((s, i) => {
+          const cp = councilParticipants[i % Math.max(1, councilParticipants.length)];
+          return {
+            role: (s.name === "Researcher" ? "research" : (cp?.role ?? "implement")) as any,
+            model: cp?.model ?? leaderModelId,
+            position: "",
+            stance: s,
+          };
+        });
 
         const debateGen = runDebate(
           clarifiedSpec,
           {
             topic: ctx.idea,
             conversationContext: "",
-            leaderModelId: "leader",
+            leaderModelId,
             participants,
           },
           ctx.llm
@@ -182,7 +201,7 @@ interface ProductSpec {
   costEstimate: number;
 }
 `;
-        const rawSpec = await ctx.llm.generate("leader", "You are a Product Owner synthesizing a technical specification.", synthesisPrompt);
+        const rawSpec = await ctx.llm.generate(leaderModelId, "You are a Product Owner synthesizing a technical specification.", synthesisPrompt);
         let productSpec: ProductSpec;
         try {
           const match = rawSpec.match(/\{[\s\S]*\}/);
@@ -197,11 +216,15 @@ interface ProductSpec {
         roadmapMap.sections.set("Product Specification", JSON.stringify(productSpec, null, 2));
         await writeArtifact(runDir, "roadmap.md", roadmapMap);
 
-        // runPreflight
-        const participants = debateState.spec.rawQA.length > 0 ? [{ role: "PO", model: "leader" }] : []; // Mocking
+        // runPreflight — show resolved participants on the brief card. These
+        // strings are display-only (no LLM call), but using real model ids
+        // gives the user useful context.
+        const preflightParticipants = councilParticipants.length > 0
+          ? councilParticipants.map((p) => ({ role: p.role as string, model: p.model }))
+          : [{ role: "leader", model: leaderModelId }];
         const preflightGen = runPreflight(
           clarifiedSpec,
-          debateState.spec.rawQA.map(() => ({ role: "expert", model: "leader" })), // Mocking
+          preflightParticipants,
           !!debateState.researchFindings,
           ctx.respondToPreflight
         );
