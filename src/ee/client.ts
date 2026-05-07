@@ -201,6 +201,7 @@ function normalizeInterceptResponse(raw: Record<string, unknown>): InterceptResp
         message: String(s.solution ?? ""),
         scope_label: String(s.scope?.toString() ?? "global"),
         last_matched_at: String(s.lastHitAt ?? new Date().toISOString()),
+        ...(typeof s.collection === "string" ? { collection: s.collection } : {}),
       }))
     : [];
   return {
@@ -523,13 +524,21 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     // ─── Semantic search ────────────────────────────────────────────────────
-    async search(query: string, limit?: number): Promise<EESearchResponse | null> {
+    async search(
+      query: string,
+      opts?: import("./types.js").EESearchOptions | number,
+    ): Promise<EESearchResponse | null> {
+      // Backwards-compat: allow `search(q, 5)` as well as `search(q, { limit: 5, collections: [...] })`.
+      const o = typeof opts === "number" ? { limit: opts } : opts ?? {};
+      const body: Record<string, unknown> = { query, limit: o.limit ?? 10 };
+      if (Array.isArray(o.collections) && o.collections.length > 0) body.collections = o.collections;
+      const timeoutMs = o.timeoutMs ?? 3000;
       try {
         const resp = await f(`${baseUrl}/api/search`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify({ query, limit: limit ?? 10 }),
-          signal: AbortSignal.timeout(3000),
+          body: JSON.stringify(body),
+          signal: o.signal ?? AbortSignal.timeout(timeoutMs),
         });
         if (!resp.ok) return null;
         return (await resp.json()) as EESearchResponse;

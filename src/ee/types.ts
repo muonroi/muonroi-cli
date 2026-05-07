@@ -53,6 +53,12 @@ export interface InterceptMatch {
   expectedBehavior?: string;
   scope_label: string;
   last_matched_at: string;
+  /**
+   * Qdrant collection this principle lives in. Optional — older response
+   * shapes do not carry it. Used by the phase-outcome wiring to credit-
+   * assign principles back to the brain.
+   */
+  collection?: string;
 }
 
 export interface InterceptResponse {
