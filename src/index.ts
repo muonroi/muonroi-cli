@@ -234,19 +234,23 @@ async function startInteractive(
         // best-effort
       }
 
-      if (isWezTerm) {
-        // WezTerm closes the window when the process exits. Hold stdin open
-        // so the user can see the terminal and press a key to confirm exit.
+      // WezTerm (and similar single-pane terminals) closes the window when
+      // the foreground process exits. To keep the pane usable after `/exit`,
+      // we hand control over to an interactive shell instead of exiting.
+      // Disable with MUONROI_NO_SHELL_HOLD=1.
+      const holdMode = process.env.MUONROI_NO_SHELL_HOLD === "1" ? "exit" : isWezTerm ? "shell" : "exit";
+      if (holdMode === "shell") {
         try {
-          process.stdout.write("\nSession ended. Press any key to close.\n");
-          process.stdin.setRawMode(true);
-          process.stdin.resume();
-          process.stdin.once("data", () => {
-            process.stdin.setRawMode(false);
-            process.exit(0);
-          });
+          const { spawn } = require("node:child_process") as typeof import("node:child_process");
+          const isWin = process.platform === "win32";
+          const shellCmd = process.env.MUONROI_EXIT_SHELL
+            || process.env.SHELL
+            || (isWin ? (process.env.COMSPEC || "cmd.exe") : "/bin/bash");
+          process.stdout.write("\nSession ended. Returning to shell — type `exit` to close this pane.\n\n");
+          const child = spawn(shellCmd, [], { stdio: "inherit", shell: false });
+          child.on("exit", (code) => process.exit(code ?? 0));
+          child.on("error", () => process.exit(0));
         } catch {
-          // stdin may not be a TTY in some launch modes — fall through
           setTimeout(() => process.exit(0), 16);
         }
       } else {
