@@ -2,6 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import type { VerifyRecipe } from "../types/index";
 import { mergeSandboxSettings, type SandboxSettings } from "../utils/settings";
+import { extractCoverageFromOutput } from "./coverage-parsers.js";
+
+export { extractCoverageFromOutput };
 
 export type VerifyAppKind =
   | "nextjs"
@@ -469,6 +472,7 @@ export function normalizeVerifyRecipe(value: unknown): VerifyRecipe | null {
     smokeTarget: typeof raw.smokeTarget === "string" && raw.smokeTarget.trim() ? raw.smokeTarget.trim() : undefined,
     evidence: asStrings(raw.evidence),
     notes: asStrings(raw.notes),
+    coverage: typeof raw.coverage === "number" ? raw.coverage : null,
   };
 }
 
