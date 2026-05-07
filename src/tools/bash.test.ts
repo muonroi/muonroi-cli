@@ -314,6 +314,21 @@ describe("BashTool sandbox state", () => {
     expect(bash.getSandboxSettings()).toEqual({ allowNet: true, allowedHosts: ["api.openai.com"] });
   });
 
+  it("translates POSIX-style absolute paths in cd when shell is POSIX", async () => {
+    if (process.platform !== "win32") return;
+    const root = makeTempDir("muonroi-bash-cdposix-");
+    // Pretend the configured shell is bash (forces POSIX path translation in cd handler).
+    const bash = new BashTool(root, { shellSettings: { kind: "bash" } });
+    if (!bash.getResolvedShell().isPosix) return; // skip if no bash on this Windows host
+
+    const driveLetter = root.match(/^([A-Za-z]):/)?.[1]?.toLowerCase();
+    if (!driveLetter) return;
+    const posixPath = `/${driveLetter}${root.slice(2).replace(/\\/g, "/")}`;
+    const result = await bash.execute(`cd ${posixPath}`);
+    expect(result.success).toBe(true);
+    expect(bash.getCwd()).toBe(root);
+  });
+
   it("includes network status in tool description when allowNet is set", () => {
     const netOn = new BashTool("/repo", {
       sandboxMode: "shuru",

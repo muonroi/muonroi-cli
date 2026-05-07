@@ -41,11 +41,12 @@ import { extractSession } from "../ee/extract-session.js";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { createBuiltinTools } from "../tools/registry.js";
+import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
-import { bridgeMcpToolResult, getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js";
+import { bridgeMcpToolResult, getVisionGuidanceForTextOnly, scrubImagePayloadsInMessages } from "../providers/mcp-vision-bridge.js";
 import { isDebugEnabled, recordTurnTrace, type PipelineStep, type TurnTrace } from "../ui/slash/debug.js";
 import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
 import {
@@ -97,6 +98,7 @@ import {
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
+  getCurrentShellSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
@@ -117,6 +119,7 @@ import {
   relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
+import { setProviderHint } from "./token-counter.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { stableCallId } from "./pending-calls.js";
@@ -358,6 +361,13 @@ export class Agent {
   private _turnUserGoalExcerpt = "";
   /** Compaction statistics tracking count and total tokens saved. */
   private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
+  /**
+   * Pinned message sequences. A pinned user message is preserved verbatim across
+   * compaction — it is re-injected as a system note immediately after the
+   * compaction summary, so the model still sees the original wording.
+   * V1 only supports user messages (avoids splitting tool-call/result pairs).
+   */
+  private _pinnedSeqs = new Set<number>();
 
   constructor(
     apiKey: string | undefined,
@@ -370,12 +380,14 @@ export class Agent {
     this.bash = new BashTool(process.cwd(), {
       sandboxMode: options.sandboxMode ?? "off",
       sandboxSettings: options.sandboxSettings,
+      shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
     this.delegations = new DelegationManager(() => this.bash.getCwd());
 
     const initialMode: AgentMode = "agent";
     this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
     this.providerId = detectProviderForModel(this.modelId);
+    setProviderHint(this.providerId);
     if (apiKey) {
       this.setApiKey(apiKey, baseURL);
     }
@@ -449,7 +461,8 @@ export class Agent {
     const newProviderId = detectProviderForModel(this.modelId);
     if (newProviderId !== this.providerId && this.apiKey) {
       this.providerId = newProviderId;
-      const effectiveBaseURL = this.providerId !== "anthropic" && this.baseURL === "https://api.anthropic.com"
+      setProviderHint(this.providerId);
+      const effectiveBaseURL = this.providerId !== "anthropic" && this.baseURL === apiBaseFor("anthropic")
         ? undefined
         : (this.baseURL ?? undefined);
       this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
@@ -512,7 +525,7 @@ export class Agent {
     this.baseURL = baseURL || null;
     // Only pass baseURL to provider factory if it's an explicit override,
     // not the default Anthropic URL (which would break non-Anthropic providers).
-    const effectiveBaseURL = this.providerId !== "anthropic" && baseURL === "https://api.anthropic.com"
+    const effectiveBaseURL = this.providerId !== "anthropic" && baseURL === apiBaseFor("anthropic")
       ? undefined
       : baseURL;
     this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
@@ -520,6 +533,7 @@ export class Agent {
 
   setProviderAndKey(providerId: ProviderId, apiKey: string, baseURL?: string): void {
     this.providerId = providerId;
+    setProviderHint(this.providerId);
     this.setApiKey(apiKey, baseURL);
   }
 
@@ -683,6 +697,7 @@ export class Agent {
     });
 
     this._compactionStats = { count: 0, totalSaved: 0 };
+    this._pinnedSeqs.clear();
 
     if (!this.sessionStore) {
       this.messages = [];
@@ -712,6 +727,40 @@ export class Agent {
 
   getCompactionStats(): { count: number; totalSaved: number } {
     return { ...this._compactionStats };
+  }
+
+  /**
+   * Pin a user message by its sequence number. Pinned messages survive
+   * compaction verbatim — re-injected as a system note after the summary.
+   * Returns true if the message was found, is a user message, and got pinned.
+   */
+  pinMessageBySeq(seq: number): boolean {
+    const idx = this.messageSeqs.findIndex((s) => s === seq);
+    if (idx < 0) return false;
+    if (this.messages[idx]?.role !== "user") return false;
+    this._pinnedSeqs.add(seq);
+    return true;
+  }
+
+  /** Pin the most recent user message in the live conversation. Returns its seq, or null. */
+  pinLastUserMessage(): number | null {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i]?.role !== "user") continue;
+      const seq = this.messageSeqs[i];
+      if (typeof seq === "number") {
+        this._pinnedSeqs.add(seq);
+        return seq;
+      }
+    }
+    return null;
+  }
+
+  unpinMessageBySeq(seq: number): boolean {
+    return this._pinnedSeqs.delete(seq);
+  }
+
+  getPinnedSeqs(): number[] {
+    return [...this._pinnedSeqs].sort((a, b) => a - b);
   }
 
   getChatEntries(): ChatEntry[] {
@@ -1097,6 +1146,7 @@ export class Agent {
       sandboxSettings: isVerify
         ? (verifyPreparedSettings ?? { ...this.bash.getSandboxSettings(), ...verifySandboxOverrides })
         : this.bash.getSandboxSettings(),
+      shellSettings: getCurrentShellSettings(),
     });
     const childBaseTools = createTools(childBash, provider, childMode);
     const initialDetail = isExplore
@@ -1485,15 +1535,46 @@ export class Agent {
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactModelId = this._resolveCompactModel();
-    const summary = await generateCompactionSummary(provider, compactModelId, preparation, undefined, signal);
+    const { summary, usage: compactUsage } = await generateCompactionSummary(provider, compactModelId, preparation, undefined, signal);
 
     appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
-    this.messages = [createCompactionSummaryMessage(summary), ...preparation.keptMessages];
-    this.messageSeqs = [null, ...keptSeqs];
 
-    // Track compaction stats
+    // Re-inject pinned user messages that were about to be summarized away.
+    // Pinned seqs that are still inside keptMessages don't need re-injection.
+    const keptSeqSet = new Set(keptSeqs.filter((s): s is number => s !== null));
+    const pinnedReinjections: ModelMessage[] = [];
+    const pinnedReinjectionSeqs: Array<number | null> = [];
+    for (const seq of [...this._pinnedSeqs].sort((a, b) => a - b)) {
+      if (keptSeqSet.has(seq)) continue;
+      const idx = this.messageSeqs.findIndex((s) => s === seq);
+      if (idx < 0) {
+        // Pinned seq no longer present (shouldn't happen, but stay defensive).
+        this._pinnedSeqs.delete(seq);
+        continue;
+      }
+      const original = this.messages[idx];
+      if (!original || original.role !== "user") continue;
+      const text = extractUserContent(original.content).trim();
+      if (!text) continue;
+      pinnedReinjections.push({
+        role: "system",
+        content: `[Pinned user message — kept verbatim across compaction]\n${text}`,
+      });
+      pinnedReinjectionSeqs.push(null);
+    }
+
+    this.messages = [
+      createCompactionSummaryMessage(summary),
+      ...pinnedReinjections,
+      ...preparation.keptMessages,
+    ];
+    this.messageSeqs = [null, ...pinnedReinjectionSeqs, ...keptSeqs];
+
+    // Track compaction stats — net of the tokens spent ON compaction itself.
     const tokensAfter = estimateConversationTokens(system, this.messages);
-    const saved = Math.max(0, preparation.tokensBefore - tokensAfter);
+    const grossSaved = Math.max(0, preparation.tokensBefore - tokensAfter);
+    const compactCost = compactUsage.promptTokens + compactUsage.completionTokens;
+    const saved = Math.max(0, grossSaved - compactCost);
     const pct = preparation.tokensBefore > 0 ? ((saved / preparation.tokensBefore) * 100).toFixed(1) : "0.0";
     this._compactionStats.count++;
     this._compactionStats.totalSaved += saved;
@@ -1524,6 +1605,8 @@ export class Agent {
             tokensBefore: preparation.tokensBefore,
             tokensAfter,
             saved,
+            grossSaved,
+            compactCost,
             pct,
             isLongSession,
           },
@@ -2913,9 +2996,18 @@ export class Agent {
         }
       }
       taskHash = routeDecision.taskHash ?? null;
-      // Update status bar with router switch info
+      // Update status bar with router switch info. Also reset back to the
+      // session default when the router does NOT switch on this turn —
+      // otherwise the bar stays "stuck" showing the previously-routed model
+      // (e.g. claude-sonnet-4-6) on later turns that actually run on the
+      // user's chosen default (e.g. deepseek-v4-flash).
       if (turnModelId !== this.modelId) {
         statusBarStore.setState({ routed_from: this.modelId, model: turnModelId });
+      } else {
+        const prev = statusBarStore.getState();
+        if (prev.routed_from || prev.model !== this.modelId) {
+          statusBarStore.setState({ routed_from: null, model: this.modelId });
+        }
       }
       if (_debugOn) {
         _debugSteps.push({
@@ -3043,20 +3135,29 @@ export class Agent {
     this.planContext = null;
     let attemptedOverflowRecovery = false;
 
-    // Auto-council: for plan/analyze tasks with high confidence, run multi-model debate
-    // Skip if this is already a council continuation turn (prevent infinite recursion)
+    // Auto-council: route to multi-model debate when EITHER
+    //   (a) PIL classified taskType=plan|analyze with high confidence, OR
+    //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
+    // After the debate finishes, runCouncilV2 records synthesis on
+    // `_lastCouncilSynthesis`; we then re-enter processMessage with the synthesis
+    // as the next user turn so the main loop continues with full debate context.
+    // Skip if this is already a council continuation turn (prevent infinite recursion).
     const autoCouncilTypes = new Set(["plan", "analyze"]);
     const councilRoles = getRoleModels();
     const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
-    if (
+    const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
+    const taskTypeMatch =
+      pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= 0.75;
+    const shouldAutoCouncil =
       !this._isCouncilContinuation &&
       isAutoCouncilEnabled() &&
-      pilCtx.taskType &&
-      autoCouncilTypes.has(pilCtx.taskType) &&
-      pilCtx.confidence >= 0.75 &&
-      configuredRoleCount >= 1
-    ) {
-      yield { type: "content", content: `\n[Auto-council triggered: ${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence]\n` };
+      configuredRoleCount >= 1 &&
+      (taskTypeMatch || heavyTier);
+    if (shouldAutoCouncil) {
+      const reason = heavyTier
+        ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
+        : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
+      yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
       yield* this.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
       const synthesis = this._lastCouncilSynthesis;
       this._lastCouncilSynthesis = null;
@@ -3495,7 +3596,14 @@ export class Agent {
           try {
             const response = await result.response;
             if (!signal.aborted) {
-              this.appendCompletedTurn(userModelMessage, sanitizeModelMessages(response.messages));
+              // Scrub oversized base64 image payloads from tool-result parts
+              // BEFORE persisting. The vision bridge above only modified the
+              // transient `tr` shown to the user — `response.messages` from
+              // the AI SDK still carries the full base64 (e.g. Playwright
+              // screenshot, ~1.5MB). Persisting that lets it accumulate and
+              // overflow the model's context on subsequent turns.
+              const scrubbed = scrubImagePayloadsInMessages(response.messages);
+              this.appendCompletedTurn(userModelMessage, sanitizeModelMessages(scrubbed));
               streamOk = true;
             }
           } catch (responseError: unknown) {

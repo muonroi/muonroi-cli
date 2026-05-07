@@ -3,6 +3,28 @@ import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
+import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+
+/**
+ * Convert a PIL gray-area question into the clarifier's round-question shape.
+ * The first option is treated as the recommended default (matches the
+ * convention used by detectGrayAreas).
+ */
+function grayAreaToRoundQuestion(g: GrayAreaQuestion): {
+  question: string;
+  why: string;
+  suggestions: string[];
+  recommended: string;
+  isRequired: boolean;
+} {
+  return {
+    question: g.question,
+    why: `Gray area: ${g.dimension} dimension is unspecified.`,
+    suggestions: g.options,
+    recommended: g.options[0] ?? "",
+    isRequired: true,
+  };
+}
 
 export interface ClarifyOptionsResult {
   options: CouncilQuestionOption[];
@@ -70,46 +92,55 @@ export async function* runClarification(
   respondToQuestion: QuestionResponder,
   llm: CouncilLLM,
   signal?: AbortSignal,
+  seedQuestions?: GrayAreaQuestion[],
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   const allQA: Array<{ question: string; answer: string }> = [];
 
   const phaseStartedAt = Date.now();
   yield phaseStart({ phaseId: "phase:clarification", kind: "clarification", label: "Clarification" });
 
-  for (let round = 0; round < MAX_CLARIFICATION_ROUNDS; round++) {
-    const { system, prompt } = buildClarificationPrompt(topic, conversationContext, allQA.length > 0 ? allQA : undefined);
+  const seeded = (seedQuestions ?? []).map(grayAreaToRoundQuestion);
 
+  for (let round = 0; round < MAX_CLARIFICATION_ROUNDS; round++) {
+    const useSeed = round === 0 && seeded.length > 0;
     const roundId = `phase:clarification-round-${round + 1}`;
     const roundStart = Date.now();
     yield phaseStart({
       phaseId: roundId,
       kind: "clarification_round",
-      label: `Clarification round ${round + 1}`,
+      label: useSeed ? `Clarification round ${round + 1} (PIL-seeded)` : `Clarification round ${round + 1}`,
     });
 
-    let questionsRaw: string;
-    try {
-      questionsRaw = yield* tracedGenerate(llm, {
-        phase: "clarify",
-        label: `Generating clarification questions (round ${round + 1})`,
-        modelId: leaderModelId,
-        system,
-        prompt,
-        maxTokens: 2048,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      yield phaseError({ phaseId: roundId, kind: "clarification_round", label: `Clarification round ${round + 1}`, startedAt: roundStart, errorMessage: msg });
-      yield { type: "content", content: `[Clarification error: ${msg}]\n` };
-      break;
-    }
-
     let questions: Array<{ question: string; why: string; suggestions?: string[]; recommended?: string; isRequired: boolean }>;
-    try {
-      const match = questionsRaw.match(/\[[\s\S]*\]/);
-      questions = match ? JSON.parse(match[0]) : [];
-    } catch {
-      questions = [];
+
+    if (useSeed) {
+      questions = seeded;
+    } else {
+      const { system, prompt } = buildClarificationPrompt(topic, conversationContext, allQA.length > 0 ? allQA : undefined);
+
+      let questionsRaw: string;
+      try {
+        questionsRaw = yield* tracedGenerate(llm, {
+          phase: "clarify",
+          label: `Generating clarification questions (round ${round + 1})`,
+          modelId: leaderModelId,
+          system,
+          prompt,
+          maxTokens: 2048,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        yield phaseError({ phaseId: roundId, kind: "clarification_round", label: `Clarification round ${round + 1}`, startedAt: roundStart, errorMessage: msg });
+        yield { type: "content", content: `[Clarification error: ${msg}]\n` };
+        break;
+      }
+
+      try {
+        const match = questionsRaw.match(/\[[\s\S]*\]/);
+        questions = match ? JSON.parse(match[0]) : [];
+      } catch {
+        questions = [];
+      }
     }
 
     if (questions.length === 0) {

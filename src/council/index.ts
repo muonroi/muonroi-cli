@@ -19,6 +19,7 @@ import { runPlanning } from "./planner.js";
 import { runExecution } from "./executor.js";
 import { planDebate } from "./debate-planner.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
+import { getPilLastResult } from "../pil/store.js";
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -76,9 +77,27 @@ export async function* runCouncil(
   let approved = false;
   const phaseAStart = Date.now();
 
+  // Pull gray-areas from the most recent PIL run so round-0 of clarification
+  // can be seeded with heuristic questions instead of an LLM call.
+  const pilSeed = (() => {
+    try {
+      const last = getPilLastResult();
+      if (last?.complexityTier === "heavy" && Array.isArray(last.grayAreas) && last.grayAreas.length > 0) {
+        return last.grayAreas;
+      }
+    } catch { /* fail-open */ }
+    return undefined;
+  })();
+
   while (!approved) {
     if (!options?.skipClarification) {
-      const clarifyGen = runClarification(topic, leaderModelId, conversationContext, respondToQuestion, llm, options?.signal);
+      if (pilSeed && pilSeed.length > 0) {
+        yield {
+          type: "content",
+          content: `\n> Clarification seeded by PIL (${pilSeed.length} gray-area question${pilSeed.length === 1 ? "" : "s"}).\n`,
+        };
+      }
+      const clarifyGen = runClarification(topic, leaderModelId, conversationContext, respondToQuestion, llm, options?.signal, pilSeed);
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
         clarifyResult = await clarifyGen.next();

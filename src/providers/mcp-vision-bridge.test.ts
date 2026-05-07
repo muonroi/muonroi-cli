@@ -133,7 +133,7 @@ describe("bridgeMcpToolResult", () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  it("falls back gracefully when vision API fails", async () => {
+  it("falls back gracefully when vision API fails — but still strips base64", async () => {
     const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
 
@@ -143,11 +143,12 @@ describe("bridgeMcpToolResult", () => {
       "deepseek-v4-flash",
     );
 
-    expect(result.proxied).toBe(false);
-    const output = typeof result.output === "string"
-      ? result.output
-      : JSON.stringify(result.output);
-    expect(output).toContain("could not be analyzed");
+    // proxied=true means the orchestrator will swap in our cleaned output;
+    // critical to prevent the raw base64 from polluting conversation history.
+    expect(result.proxied).toBe(true);
+    const serialized = JSON.stringify(result.output);
+    expect(serialized).toContain("could not be analyzed");
+    expect(serialized).not.toContain(fakeBase64);
   });
 
   it("strips base64 data from output when proxied", async () => {

@@ -6,6 +6,7 @@
  */
 
 import { createAnthropicAdapter } from "./anthropic.js";
+import { apiBaseFor } from "./endpoints.js";
 import { createGeminiAdapter } from "./gemini.js";
 import { createOllamaAdapter } from "./ollama.js";
 import { createOpenAIAdapter } from "./openai.js";
@@ -28,7 +29,7 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
     case "siliconflow":
       return createOpenAICompatibleAdapter({ ...config, id: "siliconflow" });
     case "xai":
-      return createOpenAICompatibleAdapter({ ...config, id: "xai", baseURL: config.baseURL ?? "https://api.x.ai/v1" });
+      return createOpenAICompatibleAdapter({ ...config, id: "xai", baseURL: config.baseURL ?? apiBaseFor("xai") });
     case "ollama":
       return createOllamaAdapter(config);
   }

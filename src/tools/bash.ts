@@ -7,6 +7,7 @@ import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
+import { type ResolvedShell, type ShellSettings, posixToNative, resolveShell } from "../utils/shell";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -26,6 +27,7 @@ export interface BackgroundProcess {
 interface BashToolOptions {
   sandboxMode?: SandboxMode;
   sandboxSettings?: SandboxSettings;
+  shellSettings?: ShellSettings;
 }
 
 let nextBgId = 1;
@@ -36,11 +38,15 @@ export class BashTool {
   private tmpDir: string | null = null;
   private sandboxMode: SandboxMode;
   private sandboxSettings: SandboxSettings;
+  private shellSettings: ShellSettings;
+  private resolvedShell: ResolvedShell;
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
     this.cwd = initialCwd;
     this.sandboxMode = options.sandboxMode ?? "off";
     this.sandboxSettings = options.sandboxSettings ?? {};
+    this.shellSettings = options.shellSettings ?? {};
+    this.resolvedShell = resolveShell(this.shellSettings);
   }
 
   private async ensureTmpDir(): Promise<string> {
@@ -58,7 +64,11 @@ export class BashTool {
           .trim()
           .replace(/^["']|["']$/g, "");
         try {
-          const nextCwd = path.resolve(this.cwd, dir);
+          // Translate POSIX-style absolute paths (e.g. /d/sources/x, ~/foo)
+          // when the active shell understands them, so cwd tracking matches
+          // what the shell would actually resolve.
+          const translated = this.resolvedShell.isPosix ? posixToNative(dir) : dir;
+          const nextCwd = path.resolve(this.cwd, translated);
           const info = await stat(nextCwd);
           if (!info.isDirectory()) {
             return { success: false, error: `Cannot change directory: ${nextCwd} is not a directory` };
@@ -110,6 +120,10 @@ export class BashTool {
             timeout,
             maxBuffer: 10 * 1024 * 1024,
             env: { ...process.env, FORCE_COLOR: "0" },
+            // Route through the resolved shell so POSIX syntax
+            // (`2>&1 &`, `$()`, single-quotes, `&&` as logical AND, …)
+            // works on Windows instead of falling back to cmd.exe.
+            ...(this.resolvedShell.binary ? { shell: this.resolvedShell.binary } : {}),
           },
           (err, stdout, stderr) => {
             if (aborted || abortSignal?.aborted) {
@@ -191,11 +205,13 @@ export class BashTool {
       const logPath = path.join(tmpDir, `bg-${id}.log`);
       const logStream = createWriteStream(logPath, { flags: "a" });
 
-      const child = spawn("sh", ["-c", prepared.command], {
+      const { binary, args } = this.spawnInvocation(prepared.command);
+      const child = spawn(binary, args, {
         cwd: this.cwd,
         detached: false,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env, FORCE_COLOR: "0" },
+        windowsHide: true,
       });
 
       child.stdout?.pipe(logStream);
@@ -399,6 +415,32 @@ export class BashTool {
       return `Execute a bash command inside a Shuru sandbox. Use for find, ls, git inspection, build tools, test runners, and other shell commands that should stay isolated. For content search, prefer the dedicated grep tool. The current workspace is mounted inside the sandbox at /workspace, ${netStatus}, and shell-side workspace file changes do not persist back to the host in this version, so prefer the dedicated file tools for durable edits.${hostBrowserNote} Set background=true for long-running processes like dev servers or watchers.`;
     }
     return "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
+  }
+
+  getResolvedShell(): ResolvedShell {
+    return this.resolvedShell;
+  }
+
+  private spawnInvocation(command: string): { binary: string; args: string[] } {
+    const shell = this.resolvedShell;
+    if (shell.binary) {
+      if (shell.kind === "wsl") {
+        return { binary: shell.binary, args: ["bash", "-lc", command] };
+      }
+      if (shell.kind === "powershell") {
+        return { binary: shell.binary, args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+      }
+      if (shell.kind === "bash") {
+        return { binary: shell.binary, args: ["-lc", command] };
+      }
+      // cmd.exe or unknown
+      return { binary: shell.binary, args: ["/d", "/s", "/c", command] };
+    }
+    // No explicit binary: rely on platform default the same way exec() does.
+    if (process.platform === "win32") {
+      return { binary: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", command] };
+    }
+    return { binary: "/bin/sh", args: ["-c", command] };
   }
 
   private prepareCommand(command: string): { ok: true; command: string } | { ok: false; error: string } {

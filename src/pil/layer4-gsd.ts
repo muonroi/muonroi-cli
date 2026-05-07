@@ -1,25 +1,29 @@
+/**
+ * src/pil/layer4-gsd.ts
+ *
+ * Layer 4: GSD-native workflow structuring.
+ *
+ * Three-tier triage:
+ *   - heavy:    inject mandatory discuss → research → verify → plan → impl → verify directive
+ *   - standard: GSD-quick mindset (short plan + impl + verify)
+ *   - quick:    minimal hint, run inline
+ *
+ * Phase detection still flows through the EE bridge first, then keyword
+ * fallback. The chosen phase becomes a hint inside the heavy/standard
+ * directive but never overrides the complexity-driven flow.
+ *
+ * All injected text is English. Per project rules, only user-facing text
+ * (questions surfaced via AskUserQuestion) is localised — at render time, by
+ * the agent, into the user's language.
+ */
+
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
+import { scoreComplexity } from "../gsd/complexity.js";
+import { detectGrayAreas } from "../gsd/gray-areas.js";
+import { buildDirective } from "../gsd/directives.js";
 import { routeTask } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
-
-const PHASE_HINTS: Record<GsdPhase, string> = {
-  discuss:
-    "[gsd: discuss phase — Explore options and trade-offs. Ask clarifying questions. " +
-    "Don't commit to implementation yet. Surface assumptions and risks.]",
-  plan:
-    "[gsd: plan phase — Create a structured plan with clear steps. Define success criteria. " +
-    "Identify dependencies and risks. Break work into small, testable tasks.]",
-  execute:
-    "[gsd: execute phase — Implement one task at a time. Write tests first (TDD). " +
-    "Make atomic commits. Follow the plan — flag deviations, don't freelance.]",
-  verify:
-    "[gsd: verify phase — Run tests and verify behavior matches requirements. " +
-    "Check edge cases. Validate against success criteria. Report gaps.]",
-  review:
-    "[gsd: review phase — Evaluate code quality, correctness, and completeness. " +
-    "Check for security issues, performance concerns, and maintainability.]",
-};
 
 function mapRouteToPhase(route: string): GsdPhase | null {
   switch (route) {
@@ -34,9 +38,11 @@ function mapRouteToPhase(route: string): GsdPhase | null {
   }
 }
 
+const DIRECTIVE_BUDGET_FRACTION = 0.25;
+
 export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> {
   let phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? null;
-  let routeSource = "keyword";
+  let routeSource = "preset";
 
   if (!phase) {
     const eeRoute = await routeTask(ctx.raw).catch(() => null);
@@ -48,29 +54,36 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
 
   if (!phase) {
     phase = detectGsdPhase(ctx.raw);
-    routeSource = "keyword";
+    routeSource = phase ? "keyword" : "none";
   }
 
-  if (!phase) {
-    return {
-      ...ctx,
-      layers: [...ctx.layers, { name: "gsd-workflow-structuring", applied: false, delta: "no-phase-detected" }],
-    };
-  }
+  const complexity = scoreComplexity(ctx.raw);
+  const grayAreas = complexity.tier === "heavy" ? detectGrayAreas(ctx.raw).questions : [];
+  const directive = buildDirective({ complexity, phase, grayAreas });
 
-  const hint = PHASE_HINTS[phase];
-  const trimmed = truncateToBudget(hint, Math.floor(ctx.tokenBudget * 0.15));
+  const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);
+  const trimmed = truncateToBudget(directive.text, budgetChars);
 
   return {
     ...ctx,
     gsdPhase: phase,
+    complexityTier: complexity.tier,
+    grayAreas,
     enriched: `${ctx.enriched}\n${trimmed}`,
     layers: [
       ...ctx.layers,
       {
         name: "gsd-workflow-structuring",
         applied: true,
-        delta: `phase=${phase} source=${routeSource} chars=${trimmed.length}`,
+        delta: [
+          `tier=${directive.tier}`,
+          `score=${complexity.score}`,
+          `phase=${phase ?? "none"}`,
+          `route=${routeSource}`,
+          `gray=${grayAreas.length}`,
+          `blocking=${directive.blocking}`,
+          `chars=${trimmed.length}`,
+        ].join(" "),
       },
     ],
   };

@@ -57,11 +57,70 @@ export class ProviderKeyMissingError extends Error {
  * Dynamic keytar loader — B-2 mitigation.
  * Missing/broken keytar never crashes the process.
  */
-async function loadKeytar(): Promise<{ getPassword(s: string, a: string): Promise<string | null> } | null> {
+interface KeytarLike {
+  getPassword(service: string, account: string): Promise<string | null>;
+  setPassword?(service: string, account: string, password: string): Promise<void>;
+  deletePassword?(service: string, account: string): Promise<boolean>;
+  findCredentials?(service: string): Promise<Array<{ account: string; password: string }>>;
+}
+
+async function loadKeytar(): Promise<KeytarLike | null> {
   try {
-    return (await import("keytar")) as any;
+    return (await import("keytar")) as KeytarLike;
   } catch {
     return null;
+  }
+}
+
+export const KEYCHAIN_PROVIDER_IDS: ProviderId[] = [
+  "anthropic",
+  "openai",
+  "google",
+  "deepseek",
+  "siliconflow",
+  "xai",
+];
+
+/**
+ * Store a provider API key in the OS keychain. Returns true on success.
+ * Falls back to false (silent) if keytar is unavailable on this platform.
+ */
+export async function setKeyForProvider(provider: ProviderId, key: string): Promise<boolean> {
+  if (!key || key.length < 20) {
+    throw new Error(`Key for '${provider}' is too short (< 20 chars).`);
+  }
+  const kt = await loadKeytar();
+  if (!kt?.setPassword) return false;
+  redactor.enrollSecret(key);
+  await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider], key);
+  return true;
+}
+
+/**
+ * Delete a stored key. Returns true if a key was deleted, false if none was
+ * present or keytar is unavailable.
+ */
+export async function deleteKeyForProvider(provider: ProviderId): Promise<boolean> {
+  const kt = await loadKeytar();
+  if (!kt?.deletePassword) return false;
+  return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider]);
+}
+
+/**
+ * List provider IDs that currently have a key stored in the keychain.
+ * Empty array if keytar is unavailable.
+ */
+export async function listStoredProviders(): Promise<ProviderId[]> {
+  const kt = await loadKeytar();
+  if (!kt?.findCredentials) return [];
+  try {
+    const creds = await kt.findCredentials(KEYCHAIN_SERVICE);
+    const validAccounts = new Set(Object.values(ACCOUNT_BY_PROVIDER));
+    return creds
+      .filter((c) => validAccounts.has(c.account))
+      .map((c) => c.account as ProviderId);
+  } catch {
+    return [];
   }
 }
 

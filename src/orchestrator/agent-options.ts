@@ -5,6 +5,7 @@ import type { PermissionMode } from "../utils/permission-mode.js";
 import type { AbortContext } from "./abort.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
+import type { ShellSettings } from "../utils/shell";
 
 // ---------------------------------------------------------------------------
 // Re-export types from shared runtime module for back-compat
@@ -145,6 +146,8 @@ export interface AgentOptions {
   session?: string;
   sandboxMode?: SandboxMode;
   sandboxSettings?: SandboxSettings;
+  /** Shell used by the bash tool. Falls back to user/project settings, then platform auto-detect. */
+  shellSettings?: ShellSettings;
   batchApi?: boolean;
   /** Optional external AbortContext (from src/index.ts SIGINT handler). When provided,
    *  the orchestrator uses its signal instead of creating a new AbortController per turn.

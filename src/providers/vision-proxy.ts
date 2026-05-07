@@ -9,14 +9,16 @@
 
 import type { ModelMessage } from "ai";
 import { getModelInfo } from "../models/registry.js";
+import { apiBaseFor } from "./endpoints.js";
 import { loadKeyForProvider } from "./keychain.js";
 
 const VISION_MODELS = [
-  "Qwen/Qwen2.5-VL-32B-Instruct",
+  "Qwen/Qwen3-VL-8B-Instruct",
   "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "Qwen/Qwen3-VL-32B-Instruct",
 ] as const;
-const SILICONFLOW_BASE = "https://api.siliconflow.com/v1";
-const REQUEST_TIMEOUT_MS = 45_000;
+const SILICONFLOW_BASE = apiBaseFor("siliconflow");
+const REQUEST_TIMEOUT_MS = 90_000;
 
 interface ImagePart {
   type: "image";
@@ -99,7 +101,7 @@ async function describeImages(
   try {
     apiKey = await loadKeyForProvider("siliconflow");
   } catch {
-    return buildFallbackDescription(images);
+    return buildFallbackDescription(images, ["SILICONFLOW_API_KEY not configured"]);
   }
 
   const userContext = contextTexts.map((t) => t.text).join("\n");
@@ -120,61 +122,81 @@ async function describeImages(
     });
   }
 
-  // Try each vision model with fallback
+  const failureReasons: string[] = [];
   for (const model of VISION_MODELS) {
     try {
       const result = await callVisionModel(model, visionContent, apiKey, signal);
-      if (result) return formatVisionResult(result, images.length, model);
+      if (result.ok) return formatVisionResult(result.text, images.length, model);
+      failureReasons.push(`${model}: ${result.reason}`);
+      console.warn(`[vision-proxy] ${model} failed (${result.reason}), trying next...`);
     } catch (err) {
       if (signal?.aborted) throw err;
-      console.warn(`[vision-proxy] ${model} failed, trying next...`);
+      const msg = err instanceof Error ? err.message : String(err);
+      failureReasons.push(`${model}: ${msg}`);
+      console.warn(`[vision-proxy] ${model} threw (${msg}), trying next...`);
     }
   }
 
-  return buildFallbackDescription(images);
+  return buildFallbackDescription(images, failureReasons);
 }
+
+type VisionCallResult =
+  | { ok: true; text: string }
+  | { ok: false; reason: string };
 
 async function callVisionModel(
   model: string,
   content: Array<Record<string, unknown>>,
   apiKey: string,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<VisionCallResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
 
   if (signal) {
     signal.addEventListener("abort", () => controller.abort(), { once: true });
   }
 
-  const res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: "user", content }],
-      max_tokens: 2048,
-      temperature: 0.1,
-    }),
-    signal: controller.signal,
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: "user", content }],
+        max_tokens: 2048,
+        temperature: 0.1,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeout);
+    if (timedOut) return { ok: false, reason: `timeout after ${REQUEST_TIMEOUT_MS}ms` };
+    if (signal?.aborted) throw err;
+    return { ok: false, reason: `network error: ${err instanceof Error ? err.message : String(err)}` };
+  }
 
   clearTimeout(timeout);
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "unknown error");
-    console.warn(`[vision-proxy] ${model} returned ${res.status}: ${errText}`);
-    return null;
+    return { ok: false, reason: `HTTP ${res.status} ${errText.slice(0, 200)}` };
   }
 
-  const data = (await res.json()) as {
-    choices: Array<{ message: { content: string } }>;
-  };
-
-  return data.choices?.[0]?.message?.content ?? null;
+  const data = (await res.json().catch(() => null)) as
+    | { choices?: Array<{ message?: { content?: string } }> }
+    | null;
+  const text = data?.choices?.[0]?.message?.content;
+  if (!text) return { ok: false, reason: "empty response body" };
+  return { ok: true, text };
 }
 
 function buildAnalysisPrompt(userContext: string, imageCount: number): string {
@@ -202,8 +224,11 @@ function formatVisionResult(description: string, imageCount: number, model?: str
   return `\n${header}\n${description}\n[/Vision Proxy]\n`;
 }
 
-function buildFallbackDescription(images: ImagePart[]): string {
+function buildFallbackDescription(images: ImagePart[], reasons: string[] = []): string {
   const count = images.length;
   const types = [...new Set(images.map((i) => i.mediaType))].join(", ");
-  return `\n[Vision Proxy — unavailable, ${count} image(s) (${types}) could not be analyzed. SILICONFLOW_API_KEY may be missing.]\n`;
+  const detail = reasons.length > 0
+    ? `Reason(s): ${reasons.join(" | ")}`
+    : "Reason: unknown — check SILICONFLOW_API_KEY and model availability.";
+  return `\n[Vision Proxy — unavailable, ${count} image(s) (${types}) could not be analyzed. ${detail}]\n`;
 }
