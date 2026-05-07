@@ -17,12 +17,31 @@ export type Scope =
   | { kind: "repo"; remote: string }
   | { kind: "branch"; remote: string; branch: string };
 
+/**
+ * Optional intent context attached to InterceptRequest by muonroi-cli.
+ * Hooks in foreign CLIs (Claude Code, Gemini, Codex) can't see these — only the
+ * native orchestrator can populate them. The EE server may use them to improve
+ * the L3 brain relevance filter without breaking on absence.
+ */
+export interface InterceptIntentContext {
+  /** Last ~200 chars of the assistant's reasoning before the tool call. */
+  assistantReasoningExcerpt?: string;
+  /** Principle UUIDs already surfaced earlier in the same session. */
+  priorWarningIdsInSession?: string[];
+  /** Active GSD phase identifier when running under GSD workflow. */
+  gsdPhase?: string;
+  /** First ~200 chars of the user prompt that started this turn. */
+  userGoalExcerpt?: string;
+}
+
 export interface InterceptRequest {
   toolName: string;
   toolInput: unknown;
   cwd: string;
   tenantId: string; // EE-04: required
   scope: Scope; // EE-05: required
+  /** P0 native observation: optional intent context (server ignores if unknown). */
+  context?: InterceptIntentContext;
 }
 
 export interface InterceptMatch {
@@ -45,15 +64,35 @@ export interface InterceptResponse {
   reason?: string;
 }
 
+/** Mistake kinds inferred by the local mistake-detector (P0 native observation). */
+export type MistakeKind = "user-veto" | "retry-pattern";
+
+/**
+ * Rich outcome — extends `outcome.success` with verifier/build/test/typecheck
+ * results that hooks alone cannot surface, plus mistake-detector signal.
+ *
+ * All extra fields are optional. The current EE server ignores unknown fields
+ * (extra-tolerant JSON), so wire-format upgrades are non-breaking.
+ */
+export interface PostToolOutcome {
+  success: boolean;
+  exitCode?: number;
+  durationMs?: number;
+  error?: string;
+  // P0 rich outcome — populated when the CLI knows the deeper result.
+  verifyResult?: "pass" | "fail" | "skip";
+  buildResult?: { exitCode: number; durationMs: number };
+  typeCheckResult?: "pass" | "fail";
+  testResult?: { passed: number; failed: number };
+  // P0 mistake signal — only ever set by client-side detector, never by agent self-report.
+  mistakeKind?: MistakeKind;
+  evidence?: Record<string, unknown>;
+}
+
 export interface PostToolPayload {
   toolName: string;
   toolInput: unknown;
-  outcome: {
-    success: boolean;
-    exitCode?: number;
-    durationMs?: number;
-    error?: string;
-  };
+  outcome: PostToolOutcome;
   cwd: string;
   tenantId: string; // EE-04: required
   scope: Scope; // EE-05: required
@@ -288,6 +327,20 @@ export interface EESearchResponse {
   points: EESearchResult[];
 }
 
+export interface EESearchOptions {
+  limit?: number;
+  /**
+   * Optional list of Qdrant collections to search. Server defaults to
+   * ['experience-behavioral'] when omitted. Allowed values currently:
+   *   - 'experience-behavioral'
+   *   - 'experience-principles'
+   */
+  collections?: string[];
+  /** Override per-call timeout. Defaults to 3000ms. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 // ─── User identity ───────────────────────────────────────────────────────────
 export interface EEUserResponse {
   user: string;
@@ -317,6 +370,6 @@ export interface EEClient {
   importPrinciple(data: unknown): Promise<EEImportResponse | null>;
   // Task routing + search + user
   routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null>;
-  search(query: string, limit?: number): Promise<EESearchResponse | null>;
+  search(query: string, opts?: EESearchOptions | number): Promise<EESearchResponse | null>;
   user(): Promise<EEUserResponse | null>;
 }
