@@ -36,7 +36,7 @@ describe("decide()", () => {
         taskHash: "test-hash",
       }),
       coldRoute: (_req) => ({
-        model: "deepseek-v3",
+        model: "deepseek-v4-flash",
         tier: "premium" as const,
         reason: "ee-cold",
         taskHash: "test-hash",

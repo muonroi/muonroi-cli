@@ -9,7 +9,7 @@ import type {
   LspSettings,
   NormalizedLspSettings,
 } from "../lsp/types";
-import { getEffectiveReasoningEffort, getModelIds, normalizeModelId } from "../models/registry.js";
+import { MODELS, getEffectiveReasoningEffort, getModelIds, getModelInfo, normalizeModelId } from "../models/registry.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
@@ -420,22 +420,32 @@ export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey
 }
 
 export function getCurrentModel(mode?: AgentMode): string {
-  const envModel = process.env.MUONROI_MODEL;
-  if (envModel) return normalizeModelId(envModel);
+  // Only honor a configured model if it resolves to a known catalog entry.
+  // Stale configs (e.g. retired ids like "deepseek-chat") otherwise break boot.
+  // If the catalog hasn't loaded yet, skip validation and return the raw normalized id.
+  const catalogReady = MODELS.length > 0;
+  const pickValid = (id: string | undefined): string | undefined => {
+    if (!id) return undefined;
+    const normalized = normalizeModelId(id);
+    if (!catalogReady) return normalized;
+    return getModelInfo(normalized) ? normalized : undefined;
+  };
+
+  const envModel = pickValid(process.env.MUONROI_MODEL);
+  if (envModel) return envModel;
 
   const project = loadProjectSettings();
-  if (project.model) return normalizeModelId(project.model);
+  const projectModel = pickValid(project.model);
+  if (projectModel) return projectModel;
 
   if (mode) {
     const user = loadUserSettings();
-    const modeModel = user.modeModels?.[mode];
-    if (modeModel) {
-      return normalizeModelId(modeModel);
-    }
+    const modeModel = pickValid(user.modeModels?.[mode]);
+    if (modeModel) return modeModel;
   }
 
   const user = loadUserSettings();
-  return user.defaultModel ? normalizeModelId(user.defaultModel) : DEFAULT_MODEL;
+  return pickValid(user.defaultModel) ?? DEFAULT_MODEL;
 }
 
 /**

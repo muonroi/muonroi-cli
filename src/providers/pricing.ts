@@ -31,8 +31,8 @@ export const PRICING: Record<string, Record<string, PricePerMillion>> = {
     "gemini-pro-latest": { input_per_million_usd: 1.25, output_per_million_usd: 10.0 }, // ai.google.dev/pricing
   },
   deepseek: {
-    "deepseek-chat": { input_per_million_usd: 0.27, output_per_million_usd: 1.1 }, // api-docs.deepseek.com
-    "deepseek-reasoner": { input_per_million_usd: 0.55, output_per_million_usd: 2.19 }, // api-docs.deepseek.com
+    "deepseek-v4-flash": { input_per_million_usd: 0.1, output_per_million_usd: 0.4 }, // api-docs.deepseek.com
+    "deepseek-v4-pro": { input_per_million_usd: 2.0, output_per_million_usd: 8.0 }, // api-docs.deepseek.com
   },
   siliconflow: {
     "Qwen/Qwen2.5-Coder-32B-Instruct": { input_per_million_usd: 0.18, output_per_million_usd: 0.18 }, // siliconflow.cn/pricing

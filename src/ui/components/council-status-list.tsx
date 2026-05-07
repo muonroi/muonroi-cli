@@ -7,6 +7,7 @@ const DONE_HOLD_MS = 1500;
 
 const PHASE_LABEL: Record<CouncilStatusPhase, string> = {
   clarify: "clarify",
+  plan_debate: "plan",
   research: "research",
   opening: "opening",
   exchange: "exchange",

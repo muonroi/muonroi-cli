@@ -2,24 +2,38 @@
  * src/pil/layer3-ee-injection.ts
  *
  * PIL Layer 3 — Experience Engine injection.
- * Uses in-process bridge.getEmbeddingRaw + bridge.searchCollection.
- * Eliminates network overhead and EE server dependency for vector
- * search (PIL-02). HTTP-based approach removed in Phase 06.
+ *
+ * Thin-client aware: when `serverBaseUrl` is configured in ~/.experience/config.json
+ * `searchByText` issues a single `/api/search` round-trip (server embeds + Qdrant
+ * search server-side). Otherwise falls back to in-process embed + Qdrant.
  */
 
-import { getEmbeddingRaw, searchCollection } from "../ee/bridge.js";
+import { searchByText } from "../ee/bridge.js";
 import type { EEPoint } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
-async function queryEeBridge(raw: string): Promise<{ points: EEPoint[]; error?: string }> {
+// Budget for the HTTP/in-process search round-trip. 60ms (legacy) was tuned for
+// localhost Ollama and routinely tripped the abort on VPS thin-client setups
+// where embedding goes through SiliconFlow.
+const PIL_SEARCH_TIMEOUT_MS = 1500;
+
+// Score floor — points scoring below this are treated as noise and dropped
+// before injection. Mirrors the server-side `minConfidence` (0.55) used by
+// the intercept path so the brain doesn't pollute prompts with weak hits.
+// Set MUONROI_PIL_SCORE_FLOOR=<number> to override per-machine.
+const PIL_SCORE_FLOOR = (() => {
+  const raw = Number(process.env.MUONROI_PIL_SCORE_FLOOR);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.55;
+})();
+
+async function queryEeBridge(raw: string): Promise<{ points: EEPoint[]; error?: string; filtered?: number }> {
   try {
-    const vector = await getEmbeddingRaw(raw, AbortSignal.timeout(60));
-    if (!vector) return { points: [], error: "no-embedding" };
-    const points = await searchCollection("experience-behavioral", vector, 5, AbortSignal.timeout(40));
-    return { points };
+    const points = await searchByText(raw, ["experience-behavioral"], 5, AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS));
+    const kept = points.filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR);
+    return { points: kept, filtered: points.length - kept.length };
   } catch (err) {
     return { points: [], error: String(err) };
   }
@@ -69,15 +83,17 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   }
 
   if (points.length === 0) {
-    // EE detail log: no relevant experience found
+    // EE detail log: no relevant experience found (or all filtered as noise)
     try {
       if (ctx.sessionId) {
         logInteraction(ctx.sessionId, "ee_injection", {
-          eventSubtype: "no_match",
+          eventSubtype: result.filtered && result.filtered > 0 ? "filtered_noise" : "no_match",
           data: {
             phase: "pil_enrichment",
             role: "knowledge_retriever",
             queryLength: ctx.raw.length,
+            filteredBelowFloor: result.filtered ?? 0,
+            scoreFloor: PIL_SCORE_FLOOR,
             taskType: ctx.taskType ?? null,
           },
         });

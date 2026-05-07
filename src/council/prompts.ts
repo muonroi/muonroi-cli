@@ -1,4 +1,4 @@
-import type { ClarifiedSpec } from "./types.js";
+import type { ClarifiedSpec, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 
 // ── Clarification prompts ────────────────────────────────────────────────────
 
@@ -27,7 +27,11 @@ export function buildClarificationPrompt(topic: string, conversationContext: str
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
       `- Prefer using the project's package.json name and description as implicit context for follow-up questions.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
-      `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "isRequired": true}]\n` +
+      `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "recommended": "option A", "isRequired": true}]\n\n` +
+      `Rules for "recommended":\n` +
+      `- Only include "recommended" when, given the topic + context, ONE option is clearly the best default.\n` +
+      `- Its value MUST be exactly equal to one of the entries in "suggestions".\n` +
+      `- Pick at most ONE recommended option per question. If you cannot confidently single one out, OMIT the field entirely — do not guess.\n` +
       `Return [] if no clarification needed.`,
     prompt:
       `## Topic\n${topic}\n\n` +
@@ -59,47 +63,75 @@ export function buildSpecSynthesisPrompt(topic: string, conversationContext: str
 
 // ── Debate prompts ───────────────────────────────────────────────────────────
 
+/** Resolve the persona label used inside debate prompts. Stance wins; role is fallback. */
+function personaOf(role: string, stance?: DebateStance): { label: string; lens: string; focus: string } {
+  if (stance) {
+    return {
+      label: stance.name,
+      lens: stance.lens,
+      focus: stance.focus ?? "",
+    };
+  }
+  return { label: `${role} specialist`, lens: `your ${role} perspective`, focus: "" };
+}
+
 export function buildOpeningPrompt(ctx: {
   speakerRole: string;
   partnerRole: string;
+  speakerStance?: DebateStance;
+  partnerStance?: DebateStance;
   spec: ClarifiedSpec;
+  outputShape?: OutputShape;
   conversationContext?: string;
 }): { system: string; prompt: string } {
+  const me = personaOf(ctx.speakerRole, ctx.speakerStance);
+  const them = personaOf(ctx.partnerRole, ctx.partnerStance);
+  const guardrails = ctx.outputShape?.guardrails?.length
+    ? `\nGuardrails for this discussion:\n${ctx.outputShape.guardrails.map((g) => `- ${g}`).join("\n")}\n`
+    : "";
+  const focusLine = me.focus ? `\nYour specific focus: ${me.focus}\n` : "";
   return {
     system:
-      `You are a ${ctx.speakerRole} specialist. You are entering a discussion with a ${ctx.partnerRole} specialist.\n\n` +
-      (ctx.conversationContext ? `## Conversation Context\n${ctx.conversationContext}\n\n---\n\n` : "") +
+      `You are the "${me.label}". Your lens: ${me.lens}.\n` +
+      `You are entering a discussion with the "${them.label}" (${them.lens}).\n` +
+      focusLine +
+      guardrails +
+      (ctx.conversationContext ? `\n## Conversation Context\n${ctx.conversationContext}\n\n---\n\n` : "\n") +
       `## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
       `Scope: ${ctx.spec.scope}\n\n` +
-      `Share your analysis. Focus on the success criteria — address each one. ` +
-      `End by asking the ${ctx.partnerRole} for their perspective on your analysis.`,
-    prompt: `Analyze the problem from your ${ctx.speakerRole} perspective. Be specific and evidence-based.`,
+      `Share your analysis from your stated lens. Focus on the success criteria — address each one. ` +
+      `End by asking the "${them.label}" for their perspective on your analysis.`,
+    prompt: `Analyze the problem through your stated lens. Be specific, evidence-based, and stay within your stance — do not drift into another role's perspective.`,
   };
 }
 
 export function buildResponsePrompt(ctx: {
   speakerRole: string;
   partnerRole: string;
+  speakerStance?: DebateStance;
+  partnerStance?: DebateStance;
   speakerPosition: string;
   partnerPosition: string;
   spec: ClarifiedSpec;
 }): { system: string; prompt: string } {
+  const me = personaOf(ctx.speakerRole, ctx.speakerStance);
+  const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   return {
     system:
-      `You are a ${ctx.speakerRole} specialist responding to a ${ctx.partnerRole} specialist.\n\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n\n` +
       `## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n\n` +
       `Give your honest take:\n` +
       `- Where you agree, say so briefly and build on it\n` +
       `- Where you disagree, explain why with your own reasoning\n` +
-      `- Share what they might be missing from your ${ctx.speakerRole} perspective\n\n` +
+      `- Share what they might be missing from your stated lens\n\n` +
       `End with a question back to them.`,
     prompt:
-      `Their analysis (${ctx.partnerRole}):\n${ctx.partnerPosition}\n\n` +
+      `Their analysis (${them.label}):\n${ctx.partnerPosition}\n\n` +
       `Your own analysis for context:\n${ctx.speakerPosition}`,
   };
 }
@@ -107,15 +139,19 @@ export function buildResponsePrompt(ctx: {
 export function buildFollowupPrompt(ctx: {
   speakerRole: string;
   partnerRole: string;
+  speakerStance?: DebateStance;
+  partnerStance?: DebateStance;
   partnerPosition: string;
   exchangeHistory: string;
   round: number;
   runningSummary?: string;
   spec: ClarifiedSpec;
 }): { system: string; prompt: string } {
+  const me = personaOf(ctx.speakerRole, ctx.speakerStance);
+  const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   return {
     system:
-      `You are a ${ctx.speakerRole} specialist continuing a discussion (round ${ctx.round}) with a ${ctx.partnerRole} specialist.\n\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n\n` +
       (ctx.runningSummary
         ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
         : "") +
@@ -126,10 +162,11 @@ export function buildFollowupPrompt(ctx: {
       `- If they raised valid points, acknowledge them and update your thinking\n` +
       `- If you still disagree, bring new evidence or a different angle\n` +
       `- If you've changed your mind, say so explicitly\n\n` +
+      `Stay within your lens; do not drift into the other specialist's role. ` +
       `Be concise. End with: do you agree on where we've landed?`,
     prompt:
       `Discussion so far:\n${ctx.exchangeHistory}\n\n` +
-      `Their latest (${ctx.partnerRole}):\n${ctx.partnerPosition}`,
+      `Their latest (${them.label}):\n${ctx.partnerPosition}`,
   };
 }
 
@@ -183,36 +220,118 @@ export function buildRoundSummaryPrompt(allExchanges: string, topic: string, rou
 
 // ── Synthesis + Planning ─────────────────────────────────────────────────────
 
+/** Build the leader-LLM prompt that proposes stances + output shape for a topic. */
+export function buildDebatePlanPrompt(spec: ClarifiedSpec): { system: string; prompt: string } {
+  return {
+    system:
+      `You are the lead facilitator for a multi-expert discussion. Before the debate starts, ` +
+      `you decide what KIND of conversation this is and what specialists should participate.\n\n` +
+      `Read the topic carefully. Topics vary widely:\n` +
+      `- Evaluation/comparison ("compare X vs Y", "review project", "đánh giá") → analyst stances, evaluation output\n` +
+      `- Implementation ("build X", "fix bug Y", "add feature Z") → engineering stances, plan output\n` +
+      `- Decision ("should we X?", "X or Y?") → advocate/skeptic stances, decision output\n` +
+      `- Investigation ("why does X fail?", "what causes Y?") → investigator stances, finding output\n` +
+      `- Open-ended exploration → diverse curious stances, exploration output\n` +
+      `Do NOT force every topic into the same shape.\n\n` +
+      `Propose:\n` +
+      `1. \`stances\`: 2-3 specialists tailored to THIS topic. Each has a distinct lens that produces ` +
+      `productive disagreement. Avoid overlap. Stances should fit the topic, NOT generic ` +
+      `"implement/verify/research" labels.\n` +
+      `2. \`outputShape\`: the JSON sections the synthesis should produce. ` +
+      `Pick keys/headings that match what the user actually wants to receive. ` +
+      `For evaluation, use sections like strengths/weaknesses/comparisons/recommendation. ` +
+      `For implementation, use sections like agreed/tradeoffs/actionItems/plan. ` +
+      `For decisions, use sections like options/recommendation/rationale. ` +
+      `Be specific to the topic.\n` +
+      `3. \`guardrails\`: behavioral rules participants must obey. ` +
+      `Examples: "cite sources for numbers", "do not propose code changes", "stay within YYYY constraint".\n\n` +
+      `Output ONLY a JSON object (no markdown, no preamble):\n` +
+      `{\n` +
+      `  "intentSummary": "one sentence in the user's language naming what they want",\n` +
+      `  "stances": [{"name": "Comparative Analyst", "lens": "How does X stack up vs Y on dimension Z?", "focus": "specific concrete focus"}],\n` +
+      `  "outputShape": {\n` +
+      `    "kind": "evaluation|implementation_plan|decision|investigation|exploration|other",\n` +
+      `    "sections": [\n` +
+      `      {"key": "strengths", "heading": "Strengths", "prompt": "what the subject does well, with evidence", "shape": "list"},\n` +
+      `      {"key": "recommendation", "heading": "Recommendation", "prompt": "decisive verdict in 1-2 sentences", "shape": "text"}\n` +
+      `    ],\n` +
+      `    "guardrails": ["cite the source for any numeric claim", "..."]\n` +
+      `  }\n` +
+      `}`,
+    prompt:
+      `## Topic\n${spec.problemStatement}\n\n` +
+      `## Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n\n` +
+      `## Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
+      `## Scope\n${spec.scope || "(unspecified)"}`,
+  };
+}
+
+function shapeHint(s: OutputSection): string {
+  if (s.shape === "list") return `["...", "..."]`;
+  if (s.shape === "objectList") return `[{"key": "value"}, {"key": "value"}]`;
+  return `"..."`;
+}
+
+/**
+ * Synthesis prompt is now shape-driven. The leader's {@link DebatePlan} controls
+ * which JSON sections the synthesizer emits and which Markdown headings render.
+ * No keyword detection, no hardcoded enum.
+ */
 export function buildSynthesisPrompt(ctx: {
   spec: ClarifiedSpec;
   finalPositions: string;
   allExchanges: string;
+  debatePlan?: DebatePlan;
 }): { system: string; prompt: string } {
+  const shape = ctx.debatePlan?.outputShape;
+
+  // Fallback shape — used only when the planner step failed or was skipped.
+  const fallback: OutputShape = {
+    kind: "decision",
+    sections: [
+      { key: "agreed", heading: "Agreed", prompt: "points participants converged on", shape: "list" },
+      { key: "tradeoffs", heading: "Trade-offs", prompt: "real trade-offs identified", shape: "list" },
+      { key: "recommendation", heading: "Recommendation", prompt: "decisive verdict", shape: "text" },
+    ],
+    guardrails: ["Be evidence-grounded; flag any claim that lacks support."],
+  };
+  const finalShape = shape ?? fallback;
+  const intent = ctx.debatePlan?.intentSummary
+    ? `\n## What the user actually asked for\n${ctx.debatePlan.intentSummary}\n`
+    : "";
+
+  const sectionLines = finalShape.sections
+    .map((s) => `  "${s.key}": ${shapeHint(s)}, // ${s.prompt}`)
+    .join("\n");
+  const headingLines = finalShape.sections
+    .map((s) => `## ${s.heading}`)
+    .join("\n");
+  const guardrailBlock = finalShape.guardrails.length
+    ? `\n## Guardrails\n${finalShape.guardrails.map((g) => `- ${g}`).join("\n")}\n`
+    : "";
+
   return {
     system:
-      `You are the team lead. Multiple specialists just had a structured discussion.\n\n` +
+      `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
       `## Original Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
-      `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n\n` +
+      `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
+      intent +
+      guardrailBlock +
+      `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
+      `unless the output shape explicitly asks for actionItems/plan. ` +
+      `Stay grounded in the discussion; do not invent facts; mark unverified claims explicitly.\n\n` +
       `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
       `**Part 1: JSON** — a single JSON object:\n` +
       `{\n` +
-      `  "type": "decision"|"action_items"|"plan_update"|"resolve_question",\n` +
+      `  "type": "${finalShape.kind}",\n` +
       `  "summary": "1-2 sentence executive summary",\n` +
-      `  "agreed": ["point 1", "point 2"],\n` +
-      `  "tradeoffs": ["trade-off 1"],\n` +
-      `  "recommendation": "Your decisive recommendation",\n` +
-      `  "actionItems": ["step 1", "step 2"],\n` +
-      `  "plan": {\n` +
-      `    "steps": [{"description": "...", "priority": "high|medium|low"}],\n` +
-      `    "estimatedComplexity": "trivial|moderate|complex",\n` +
-      `    "prerequisites": ["..."]\n` +
-      `  }\n` +
+      sectionLines + "\n" +
       `}\n\n` +
-      `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown:\n` +
-      `## AGREED\n## TRADE-OFFS\n## RECOMMENDATION\n## NEXT STEPS\n\n` +
-      `Be decisive.`,
+      `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
+      headingLines +
+      `\n\nBe decisive but evidence-grounded.`,
     prompt: `Final positions:\n${ctx.finalPositions}\n\nFull discussion:\n${ctx.allExchanges}`,
   };
 }

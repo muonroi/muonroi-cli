@@ -8,7 +8,6 @@ import type { ModelTier } from "../types/index.js";
 const FAST_PATTERNS = [
   /haiku/i, /mini/i, /flash/i, /nano/i, /small/i, /lite/i,
   /gpt-4o-mini/i, /gpt-3/i,
-  /deepseek-chat/i,
   /grok-3-mini/i, /grok-2/i,
   /gemma/i, /phi-/i, /llama.*8b/i,
 ];
@@ -16,7 +15,6 @@ const FAST_PATTERNS = [
 const PREMIUM_PATTERNS = [
   /opus/i, /pro(?!ject)/i,
   /\bo[13]-(?!mini)/i, /o1(?!-mini)/i, /o3(?!-mini)/i,
-  /deepseek-reasoner/i,
   /grok-3(?!-mini)/i,
   /ultra/i, /large/i,
 ];

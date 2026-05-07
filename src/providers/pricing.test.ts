@@ -27,10 +27,10 @@ describe("lookupPricing", () => {
     expect(p!.input_per_million_usd).toBe(0.3);
   });
 
-  it("returns pricing for deepseek deepseek-chat", () => {
-    const p = lookupPricing("deepseek", "deepseek-chat");
+  it("returns pricing for deepseek deepseek-v4-flash", () => {
+    const p = lookupPricing("deepseek", "deepseek-v4-flash");
     expect(p).toBeDefined();
-    expect(p!.input_per_million_usd).toBe(0.27);
+    expect(p!.input_per_million_usd).toBe(0.1);
   });
 
   it("returns undefined for unknown provider", () => {

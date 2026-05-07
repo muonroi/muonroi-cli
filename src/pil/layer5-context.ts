@@ -1,24 +1,37 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { getEmbeddingRaw, searchCollection } from "../ee/bridge.js";
+import { searchByText } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
 const STALE_THRESHOLD_MS = 30 * 60 * 1000;
 
+// Single round-trip for both collections via /api/search; topK=5 yields
+// up to 2 principles + 3 behavioral after server-side scoring.
+const LAYER5_SEARCH_TIMEOUT_MS = 1500;
+
+// Score floor — points below this are dropped as noise. Same default and
+// override knob as Layer 3 to keep behaviour consistent across PIL.
+const LAYER5_SCORE_FLOOR = (() => {
+  const raw = Number(process.env.MUONROI_PIL_SCORE_FLOOR);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.55;
+})();
+
 async function fetchPrinciples(raw: string, budget: number): Promise<string> {
   try {
-    const vector = await getEmbeddingRaw(raw, AbortSignal.timeout(60));
-    if (!vector) return "";
-    const [t0, t1] = await Promise.all([
-      searchCollection("experience-principles", vector, 2, AbortSignal.timeout(40)),
-      searchCollection("experience-behavioral", vector, 3, AbortSignal.timeout(40)),
-    ]);
-    const points = [...t0, ...t1].sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
-    if (points.length === 0) return "";
-    const lines = points.map((p) => {
-      const text = p.payload?.text ?? (p.payload?.json ? JSON.parse(p.payload.json as string).solution : "");
-      return `- ${String(text).slice(0, 120)}`;
+    const points = await searchByText(
+      raw,
+      ["experience-principles", "experience-behavioral"],
+      5,
+      AbortSignal.timeout(LAYER5_SEARCH_TIMEOUT_MS),
+    );
+    const filtered = points.filter((p) => (p.score ?? 0) >= LAYER5_SCORE_FLOOR);
+    if (filtered.length === 0) return "";
+    const sorted = filtered.slice().sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+    const lines = sorted.map((p) => {
+      const payload = p.payload as { text?: string; json?: string } | undefined;
+      const text = payload?.text ?? (payload?.json ? (JSON.parse(payload.json) as { solution?: string }).solution : "");
+      return `- ${String(text ?? "").slice(0, 120)}`;
     });
     return truncateToBudget(`[principles: Always-loaded experience]\n${lines.join("\n")}`, budget);
   } catch {

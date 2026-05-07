@@ -5,6 +5,7 @@ import type { StreamChunk } from "../../src/types/index.js";
 
 vi.mock("../../src/council/leader.js", () => ({
   resolveLeaderModel: () => "mock-premium",
+  resolveLeaderModelDetailed: async () => ({ modelId: "mock-premium" }),
   resolveParticipants: async () => [
     { role: "implement", model: "mock-balanced" },
     { role: "verify", model: "mock-premium" },
@@ -259,10 +260,12 @@ describe("Council Edge Cases", () => {
     const llm: CouncilLLM = {
       async generate(_modelId, system, _prompt, _max) {
         if (system.includes("identify AMBIGUITIES")) return "[]";
+        // Order matters: "team lead synthesizing..." also contains "synthesizing",
+        // so the team-lead check has to win before the spec-synth check.
+        if (system.includes("team lead")) return '{"type":"decision","summary":"Use approach A","agreed":["speed"],"tradeoffs":["complexity"],"recommendation":"A","plan":{"steps":[],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## Done\nUse A';
         if (system.includes("synthesizing")) return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
         if (system.includes("research phase")) return '{"needsResearch":false}';
         if (system.includes("evaluating")) return '{"allCriteriaMet":true,"criteriaStatus":[],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"Done"}';
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Use approach A","agreed":["speed"],"tradeoffs":["complexity"],"recommendation":"A","plan":{"steps":[],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## Done\nUse A';
         if (system.includes("Summarize")) return "ok";
         return "Analysis...";
       },

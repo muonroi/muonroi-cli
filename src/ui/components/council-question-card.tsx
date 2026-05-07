@@ -47,6 +47,8 @@ export function CouncilQuestionCard({
 }: CouncilQuestionCardProps) {
   const options = question.options && question.options.length > 0 ? question.options : legacyFallback(question);
   const idx = clampIndex(state.idx, options.length);
+  const hasRecommendation = typeof question.defaultIndex === "number";
+  const recommendedIdx = hasRecommendation ? clampIndex(question.defaultIndex!, options.length) : -1;
   const freetext = state.freetext;
   const labelText = PHASE_LABEL[question.phase ?? "clarify"];
 
@@ -77,6 +79,7 @@ export function CouncilQuestionCard({
 
       {options.map((opt, i) => {
         const selected = i === idx;
+        const isRecommended = i === recommendedIdx && opt.kind === "choice";
         const cursor = selected ? "›" : " ";
         const numberColor = selected ? t.accent : t.textMuted;
         const labelColor = selected ? t.accent : t.text;
@@ -85,6 +88,9 @@ export function CouncilQuestionCard({
             <box>
               <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
               <text fg={labelColor}>{opt.label}</text>
+              {isRecommended && (
+                <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>
+              )}
             </box>
             {opt.description && (
               <box paddingLeft={5}>

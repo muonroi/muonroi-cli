@@ -80,7 +80,7 @@ describe("resolveModelRuntime", () => {
 describe("detectProviderForModel", () => {
   test("detects anthropic", () => expect(detectProviderForModel("claude-sonnet-4-6")).toBe("anthropic"));
   test("detects openai", () => expect(detectProviderForModel("gpt-4o")).toBe("openai"));
-  test("detects deepseek", () => expect(detectProviderForModel("deepseek-chat")).toBe("deepseek"));
+  test("detects deepseek", () => expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
   test("detects xai", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
   test("falls back to anthropic for unknown", () => expect(detectProviderForModel("unknown-model")).toBe("anthropic"));
 });

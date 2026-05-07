@@ -1,8 +1,9 @@
 import { createTwoFilesPatch } from "diff";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, isAbsolute, resolve } from "path";
 import { summarizeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
+import type { FileTracker } from "./file-tracker.js";
 
 export interface FileDiff {
   filePath: string;
@@ -38,7 +39,21 @@ function computeDiff(filePath: string, before: string, after: string): FileDiff 
   return { filePath, additions, removals, patch, isNew: before === "" };
 }
 
-export function readFile(filePath: string, cwd: string, startLine?: number, endLine?: number): FileResult {
+function mtimeMsOf(absolutePath: string): number {
+  try {
+    return statSync(absolutePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+export function readFile(
+  filePath: string,
+  cwd: string,
+  startLine?: number,
+  endLine?: number,
+  tracker?: FileTracker,
+): FileResult {
   try {
     const full = resolvePath(filePath, cwd);
     if (!existsSync(full)) {
@@ -52,6 +67,10 @@ export function readFile(filePath: string, cwd: string, startLine?: number, endL
     const end = Math.min(totalLines, endLine ?? totalLines);
     const slice = lines.slice(start, end);
 
+    // Track FULL content (not just the slice) so partial reads still satisfy
+    // the read-before-write guard against the on-disk file as a whole.
+    tracker?.markRead(full, content, mtimeMsOf(full));
+
     const numbered = slice.map((line, i) => `${start + i + 1} | ${line}`).join("\n");
     const header = `[${filePath}: lines ${start + 1}-${end} of ${totalLines}]`;
     return { success: true, output: `${header}\n${numbered}` };
@@ -61,13 +80,32 @@ export function readFile(filePath: string, cwd: string, startLine?: number, endL
   }
 }
 
-export async function writeFile(filePath: string, content: string, cwd: string): Promise<FileResult> {
+export async function writeFile(
+  filePath: string,
+  content: string,
+  cwd: string,
+  tracker?: FileTracker,
+): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
-    const before = existsSync(full) ? readFileSync(full, "utf-8") : "";
+    const exists = existsSync(full);
+    const before = exists ? readFileSync(full, "utf-8") : "";
+
+    // Safety: existing files must have been read first AND unchanged on disk
+    // since that read. New files (no prior content) skip the guard.
+    if (exists && tracker) {
+      const violation = tracker.checkBeforeWrite(full, before);
+      if (violation) {
+        return { success: false, output: violation };
+      }
+    }
+
     const dir = dirname(full);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(full, content, "utf-8");
+
+    // Refresh tracker so subsequent edits in the same session don't refuse.
+    tracker?.markRead(full, content, mtimeMsOf(full));
 
     const diff = computeDiff(filePath, before, content);
     const verb = before === "" ? "Created" : "Updated";
@@ -90,6 +128,7 @@ export async function editFile(
   oldString: string,
   newString: string,
   cwd: string,
+  tracker?: FileTracker,
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
@@ -97,6 +136,15 @@ export async function editFile(
       return { success: false, output: `File not found: ${filePath}` };
     }
     const before = readFileSync(full, "utf-8");
+
+    // Safety: edit always requires a prior read of the current on-disk version.
+    if (tracker) {
+      const violation = tracker.checkBeforeWrite(full, before);
+      if (violation) {
+        return { success: false, output: violation };
+      }
+    }
+
     const count = before.split(oldString).length - 1;
 
     if (count === 0) {
@@ -111,6 +159,9 @@ export async function editFile(
 
     const after = before.replace(oldString, newString);
     writeFileSync(full, after, "utf-8");
+
+    // Refresh tracker so back-to-back edits keep working.
+    tracker?.markRead(full, after, mtimeMsOf(full));
 
     const diff = computeDiff(filePath, before, after);
     const lspDiagnostics = await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);

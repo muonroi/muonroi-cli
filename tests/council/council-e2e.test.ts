@@ -65,9 +65,25 @@ async function collectChunks(
 }
 
 function getContent(chunks: StreamChunk[]): string {
+  // Council phases were promoted from inline `## Phase A/B/...` content lines
+  // to typed `council_phase` stream events. Tests still want to assert "the
+  // clarification phase ran" / "preflight was rejected" without coupling to
+  // the transport, so we flatten labels + details into the same haystack and
+  // map kinds back to their legacy phase aliases.
+  const KIND_TO_LEGACY_PHASE: Record<string, string> = {
+    clarification: "Phase A",
+    preflight: "Phase B",
+  };
   return chunks
-    .filter((c) => c.type === "content")
-    .map((c) => c.content ?? "")
+    .map((c) => {
+      if (c.type === "content") return c.content ?? "";
+      if (c.type === "council_phase" && c.councilPhase) {
+        const p = c.councilPhase;
+        const legacy = KIND_TO_LEGACY_PHASE[p.kind] ?? "";
+        return `\n${[legacy, p.label, p.detail].filter(Boolean).join(" ")}\n`;
+      }
+      return "";
+    })
     .join("");
 }
 
@@ -77,6 +93,14 @@ function getQuestions(chunks: StreamChunk[]): StreamChunk[] {
 
 function getPreflights(chunks: StreamChunk[]): StreamChunk[] {
   return chunks.filter((c) => c.type === "council_preflight");
+}
+
+function getPhases(chunks: StreamChunk[]): StreamChunk[] {
+  return chunks.filter((c) => c.type === "council_phase");
+}
+
+function hasPhaseKind(chunks: StreamChunk[], kind: string): boolean {
+  return getPhases(chunks).some((c) => c.councilPhase?.kind === kind);
 }
 
 // ── Mock infrastructure ──────────────────────────────────────────────────────
@@ -91,6 +115,7 @@ vi.mock("../../src/utils/settings.js", () => ({
 vi.mock("../../src/council/leader.js", async (importOriginal) => {
   return {
     resolveLeaderModel: () => "mock-premium",
+    resolveLeaderModelDetailed: async () => ({ modelId: "mock-premium" }),
     resolveParticipants: async () => [
       { role: "implement", model: "mock-balanced" },
       { role: "verify", model: "mock-premium" },
