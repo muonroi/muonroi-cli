@@ -560,6 +560,21 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/commit-pr",
   "/wallet",
   "/btw",
+  // Registry-dispatched commands. Must be reserved so the custom-subagent
+  // matcher does not hijack them when a user-defined subagent name happens to
+  // prefix-match (e.g. an "ideal" subagent would otherwise swallow /ideal,
+  // routing the input to the LLM which then runs `/ideal "..."` via bash and
+  // shows the resulting Windows cmd error as a fake assistant message).
+  "/ideal",
+  "/council",
+  "/compact",
+  "/expand",
+  "/pin",
+  "/pins",
+  "/unpin",
+  "/cost",
+  "/ee",
+  "/debug",
 ]);
 
 interface SandboxRow {
