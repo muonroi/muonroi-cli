@@ -8,6 +8,7 @@ import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
 import { deliberateCompact } from "../flow/compaction/index.js";
+import { setActiveEeYield } from "../index.js";
 import * as path from "node:path";
 import type { StructuredResponse } from "../types/index";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
@@ -2304,6 +2305,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         let turnHadError = false;
         let turnHadAuthError = false;
         try {
+          // Register EE sink BEFORE the stream loop so experience_warning/injected chunks
+          // reach the TUI render path. Deregistered in finally to prevent stale closure.
+          setActiveEeYield((eeChunk) => {
+            if (eeChunk.type === "experience_warning") {
+              applyLocalAssistantDelta(
+                `\n⚠ [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
+              );
+            } else if (eeChunk.type === "experience_injected") {
+              applyLocalAssistantDelta(
+                `\n💡 [Experience Injected] ${eeChunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${eeChunk.experienceInjected?.scoreFloor ?? 0})\n`,
+              );
+            }
+          });
           for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
             if (isStale()) {
               break;
@@ -2404,6 +2418,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 contentAccRef.current += `\n${chunk.content || "Unknown error"}`;
                 setStreamContent(contentAccRef.current);
                 break;
+              case "experience_warning":
+                applyLocalAssistantDelta(
+                  `\n⚠ [Experience] ${chunk.experienceWarning?.message ?? chunk.content ?? ""}\nWhy: ${chunk.experienceWarning?.why ?? ""}\n`,
+                );
+                break;
+              case "experience_injected":
+                applyLocalAssistantDelta(
+                  `\n💡 [Experience Injected] ${chunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${chunk.experienceInjected?.scoreFloor ?? 0})\n`,
+                );
+                break;
               case "done":
                 break;
             }
@@ -2414,6 +2438,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             contentAccRef.current += "\nAn unexpected error occurred.";
             setStreamContent(contentAccRef.current);
           }
+        } finally {
+          setActiveEeYield(null);
         }
         const wasInterrupted = interruptedRunIdRef.current === runId;
         if (isStale()) {
