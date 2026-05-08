@@ -24,7 +24,8 @@ export interface PipelineMetrics {
   layerTimings: Array<{ name: string; ms: number }>;
   inputChars: number;
   outputChars: number;
-  estimatedTokensSaved: number;
+  /** Tokens added to system prompt input by the L6 suffix instruction. NOT tokens saved in output. */
+  suffixInstructionTokens: number;
   enrichmentTokensAdded: number;
 }
 

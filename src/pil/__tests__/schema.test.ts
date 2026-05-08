@@ -68,7 +68,7 @@ describe("PipelineContextSchema", () => {
         layerTimings: [{ name: "l1", ms: 2 }],
         inputChars: 10,
         outputChars: 10,
-        estimatedTokensSaved: 20,
+        suffixInstructionTokens: 20,
         enrichmentTokensAdded: 0,
       },
     });
@@ -88,7 +88,7 @@ describe("PipelineMetricsSchema", () => {
       layerTimings: [],
       inputChars: 5,
       outputChars: 5,
-      estimatedTokensSaved: 0,
+      suffixInstructionTokens: 0,
       enrichmentTokensAdded: 0,
     });
     expect(result.success).toBe(true);
@@ -100,7 +100,7 @@ describe("PipelineMetricsSchema", () => {
       layerTimings: [],
       inputChars: 0,
       outputChars: 0,
-      estimatedTokensSaved: 0,
+      suffixInstructionTokens: 0,
       enrichmentTokensAdded: 0,
     });
     expect(result.success).toBe(false);

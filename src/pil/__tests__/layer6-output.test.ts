@@ -7,6 +7,11 @@ vi.mock("../../ee/bridge.js", () => ({
   classifyViaBrain: vi.fn().mockResolvedValue(null),
 }));
 
+async function getMockBrain() {
+  const { classifyViaBrain } = await import("../../ee/bridge.js");
+  return vi.mocked(classifyViaBrain);
+}
+
 const makeCtx = (taskType: TaskType | null = null, outputStyle: OutputStyle | null = null): PipelineContext => ({
   raw: "test prompt for output style detection",
   enriched: "test prompt for output style detection",
@@ -73,15 +78,21 @@ describe("applyPilSuffix — outputStyle variants", () => {
   });
 });
 
-describe("layer6Output — style usage (detection moved to L1)", () => {
-  it("uses ctx.outputStyle from L1/L2 directly — no brain call", async () => {
+describe("layer6Output — style resolution", () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it("uses ctx.outputStyle from L1 directly when already set — no brain call", async () => {
+    const brain = await getMockBrain();
     const result = await layer6Output(makeCtx("debug", "concise"));
     expect(result.layers[0].delta).toContain("style=concise");
+    expect(result.layers[0].delta).toContain("src=inherited");
+    expect(brain).not.toHaveBeenCalled();
   });
 
-  it("defaults to concise when ctx.outputStyle is null", async () => {
-    const result = await layer6Output(makeCtx("debug", null));
-    expect(result.layers[0].delta).toContain("style=concise");
+  it("uses detailed style when passed from L1", async () => {
+    const result = await layer6Output(makeCtx("plan", "detailed"));
+    expect(result.layers[0].delta).toContain("style=detailed");
+    expect(result.layers[0].delta).toContain("src=inherited");
   });
 
   it("when ctx.taskType is null, layer is not applied", async () => {
@@ -89,9 +100,43 @@ describe("layer6Output — style usage (detection moved to L1)", () => {
     expect(result.layers[0].applied).toBe(false);
   });
 
-  it("uses detailed style when passed from L1", async () => {
-    const result = await layer6Output(makeCtx("plan", "detailed"));
+  it("PIL-03a: rescues outputStyle via brain when L1 returns null", async () => {
+    const brain = await getMockBrain();
+    brain.mockResolvedValueOnce("detailed");
+    const result = await layer6Output(makeCtx("plan", null));
+    expect(result.outputStyle).toBe("detailed");
     expect(result.layers[0].delta).toContain("style=detailed");
+    expect(result.layers[0].delta).toContain("src=brain-rescue");
+  });
+
+  it("PIL-03b: uses task-type heuristic when brain returns null (debug→balanced)", async () => {
+    const result = await layer6Output(makeCtx("debug", null));
+    expect(result.outputStyle).toBe("balanced");
+    expect(result.layers[0].delta).toContain("style=balanced");
+    expect(result.layers[0].delta).toContain("src=task-heuristic");
+  });
+
+  it("PIL-03b: task-heuristic for plan→balanced (not detailed — avoids generating extra sections)", async () => {
+    const result = await layer6Output(makeCtx("plan", null));
+    expect(result.outputStyle).toBe("balanced");
+    expect(result.layers[0].delta).toContain("style=balanced");
+  });
+
+  it("PIL-03b: task-heuristic for generate→concise", async () => {
+    const result = await layer6Output(makeCtx("generate", null));
+    expect(result.outputStyle).toBe("concise");
+    expect(result.layers[0].delta).toContain("style=concise");
+  });
+
+  it("PIL-03b: task-heuristic for refactor→concise", async () => {
+    const result = await layer6Output(makeCtx("refactor", null));
+    expect(result.outputStyle).toBe("concise");
+  });
+
+  it("PIL-03: resolved outputStyle propagated back onto ctx", async () => {
+    const result = await layer6Output(makeCtx("analyze", null));
+    expect(result.outputStyle).not.toBeNull();
+    expect(result.outputStyle).toBe("balanced");
   });
 });
 

@@ -282,11 +282,24 @@ Provider --- auto-detect from model ID, load correct API key
   |           keychain > env var > settings.json
   |           7 providers via AI SDK v6
   v
-Vision Proxy --- text-only models get auto-image-description through vision models
-  |
+Hybrid Vision Proxy (input side) --- text-only models get auto-image-description
+  |                                    proxyVision() rewrites image parts in user
+  |                                    messages to text via Qwen3-VL fallback chain
   v
 Tool Loop --- bash, file, grep, LSP, schedule, registry
   |           Shuru sandbox isolation for shell commands
+  v
+Hybrid Vision Bridge (output side) --- bridgeMcpToolResult() intercepts ANY tool
+  |                                     returning images (Playwright screenshot,
+  |                                     Figma export, computer_screenshot, ...)
+  |                                     extract -> Qwen3-VL -> cache -> strip bytes
+  |                                     -> inject description into response.messages
+  v
+Tool-output guardrails --- scrubImagePayloadsInMessages() before persist:
+  |                         (1) strip leftover base64 from AI-SDK message tree
+  |                         (2) inject bridged vision description by toolCallId
+  |                         (3) cap non-image tool outputs at 200KB head+tail
+  |                             (env: MUONROI_TOOL_OUTPUT_MAX_BYTES)
   v
 Post-turn auto-compact --- silent context compression
   |                         keeps token costs flat across sessions
@@ -309,9 +322,18 @@ Session storage --- SQLite persistence, crash recovery via pending-calls log
 
 Provider auto-detection: model IDs are matched by prefix (`deepseek-*` -> DeepSeek, `gpt-*` -> OpenAI, `grok-*` -> xAI, etc.) so you can use models not in the built-in catalog.
 
-### Vision proxy
+### Hybrid vision proxy
 
-Paste images into any model. When the active model doesn't support vision, images are routed through vision-capable models (Anthropic first, SiliconFlow Qwen VL as fallback) for description. The proxy proactively provides `analyze_image`, `ask_vision_proxy`, and `list_vision_cache` tools to the agent.
+Two cooperating layers turn any text-only model (DeepSeek, etc.) into a vision-capable agent. Both gate on `needsVisionProxy(modelId)` and share the same `Qwen3-VL-8B → 30B-A3B → 32B` fallback chain on SiliconFlow, plus an SVG fast-path that decodes `image/svg+xml` straight to source instead of paying for a vision call.
+
+| Layer | Source file | Direction | Triggers on | Behavior |
+|-------|-------------|-----------|-------------|----------|
+| **1. Input proxy** | `vision-proxy.ts` (`proxyVision`) | user → model | image parts in user messages (paste, drag-drop, file mentions) | extract image part → Qwen3-VL → replace with text description before the LLM call |
+| **2. Output bridge** | `mcp-vision-bridge.ts` (`bridgeMcpToolResult`) | tool → model | image-bearing tool results (Playwright `browser_take_screenshot`, Figma `export_frame`, generic `computer_screenshot`, any MCP tool returning base64) | extract → Qwen3-VL → cache (20 images × 15 min TTL) → strip bytes → inject description into the tool result the model sees |
+
+The bridge layer also exposes three follow-up tools to the agent: `analyze_image` (analyze a file path / data URI / base64 on demand), `ask_vision_proxy` (re-query a cached image with a specific question), and `list_vision_cache` (enumerate currently cached images by ID).
+
+**Persistence guardrails** — `scrubImagePayloadsInMessages` runs over `response.messages` before SQLite write to (1) strip any base64 the AI SDK kept in its internal tool-result representation, (2) re-inject the vision description by `toolCallId` so the next turn still has the visual context (without this, screenshots leave the model blind on subsequent turns), and (3) cap any non-image tool output at 200KB (head 70% + tail 20% with a truncation marker) — tunable via `MUONROI_TOOL_OUTPUT_MAX_BYTES`. The cap stops accidental megabyte payloads (recursive `directory_tree`, large `find` listings) from accumulating across turns and overflowing the model's context window.
 
 ## Shuru Sandbox
 
@@ -420,6 +442,7 @@ Per-project overrides:
 | `MUONROI_EE_DEBUG` | Set to `1` to log EE client mode detection |
 | `MUONROI_DEBUG` | Enable debug logging in EE offline queue |
 | `MUONROI_PIL_SCORE_FLOOR` | Override EE similarity score floor (0.0-1.0, default 0.55) |
+| `MUONROI_TOOL_OUTPUT_MAX_BYTES` | Per-tool-result size cap before persist (default 200000, min 1024). Larger outputs are truncated head+tail with a marker. |
 | `ANTHROPIC_API_KEY` | Anthropic API key (alternative) |
 | `OPENAI_API_KEY` | OpenAI API key |
 | `GOOGLE_API_KEY` | Google/Gemini API key |

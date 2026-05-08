@@ -423,22 +423,25 @@ return result.text;
 
 *(Existing tests: `clarifier-options.test.ts`, `clarifier-max-rounds.test.ts` — must continue to pass)*
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **AI SDK `result.steps` shape for browser detection (CQ-04)**
    - What we know: `generateText` returns steps; each step has `toolCalls`
    - What's unclear: exact TypeScript type of `step.toolCalls` keys — is it a `Record<string, ToolCall>` or an array?
    - Recommendation: Inspect `GenerateTextResult` type definition in installed `ai` package before writing browser detection. Alternative: check `result.toolCalls` (flat array across all steps) which is more reliably typed.
+   - **RESOLVED:** Plan 04 Task 2 uses `result.toolCalls` (flat array on `GenerateTextResult`) as primary check, with `(result.steps ?? []).some(s => ...)` as fallback. Executor must verify `GenerateTextResult` type in installed AI SDK version before writing browser detection logic.
 
 2. **`CouncilLLM` interface — add `dispose()` for MCP cleanup?**
    - What we know: `McpToolBundle.close()` must be called to stop spawned MCP processes
    - What's unclear: whether orchestrator needs a hook, or if we can close in a `finally` block inside `research()` and re-open lazily
    - Recommendation: Use lazy-per-call pattern (open MCP bundle, use, close in finally). Avoids interface change and is correct for long-running CLI sessions where MCP may be used infrequently.
+   - **RESOLVED:** Plan 04 Task 2 uses lazy-per-call pattern — `buildMcpToolSet` called inside `research()` with `finally { mcpBundle?.close() }`. No `dispose()` method needed on `CouncilLLM` interface.
 
 3. **`runPlanning` third arg — does it need `debateState.active`?**
    - What we know: `index.ts:199` calls `runPlanning(debateState, spec, active, leaderModelId, ...)` passing `index.ts`'s stale `active`
    - What's unclear: whether `runPlanning` actually uses `active` for anything beyond display
    - Recommendation: After fixing `finalPositions`, also update this call to `debateState.active` for consistency — verified by reading `planner.ts` first.
+   - **RESOLVED:** Plan 03 Task 2 explicitly updates both call sites — `runPlanning(debateState, spec, debateState.active, ...)` and `finalPositions: debateState.active.map(...)`. Executor must read `planner.ts` to verify the third arg usage before changing.
 
 ## Environment Availability
 

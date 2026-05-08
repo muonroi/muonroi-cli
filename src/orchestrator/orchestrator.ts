@@ -355,6 +355,8 @@ export class Agent {
   private _compactedThisTurn = false;
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
   private _priorWarningIdsInSession = new Set<string>();
+  /** EE session guidance: structured warnings accumulated across turns — injected into model context at turn start. Keyed by principle_uuid to deduplicate. */
+  private _sessionEEGuidance = new Map<string, { toolName: string; message: string; why: string; confidence: number }>();
   /** P0 native observation: rolling buffer of assistant reasoning text in current turn — last 200 chars sent as intent_context.assistantReasoningExcerpt. */
   private _turnAssistantReasoning = "";
   /** P0 native observation: cached user goal for current turn — first 200 chars of userMessage. */
@@ -2944,7 +2946,7 @@ export class Agent {
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
     this._pilEnrichmentDelta =
-      pilCtx.metrics?.estimatedTokensSaved ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
+      pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
 
     // P1 Item 3 wiring: phase-boundary detection. setPhase returns a snapshot
     // of the prior phase iff the phase NAME just changed. We classify the
@@ -3170,6 +3172,20 @@ export class Agent {
 
     this.messages.push(userModelMessage);
     this.messageSeqs.push(null);
+
+    // Inject accumulated EE session guidance as a system message so the model
+    // is informed of past warnings before making tool decisions this turn.
+    if (this._sessionEEGuidance.size > 0) {
+      const lines = Array.from(this._sessionEEGuidance.entries()).map(([, g]) => {
+        const pct = Math.round(g.confidence * 100);
+        return `- [${g.toolName}] ${g.message} (Why: ${g.why}) [${pct}%]`;
+      });
+      this.messages.push({
+        role: "system",
+        content: `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`,
+      });
+      this.messageSeqs.push(null);
+    }
 
     const provider = turnProvider;
     const subagents = loadValidSubAgents();
@@ -3460,13 +3476,28 @@ export class Agent {
                   };
                   const preResult = await this.fireHook(preInput, signal).catch(() => ({
                     blocked: false,
-                    blockingErrors: [],
+                    blockingErrors: [] as Array<{ command: string; stderr: string }>,
                     preventContinuation: false,
                     additionalContexts: [] as string[],
-                    results: [],
+                    results: [] as import("../hooks/types.js").HookResult[],
+                    eeMatches: [] as import("../hooks/types.js").EEMatchEntry[],
                   }));
                   for (const ctx of preResult.additionalContexts ?? []) {
                     yield { type: "content", content: `${ctx}\n` };
+                  }
+                  // Store structured EE matches for session guidance injection on next turn.
+                  for (const m of preResult.eeMatches ?? []) {
+                    this._sessionEEGuidance.set(m.id, {
+                      toolName: m.toolName,
+                      message: m.message,
+                      why: m.why,
+                      confidence: m.confidence,
+                    });
+                    // Cap at 30 entries — oldest first, trim when exceeded.
+                    if (this._sessionEEGuidance.size > 30) {
+                      const firstKey = this._sessionEEGuidance.keys().next().value;
+                      if (firstKey !== undefined) this._sessionEEGuidance.delete(firstKey);
+                    }
                   }
                   // P0 native observation: track which principle IDs surfaced
                   // this turn so the next intercept can dedup server-side.
@@ -3522,7 +3553,7 @@ export class Agent {
 
                 // Vision Bridge: proxy image-bearing tool results for text-only models (any tool, not just MCP)
                 try {
-                  const bridgeResult = await bridgeMcpToolResult(part.toolName, tr.output, turnModelId, signal);
+                  const bridgeResult = await bridgeMcpToolResult(part.toolName, tr.output, turnModelId, signal, part.toolCallId);
                   if (bridgeResult.proxied) {
                     tr = { ...tr, output: typeof bridgeResult.output === "string" ? bridgeResult.output : JSON.stringify(bridgeResult.output) };
                     yield { type: "content", content: `[Vision Bridge: image → text for ${turnModelId}]\n` };

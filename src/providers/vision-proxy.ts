@@ -11,6 +11,24 @@ import type { ModelMessage } from "ai";
 import { getModelInfo } from "../models/registry.js";
 import { apiBaseFor } from "./endpoints.js";
 import { loadKeyForProvider } from "./keychain.js";
+import { UI_LAYOUT_SCHEMA_HINT } from "./mcp-vision-bridge.js";
+
+const DESIGN_INTENT_PATTERNS = [
+  /\bredesign\b/i,
+  /\bdesign\s*(system|token|spec|review)?\b/i,
+  /\bui\s*(layout|kit|spec|design)\b/i,
+  /\blayout\b/i,
+  /\bmockup\b/i,
+  /\bwireframe\b/i,
+  /\bfigma\b/i,
+  /\bcomponent\s*(library|spec|map)\b/i,
+  /thiết\s*kế|giao\s*diện|bố\s*cục|redesign/i,
+];
+
+function looksLikeDesignIntent(text: string): boolean {
+  if (!text) return false;
+  return DESIGN_INTENT_PATTERNS.some((re) => re.test(text));
+}
 
 const VISION_MODELS = [
   "Qwen/Qwen3-VL-8B-Instruct",
@@ -80,12 +98,21 @@ export async function proxyVision(
     const textParts = parts.filter((p): p is TextPart => p.type === "text");
     totalImages += imageParts.length;
 
-    const descriptions = await describeImages(imageParts, textParts, signal);
+    const userText = textParts.map((t) => t.text).join("\n");
+    const designIntent = looksLikeDesignIntent(userText);
 
-    const newContent = [
-      ...textParts,
-      { type: "text" as const, text: descriptions },
-    ];
+    const svgFast = trySvgFastPath(imageParts, designIntent);
+    if (svgFast) {
+      processed.push({
+        ...msg,
+        content: [...textParts, { type: "text" as const, text: svgFast }],
+      });
+      continue;
+    }
+
+    const descriptions = await describeImages(imageParts, textParts, signal, designIntent);
+
+    const newContent = [...textParts, { type: "text" as const, text: descriptions }];
     processed.push({ ...msg, content: newContent });
   }
 
@@ -96,6 +123,7 @@ async function describeImages(
   images: ImagePart[],
   contextTexts: TextPart[],
   signal?: AbortSignal,
+  designIntent = false,
 ): Promise<string> {
   let apiKey: string;
   try {
@@ -109,7 +137,9 @@ async function describeImages(
   const visionContent: Array<Record<string, unknown>> = [];
   visionContent.push({
     type: "text",
-    text: buildAnalysisPrompt(userContext, images.length),
+    text: designIntent
+      ? buildDesignPrompt(userContext, images.length)
+      : buildAnalysisPrompt(userContext, images.length),
   });
 
   for (const img of images) {
@@ -122,11 +152,13 @@ async function describeImages(
     });
   }
 
+  const responseFormat = designIntent ? { type: "json_object" as const } : undefined;
+
   const failureReasons: string[] = [];
   for (const model of VISION_MODELS) {
     try {
-      const result = await callVisionModel(model, visionContent, apiKey, signal);
-      if (result.ok) return formatVisionResult(result.text, images.length, model);
+      const result = await callVisionModel(model, visionContent, apiKey, signal, responseFormat);
+      if (result.ok) return formatVisionResult(result.text, images.length, model, designIntent);
       failureReasons.push(`${model}: ${result.reason}`);
       console.warn(`[vision-proxy] ${model} failed (${result.reason}), trying next...`);
     } catch (err) {
@@ -140,15 +172,37 @@ async function describeImages(
   return buildFallbackDescription(images, failureReasons);
 }
 
-type VisionCallResult =
-  | { ok: true; text: string }
-  | { ok: false; reason: string };
+function trySvgFastPath(images: ImagePart[], designIntent: boolean): string | null {
+  if (images.length === 0) return null;
+  if (!images.every((img) => img.mediaType === "image/svg+xml")) return null;
+
+  const decoded = images
+    .map((img, idx) => {
+      let svg: string;
+      try {
+        svg = Buffer.from(img.image, "base64").toString("utf8");
+      } catch {
+        return `<!-- svg ${idx + 1}: decode failed -->`;
+      }
+      return svg.length > 32_000 ? `${svg.slice(0, 32_000)}\n<!-- truncated -->` : svg;
+    })
+    .join("\n\n");
+
+  const header = `[Vision Proxy — ${images.length} SVG source(s) passed through (fast-path, no vision call)]`;
+  const guidance = designIntent
+    ? `\nThe raw SVG below IS the layout contract. Map nodes to:\n${UI_LAYOUT_SCHEMA_HINT}\n`
+    : "\nThe raw SVG below is vector text — read element attributes (x, y, width, fill, text content) directly.\n";
+  return `\n${header}${guidance}\n\`\`\`svg\n${decoded}\n\`\`\`\n[/Vision Proxy]\n`;
+}
+
+type VisionCallResult = { ok: true; text: string } | { ok: false; reason: string };
 
 async function callVisionModel(
   model: string,
   content: Array<Record<string, unknown>>,
   apiKey: string,
   signal?: AbortSignal,
+  responseFormat?: { type: "json_object" },
 ): Promise<VisionCallResult> {
   const controller = new AbortController();
   let timedOut = false;
@@ -172,8 +226,9 @@ async function callVisionModel(
       body: JSON.stringify({
         model,
         messages: [{ role: "user", content }],
-        max_tokens: 2048,
+        max_tokens: 3072,
         temperature: 0.1,
+        ...(responseFormat ? { response_format: responseFormat } : {}),
       }),
       signal: controller.signal,
     });
@@ -191,9 +246,7 @@ async function callVisionModel(
     return { ok: false, reason: `HTTP ${res.status} ${errText.slice(0, 200)}` };
   }
 
-  const data = (await res.json().catch(() => null)) as
-    | { choices?: Array<{ message?: { content?: string } }> }
-    | null;
+  const data = (await res.json().catch(() => null)) as { choices?: Array<{ message?: { content?: string } }> } | null;
   const text = data?.choices?.[0]?.message?.content;
   if (!text) return { ok: false, reason: "empty response body" };
   return { ok: true, text };
@@ -202,7 +255,8 @@ async function callVisionModel(
 function buildAnalysisPrompt(userContext: string, imageCount: number): string {
   const plural = imageCount > 1 ? `${imageCount} images` : "the image";
   return [
-    `Analyze ${plural} for a software developer. The developer is working in a coding CLI tool.`,
+    `You are a vision model. Analyze ${plural} for a software developer working in a coding CLI tool.`,
+    "Use your full vision capability — do NOT refuse on the basis of being text-only.",
     "Focus on:",
     "- UI layout and component structure (if screenshot)",
     "- All visible text, labels, buttons, and form elements",
@@ -216,19 +270,48 @@ function buildAnalysisPrompt(userContext: string, imageCount: number): string {
   ].join("\n");
 }
 
-function formatVisionResult(description: string, imageCount: number, model?: string): string {
+function formatVisionResult(description: string, imageCount: number, model?: string, designIntent = false): string {
   const usedModel = model ?? VISION_MODELS[0];
-  const header = imageCount > 1
-    ? `[Vision Proxy — ${imageCount} images analyzed via ${usedModel}]`
-    : `[Vision Proxy — image analyzed via ${usedModel}]`;
+  const tag = designIntent ? "design contract via" : "analyzed via";
+  const single = designIntent ? "design contract via" : "analyzed via";
+  const header =
+    imageCount > 1
+      ? `[Vision Proxy — ${imageCount} images ${tag} ${usedModel}]`
+      : `[Vision Proxy — image ${single} ${usedModel}]`;
   return `\n${header}\n${description}\n[/Vision Proxy]\n`;
+}
+
+function buildDesignPrompt(userContext: string, imageCount: number): string {
+  const plural = imageCount > 1 ? `${imageCount} images` : "the image";
+  return [
+    `Analyze ${plural} as a UI/UX design contract for a software developer who CANNOT see the image.`,
+    "Output will be consumed by another AI agent to recreate or redesign this UI, so precision matters more than prose.",
+    "",
+    "Return ONLY a single JSON object matching this exact shape (no markdown, no commentary, no code fences):",
+    UI_LAYOUT_SCHEMA_HINT,
+    "",
+    "Extraction rules:",
+    "- bbox: pixel coordinates relative to the visible image (origin top-left). Estimate when unsure but never omit.",
+    "- Colors: 6-digit lowercase hex (#rrggbb). Sample dominant pixel.",
+    "- Typography sizePx: estimate from cap-height, round to nearest 2.",
+    "- spacingScalePx / radiusScalePx: distinct observed values, sorted ascending.",
+    "- components[]: every visible interactive or content element. Stable IDs like 'btn_signup'.",
+    "- children[]: component IDs nested inside this component.",
+    "- hierarchy[]: visual reading order of headings — level 1 hero, 2 section, 3 sub.",
+    "- text: EXACT visible string. null only when no text (icon-only).",
+    "- notes[]: things schema cannot capture — gradients, illustrations, motion.",
+    "",
+    "If a field is genuinely not determinable, use null. Never invent values.",
+    userContext ? `\nDeveloper's context: "${userContext}"` : "",
+  ].join("\n");
 }
 
 function buildFallbackDescription(images: ImagePart[], reasons: string[] = []): string {
   const count = images.length;
   const types = [...new Set(images.map((i) => i.mediaType))].join(", ");
-  const detail = reasons.length > 0
-    ? `Reason(s): ${reasons.join(" | ")}`
-    : "Reason: unknown — check SILICONFLOW_API_KEY and model availability.";
+  const detail =
+    reasons.length > 0
+      ? `Reason(s): ${reasons.join(" | ")}`
+      : "Reason: unknown — check SILICONFLOW_API_KEY and model availability.";
   return `\n[Vision Proxy — unavailable, ${count} image(s) (${types}) could not be analyzed. ${detail}]\n`;
 }

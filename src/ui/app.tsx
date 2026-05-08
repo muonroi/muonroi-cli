@@ -88,6 +88,7 @@ import {
   PlanView,
 } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
+import { SLASH_MENU_ITEMS, type SlashMenuItem } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
@@ -453,57 +454,6 @@ const _LINE = {
   leftT: "━",
   rightT: "━",
 };
-
-interface SlashMenuItem {
-  id: string;
-  label: string;
-  description: string;
-}
-
-const SLASH_MENU_ITEMS: SlashMenuItem[] = [
-  { id: "exit", label: "exit", description: "Quit the CLI" },
-  { id: "help", label: "help", description: "Show available commands" },
-  { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
-  { id: "compact", label: "compact", description: "Compact conversation context" },
-  { id: "remote-control", label: "remote-control", description: "Remote control" },
-  { id: "agents", label: "agents", description: "Manage custom sub-agents" },
-  { id: "schedule", label: "schedule", description: "View scheduled runs" },
-  { id: "mcp", label: "mcp", description: "Manage MCP servers" },
-  { id: "sandbox", label: "sandbox", description: "Select shell sandbox mode" },
-  { id: "wallet", label: "wallet", description: "Wallet and payment settings" },
-  { id: "models", label: "models", description: "Select a model" },
-  { id: "new", label: "new session", description: "Start a new session" },
-  { id: "sessions", label: "sessions", description: "List recent sessions to resume" },
-  { id: "commit-push", label: "commit & push", description: "Commit and push" },
-  { id: "commit-pr", label: "commit & pr", description: "Commit and open PR" },
-  { id: "review", label: "review", description: "Review recent changes" },
-  { id: "verify", label: "verify", description: "Run local verification" },
-  { id: "skills", label: "skills", description: "Manage skills" },
-  { id: "btw", label: "btw", description: "Ask a side question without interrupting" },
-  { id: "update", label: "update", description: "Update muonroi-cli to the latest version" },
-  { id: "cost", label: "cost", description: "Show session cost breakdown" },
-  { id: "ee", label: "ee", description: "Experience Engine status and controls" },
-  { id: "route", label: "route", description: "Show current model routing info" },
-  { id: "plan", label: "plan", description: "Show active GSD plan" },
-  { id: "execute", label: "execute", description: "Execute active GSD plan" },
-  { id: "discuss", label: "discuss", description: "Discuss phase gray areas" },
-  { id: "expand", label: "expand", description: "Expand last compacted context" },
-  { id: "optimize", label: "optimize", description: "Optimize prompt for token savings" },
-  { id: "debug", label: "debug", description: "Toggle debug trace mode" },
-  { id: "debug-on", label: "debug on", description: "Enable pipeline debug tracing" },
-  { id: "debug-off", label: "debug off", description: "Disable pipeline debug tracing" },
-  { id: "debug-status", label: "debug status", description: "Show session debug summary" },
-  { id: "debug-last", label: "debug last", description: "Show last recorded trace" },
-  { id: "council", label: "council", description: "Multi-model adversarial debate" },
-  { id: "ee-stats", label: "ee stats", description: "Knowledge base statistics" },
-  { id: "ee-gates", label: "ee gates", description: "Quality gate checklist" },
-  { id: "ee-evolve", label: "ee evolve", description: "Trigger EE evolution cycle" },
-  { id: "ee-user", label: "ee user", description: "Current EE user identity" },
-  { id: "ee-search", label: "ee search", description: "Semantic search across knowledge base" },
-  { id: "ee-timeline", label: "ee timeline", description: "Principle evolution for a topic" },
-  { id: "ee-graph", label: "ee graph", description: "Principle relationship graph" },
-  { id: "ee-route", label: "ee route", description: "Route task to workflow" },
-];
 
 const REVIEW_PROMPT = `Review all current changes in this repository. Follow these steps:
 
@@ -3714,38 +3664,49 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           key.preventDefault?.();
           return;
         }
-        if (key.name === "backspace") {
-          // Delete from input (mirrors the slash + query) and from the
-          // search query state. When everything (including the leading "/")
-          // is gone, dismiss the overlay instead of leaving it stuck open.
-          // preventDefault so the textarea does not also process backspace
-          // and delete a second character.
-          const ta = inputRef.current;
-          const current = ta?.plainText ?? "";
-          if (current.length > 0) {
-            ta?.setText(current.slice(0, -1));
-            if (ta) ta.cursorOffset = current.length - 1;
-          }
-          const nextInput = current.slice(0, -1);
-          setSlashSearchQuery((q) => q.slice(0, -1));
-          setSlashMenuIndex(0);
-          if (nextInput.length === 0 || !nextInput.startsWith("/")) {
+        if (key.name === "tab") {
+          // Autocomplete: fill the input with "/<id> " and close the menu so
+          // the user can keep typing message text (e.g. /ideate Tab <prompt>).
+          const item = filteredSlashItems[slashMenuIndex];
+          if (item) {
+            const completion = `/${item.id} `;
             setShowSlashMenu(false);
             setSlashSearchQuery("");
-            inputRef.current?.clear();
+            const ta = inputRef.current;
+            if (ta) {
+              ta.clear?.();
+              ta.insertText?.(completion);
+              try { ta.cursorOffset = completion.length; } catch { /* opentui versions vary */ }
+            }
           }
           key.preventDefault?.();
+          key.stopPropagation?.();
+          return;
+        }
+        if (key.name === "backspace") {
+          // Textarea is focused and handles the actual deletion. We only mirror
+          // the resulting state into slashSearchQuery, and close the overlay
+          // when the predicted next text no longer starts with "/".
+          const predicted = slashSearchQuery.length > 0
+            ? slashSearchQuery.slice(0, -1)
+            : "";
+          setSlashSearchQuery(predicted);
+          setSlashMenuIndex(0);
+          // If the query is already empty, the next backspace will eat the
+          // leading "/" — close the menu so the user is back to free typing.
+          if (slashSearchQuery.length === 0) {
+            setShowSlashMenu(false);
+          }
           return;
         }
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+          // Textarea is focused — let it insert the character natively. We
+          // only sync the search query so the menu filter stays accurate.
+          // No preventDefault, no insertText: that combination caused the
+          // "/iideall" duplication AND the focus-loss feeling because the
+          // textarea was previously unfocused.
           setSlashSearchQuery((q) => q + key.sequence);
           setSlashMenuIndex(0);
-          // Keep the input field visually in sync so the user sees what they
-          // are typing (the textarea is unfocused while the overlay is open).
-          // preventDefault so the textarea does not ALSO insert the same
-          // sequence — without this every keystroke duplicates ("/iideall").
-          inputRef.current?.insertText(key.sequence);
-          key.preventDefault?.();
           return;
         }
         return;
@@ -4107,9 +4068,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return;
       }
       // Per-session input history: ArrowUp/ArrowDown navigate previously
-      // submitted prompts when the buffer is empty (or when we're already
-      // browsing history). A non-empty draft falls through so the textarea
-      // can still move the cursor between lines.
+      // submitted prompts only when the cursor sits at the end of the buffer.
+      // If the cursor is mid-text the keys fall through so the textarea can
+      // move the caret between lines while editing a recalled prompt.
       if ((key.name === "up" || key.name === "down") && !key.ctrl && !key.meta) {
         const ta = inputRef.current;
         if (!ta) return;
@@ -4117,7 +4078,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (hist.length === 0) return;
         const browsing = historyIndexRef.current !== -1;
         const buffer = ta.plainText || "";
-        if (!browsing && buffer.length > 0) return;
+        const caret = (typeof ta.cursorOffset === "number") ? ta.cursorOffset : buffer.length;
+        if (caret !== buffer.length) return;
         if (key.name === "up") {
           if (!browsing) {
             historyDraftRef.current = buffer;
@@ -4948,7 +4910,6 @@ function PromptBox({
                 !showModelPicker &&
                 !showSandboxPicker &&
                 !showWalletPicker &&
-                !showSlashMenu &&
                 !showPlanQuestions &&
                 !showApiKeyModal &&
                 !blockPrompt

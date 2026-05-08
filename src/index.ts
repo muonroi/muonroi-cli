@@ -558,16 +558,25 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
 
   try {
     const delegation = await loadDelegation(jobPath);
-    const apiKey = stringOption(options.apiKey) || getApiKey();
+
+    const baseURL = stringOption(options.baseUrl) || getBaseURL();
+    const explicitModel = stringOption(options.model) || delegation.model;
+    const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
+
+    // Resolve API key: explicit flag > legacy env/settings.apiKey > per-provider keychain
+    // (matches the foreground flow — delegations were previously broken when the user
+    // only had a per-provider key in the OS keychain, e.g. deepseek.)
+    let apiKey = stringOption(options.apiKey) || getApiKey();
+    if (!apiKey) {
+      const modelForResolve = model ?? delegation.model ?? getCurrentModel("agent");
+      const keychainKey = await resolveKeyForModel(modelForResolve);
+      if (keychainKey) apiKey = keychainKey;
+    }
     if (!apiKey) {
       throw new Error(
         "API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.",
       );
     }
-
-    const baseURL = stringOption(options.baseUrl) || getBaseURL();
-    const explicitModel = stringOption(options.model) || delegation.model;
-    const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
     const maxToolRounds =
       parseInt(stringOption(options.maxToolRounds) || String(delegation.maxToolRounds), 10) || delegation.maxToolRounds;
     const sandboxMode = resolveCliSandboxMode(options.sandbox) || delegation.sandboxMode || getCurrentSandboxMode();
@@ -605,6 +614,15 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
   }
 }
 
+async function persistApiKeyToKeychain(rawKey: string, modelHint?: string): Promise<boolean> {
+  const provider = detectProviderForModel(modelHint ?? getCurrentModel("agent"));
+  try {
+    return await setKeyForProvider(provider, rawKey);
+  } catch {
+    return false;
+  }
+}
+
 function resolveConfig(options: CliOptions) {
   const apiKey = stringOption(options.apiKey) || getApiKey();
   const baseURL = stringOption(options.baseUrl) || getBaseURL();
@@ -626,7 +644,12 @@ function resolveConfig(options: CliOptions) {
   }
   const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), cliOverrides);
 
-  if (typeof options.apiKey === "string") saveUserSettings({ apiKey: options.apiKey });
+  if (typeof options.apiKey === "string") {
+    // Persist to OS keychain (per-provider) instead of plaintext settings.json.
+    // Fire-and-forget: keychain write is async; if it fails (no keytar), the key still
+    // works for this run via `apiKey` above and the user can re-supply it next invocation.
+    void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch(() => {});
+  }
   if (typeof options.model === "string") saveUserSettings({ defaultModel: normalizeModelId(options.model) });
 
   return { apiKey, baseURL, model, maxToolRounds, sandboxMode, sandboxSettings };

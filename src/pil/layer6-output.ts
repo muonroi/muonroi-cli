@@ -6,15 +6,31 @@
  * Each suffix is tuned to minimize output tokens while preserving quality.
  * Conversational turns (taskType=null) pass through unchanged.
  *
- * PIL-03: When ctx.outputStyle is null and ctx.taskType is not null,
- * calls classifyViaBrain with a 50ms timeout for multilingual output style
- * detection (Vietnamese+code mix that regex cannot handle). Fail-open:
- * if brain returns null/timeout, ctx.outputStyle stays null.
+ * PIL-03: When ctx.outputStyle is null and ctx.taskType is not null:
+ *   a) 50ms brain rescue — classifyViaBrain for multilingual style detection
+ *   b) task-type heuristic — domain-specific default when brain is unavailable
+ * Resolved style is propagated back onto ctx.outputStyle so the orchestrator
+ * picks it up via applyPilSuffix without falling back to the hard "concise" default.
  */
 
 import type { ToolSet } from "ai";
-import type { OutputStyle, PipelineContext } from "./types.js";
+import { classifyViaBrain } from "../ee/bridge.js";
+import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 import { buildResponseTools } from "./response-tools.js";
+
+const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
+
+// Per-task-type fallback style when brain is unavailable.
+// Reflects the information density each task type genuinely needs.
+const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
+  debug: "balanced",        // needs root cause + fix context
+  plan: "balanced",         // balanced by default; user requests detail explicitly
+  analyze: "balanced",      // findings need brief evidence
+  documentation: "balanced",// examples + explanation
+  generate: "concise",      // code speaks for itself
+  refactor: "concise",      // diff is the output
+  general: "balanced",
+};
 
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
@@ -80,14 +96,42 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
       };
     }
 
-    // Style already resolved by L1 (brain detection) + L2 (config fallback)
-    const style: OutputStyle = ctx.outputStyle ?? "concise";
+    // PIL-03: rescue outputStyle when L1 couldn't determine it (brain timeout / EE disabled).
+    let outputStyle = ctx.outputStyle;
+    let styleSource = "inherited";
 
+    if (outputStyle === null) {
+      // Pass a: 50ms brain rescue — catches multilingual prompts that regex/L1 missed
+      try {
+        const brainRaw = await classifyViaBrain(
+          `Task type: ${ctx.taskType}. Reply ONE word only: concise | balanced | detailed\nPrompt: "${ctx.raw.slice(0, 150)}"`,
+          50,
+        );
+        if (brainRaw) {
+          const matched = VALID_STYLES.find(s => brainRaw.toLowerCase().includes(s));
+          if (matched) {
+            outputStyle = matched;
+            styleSource = "brain-rescue";
+          }
+        }
+      } catch {
+        // fall through to pass b
+      }
+
+      // Pass b: task-type heuristic — fires when brain is also unavailable
+      if (outputStyle === null) {
+        outputStyle = TASK_TYPE_DEFAULT_STYLE[ctx.taskType as TaskType] ?? "concise";
+        styleSource = "task-heuristic";
+      }
+    }
+
+    const style: OutputStyle = outputStyle;
     const taskKey = ctx.taskType as string;
     const suffixEntry = SUFFIXES[taskKey];
     if (!suffixEntry) {
       return {
         ...ctx,
+        outputStyle,
         layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: "no-suffix-entry" }],
       };
     }
@@ -95,12 +139,13 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     const suffix = suffixEntry[style];
     return {
       ...ctx,
+      outputStyle,  // propagate resolved style to orchestrator's applyPilSuffix
       layers: [
         ...ctx.layers,
         {
           name: "output-optimization",
           applied: true,
-          delta: `suffix=${ctx.taskType},style=${style},chars=${suffix.trim().length}`,
+          delta: `suffix=${ctx.taskType},style=${style},src=${styleSource},chars=${suffix.trim().length}`,
         },
       ],
     };

@@ -14,6 +14,7 @@ import path from "path";
 import { healthDetailed } from "../ee/health.js";
 import type { EEHealthResult } from "../ee/health.js";
 import { getDatabase } from "../storage/db.js";
+import { listStoredProviders } from "../providers/keychain.js";
 import { loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
@@ -76,9 +77,25 @@ async function checkKeyPresence(): Promise<CheckResult> {
     };
   }
   try {
+    const stored = await listStoredProviders();
+    if (stored.length > 0) {
+      return {
+        name: "key_presence",
+        status: "pass",
+        detail: `API key(s) in OS keychain: ${stored.join(", ")}`,
+      };
+    }
+  } catch {
+    /* keytar unavailable — fall through */
+  }
+  try {
     const settings = loadUserSettings();
     if (settings.apiKey && settings.apiKey.length > 0) {
-      return { name: "key_presence", status: "pass", detail: "API key found in user-settings.json" };
+      return {
+        name: "key_presence",
+        status: "warn",
+        detail: "API key in plaintext user-settings.json — run 'muonroi-cli keys cleanup-settings' to migrate to OS keychain",
+      };
     }
   } catch {
     /* settings file unreadable — fall through */
@@ -86,7 +103,7 @@ async function checkKeyPresence(): Promise<CheckResult> {
   return {
     name: "key_presence",
     status: "fail",
-    detail: "No API key found (set MUONROI_API_KEY or run muonroi-cli to configure)",
+    detail: "No API key found (run 'muonroi-cli keys set <provider>' or set MUONROI_API_KEY)",
   };
 }
 
