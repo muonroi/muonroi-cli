@@ -14,9 +14,9 @@ describe("doctor — runDoctor returns 7 checks", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns exactly 7 CheckResult entries", async () => {
+  it("returns exactly 8 CheckResult entries (ee.health + ee.brain added in 16-07)", async () => {
     const results = await runDoctor();
-    expect(results).toHaveLength(7);
+    expect(results).toHaveLength(8);
   });
 
   it("each CheckResult has valid name, status, and detail fields", async () => {
@@ -38,7 +38,8 @@ describe("doctor — runDoctor returns 7 checks", () => {
     expect(names).toContain("os");
     expect(names).toContain("key_presence");
     expect(names).toContain("ollama");
-    expect(names).toContain("ee");
+    expect(names).toContain("ee.health");
+    expect(names).toContain("ee.brain");
     expect(names).toContain("qdrant");
     expect(names).toContain("error_rate");
   });
@@ -47,7 +48,7 @@ describe("doctor — runDoctor returns 7 checks", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network unreachable")));
     const results = await runDoctor();
     const ollamaCheck = results.find((r) => r.name === "ollama")!;
-    const eeCheck = results.find((r) => r.name === "ee")!;
+    const eeCheck = results.find((r) => r.name === "ee.health")!;
     const qdrantCheck = results.find((r) => r.name === "qdrant")!;
     expect(ollamaCheck.status).toBe("warn");
     expect(eeCheck.status).toBe("warn");
