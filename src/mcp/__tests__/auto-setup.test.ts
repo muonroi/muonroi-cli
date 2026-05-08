@@ -69,4 +69,13 @@ describe("ensureDefaultMcpServers — research servers", () => {
     const tavily = merged.find((s) => s.id === "tavily");
     expect(tavily?.enabled).toBe(true); // user's setting preserved
   });
+
+  it("is idempotent across repeated calls (no duplicate ids)", async () => {
+    const { ensureDefaultMcpServers } = await import("../auto-setup.js");
+    const first = ensureDefaultMcpServers();
+    const second = ensureDefaultMcpServers();
+    expect(second.map((s) => s.id).sort()).toEqual(first.map((s) => s.id).sort());
+    const ids = second.map((s) => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
 });
