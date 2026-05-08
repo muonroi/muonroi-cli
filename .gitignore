@@ -27,3 +27,4 @@ deps-outdated.txt
 # (live in user home, but if MUONROI_CLI_HOME=. is set during dev these may appear here)
 .muonroi-cli/
 .muonroi-flow/
+/.claude

@@ -174,6 +174,49 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
 }
 
 /**
+ * Return the list of providers that currently have credentials available — checked across
+ * OS keychain, environment variables, and user-settings.json. `ollama` is always included
+ * because it is keyless. Order is stable for UI rendering.
+ */
+export async function getConfiguredProviders(): Promise<ProviderId[]> {
+  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"];
+  const stored = new Set(await listStoredProviders());
+
+  let settingsProviders: Record<string, { apiKey?: string }> = {};
+  try {
+    const { loadUserSettings } = await import("../utils/settings.js");
+    settingsProviders = (loadUserSettings().providers ?? {}) as Record<string, { apiKey?: string }>;
+  } catch {
+    /* settings unreadable — keychain + env still work */
+  }
+
+  const configured: ProviderId[] = [];
+  for (const p of order) {
+    if (p === "ollama") {
+      configured.push(p);
+      continue;
+    }
+    if (stored.has(p)) {
+      configured.push(p);
+      continue;
+    }
+    const envKey = process.env[ENV_BY_PROVIDER[p]];
+    if (envKey && envKey.length >= 20) {
+      configured.push(p);
+      continue;
+    }
+    const settingsField = SETTINGS_KEY_MAP[p];
+    if (settingsField) {
+      const k = settingsProviders[settingsField]?.apiKey;
+      if (k && k.length >= 20) {
+        configured.push(p);
+      }
+    }
+  }
+  return configured;
+}
+
+/**
  * Find the first provider with an available API key.
  * Checks in priority order: anthropic, openai, google, deepseek, siliconflow, ollama.
  * Returns null if no provider has a key (unlikely — ollama is keyless fallback).
