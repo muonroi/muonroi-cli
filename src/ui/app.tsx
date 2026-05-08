@@ -2785,6 +2785,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     return { ...d, criteriaHistory, costHistory };
                   });
                 }
+                if (chunk.type === "experience_warning" && chunk.experienceWarning) {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), {
+                        ...last,
+                        content: (last.content ?? "") + `\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                      }];
+                    }
+                    return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
+                  });
+                }
+                if (chunk.type === "experience_injected" && chunk.experienceInjected) {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), {
+                        ...last,
+                        content: (last.content ?? "") + `\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                      }];
+                    }
+                    return [...prev, buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`)];
+                  });
+                }
                 if (chunk.type === "done") break;
               }
             } catch (e: unknown) {
@@ -2845,6 +2869,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.type === "council_phase" && chunk.councilPhase) {
                   const cp = chunk.councilPhase;
                   setCouncilPhases((prev) => upsertPhase(prev, cp));
+                }
+                if (chunk.type === "experience_warning" && chunk.experienceWarning) {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), {
+                        ...last,
+                        content: (last.content ?? "") + `\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                      }];
+                    }
+                    return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
+                  });
+                }
+                if (chunk.type === "experience_injected" && chunk.experienceInjected) {
+                  setMessages((prev) => {
+                    const last = prev[prev.length - 1];
+                    if (last?.type === "assistant") {
+                      return [...prev.slice(0, -1), {
+                        ...last,
+                        content: (last.content ?? "") + `\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                      }];
+                    }
+                    return [...prev, buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`)];
+                  });
                 }
                 if (chunk.type === "done") break;
               }
