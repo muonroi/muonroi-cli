@@ -35,10 +35,47 @@ export function createCouncilLLM(
       return text;
     },
 
-    // debate() is implemented in Phase 15 Plan 02. Stub satisfies CouncilLLM interface.
     async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
-      const text = await this.generate(modelId, system, prompt);
-      return { text, toolCalls: [] };
+      const providerId = detectProviderForModel(modelId);
+      const key = await loadKeyForProvider(providerId);
+      const { factory } = createProviderFactory(providerId, { apiKey: key });
+      const runtime = resolveModelRuntime(factory, modelId);
+
+      const builtinTools = createTools(bash, mode);
+
+      // Lazy MCP bundle — fail-open so builtins remain available
+      let mcpBundle: McpToolBundle | null = null;
+      try {
+        mcpBundle = await buildMcpToolSet(loadMcpServers());
+      } catch {
+        // MCP spawn failed — debate continues with builtin tools only
+      }
+
+      const allTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+
+      try {
+        const result = await generateText({
+          model: runtime.model,
+          system,
+          prompt,
+          tools: allTools,
+          stopWhen: stepCountIs(4),
+          maxOutputTokens: 2048,
+          temperature: 0.7,
+          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+          ...(signal ? { abortSignal: signal } : {}),
+        });
+        stats.calls++;
+        return {
+          text: result.text,
+          toolCalls: (result.toolCalls ?? []) as Array<{ toolName: string; result?: unknown }>,
+        };
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        return { text: `[debate failed: ${errMsg}]`, toolCalls: [] };
+      } finally {
+        await mcpBundle?.close().catch(() => {});
+      }
     },
 
     async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string> {
