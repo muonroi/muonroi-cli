@@ -162,6 +162,13 @@ Plans:
   3. `evaluateDebate` reports `evidenceDensity` and `disagreementResolved`; when `evidenceDensity < 0.3` after ≥2 rounds, the leader injects a forced research query
   4. Each round's exchanges are persisted as a `[Council Round N]` system message in the session DB, including each speaker's response and citations
   5. Debate-planner uses structured JSON output (provider schema mode where supported) and retries once with explicit schema feedback before falling back to generic stances; fallback rate drops below 10% on representative topics
+**Plans:** 5 plans
+Plans:
+- [ ] 15-01-PLAN.md — Type contracts: LeaderEvaluation + CouncilLLM.debate() interface
+- [ ] 15-02-PLAN.md — llm.debate() implementation + prompts refute-then-cite injection
+- [ ] 15-03-PLAN.md — debate.ts: switch to llm.debate() + per-round persistence + evidence density metrics
+- [ ] 15-04-PLAN.md — debate-planner: generateObject structured output + retry path
+- [ ] 15-05-PLAN.md — TDD: round-tools.test.ts + evaluator-metrics.test.ts (CQ-06 through CQ-10)
 
 ### Phase 16: PIL + EE Integration into Council
 **Milestone**: v1.6 Council Quality & Trust
@@ -209,7 +216,7 @@ Plans:
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
 | 13. Product Ideal Loop | v1.5 | 6/6 | Complete    | 2026-05-07 |
-| 14. Council Accounting & Research MCP Wiring | v1.6 | 0/4 | Planned     | — |
-| 15. Tool-grounded Debate Rounds | v1.6 | 0/0 | Planned     | — |
+| 14. Council Accounting & Research MCP Wiring | v1.6 | 4/4 | Complete    | 2026-05-08 |
+| 15. Tool-grounded Debate Rounds | v1.6 | 0/5 | Planned     | — |
 | 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
 | 17. Council Robustness & Observability | v1.6 | 0/0 | Planned     | — |
