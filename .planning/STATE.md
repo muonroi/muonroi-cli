@@ -5,13 +5,13 @@ milestone_name: Council Quality & Trust
 status: active
 stopped_at: ""
 last_updated: "2026-05-08T00:00:00.000Z"
-last_activity: "2026-05-08 — Phase 17 planned: 4 plans (17-01..17-04) covering CQ-20..CQ-24, verification passed"
+last_activity: "2026-05-08 — Phase 17 complete: parseOutcome fallback, Council Tool Trace, /council inspect, doctor MCP nudge, docs/Council.md, audit-replay tests — CQ-20..CQ-24 all satisfied"
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 13
-  completed_plans: 9
-  percent: 50
+  completed_plans: 13
+  percent: 75
 ---
 
 # Project State

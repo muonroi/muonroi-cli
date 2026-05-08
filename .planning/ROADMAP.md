@@ -62,7 +62,7 @@ See milestone archive for details.
 - [x] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations — completed 2026-05-08
 - [x] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
 - [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
-- [ ] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation
+- [x] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation (completed 2026-05-08)
 
 ## Phase Details
 
@@ -230,11 +230,11 @@ Plans:
 **Plans:** 4 plans
 Plans:
 **Wave 1** (parallel)
-- [ ] 17-01-PLAN.md — parseOutcome raw log + shape fallback (CQ-20) + [Council Tool Trace] persistence in llm.ts + debate.ts (CQ-22)
-- [ ] 17-02-PLAN.md — /council inspect slash command + menu-items registration (CQ-21)
-- [ ] 17-03-PLAN.md — doctor council.mcp nudge check (CQ-23)
+- [x] 17-01-PLAN.md — parseOutcome raw log + shape fallback (CQ-20) + [Council Tool Trace] persistence in llm.ts + debate.ts (CQ-22)
+- [x] 17-02-PLAN.md — /council inspect slash command + menu-items registration (CQ-21)
+- [x] 17-03-PLAN.md — doctor council.mcp nudge check (CQ-23)
 **Wave 2** (depends on Wave 1)
-- [ ] 17-04-PLAN.md — docs/Council.md + README link + audit-replay.test.ts (CQ-24)
+- [x] 17-04-PLAN.md — docs/Council.md + README link + audit-replay.test.ts (CQ-24)
 
 ## Progress
 
@@ -252,4 +252,4 @@ Plans:
 | 14. Council Accounting & Research MCP Wiring | v1.6 | 4/4 | Complete    | 2026-05-08 |
 | 15. Tool-grounded Debate Rounds | v1.6 | 0/5 | Planned     | — |
 | 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
-| 17. Council Robustness & Observability | v1.6 | 0/4 | Planned     | — |
+| 17. Council Robustness & Observability | v1.6 | 4/4 | Complete    | 2026-05-08 |
