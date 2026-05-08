@@ -230,6 +230,32 @@ async function startInteractive(
   const providerKey = await loadKeyForProvider(activeProvider).catch(() => undefined);
   void providerKey; // Agent also loads key internally; this run is for early redactor enrollment.
 
+  // Web-research migration prompt — runs once per install for existing users
+  // who never saw the first-run wizard's research step. Skip in non-interactive
+  // mode (--prompt, --verify, headless harnesses).
+  if (process.stdin.isTTY) {
+    try {
+      const { loadUserSettings } = await import("./utils/settings.js");
+      if (loadUserSettings().webResearchPrompted !== true) {
+        const rl = createInterface({ input: process.stdin, output: process.stderr });
+        const ask = (q: string): Promise<string> =>
+          new Promise((resolve) => rl.question(q, (a) => resolve(a)));
+        try {
+          const { runResearchMigrationPrompt } = await import("./mcp/research-onboarding.js");
+          await runResearchMigrationPrompt({
+            askChoice: ask,
+            askText: ask,
+            log: (m) => process.stderr.write(m),
+          });
+        } finally {
+          rl.close();
+        }
+      }
+    } catch (err) {
+      process.stderr.write(`\nWarning: research migration prompt failed: ${(err as Error).message}\n`);
+    }
+  }
+
   // 5-6. createPendingCallsLog + createAbortContext — wired before Agent so
   //       the Agent receives them via AgentOptions (Pitfall 9, TUI-04).
   //   Session ID is not available until Agent opens SQLite; use a stable
