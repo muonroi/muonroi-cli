@@ -15,7 +15,7 @@ import { healthDetailed } from "../ee/health.js";
 import type { EEHealthResult } from "../ee/health.js";
 import { getDatabase } from "../storage/db.js";
 import { listStoredProviders } from "../providers/keychain.js";
-import { loadUserSettings } from "../utils/settings.js";
+import { loadMcpServers, loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
   name: string;
@@ -256,6 +256,104 @@ async function checkRecentErrorRate(): Promise<CheckResult> {
   }
 }
 
+// CQ-23: threshold for qualifying council sessions to trigger MCP nudge
+const COUNCIL_MCP_NUDGE_THRESHOLD = 3;
+const RESEARCH_KEYWORDS = /research|find\s|look\s*up|search\s|investigate|what\s+is\s|latest|current\s+version|news\s|documentation|compare\s/i;
+
+async function checkCouncilMcpNudge(): Promise<CheckResult> {
+  try {
+    // 1. Check if tavily or playwright is enabled in MCP config
+    const mcpServers = loadMcpServers();
+    // McpServerConfig has: id, label, enabled, transport, command?, ...
+    // Match tavily/playwright by id or label (case-insensitive)
+    const serverNames = mcpServers.map((s) =>
+      `${s.id ?? ""} ${s.label ?? ""} ${s.command ?? ""}`.toLowerCase(),
+    );
+    const tavilyEnabled = serverNames.some((n) => n.includes("tavily"));
+    const playwrightEnabled = serverNames.some(
+      (n) => n.includes("playwright") || n.includes("chrome"),
+    );
+
+    if (tavilyEnabled && playwrightEnabled) {
+      return { name: "council.mcp", status: "pass", detail: "tavily + playwright enabled" };
+    }
+    if (tavilyEnabled || playwrightEnabled) {
+      const enabled = tavilyEnabled ? "tavily" : "playwright";
+      return {
+        name: "council.mcp",
+        status: "pass",
+        detail: `${enabled} enabled (partial MCP coverage)`,
+      };
+    }
+
+    // 2. Query DB for [Council Memory] records with URL or research topics
+    const db = getDatabase();
+    const rows = db
+      .prepare(
+        `SELECT message_json FROM messages
+         WHERE role = 'system'
+           AND message_json LIKE '%[Council Memory]%'
+         ORDER BY created_at DESC
+         LIMIT 50`,
+      )
+      .all() as Array<{ message_json: string }>;
+
+    let qualifyingCount = 0;
+    for (const row of rows) {
+      try {
+        const content = (() => {
+          try {
+            const parsed = JSON.parse(row.message_json) as { content?: string };
+            return typeof parsed.content === "string" ? parsed.content : row.message_json;
+          } catch {
+            return row.message_json;
+          }
+        })();
+
+        if (!content.startsWith("[Council Memory] ")) continue;
+        const record = JSON.parse(content.slice("[Council Memory] ".length)) as { topic?: string };
+        const topic = record.topic ?? "";
+        if (/https?:\/\//.test(topic) || RESEARCH_KEYWORDS.test(topic)) {
+          qualifyingCount++;
+        }
+      } catch {
+        /* skip malformed rows */
+      }
+    }
+
+    if (qualifyingCount >= COUNCIL_MCP_NUDGE_THRESHOLD) {
+      const missing = [!tavilyEnabled && "tavily", !playwrightEnabled && "playwright"]
+        .filter(Boolean)
+        .join(", ");
+      return {
+        name: "council.mcp",
+        status: "warn",
+        detail: [
+          `${qualifyingCount} council session(s) ran URL/research topics without MCP enabled.`,
+          `Missing: ${missing}.`,
+          `Enable these in ~/.muonroi-cli/user-settings.json under "mcpServers"`,
+          `to allow tavily internet search and playwright browser access during debates.`,
+        ].join(" "),
+      };
+    }
+
+    return {
+      name: "council.mcp",
+      status: "pass",
+      detail:
+        qualifyingCount === 0
+          ? "No URL/research council sessions detected"
+          : `${qualifyingCount} URL/research session(s) (threshold ${COUNCIL_MCP_NUDGE_THRESHOLD} not reached)`,
+    };
+  } catch {
+    return {
+      name: "council.mcp",
+      status: "pass",
+      detail: "council mcp check skipped (DB unavailable)",
+    };
+  }
+}
+
 export async function runDoctor(): Promise<CheckResult[]> {
   return Promise.all([
     checkBunVersion(),
@@ -266,5 +364,6 @@ export async function runDoctor(): Promise<CheckResult[]> {
     checkBrainEmptiness(),   // NEW — CQ-16d
     checkQdrant(),
     checkRecentErrorRate(),
+    checkCouncilMcpNudge(), // NEW — CQ-23
   ]);
 }
