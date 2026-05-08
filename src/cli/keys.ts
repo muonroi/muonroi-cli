@@ -96,7 +96,12 @@ async function promptHidden(question: string): Promise<string> {
   });
 }
 
-export async function runKeysSet(provider: string): Promise<void> {
+export interface KeysSetOptions {
+  bw?: boolean;
+  itemPrefix?: string;
+}
+
+export async function runKeysSet(provider: string, options: KeysSetOptions = {}): Promise<void> {
   if (!isValidProvider(provider)) {
     console.error(`Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")}`);
     process.exit(1);
@@ -106,6 +111,18 @@ export async function runKeysSet(provider: string): Promise<void> {
     console.error("Aborted (empty key).");
     process.exit(1);
   }
+
+  if (options.bw) {
+    const { writeBwSecureNote } = await import("./bw-vault.js");
+    const itemName = `${options.itemPrefix ?? "muonroi-cli/"}${provider}`;
+    const res = await writeBwSecureNote(itemName, key);
+    if (!res.ok) {
+      console.error(`Bitwarden write failed: ${res.error}`);
+      process.exit(2);
+    }
+    console.log(`Bitwarden vault: ${res.action} '${itemName}'.`);
+  }
+
   try {
     const ok = await setKeyForProvider(provider, key);
     if (!ok) {
@@ -115,6 +132,42 @@ export async function runKeysSet(provider: string): Promise<void> {
       process.exit(2);
     }
     console.log(`Stored ${provider} key in OS keychain.`);
+  } catch (e) {
+    console.error(`Failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+export async function runMcpKeysSet(id: string, options: KeysSetOptions = {}): Promise<void> {
+  if (!isMcpKeyId(id)) {
+    console.error(`Unknown MCP key '${id}'. Valid: ${MCP_KEY_IDS.join(", ")}`);
+    process.exit(1);
+  }
+  const key = (await promptHidden(`Paste ${id} API key (hidden): `)).trim();
+  if (!key) {
+    console.error("Aborted (empty key).");
+    process.exit(1);
+  }
+
+  if (options.bw) {
+    const { writeBwSecureNote } = await import("./bw-vault.js");
+    const itemName = `${options.itemPrefix ?? "muonroi-cli/"}${id}`;
+    const res = await writeBwSecureNote(itemName, key);
+    if (!res.ok) {
+      console.error(`Bitwarden write failed: ${res.error}`);
+      process.exit(2);
+    }
+    console.log(`Bitwarden vault: ${res.action} '${itemName}'.`);
+  }
+
+  try {
+    const ok = await setMcpKey(id, key);
+    if (!ok) {
+      console.error("OS keychain unavailable on this platform (keytar failed to load).");
+      console.error(`Falling back: set environment variable: export ${id.toUpperCase()}_API_KEY='<your key>'`);
+      process.exit(2);
+    }
+    console.log(`Stored MCP key '${id}' in OS keychain.`);
   } catch (e) {
     console.error(`Failed: ${(e as Error).message}`);
     process.exit(1);
