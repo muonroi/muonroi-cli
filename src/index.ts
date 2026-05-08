@@ -948,9 +948,11 @@ const keys = program
 keys
   .command("set <provider>")
   .description("Prompt for a provider API key and store it in the OS keychain")
-  .action(async (provider: string) => {
+  .option("--bw", "Also write the key to a Bitwarden vault Secure Note (requires bw CLI + BW_SESSION)")
+  .option("--prefix <prefix>", "Bitwarden item name prefix when --bw is set (default: 'muonroi-cli/')", "muonroi-cli/")
+  .action(async (provider: string, opts: { bw?: boolean; prefix: string }) => {
     const { runKeysSet } = await import("./cli/keys.js");
-    await runKeysSet(provider);
+    await runKeysSet(provider, { bw: opts.bw, itemPrefix: opts.prefix });
   });
 
 keys
@@ -1008,6 +1010,16 @@ mcp
     } finally {
       rl.close();
     }
+  });
+
+mcp
+  .command("set <id>")
+  .description("Prompt for an MCP API key (e.g. tavily) and store it in the OS keychain")
+  .option("--bw", "Also write the key to a Bitwarden vault Secure Note (requires bw CLI + BW_SESSION)")
+  .option("--prefix <prefix>", "Bitwarden item name prefix when --bw is set (default: 'muonroi-cli/')", "muonroi-cli/")
+  .action(async (id: string, opts: { bw?: boolean; prefix: string }) => {
+    const { runMcpKeysSet } = await import("./cli/keys.js");
+    await runMcpKeysSet(id, { bw: opts.bw, itemPrefix: opts.prefix });
   });
 
 mcp
