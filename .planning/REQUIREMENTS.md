@@ -60,6 +60,10 @@ Requirements for closing the EE learning loop. Each maps to roadmap phases.
 - [ ] **CQ-17**: `ee/phase-outcome.ts:recordCouncilOutcome` pushes the synthesis + verdict + confidence to the EE brain so it learns from each council run
 - [ ] **CQ-18**: Synthesis text respects `ctx.outputStyle` (concise/balanced/detailed) from PIL Layer 6 instead of always using a hard default
 - [ ] **CQ-19**: A user-facing feature flag `council.experienceMode = off | advisory | enforcing` controls EE involvement (default `advisory`) and is documented in `/gsd-settings`
+- [ ] **CQ-16a**: App boot wires `setRenderSink` to the StreamChunk pipeline so PreToolUse `emitMatches` warnings appear in chat UI as `⚠ [Experience]` blocks instead of being swallowed by stderr in TUI raw mode
+- [ ] **CQ-16b**: Successful PIL Layer 3 injection emits a dedicated `experience_injected` StreamChunk (collapsed by default, expandable) showing experience id, score, source collection, and the snippet that was added to the prompt — so the user can see WHICH experience was applied, not just that "something" was
+- [ ] **CQ-16c**: `muonroi doctor` checks EE thin-client health: reads `~/.experience/config.json` (`serverBaseUrl` + `serverReadAuthToken`), probes `/health` with auth, and reports `qdrant`/`fileStore`/`embed` sub-status; fails gracefully with actionable hint when the VPS is unreachable or token is missing
+- [ ] **CQ-16d**: Brain-emptiness diagnostic: when `interaction_logs` shows ≥50 consecutive `ee_injection` events with `event_subtype != 'injected'`, the doctor (and a one-time hint at session start) suggests running `experience extract` / `experience evolve` to bootstrap the principles collection, OR lowering `MUONROI_PIL_SCORE_FLOOR` below 0.55 if matches are present but filtered as noise
 
 ### Council Robustness & Observability (Phase 17)
 
@@ -125,6 +129,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | CQ-17 | Phase 16 | Pending |
 | CQ-18 | Phase 16 | Pending |
 | CQ-19 | Phase 16 | Pending |
+| CQ-16a | Phase 16 | Pending |
+| CQ-16b | Phase 16 | Pending |
+| CQ-16c | Phase 16 | Pending |
+| CQ-16d | Phase 16 | Pending |
 | CQ-20 | Phase 17 | Pending |
 | CQ-21 | Phase 17 | Pending |
 | CQ-22 | Phase 17 | Pending |
@@ -133,10 +141,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 **Coverage:**
 - v1.2 requirements: 12 total — all mapped, all complete
-- v1.6 requirements: 24 total — all mapped to Phases 14–17, all pending
-- Total mapped: 36 / 36
+- v1.6 requirements: 28 total (24 base + 4 EE visibility/health additions CQ-16a..d) — all mapped to Phases 14–17, all pending
+- Total mapped: 40 / 40
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-05-01*
-*Last updated: 2026-05-08 — added v1.6 (CQ-01..CQ-24) for Council Quality & Trust milestone*
+*Last updated: 2026-05-08 — added v1.6 (CQ-01..CQ-24) for Council Quality & Trust milestone; added CQ-16a..d (EE visibility, thin-client health, brain emptiness) after verifying EE is running thin-client mode on VPS but UI render sink unwired and brain has 0 successful Layer 3 injections in 55 attempts*
