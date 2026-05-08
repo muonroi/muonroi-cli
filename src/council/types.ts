@@ -169,14 +169,23 @@ export interface CouncilStats {
 
 // ── LLM abstraction ──────────────────────────────────────────────────────────
 
+export type ToolTraceEmitter = (traceText: string) => void;
+
 export interface CouncilLLM {
   generate(modelId: string, system: string, prompt: string, maxTokens?: number): Promise<string>;
-  research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string>;
+  research(
+    modelId: string,
+    topic: string,
+    conversationContext: string,
+    signal?: AbortSignal,
+    persistTrace?: ToolTraceEmitter,
+  ): Promise<string>;
   debate(
     modelId: string,
     system: string,
     prompt: string,
     signal?: AbortSignal,
+    persistTrace?: ToolTraceEmitter,
   ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
 }
 
