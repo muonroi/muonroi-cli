@@ -49,6 +49,8 @@ import {
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
+import { setRenderSink } from "./ee/render.js";
+import type { StreamChunk } from "./types/index.js";
 
 const exitCleanlyOnSigterm = () => {
   process.exit(0);
@@ -67,6 +69,25 @@ process.on("unhandledRejection", (reason) => {
   try { require("fs").appendFileSync(require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"), `[${new Date().toISOString()}] REJECTION: ${msg}\n`); } catch {}
   console.error("Unhandled rejection:", reason);
   process.exit(1);
+});
+
+// ── EE render sink wiring (CQ-16a) ─────────────────────────────────────────
+// Single-orchestrator-at-a-time invariant holds (no multi-session concurrency in v1.6).
+// Sink routes experience_warning chunks into the active orchestrator's chat stream.
+// When no active stream (headless / idle): drop silently — never leak to stderr in TUI.
+let _activeEeYield: ((chunk: StreamChunk) => void) | null = null;
+
+export function setActiveEeYield(fn: ((chunk: StreamChunk) => void) | null): void {
+  _activeEeYield = fn;
+}
+
+setRenderSink((lineOrChunk) => {
+  if (!_activeEeYield) return; // drop silently when no TUI active
+  const chunk: StreamChunk =
+    typeof lineOrChunk === "string"
+      ? { type: "experience_warning" as StreamChunk["type"], content: lineOrChunk }
+      : lineOrChunk;
+  _activeEeYield(chunk);
 });
 
 /**
