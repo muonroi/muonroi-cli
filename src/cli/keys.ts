@@ -24,6 +24,13 @@ import {
   setKeyForProvider,
 } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { setMcpKey, type McpKeyId } from "../mcp/mcp-keychain.js";
+
+const MCP_KEY_IDS: readonly McpKeyId[] = ["tavily"];
+
+function isMcpKeyId(value: string): value is McpKeyId {
+  return (MCP_KEY_IDS as readonly string[]).includes(value);
+}
 
 const SETTINGS_PATH = path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
 
@@ -223,6 +230,88 @@ export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void>
   if (imported > 0) {
     console.log("Run 'muonroi-cli keys cleanup-settings' to strip any plaintext keys from settings.json.");
   }
+}
+
+interface McpBwImportOptions {
+  keys?: string[];
+  itemPrefix?: string;
+}
+
+/**
+ * Import MCP secrets (e.g. Tavily) from a Bitwarden vault into the OS
+ * keychain via mcp-keychain. Vault items are expected at `<prefix><id>` —
+ * default prefix `muonroi-cli/`. The key value is read from the item's
+ * notes field, mirroring the provider import-bw flow.
+ */
+export async function runMcpImportBw(opts: McpBwImportOptions = {}): Promise<void> {
+  const which = spawnSync("bw", ["--version"], { encoding: "utf8" });
+  if (which.status !== 0) {
+    console.error("Bitwarden CLI ('bw') not found in PATH.");
+    console.error("Install: https://bitwarden.com/help/cli/");
+    process.exit(2);
+  }
+
+  const session = process.env.BW_SESSION;
+  if (!session) {
+    console.error("BW_SESSION not set. Run:");
+    console.error("  export BW_SESSION=$(bw unlock --raw)");
+    process.exit(2);
+  }
+
+  const status = spawnSync("bw", ["status", "--session", session], { encoding: "utf8" });
+  if (status.status !== 0) {
+    console.error(`bw status failed: ${status.stderr || status.stdout}`);
+    process.exit(2);
+  }
+  let parsed: { status?: string };
+  try {
+    parsed = JSON.parse(status.stdout);
+  } catch {
+    parsed = {};
+  }
+  if (parsed.status !== "unlocked") {
+    console.error(`Bitwarden vault is not unlocked (status: ${parsed.status ?? "unknown"}).`);
+    console.error("Run: export BW_SESSION=$(bw unlock --raw)");
+    process.exit(2);
+  }
+
+  const requested = opts.keys && opts.keys.length > 0 ? opts.keys : MCP_KEY_IDS.slice();
+  const prefix = opts.itemPrefix ?? "muonroi-cli/";
+
+  let imported = 0;
+  let skipped = 0;
+  for (const id of requested) {
+    if (!isMcpKeyId(id)) {
+      console.warn(`Skip unknown MCP key: ${id}`);
+      skipped++;
+      continue;
+    }
+    const itemName = `${prefix}${id}`;
+    const got = spawnSync("bw", ["get", "notes", itemName, "--session", session], { encoding: "utf8" });
+    if (got.status !== 0) {
+      skipped++;
+      continue;
+    }
+    const key = got.stdout.trim();
+    if (!key || key.length < 16) {
+      console.warn(`Skip ${id}: vault item '${itemName}' empty or too short.`);
+      skipped++;
+      continue;
+    }
+    try {
+      const ok = await setMcpKey(id, key);
+      if (!ok) {
+        console.error("OS keychain unavailable. Aborting import.");
+        process.exit(2);
+      }
+      console.log(`Imported MCP key '${id}' → keychain.`);
+      imported++;
+    } catch (e) {
+      console.warn(`Failed ${id}: ${(e as Error).message}`);
+      skipped++;
+    }
+  }
+  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}.`);
 }
 
 export async function runKeysCleanupSettings(): Promise<void> {
