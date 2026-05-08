@@ -76,3 +76,47 @@ export function fireFeedback(ctx: JudgeContext): void {
     }
   }
 }
+
+export interface CouncilJudgeResult {
+  confidence: number;   // 0–1
+  verdict: "pass" | "fail" | "needs_review";
+  reason: string;
+}
+
+/**
+ * Judge a council synthesis for quality using heuristic scoring.
+ * No LLM involved — deterministic rules based on synthesis content.
+ * confidence < 0.5 → verdict=needs_review.
+ * Fire-and-forget pattern: callers use .then() not await.
+ * Never throws — fail-open B-4 compliant.
+ */
+export async function judgeCouncilOutcome(synthesis: string): Promise<CouncilJudgeResult> {
+  try {
+    // Heuristic scoring (deterministic — no LLM):
+    // +0.3 for synthesis length >= 200 chars (substantive)
+    // +0.2 for at least one citation pattern ([file:], [url], [REFUTED via])
+    // +0.2 for recommended action present (look for "Recommendation" or "recommend")
+    // +0.15 for convergence signal ("agreed", "consensus", "all participants")
+    // +0.15 for evidence density (>= 2 citation patterns)
+    let score = 0.0;
+    const len = synthesis.length;
+    const lc = synthesis.toLowerCase();
+    const citationCount = (synthesis.match(/\[(?:file:|url|snapshot:|REFUTED via)/g) ?? []).length;
+
+    if (len >= 200) score += 0.3;
+    if (citationCount >= 1) score += 0.2;
+    if (lc.includes("recommend")) score += 0.2;
+    if (lc.includes("agreed") || lc.includes("consensus")) score += 0.15;
+    if (citationCount >= 2) score += 0.15;
+
+    const confidence = Math.min(1.0, Math.max(0.0, score));
+
+    return {
+      confidence,
+      verdict: confidence < 0.5 ? "needs_review" : "pass",
+      reason: `heuristic: len=${len} citations=${citationCount} score=${score.toFixed(2)}`,
+    };
+  } catch (err) {
+    return { confidence: 0, verdict: "needs_review", reason: `error: ${(err as Error).message}` };
+  }
+}
