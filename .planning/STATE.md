@@ -5,13 +5,13 @@ milestone_name: Council Quality & Trust
 status: active
 stopped_at: ""
 last_updated: "2026-05-08T00:00:00.000Z"
-last_activity: "2026-05-08 — Phase 15 planned: 5 plans, 3 waves — ready to execute"
+last_activity: "2026-05-08 — Phase 15 complete: CQ-06/07/08/09/10 all verified, 22/22 tests pass"
 progress:
   total_phases: 4
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 9
-  completed_plans: 4
-  percent: 25
+  completed_plans: 9
+  percent: 50
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-05-08)
 
 ## Current Position
 
-Phase: Phase 15 (Tool-grounded Debate Rounds) — planned, ready to execute
-Plan: 5 plans (3 waves)
-Status: Ready to execute
-Last activity: 2026-05-08 — Phase 15 planned: 5 plans in 3 waves (15-01→15-02/03/04→15-05), all CQ-06–CQ-10 covered
+Phase: Phase 16 (PIL + EE Integration into Council) — next up
+Plan: —
+Status: Phase 15 complete, ready to plan Phase 16
+Last activity: 2026-05-08 — Phase 15 complete: llm.debate(), refute-then-cite prompts, evidenceDensity metrics, per-round persistence, generateObject planner — 22/22 tests pass
 
 Progress: [██░░░░░░░░] 25%
 
