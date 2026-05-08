@@ -3693,27 +3693,33 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           setShowSlashMenu(false);
           setSlashSearchQuery("");
           inputRef.current?.clear();
+          key.preventDefault?.();
           return;
         }
         if (key.name === "up") {
           setSlashMenuIndex((i) => Math.max(0, i - 1));
+          key.preventDefault?.();
           return;
         }
         if (key.name === "down") {
           if (filteredSlashItems.length > 0)
             setSlashMenuIndex((i) => Math.min(filteredSlashItems.length - 1, i + 1));
+          key.preventDefault?.();
           return;
         }
         if (key.name === "return") {
           const item = filteredSlashItems[slashMenuIndex];
           if (item) handleSlashMenuSelect(item);
           setSlashSearchQuery("");
+          key.preventDefault?.();
           return;
         }
         if (key.name === "backspace") {
           // Delete from input (mirrors the slash + query) and from the
           // search query state. When everything (including the leading "/")
           // is gone, dismiss the overlay instead of leaving it stuck open.
+          // preventDefault so the textarea does not also process backspace
+          // and delete a second character.
           const ta = inputRef.current;
           const current = ta?.plainText ?? "";
           if (current.length > 0) {
@@ -3728,6 +3734,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setSlashSearchQuery("");
             inputRef.current?.clear();
           }
+          key.preventDefault?.();
           return;
         }
         if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
@@ -3735,7 +3742,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           setSlashMenuIndex(0);
           // Keep the input field visually in sync so the user sees what they
           // are typing (the textarea is unfocused while the overlay is open).
+          // preventDefault so the textarea does not ALSO insert the same
+          // sequence — without this every keystroke duplicates ("/iideall").
           inputRef.current?.insertText(key.sequence);
+          key.preventDefault?.();
           return;
         }
         return;
