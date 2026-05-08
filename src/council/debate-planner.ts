@@ -82,12 +82,24 @@ export async function* planDebate(
   llm: CouncilLLM,
   eeWarnings?: CouncilWarning[],          // CQ-13: experience snippets to seed prompt
   experienceMode?: CouncilExperienceMode, // CQ-14: controls Experience Auditor injection
+  taskType?: string,                       // CQ-11: task type from PIL (e.g. "architecture", "bugfix")
+  complexityTier?: string,                 // CQ-11: complexity tier from PIL (e.g. "heavy", "medium", "light")
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
   const eeSnippets = eeWarnings?.map((w) => w.text).filter(Boolean) ?? [];
   const { system: baseSystem, prompt } = buildDebatePlanPrompt(spec);
-  const system = eeSnippets.length > 0
-    ? `${baseSystem}\n\n## Experience Warnings (from brain)\nNote these past mistakes when designing debate stances:\n${eeSnippets.map((s) => `- ${s}`).join("\n")}`
-    : baseSystem;
+
+  // Build calibration context from PIL metadata
+  const pilCalibration: string[] = [];
+  if (taskType) pilCalibration.push(`Task type: ${taskType}`);
+  if (complexityTier) pilCalibration.push(`Complexity tier: ${complexityTier} — calibrate debate depth accordingly`);
+
+  let system = baseSystem;
+  if (pilCalibration.length > 0) {
+    system += `\n\n## Task Context (from PIL)\n${pilCalibration.join("\n")}`;
+  }
+  if (eeSnippets.length > 0) {
+    system += `\n\n## Experience Warnings (from brain)\nNote these past mistakes when designing debate stances:\n${eeSnippets.map((s) => `- ${s}`).join("\n")}`;
+  }
 
   // Attempt 1: generateObject with Zod schema
   try {
