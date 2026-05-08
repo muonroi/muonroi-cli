@@ -21,6 +21,7 @@ const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";
+export type CouncilExperienceMode = "off" | "advisory" | "enforcing";
 
 /** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
 export type PaymentChain = "base" | "base-sepolia";
@@ -197,6 +198,8 @@ export interface UserSettings {
   councilRounds?: number;
   autoCouncil?: boolean;
   councilPreferMultiProvider?: boolean;
+  /** EE involvement level in council debates. Default: advisory. CQ-19. */
+  councilExperienceMode?: CouncilExperienceMode;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
   providers?: {
@@ -817,5 +820,9 @@ export function isAutoCouncilEnabled(): boolean {
 
 export function isCouncilMultiProviderPreferred(): boolean {
   return loadUserSettings().councilPreferMultiProvider ?? false;
+}
+
+export function getCouncilExperienceMode(): CouncilExperienceMode {
+  return loadUserSettings().councilExperienceMode ?? "advisory";
 }
 
