@@ -110,6 +110,15 @@ vi.mock("../../src/utils/settings.js", () => ({
   getRoleModels: () => ({ leader: "mock-premium" }),
   isCouncilMultiProviderPreferred: () => false,
   loadUserSettings: () => ({}),
+  getCouncilExperienceMode: () => "advisory",
+}));
+
+vi.mock("../../src/pil/pipeline.js", () => ({
+  runPipeline: async () => null,
+}));
+
+vi.mock("../../src/ee/council-bridge.js", () => ({
+  queryExperience: async () => ({ warnings: [] }),
 }));
 
 vi.mock("../../src/council/leader.js", async (importOriginal) => {

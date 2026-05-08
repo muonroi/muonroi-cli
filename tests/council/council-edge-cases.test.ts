@@ -28,6 +28,15 @@ vi.mock("../../src/utils/settings.js", () => ({
   getRoleModels: () => ({}),
   isCouncilMultiProviderPreferred: () => false,
   loadUserSettings: () => ({}),
+  getCouncilExperienceMode: () => "advisory",
+}));
+
+vi.mock("../../src/pil/pipeline.js", () => ({
+  runPipeline: async () => null,
+}));
+
+vi.mock("../../src/ee/council-bridge.js", () => ({
+  queryExperience: async () => ({ warnings: [] }),
 }));
 
 async function collectChunks(gen: AsyncGenerator<StreamChunk, string | null, unknown>) {
