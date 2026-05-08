@@ -21,8 +21,8 @@ export async function* runPlanning(
   respondToPreflight: PreflightResponder,
   llm: CouncilLLM,
   debatePlan?: DebatePlan,
-  // CQ-18: PIL outputStyle propagated from runCouncil — consumed in plan 16-06 (synthesis prompt)
-  _outputStyle?: string | null,
+  // CQ-18: PIL outputStyle from runCouncil — passed to buildSynthesisPrompt to control synthesis tone
+  outputStyle?: string | null,
 ): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string }, unknown> {
   const p3Start = Date.now();
   yield phaseStart({
@@ -47,7 +47,7 @@ export async function* runPlanning(
   let outcome: EnhancedCouncilOutcome | null = null;
 
   try {
-    const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges, debatePlan });
+    const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined });
     synthesisText = yield* tracedGenerate(llm, {
       phase: "synthesis",
       label: "Synthesizing action plan",
