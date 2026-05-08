@@ -152,7 +152,15 @@ export async function* runCouncil(
     label: "Debate plan",
     detail: "stances + output shape",
   });
-  const planGenerator = planDebate(spec, leaderModelId, llm, eeResult.warnings, experienceMode);
+  const planGenerator = planDebate(
+    spec,
+    leaderModelId,
+    llm,
+    eeResult.warnings,
+    experienceMode,
+    pilCtx?.taskType ?? undefined,
+    pilCtx?.complexityTier ?? undefined,
+  );
   let planStep: IteratorResult<StreamChunk, import("./types.js").DebatePlan>;
   do {
     planStep = await planGenerator.next();
