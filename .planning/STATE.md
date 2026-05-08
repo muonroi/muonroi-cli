@@ -5,11 +5,11 @@ milestone_name: Council Quality & Trust
 status: active
 stopped_at: ""
 last_updated: "2026-05-08T00:00:00.000Z"
-last_activity: "2026-05-08 — Phase 15 complete: CQ-06/07/08/09/10 all verified, 22/22 tests pass"
+last_activity: "2026-05-08 — Phase 17 planned: 4 plans (17-01..17-04) covering CQ-20..CQ-24, verification passed"
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 9
+  total_plans: 13
   completed_plans: 9
   percent: 50
 ---
