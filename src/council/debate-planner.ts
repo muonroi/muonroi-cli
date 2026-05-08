@@ -1,7 +1,11 @@
+import { generateObject } from "ai";
+import { z } from "zod";
 import type { StreamChunk } from "../types/index.js";
 import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
 import { tracedGenerate } from "./llm.js";
+import { detectProviderForModel, createProviderFactory, resolveModelRuntime } from "../providers/runtime.js";
+import { loadKeyForProvider } from "../providers/keychain.js";
 
 const FALLBACK_PLAN: DebatePlan = {
   intentSummary: "(planner unavailable — using generic stances)",
@@ -20,9 +24,39 @@ const FALLBACK_PLAN: DebatePlan = {
   },
 };
 
+// ── Zod schemas mirroring DebatePlan interface ───────────────────────────────
+
+const DebateStanceSchema = z.object({
+  name: z.string(),
+  lens: z.string(),
+  focus: z.string().optional(),
+});
+
+const OutputSectionSchema = z.object({
+  key: z.string(),
+  heading: z.string(),
+  prompt: z.string().optional().default(""),
+  shape: z.enum(["list", "text", "objectList"]).default("list"),
+});
+
+const DebatePlanSchema = z.object({
+  intentSummary: z.string(),
+  stances: z.array(DebateStanceSchema),
+  outputShape: z.object({
+    kind: z.string(),
+    sections: z.array(OutputSectionSchema),
+    guardrails: z.array(z.string()).default([]),
+  }),
+});
+
+// ── planDebate ────────────────────────────────────────────────────────────────
+
 /**
  * Leader-LLM proposes the debate's stances + output shape based on the topic.
- * Falls back to a generic plan if the LLM call or parsing fails.
+ *
+ * Attempt 1: generateObject with DebatePlanSchema (structured output).
+ * On failure: retry once via tracedGenerate with schema error feedback injected.
+ * On second failure: return FALLBACK_PLAN.
  */
 export async function* planDebate(
   spec: ClarifiedSpec,
@@ -30,23 +64,63 @@ export async function* planDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
   const { system, prompt } = buildDebatePlanPrompt(spec);
-  let raw: string;
+
+  // Attempt 1: generateObject with Zod schema
   try {
-    raw = yield* tracedGenerate(llm, {
-      phase: "plan_debate",
-      label: "Planning debate (stances + output shape)",
-      modelId: leaderModelId,
+    const providerId = detectProviderForModel(leaderModelId);
+    const key = await loadKeyForProvider(providerId);
+    const { factory } = createProviderFactory(providerId, { apiKey: key });
+    const runtime = resolveModelRuntime(factory, leaderModelId);
+
+    const { object } = await generateObject({
+      model: runtime.model,
+      schema: DebatePlanSchema,
       system,
       prompt,
-      maxTokens: 1500,
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
-  } catch (err) {
-    yield { type: "content", content: `[Debate planning error: ${err instanceof Error ? err.message : err}]\n` };
-    return FALLBACK_PLAN;
+
+    // Validate with existing sanitize helpers for normalization
+    const stances = sanitizeStances(object.stances);
+    const outputShape = sanitizeShape(object.outputShape);
+    if (stances.length >= 2 && outputShape) {
+      return {
+        intentSummary: object.intentSummary || "(no intent summary provided)",
+        stances,
+        outputShape,
+      };
+    }
+    // Invalid even with schema — fall through to retry with a sanitize-failure message
+    throw new Error("Sanitize check failed: stances.length < 2 or outputShape is null");
+  } catch (structuredErr) {
+    // generateObject failed (or sanitize check failed) — retry once with schema error feedback
+    // T-15-07: Slice error to 200 chars to prevent prompt blowout from verbose Zod errors
+    const schemaFeedback = structuredErr instanceof Error ? structuredErr.message : String(structuredErr);
+    const retryPrompt =
+      prompt +
+      `\n\nSchema validation failed: ${schemaFeedback.slice(0, 200)}. Output valid JSON matching the required schema.`;
+
+    try {
+      const retryRaw = yield* tracedGenerate(llm, {
+        phase: "plan_debate",
+        label: "Planning debate (retry with schema feedback)",
+        modelId: leaderModelId,
+        system,
+        prompt: retryPrompt,
+        maxTokens: 1500,
+      });
+      const retryParsed = parsePlan(retryRaw);
+      if (retryParsed) return retryParsed;
+    } catch (retryErr) {
+      yield {
+        type: "content",
+        content: `[Debate planning retry failed: ${retryErr instanceof Error ? retryErr.message : retryErr}]\n`,
+      };
+    }
   }
 
-  const parsed = parsePlan(raw);
-  return parsed ?? FALLBACK_PLAN;
+  // All attempts exhausted — return fallback
+  return FALLBACK_PLAN;
 }
 
 function parsePlan(raw: string): DebatePlan | null {
