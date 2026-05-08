@@ -197,6 +197,8 @@ export interface UserSettings {
   councilRounds?: number;
   autoCouncil?: boolean;
   councilPreferMultiProvider?: boolean;
+  /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
+  webResearchPrompted?: boolean;
   providers?: {
     anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;
