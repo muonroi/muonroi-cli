@@ -96,10 +96,11 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
  * for provider + key and persists to the OS keychain.
  */
 async function firstRunWizard(currentModel?: string): Promise<string | null> {
+  let rl: ReturnType<typeof createInterface> | undefined;
   try {
-    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    rl = createInterface({ input: process.stdin, output: process.stderr });
     const ask = (q: string): Promise<string> =>
-      new Promise((resolve) => rl.question(q, (answer) => resolve(answer)));
+      new Promise((resolve) => rl!.question(q, (answer) => resolve(answer)));
 
     process.stderr.write("\nWelcome to muonroi-cli!\n\n");
 
@@ -199,6 +200,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
     rl.close();
     return trimmed;
   } catch {
+    rl?.close();
     return null;
   }
 }
