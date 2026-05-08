@@ -1,7 +1,13 @@
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
+import { handleCouncilInspectSlash } from "./council-inspect.js";
 
 export const handleCouncilSlash: SlashHandler = async (args, ctx) => {
+  // Delegate sub-command: /council inspect <session-id>
+  if (args[0] === "inspect") {
+    return handleCouncilInspectSlash(args.slice(1), ctx);
+  }
+
   let rounds: number | undefined;
   const firstArg = args[0];
   if (firstArg && /^\d+$/.test(firstArg)) {
