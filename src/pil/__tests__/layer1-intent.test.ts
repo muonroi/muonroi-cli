@@ -167,8 +167,8 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     await layer1Intent(makeCtx("some ambiguous input without keywords"));
     expect(mockClassifyViaBrain).toHaveBeenCalled();
     expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("Classify this prompt"),
-      100,
+      expect.stringContaining("multilingual prompt classifier"),
+      1500,
     );
   });
 
@@ -181,9 +181,9 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     expect(promptArg).toContain("detailed");
   });
 
-  it("classifyViaBrain called with 100ms timeout for combined detection", async () => {
+  it("classifyViaBrain called with 1500ms timeout for combined detection (brain-LLM realistic latency)", async () => {
     await layer1Intent(makeCtx("some ambiguous input"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.any(String), 100);
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.any(String), 1500);
   });
 
   it("brain returns 'debug' → taskType='debug', confidence=0.55", async () => {
@@ -215,16 +215,16 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
     await layer1Intent(makeCtx("refactor this"));
     expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("concise, balanced, or detailed"),
-      50,
+      expect.stringContaining("preferred output style"),
+      800,
     );
   });
 
   it("classifyViaBrain called for style detection even when keyword match found", async () => {
     await layer1Intent(makeCtx("there is a bug here"));
     expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("concise, balanced, or detailed"),
-      50,
+      expect.stringContaining("preferred output style"),
+      800,
     );
   });
 });

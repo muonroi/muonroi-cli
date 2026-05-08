@@ -14,7 +14,7 @@ import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import * as phaseTracker from "../ee/phase-tracker.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
-import type { PreToolUseHookInput, PostToolUseHookInput } from "../hooks/types";
+import type { PreToolUseHookInput, PostToolUseHookInput, PostToolUseFailureHookInput } from "../hooks/types";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
@@ -2926,7 +2926,7 @@ export class Agent {
       resumeDigest: this._resumeDigest,
       activeRunId: this._activeRunId,
       sessionId: this.session?.id ?? null,
-    }).catch(() => ({
+    }).catch((err) => ({
       raw: userMessage,
       enriched: userMessage,
       taskType: null,
@@ -2938,6 +2938,7 @@ export class Agent {
       layers: [],
       gsdPhase: null,
       activeRunId: null,
+      fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
     }));
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
@@ -2998,9 +2999,13 @@ export class Agent {
           durationMs: pilDurationMs,
           data: {
             layers: pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [],
+            layerCount: pilCtx.layers?.length ?? 0,
+            layerTimings: pilCtx.metrics?.layerTimings ?? null,
             domain: pilCtx.domain,
             confidence: pilCtx.confidence,
             outputStyle: pilCtx.outputStyle,
+            fallbackReason: pilCtx.fallbackReason ?? null,
+            eeMode: (await import("../ee/client-mode.js")).getCachedEEClientMode()?.mode ?? "unknown",
           },
         });
         logInteraction(this.session.id, "user_message", {
@@ -3575,6 +3580,62 @@ export class Agent {
                     });
                   }
                 } catch { /* fail-open */ }
+                yield { type: "tool_result", toolCall: tc, toolResult: tr };
+                break;
+              }
+
+              case "tool-error": {
+                // AI SDK emits this when tool execution throws/aborts before
+                // producing a tool-result. Without this branch, the tool_call
+                // log row has no matching tool_result and the EE judge never
+                // sees the failure → silent ~1.6% pairing leak in prod DB.
+                const errPart = part as {
+                  type: "tool-error";
+                  toolCallId: string;
+                  toolName: string;
+                  input?: unknown;
+                  error: unknown;
+                };
+                const tc: ToolCall = {
+                  id: errPart.toolCallId,
+                  type: "function",
+                  function: { name: errPart.toolName, arguments: JSON.stringify(errPart.input ?? {}) },
+                };
+                const errMsg = errPart.error instanceof Error
+                  ? errPart.error.message
+                  : (typeof errPart.error === "string" ? errPart.error : JSON.stringify(errPart.error));
+                const tr = { success: false, output: `[tool-error] ${errMsg}` };
+
+                // Settle pending-call ledger so we don't leak stale .tmp files.
+                if (this.pendingCalls) {
+                  const pending = activeToolCalls.find((t) => t.id === errPart.toolCallId);
+                  const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
+                  if (callId) void this.pendingCalls.end(callId, "settled").catch(() => {});
+                }
+
+                // Fire PostToolUseFailure so EE judge can record IGNORED outcome.
+                {
+                  const failInput: PostToolUseFailureHookInput = {
+                    hook_event_name: "PostToolUseFailure",
+                    tool_name: errPart.toolName,
+                    tool_input: (errPart.input as Record<string, unknown>) ?? {},
+                    error: errMsg,
+                    session_id: this.session?.id,
+                    cwd: this.bash.getCwd(),
+                  };
+                  await this.fireHook(failInput, signal).catch(() => {});
+                }
+
+                try {
+                  if (this.session) {
+                    logInteraction(this.session.id, "tool_result", {
+                      eventSubtype: errPart.toolName,
+                      data: { success: false, error: errMsg.slice(0, 500), reason: "tool-error" },
+                    });
+                  }
+                } catch { /* fail-open */ }
+
+                notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
                 break;
               }

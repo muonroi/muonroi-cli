@@ -29,9 +29,15 @@ const PIL_SCORE_FLOOR = (() => {
   return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.55;
 })();
 
+// Server-side `/api/search` whitelist (experience-engine/server.js):
+//   experience-behavioral  — extracted behavioral patterns (seeded by evolve/extract)
+//   experience-principles  — abstracted principles (seeded by evolution-abstraction)
+// experience-routes / experience-selfqa are intentionally NOT exposed.
+const PIL_SEARCH_COLLECTIONS = ["experience-behavioral", "experience-principles"];
+
 async function queryEeBridge(raw: string): Promise<{ points: EEPoint[]; error?: string; filtered?: number }> {
   try {
-    const points = await searchByText(raw, ["experience-behavioral"], 5, AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS));
+    const points = await searchByText(raw, PIL_SEARCH_COLLECTIONS, 5, AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS));
     const kept = points.filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR);
     return { points: kept, filtered: points.length - kept.length };
   } catch (err) {
@@ -43,15 +49,20 @@ function formatExperienceHints(points: EEPoint[]): string {
   if (points.length === 0) return "";
   const lines = points.map((p) => {
     const payload = p.payload ?? {};
-    const text =
-      (payload["text"] as string) ||
-      (() => {
-        try {
-          return (JSON.parse((payload["json"] as string) || "{}") as { solution?: string }).solution || "";
-        } catch {
-          return "";
-        }
-      })();
+    let text = (payload["text"] as string) ?? "";
+    if (!text) {
+      try {
+        const parsed = JSON.parse((payload["json"] as string) || "{}") as {
+          solution?: string;
+          principle?: string;
+          judgment?: string;
+        };
+        // Prefer the most directly actionable field: solution > principle > judgment.
+        text = parsed.solution || parsed.principle || parsed.judgment || "";
+      } catch {
+        text = "";
+      }
+    }
     return `- ${text} [id:${p.id}]`;
   });
   return `[experience: Relevant patterns from past work]\n${lines.join("\n")}`;

@@ -378,4 +378,6 @@ export interface EEClient {
   routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null>;
   search(query: string, opts?: EESearchOptions | number): Promise<EESearchResponse | null>;
   user(): Promise<EEUserResponse | null>;
+  // PIL brain proxy — used by thin clients to reach the VPS LLM router.
+  brainProxy(prompt: string, timeoutMs?: number): Promise<string | null>;
 }

@@ -176,8 +176,14 @@ export async function executeEventHooks(
         const sid = (input as PreToolUseHookInput).session_id;
         if (sid) {
           const matches = r.matches ?? [];
+          // r.decision can be empty when the server short-circuits (budget cap,
+          // read-only fast-path, missing embedding). Use a stable fallback so
+          // analytics queries can group these without losing rows.
+          const subtype = (typeof r.decision === "string" && r.decision.trim().length > 0)
+            ? r.decision
+            : "no-decision";
           logInteraction(sid, "ee_intercept", {
-            eventSubtype: r.decision,
+            eventSubtype: subtype,
             data: {
               phase: "pre_tool",
               role: "guardian",

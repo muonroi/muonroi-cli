@@ -22,6 +22,34 @@ export type InteractionEventType =
   | "ee_judge"
   | "ee_injection";
 
+// Retention: keep ~14 days of detail logs. Override via env if a workspace
+// needs longer history (e.g. forensic post-mortems).
+const RETENTION_DAYS = (() => {
+  const raw = Number(process.env.MUONROI_INTERACTION_LOG_RETENTION_DAYS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 14;
+})();
+// Probabilistic prune: ~1 in 200 inserts triggers a delete sweep. With ~3-5
+// log writes per turn this lands roughly every 40-70 user turns — frequent
+// enough to keep the table bounded, cheap enough not to hurt hot path.
+const PRUNE_PROBABILITY = 1 / 200;
+let _pruneInflight = false;
+
+function maybePruneOld(): void {
+  if (_pruneInflight) return;
+  if (Math.random() >= PRUNE_PROBABILITY) return;
+  _pruneInflight = true;
+  try {
+    const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000).toISOString();
+    getDatabase()
+      .prepare(`DELETE FROM interaction_logs WHERE created_at < ?`)
+      .run(cutoff);
+  } catch {
+    // Fail-open
+  } finally {
+    _pruneInflight = false;
+  }
+}
+
 /**
  * Log a single interaction event to the database.
  * Synchronous SQLite insert — no await needed. Wrapped in try-catch to be fail-open.
@@ -55,6 +83,7 @@ export function logInteraction(
       metadataJson,
       new Date().toISOString(),
     );
+    maybePruneOld();
   } catch {
     // Fail-open: logging must never break the main flow
   }

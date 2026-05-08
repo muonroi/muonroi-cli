@@ -7,7 +7,7 @@
 
 import { z } from "zod";
 
-export const TaskTypeSchema = z.enum(["refactor", "debug", "plan", "analyze", "documentation", "generate"]);
+export const TaskTypeSchema = z.enum(["refactor", "debug", "plan", "analyze", "documentation", "generate", "general"]);
 
 export const OutputStyleSchema = z.enum(["concise", "detailed", "balanced"]);
 
@@ -58,4 +58,5 @@ export const PipelineContextSchema = z.object({
       }),
     )
     .optional(),
+  fallbackReason: z.string().nullable().optional(),
 });

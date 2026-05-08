@@ -17,12 +17,16 @@ const PATTERNS: Array<{
   { re: /\bgit\s+(status|log|diff|add|commit|push|pull|branch|checkout)\b/i, intent: "git", confidence: 0.85, tierHint: "fast" },
   { re: /\brefactor\b/i, intent: "refactor", confidence: 0.75, tierHint: "balanced" },
   { re: /\b(architect|design|plan|strategy)\b/i, intent: "design", confidence: 0.7, tierHint: "premium" },
-  // Vietnamese patterns — higher tiers first to avoid premature fast-match
+  // Vietnamese patterns — higher tiers first to avoid premature fast-match.
+  // Debug-specific patterns sit ABOVE the broad "sửa/fix" edit pattern so
+  // bug-fix prompts ("sửa lỗi …", "fix bug …") don't get miscategorised as
+  // generic edits (which downstream maps to taskType=generate).
+  { re: /(sửa lỗi|sua loi|báo lỗi|bao loi|fix bug|fix the bug|debug|traceback|stack trace|exception|không chạy|khong chay)/i, intent: "debug", confidence: 0.75, tierHint: "balanced" },
   { re: /(thiết kế|kiến trúc|\barchitect\b|\bdesign\b|xây dựng hệ thống|chiến lược)/i, intent: "design", confidence: 0.7, tierHint: "premium" },
   { re: /(tái cấu trúc|refactor|cấu trúc lại|tổ chức lại)/i, intent: "refactor", confidence: 0.75, tierHint: "balanced" },
   { re: /(thêm tính năng|thêm chức năng|bổ sung|implement)/i, intent: "add-feature", confidence: 0.75, tierHint: "balanced" },
   { re: /(tạo|tạo mới|sinh|generate)\s+.*(file|component|module|class|hàm|function)/i, intent: "create-file", confidence: 0.85, tierHint: "fast" },
-  { re: /(sửa|fix|chỉnh|update|cập nhật|patch|sửa lỗi)\s+\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
+  { re: /(sửa|fix|chỉnh|update|cập nhật|patch)\s+\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
   { re: /(chạy|run|thực thi)\s+(lệnh|command|script|test|build)/i, intent: "run-command", confidence: 0.85, tierHint: "fast" },
   { re: /(giải thích|explain|mô tả|describe)\s+/i, intent: "explain", confidence: 0.7, tierHint: "fast" },
   { re: /(tìm|tìm kiếm|search|grep)\s+/i, intent: "search", confidence: 0.8, tierHint: "fast" },
