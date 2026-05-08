@@ -11,7 +11,9 @@
 import { readFile } from "fs/promises";
 import os from "os";
 import path from "path";
-import { health as eeHealth } from "../ee/health.js";
+import { healthDetailed } from "../ee/health.js";
+import type { EEHealthResult } from "../ee/health.js";
+import { getDatabase } from "../storage/db.js";
 import { loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
@@ -104,19 +106,97 @@ async function checkOllamaHealth(): Promise<CheckResult> {
   }
 }
 
-async function checkEE(): Promise<CheckResult> {
+async function checkEEDetailed(): Promise<CheckResult> {
   try {
-    const result = await eeHealth();
-    if (result.ok) return { name: "ee", status: "pass", detail: "Experience Engine healthy" };
+    const result: EEHealthResult = await healthDetailed();
+
+    const serverOk = result.components.server.ok;
+    const gatesOk = result.components.gates?.ok ?? true; // null if local mode
+    const isHealthy = result.ok;
+
+    const parts = [
+      `mode=${result.mode}`,
+      `circuit=${result.circuit}`,
+      `server=${serverOk ? "ok" : `fail(${result.components.server.status})`}`,
+    ];
+    if (result.components.gates !== null) {
+      parts.push(`gates=${gatesOk ? "ok" : `fail(${result.components.gates!.status})`}`);
+    }
+
+    if (!isHealthy) {
+      const hint = result.mode === "thin-client"
+        ? "Hint: check VPS experience.muonroi.com is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
+        : "Hint: start EE locally or configure thin-client in ~/.experience/config.json";
+      return {
+        name: "ee.health",
+        status: "warn",
+        detail: `EE unreachable — ${parts.join(", ")}. ${hint}`,
+      };
+    }
+
     return {
-      name: "ee",
+      name: "ee.health",
+      status: "pass",
+      detail: parts.join(", "),
+    };
+  } catch (err) {
+    return {
+      name: "ee.health",
       status: "warn",
-      detail: result.status === 0
-        ? "Experience Engine not running (optional — CLI works without it)"
-        : `EE responded ${result.status} (optional)`,
+      detail: `EE health probe failed: ${(err as Error).message} — optional, CLI works without EE`,
+    };
+  }
+}
+
+// Threshold: >= 50 consecutive no_match events → brain likely needs bootstrapping
+const BRAIN_EMPTY_THRESHOLD = 50;
+
+async function checkBrainEmptiness(): Promise<CheckResult> {
+  try {
+    const db = getDatabase();
+
+    // Count ee_injection events with event_subtype='no_match' in last 30 days
+    const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString();
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as cnt FROM interaction_logs
+         WHERE event_type = 'ee_injection'
+           AND event_subtype = 'no_match'
+           AND created_at >= ?`,
+      )
+      .get(cutoff) as { cnt: number } | undefined;
+
+    const noMatchCount = row?.cnt ?? 0;
+
+    if (noMatchCount >= BRAIN_EMPTY_THRESHOLD) {
+      return {
+        name: "ee.brain",
+        status: "warn",
+        detail: [
+          `${noMatchCount} no_match injection events in 30d — brain may need bootstrapping.`,
+          `Run 'experience extract' over recent sessions to seed the brain,`,
+          `then 'experience evolve' to abstract principles.`,
+          `Or lower MUONROI_PIL_SCORE_FLOOR below 0.55 if matches exist but are filtered as noise.`,
+        ].join(" "),
+      };
+    }
+
+    if (noMatchCount > 0) {
+      return {
+        name: "ee.brain",
+        status: "pass",
+        detail: `${noMatchCount} no_match events in 30d (within normal range)`,
+      };
+    }
+
+    return {
+      name: "ee.brain",
+      status: "pass",
+      detail: "No no_match injection events in 30d",
     };
   } catch {
-    return { name: "ee", status: "warn", detail: "Experience Engine not running (optional — CLI works without it)" };
+    // fail-open: DB may not be initialized yet
+    return { name: "ee.brain", status: "pass", detail: "brain check skipped (DB unavailable)" };
   }
 }
 
@@ -165,7 +245,8 @@ export async function runDoctor(): Promise<CheckResult[]> {
     checkOS(),
     checkKeyPresence(),
     checkOllamaHealth(),
-    checkEE(),
+    checkEEDetailed(),       // replaces checkEE() — CQ-16c
+    checkBrainEmptiness(),   // NEW — CQ-16d
     checkQdrant(),
     checkRecentErrorRate(),
   ]);
