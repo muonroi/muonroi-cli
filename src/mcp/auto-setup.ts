@@ -35,6 +35,30 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     args: ["-y", "figma-developer-mcp", "--stdio"],
     env: { FIGMA_API_KEY: "" },
   },
+  {
+    id: "context7",
+    label: "Context7 (Library Docs)",
+    enabled: true,
+    transport: "http",
+    url: "https://mcp.context7.com/mcp",
+  },
+  {
+    id: "fetch",
+    label: "Fetch (URL → markdown)",
+    enabled: true,
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-fetch"],
+  },
+  {
+    id: "tavily",
+    label: "Tavily Web Search",
+    enabled: false,
+    transport: "stdio",
+    command: "npx",
+    args: ["-y", "tavily-mcp"],
+    env: { TAVILY_API_KEY: "" },
+  },
 ];
 
 const PACKAGE_MIGRATIONS: Record<string, string> = {
