@@ -139,6 +139,8 @@ muonroi-cli bug-report                          # generate diagnostic bundle
 
 The headline feature. Multiple models discuss a topic through structured debate with convergence detection.
 
+- **Council** — multi-model adversarial debate with tool grounding. See [docs/Council.md](docs/Council.md) for the full pipeline reference.
+
 ```
 /council Should we use REST or gRPC for internal microservices?
 /council 3 Monolith vs microservices for our 5-person startup
