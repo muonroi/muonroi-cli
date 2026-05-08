@@ -59,7 +59,7 @@ See milestone archive for details.
 
 **Audit reference:** `.planning/research/v1.6-council-quality-context.md` (read this first when resuming work).
 
-- [ ] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations
+- [x] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations — completed 2026-05-08
 - [ ] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
 - [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
 - [ ] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation
@@ -144,12 +144,12 @@ Plans:
   4. When the topic contains an `https?://` URL, the research role's tool trace contains at least one Playwright or Chrome-DevTools call before the research output is returned
   5. Research output always contains the three labelled sections `## Source Code Findings`, `## Internet Findings`, `## Frontend Findings (live)`, each with citations (`[file:line]`, `[url]`, or `[snapshot:uid]`); empty sections are explicitly marked `(no findings — gap noted)`
   6. Re-running the audit topic against the eBerth session reproduces all of the above in the persisted council memory record
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 Plans:
-- [ ] 14-01-PLAN.md — Type contracts: DebateState.active + RunCouncilOptions.councilStats
-- [ ] 14-02-PLAN.md — Test scaffolds: accounting.test.ts + research-tools.test.ts
-- [ ] 14-03-PLAN.md — Bug fixes: debate.ts return + index.ts stats/positions + orchestrator pass-through
-- [ ] 14-04-PLAN.md — MCP wiring + URL detection + 3-section research prompt
+- [x] 14-01-PLAN.md — Type contracts: DebateState.active + RunCouncilOptions.councilStats
+- [x] 14-02-PLAN.md — Test scaffolds: accounting.test.ts + research-tools.test.ts
+- [x] 14-03-PLAN.md — Bug fixes: debate.ts return + index.ts stats/positions + orchestrator pass-through
+- [x] 14-04-PLAN.md — MCP wiring + URL detection + 3-section research prompt
 
 ### Phase 15: Tool-grounded Debate Rounds
 **Milestone**: v1.6 Council Quality & Trust
