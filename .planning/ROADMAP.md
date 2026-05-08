@@ -227,6 +227,14 @@ Plans:
   4. `muonroi doctor` warns when MCP `tavily` or `playwright` is not enabled but the user has run ≥3 debates whose topic contained URLs or research keywords
   5. New `docs/Council.md` documents the integrated flow (PIL → EE warnings → planner → debate with tools → EE judge → synthesis) with a worked example
   6. E2E test re-runs the original audit topic and asserts the persisted council memory contains evidence from `docs/*` AND a Tavily citation AND a Playwright snapshot of `localhost:3010`
+**Plans:** 4 plans
+Plans:
+**Wave 1** (parallel)
+- [ ] 17-01-PLAN.md — parseOutcome raw log + shape fallback (CQ-20) + [Council Tool Trace] persistence in llm.ts + debate.ts (CQ-22)
+- [ ] 17-02-PLAN.md — /council inspect slash command + menu-items registration (CQ-21)
+- [ ] 17-03-PLAN.md — doctor council.mcp nudge check (CQ-23)
+**Wave 2** (depends on Wave 1)
+- [ ] 17-04-PLAN.md — docs/Council.md + README link + audit-replay.test.ts (CQ-24)
 
 ## Progress
 
@@ -244,4 +252,4 @@ Plans:
 | 14. Council Accounting & Research MCP Wiring | v1.6 | 4/4 | Complete    | 2026-05-08 |
 | 15. Tool-grounded Debate Rounds | v1.6 | 0/5 | Planned     | — |
 | 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
-| 17. Council Robustness & Observability | v1.6 | 0/0 | Planned     | — |
+| 17. Council Robustness & Observability | v1.6 | 0/4 | Planned     | — |
