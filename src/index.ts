@@ -1010,6 +1010,15 @@ mcp
     }
   });
 
+mcp
+  .command("import-bw [keys...]")
+  .description("Import MCP secrets (e.g. tavily) from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)")
+  .option("--prefix <prefix>", "Vault item name prefix (default: 'muonroi-cli/')", "muonroi-cli/")
+  .action(async (keys: string[], opts: { prefix: string }) => {
+    const { runMcpImportBw } = await import("./cli/keys.js");
+    await runMcpImportBw({ keys, itemPrefix: opts.prefix });
+  });
+
 program.parse();
 
 function formatContext(tokens: number): string {

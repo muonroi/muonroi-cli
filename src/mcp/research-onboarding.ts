@@ -79,7 +79,8 @@ export async function runResearchOnboarding(io: OnboardingIO): Promise<Onboardin
   io.log("\nWeb research is available via MCP servers:\n");
   io.log("  - context7 - version-pinned library docs (free, no key)\n");
   io.log("  - fetch - URL to markdown extraction (free, no key)\n");
-  io.log("  - tavily - LLM-tuned web search (free tier 1k/mo, needs API key)\n\n");
+  io.log("  - tavily - LLM-tuned web search (free tier 1k/mo, needs API key)\n");
+  io.log("\nTip: if you keep keys in Bitwarden, run `muonroi-cli mcp import-bw tavily` instead.\n\n");
   const yn = (await io.askYesNo("Enable Tavily web search now? [Y/n]: ")).trim().toLowerCase();
   let tavilyEnabled = false;
   if (yn !== "n" && yn !== "no") {
