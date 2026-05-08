@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.6
 milestone_name: Council Quality & Trust
-status: planning
+status: active
 stopped_at: ""
 last_updated: "2026-05-08T00:00:00.000Z"
-last_activity: "2026-05-08 — Milestone v1.6 started after audit of council session 1b4f7528ddc8"
+last_activity: "2026-05-08 — Phase 14 complete: CQ-01/02/03/04/05 all fixed, 25/25 tests pass"
 progress:
   total_phases: 4
-  completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  completed_phases: 1
+  total_plans: 4
+  completed_plans: 4
+  percent: 25
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-05-08)
 
 ## Current Position
 
-Phase: Not started (defining requirements)
+Phase: Phase 15 (Tool-grounded Debate Rounds) — next up
 Plan: —
-Status: Defining requirements
-Last activity: 2026-05-08 — Milestone v1.6 started after audit of council session 1b4f7528ddc8 exposed structural problems in council architecture
+Status: Phase 14 complete, ready to plan Phase 15
+Last activity: 2026-05-08 — Phase 14 complete: 5 council bugs fixed (CQ-01 through CQ-05), 25/25 tests pass
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [██░░░░░░░░] 25%
 
 ## Milestone Context
 
