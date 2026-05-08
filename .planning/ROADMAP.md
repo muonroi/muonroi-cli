@@ -7,7 +7,8 @@
 - v1.2 Close EE Learning Loop (Phases 08-10) - shipped
 - v1.3 Quality of Life (Phase 11) - planned
 - v1.4 Architecture Quality (Phase 12.1) - active
-- v1.5 Self-Driving Product Loop (Phase 13) - planned
+- v1.5 Self-Driving Product Loop (Phase 13) - shipped 2026-05-07
+- v1.6 Council Quality & Trust (Phases 14-17) - active
 
 ## Phases
 
@@ -51,6 +52,17 @@ See milestone archive for details.
 **Milestone Goal:** Ship `/ideal` slash command — takes free-text idea + cost cap, runs full Agile cycle (gather → research → scope → sprint × N) with deterministic 5-condition Definition-of-Done and 3 circuit breakers. Differentiator vs Aider/Cursor/Continue.
 
 - [x] **Phase 13: Product Ideal Loop** — `src/product-loop/` module + `/ideal` CLI + role registry + done-gate + circuit breakers + per-product cost scoping
+
+### v1.6 Council Quality & Trust
+
+**Milestone Goal:** Fix the council architecture so multi-agent debate produces evidence-grounded outputs. Triggered by 2026-05-08 audit of session `1b4f7528ddc8` where the council failed to read user-requested docs, never visited the requested URL, did no internet research, and produced a synthesis with zero citations.
+
+**Audit reference:** `.planning/research/v1.6-council-quality-context.md` (read this first when resuming work).
+
+- [ ] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations
+- [ ] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
+- [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
+- [ ] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation
 
 ## Phase Details
 
@@ -120,9 +132,67 @@ Plans:
 - [x] 13-05-PLAN.md — Cost-scoper + per-product JSONL ledger + commitToProduct + EE phase-tracker bridge + PhaseOutcomeKind extension
 - [x] 13-06-PLAN.md — /ideal slash + orchestrator runProductLoopV1 + sprint-runner + feedback-routing + product_status_card TUI + integration tests
 
+### Phase 14: Council Accounting & Research MCP Wiring
+**Milestone**: v1.6 Council Quality & Trust
+**Goal**: Make council outputs auditable AND make the research role actually capable of internet, URL, and source-code research as users request.
+**Depends on**: none — pure surgery on existing `src/council/*` and `src/orchestrator/*`
+**Requirements**: CQ-01, CQ-02, CQ-03, CQ-04, CQ-05
+**Success Criteria** (what must be TRUE):
+  1. `[Council Memory]` records show `stats.calls > 0` matching the actual count of LLM API calls (single shared accounting object, no second `stats` shadow)
+  2. `[Council Memory] finalPositions` contains each agent's actual end-of-debate text, not empty strings
+  3. When MCP `tavily`, `playwright`, `chrome-devtools`, and `filesystem` are enabled, they appear as tools available to the research role alongside builtin (bash/grep/read_file)
+  4. When the topic contains an `https?://` URL, the research role's tool trace contains at least one Playwright or Chrome-DevTools call before the research output is returned
+  5. Research output always contains the three labelled sections `## Source Code Findings`, `## Internet Findings`, `## Frontend Findings (live)`, each with citations (`[file:line]`, `[url]`, or `[snapshot:uid]`); empty sections are explicitly marked `(no findings — gap noted)`
+  6. Re-running the audit topic against the eBerth session reproduces all of the above in the persisted council memory record
+
+### Phase 15: Tool-grounded Debate Rounds
+**Milestone**: v1.6 Council Quality & Trust
+**Goal**: Agents actually debate by verifying each other's claims with tools — not by trading prose generated from general knowledge.
+**Depends on**: Phase 14 (research wiring + merged tool set is reused for round tools)
+**Requirements**: CQ-06, CQ-07, CQ-08, CQ-09, CQ-10
+**Success Criteria** (what must be TRUE):
+  1. Opening, response, and follow-up debate calls accept and use a merged `tools` parameter (MCP + builtin) so agents can grep/fetch/browse during rounds
+  2. Stance prompts mandate verify-then-refute; debate logs of contentious topics contain at least one `[REFUTED via <tool>:<evidence>]` citation or an explicit concession
+  3. `evaluateDebate` reports `evidenceDensity` and `disagreementResolved`; when `evidenceDensity < 0.3` after ≥2 rounds, the leader injects a forced research query
+  4. Each round's exchanges are persisted as a `[Council Round N]` system message in the session DB, including each speaker's response and citations
+  5. Debate-planner uses structured JSON output (provider schema mode where supported) and retries once with explicit schema feedback before falling back to generic stances; fallback rate drops below 10% on representative topics
+
+### Phase 16: PIL + EE Integration into Council
+**Milestone**: v1.6 Council Quality & Trust
+**Goal**: Bring the project's existing intelligence (PIL pipeline, EE brain) into the council so debates are calibrated by past experience and outcomes feed learning back to the brain.
+**Depends on**: Phase 15 (round tool tracing is the integration point for `wrapToolWithEeCheck`)
+**Requirements**: CQ-11, CQ-12, CQ-13, CQ-14, CQ-15, CQ-16, CQ-17, CQ-18, CQ-19
+**Success Criteria** (what must be TRUE):
+  1. `runCouncil` invokes `runPipeline(topic)` at run start; `taskType`, `complexityTier`, `domain`, and `outputStyle` propagate to debate-planner and synthesis prompts
+  2. New `ee/council-bridge.ts:queryExperience(topic, domain)` returns relevant EE warnings/principles and degrades gracefully when EE is offline (no crash, no hang, ≤500ms cumulative latency budget on the critical path)
+  3. When `queryExperience` returns ≥1 high-confidence warning, an "Experience Auditor" stance is auto-added with a lens dynamically built from the top warning
+  4. Tool calls inside debate rounds emit PreToolUse warnings into the debate output stream via `wrapToolWithEeCheck` before executing
+  5. After synthesis, `ee/judge.ts:judgeOutcome` returns confidence ∈ [0,1]; confidence `< 0.5` triggers either another debate round (if rounds remaining) or a `[NEEDS HUMAN REVIEW]` flag on the synthesis
+  6. `ee/phase-outcome.ts:recordCouncilOutcome` posts the synthesis + verdict + confidence to the EE brain on every run
+  7. Synthesis text honours `ctx.outputStyle` (concise/balanced/detailed) instead of always defaulting to one style
+  8. Feature flag `council.experienceMode = off | advisory | enforcing` is settable via `/gsd-settings`, defaults to `advisory`, and `off` exits the EE integration cleanly with no latency cost
+
+**Open questions for plan-phase:**
+- EE thin-mode latency budget — measure first, may need cache or async pre-fetch
+- `ee/judge.ts` schema fit — may need a new judging dimension for council outcomes vs phase outcomes
+- Whether `Experience Auditor` should count toward the participants quota or be additive
+
+### Phase 17: Council Robustness & Observability
+**Milestone**: v1.6 Council Quality & Trust
+**Goal**: Make the council self-auditable, give the user a way to inspect any past debate, and let `doctor` catch missing MCP configuration before it bites.
+**Depends on**: Phase 16
+**Requirements**: CQ-20, CQ-21, CQ-22, CQ-23, CQ-24
+**Success Criteria** (what must be TRUE):
+  1. `parseOutcome` logs raw synthesis text on parse failure and tries a shape-based fallback parser using `debatePlan.outputShape.sections` before returning null
+  2. `/council inspect <session-id>` slash command renders a past `[Council Memory]` record with citations, per-agent tool calls, evidence density, and the leader's per-round evaluation; works on any session in `~/.muonroi-cli/muonroi.db`
+  3. Every tool call inside research and rounds is persisted as a `[Council Tool Trace]` system message (truncated to 2KB per arg/result) so a debate can be forensically replayed
+  4. `muonroi doctor` warns when MCP `tavily` or `playwright` is not enabled but the user has run ≥3 debates whose topic contained URLs or research keywords
+  5. New `docs/Council.md` documents the integrated flow (PIL → EE warnings → planner → debate with tools → EE judge → synthesis) with a worked example
+  6. E2E test re-runs the original audit topic and asserts the persisted council memory contains evidence from `docs/*` AND a Tavily citation AND a Playwright snapshot of `localhost:3010`
+
 ## Progress
 
-**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1 -> Phase 13
+**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1 -> Phase 13 -> Phase 14 -> Phase 15 -> Phase 16 -> Phase 17
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -133,3 +203,7 @@ Plans:
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
 | 13. Product Ideal Loop | v1.5 | 6/6 | Complete    | 2026-05-07 |
+| 14. Council Accounting & Research MCP Wiring | v1.6 | 0/0 | Planned     | — |
+| 15. Tool-grounded Debate Rounds | v1.6 | 0/0 | Planned     | — |
+| 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
+| 17. Council Robustness & Observability | v1.6 | 0/0 | Planned     | — |
