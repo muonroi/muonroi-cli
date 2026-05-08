@@ -155,11 +155,13 @@ export async function* runDebate(
       () => Promise.all(
         pairs.map(async ({ a, b, key }) => {
         const log = exchangeLogs.get(key)!;
-        const chunks: Array<{ label: string; text: string }> = [];
+        const chunks: Array<{ label: string; text: string; toolCalls?: Array<{ toolName: string; result?: unknown }> }> = [];
 
         try {
           let aResponse: string;
           let bResponse: string;
+          let aToolCalls: Array<{ toolName: string; result?: unknown }> = [];
+          let bToolCalls: Array<{ toolName: string; result?: unknown }> = [];
 
           const aLabel = a.stance?.name ?? a.role;
           const bLabel = b.stance?.name ?? b.role;
@@ -170,9 +172,11 @@ export async function* runDebate(
               speakerPosition: a.position, partnerPosition: b.position,
               spec,
             });
-            aResponse = await llm.generate(a.model, aPrompt.system, aPrompt.prompt);
+            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal);
+            aResponse = aResult.text;
+            aToolCalls = aResult.toolCalls;
             log.push(`[${aLabel}]: ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse });
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls });
 
             const bPrompt = buildResponsePrompt({
               speakerRole: b.role, partnerRole: a.role,
@@ -180,9 +184,11 @@ export async function* runDebate(
               speakerPosition: b.position, partnerPosition: aResponse,
               spec,
             });
-            bResponse = await llm.generate(b.model, bPrompt.system, bPrompt.prompt);
+            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal);
+            bResponse = bResult.text;
+            bToolCalls = bResult.toolCalls;
             log.push(`[${bLabel}]: ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse });
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls });
           } else {
             const historyText = log.join("\n\n");
             const aPrompt = buildFollowupPrompt({
@@ -191,9 +197,11 @@ export async function* runDebate(
               partnerPosition: b.position, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
-            aResponse = await llm.generate(a.model, aPrompt.system, aPrompt.prompt, 1536);
+            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal);
+            aResponse = aResult.text;
+            aToolCalls = aResult.toolCalls;
             log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse });
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls });
 
             const bPrompt = buildFollowupPrompt({
               speakerRole: b.role, partnerRole: a.role,
@@ -201,9 +209,11 @@ export async function* runDebate(
               partnerPosition: aResponse, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
-            bResponse = await llm.generate(b.model, bPrompt.system, bPrompt.prompt, 1536);
+            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal);
+            bResponse = bResult.text;
+            bToolCalls = bResult.toolCalls;
             log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse });
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls });
           }
 
           b.position = bResponse;
@@ -242,6 +252,20 @@ export async function* runDebate(
       startedAt: p2Start,
       detail: `${pairs.length} pair${pairs.length === 1 ? "" : "s"} exchanged`,
     });
+
+    // ── Per-round persistence: emit [Council Round N] system message ──────────
+    const roundSummaryText = pairResults
+      .flatMap((pr) => pr.chunks)
+      .map((c) => {
+        const toolSuffix = c.toolCalls?.length
+          ? ` [tools: ${c.toolCalls.map((t) => t.toolName).join(", ")}]`
+          : "";
+        return `${c.label}: ${c.text}${toolSuffix}`;
+      })
+      .join("\n\n");
+    const roundPersistText = `[Council Round ${round}]\n${roundSummaryText}`;
+    // Emit as council_status so orchestrator layer can persist [Council Round N] to conversation DB
+    yield { type: "council_status" as const, content: roundPersistText };
 
     // ── Leader evaluation (replaces self-evaluated convergence) ──────────────
     const evalPhaseId = `phase:evaluation-${round}`;
@@ -411,18 +435,43 @@ async function* evaluateDebate(
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<LeaderEvaluation>;
+
+      const citationCount = countCitations(exchangeText);
+      const claimCount = estimateClaims(exchangeText);
+      const evidenceDensity = citationCount / claimCount;
+      const disagreementResolved = citationCount;
+
+      let needsResearch = parsed.needsResearch ?? false;
+      let researchQuery = parsed.researchQuery;
+      if (!needsResearch && round >= 2 && evidenceDensity < 0.3) {
+        needsResearch = true;
+        researchQuery = `Verify claims from debate round ${round} on: ${spec.problemStatement.slice(0, 80)}`;
+      }
+
       return {
         allCriteriaMet: parsed.allCriteriaMet ?? false,
         criteriaStatus: parsed.criteriaStatus ?? [],
         unresolvedPoints: parsed.unresolvedPoints ?? [],
-        needsResearch: parsed.needsResearch ?? false,
-        researchQuery: parsed.researchQuery,
+        needsResearch,
+        researchQuery,
         shouldContinue: parsed.shouldContinue ?? true,
         reason: parsed.reason ?? "",
+        evidenceDensity,
+        disagreementResolved,
       };
     }
   } catch {
     // Continue debate if evaluation fails
   }
   return null;
+}
+
+function countCitations(text: string): number {
+  const matches = text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g);
+  return matches?.length ?? 0;
+}
+
+function estimateClaims(text: string): number {
+  const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 10);
+  return Math.max(sentences.length, 1);
 }
