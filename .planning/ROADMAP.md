@@ -201,6 +201,20 @@ Cross-cutting constraints: `llm.debate()` return shape `{ text, toolCalls }` mus
 - "Experience Auditor" participant accounting — additive when `experienceMode=advisory` (3rd voice), replaces a generic role when `experienceMode=enforcing`?
 - `setRenderSink` wiring point — most natural is in `src/index.ts` boot, sink pushes a synthetic `StreamChunk` into the active orchestrator's stream. Need to confirm there's exactly one orchestrator at a time before this is safe (multi-session concurrency = NO per current architecture, so safe).
 
+**Plans:** 8 plans
+Plans:
+**Wave 1** (parallel — foundational types + EE pre-fetch + render sink)
+- [ ] 16-01-PLAN.md — StreamChunk types extension + council-bridge.ts + settings experienceMode flag
+- [ ] 16-02-PLAN.md — setRenderSink boot wiring + render.ts StreamChunk extension
+- [ ] 16-03-PLAN.md — PIL Layer 3 experience_injected chunk emission
+**Wave 2** (depends on Wave 1)
+- [ ] 16-04-PLAN.md — runCouncil: runPipeline invocation + queryExperience parallel pre-fetch + outputStyle propagation
+- [ ] 16-05-PLAN.md — debate-planner experience seeding + Experience Auditor auto-add + synthesis outputStyle
+- [ ] 16-06-PLAN.md — judgeCouncilOutcome + recordCouncilOutcome + wrapToolsWithEeCheck
+**Wave 3** (depends on Wave 2)
+- [ ] 16-07-PLAN.md — Doctor EE thin-client health probe + brain-emptiness diagnostic
+- [ ] 16-08-PLAN.md — Tests: render-sink-wiring, doctor-ee-health, layer3-injected-chunk
+
 ### Phase 17: Council Robustness & Observability
 **Milestone**: v1.6 Council Quality & Trust
 **Goal**: Make the council self-auditable, give the user a way to inspect any past debate, and let `doctor` catch missing MCP configuration before it bites.
