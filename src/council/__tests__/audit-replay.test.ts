@@ -71,10 +71,21 @@ vi.mock("../context.js", () => ({
   buildProjectSnapshot: vi.fn().mockResolvedValue(""),
 }));
 
-vi.mock("../../utils/settings.js", () => ({
-  isCouncilMultiProviderPreferred: vi.fn().mockReturnValue(false),
-  getCouncilExperienceMode: vi.fn().mockReturnValue("advisory"),
-}));
+vi.mock("../../utils/settings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/settings.js")>();
+  return {
+    ...actual,
+    isCouncilMultiProviderPreferred: vi.fn().mockReturnValue(false),
+    getCouncilExperienceMode: vi.fn().mockReturnValue("advisory"),
+    loadMcpServers: vi.fn().mockReturnValue([]),
+    loadUserSettings: vi.fn().mockReturnValue({
+      apiKey: undefined,
+      defaultModel: "mock-model",
+      providers: {},
+      roleModels: {},
+    }),
+  };
+});
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
