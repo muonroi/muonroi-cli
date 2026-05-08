@@ -149,15 +149,16 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
 
     process.stderr.write(`\nGet a key here: ${consoleUrlFor(provider)}\n`);
     const raw = await ask(`Paste your ${provider} API key: `);
-    rl.close();
 
     const trimmed = raw.trim();
     if (!trimmed) {
       process.stderr.write("No key provided. Aborted.\n");
+      rl.close();
       return null;
     }
     if (trimmed.length < 20) {
       process.stderr.write("Key looks too short (< 20 chars). Aborted.\n");
+      rl.close();
       return null;
     }
 
@@ -165,6 +166,17 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
       const ok = await setKeyForProvider(provider, trimmed);
       if (ok) {
         process.stderr.write(`\nStored ${provider} key in OS keychain.\n`);
+        // Web-research onboarding (Tavily + context7 + fetch).
+        try {
+          const { runResearchOnboarding } = await import("./mcp/research-onboarding.js");
+          await runResearchOnboarding({
+            askYesNo: ask,
+            askText: ask,
+            log: (m) => process.stderr.write(m),
+          });
+        } catch (err) {
+          process.stderr.write(`\nWarning: research onboarding failed: ${(err as Error).message}\n`);
+        }
         if (currentModel) {
           const currentProvider = detectProviderForModel(currentModel);
           if (currentProvider !== provider) {
@@ -184,6 +196,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
       process.stderr.write(`\nWarning: failed to store key in keychain: ${(err as Error).message}\n`);
     }
 
+    rl.close();
     return trimmed;
   } catch {
     return null;
