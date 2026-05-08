@@ -21,6 +21,8 @@ export async function* runPlanning(
   respondToPreflight: PreflightResponder,
   llm: CouncilLLM,
   debatePlan?: DebatePlan,
+  // CQ-18: PIL outputStyle propagated from runCouncil — consumed in plan 16-06 (synthesis prompt)
+  _outputStyle?: string | null,
 ): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string }, unknown> {
   const p3Start = Date.now();
   yield phaseStart({
