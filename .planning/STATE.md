@@ -1,36 +1,40 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.2
-milestone_name: Close EE Learning Loop — SHIPPED
-status: verifying
-stopped_at: context exhaustion at 100% (2026-05-07)
-last_updated: "2026-05-07T01:22:05.777Z"
-last_activity: "2026-05-02 - Completed quick task 260502-dvm: First-run wizard + doctor fix"
+milestone: v1.6
+milestone_name: Council Quality & Trust
+status: planning
+stopped_at: ""
+last_updated: "2026-05-08T00:00:00.000Z"
+last_activity: "2026-05-08 — Milestone v1.6 started after audit of council session 1b4f7528ddc8"
 progress:
-  total_phases: 16
-  completed_phases: 11
-  total_plans: 45
-  completed_plans: 43
-  percent: 96
+  total_phases: 4
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-05-01)
+See: .planning/PROJECT.md (updated 2026-05-08)
 
 **Core value:** Sell the orchestration intelligence (memory + router + cap + compaction) that stretches BYOK tokens 2-3x further than any subscription-locked tool.
-**Current focus:** Phase 10 — prompt-stale-reconciliation
+**Current focus:** v1.6 Council Quality & Trust — Phase 14 (Council Accounting & Research MCP Wiring)
 
 ## Current Position
 
-Phase: 10
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-05-02 - Completed quick task 260502-dvm: First-run wizard + doctor fix
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-05-08 — Milestone v1.6 started after audit of council session 1b4f7528ddc8 exposed structural problems in council architecture
 
 Progress: [░░░░░░░░░░] 0%
+
+## Milestone Context
+
+Audit reference: `.planning/research/v1.6-council-quality-context.md` — full root-cause analysis. Read this first when resuming work on any v1.6 phase.
 
 ## Performance Metrics
 

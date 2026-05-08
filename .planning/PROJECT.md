@@ -99,14 +99,17 @@ Definition of done for v1 beta:
 - Session resume from `.muonroi-flow/` artifacts succeeds without chat memory — verified by killing CLI mid-task and restarting
 - 4 LLM providers wired and proven via integration test suite
 
-## Current Milestone: v1.2 Close EE Learning Loop
+## Current Milestone: v1.6 Council Quality & Trust
 
-**Goal:** Fix 3 critical Experience Engine integration gaps that prevent the CLI from closing the learning feedback loop — session extraction, offline resilience, and stale suggestion cleanup.
+**Goal:** Fix the council architecture so multi-agent debate produces evidence-grounded outputs — not 2 LLM monologues based on general knowledge. Triggered by 2026-05-08 audit of session `1b4f7528ddc8` (project `eBerth`) where the council failed to read user-requested docs, never visited the requested URL, did no internet research, and produced a synthesis with zero citations.
 
 **Target features:**
-- Session End Extraction — wire /api/extract on session end so EE brain learns from CLI sessions
-- ~~Offline Queue~~ — ✓ Validated in Phase 09 (2026-05-02): file-based FIFO queue in ~/.muonroi-cli/ee-offline-queue/, 100-entry cap, auto-replay on circuit recovery
-- Prompt-stale Reconciliation — call /api/prompt-stale to clean up stale PIL Layer 3 suggestions
+- Council Accounting & Research MCP Wiring (Phase 14) — fix `stats.calls`/`finalPositions` bugs and wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()` so research role can verify against source code + internet + live frontend
+- Tool-grounded Debate Rounds (Phase 15) — opening/response/followup calls support tools so agents can verify each other's claims with code/web/browser; refutations tagged `[REFUTED via tool:evidence]`
+- PIL + EE Integration into Council (Phase 16) — `runPipeline` runs at council start; EE brain queries past experiences; auto-add "Experience Auditor" stance when high-confidence warnings exist; `ee/judge` scores synthesis confidence; outcomes feed brain learning
+- Council Robustness & Observability (Phase 17) — `parseOutcome` resilience, `/council inspect`, tool trace persistence, doctor MCP warnings, `docs/Council.md`
+
+**Audit reference:** `.planning/research/v1.6-council-quality-context.md` — full root-cause analysis of 5 structural problems in current council, mapping each to a phase.
 
 ## Evolution
 
@@ -126,4 +129,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-05-02 — Phase 10 (Prompt-stale Reconciliation) complete: v1.2 milestone "Close EE Learning Loop" fully delivered*
+*Last updated: 2026-05-08 — Milestone v1.6 (Council Quality & Trust) defined after 2026-05-08 audit of council session `1b4f7528ddc8` exposed 5 structural problems in council architecture.*
