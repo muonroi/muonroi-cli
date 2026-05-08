@@ -13,6 +13,7 @@ import {
 import { runLoopDriver, type DriverContext, type DriverResult } from "./loop-driver.js";
 import { runSprint } from "./sprint-runner.js";
 import { previewRunCost, formatCostPreview } from "./cost-preview.js";
+import { polishDelivery } from "./ship-polish.js";
 import type { ProductSpec, IterationState, RoleSlot } from "./types.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
@@ -240,6 +241,27 @@ async function* drainSprints(args: {
           doneAt: new Date(),
           verdict: { pass: true, score: iter.scoreAfter, failedCondition: undefined as any, reason: "all_conditions_met" },
         });
+      }
+      // Ship-time delivery polish: scaffold README, fill package.json
+      // metadata, write delivery-notes. Idempotent + non-destructive.
+      if (ctx.cwd) {
+        try {
+          const polish = await polishDelivery({
+            cwd: ctx.cwd,
+            runDir: path.join(ctx.flowDir, "runs", ctx.runId),
+            productSpec,
+            runId: ctx.runId,
+          });
+          if (polish.notes.length > 0) {
+            yield {
+              type: "content",
+              content: `\n**Delivery polish:**\n${polish.notes.map((n) => `- ${n}`).join("\n")}\n`,
+            } as StreamChunk;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          yield { type: "content", content: `\n_Delivery polish skipped: ${msg}_\n` } as StreamChunk;
+        }
       }
       return {
         runId: ctx.runId,
