@@ -29,11 +29,39 @@ function bar(pct: number, width = 16): string {
   return `${"█".repeat(filled)}${"░".repeat(Math.max(0, width - filled))}`;
 }
 
+const SPARK_BLOCKS = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/**
+ * ASCII sparkline of values normalised to [0..1]. Length matches input.
+ * Empty input → empty string. Single value → mid-block.
+ */
+export function sparkline(values: number[]): string {
+  if (values.length === 0) return "";
+  return values
+    .map((v) => {
+      const clamped = Math.max(0, Math.min(1, v));
+      const idx = Math.min(SPARK_BLOCKS.length - 1, Math.floor(clamped * SPARK_BLOCKS.length));
+      return SPARK_BLOCKS[idx];
+    })
+    .join("");
+}
+
 export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): React.ReactNode {
   const sprintPct = clampPct(data.sprintN, data.totalSprints);
   const costPct = clampPct(data.costSpent, data.costCap);
   const totalCriteria = data.criteriaMet + data.criteriaPartial + data.criteriaUnmet;
   const costColor = costPct > 80 ? t.diffRemovedFg : t.accent;
+
+  // Sparkline = met / total ratio per sprint. Higher is better.
+  const criteriaSpark = data.criteriaHistory?.length
+    ? sparkline(
+        data.criteriaHistory.map((h) => (h.total > 0 ? h.met / h.total : 0)),
+      )
+    : "";
+  // Cost burn = cumulative / cap ratio. Caller supplies cumulative.
+  const costSpark = data.costHistory?.length
+    ? sparkline(data.costHistory.map((h) => (data.costCap > 0 ? h.cumulativeUsd / data.costCap : 0)))
+    : "";
 
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
@@ -52,6 +80,13 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
         <text fg={costColor}>{bar(costPct)}</text>
         <text fg={t.textDim}>{` ${costPct.toFixed(0)}%`}</text>
       </box>
+      {costSpark && (
+        <box>
+          <text fg={t.textMuted}>{"Burn:     "}</text>
+          <text fg={costColor}>{costSpark}</text>
+          <text fg={t.textDim}>{` (per-sprint)`}</text>
+        </box>
+      )}
       <box>
         <text fg={t.textMuted}>{"Criteria: "}</text>
         <text fg={t.planOptionCheck}>{`✓ ${data.criteriaMet}`}</text>
@@ -61,6 +96,13 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
         <text fg={t.diffRemovedFg}>{`✗ ${data.criteriaUnmet}`}</text>
         <text fg={t.textDim}>{`  (of ${totalCriteria})`}</text>
       </box>
+      {criteriaSpark && (
+        <box>
+          <text fg={t.textMuted}>{"Trend:    "}</text>
+          <text fg={t.planOptionCheck}>{criteriaSpark}</text>
+          <text fg={t.textDim}>{` met-ratio per sprint`}</text>
+        </box>
+      )}
     </box>
   );
 }

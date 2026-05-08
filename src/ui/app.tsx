@@ -28,6 +28,8 @@ import type {
 } from "../types/index";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
+import { ProductStatusCard } from "./cards/product-status-card.js";
+import type { ProductStatusCardData } from "../product-loop/types.js";
 import {
   CouncilQuestionCard,
   initialCardState,
@@ -877,6 +879,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [councilStatuses, setCouncilStatuses] = useState<CouncilStatusData[]>([]);
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
+  const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -2786,17 +2789,25 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setCouncilPhases((prev) => upsertPhase(prev, chunk.councilPhase!));
                 }
                 if (chunk.type === "product_status_card" && chunk.productStatusCard) {
-                  // Snapshot rendering is handled by <ProductStatusCard /> consumers.
-                  // Keep last-known data on the message log for now.
                   const d = chunk.productStatusCard;
-                  setMessages((prev) => [
-                    ...prev,
-                    buildAssistantEntry(
-                      `[product] sprint ${d.sprintN}/${d.totalSprints} · ` +
-                        `cost $${d.costSpent.toFixed(2)}/$${d.costCap.toFixed(2)} · ` +
-                        `criteria ✓${d.criteriaMet} ◐${d.criteriaPartial} ✗${d.criteriaUnmet} · ${d.currentStage}`,
-                    ),
-                  ]);
+                  setProductStatus((prev) => {
+                    // Accumulate per-sprint history client-side so loop-driver
+                    // doesn't have to ship the full history every chunk.
+                    const total = d.criteriaMet + d.criteriaPartial + d.criteriaUnmet;
+                    const prevHistory = prev?.criteriaHistory ?? [];
+                    const lastHist = prevHistory[prevHistory.length - 1];
+                    const criteriaHistory =
+                      lastHist && lastHist.sprintN === d.sprintN
+                        ? [...prevHistory.slice(0, -1), { sprintN: d.sprintN, met: d.criteriaMet, total }]
+                        : [...prevHistory, { sprintN: d.sprintN, met: d.criteriaMet, total }];
+                    const prevCost = prev?.costHistory ?? [];
+                    const lastCost = prevCost[prevCost.length - 1];
+                    const costHistory =
+                      lastCost && lastCost.sprintN === d.sprintN
+                        ? [...prevCost.slice(0, -1), { sprintN: d.sprintN, cumulativeUsd: d.costSpent }]
+                        : [...prevCost, { sprintN: d.sprintN, cumulativeUsd: d.costSpent }];
+                    return { ...d, criteriaHistory, costHistory };
+                  });
                 }
                 if (chunk.type === "done") break;
               }
@@ -2806,6 +2817,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               setCouncilPhases([]);
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
+              setProductStatus(null);
             }
             return;
           }
@@ -4412,6 +4424,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               {councilPhases.length > 0 && (
                 <CouncilPhaseTimeline phases={councilPhases} theme={t} />
               )}
+              {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
               {councilStatuses.length > 0 && (
                 <CouncilStatusList statuses={councilStatuses} theme={t} />
               )}
