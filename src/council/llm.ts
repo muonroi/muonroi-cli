@@ -5,13 +5,36 @@ import { createProviderFactory, detectProviderForModel, resolveModelRuntime } fr
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { BashTool } from "../tools/bash.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
-import type { CouncilLLM, CouncilStats } from "./types.js";
+import type { CouncilLLM, CouncilStats, ToolTraceEmitter } from "./types.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
+
+// ── Tool trace helpers (CQ-22) ────────────────────────────────────────────────
+
+const TRACE_ARG_LIMIT = 2048;
+
+function truncate(value: unknown): string {
+  const s = typeof value === "string" ? value : (JSON.stringify(value) ?? "");
+  return s.length > TRACE_ARG_LIMIT ? s.slice(0, TRACE_ARG_LIMIT) + "…[truncated]" : s;
+}
+
+function emitToolTrace(
+  toolName: string,
+  args: unknown,
+  result: unknown,
+  persistTrace?: ToolTraceEmitter,
+): void {
+  if (!persistTrace) return;
+  const traceText =
+    `[Council Tool Trace] tool=${toolName} ` +
+    `args=${truncate(args)} ` +
+    `result=${truncate(result)}`;
+  persistTrace(traceText);
+}
 
 /**
  * Wrap each tool in the set with EE PreToolUse intercept check.
@@ -71,7 +94,7 @@ export function createCouncilLLM(
       return text;
     },
 
-    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
+    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -103,9 +126,13 @@ export function createCouncilLLM(
           ...(signal ? { abortSignal: signal } : {}),
         });
         stats.calls++;
+        const toolCalls = (result.toolCalls ?? []) as Array<{ toolName: string; args?: unknown; input?: unknown; result?: unknown }>;
+        for (const tc of toolCalls) {
+          emitToolTrace(tc.toolName, tc.args ?? tc.input ?? {}, tc.result, persistTrace);
+        }
         return {
           text: result.text,
-          toolCalls: (result.toolCalls ?? []) as Array<{ toolName: string; result?: unknown }>,
+          toolCalls: toolCalls as Array<{ toolName: string; result?: unknown }>,
         };
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -115,7 +142,7 @@ export function createCouncilLLM(
       }
     },
 
-    async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string> {
+    async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -154,10 +181,16 @@ export function createCouncilLLM(
           ...(signal ? { abortSignal: signal } : {}),
         });
 
+        // Emit tool traces (CQ-22)
+        const researchToolCalls = (result.toolCalls ?? []) as Array<{ toolName: string; args?: unknown; input?: unknown; result?: unknown }>;
+        for (const tc of researchToolCalls) {
+          emitToolTrace(tc.toolName, tc.args ?? tc.input ?? {}, tc.result, persistTrace);
+        }
+
         // CQ-04: When URL present, verify at least one browser tool was invoked
         if (hasUrl) {
           // Use result.toolCalls (flat array across all steps) — more reliably typed than steps[].toolCalls
-          const browserUsed = (result.toolCalls ?? []).some(
+          const browserUsed = researchToolCalls.some(
             (tc) =>
               tc.toolName.includes("playwright") ||
               tc.toolName.includes("chrome"),

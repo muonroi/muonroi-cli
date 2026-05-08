@@ -43,8 +43,9 @@ export async function* runDebate(
       detail: `via ${researchCandidate.model}`,
     });
 
+    const researchTraces: string[] = [];
     researchFindings = yield* tracedAsync(
-      () => llm.research(researchCandidate.model, spec.problemStatement, conversationContext, signal),
+      () => llm.research(researchCandidate.model, spec.problemStatement, conversationContext, signal, (t) => researchTraces.push(t)),
       {
         phase: "research",
         label: "Researching codebase",
@@ -52,6 +53,10 @@ export async function* runDebate(
         role: "research",
       },
     );
+    // CQ-22: emit research tool traces as council_status
+    for (const trace of researchTraces) {
+      yield { type: "council_status" as const, content: trace };
+    }
     yield phaseDone({
       phaseId: "phase:research",
       kind: "research",
@@ -155,7 +160,7 @@ export async function* runDebate(
       () => Promise.all(
         pairs.map(async ({ a, b, key }) => {
         const log = exchangeLogs.get(key)!;
-        const chunks: Array<{ label: string; text: string; toolCalls?: Array<{ toolName: string; result?: unknown }> }> = [];
+        const chunks: Array<{ label: string; text: string; toolCalls?: Array<{ toolName: string; result?: unknown }>; traces?: string[] }> = [];
 
         try {
           let aResponse: string;
@@ -172,11 +177,12 @@ export async function* runDebate(
               speakerPosition: a.position, partnerPosition: b.position,
               spec,
             });
-            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal);
+            const aTraces: string[] = [];
+            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal, (t) => aTraces.push(t));
             aResponse = aResult.text;
             aToolCalls = aResult.toolCalls;
             log.push(`[${aLabel}]: ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls });
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls, traces: aTraces });
 
             const bPrompt = buildResponsePrompt({
               speakerRole: b.role, partnerRole: a.role,
@@ -184,11 +190,12 @@ export async function* runDebate(
               speakerPosition: b.position, partnerPosition: aResponse,
               spec,
             });
-            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal);
+            const bTraces: string[] = [];
+            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal, (t) => bTraces.push(t));
             bResponse = bResult.text;
             bToolCalls = bResult.toolCalls;
             log.push(`[${bLabel}]: ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls });
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls, traces: bTraces });
           } else {
             const historyText = log.join("\n\n");
             const aPrompt = buildFollowupPrompt({
@@ -197,11 +204,12 @@ export async function* runDebate(
               partnerPosition: b.position, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
-            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal);
+            const aTraces: string[] = [];
+            const aResult = await llm.debate(a.model, aPrompt.system, aPrompt.prompt, signal, (t) => aTraces.push(t));
             aResponse = aResult.text;
             aToolCalls = aResult.toolCalls;
             log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls });
+            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls, traces: aTraces });
 
             const bPrompt = buildFollowupPrompt({
               speakerRole: b.role, partnerRole: a.role,
@@ -209,11 +217,12 @@ export async function* runDebate(
               partnerPosition: aResponse, exchangeHistory: historyText, round,
               runningSummary, spec,
             });
-            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal);
+            const bTraces: string[] = [];
+            const bResult = await llm.debate(b.model, bPrompt.system, bPrompt.prompt, signal, (t) => bTraces.push(t));
             bResponse = bResult.text;
             bToolCalls = bResult.toolCalls;
             log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls });
+            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls, traces: bTraces });
           }
 
           b.position = bResponse;
@@ -239,6 +248,10 @@ export async function* runDebate(
           ? `\`[${labelParts[1]}]\` → \`[${labelParts[2]}]\``
           : chunk.label;
         yield { type: "content", content: `\n### ${cleanLabel}\n${chunk.text}\n` };
+        // CQ-22: emit tool traces as council_status for orchestrator persistence
+        for (const trace of chunk.traces ?? []) {
+          yield { type: "council_status" as const, content: trace };
+        }
       }
       if (pr.error) {
         yield { type: "content", content: `[Discussion error: ${pr.error}]\n` };
@@ -303,8 +316,9 @@ export async function* runDebate(
           detail: evaluation.researchQuery.slice(0, 80),
         });
         const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
+        const midTraces: string[] = [];
         const findings = yield* tracedAsync(
-          () => llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal),
+          () => llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal, (t) => midTraces.push(t)),
           {
             phase: "research",
             label: "Mid-debate research",
@@ -312,6 +326,10 @@ export async function* runDebate(
             role: "research",
           },
         );
+        // CQ-22: emit mid-debate research tool traces
+        for (const trace of midTraces) {
+          yield { type: "council_status" as const, content: trace };
+        }
         yield phaseDone({
           phaseId: midPhaseId,
           kind: "mid_research",
