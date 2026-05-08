@@ -12,14 +12,16 @@
  *   └──────────────────────────────────────────────┘
  */
 import type { InterceptMatch } from "./types.js";
+import type { StreamChunk } from "../types/index.js";
 
 const BORDER_WIDTH = 46;
 const TOP_BORDER = `┌─ ⚠ Experience Warning ${"─".repeat(BORDER_WIDTH - 22)}┐`;
 const BOTTOM_BORDER = `└${"─".repeat(BORDER_WIDTH - 1)}┘`;
 
-type RenderSink = (line: string) => void;
-let _sink: RenderSink = (line) => {
-  console.warn(line);
+export type RenderSink = (lineOrChunk: string | StreamChunk) => void;
+let _sink: RenderSink = (lineOrChunk) => {
+  // Default: string → console.warn; StreamChunk → ignore (no active TUI)
+  if (typeof lineOrChunk === "string") console.warn(lineOrChunk);
 };
 
 export function setRenderSink(fn: RenderSink): void {
@@ -41,7 +43,25 @@ export function renderInterceptWarning(m: InterceptMatch): string {
   return lines.join("\n");
 }
 
+/**
+ * Convert an InterceptMatch to an experience_warning StreamChunk.
+ * Used by the TUI sink to render collapsible warning blocks.
+ */
+export function warningToChunk(m: InterceptMatch): StreamChunk {
+  return {
+    type: "experience_warning" as StreamChunk["type"],
+    content: renderInterceptWarning(m),
+    experienceWarning: {
+      confidence: m.confidence,
+      message: m.message,
+      why: m.why,
+      scopeLabel: m.scope_label,
+      principleUuid: m.principle_uuid,
+    },
+  } as StreamChunk;
+}
+
 export function emitMatches(matches: InterceptMatch[] | undefined): void {
   if (!matches?.length) return;
-  for (const m of matches) _sink(renderInterceptWarning(m));
+  for (const m of matches) _sink(warningToChunk(m));
 }
