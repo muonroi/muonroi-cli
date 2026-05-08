@@ -76,6 +76,18 @@ export interface ProductStatusCardData {
   criteriaPartial: number;
   criteriaUnmet: number;
   currentStage: string;
+  /**
+   * Per-sprint snapshot of (met, total) so the renderer can draw a
+   * met-ratio sparkline showing whether the run is converging on done
+   * across sprints. Optional — older callers can omit and the card
+   * just hides the sparkline row.
+   */
+  criteriaHistory?: Array<{ sprintN: number; met: number; total: number }>;
+  /**
+   * Per-sprint cumulative cost so the renderer can draw a burndown
+   * (or burn-up). Optional.
+   */
+  costHistory?: Array<{ sprintN: number; cumulativeUsd: number }>;
 }
 
 export type Stage = "idle" | "discover" | "gather" | "research" | "scoping" | "approved" | "halted" | "error";
