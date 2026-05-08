@@ -42,7 +42,7 @@ export async function* runCouncil(
   processMessageFn: (message: string) => AsyncGenerator<StreamChunk, void, unknown>,
   options?: RunCouncilOptions,
 ): AsyncGenerator<StreamChunk, string | null, unknown> {
-  const stats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
+  const stats: CouncilStats = options?.councilStats ?? { calls: 0, startMs: Date.now(), phases: [] };
 
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
@@ -198,7 +198,7 @@ export async function* runCouncil(
 
   // ── Phase D: Plan ───────────────────────────────────────────────────────────
   const planStart = Date.now();
-  const planGen = runPlanning(debateState, spec, active, leaderModelId, respondToPreflight, llm, debatePlan);
+  const planGen = runPlanning(debateState, spec, debateState.active, leaderModelId, respondToPreflight, llm, debatePlan);
 
   let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string }>;
   do {
@@ -223,8 +223,8 @@ export async function* runCouncil(
         topic,
         spec,
         debatePlan,
-        participants: active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
-        finalPositions: active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
+        participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
+        finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
         synthesis: synthesisText.slice(0, 2000),
         stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
         timestamp: new Date().toISOString(),

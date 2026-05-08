@@ -126,7 +126,7 @@ export async function* runDebate(
 
   if (active.length < 2) {
     yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
-    return { spec, exchangeLogs, runningSummary: "", roundCount: 0, researchFindings };
+    return { spec, exchangeLogs, runningSummary: "", roundCount: 0, researchFindings, active };
   }
 
   // ── Phase 2: Dynamic discussion rounds ─────────────────────────────────────
@@ -358,7 +358,7 @@ export async function* runDebate(
     }
   }
 
-  return { spec, exchangeLogs, runningSummary, roundCount, researchFindings };
+  return { spec, exchangeLogs, runningSummary, roundCount, researchFindings, active };
 }
 
 async function* evaluateResearchNeed(

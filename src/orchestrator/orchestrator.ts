@@ -2062,6 +2062,7 @@ export class Agent {
         skipClarification: options?.skipClarification,
         userModelMessage: options?.userModelMessage,
         cwd: this.bash.getCwd(),
+        councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
       },
     );
 
