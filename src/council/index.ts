@@ -1,7 +1,7 @@
 import type { ModelMessage } from "ai";
 import type { StreamChunk } from "../types/index.js";
 import { appendSystemMessage } from "../storage/index.js";
-import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
+import { isCouncilMultiProviderPreferred, getCouncilExperienceMode } from "../utils/settings.js";
 import type {
   ClarifiedSpec,
   CouncilLLM,
@@ -19,7 +19,10 @@ import { runPlanning } from "./planner.js";
 import { runExecution } from "./executor.js";
 import { planDebate } from "./debate-planner.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
-import { getPilLastResult } from "../pil/store.js";
+import { runPipeline } from "../pil/pipeline.js";
+import type { PipelineContext } from "../pil/types.js";
+import { queryExperience } from "../ee/council-bridge.js";
+import type { CouncilExperienceResult } from "../ee/council-bridge.js";
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -79,17 +82,20 @@ export async function* runCouncil(
   let approved = false;
   const phaseAStart = Date.now();
 
-  // Pull gray-areas from the most recent PIL run so round-0 of clarification
-  // can be seeded with heuristic questions instead of an LLM call.
-  const pilSeed = (() => {
-    try {
-      const last = getPilLastResult();
-      if (last?.complexityTier === "heavy" && Array.isArray(last.grayAreas) && last.grayAreas.length > 0) {
-        return last.grayAreas;
-      }
-    } catch { /* fail-open */ }
-    return undefined;
-  })();
+  // CQ-11: Run PIL pipeline for full context (taskType, domain, outputStyle, grayAreas)
+  let pilCtx: PipelineContext | undefined;
+  try {
+    pilCtx = await runPipeline(topic, { sessionId });
+  } catch { /* fail-open — council runs without PIL context */ }
+
+  const pilSeed = pilCtx?.grayAreas?.length ? pilCtx.grayAreas : undefined;
+
+  // CQ-11: Pre-fetch EE warnings in parallel — starts here, awaited before planDebate
+  const experienceMode = getCouncilExperienceMode();
+  const eePromise: Promise<CouncilExperienceResult> =
+    experienceMode !== "off"
+      ? queryExperience(topic, pilCtx?.domain ?? undefined, options?.signal).catch(() => ({ warnings: [] }))
+      : Promise.resolve({ warnings: [] });
 
   while (!approved) {
     if (!options?.skipClarification) {
@@ -127,6 +133,15 @@ export async function* runCouncil(
 
   stats.phases.push({ name: "clarify+preflight", durationMs: Date.now() - phaseAStart });
 
+  // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)
+  const eeResult = await eePromise;
+  if (eeResult.warnings.length > 0) {
+    yield {
+      type: "content",
+      content: `\n> [Experience] ${eeResult.warnings.length} past warning(s) loaded — Experience Auditor will calibrate debate.\n`,
+    };
+  }
+
   // ── Phase B.5: Leader plans the debate (stances + output shape) ─────────────
   const planStartMs = Date.now();
   yield phaseStart({
@@ -135,7 +150,7 @@ export async function* runCouncil(
     label: "Debate plan",
     detail: "stances + output shape",
   });
-  const planGenerator = planDebate(spec, leaderModelId, llm);
+  const planGenerator = planDebate(spec, leaderModelId, llm, eeResult.warnings, experienceMode);
   let planStep: IteratorResult<StreamChunk, import("./types.js").DebatePlan>;
   do {
     planStep = await planGenerator.next();
@@ -198,7 +213,16 @@ export async function* runCouncil(
 
   // ── Phase D: Plan ───────────────────────────────────────────────────────────
   const planStart = Date.now();
-  const planGen = runPlanning(debateState, spec, debateState.active, leaderModelId, respondToPreflight, llm, debatePlan);
+  const planGen = runPlanning(
+    debateState,
+    spec,
+    debateState.active,
+    leaderModelId,
+    respondToPreflight,
+    llm,
+    debatePlan,
+    pilCtx?.outputStyle ?? undefined,  // CQ-18: propagate outputStyle
+  );
 
   let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string }>;
   do {
