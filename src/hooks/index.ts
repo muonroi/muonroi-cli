@@ -21,6 +21,7 @@ export type {
   AggregatedHookResult,
   BaseHookInput,
   CommandHook,
+  EEMatchEntry,
   HookCommand,
   HookEvent,
   HookInput,
@@ -35,6 +36,7 @@ export type {
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
 import { interceptWithDefaults } from "../ee/intercept.js";
+import { getRenderSink, setRenderSink } from "../ee/render.js";
 import { getTenantId } from "../ee/tenant.js";
 import { judge, type JudgeContext } from "../ee/judge.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
@@ -93,12 +95,25 @@ export async function executeEventHooks(
   try {
     if (input.hook_event_name === "PreToolUse") {
       const preInput = input as PreToolUseHookInput;
-      const r = await interceptWithDefaults({
-        toolName: input.tool_name,
-        toolInput: input.tool_input,
-        cwd,
-        ...(preInput.intent_context ? { context: preInput.intent_context } : {}),
+
+      // Capture EE render output so warnings surface in the agent content stream
+      // (yielded as content above the tool action) rather than going to console.warn.
+      const capturedWarnings: string[] = [];
+      const originalSink = getRenderSink();
+      setRenderSink((chunk) => {
+        capturedWarnings.push(typeof chunk === "string" ? chunk : (chunk as { content?: string }).content ?? "");
       });
+      let r: Awaited<ReturnType<typeof interceptWithDefaults>>;
+      try {
+        r = await interceptWithDefaults({
+          toolName: input.tool_name,
+          toolInput: input.tool_input,
+          cwd,
+          ...(preInput.intent_context ? { context: preInput.intent_context } : {}),
+        });
+      } finally {
+        setRenderSink(originalSink);
+      }
       // Thread the warning response to PostToolUse via module-level latch
       _lastWarningResponse = r;
 
@@ -203,24 +218,34 @@ export async function executeEventHooks(
         }
       } catch { /* fail-open */ }
 
+      const eeMatches = (r.matches ?? []).map((m) => ({
+        id: m.principle_uuid,
+        toolName: input.tool_name,
+        message: m.message,
+        why: m.why,
+        confidence: m.confidence,
+      }));
+
       if (r.decision === "block") {
         return {
           blocked: true,
           blockingErrors: [{ command: "ee:intercept", stderr: r.reason ?? "ee-blocked" }],
           preventContinuation: true,
           stopReason: r.reason ?? "ee-blocked",
-          additionalContexts: r.suggestions ?? [],
+          additionalContexts: [...capturedWarnings, ...(r.suggestions ?? [])],
           decision: "block",
           results: [],
+          eeMatches,
         };
       }
       return {
         blocked: false,
         blockingErrors: [],
         preventContinuation: false,
-        additionalContexts: r.suggestions ?? [],
+        additionalContexts: [...capturedWarnings, ...(r.suggestions ?? [])],
         decision: "approve",
         results: [],
+        eeMatches,
       };
     }
 

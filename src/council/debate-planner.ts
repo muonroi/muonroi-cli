@@ -76,13 +76,6 @@ function injectAuditorStance(
   return { ...plan, stances };
 }
 
-/**
- * Leader-LLM proposes the debate's stances + output shape based on the topic.
- *
- * Attempt 1: generateObject with DebatePlanSchema (structured output).
- * On failure: retry once via tracedGenerate with schema error feedback injected.
- * On second failure: return FALLBACK_PLAN.
- */
 export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
