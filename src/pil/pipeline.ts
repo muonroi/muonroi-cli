@@ -1,13 +1,20 @@
 /**
  * src/pil/pipeline.ts
  *
- * runPipeline() entry point: orchestrates 6 sequential layers with a 200ms timeout.
- * Fail-open: any unhandled error or timeout returns the original fallback context.
+ * runPipeline() entry point: orchestrates 6 sequential layers with an
+ * adaptive timeout. Fail-open: any unhandled error or timeout returns the
+ * original fallback context.
+ *
+ * Timeout budget:
+ *   - 200ms when EE is disabled / not reachable (fast regex-only path).
+ *   - 3000ms when EE thin/thin-degraded mode is active so Layer 1 can hit
+ *     the remote `/api/brain` endpoint and Layer 6 can refine output style.
  *
  * CRITICAL: fallback is captured BEFORE runLayers() starts to ensure the timeout
  * path returns a pristine context (Pitfall 4 from RESEARCH.md).
  */
 
+import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { layer1Intent } from "./layer1-intent.js";
 import { layer2Personality } from "./layer2-personality.js";
@@ -19,6 +26,17 @@ import { PipelineContextSchema } from "./schema.js";
 import { setPilLastResult } from "./store.js";
 import { resolveAfter } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
+
+const PIPELINE_TIMEOUT_FAST_MS = 200;
+const PIPELINE_TIMEOUT_BRAIN_MS = 3000;
+
+function pipelineTimeoutMs(): number {
+  const mode = getCachedEEClientMode();
+  if (mode && (mode.mode === "thin" || mode.mode === "thin-degraded" || mode.mode === "fat")) {
+    return PIPELINE_TIMEOUT_BRAIN_MS;
+  }
+  return PIPELINE_TIMEOUT_FAST_MS;
+}
 
 const SKIPPED_LAYERS = [
   "personality-adaptation",
@@ -101,14 +119,28 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     resumeDigest: options?.resumeDigest ?? null,
     activeRunId: options?.activeRunId ?? null,
     sessionId: options?.sessionId ?? null,
+    fallbackReason: null,
   };
   try {
-    const result = await Promise.race([runLayers({ ...fallback }), resolveAfter(200, fallback)]);
-    const validated = PipelineContextSchema.safeParse(result).success ? result : fallback;
-    setPilLastResult(validated);
-    return validated;
-  } catch {
-    setPilLastResult(fallback);
-    return fallback;
+    const result = await Promise.race([
+      runLayers({ ...fallback }),
+      resolveAfter(pipelineTimeoutMs(), { ...fallback, fallbackReason: "pipeline-timeout" } as PipelineContext),
+    ]);
+    const parse = PipelineContextSchema.safeParse(result);
+    if (!parse.success) {
+      const validated: PipelineContext = {
+        ...fallback,
+        fallbackReason: `schema-reject:${parse.error.issues[0]?.path?.join(".") ?? "unknown"}`,
+      } as PipelineContext;
+      setPilLastResult(validated);
+      return validated;
+    }
+    setPilLastResult(result);
+    return result;
+  } catch (err) {
+    const reason = err instanceof Error ? `exception:${err.name}` : "exception:unknown";
+    const failed = { ...fallback, fallbackReason: reason } as PipelineContext;
+    setPilLastResult(failed);
+    return failed;
   }
 }

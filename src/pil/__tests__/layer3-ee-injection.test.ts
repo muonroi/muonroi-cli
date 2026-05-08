@@ -96,13 +96,13 @@ describe("layer3EeInjection (bridge-based)", () => {
     }
   });
 
-  test("Test 6: collection name is always 'experience-behavioral' regardless of taskType", async () => {
+  test("Test 6: search hits server whitelist (behavioral + principles) regardless of taskType", async () => {
     vi.mocked(searchByText).mockResolvedValue([]);
 
     await layer3EeInjection(makeCtx({ taskType: "refactor" }));
     expect(vi.mocked(searchByText)).toHaveBeenCalledWith(
       expect.any(String),
-      ["experience-behavioral"],
+      ["experience-behavioral", "experience-principles"],
       expect.any(Number),
       expect.any(Object),
     );

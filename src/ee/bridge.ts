@@ -130,10 +130,32 @@ async function silentCall<T>(fn: () => Promise<T>): Promise<T> {
 
 /**
  * Classify a prompt via the EE brain LLM (Ollama or SiliconFlow).
- * Returns a classification string or null on timeout / core absent.
- * timeoutMs is forwarded to experience-core.js — keep ≤5000ms on the CLI hot path.
+ * Returns a classification string or null on timeout / brain unreachable.
+ *
+ * Resolution order:
+ *   1. Thin / thin-degraded clients → POST /api/brain on the configured EE server.
+ *   2. Fat clients (local experience-core.js present) → in-process call.
+ *   3. Otherwise → null (caller falls back to regex/keyword paths).
  */
 export async function classifyViaBrain(prompt: string, timeoutMs = 5000): Promise<string | null> {
+  // Thin-client HTTP path — required for CLIs without local experience-core.js.
+  try {
+    const { getCachedEEClientMode } = await import("./client-mode.js");
+    const modeInfo = getCachedEEClientMode();
+    const useRemote = modeInfo
+      ? modeInfo.mode === "thin" || modeInfo.mode === "thin-degraded"
+      : !!(await import("./auth.js")).getCachedServerBaseUrl();
+    if (useRemote) {
+      const { getDefaultEEClient } = await import("./intercept.js");
+      const result = await getDefaultEEClient().brainProxy(prompt, timeoutMs);
+      if (typeof result === "string") return result;
+      // Server unreachable — fall through to in-process path so a fat-client
+      // box still works after a transient network blip.
+    }
+  } catch {
+    /* fall through */
+  }
+
   const core = await getEECore();
   if (!core) return null;
   try {

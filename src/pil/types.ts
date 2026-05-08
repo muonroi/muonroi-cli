@@ -49,4 +49,11 @@ export interface PipelineContext {
   complexityTier?: ComplexityTier | null;
   /** Heuristic gray-area questions surfaced by layer4 when tier === "heavy". */
   grayAreas?: GrayAreaQuestion[];
+  /**
+   * Diagnostic: when the pipeline returns the fallback context, this records
+   * the reason (timeout / schema-reject / exception). Null on the happy path.
+   * Helps distinguish "fallback because brain unreachable" from "fallback
+   * because schema validation failed" when reading interaction_logs.
+   */
+  fallbackReason?: string | null;
 }
