@@ -55,7 +55,7 @@ User → Onboarding (wizard | migration prompt | /mcp setup)
 | ID | Label | Transport | URL / Command | Key | Default enabled |
 |---|---|---|---|---|---|
 | `context7` | Context7 (Library Docs) | http | `https://mcp.context7.com/mcp` | optional (free tier) | true |
-| `fetch` | Fetch (URL → markdown) | stdio | `npx -y @modelcontextprotocol/server-fetch` | none | true |
+| `fetch` | Fetch (URL → markdown) | stdio | `npx -y mcp-fetch-server` | none | true |
 | `tavily` | Tavily Web Search | stdio | `npx -y tavily-mcp` | required (`TAVILY_API_KEY`) | true if key present, else false |
 
 ### Module boundaries
