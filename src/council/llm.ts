@@ -1,10 +1,15 @@
 import { generateText, stepCountIs } from "ai";
+import type { ToolSet } from "ai";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { BashTool } from "../tools/bash.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import type { CouncilLLM, CouncilStats } from "./types.js";
+import { loadMcpServers } from "../utils/settings.js";
+import { buildMcpToolSet } from "../mcp/runtime.js";
+import type { McpToolBundle } from "../mcp/runtime.js";
+import { buildResearchSystemPrompt } from "./prompts.js";
 
 export function createCouncilLLM(
   bash: BashTool,
@@ -36,47 +41,69 @@ export function createCouncilLLM(
       const { factory } = createProviderFactory(providerId, { apiKey: key });
       const runtime = resolveModelRuntime(factory, modelId);
 
-      const researchTools = createTools(bash, mode);
+      const builtinTools = createTools(bash, mode);
 
-      const systemPrompt =
-        `You are a research specialist. Your job is to gather FACTS about the topic below.\n\n` +
-        `## Instructions\n` +
-        `- Use available tools (bash, read_file, grep) to investigate the codebase and find relevant files, code, or configurations\n` +
-        `- Search for existing patterns, implementations, or decisions related to the topic\n` +
-        `- Report EXACT findings: file paths, function names, error messages, code snippets\n` +
-        `- Do NOT make assumptions or speculate — only report what you find\n` +
-        `- If you can't find anything relevant, say so explicitly\n\n` +
-        `## Output Format\n` +
-        `After your investigation, produce a research report with:\n` +
-        `## Research Findings\n` +
-        `- [fact 1 with source]\n` +
-        `- [fact 2 with source]\n\n` +
-        `## Key Evidence\n` +
-        `- [code snippets or file paths that are most relevant]\n\n` +
-        `## Gaps\n` +
-        `- [what we don't know yet or couldn't verify]\n`;
+      // CQ-03: Lazy MCP bundle per research call — fail-open so builtins remain available
+      let mcpBundle: McpToolBundle | null = null;
+      try {
+        mcpBundle = await buildMcpToolSet(loadMcpServers());
+      } catch {
+        // MCP spawn failed — research continues with builtin tools only
+      }
+
+      const allTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+
+      // CQ-04: Detect URL in topic — inject mandatory browser instruction into system prompt
+      const hasUrl = /https?:\/\/\S+/.test(topic);
+      const systemPrompt = buildResearchSystemPrompt(hasUrl);
 
       const userPrompt = conversationContext
-        ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`
-        : `## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`;
+        ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate and report findings.`
+        : `## Research Topic\n${topic}\n\nInvestigate and report findings.`;
 
       try {
-        const { text } = await generateText({
+        const result = await generateText({
           model: runtime.model,
           system: systemPrompt,
           prompt: userPrompt,
-          tools: researchTools,
-          stopWhen: stepCountIs(10),
+          tools: allTools,
+          stopWhen: stepCountIs(15),
           maxOutputTokens: 4096,
           temperature: 0.3,
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
           ...(signal ? { abortSignal: signal } : {}),
         });
+
+        // CQ-04: When URL present, verify at least one browser tool was invoked
+        if (hasUrl) {
+          // Use result.toolCalls (flat array across all steps) — more reliably typed than steps[].toolCalls
+          const browserUsed = (result.toolCalls ?? []).some(
+            (tc) =>
+              tc.toolName.includes("playwright") ||
+              tc.toolName.includes("chrome"),
+          );
+          if (!browserUsed) {
+            stats.calls++;
+            return (
+              result.text +
+              "\n\n## Research Gap\n" +
+              "- URL was present in topic but no browser tool was invoked. " +
+              "Frontend findings unverified."
+            );
+          }
+        }
+
         stats.calls++;
-        return text;
+        return result.text;
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
-        return `## Research Findings\n[Research failed: ${errMsg}]\n\n## Gaps\n- Could not complete research due to error`;
+        return (
+          `## Source Code Findings\n[Research failed: ${errMsg}]\n\n` +
+          `## Internet Findings\n_Not performed._\n\n` +
+          `## Frontend Findings (live)\n_Not performed._`
+        );
+      } finally {
+        await mcpBundle?.close().catch(() => {});
       }
     },
   };
