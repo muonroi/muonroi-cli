@@ -2750,6 +2750,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               buildUserEntry(heading),
               buildAssistantEntry(warningPrefix ? `${warningPrefix}\nProduct loop starting…\n` : "Product loop starting…\n"),
             ]);
+            // Fresh product-loop run — clear any persisted phase/status so old
+            // runs don't bleed into the new one (phaseIds collide across runs).
+            setCouncilPhases([]);
+            setCouncilStatuses([]);
+            councilDoneAtRef.current.clear();
             try {
               const gen = (agent as any).runProductLoopV1(payload);
               for await (const chunk of gen) {
@@ -2770,6 +2775,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setPendingCouncilPreflight(chunk.councilPreflight);
                   setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
+                if (chunk.type === "council_status" && chunk.councilStatus) {
+                  const cs = chunk.councilStatus;
+                  if (cs.state === "done" || cs.state === "error") {
+                    councilDoneAtRef.current.set(cs.statusId, Date.now());
+                  }
+                  setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                }
+                if (chunk.type === "council_phase" && chunk.councilPhase) {
+                  setCouncilPhases((prev) => upsertPhase(prev, chunk.councilPhase!));
+                }
                 if (chunk.type === "product_status_card" && chunk.productStatusCard) {
                   // Snapshot rendering is handled by <ProductStatusCard /> consumers.
                   // Keep last-known data on the message log for now.
@@ -2787,6 +2802,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               }
             } catch (e: unknown) {
               setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
+            } finally {
+              setCouncilPhases([]);
+              setCouncilStatuses([]);
+              councilDoneAtRef.current.clear();
             }
             return;
           }
