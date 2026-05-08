@@ -2,6 +2,8 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import type { StreamChunk } from "../types/index.js";
 import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
+import type { CouncilWarning } from "../ee/council-bridge.js";
+import type { CouncilExperienceMode } from "../utils/settings.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
 import { tracedGenerate } from "./llm.js";
 import { detectProviderForModel, createProviderFactory, resolveModelRuntime } from "../providers/runtime.js";
@@ -62,6 +64,9 @@ export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
   llm: CouncilLLM,
+  // CQ-11: EE warnings + mode — passed from runCouncil, consumed fully in plan 16-05
+  _eeWarnings?: CouncilWarning[],
+  _experienceMode?: CouncilExperienceMode,
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
   const { system, prompt } = buildDebatePlanPrompt(spec);
 
