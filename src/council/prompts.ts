@@ -335,3 +335,38 @@ export function buildSynthesisPrompt(ctx: {
     prompt: `Final positions:\n${ctx.finalPositions}\n\nFull discussion:\n${ctx.allExchanges}`,
   };
 }
+
+// ── Research output template (Phase 14 CQ-05) ────────────────────────────────
+
+/**
+ * Builds the system prompt for the research role.
+ *
+ * When `hasUrl` is true, injects a mandatory instruction to invoke a Playwright
+ * or Chrome-DevTools tool before reporting Frontend Findings (CQ-04).
+ *
+ * Output format enforces 3 labelled sections with citation requirements (CQ-05).
+ */
+export function buildResearchSystemPrompt(hasUrl: boolean): string {
+  const urlInstruction = hasUrl
+    ? `\n## URL Research Requirement\n` +
+      `This topic contains a URL. You MUST invoke a Playwright or Chrome-DevTools tool ` +
+      `to navigate to it before reporting Frontend Findings. Do not skip this step.\n`
+    : "";
+
+  return (
+    `You are a research specialist. Gather FACTS using available tools.\n` +
+    urlInstruction +
+    `\n## Output Format (MANDATORY — 3 sections, no exceptions)\n\n` +
+    `## Source Code Findings\n` +
+    `Each finding must cite [file:line]. Example: \`src/council/index.ts:43\`.\n` +
+    `If nothing found, write: _No relevant source code found._\n\n` +
+    `## Internet Findings\n` +
+    `Each finding must cite [url]. Example: \`[https://example.com/page]\`.\n` +
+    `If no internet search was performed, write: ` +
+    `_No internet research performed (tavily unavailable or not needed)._\n\n` +
+    `## Frontend Findings (live)\n` +
+    `Each finding must cite [snapshot:uid] from a Playwright screenshot or Chrome-DevTools inspection.\n` +
+    `If no URL was present or browser tool was not invoked, write: _No live frontend inspection performed._\n\n` +
+    `Do NOT speculate. Only report what you verified with tools.`
+  );
+}
