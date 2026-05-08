@@ -63,6 +63,11 @@ describe("runResearchOnboarding", () => {
     });
     expect(result.tavilyEnabled).toBe(true);
     expect(settingsStore.webResearchPrompted).toBe(true);
+    // Critical: tavily entry must end up enabled in mcpServers, not just in
+    // the result object. The first-run wizard runs before any other path
+    // touches mcpServers, so this is the production bug we're guarding.
+    const tavily = mcpServers.find((s) => s.id === "tavily");
+    expect(tavily?.enabled).toBe(true);
   });
 
   it("Y + blank key: skips tavily, still sets flag", async () => {
