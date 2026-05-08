@@ -63,7 +63,11 @@ import {
   savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
+  getDisabledProviders,
+  setProviderDisabled,
 } from "../utils/settings";
+import { getConfiguredProviders } from "../providers/keychain.js";
+import type { ProviderId } from "../providers/types.js";
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
@@ -777,6 +781,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   }, []);
   // Wire status bar subscriptions once at boot (Plan 06)
   useEffect(() => wireStatusBar(), []);
+  useEffect(() => {
+    let cancelled = false;
+    getConfiguredProviders()
+      .then((list) => {
+        if (!cancelled) setConfiguredProviders(list);
+      })
+      .catch(() => {
+        if (!cancelled) setConfiguredProviders([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -790,6 +807,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [showModelPicker, setShowModelPicker] = useState(false);
   const [modelPickerIndex, setModelPickerIndex] = useState(0);
   const [modelSearchQuery, setModelSearchQuery] = useState("");
+  const [configuredProviders, setConfiguredProviders] = useState<ProviderId[]>([]);
+  const [disabledProviders, setDisabledProvidersState] = useState<ProviderId[]>(() => getDisabledProviders());
+  const [modelPickerFocus, setModelPickerFocus] = useState<"models" | "providers">("models");
+  const [providerChipIndex, setProviderChipIndex] = useState(0);
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
   const [sandboxSettings, setSandboxSettingsState] = useState<SandboxSettings>(() => agent.getSandboxSettings());
   const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex] = useState(0);
@@ -1022,9 +1043,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const modelInfo = getModelInfo(model);
   const contextStats = modelInfo ? agent.getContextStats(modelInfo.contextWindow, streamContent) : null;
   
-  // UI Loading logic for dynamic models
-  const modelList = isLoading ? [] : MODELS;
-  
+  // UI Loading logic for dynamic models — restrict to providers that have API keys configured
+  // and have not been explicitly disabled by the user. Catalog entries lacking a provider are
+  // kept (defensive); models with an unknown provider are filtered out to avoid clutter.
+  const activeProviders = useMemo(() => {
+    const disabled = new Set(disabledProviders);
+    return new Set(configuredProviders.filter((p) => !disabled.has(p)));
+  }, [configuredProviders, disabledProviders]);
+
+  const modelList = useMemo(() => {
+    if (isLoading) return [];
+    if (configuredProviders.length === 0) return MODELS; // boot-time fallback before async load
+    return MODELS.filter((m) => !m.provider || activeProviders.has(m.provider as ProviderId));
+  }, [activeProviders, configuredProviders.length]);
+
   const filteredModels = modelSearchQuery
     ? modelList.filter(
         (m) =>
@@ -1101,6 +1133,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setShowWalletPicker(true);
     // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
+  }, []);
+
+  const toggleProviderEnabled = useCallback((provider: ProviderId) => {
+    setDisabledProvidersState((prev) => {
+      const isDisabled = prev.includes(provider);
+      const next = setProviderDisabled(provider, !isDisabled);
+      return next;
+    });
+    setModelPickerIndex(0);
   }, []);
 
   const setReasoningEfforts = useCallback((next: Record<string, ReasoningEffort>) => {
@@ -3789,6 +3830,29 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (isEscapeKey(key)) {
           setShowModelPicker(false);
           setModelSearchQuery("");
+          setModelPickerFocus("models");
+          return;
+        }
+        if (key.name === "tab") {
+          if (configuredProviders.length > 0) {
+            setModelPickerFocus((f) => (f === "models" ? "providers" : "models"));
+          }
+          return;
+        }
+        if (modelPickerFocus === "providers") {
+          if (key.name === "left") {
+            setProviderChipIndex((i) => Math.max(0, i - 1));
+            return;
+          }
+          if (key.name === "right") {
+            setProviderChipIndex((i) => Math.min(configuredProviders.length - 1, i + 1));
+            return;
+          }
+          if (key.name === "space" || key.sequence === " " || key.name === "return") {
+            const p = configuredProviders[providerChipIndex];
+            if (p) toggleProviderEnabled(p);
+            return;
+          }
           return;
         }
         if (key.name === "up") {
@@ -3817,6 +3881,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           }
           setShowModelPicker(false);
           setModelSearchQuery("");
+          setModelPickerFocus("models");
           return;
         }
         if (key.name === "backspace") {
@@ -4223,6 +4288,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       mcpModalIndex,
       mcpRows,
       modelPickerIndex,
+      modelPickerFocus,
+      providerChipIndex,
+      configuredProviders,
+      toggleProviderEnabled,
       openApiKeyModal,
       openCatalogMcp,
       openMcpEditor,
@@ -4708,6 +4777,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           searchQuery={modelSearchQuery}
           filteredModels={filteredModels}
           reasoningEffortByModel={reasoningEffortByModel}
+          configuredProviders={configuredProviders}
+          disabledProviders={disabledProviders}
+          focus={modelPickerFocus}
+          providerChipIndex={providerChipIndex}
         />
       )}
       {showWalletPicker && (
@@ -6771,6 +6844,10 @@ function ModelPickerModal({
   searchQuery,
   filteredModels,
   reasoningEffortByModel,
+  configuredProviders,
+  disabledProviders,
+  focus,
+  providerChipIndex,
 }: {
   t: Theme;
   currentModel: string;
@@ -6780,7 +6857,12 @@ function ModelPickerModal({
   searchQuery: string;
   filteredModels: ModelInfo[];
   reasoningEffortByModel: Record<string, ReasoningEffort>;
+  configuredProviders: ProviderId[];
+  disabledProviders: ProviderId[];
+  focus: "models" | "providers";
+  providerChipIndex: number;
 }) {
+  const disabledSet = new Set(disabledProviders);
   const listRef = useRef<ScrollBoxRenderable>(null);
   useEffect(() => {
     const m = filteredModels[selectedIndex];
@@ -6820,6 +6902,27 @@ function ModelPickerModal({
           </text>
           <text fg={t.textMuted}>{"esc"}</text>
         </box>
+        {configuredProviders.length > 0 && (
+          <box
+            flexShrink={0}
+            flexDirection="row"
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            backgroundColor={focus === "providers" ? t.selectedBg : undefined}
+          >
+            <text fg={t.textMuted}>{"providers: "}</text>
+            {configuredProviders.map((p, i) => {
+              const enabled = !disabledSet.has(p);
+              const focused = focus === "providers" && i === providerChipIndex;
+              const mark = enabled ? "✓" : "✗";
+              const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
+              return (
+                <text key={p} fg={fg}>{`${i === 0 ? "" : "  "}${focused ? "[" : " "}${mark} ${p}${focused ? "]" : " "}`}</text>
+              );
+            })}
+          </box>
+        )}
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
           <text fg={t.text}>{searchQuery || <span style={{ fg: t.textMuted }}>{"Search..."}</span>}</text>
         </box>
@@ -6856,7 +6959,11 @@ function ModelPickerModal({
         </scrollbox>
         <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
           <text fg={t.textMuted}>
-            {selectedSupportsReasoning ? "left/right reasoning  enter select  esc close" : "enter select  esc close"}
+            {focus === "providers"
+              ? "left/right pick provider  space toggle  tab back  esc close"
+              : selectedSupportsReasoning
+                ? "left/right reasoning  enter select  tab providers  esc close"
+                : "enter select  tab providers  esc close"}
           </text>
         </box>
       </box>

@@ -211,6 +211,8 @@ export interface UserSettings {
     xai?: ProviderKeyConfig;
     ollama?: { baseURL?: string };
   };
+  /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
+  disabledProviders?: ProviderId[];
 }
 
 export interface ProjectSettings {
@@ -824,5 +826,27 @@ export function isCouncilMultiProviderPreferred(): boolean {
 
 export function getCouncilExperienceMode(): CouncilExperienceMode {
   return loadUserSettings().councilExperienceMode ?? "advisory";
+}
+
+export function getDisabledProviders(): ProviderId[] {
+  const raw = loadUserSettings().disabledProviders;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((p): p is ProviderId =>
+    typeof p === "string" &&
+    ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"].includes(p),
+  );
+}
+
+export function isProviderDisabled(provider: ProviderId): boolean {
+  return getDisabledProviders().includes(provider);
+}
+
+export function setProviderDisabled(provider: ProviderId, disabled: boolean): ProviderId[] {
+  const current = new Set(getDisabledProviders());
+  if (disabled) current.add(provider);
+  else current.delete(provider);
+  const next = [...current];
+  saveUserSettings({ disabledProviders: next });
+  return next;
 }
 
