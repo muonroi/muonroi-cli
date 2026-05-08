@@ -986,6 +986,30 @@ keys
     await runKeysCleanupSettings();
   });
 
+const mcp = program
+  .command("mcp")
+  .description("Manage MCP server configuration");
+
+mcp
+  .command("setup-research")
+  .description("Configure web research MCP servers (context7, fetch, tavily)")
+  .action(async () => {
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    const ask = (q: string): Promise<string> =>
+      new Promise((resolve) => rl.question(q, (a) => resolve(a)));
+    try {
+      const { runResearchOnboarding } = await import("./mcp/research-onboarding.js");
+      const result = await runResearchOnboarding({
+        askYesNo: ask,
+        askText: ask,
+        log: (m) => process.stderr.write(m),
+      });
+      process.stderr.write(`\nDone. Tavily ${result.tavilyEnabled ? "enabled" : "skipped"}.\n`);
+    } finally {
+      rl.close();
+    }
+  });
+
 program.parse();
 
 function formatContext(tokens: number): string {
