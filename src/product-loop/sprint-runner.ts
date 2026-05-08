@@ -346,5 +346,9 @@ function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): Coun
         throw err;
       }
     },
+    // debate() delegates to base — cost metering will be added in Phase 15 Plan 02 when fully implemented.
+    async debate(modelId, system, prompt, signal) {
+      return base.debate(modelId, system, prompt, signal);
+    },
   };
 }
