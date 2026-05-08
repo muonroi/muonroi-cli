@@ -35,6 +35,12 @@ export function createCouncilLLM(
       return text;
     },
 
+    // debate() is implemented in Phase 15 Plan 02. Stub satisfies CouncilLLM interface.
+    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
+      const text = await this.generate(modelId, system, prompt);
+      return { text, toolCalls: [] };
+    },
+
     async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);

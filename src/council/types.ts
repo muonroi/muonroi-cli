@@ -45,6 +45,10 @@ export interface LeaderEvaluation {
   researchQuery?: string;
   shouldContinue: boolean;
   reason: string;
+  /** Citations / total verifiable claims ratio (0.0–1.0). Computed by evaluateDebate after each round. */
+  evidenceDensity?: number;
+  /** Count of [REFUTED] tags + explicit concessions found in the exchange text. */
+  disagreementResolved?: number;
 }
 
 export interface DebateState {
@@ -168,6 +172,12 @@ export interface CouncilStats {
 export interface CouncilLLM {
   generate(modelId: string, system: string, prompt: string, maxTokens?: number): Promise<string>;
   research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string>;
+  debate(
+    modelId: string,
+    system: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
 }
 
 export type QuestionResponder = (questionId: string) => Promise<string>;
