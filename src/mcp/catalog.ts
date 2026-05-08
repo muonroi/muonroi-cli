@@ -97,6 +97,33 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
     directoryUrl: "https://cursor.directory/plugins/mcp-figma",
   },
   {
+    id: "context7",
+    name: "Context7 (Library Docs)",
+    description:
+      "Version-pinned, chunked library documentation for Claude/Gemini/Codex-style coding agents.",
+    directoryUrl: "https://context7.com",
+    sourceUrl: "https://github.com/upstash/context7",
+    starterTransport: "http",
+  },
+  {
+    id: "fetch",
+    name: "Fetch (URL → markdown)",
+    description:
+      "Fetches a URL and converts HTML to markdown for the agent to read.",
+    directoryUrl: "https://www.npmjs.com/package/mcp-fetch-server",
+    sourceUrl: "https://www.npmjs.com/package/mcp-fetch-server",
+    starterTransport: "stdio",
+  },
+  {
+    id: "tavily",
+    name: "Tavily Web Search",
+    description:
+      "LLM-tuned web search with answer summaries and rerank. Free tier 1k/month. Requires TAVILY_API_KEY.",
+    directoryUrl: "https://tavily.com",
+    sourceUrl: "https://github.com/tavily-ai/tavily-mcp",
+    starterTransport: "stdio",
+  },
+  {
     id: "firebase",
     name: "Firebase",
     description: "Auth, Firestore, and Storage operations.",
