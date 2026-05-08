@@ -21,6 +21,8 @@ import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo } from "../types/index.js";
+import { routeModel as eeRouteModel } from "../ee/bridge.js";
+import type { EERouteResult } from "../ee/bridge.js";
 
 export interface ProductLoopFlags {
   maxCost: number;
@@ -487,15 +489,53 @@ async function resolveRoleAssignments(
   }
   if (inventory.length === 0) return out;
 
-  const result = await resolveRoles({ inventory });
+  // EE-driven override: ask the experience brain for the best (model,tier)
+  // per role, given accumulated past-performance signals. routeModel returns
+  // null when no EE core is installed, in which case role-registry falls
+  // back to its tier-preference cold-start logic.
+  const eeRouteOverride = async (slot: RoleSlot): Promise<EERouteResult | null> => {
+    const task = describeRoleTask(slot);
+    try {
+      return await eeRouteModel(
+        task,
+        { role: slot, sessionModel: sessionModelId, source: "product-loop" },
+        "muonroi-cli",
+      );
+    } catch {
+      return null;
+    }
+  };
+
+  const result = await resolveRoles({ inventory, eeRouteOverride });
   if (result.kind !== "ok") return out;
   for (const [slot, a] of Object.entries(result.roles)) {
     out.set(slot as RoleSlot, { modelId: a.model, provider: a.provider, tier: a.tier });
   }
-  // sessionModelId is preserved by callers via DriverContext; we just need it
-  // here to anchor the parameter signature for symmetry with resolveLeader*.
-  void sessionModelId;
   return out;
+}
+
+/**
+ * Slot → human-readable task description fed to EE's routeModel. The brain
+ * uses this string as the primary classification key, so phrasing matters:
+ * keep it specific to the role's actual deliverable.
+ */
+function describeRoleTask(slot: RoleSlot): string {
+  switch (slot) {
+    case "PO":
+      return "product owner: clarify product spec and acceptance criteria";
+    case "Architect":
+      return "software architect: design module boundaries and data flow";
+    case "Implementer":
+      return "implementer: write production code from a spec";
+    case "Tester":
+      return "tester: design and write unit/integration tests";
+    case "Reviewer":
+      return "code reviewer: critique code for bugs, perf, and clarity";
+    case "Customer":
+      return "customer proxy: validate that built feature meets user need";
+    default:
+      return `role ${String(slot)}`;
+  }
 }
 
 async function* runShip(
