@@ -53,6 +53,7 @@ export interface DebateState {
   runningSummary: string;
   roundCount: number;
   researchFindings?: string;
+  active: CouncilParticipant[];  // mutated positions from debate rounds — NEW (Phase 14 CQ-02)
 }
 
 /**
