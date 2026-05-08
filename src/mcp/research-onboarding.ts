@@ -32,8 +32,9 @@ export async function validateTavilyKey(key: string): Promise<boolean> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: key, query: "ping", max_results: 1 }),
+      signal: AbortSignal.timeout(5000),
     });
-    return res.status === 200;
+    return res.ok;
   } catch {
     return false;
   }
@@ -123,6 +124,9 @@ export async function runResearchMigrationPrompt(io: MigrationIO): Promise<Migra
     saveUserSettings({ webResearchPrompted: true });
     io.log("Got it - won't ask again. Run `muonroi-cli mcp setup-research` if you change your mind.\n");
   } else {
+    // Plain "n" or unrecognized input: deliberately do NOT set webResearchPrompted.
+    // The migration prompt will re-fire next session so users who decline once
+    // are not silently locked out of web research forever.
     io.log("Skipped for this session.\n");
   }
   return { shown: true, tavilyEnabled };
