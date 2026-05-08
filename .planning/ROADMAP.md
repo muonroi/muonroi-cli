@@ -60,7 +60,7 @@ See milestone archive for details.
 **Audit reference:** `.planning/research/v1.6-council-quality-context.md` (read this first when resuming work).
 
 - [x] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations — completed 2026-05-08
-- [ ] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
+- [x] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
 - [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
 - [ ] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation
 
@@ -165,13 +165,13 @@ Plans:
 **Plans:** 5 plans
 Plans:
 **Wave 1**
-- [ ] 15-01-PLAN.md — Type contracts: LeaderEvaluation + CouncilLLM.debate() interface
+- [x] 15-01-PLAN.md — Type contracts: LeaderEvaluation + CouncilLLM.debate() interface
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 15-02-PLAN.md — llm.debate() implementation + prompts refute-then-cite injection
-- [ ] 15-03-PLAN.md — debate.ts: switch to llm.debate() + per-round persistence + evidence density metrics
-- [ ] 15-04-PLAN.md — debate-planner: generateObject structured output + retry path
+- [x] 15-02-PLAN.md — llm.debate() implementation + prompts refute-then-cite injection
+- [x] 15-03-PLAN.md — debate.ts: switch to llm.debate() + per-round persistence + evidence density metrics
+- [x] 15-04-PLAN.md — debate-planner: generateObject structured output + retry path
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 15-05-PLAN.md — TDD: round-tools.test.ts + evaluator-metrics.test.ts (CQ-06 through CQ-10)
+- [x] 15-05-PLAN.md — TDD: round-tools.test.ts + evaluator-metrics.test.ts (CQ-06 through CQ-10)
 
 Cross-cutting constraints: `llm.debate()` return shape `{ text, toolCalls }` must remain consistent across 15-01 (types), 15-02 (implementation), 15-03 (consumers)
 
