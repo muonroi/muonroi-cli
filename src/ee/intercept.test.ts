@@ -54,11 +54,11 @@ describe("updateLastSurfacedState / resetLastSurfacedState", () => {
 
 describe("intercept integration", () => {
   let stub: StubHandle;
-  let captured: string[];
+  let captured: Array<any>;
 
   beforeEach(async () => {
     captured = [];
-    setRenderSink((line) => captured.push(line));
+    setRenderSink((chunk) => captured.push(chunk));
     resetEEClientState();
   });
 
@@ -102,11 +102,13 @@ describe("intercept integration", () => {
     const resp = await intercept(baseReq);
     expect(resp.decision).toBe("allow");
     expect(resp.matches).toHaveLength(1);
-    // The render sink should have captured the warning
+    // The render sink captures StreamChunk objects; check rendered content
+    const getContent = (c: any): string =>
+      typeof c === "string" ? c : (c?.content ?? JSON.stringify(c));
     expect(captured).toHaveLength(1);
-    expect(captured[0]).toContain("Avoid destructive commands");
-    expect(captured[0]).toContain("Dangerous command detected");
-    expect(captured[0]).toContain("global");
+    expect(getContent(captured[0])).toContain("Avoid destructive commands");
+    expect(getContent(captured[0])).toContain("Dangerous command detected");
+    expect(getContent(captured[0])).toContain("global");
   });
 
   it("posttool carries tenantId + scope (awaitable Promise<void>)", async () => {
