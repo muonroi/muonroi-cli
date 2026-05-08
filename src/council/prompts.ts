@@ -63,6 +63,29 @@ export function buildSpecSynthesisPrompt(topic: string, conversationContext: str
 
 // ── Debate prompts ───────────────────────────────────────────────────────────
 
+/** Evidence rule injected into every stance-prompt builder. */
+const EVIDENCE_RULE_OPENING =
+  `\n## Evidence Rule\n` +
+  `If you dispute a verifiable claim made by your partner, you MUST run a tool to verify it first.\n` +
+  `Tag your result:\n` +
+  `- \`[REFUTED via <tool>:<evidence>]\` if the claim is false\n` +
+  `- \`[CONFIRMED via <tool>:<evidence>]\` if the claim holds\n` +
+  `If no tool is available, note the claim as unverified: \`[UNVERIFIED: <claim>]\`.\n`;
+const EVIDENCE_RULE_RESPONSE =
+  `\n## Evidence Rule\n` +
+  `If you dispute a verifiable claim made by your partner, you MUST run a tool to verify it first.\n` +
+  `Tag your result:\n` +
+  `- \`[REFUTED via <tool>:<evidence>]\` if the claim is false\n` +
+  `- \`[CONFIRMED via <tool>:<evidence>]\` if the claim holds\n` +
+  `If no tool is available, note the claim as unverified: \`[UNVERIFIED: <claim>]\`.\n`;
+const EVIDENCE_RULE_FOLLOWUP =
+  `\n## Evidence Rule\n` +
+  `If you dispute a verifiable claim made by your partner, you MUST run a tool to verify it first.\n` +
+  `Tag your result:\n` +
+  `- \`[REFUTED via <tool>:<evidence>]\` if the claim is false\n` +
+  `- \`[CONFIRMED via <tool>:<evidence>]\` if the claim holds\n` +
+  `If no tool is available, note the claim as unverified: \`[UNVERIFIED: <claim>]\`.\n`;
+
 /** Resolve the persona label used inside debate prompts. Stance wins; role is fallback. */
 function personaOf(role: string, stance?: DebateStance): { label: string; lens: string; focus: string } {
   if (stance) {
@@ -95,6 +118,7 @@ export function buildOpeningPrompt(ctx: {
       `You are the "${me.label}". Your lens: ${me.lens}.\n` +
       `You are entering a discussion with the "${them.label}" (${them.lens}).\n` +
       focusLine +
+      EVIDENCE_RULE_OPENING +
       guardrails +
       (ctx.conversationContext ? `\n## Conversation Context\n${ctx.conversationContext}\n\n---\n\n` : "\n") +
       `## Discussion Brief\n` +
@@ -121,8 +145,9 @@ export function buildResponsePrompt(ctx: {
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   return {
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n\n` +
-      `## Discussion Brief\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n` +
+      EVIDENCE_RULE_RESPONSE +
+      `\n## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n\n` +
       `Give your honest take:\n` +
@@ -151,7 +176,9 @@ export function buildFollowupPrompt(ctx: {
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
   return {
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n` +
+      EVIDENCE_RULE_FOLLOWUP +
+      `\n` +
       (ctx.runningSummary
         ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
         : "") +
@@ -195,7 +222,9 @@ export function buildLeaderEvaluationPrompt(ctx: {
       `  "needsResearch": false,\n` +
       `  "researchQuery": null,\n` +
       `  "shouldContinue": true/false,\n` +
-      `  "reason": "one sentence explaining your decision"\n` +
+      `  "reason": "one sentence explaining your decision",\n` +
+      `  "evidenceDensity": 0.0,  // citations / total claims ratio (0.0–1.0)\n` +
+      `  "disagreementResolved": 0  // count of [REFUTED] + [CONFIRMED] tags and explicit concessions\n` +
       `}`,
     prompt: `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
   };
