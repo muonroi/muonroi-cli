@@ -41,12 +41,16 @@ describe("renderInterceptWarning", () => {
 });
 
 describe("emitMatches + setRenderSink", () => {
-  let captured: string[];
+  let captured: Array<any>;
 
   beforeEach(() => {
     captured = [];
-    setRenderSink((line) => captured.push(line));
+    setRenderSink((chunk) => captured.push(chunk));
   });
+
+  // emitMatches now emits StreamChunk objects; extract renderable content for assertions
+  const getContent = (c: any): string =>
+    typeof c === "string" ? c : (c?.content ?? JSON.stringify(c));
 
   it("emits each match via the sink", () => {
     const matches: InterceptMatch[] = [
@@ -55,8 +59,8 @@ describe("emitMatches + setRenderSink", () => {
     ];
     emitMatches(matches);
     expect(captured).toHaveLength(2);
-    expect(captured[0]).toContain("Avoid editing X");
-    expect(captured[1]).toContain("Do not delete Z");
+    expect(getContent(captured[0])).toContain("Avoid editing X");
+    expect(getContent(captured[1])).toContain("Do not delete Z");
   });
 
   it("does nothing for undefined matches", () => {
