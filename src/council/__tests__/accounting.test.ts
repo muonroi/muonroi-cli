@@ -48,8 +48,8 @@ describe("CQ-02: runDebate returns active field in DebateState", () => {
       runningSummary: "",
       roundCount: 0,
       active: [
-        { role: "analyst" as const, model: "claude-3-5-haiku-20241022", position: "final position text" },
-        { role: "critic" as const, model: "gpt-4o-mini", position: "final critic position" },
+        { role: "implement" as const, model: "claude-3-5-haiku-20241022", position: "final position text" },
+        { role: "verify" as const, model: "gpt-4o-mini", position: "final critic position" },
       ],
     };
 
@@ -65,8 +65,8 @@ describe("CQ-02: runDebate returns active field in DebateState", () => {
   it("active participants carry their positions after debate rounds", () => {
     // Simulate debate.ts mutation pattern: participant.position = response
     const active: DebateState["active"] = [
-      { role: "analyst" as const, model: "m1", position: "" },
-      { role: "critic" as const, model: "m2", position: "" },
+      { role: "implement" as const, model: "m1", position: "" },
+      { role: "verify" as const, model: "m2", position: "" },
     ];
 
     // Simulate what debate.ts does during rounds (b.position = bResponse)
