@@ -32,3 +32,27 @@ export function projectCostUSD(
   const outUSD = (estOutputTokens / 1_000_000) * p.output_per_million_usd;
   return inUSD + outUSD;
 }
+
+/**
+ * Cache-aware cost projection. Splits input tokens into hit (charged at the
+ * cached_input rate when the model surfaces one) and miss (full input rate).
+ * Falls back to {@link projectCostUSD} when the model has no cached price.
+ *
+ * Use this for cost previews and post-hoc reconciliation of /ideal runs where
+ * DeepSeek prompt caching can change projected spend by an order of magnitude.
+ */
+export function projectCostUSDWithCache(
+  provider: string,
+  model: string,
+  estInputMissTokens: number,
+  estInputHitTokens: number,
+  estOutputTokens: number,
+): number {
+  const p = lookupPricing(provider, model);
+  if (!p) return 0;
+  const missUSD = (estInputMissTokens / 1_000_000) * p.input_per_million_usd;
+  const hitRate = p.cached_input_per_million_usd ?? p.input_per_million_usd;
+  const hitUSD = (estInputHitTokens / 1_000_000) * hitRate;
+  const outUSD = (estOutputTokens / 1_000_000) * p.output_per_million_usd;
+  return missUSD + hitUSD + outUSD;
+}
