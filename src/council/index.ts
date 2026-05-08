@@ -23,6 +23,8 @@ import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import { queryExperience } from "../ee/council-bridge.js";
 import type { CouncilExperienceResult } from "../ee/council-bridge.js";
+import { judgeCouncilOutcome } from "../ee/judge.js";
+import { recordCouncilOutcome } from "../ee/phase-outcome.js";
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -256,6 +258,25 @@ export async function* runCouncil(
       appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
     } catch { /* non-critical */ }
   }
+
+  // CQ-16: Judge synthesis quality; confidence < 0.5 → [NEEDS HUMAN REVIEW] flag
+  // CQ-17: Record council outcome to EE brain (fire-and-forget)
+  void judgeCouncilOutcome(synthesisText).then((verdict) => {
+    // CQ-16: Append review flag if confidence < 0.5
+    if (verdict.confidence < 0.5 && sessionId) {
+      try {
+        appendSystemMessage(
+          sessionId,
+          `[NEEDS HUMAN REVIEW] Council synthesis confidence: ${(verdict.confidence * 100).toFixed(0)}%. Reason: ${verdict.reason}`,
+        );
+      } catch { /* non-critical */ }
+    }
+    // CQ-17: Record to EE brain
+    recordCouncilOutcome(topic, synthesisText, verdict, {
+      sessionId,
+      durationMs: Date.now() - stats.startMs,
+    });
+  }).catch(() => { /* non-critical */ });
 
   // ── Phase E: Execute (if plan approved) ─────────────────────────────────────
   if (plan && plan.steps.length > 0) {

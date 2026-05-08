@@ -17,6 +17,7 @@
  */
 
 import type { Scope } from "./types.js";
+import type { CouncilJudgeResult } from "./judge.js";
 
 export type PhaseOutcomeKind = "pass" | "fail" | "abandoned" | "aborted" | "resumed";
 
@@ -123,4 +124,43 @@ export function fireAndForgetPhaseOutcome(
 /** Test-only: reset the once-per-process warning latch. */
 export function _resetPhaseOutcomeState(): void {
   _warnedOnce = false;
+}
+
+export interface RecordCouncilOutcomeOpts {
+  sessionId?: string;
+  durationMs?: number;
+  baseUrl?: string;
+  authToken?: string;
+}
+
+/**
+ * Fire-and-forget council outcome to EE brain.
+ * Maps verdict → PhaseOutcomeKind: pass/fail/abandoned.
+ * B-4 compliant — never blocks. Never throws.
+ */
+export function recordCouncilOutcome(
+  topic: string,
+  synthesis: string,
+  verdict: CouncilJudgeResult,
+  opts: RecordCouncilOutcomeOpts = {},
+): void {
+  const outcomeKind: PhaseOutcomeKind =
+    verdict.verdict === "pass" ? "pass"
+    : verdict.verdict === "needs_review" ? "fail"
+    : "abandoned";
+
+  const payload: PhaseOutcomePayload = {
+    sessionId: opts.sessionId ?? "council",
+    phaseName: `council:${topic.slice(0, 60)}`,
+    outcome: outcomeKind,
+    evidence: {
+      synthesisLength: synthesis.length,
+      confidence: verdict.confidence,
+      judgeReason: verdict.reason,
+      durationMs: opts.durationMs,
+    },
+  };
+
+  void firePhaseOutcome(payload, { baseUrl: opts.baseUrl, authToken: opts.authToken })
+    .catch(() => { /* swallow — non-critical */ });
 }

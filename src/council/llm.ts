@@ -10,6 +10,42 @@ import { loadMcpServers } from "../utils/settings.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
+import { emitMatches } from "../ee/render.js";
+
+/**
+ * Wrap each tool in the set with EE PreToolUse intercept check.
+ * Before executing any tool, fires EE intercept and emits warnings via render sink.
+ * CQ-15: wrapToolsWithEeCheck applied to all debate round tools.
+ */
+function wrapToolsWithEeCheck(tools: ToolSet, tenantId: string): ToolSet {
+  const wrapped: ToolSet = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    if (!tool || typeof (tool as { execute?: unknown }).execute !== "function") {
+      wrapped[name] = tool;
+      continue;
+    }
+    wrapped[name] = {
+      ...tool,
+      execute: async (args: unknown, opts: unknown) => {
+        // Fire EE PreToolUse intercept (non-blocking, fail-open)
+        try {
+          const client = getDefaultEEClient();
+          const resp = await client.intercept({
+            toolName: name,
+            toolInput: args,
+            cwd: process.cwd(),
+            tenantId,
+            scope: { kind: "global" },
+          });
+          emitMatches(resp?.matches);
+        } catch { /* fail-open — tool must execute regardless */ }
+        return (tool as { execute: (args: unknown, opts: unknown) => unknown }).execute(args, opts);
+      },
+    };
+  }
+  return wrapped;
+}
 
 export function createCouncilLLM(
   bash: BashTool,
@@ -51,7 +87,8 @@ export function createCouncilLLM(
         // MCP spawn failed — debate continues with builtin tools only
       }
 
-      const allTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+      const mergedTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+      const allTools: ToolSet = wrapToolsWithEeCheck(mergedTools, sessionId ?? "council");
 
       try {
         const result = await generateText({
