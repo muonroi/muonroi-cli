@@ -311,6 +311,7 @@ export function buildSynthesisPrompt(ctx: {
   finalPositions: string;
   allExchanges: string;
   debatePlan?: DebatePlan;
+  outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
 }): { system: string; prompt: string } {
   const shape = ctx.debatePlan?.outputShape;
 
@@ -339,28 +340,44 @@ export function buildSynthesisPrompt(ctx: {
     ? `\n## Guardrails\n${finalShape.guardrails.map((g) => `- ${g}`).join("\n")}\n`
     : "";
 
+  // CQ-18: Respect PIL outputStyle from Layer 6 (concise/balanced/detailed)
+  const styleDirective = ctx.outputStyle
+    ? `Output style preference: ${ctx.outputStyle}. ` +
+      (ctx.outputStyle === "concise"
+        ? "Be brief and direct. Prefer bullet lists. Omit preamble."
+        : ctx.outputStyle === "detailed"
+        ? "Be thorough. Include rationale and evidence for each point."
+        : "Balance clarity with completeness.") // balanced (default)
+    : "";
+
+  let system =
+    `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
+    `## Original Brief\n` +
+    `Problem: ${ctx.spec.problemStatement}\n` +
+    `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
+    `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
+    intent +
+    guardrailBlock +
+    `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
+    `unless the output shape explicitly asks for actionItems/plan. ` +
+    `Stay grounded in the discussion; do not invent facts; mark unverified claims explicitly.\n\n` +
+    `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
+    `**Part 1: JSON** — a single JSON object:\n` +
+    `{\n` +
+    `  "type": "${finalShape.kind}",\n` +
+    `  "summary": "1-2 sentence executive summary",\n` +
+    sectionLines + "\n" +
+    `}\n\n` +
+    `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
+    headingLines +
+    `\n\nBe decisive but evidence-grounded.`;
+
+  if (styleDirective) {
+    system = `${styleDirective}\n\n${system}`;
+  }
+
   return {
-    system:
-      `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
-      `## Original Brief\n` +
-      `Problem: ${ctx.spec.problemStatement}\n` +
-      `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
-      `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
-      intent +
-      guardrailBlock +
-      `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
-      `unless the output shape explicitly asks for actionItems/plan. ` +
-      `Stay grounded in the discussion; do not invent facts; mark unverified claims explicitly.\n\n` +
-      `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
-      `**Part 1: JSON** — a single JSON object:\n` +
-      `{\n` +
-      `  "type": "${finalShape.kind}",\n` +
-      `  "summary": "1-2 sentence executive summary",\n` +
-      sectionLines + "\n" +
-      `}\n\n` +
-      `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
-      headingLines +
-      `\n\nBe decisive but evidence-grounded.`,
+    system,
     prompt: `Final positions:\n${ctx.finalPositions}\n\nFull discussion:\n${ctx.allExchanges}`,
   };
 }

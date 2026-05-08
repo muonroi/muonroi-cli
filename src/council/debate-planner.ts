@@ -53,6 +53,29 @@ const DebatePlanSchema = z.object({
 
 // ── planDebate ────────────────────────────────────────────────────────────────
 
+/** Helper: inject Experience Auditor stance into a plan, depending on mode. */
+function injectAuditorStance(
+  plan: DebatePlan,
+  eeWarnings: CouncilWarning[] | undefined,
+  experienceMode: CouncilExperienceMode | undefined,
+): DebatePlan {
+  // CQ-14: Auto-add Experience Auditor stance when EE returns >= 1 warning and mode != off
+  if (!eeWarnings || eeWarnings.length < 1 || experienceMode === "off") return plan;
+  const auditorStance: DebateStance = {
+    name: "Experience Auditor",
+    lens: "Challenge all claims against known past mistakes and principles recorded in the experience brain.",
+    focus: eeWarnings.map((w) => w.text).join("; ").slice(0, 300),
+  };
+  const stances = [...plan.stances];
+  // advisory: append as 3rd voice; enforcing: replace last generic stance
+  if (experienceMode === "enforcing" && stances.length >= 2) {
+    stances[stances.length - 1] = auditorStance;
+  } else {
+    stances.push(auditorStance);
+  }
+  return { ...plan, stances };
+}
+
 /**
  * Leader-LLM proposes the debate's stances + output shape based on the topic.
  *
@@ -64,11 +87,14 @@ export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
   llm: CouncilLLM,
-  // CQ-11: EE warnings + mode — passed from runCouncil, consumed fully in plan 16-05
-  _eeWarnings?: CouncilWarning[],
-  _experienceMode?: CouncilExperienceMode,
+  eeWarnings?: CouncilWarning[],          // CQ-13: experience snippets to seed prompt
+  experienceMode?: CouncilExperienceMode, // CQ-14: controls Experience Auditor injection
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
-  const { system, prompt } = buildDebatePlanPrompt(spec);
+  const eeSnippets = eeWarnings?.map((w) => w.text).filter(Boolean) ?? [];
+  const { system: baseSystem, prompt } = buildDebatePlanPrompt(spec);
+  const system = eeSnippets.length > 0
+    ? `${baseSystem}\n\n## Experience Warnings (from brain)\nNote these past mistakes when designing debate stances:\n${eeSnippets.map((s) => `- ${s}`).join("\n")}`
+    : baseSystem;
 
   // Attempt 1: generateObject with Zod schema
   try {
@@ -89,11 +115,12 @@ export async function* planDebate(
     const stances = sanitizeStances(object.stances);
     const outputShape = sanitizeShape(object.outputShape);
     if (stances.length >= 2 && outputShape) {
-      return {
+      const plan: DebatePlan = {
         intentSummary: object.intentSummary || "(no intent summary provided)",
         stances,
         outputShape,
       };
+      return injectAuditorStance(plan, eeWarnings, experienceMode);
     }
     // Invalid even with schema — fall through to retry with a sanitize-failure message
     throw new Error("Sanitize check failed: stances.length < 2 or outputShape is null");
@@ -115,7 +142,7 @@ export async function* planDebate(
         maxTokens: 1500,
       });
       const retryParsed = parsePlan(retryRaw);
-      if (retryParsed) return retryParsed;
+      if (retryParsed) return injectAuditorStance(retryParsed, eeWarnings, experienceMode);
     } catch (retryErr) {
       yield {
         type: "content",
@@ -125,7 +152,7 @@ export async function* planDebate(
   }
 
   // All attempts exhausted — return fallback
-  return FALLBACK_PLAN;
+  return injectAuditorStance(FALLBACK_PLAN, eeWarnings, experienceMode);
 }
 
 function parsePlan(raw: string): DebatePlan | null {
