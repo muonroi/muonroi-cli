@@ -48,7 +48,7 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     enabled: true,
     transport: "stdio",
     command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-fetch"],
+    args: ["-y", "mcp-fetch-server"],
   },
   {
     id: "tavily",
