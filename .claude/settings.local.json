@@ -28,7 +28,11 @@
       "Skill(gsd-quick)",
       "PowerShell(Out-Null *)",
       "mcp__plugin_chrome-devtools-mcp_chrome-devtools__list_pages",
-      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__navigate_page"
+      "mcp__plugin_chrome-devtools-mcp_chrome-devtools__navigate_page",
+      "Skill(gsd-new-milestone)",
+      "Skill(gsd-discuss-phase)",
+      "Skill(gsd-plan-phase)",
+      "Skill(gsd-execute-phase)"
     ]
   }
 }

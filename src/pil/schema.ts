@@ -27,7 +27,7 @@ export const PipelineMetricsSchema = z.object({
   layerTimings: z.array(LayerTimingSchema),
   inputChars: z.number().min(0),
   outputChars: z.number().min(0),
-  estimatedTokensSaved: z.number().min(0),
+  suffixInstructionTokens: z.number().min(0),
   enrichmentTokensAdded: z.number().min(0),
 });
 

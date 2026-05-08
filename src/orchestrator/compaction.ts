@@ -39,7 +39,9 @@ export const COMPACTION_SUMMARY_HEADER = "[Context checkpoint summary]";
 const SUMMARIZATION_SYSTEM_PROMPT = `You are a context summarization assistant.
 
 Do not continue the conversation. Do not answer any questions from the conversation.
-Only output a structured checkpoint summary that another coding agent can use to continue the work.`;
+Only output a structured checkpoint summary that another coding agent can use to continue the work.
+
+CRITICAL: The agent reading this summary must NEVER redo completed work. Mark completed items clearly.`;
 
 const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
@@ -48,25 +50,34 @@ Use this exact format:
 ## Goal
 [What the user is trying to accomplish]
 
+## Active Plan
+- **Plan file**: [path to PLAN.md or plan document being followed, or "(none)" if no explicit plan]
+- **Plan step**: [current step number and description, e.g. "Step 3/7: implement layer6-output.ts", or "(none)"]
+- **Plan source**: [e.g. "/gsd:execute-phase", "/gsd:quick", "manual", or "(none)"]
+
 ## Constraints & Preferences
 - [Requirements, preferences, or constraints]
 - [(none) if none were mentioned]
 
 ## Progress
-### Done
-- [x] [Completed work]
+### ✅ DONE — DO NOT REDO
+- [x] [Completed work — be specific: file changed, test passed, command ran]
 
-### In Progress
-- [ ] [Current work]
+### 🔄 In Progress (resume here)
+- [ ] [Current work with exact state: e.g. "editing src/foo.ts — halfway through refactor"]
 
-### Blocked
-- [Any active blockers]
+### ❌ Blocked
+- [Any active blockers with root cause if known]
+
+## Session Notes
+- [Important observations, warnings, or gotchas discovered during the session]
+- [(none) if not applicable]
 
 ## Key Decisions
 - **[Decision]**: [Rationale]
 
 ## Next Steps
-1. [The next action to take]
+1. [The very next action to take — be specific enough that the agent can act without re-reading the conversation]
 
 ## Critical Context
 - [Important details needed to continue]
@@ -85,8 +96,10 @@ const UPDATE_SUMMARIZATION_PROMPT = `The messages above are new conversation mes
 Update the existing structured summary with new information. Rules:
 - Preserve still-relevant information from the previous summary
 - Add new progress, decisions, and critical context
-- Move completed items from "In Progress" to "Done" when appropriate
+- Move completed items from "In Progress" to "Done" (✅ DONE — DO NOT REDO) when appropriate
+- Update "Active Plan" step if the current step has advanced
 - Update "Next Steps" based on the current state
+- Append new observations to "Session Notes"
 - Preserve exact file paths, function names, and error messages
 
 ## Critical Data
@@ -97,14 +110,18 @@ Use the exact same section structure as the existing summary format.`;
 const TURN_PREFIX_SUMMARIZATION_PROMPT = `This is the early prefix of a single turn that was too large to keep in full. The recent suffix is still available.
 
 Summarize only what is needed so another coding agent can understand the retained suffix.
+CRITICAL: List all completed steps explicitly so the agent does not redo them.
 
 Use this exact format:
 
 ## Original Request
 [What the user asked for in this turn]
 
-## Early Progress
-- [Key work done before the kept suffix]
+## Early Progress — COMPLETED (DO NOT REDO)
+- [x] [Each completed step before the suffix — be specific: file edited, test ran, etc.]
+
+## Current State
+- [Exact state at the cut point: what was just done, what variable/file is mid-edit]
 
 ## Context For Suffix
 - [Information needed to understand the kept recent messages]`;

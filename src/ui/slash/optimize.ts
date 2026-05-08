@@ -25,7 +25,7 @@ function formatPilTable(ctx: PipelineContext): string {
   let metricsBlock = "";
   if (ctx.metrics) {
     const m = ctx.metrics;
-    metricsBlock = `\n\nMetrics:\n  total pipeline: ${m.totalMs}ms\n  input chars: ${m.inputChars}\n  output chars: ${m.outputChars}\n  est. tokens saved: ${m.estimatedTokensSaved}\n  layer timings:\n${m.layerTimings.map((t) => `    ${t.name.padEnd(28)} ${t.ms}ms`).join("\n")}`;
+    metricsBlock = `\n\nMetrics:\n  total pipeline: ${m.totalMs}ms\n  input chars: ${m.inputChars}\n  output chars: ${m.outputChars}\n  L6 suffix input cost: ${m.suffixInstructionTokens} tok\n  layer timings:\n${m.layerTimings.map((t) => `    ${t.name.padEnd(28)} ${t.ms}ms`).join("\n")}`;
   }
 
   const outputMode = `Output mode: ${getLastOutputMode()}`;

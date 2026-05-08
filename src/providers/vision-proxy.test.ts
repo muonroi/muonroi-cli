@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
 
 vi.mock("../models/registry.js", () => ({
@@ -115,7 +115,11 @@ describe("proxyVision", () => {
 
   it("returns fallback description on API error", async () => {
     setFetch(
-      vi.fn().mockResolvedValue({ ok: false, status: 500, text: () => Promise.resolve("server error") }) as unknown as typeof globalThis.fetch,
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        text: () => Promise.resolve("server error"),
+      }) as unknown as typeof globalThis.fetch,
     );
 
     const messages = [
@@ -163,6 +167,75 @@ describe("proxyVision", () => {
     expect(result.imageCount).toBe(2);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
     expect(content.some((p) => p.text.includes("2 images analyzed"))).toBe(true);
+  });
+
+  it("uses json_object response_format when user text signals design intent", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: '{"viewport":{"width":1440}}' } }] }),
+    });
+    setFetch(mockFetch as unknown as typeof globalThis.fetch);
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "redesign this Figma mockup as a dashboard" },
+          { type: "image" as const, image: fakeBase64, mediaType: "image/png" },
+        ],
+      },
+    ];
+
+    await proxyVision(messages, "deepseek-v4-flash");
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.response_format).toEqual({ type: "json_object" });
+  });
+
+  it("does NOT set response_format for plain analysis intent", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ choices: [{ message: { content: "ok" } }] }),
+    });
+    setFetch(mockFetch as unknown as typeof globalThis.fetch);
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "what error is shown here?" },
+          { type: "image" as const, image: fakeBase64, mediaType: "image/png" },
+        ],
+      },
+    ];
+
+    await proxyVision(messages, "deepseek-v4-flash");
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.response_format).toBeUndefined();
+  });
+
+  it("svg input bypasses vision API entirely", async () => {
+    const mockFetch = vi.fn();
+    setFetch(mockFetch as unknown as typeof globalThis.fetch);
+
+    const svg = '<svg width="100"><rect x="10" y="10" fill="#007bff"/></svg>';
+    const svgB64 = Buffer.from(svg, "utf8").toString("base64");
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "redesign this layout" },
+          { type: "image" as const, image: svgB64, mediaType: "image/svg+xml" },
+        ],
+      },
+    ];
+
+    const result = await proxyVision(messages, "deepseek-v4-flash");
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(result.proxied).toBe(true);
+    const content = result.messages[0].content as Array<{ type: string; text: string }>;
+    expect(content.some((p) => p.text.includes("fast-path"))).toBe(true);
+    expect(content.some((p) => p.text.includes("rect"))).toBe(true);
   });
 
   it("preserves non-user messages unchanged", async () => {

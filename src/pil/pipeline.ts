@@ -89,7 +89,7 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
       layerTimings: timings,
       inputChars: ctx.raw.length,
       outputChars: ctx.enriched.length,
-      estimatedTokensSaved: Math.round(suffixChars / 4),
+      suffixInstructionTokens: Math.round(suffixChars / 4),
       enrichmentTokensAdded: Math.round(enrichmentCharsAdded / 4),
     },
   };

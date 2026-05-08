@@ -44,7 +44,7 @@ const makePipelineContext = (): PipelineContext => ({
     ],
     inputChars: 12,
     outputChars: 31,
-    estimatedTokensSaved: 20,
+    suffixInstructionTokens: 20,
     enrichmentTokensAdded: 5,
   },
   layers: [
@@ -135,7 +135,7 @@ describe("handleOptimizeSlash", () => {
     const result = (await dispatchSlash("optimize", [], makeCtx())) as string;
     expect(result).toContain("Metrics:");
     expect(result).toContain("total pipeline:");
-    expect(result).toContain("est. tokens saved:");
+    expect(result).toContain("L6 suffix input cost:");
     expect(result).toContain("layer timings:");
   });
 

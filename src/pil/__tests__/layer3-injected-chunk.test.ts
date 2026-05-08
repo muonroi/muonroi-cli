@@ -40,7 +40,7 @@ const BASE_CTX: PipelineContext = {
   layers: [],
   tokenBudget: 4096,
   sessionId: "test-session",
-  taskType: "implement",
+  taskType: "general",
   domain: "frontend",
   outputStyle: null,
   confidence: 0.8,

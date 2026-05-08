@@ -200,6 +200,14 @@ export interface HookResult {
   command: string;
 }
 
+export interface EEMatchEntry {
+  id: string;
+  toolName: string;
+  message: string;
+  why: string;
+  confidence: number;
+}
+
 export interface AggregatedHookResult {
   blocked: boolean;
   blockingErrors: Array<{ command: string; stderr: string }>;
@@ -208,6 +216,8 @@ export interface AggregatedHookResult {
   additionalContexts: string[];
   decision?: "approve" | "block";
   results: HookResult[];
+  /** Structured EE match entries — used by orchestrator to inject into session guidance. */
+  eeMatches?: EEMatchEntry[];
 }
 
 // --- Hook Configuration types ---
