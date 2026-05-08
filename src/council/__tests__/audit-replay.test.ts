@@ -91,8 +91,12 @@ vi.mock("../../utils/settings.js", async (importOriginal) => {
 
 const SYNTHESIS_JSON = JSON.stringify({
   type: "evaluation",
-  summary: "Council found strong evidence from docs/Council.md and tavily research confirming the approach.",
-  findings: ["docs/Council.md:42 shows the flow", "tavily found https://tavily.example.com/results"],
+  summary: "Council found strong evidence from docs/Council.md, tavily research, and snapshot:pw-001 of localhost:3010.",
+  findings: [
+    "docs/Council.md:42 shows the flow",
+    "tavily found https://tavily.example.com/results",
+    "snapshot:pw-001 localhost:3010 screenshot confirms UI state",
+  ],
   plan: { steps: [], estimatedComplexity: "trivial", prerequisites: [] },
 });
 
@@ -288,13 +292,10 @@ describe("audit-replay", () => {
     const jsonStr = memMsg!.content.slice("[Council Memory] ".length);
     const record = JSON.parse(jsonStr);
 
-    // synthesis should contain at least one of: docs/ reference, tavily, or snapshot
+    // synthesis must contain all three: docs/ reference, tavily citation, snapshot signal
     const synthesis: string = record.synthesis ?? "";
-    const hasEvidence =
-      synthesis.includes("docs/") ||
-      synthesis.includes("tavily") ||
-      synthesis.includes("snapshot");
-
-    expect(hasEvidence).toBe(true);
+    expect(synthesis).toContain("docs/");
+    expect(synthesis).toContain("tavily");
+    expect(synthesis).toContain("snapshot");
   });
 });

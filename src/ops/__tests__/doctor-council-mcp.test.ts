@@ -27,24 +27,31 @@ vi.mock("../../providers/keychain.js", () => ({
   listStoredProviders: vi.fn().mockResolvedValue([]),
 }));
 
-// Mock loadMcpServers and loadUserSettings from settings.js
-const mockLoadMcpServers = vi.fn().mockReturnValue([]);
-const mockLoadUserSettings = vi.fn().mockReturnValue({});
+// vi.hoisted() ensures mock variables are initialized before vi.mock() factories run
+const { mockLoadMcpServers, mockLoadUserSettings } = vi.hoisted(() => ({
+  mockLoadMcpServers: vi.fn().mockReturnValue([]),
+  mockLoadUserSettings: vi.fn().mockReturnValue({}),
+}));
+
 vi.mock("../../utils/settings.js", () => ({
   loadMcpServers: mockLoadMcpServers,
   loadUserSettings: mockLoadUserSettings,
   loadProjectSettings: vi.fn().mockReturnValue({}),
 }));
 
-// Mock getDatabase — returns different results for brain vs mcp queries
-const mockGet = vi.fn().mockReturnValue({ cnt: 0 });
-const mockAll = vi.fn().mockReturnValue([]);
-const mockPrepare = vi.fn().mockImplementation((sql: string) => {
-  if (sql.includes("interaction_logs")) {
-    return { get: mockGet };
-  }
-  return { all: mockAll };
+// vi.hoisted() for db mocks — mockPrepare captures mockGet/mockAll in the same closure
+const { mockGet, mockAll, mockPrepare } = vi.hoisted(() => {
+  const mockGet = vi.fn().mockReturnValue({ cnt: 0 });
+  const mockAll = vi.fn().mockReturnValue([]);
+  const mockPrepare = vi.fn().mockImplementation((sql: string) => {
+    if (sql.includes("interaction_logs")) {
+      return { get: mockGet };
+    }
+    return { all: mockAll };
+  });
+  return { mockGet, mockAll, mockPrepare };
 });
+
 vi.mock("../../storage/db.js", () => ({
   getDatabase: vi.fn(() => ({ prepare: mockPrepare })),
 }));
