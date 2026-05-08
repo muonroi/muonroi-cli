@@ -129,37 +129,66 @@ export async function* runPlanning(
   return { outcome, plan, synthesisText };
 }
 
-function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedCouncilOutcome | null {
-  try {
-    const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) return null;
-    const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
-    const type = typeof parsed.type === "string" ? parsed.type : (debatePlan?.outputShape.kind ?? "decision");
-    const summary = typeof parsed.summary === "string" ? parsed.summary : "";
-    if (!summary) return null;
-
-    // Pull dynamic sections out by the leader's proposed keys.
-    const sections: Record<string, unknown> = {};
-    if (debatePlan?.outputShape.sections) {
-      for (const s of debatePlan.outputShape.sections) {
-        if (s.key in parsed) sections[s.key] = parsed[s.key];
-      }
-    }
-
-    return {
-      type,
-      summary,
-      sections: Object.keys(sections).length > 0 ? sections : undefined,
-      // Legacy fields — synthesizer may still emit them when shape calls for them.
-      agreed: Array.isArray(parsed.agreed) ? (parsed.agreed as string[]) : undefined,
-      tradeoffs: Array.isArray(parsed.tradeoffs) ? (parsed.tradeoffs as string[]) : undefined,
-      recommendation: typeof parsed.recommendation === "string" ? parsed.recommendation : undefined,
-      actionItems: Array.isArray(parsed.actionItems) ? (parsed.actionItems as string[]) : undefined,
-      planUpdate: typeof parsed.planUpdate === "string" ? parsed.planUpdate : undefined,
-      resolvedQuestion: parsed.resolvedQuestion as EnhancedCouncilOutcome["resolvedQuestion"],
-      plan: parsed.plan as ActionPlan | undefined,
-    };
-  } catch {
-    return null;
+function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedCouncilOutcome | null {
+  const shape = debatePlan.outputShape;
+  // Extract summary: first line with >= 20 non-whitespace chars
+  const summary = synthesisText.split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length >= 20) ?? "";
+  if (!summary) return null;
+  const sections: Record<string, unknown> = {};
+  for (const s of shape.sections) {
+    sections[s.key] = s.shape === "list" ? [] : s.shape === "objectList" ? [] : "";
   }
+  return {
+    type: shape.kind,
+    summary,
+    sections: Object.keys(sections).length > 0 ? sections : undefined,
+  };
+}
+
+function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedCouncilOutcome | null {
+  const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+      const type = typeof parsed.type === "string" ? parsed.type : (debatePlan?.outputShape.kind ?? "decision");
+      const summary = typeof parsed.summary === "string" ? parsed.summary : "";
+      if (!summary) {
+        // fall through to log + fallback
+        throw new Error("No summary in parsed JSON");
+      }
+
+      // Pull dynamic sections out by the leader's proposed keys.
+      const sections: Record<string, unknown> = {};
+      if (debatePlan?.outputShape.sections) {
+        for (const s of debatePlan.outputShape.sections) {
+          if (s.key in parsed) sections[s.key] = parsed[s.key];
+        }
+      }
+
+      return {
+        type,
+        summary,
+        sections: Object.keys(sections).length > 0 ? sections : undefined,
+        // Legacy fields — synthesizer may still emit them when shape calls for them.
+        agreed: Array.isArray(parsed.agreed) ? (parsed.agreed as string[]) : undefined,
+        tradeoffs: Array.isArray(parsed.tradeoffs) ? (parsed.tradeoffs as string[]) : undefined,
+        recommendation: typeof parsed.recommendation === "string" ? parsed.recommendation : undefined,
+        actionItems: Array.isArray(parsed.actionItems) ? (parsed.actionItems as string[]) : undefined,
+        planUpdate: typeof parsed.planUpdate === "string" ? parsed.planUpdate : undefined,
+        resolvedQuestion: parsed.resolvedQuestion as EnhancedCouncilOutcome["resolvedQuestion"],
+        plan: parsed.plan as ActionPlan | undefined,
+      };
+    } catch {
+      // fall through to log + fallback
+    }
+  }
+  // Log raw text for diagnostics (CQ-20)
+  console.error("[Council] parseOutcome failed — raw synthesis text:", synthesisText);
+  // Shape-based fallback
+  if (debatePlan?.outputShape) {
+    return shapeFallback(synthesisText, debatePlan);
+  }
+  return null;
 }
