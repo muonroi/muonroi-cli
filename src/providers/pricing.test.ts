@@ -27,10 +27,19 @@ describe("lookupPricing", () => {
     expect(p!.input_per_million_usd).toBe(0.3);
   });
 
-  it("returns pricing for deepseek deepseek-v4-flash", () => {
+  it("returns pricing for deepseek deepseek-v4-flash with cached_input rate", () => {
     const p = lookupPricing("deepseek", "deepseek-v4-flash");
     expect(p).toBeDefined();
-    expect(p!.input_per_million_usd).toBe(0.1);
+    expect(p!.input_per_million_usd).toBe(0.27);
+    expect(p!.output_per_million_usd).toBe(1.1);
+    expect(p!.cached_input_per_million_usd).toBe(0.027);
+  });
+
+  it("anthropic models surface cache_write surcharge", () => {
+    const p = lookupPricing("anthropic", "claude-3-5-sonnet-latest");
+    expect(p?.cached_input_per_million_usd).toBeDefined();
+    expect(p?.cache_write_per_million_usd).toBeDefined();
+    expect(p!.cache_write_per_million_usd!).toBeGreaterThan(p!.input_per_million_usd);
   });
 
   it("returns undefined for unknown provider", () => {

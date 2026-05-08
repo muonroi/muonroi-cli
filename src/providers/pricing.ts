@@ -12,27 +12,80 @@
 export interface PricePerMillion {
   input_per_million_usd: number;
   output_per_million_usd: number;
+  /**
+   * Optional cache-hit input price (per million tokens). When the provider
+   * surfaces a cached-input rate (DeepSeek's prompt-cache hit, OpenAI cached
+   * input, Anthropic cache-read), set this. Cost engines should bill the
+   * cached portion at this rate and the miss portion at input_per_million_usd.
+   * If omitted, treat input as fully un-cached.
+   */
+  cached_input_per_million_usd?: number;
+  /**
+   * Optional Anthropic-style cache-write surcharge per million. Anthropic
+   * charges 1.25× input for cache writes; cost engines that track writes
+   * separately can use this. Most providers won't set it.
+   */
+  cache_write_per_million_usd?: number;
 }
 
-// verified 2026-04-29 from official provider pricing pages
+// verified 2026-04-29 from official provider pricing pages; cache prices
+// re-verified 2026-05-08 against deepseek-platform / openai / anthropic docs
 export const PRICING: Record<string, Record<string, PricePerMillion>> = {
   anthropic: {
-    "claude-3-5-haiku-latest": { input_per_million_usd: 0.8, output_per_million_usd: 4.0 }, // anthropic.com/pricing
-    "claude-3-5-sonnet-latest": { input_per_million_usd: 3.0, output_per_million_usd: 15.0 }, // anthropic.com/pricing
-    "claude-3-opus-latest": { input_per_million_usd: 15.0, output_per_million_usd: 75.0 }, // anthropic.com/pricing
+    "claude-3-5-haiku-latest": {
+      input_per_million_usd: 0.8,
+      output_per_million_usd: 4.0,
+      cached_input_per_million_usd: 0.08, // 0.1× input (cache-read)
+      cache_write_per_million_usd: 1.0, // 1.25× input
+    },
+    "claude-3-5-sonnet-latest": {
+      input_per_million_usd: 3.0,
+      output_per_million_usd: 15.0,
+      cached_input_per_million_usd: 0.3,
+      cache_write_per_million_usd: 3.75,
+    },
+    "claude-3-opus-latest": {
+      input_per_million_usd: 15.0,
+      output_per_million_usd: 75.0,
+      cached_input_per_million_usd: 1.5,
+      cache_write_per_million_usd: 18.75,
+    },
   },
   openai: {
-    "gpt-4o": { input_per_million_usd: 2.5, output_per_million_usd: 10.0 }, // openai.com/api/pricing
-    "gpt-4o-mini": { input_per_million_usd: 0.15, output_per_million_usd: 0.6 }, // openai.com/api/pricing
-    o1: { input_per_million_usd: 15.0, output_per_million_usd: 60.0 }, // openai.com/api/pricing
+    "gpt-4o": {
+      input_per_million_usd: 2.5,
+      output_per_million_usd: 10.0,
+      cached_input_per_million_usd: 1.25, // 0.5× input
+    },
+    "gpt-4o-mini": {
+      input_per_million_usd: 0.15,
+      output_per_million_usd: 0.6,
+      cached_input_per_million_usd: 0.075,
+    },
+    o1: {
+      input_per_million_usd: 15.0,
+      output_per_million_usd: 60.0,
+      cached_input_per_million_usd: 7.5,
+    },
   },
   google: {
     "gemini-2.5-flash": { input_per_million_usd: 0.3, output_per_million_usd: 2.5 }, // ai.google.dev/pricing
     "gemini-pro-latest": { input_per_million_usd: 1.25, output_per_million_usd: 10.0 }, // ai.google.dev/pricing
   },
   deepseek: {
-    "deepseek-v4-flash": { input_per_million_usd: 0.1, output_per_million_usd: 0.4 }, // api-docs.deepseek.com
-    "deepseek-v4-pro": { input_per_million_usd: 2.0, output_per_million_usd: 8.0 }, // api-docs.deepseek.com
+    // DeepSeek V4 chat: $0.27/M input miss, $0.027/M input hit, $1.10/M output
+    // (api-docs.deepseek.com/quick_start/pricing). Flash/Pro split below mirrors
+    // their public chat / reasoner tiers; refresh quarterly.
+    "deepseek-v4-flash": {
+      input_per_million_usd: 0.27,
+      cached_input_per_million_usd: 0.027,
+      output_per_million_usd: 1.1,
+    },
+    "deepseek-v4-pro": {
+      input_per_million_usd: 0.55,
+      cached_input_per_million_usd: 0.055,
+      output_per_million_usd: 2.19,
+    },
   },
   siliconflow: {
     "Qwen/Qwen2.5-Coder-32B-Instruct": { input_per_million_usd: 0.18, output_per_million_usd: 0.18 }, // siliconflow.com/pricing

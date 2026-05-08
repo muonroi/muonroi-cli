@@ -12,6 +12,7 @@ import {
 } from "./artifact-io.js";
 import { runLoopDriver, type DriverContext, type DriverResult } from "./loop-driver.js";
 import { runSprint } from "./sprint-runner.js";
+import { previewRunCost, formatCostPreview } from "./cost-preview.js";
 import type { ProductSpec, IterationState, RoleSlot } from "./types.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
@@ -110,6 +111,17 @@ async function* runStart(
     stack: flags.stack,
     createdAt: new Date(),
   });
+
+  // Surface a cost-vs-cap preview before the loop kicks off so $50 isn't
+  // an arbitrary number — show predicted spend per sprint × max-sprints
+  // against the configured cap, with a recommended max-sprints if it
+  // would exceed. Falls back gracefully for unknown-pricing models.
+  const preview = previewRunCost({
+    sessionModelId: opts.sessionModelId,
+    maxSprints: flags.maxSprints,
+    capUsd: flags.maxCost,
+  });
+  yield { type: "content", content: `\n${formatCostPreview(preview)}\n` } as StreamChunk;
 
   const ctx: DriverContext = {
     runId,
