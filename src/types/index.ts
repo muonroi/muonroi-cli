@@ -306,8 +306,24 @@ export interface CouncilPreflightData {
   researchNeeded: boolean;
 }
 
+export interface ExperienceWarningData {
+  confidence: number;
+  message: string;
+  why: string;
+  scopeLabel: string;
+  principleUuid: string;
+}
+
+export interface ExperienceInjectedData {
+  pointCount: number;
+  pointIds: string[];
+  scoreFloor: number;
+  taskType?: string;
+  domain?: string;
+}
+
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response" | "product_status_card";
+  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response" | "product_status_card" | "experience_warning" | "experience_injected";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -321,6 +337,8 @@ export interface StreamChunk {
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
+  experienceWarning?: ExperienceWarningData;
+  experienceInjected?: ExperienceInjectedData;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
