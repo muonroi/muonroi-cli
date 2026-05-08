@@ -144,6 +144,12 @@ Plans:
   4. When the topic contains an `https?://` URL, the research role's tool trace contains at least one Playwright or Chrome-DevTools call before the research output is returned
   5. Research output always contains the three labelled sections `## Source Code Findings`, `## Internet Findings`, `## Frontend Findings (live)`, each with citations (`[file:line]`, `[url]`, or `[snapshot:uid]`); empty sections are explicitly marked `(no findings — gap noted)`
   6. Re-running the audit topic against the eBerth session reproduces all of the above in the persisted council memory record
+**Plans:** 4 plans
+Plans:
+- [ ] 14-01-PLAN.md — Type contracts: DebateState.active + RunCouncilOptions.councilStats
+- [ ] 14-02-PLAN.md — Test scaffolds: accounting.test.ts + research-tools.test.ts
+- [ ] 14-03-PLAN.md — Bug fixes: debate.ts return + index.ts stats/positions + orchestrator pass-through
+- [ ] 14-04-PLAN.md — MCP wiring + URL detection + 3-section research prompt
 
 ### Phase 15: Tool-grounded Debate Rounds
 **Milestone**: v1.6 Council Quality & Trust
@@ -203,7 +209,7 @@ Plans:
 | 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
 | 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
 | 13. Product Ideal Loop | v1.5 | 6/6 | Complete    | 2026-05-07 |
-| 14. Council Accounting & Research MCP Wiring | v1.6 | 0/0 | Planned     | — |
+| 14. Council Accounting & Research MCP Wiring | v1.6 | 0/4 | Planned     | — |
 | 15. Tool-grounded Debate Rounds | v1.6 | 0/0 | Planned     | — |
 | 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
 | 17. Council Robustness & Observability | v1.6 | 0/0 | Planned     | — |
