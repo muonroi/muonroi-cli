@@ -164,31 +164,42 @@ Plans:
   5. Debate-planner uses structured JSON output (provider schema mode where supported) and retries once with explicit schema feedback before falling back to generic stances; fallback rate drops below 10% on representative topics
 **Plans:** 5 plans
 Plans:
+**Wave 1**
 - [ ] 15-01-PLAN.md — Type contracts: LeaderEvaluation + CouncilLLM.debate() interface
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 15-02-PLAN.md — llm.debate() implementation + prompts refute-then-cite injection
 - [ ] 15-03-PLAN.md — debate.ts: switch to llm.debate() + per-round persistence + evidence density metrics
 - [ ] 15-04-PLAN.md — debate-planner: generateObject structured output + retry path
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 15-05-PLAN.md — TDD: round-tools.test.ts + evaluator-metrics.test.ts (CQ-06 through CQ-10)
+
+Cross-cutting constraints: `llm.debate()` return shape `{ text, toolCalls }` must remain consistent across 15-01 (types), 15-02 (implementation), 15-03 (consumers)
 
 ### Phase 16: PIL + EE Integration into Council
 **Milestone**: v1.6 Council Quality & Trust
 **Goal**: Bring the project's existing intelligence (PIL pipeline, EE brain) into the council so debates are calibrated by past experience and outcomes feed learning back to the brain.
 **Depends on**: Phase 15 (round tool tracing is the integration point for `wrapToolWithEeCheck`)
-**Requirements**: CQ-11, CQ-12, CQ-13, CQ-14, CQ-15, CQ-16, CQ-17, CQ-18, CQ-19
+**Requirements**: CQ-11, CQ-12, CQ-13, CQ-14, CQ-15, CQ-16, CQ-17, CQ-18, CQ-19, CQ-16a, CQ-16b, CQ-16c, CQ-16d
+**EE mode assumption**: thin-client only. EE runs on VPS at `experience.muonroi.com` (per `~/.experience/config.json` `version: "thin-client"`). Fat-mode is OUT OF SCOPE for v1.6 — `~/.experience/experience-core.js` is absent on the dev box and embedding it is a separate project. All EE access goes through HTTP via `ee/bridge.ts:searchByText`, `ee/client.ts` (intercept/judge/extract/phase-outcome). The thin-client circuit breaker + offline queue absorb VPS unreachability.
 **Success Criteria** (what must be TRUE):
   1. `runCouncil` invokes `runPipeline(topic)` at run start; `taskType`, `complexityTier`, `domain`, and `outputStyle` propagate to debate-planner and synthesis prompts
-  2. New `ee/council-bridge.ts:queryExperience(topic, domain)` returns relevant EE warnings/principles and degrades gracefully when EE is offline (no crash, no hang, ≤500ms cumulative latency budget on the critical path)
+  2. New `ee/council-bridge.ts:queryExperience(topic, domain)` issues a single thin-client `searchByText` call (`experience-behavioral` + `experience-principles` collections), returns matched points, and degrades gracefully when the VPS is unreachable (no crash, no hang, ≤500ms cumulative latency budget on the critical path; fall back to no-experience path on timeout)
   3. When `queryExperience` returns ≥1 high-confidence warning, an "Experience Auditor" stance is auto-added with a lens dynamically built from the top warning
   4. Tool calls inside debate rounds emit PreToolUse warnings into the debate output stream via `wrapToolWithEeCheck` before executing
   5. After synthesis, `ee/judge.ts:judgeOutcome` returns confidence ∈ [0,1]; confidence `< 0.5` triggers either another debate round (if rounds remaining) or a `[NEEDS HUMAN REVIEW]` flag on the synthesis
   6. `ee/phase-outcome.ts:recordCouncilOutcome` posts the synthesis + verdict + confidence to the EE brain on every run
   7. Synthesis text honours `ctx.outputStyle` (concise/balanced/detailed) instead of always defaulting to one style
   8. Feature flag `council.experienceMode = off | advisory | enforcing` is settable via `/gsd-settings`, defaults to `advisory`, and `off` exits the EE integration cleanly with no latency cost
+  9. **(CQ-16a)** App boot wires `setRenderSink` (from `src/ee/render.ts`) into the StreamChunk pipeline so PreToolUse `emitMatches` warnings appear in the chat UI as `⚠ [Experience]` blocks; `console.warn` no longer leaks to stderr in TUI raw mode
+ 10. **(CQ-16b)** Successful PIL Layer 3 injection emits a dedicated `experience_injected` StreamChunk (collapsed by default, expandable) showing experience id, score, source collection, and the snippet that was added to the prompt — so the user can see WHICH experience was applied, not only that "something" was
+ 11. **(CQ-16c)** `muonroi doctor` includes an EE thin-client health probe: reads `~/.experience/config.json` (`serverBaseUrl` + `serverReadAuthToken`), calls `/health` with `Authorization: Bearer <token>`, and reports per-subsystem status (`qdrant`, `fileStore`, `embed`); shows actionable hints when VPS unreachable, token missing, or only one subsystem degraded
+ 12. **(CQ-16d)** Brain-emptiness diagnostic: when `interaction_logs` shows ≥50 consecutive `ee_injection` rows whose `event_subtype != 'injected'`, doctor (and a session-start one-liner) suggest either running `experience extract` / `experience evolve` on the VPS to bootstrap principles, or lowering `MUONROI_PIL_SCORE_FLOOR` if matches are present but filtered as noise. Today's audit on this machine: 0/55 successful injections — suggests brain bootstrap needed.
 
 **Open questions for plan-phase:**
-- EE thin-mode latency budget — measure first, may need cache or async pre-fetch
-- `ee/judge.ts` schema fit — may need a new judging dimension for council outcomes vs phase outcomes
-- Whether `Experience Auditor` should count toward the participants quota or be additive
+- `queryExperience` latency budget on a 5-second `serverTimeoutMs` — when VPS is slow, do we wait or short-circuit? Recommend: 1.5s hard cap on the council critical path, parallel with clarifier/preflight to hide cost.
+- `ee/judge.ts` schema fit — current judge is for phase outcomes; council outcomes need different dimensions (evidence-grounded? convergence? actionability?). May need new `judgeCouncilOutcome` variant.
+- "Experience Auditor" participant accounting — additive when `experienceMode=advisory` (3rd voice), replaces a generic role when `experienceMode=enforcing`?
+- `setRenderSink` wiring point — most natural is in `src/index.ts` boot, sink pushes a synthetic `StreamChunk` into the active orchestrator's stream. Need to confirm there's exactly one orchestrator at a time before this is safe (multi-session concurrency = NO per current architecture, so safe).
 
 ### Phase 17: Council Robustness & Observability
 **Milestone**: v1.6 Council Quality & Trust
