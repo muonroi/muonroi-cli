@@ -1,5 +1,6 @@
 import { loadMcpServers, saveMcpServers, saveUserSettings, loadUserSettings } from "../utils/settings.js";
 import { setMcpKey } from "./mcp-keychain.js";
+import { ensureDefaultMcpServers } from "./auto-setup.js";
 
 export interface OnboardingIO {
   askYesNo: (prompt: string) => Promise<string>;
@@ -41,6 +42,11 @@ export async function validateTavilyKey(key: string): Promise<boolean> {
 }
 
 function setTavilyEnabled(enabled: boolean): void {
+  // Ensure DEFAULT_CONFIGS is materialized in settings before mutating.
+  // First-run wizard runs before the orchestrator's own ensureDefaultMcpServers
+  // call, so without this the tavily row may not yet exist and the toggle
+  // would silently no-op.
+  ensureDefaultMcpServers();
   const servers = loadMcpServers();
   const idx = servers.findIndex((s) => s.id === "tavily");
   if (idx === -1) return;

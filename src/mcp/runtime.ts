@@ -8,6 +8,24 @@ import type { ToolSet } from "ai";
 import type { McpServerConfig } from "../utils/settings.js";
 import { validateMcpServerConfig } from "./validate.js";
 import { createOAuthProviderWithCallback } from "./oauth-provider.js";
+import { getMcpKey, type McpKeyId } from "./mcp-keychain.js";
+
+// Map MCP server id → keychain id + env var name for env hydration at spawn.
+// When a server's env value is empty/missing, we look up the key from the
+// OS keychain (or its env-var fallback) and inject it into the spawned process.
+const MCP_ENV_HYDRATION: Record<string, { keyId: McpKeyId; envVar: string }> = {
+  tavily: { keyId: "tavily", envVar: "TAVILY_API_KEY" },
+};
+
+async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfig> {
+  const hydration = MCP_ENV_HYDRATION[server.id];
+  if (!hydration) return server;
+  const existing = server.env?.[hydration.envVar];
+  if (existing && existing.length > 0) return server;
+  const key = await getMcpKey(hydration.keyId);
+  if (!key) return server;
+  return { ...server, env: { ...(server.env ?? {}), [hydration.envVar]: key } };
+}
 
 function mcpToolPrefix(server: McpServerConfig): string {
   return `mcp_${server.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
@@ -56,16 +74,21 @@ export async function buildMcpToolSet(
   const clients: MCPClient[] = [];
   const cleanups: (() => void)[] = [];
 
-  for (const server of servers) {
-    if (!server.enabled) continue;
+  for (const rawServer of servers) {
+    if (!rawServer.enabled) continue;
 
-    const validation = validateMcpServerConfig(server);
+    const validation = validateMcpServerConfig(rawServer);
     if (!validation.ok) {
-      errors.push(`${server.label}: ${validation.error}`);
+      errors.push(`${rawServer.label}: ${validation.error}`);
       continue;
     }
 
     try {
+      // Hydrate env vars from the OS keychain before spawning — e.g. inject
+      // TAVILY_API_KEY for the tavily MCP if the user stored it via the
+      // research-onboarding wizard.
+      const server = await hydrateServerEnv(rawServer);
+
       let authProvider: OAuthClientProvider | undefined;
 
       if (server.transport !== "stdio" && opts?.onOAuthRequired) {
@@ -96,7 +119,7 @@ export async function buildMcpToolSet(
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${server.label}: ${message}`);
+      errors.push(`${rawServer.label}: ${message}`);
     }
   }
 
