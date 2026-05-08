@@ -11,6 +11,7 @@
 import { searchByText } from "../ee/bridge.js";
 import type { EEPoint } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
+import { getRenderSink } from "../ee/render.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
@@ -119,6 +120,23 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   // Use String(p.id) since EEPoint.id is string | number from Qdrant.
   updateLastSurfacedState(points.map((p) => String(p.id)));
+
+  // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block
+  // showing which experience was applied (id, score, collection, snippet).
+  try {
+    const injectedChunk = {
+      type: "experience_injected" as const,
+      experienceInjected: {
+        pointCount: points.length,
+        pointIds: points.map((p) => String(p.id)),
+        scoreFloor: PIL_SCORE_FLOOR,
+        taskType: ctx.taskType ?? undefined,
+        domain: ctx.domain ?? undefined,
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    getRenderSink()(injectedChunk as any);
+  } catch { /* fail-open — never break injection path */ }
 
   const hint = formatExperienceHints(points);
   const budgetShare = Math.floor(ctx.tokenBudget * 0.3);
