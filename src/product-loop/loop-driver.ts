@@ -9,6 +9,13 @@ import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { discoverProject, formatDiscoverySummary, type DiscoveryResult } from "./discover.js";
+import {
+  auditRepo,
+  formatAuditSummary,
+  auditAsContextBlock,
+  additionalPrefills,
+  type RepoAudit,
+} from "./repo-audit.js";
 import type { DriverContext, DriverResult, Stage, ProductSpec } from "./types.js";
 import type { ClarifiedSpec, DebateState, CouncilParticipant } from "../council/types.js";
 
@@ -17,6 +24,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   let clarifiedSpec: ClarifiedSpec | undefined;
   let debateState: DebateState | undefined;
   let discovery: DiscoveryResult | undefined;
+  let audit: RepoAudit | undefined;
+  let conversationContext = "";
 
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
 
@@ -44,22 +53,48 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           label: "Project discovery",
         });
 
-        discovery = await discoverProject(ctx.cwd);
+        // Run shallow manifest probe and deep repo audit in parallel.
+        const [discoveryResult, auditResult] = await Promise.all([
+          discoverProject(ctx.cwd),
+          auditRepo(ctx.cwd),
+        ]);
+        discovery = discoveryResult;
+        audit = auditResult;
 
-        const summary = formatDiscoverySummary(discovery);
-        if (summary) {
-          yield { type: "content", content: `\n${summary}\n` } as StreamChunk;
+        // Merge audit-derived prefills into discovery (manifest wins on conflict).
+        for (const [dim, value] of additionalPrefills(audit).entries()) {
+          if (!discovery.prefilled.has(dim)) {
+            discovery.prefilled.set(dim, value);
+            discovery.evidence.push({ dim, source: "repo-audit", value });
+            discovery.notes.push(`Inferred from audit: ${dim}=${value}`);
+          }
         }
 
-        // Persist discovery evidence so resume can replay decisions.
+        const discoverSummary = formatDiscoverySummary(discovery);
+        if (discoverSummary) {
+          yield { type: "content", content: `\n${discoverSummary}\n` } as StreamChunk;
+        }
+        const auditSummary = formatAuditSummary(audit);
+        if (auditSummary) {
+          yield { type: "content", content: `\n${auditSummary}\n` } as StreamChunk;
+        }
+
+        // Build conversationContext for clarifier + debate so prompts are
+        // grounded in real repo state, not generic boilerplate.
+        conversationContext = auditAsContextBlock(audit);
+
+        // Persist discovery evidence + repo audit so resume can replay.
+        const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
         if (discovery.evidence.length > 0) {
-          const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
           stateMap.sections.set(
             "Discovery",
             discovery.evidence.map((e) => `- ${e.dim}: ${e.value} (source: ${e.source})`).join("\n"),
           );
-          await writeArtifact(runDir, "state.md", stateMap);
         }
+        if (audit.hasProject) {
+          stateMap.sections.set("Repo Audit", conversationContext);
+        }
+        await writeArtifact(runDir, "state.md", stateMap);
 
         state = "gather";
         break;
@@ -80,7 +115,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const clarifierGen = runClarification(
           ctx.idea,
           leaderModelId,
-          "",
+          conversationContext,
           ctx.respondToQuestion,
           ctx.llm,
           undefined,
@@ -169,7 +204,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           clarifiedSpec,
           {
             topic: ctx.idea,
-            conversationContext: "",
+            conversationContext,
             leaderModelId,
             participants,
           },
