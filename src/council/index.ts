@@ -27,6 +27,8 @@ export interface RunCouncilOptions {
   signal?: AbortSignal;
   /** Working directory used to resolve the "current project" snapshot. */
   cwd?: string;
+  /** Shared stats object from orchestrator — when provided, runCouncil uses it instead of a local one so stats.calls is accurate (Phase 14 CQ-01). */
+  councilStats?: CouncilStats;
 }
 
 export async function* runCouncil(
