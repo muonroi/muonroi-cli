@@ -218,7 +218,7 @@ export interface StructuredResponse {
   data: Record<string, unknown>;
 }
 
-export type CouncilQuestionPhase = "clarify" | "preflight" | "plan-confirm";
+export type CouncilQuestionPhase = "clarify" | "preflight" | "plan-confirm" | "post-debate";
 
 export type CouncilOptionKind = "choice" | "freetext" | "chat";
 
@@ -368,7 +368,7 @@ export interface ModelInfo {
 }
 
 export type AgentMode = "agent" | "plan" | "ask";
-export type SessionStatus = "active" | "archived";
+export type SessionStatus = "active" | "completed" | "archived";
 export type UsageSource = "message" | "title" | "task" | "delegation" | "other";
 
 export interface WorkspaceInfo {

@@ -9,8 +9,9 @@
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
 import { getModelByTier, getModelInfo } from "../models/registry.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import { taskTypeToRole } from "../pil/task-tier-map.js";
-import { getRoleModel } from "../utils/settings.js";
+import { getRoleModel, isProviderDisabled } from "../utils/settings.js";
 import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
@@ -246,17 +247,20 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     const roleModelId = getRoleModel(role);
     if (roleModelId) {
       const info = getModelInfo(roleModelId);
-      const d: RouteDecision = {
-        tier: "hot",
-        model: roleModelId,
-        provider: info?.provider ?? opts.defaultProvider,
-        reason: `role:${role}→${roleModelId}`,
-        source: "role",
-      };
-      const checked = await capCheck(d, opts.homeOverride);
-      routerStore.setState({ tier: checked.tier, lastDecision: checked, taskHash: null, source: "role" });
-      if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
-      return checked;
+      const provider = detectProviderForModel(roleModelId);
+      if (!isProviderDisabled(provider)) {
+        const d: RouteDecision = {
+          tier: "hot",
+          model: roleModelId,
+          provider,
+          reason: `role:${role}→${roleModelId}`,
+          source: "role",
+        };
+        const checked = await capCheck(d, opts.homeOverride);
+        routerStore.setState({ tier: checked.tier, lastDecision: checked, taskHash: null, source: "role" });
+        if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
+        return checked;
+      }
     }
   }
 

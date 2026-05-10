@@ -37,6 +37,22 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 }
 
 describe("layer5Context", () => {
+  it("skips workspace context when intentKind === 'chitchat'", async () => {
+    const before = "hi";
+    const result = await layer5Context(
+      makeCtx({
+        raw: before,
+        enriched: before,
+        intentKind: "chitchat",
+        resumeDigest: "should be ignored on chitchat",
+      }),
+    );
+    expect(result.enriched).toBe(before);
+    const layer = result.layers.find((l) => l.name === "context-enrichment");
+    expect(layer!.applied).toBe(false);
+    expect(layer!.delta).toBe("skip:chitchat");
+  });
+
   it("injects resume digest when available", async () => {
     const digest = "Last session: refactored auth middleware, JWT validation working, need to add refresh token logic.";
     const result = await layer5Context(makeCtx({ resumeDigest: digest }));

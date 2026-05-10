@@ -92,12 +92,14 @@ export interface CouncilJudgeResult {
  */
 export async function judgeCouncilOutcome(synthesis: string): Promise<CouncilJudgeResult> {
   try {
-    // Heuristic scoring (deterministic â€” no LLM):
+    // Heuristic scoring (deterministic — no LLM):
     // +0.3 for synthesis length >= 200 chars (substantive)
     // +0.2 for at least one citation pattern ([file:], [url], [REFUTED via])
     // +0.2 for recommended action present (look for "Recommendation" or "recommend")
     // +0.15 for convergence signal ("agreed", "consensus", "all participants")
     // +0.15 for evidence density (>= 2 citation patterns)
+    // +0.15 for long synthesis >= 1000 chars (typical council output)
+    // +0.1 for very long synthesis >= 3000 chars
     let score = 0.0;
     const len = synthesis.length;
     const lc = synthesis.toLowerCase();
@@ -108,6 +110,8 @@ export async function judgeCouncilOutcome(synthesis: string): Promise<CouncilJud
     if (lc.includes("recommend")) score += 0.2;
     if (lc.includes("agreed") || lc.includes("consensus")) score += 0.15;
     if (citationCount >= 2) score += 0.15;
+    if (len >= 1000) score += 0.15;
+    if (len >= 3000) score += 0.1;
 
     const confidence = Math.min(1.0, Math.max(0.0, score));
 

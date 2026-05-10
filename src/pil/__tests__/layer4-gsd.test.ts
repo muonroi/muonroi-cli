@@ -18,6 +18,15 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 }
 
 describe("layer4Gsd (gsd-native)", () => {
+  it("skips directive injection when intentKind === 'chitchat'", async () => {
+    const before = "hello";
+    const result = await layer4Gsd(makeCtx({ raw: before, enriched: before, intentKind: "chitchat" }));
+    expect(result.enriched).toBe(before);
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.applied).toBe(false);
+    expect(layer!.delta).toBe("skip:chitchat");
+  });
+
   it("appends a gsd-native directive and records the layer as applied", async () => {
     const result = await layer4Gsd(makeCtx({ raw: "implement the login feature" }));
     expect(result.enriched).toContain("[gsd-native]");

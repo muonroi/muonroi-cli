@@ -175,10 +175,23 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
     // like "refactor this" or "fix the bug" that happen to be short.
     const trimmed = ctx.raw.trim();
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-    const isHotPathChitchat = taskType === null && trimmed.length < 10 && wordCount <= 2;
+    // Hot-path fires when there's NO task signal AND the input is ultra-short.
+    // Pass 1 (classifier) tags short messages as taskType="general" via
+    // `regex:short-message`. If Pass 2 keyword fallback found nothing either,
+    // we treat that as chitchat too — otherwise "hi" would be classified as
+    // "general task" instead of "chitchat" and lose the MCP-skip optimization.
+    const noTaskSignal =
+      taskType === null ||
+      (taskType === "general" && result.reason === "regex:short-message");
+    const isHotPathChitchat = noTaskSignal && trimmed.length < 10 && wordCount <= 2;
+    let intentKind: "task" | "chitchat" | null = null;
     if (isHotPathChitchat) {
       taskType = "general";
       confidence = 0.5;
+      intentKind = "chitchat";
+      // Greetings get a concise default — no need to spend 800ms on a brain
+      // round-trip in Pass 3b just to learn the user wants a short reply.
+      outputStyle = "concise";
     }
 
     if (taskType === null) {
@@ -213,6 +226,13 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
         if (matched) {
           taskType = matched;
           confidence = 0.55;
+          intentKind = "task";
+        } else if (/\bnone\b/.test(lower)) {
+          // Brain explicitly classified as chitchat / no-coding-intent.
+          taskType = "general";
+          confidence = 0.6;
+          intentKind = "chitchat";
+          if (outputStyle === null) outputStyle = "concise";
         }
         const styleMatched = VALID_STYLES.find(s => lower.includes(s));
         if (styleMatched) outputStyle = styleMatched;
@@ -241,12 +261,17 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
       outputStyle = detectStyleFromText(ctx.raw);
     }
 
+    if (intentKind === null && taskType !== null && taskType !== "general") {
+      intentKind = "task";
+    }
+
     return {
       ...ctx,
       taskType,
       domain,
       confidence,
       outputStyle,
+      intentKind,
       layers: [
         ...ctx.layers,
         {
@@ -254,7 +279,7 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
           applied: taskType !== null,
           delta:
             taskType !== null
-              ? `taskType=${taskType},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"}`
+              ? `taskType=${taskType},kind=${intentKind ?? "unknown"},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"}`
               : null,
         },
       ],

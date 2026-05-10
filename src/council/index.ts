@@ -1,6 +1,7 @@
 import type { ModelMessage } from "ai";
 import type { StreamChunk } from "../types/index.js";
-import { appendSystemMessage } from "../storage/index.js";
+import { appendSystemMessage, logInteraction } from "../storage/index.js";
+import { SessionStore } from "../storage/sessions.js";
 import { isCouncilMultiProviderPreferred, getCouncilExperienceMode } from "../utils/settings.js";
 import type {
   ClarifiedSpec,
@@ -221,6 +222,21 @@ export async function* runCouncil(
   const debateState = debateResult.value;
   stats.phases.push({ name: "debate", durationMs: Date.now() - debateStart });
 
+  // Store debate transcript as individual message
+  if (sessionId && debateState.exchangeLogs) {
+    try {
+      const logString = [...debateState.exchangeLogs.values()].flat().join("\n");
+      appendSystemMessage(sessionId, `[Debate Transcript]\nRounds: ${debateState.roundCount}\n\n${logString}`);
+    } catch { /* non-critical */ }
+  }
+
+  // Log interaction: debate complete
+  logInteraction(sessionId ?? "unknown", "council", {
+    eventSubtype: "debate_complete",
+    durationMs: Date.now() - debateStart,
+    data: { topic, roundCount: debateState.roundCount },
+  });
+
   // ── Phase D: Plan ───────────────────────────────────────────────────────────
   const planStart = Date.now();
   const planGen = runPlanning(
@@ -241,8 +257,175 @@ export async function* runCouncil(
       yield planResult.value;
     }
   } while (!planResult.done);
-  const { outcome, plan, synthesisText } = planResult.value;
+  let { outcome, plan, synthesisText } = planResult.value;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
+
+  // Log interaction: synthesis
+  logInteraction(sessionId ?? "unknown", "council", {
+    eventSubtype: "synthesis",
+    model: leaderModelId,
+    durationMs: Date.now() - planStart,
+    data: { topic, roundCount: debateState.roundCount, participantCount: debateState.active.length },
+  });
+
+  // ── Post-Debate AskCard: What next? ─────────────────────────────────────────
+  if (sessionId) {
+    try {
+      const { randomUUID } = await import("crypto");
+      const refinementTopics: string[] = [];
+      if (outcome) {
+        if (outcome.sections) {
+          for (const [key, val] of Object.entries(outcome.sections)) {
+            const strVal = typeof val === "string" ? val : Array.isArray(val) ? val.join("") : JSON.stringify(val);
+            if (!strVal || strVal.trim().length === 0) {
+              const sectionLabel = debatePlan.outputShape.sections.find((s) => s.key === key)?.heading ?? key;
+              refinementTopics.push(sectionLabel);
+            }
+          }
+        }
+      }
+
+      const questionId = randomUUID();
+      const hasPlan = plan && plan.steps.length > 0;
+      const hasEmptySections = refinementTopics.length > 0;
+
+      const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" }> = [];
+
+      baseOptions.push({
+        label: "Save & Exit",
+        description: "Save the debate outcome and finish",
+        value: "save_exit",
+        kind: "choice",
+      });
+
+      if (!hasPlan) {
+        baseOptions.push({
+          label: "Generate Action Plan",
+          description: "Create a detailed implementation plan from the debate outcome",
+          value: "generate_plan",
+          kind: "choice",
+        });
+      }
+
+      if (hasEmptySections) {
+        baseOptions.push({
+          label: `Refine: ${refinementTopics.join(", ")}`,
+          description: `Answer questions about ${refinementTopics.length} unresolved aspect(s)`,
+          value: "refine",
+          kind: "choice",
+        });
+      }
+
+      if (hasPlan) {
+        baseOptions.push({
+          label: "Start Implementation",
+          description: "Execute the action plan now",
+          value: "implement",
+          kind: "choice",
+        });
+      }
+
+      const defaultIndex = hasEmptySections
+        ? baseOptions.findIndex((o) => o.value === "refine")
+        : 0;
+
+      yield {
+        type: "council_question",
+        content: "## Debate Synthesis Complete\n\nThe council has reached a synthesis. What would you like to do next?",
+        councilQuestion: {
+          questionId,
+          phase: "post-debate",
+          question: hasEmptySections
+            ? `The debate identified ${refinementTopics.length} area(s) that need clarification. Would you like to refine them or save the current outcome?`
+            : "What would you like to do next?",
+          context: hasEmptySections
+            ? `Unresolved areas: ${refinementTopics.join(", ")}`
+            : "The council completed its debate and generated a synthesis.",
+          isRequired: false,
+          options: baseOptions,
+          defaultIndex: defaultIndex >= 0 ? defaultIndex : 0,
+        },
+      } as StreamChunk;
+
+      const answer = await respondToQuestion(questionId);
+      yield { type: "content", content: `\n  ↳ ${answer}\n` };
+
+      if (answer === "generate_plan") {
+        yield { type: "content", content: "\n> Re-running planning with action plan focus...\n" };
+        const refineGen = runPlanning(
+          debateState,
+          spec,
+          debateState.active,
+          leaderModelId,
+          respondToPreflight,
+          llm,
+          debatePlan,
+          pilCtx?.outputStyle ?? undefined,
+          undefined,
+          true,
+        );
+        let refineResult;
+        do {
+          refineResult = await refineGen.next();
+          if (!refineResult.done && refineResult.value) yield refineResult.value;
+        } while (!refineResult.done);
+        outcome = refineResult.value.outcome;
+        plan = refineResult.value.plan;
+        synthesisText = refineResult.value.synthesisText;
+      } else if (answer === "refine" && hasEmptySections) {
+        yield { type: "content", content: "\n> Let's clarify the unresolved aspects...\n" };
+        const refinedAnswers: Array<{ section: string; answer: string }> = [];
+        for (const label of refinementTopics) {
+          const sqId = randomUUID();
+          yield {
+            type: "council_question",
+            content: `## Refine: ${label}`,
+            councilQuestion: {
+              questionId: sqId,
+              phase: "post-debate",
+              question: `What should go in the "${label}" section?`,
+              context: `The debate did not produce a clear ${label}. Provide your input to be included in the final outcome.`,
+              isRequired: false,
+              options: [
+                { label: "Skip — leave as-is", description: "Keep the current (empty) value", value: "", kind: "choice" },
+                { label: "Type something", description: "Write your own input", value: "", kind: "freetext" },
+              ],
+            },
+          } as StreamChunk;
+          const ans = await respondToQuestion(sqId);
+          refinedAnswers.push({ section: label, answer: ans });
+          yield { type: "content", content: `\n  ↳ ${ans}\n` };
+        }
+        // Build refineContext string from user answers
+        const refineCtx = refinedAnswers
+          .filter((ra) => ra.answer && ra.answer.trim().length > 0)
+          .map((ra) => `### ${ra.section}\nThe user provided: ${ra.answer}`)
+          .join("\n\n");
+        // Re-run synthesis WITH user's input injected into prompt
+        yield { type: "content", content: "\n> Re-synthesizing with your input...\n" };
+        const refineGen = runPlanning(
+          debateState,
+          spec,
+          debateState.active,
+          leaderModelId,
+          respondToPreflight,
+          llm,
+          debatePlan,
+          pilCtx?.outputStyle ?? undefined,
+          refineCtx,
+        );
+        let refineResult;
+        do {
+          refineResult = await refineGen.next();
+          if (!refineResult.done && refineResult.value) yield refineResult.value;
+        } while (!refineResult.done);
+        outcome = refineResult.value.outcome;
+        plan = refineResult.value.plan;
+        synthesisText = refineResult.value.synthesisText;
+      }
+      // "save_exit" and "implement" fall through to normal persistence
+    } catch { /* non-critical */ }
+  }
 
   // ── Persist outcome ─────────────────────────────────────────────────────────
   if (sessionId) {
@@ -258,12 +441,19 @@ export async function* runCouncil(
         spec,
         debatePlan,
         participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
-        finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
-        synthesis: synthesisText.slice(0, 2000),
+        finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
+        synthesis: synthesisText,
         stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
         timestamp: new Date().toISOString(),
       };
       appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
+    } catch { /* non-critical */ }
+  }
+
+  // Update session status to completed
+  if (sessionId) {
+    try {
+      new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
     } catch { /* non-critical */ }
   }
 

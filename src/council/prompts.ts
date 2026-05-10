@@ -312,6 +312,8 @@ export function buildSynthesisPrompt(ctx: {
   allExchanges: string;
   debatePlan?: DebatePlan;
   outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
+  refineContext?: string;      // User answers from post-debate refinement askcard
+  planEmphasis?: boolean;       // If true, instruct LLM to produce a concrete action plan
 }): { system: string; prompt: string } {
   const shape = ctx.debatePlan?.outputShape;
 
@@ -376,9 +378,26 @@ export function buildSynthesisPrompt(ctx: {
     system = `${styleDirective}\n\n${system}`;
   }
 
+  let extraContext = "";
+  if (ctx.refineContext) {
+    extraContext += `
+## User Refinements
+${ctx.refineContext}
+`;
+  }
+  if (ctx.planEmphasis) {
+    extraContext += `
+## Additional Instruction
+The user has requested a concrete action plan with executable steps. Prioritize generating actionable steps in the plan field of the JSON output.
+`;
+  }
   return {
     system,
-    prompt: `Final positions:\n${ctx.finalPositions}\n\nFull discussion:\n${ctx.allExchanges}`,
+    prompt: `Final positions:
+${ctx.finalPositions}
+
+Full discussion:
+${ctx.allExchanges}${extraContext}`,
   };
 }
 

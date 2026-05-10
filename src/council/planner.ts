@@ -21,8 +21,10 @@ export async function* runPlanning(
   respondToPreflight: PreflightResponder,
   llm: CouncilLLM,
   debatePlan?: DebatePlan,
-  // CQ-18: PIL outputStyle from runCouncil — passed to buildSynthesisPrompt to control synthesis tone
+  // CQ-18: PIL outputStyle from runCouncil
   outputStyle?: string | null,
+  refineContext?: string,    // User refinement answers from post-debate askcard
+  planEmphasis?: boolean,     // If true, emphasize action plan generation
 ): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string }, unknown> {
   const p3Start = Date.now();
   yield phaseStart({
@@ -39,7 +41,7 @@ export async function* runPlanning(
   const finalPositions = participants
     .map((p) => {
       const label = p.stance?.name ?? p.role;
-      return `**${label}** (${p.role} · ${p.model}): ${p.position.slice(0, 500)}...`;
+      return `**${label}** (${p.role} · ${p.model}): ${p.position.slice(0, 2000)}...`;
     })
     .join("\n\n");
 
@@ -47,14 +49,14 @@ export async function* runPlanning(
   let outcome: EnhancedCouncilOutcome | null = null;
 
   try {
-    const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined });
+    const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined, refineContext, planEmphasis });
     synthesisText = yield* tracedGenerate(llm, {
       phase: "synthesis",
       label: "Synthesizing action plan",
       modelId: leaderModelId,
       system,
       prompt,
-      maxTokens: 4096,
+      maxTokens: 8192,
     });
 
     const readablePart = synthesisText.includes("---READABLE---")
@@ -136,9 +138,31 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
     .map((l) => l.trim())
     .find((l) => l.length >= 20) ?? "";
   if (!summary) return null;
+  // Simple markdown heading-based extraction for each section
   const sections: Record<string, unknown> = {};
   for (const s of shape.sections) {
-    sections[s.key] = s.shape === "list" ? [] : s.shape === "objectList" ? [] : "";
+    const heading = s.heading.toLowerCase().replace(/[^a-z0-9\s]/g, "");
+    // Find lines after "## Heading" pattern
+    const lines: string[] = [];
+    let found = false;
+    for (const line of synthesisText.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.match(new RegExp("^#{1,3}\s+" + heading.replace(/\s+/g, "\s+"), "i"))) {
+        found = true;
+        continue;
+      }
+      if (found) {
+        if (trimmed.startsWith("#")) break;
+        if (trimmed) lines.push(trimmed);
+      }
+    }
+    if (s.shape === "list") {
+      sections[s.key] = lines;
+    } else if (s.shape === "objectList") {
+      sections[s.key] = [];
+    } else {
+      sections[s.key] = lines.join("\n");
+    }
   }
   return {
     type: shape.kind,
@@ -148,14 +172,17 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
 }
 
 function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedCouncilOutcome | null {
-  const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
+  // Target only JSON before the ---READABLE--- separator to avoid matching curly braces in markdown
+  const jsonPart = synthesisText.includes("---READABLE---")
+    ? synthesisText.split("---READABLE---")[0]
+    : synthesisText;
+  const jsonMatch = jsonPart.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
       const type = typeof parsed.type === "string" ? parsed.type : (debatePlan?.outputShape.kind ?? "decision");
       const summary = typeof parsed.summary === "string" ? parsed.summary : "";
       if (!summary) {
-        // fall through to log + fallback
         throw new Error("No summary in parsed JSON");
       }
 
@@ -184,8 +211,8 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
       // fall through to log + fallback
     }
   }
-  // Log raw text for diagnostics (CQ-20)
-  console.error("[Council] parseOutcome failed — raw synthesis text:", synthesisText);
+  // Log raw text for diagnostics
+  console.error("[Council] parseOutcome failed — raw synthesis text:", synthesisText.slice(0, 500));
   // Shape-based fallback
   if (debatePlan?.outputShape) {
     return shapeFallback(synthesisText, debatePlan);

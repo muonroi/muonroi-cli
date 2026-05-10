@@ -32,6 +32,32 @@ const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
   general: "balanced",
 };
 
+// PIL-04 Tier 1.1: response-tool gating.
+// JSON-structured output saves tokens for list-shaped responses (analyze findings,
+// plan steps) where keys repeat instead of prose. It LOSES for code-heavy tasks
+// (generate/refactor/debug-with-diff) because escaping \n and \" in JSON strings
+// inflates tokens by 20-30%. Restrict response-tool activation accordingly.
+const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan"]);
+
+// PIL-04 Tier 1.2: per-task output token budget.
+// Hint to model. Empirically derived from interaction_logs avg output sizes;
+// ~20% below mean to nudge brevity without truncating real answers.
+const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
+  refactor: 800,
+  debug: 500,
+  plan: 700,
+  analyze: 600,
+  documentation: 900,
+  generate: 1200,
+  general: 200,
+};
+
+// PIL-04 Tier 1.3: ban preamble openers.
+// Measured ~30 tokens/turn wasted on "I'll help you...", "Sure, let me..." etc.
+// Bilingual EN+VN. Skipped for response-tools path (JSON has no preamble surface).
+const NO_PREAMBLE_RULE =
+  `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.`;
+
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
     concise: `\nOUTPUT RULES (refactor): Show only changed code. Prefer unified diff or replacement function. No prose unless architecture changes. One sentence max if explanation needed. No preamble.`,
@@ -71,24 +97,54 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
 };
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
+  // Chitchat: layer6Output already skipped suffix work; mirror that here so
+  // direct callers (e.g. orchestrator) don't accidentally re-inject rules.
+  if (ctx.intentKind === "chitchat") return systemPrompt;
   if (!ctx.taskType || !SUFFIXES[ctx.taskType]) return systemPrompt;
+
   if (responseToolsActive) {
     return (
       systemPrompt +
       `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then summarize your result via respond_${ctx.taskType}.`
     );
   }
+
   const style: OutputStyle = ctx.outputStyle ?? "concise";
-  return systemPrompt + SUFFIXES[ctx.taskType][style];
+  const baseSuffix = SUFFIXES[ctx.taskType][style];
+
+  // PIL-04 Tier 1.2: output-budget hint. Generic per-task ceiling so model
+  // self-regulates length even when style="balanced" or "detailed".
+  const budget = TASK_OUTPUT_BUDGET[ctx.taskType as TaskType] ?? 600;
+  const budgetHint = `\nOUTPUT BUDGET: aim for ≤${budget} tokens. Stop when the answer is complete; do not pad.`;
+
+  // PIL-04 Tier 1.3: ban preamble (applied to all styles — ~30 tokens saved/turn).
+  return systemPrompt + baseSuffix + budgetHint + NO_PREAMBLE_RULE;
 }
 
 export function getResponseToolSet(ctx: PipelineContext): ToolSet {
   if (!ctx.taskType) return {};
+  // PIL-04 Tier 1.1: gate JSON-structured output to list-shaped tasks where it
+  // wins on tokens. Code-heavy tasks fall through to markdown OUTPUT RULES.
+  if (!RESPONSE_TOOL_TASK_TYPES.has(ctx.taskType)) return {};
   return buildResponseTools(ctx.taskType);
 }
 
 export async function layer6Output(ctx: PipelineContext): Promise<PipelineContext> {
   try {
+    // Chitchat short-circuit: greetings/small-talk don't need OUTPUT RULES
+    // suffixes — the model already produces a short reply for "hi" without
+    // being told to. Aligns with L4/L5 chitchat skips so the fast-path stays
+    // clean end-to-end (no GSD, no context, no suffix, no MCP).
+    if (ctx.intentKind === "chitchat") {
+      return {
+        ...ctx,
+        layers: [
+          ...ctx.layers,
+          { name: "output-optimization", applied: false, delta: "skip:chitchat" },
+        ],
+      };
+    }
+
     if (ctx.taskType === null) {
       return {
         ...ctx,

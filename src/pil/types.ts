@@ -51,6 +51,14 @@ export interface PipelineContext {
   /** Heuristic gray-area questions surfaced by layer4 when tier === "heavy". */
   grayAreas?: GrayAreaQuestion[];
   /**
+   * Coarse intent: "chitchat" for greetings/small-talk/no-coding-intent,
+   * "task" when there is a coding intent, null when undetermined. Set by
+   * layer1; respected by layer4 (skip GSD directive) and layer5 (skip
+   * heavy context like recent-files / flow-state). Distinct from taskType
+   * "general", which conflates chitchat with low-confidence fallback.
+   */
+  intentKind?: "task" | "chitchat" | null;
+  /**
    * Diagnostic: when the pipeline returns the fallback context, this records
    * the reason (timeout / schema-reject / exception). Null on the happy path.
    * Helps distinguish "fallback because brain unreachable" from "fallback
