@@ -44,7 +44,19 @@ describe("layer1Intent", () => {
     const result = await layer1Intent(makeCtx("hi there"));
 
     expect(result.taskType).toBe("general");
-    expect(result.confidence).toBe(0.3);
+    // Hot-path chitchat short-circuit promotes the message to chitchat (≤10
+    // chars + ≤2 words AND no keyword match). It also bumps confidence to 0.5
+    // and assigns intentKind="chitchat" so downstream layers can skip MCP.
+    expect(result.confidence).toBe(0.5);
+    expect(result.intentKind).toBe("chitchat");
+  });
+
+  it("does NOT trigger chitchat hot-path when classifier is high-confidence", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:short-message", confidence: 0.3 });
+    // 11 chars, 3 words — fails hot-path constraints, stays plain "general".
+    const result = await layer1Intent(makeCtx("hi how are"));
+    expect(result.taskType).toBe("general");
+    expect(result.intentKind).toBeFalsy();
   });
 
   it("returns taskType=null for no-match without keyword or brain hit", async () => {

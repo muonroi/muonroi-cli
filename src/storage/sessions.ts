@@ -122,6 +122,17 @@ export class SessionStore {
     return session;
   }
 
+  setStatus(id: string, status: SessionStatus): void {
+    const now = new Date().toISOString();
+    getDatabase()
+      .prepare(`
+      UPDATE sessions
+      SET status = ?, updated_at = ?
+      WHERE id = ?
+    `)
+      .run(status, now, id);
+  }
+
   setTitle(id: string, title: string | null): void {
     const now = new Date().toISOString();
     getDatabase()

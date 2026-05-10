@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { applyPilSuffix, layer6Output } from "../layer6-output.js";
+import { applyPilSuffix, layer6Output, getResponseToolSet } from "../layer6-output.js";
 import type { OutputStyle, PipelineContext, TaskType } from "../types.js";
 
 // Mock bridge for PIL-03 classifyViaBrain tests
@@ -50,6 +50,64 @@ describe("applyPilSuffix — per-task-type suffixes", () => {
     const ctxNullStyle = makeCtx("debug", null);
     const ctxConcise = makeCtx("debug", "concise");
     expect(applyPilSuffix("S", ctxNullStyle)).toBe(applyPilSuffix("S", ctxConcise));
+  });
+
+  it("PIL-04 Tier 1.2: appends OUTPUT BUDGET hint per task type", () => {
+    const result = applyPilSuffix("S", makeCtx("debug", "concise"));
+    expect(result).toMatch(/OUTPUT BUDGET: aim for ≤500 tokens/);
+    const genResult = applyPilSuffix("S", makeCtx("generate", "concise"));
+    expect(genResult).toMatch(/OUTPUT BUDGET: aim for ≤1200 tokens/);
+  });
+
+  it("PIL-04 Tier 1.3: appends FORBIDDEN OPENERS rule for all styles", () => {
+    for (const style of ["concise", "balanced", "detailed"] as OutputStyle[]) {
+      const result = applyPilSuffix("S", makeCtx("plan", style));
+      expect(result).toMatch(/FORBIDDEN OPENERS/);
+      expect(result).toMatch(/Tôi sẽ/);  // bilingual
+    }
+  });
+
+  it("PIL-04: response-tools path skips budget+preamble (tool already enforces structure)", () => {
+    const result = applyPilSuffix("S", makeCtx("analyze", "balanced"), true);
+    expect(result).toContain("respond_analyze");
+    expect(result).not.toMatch(/OUTPUT BUDGET/);
+    expect(result).not.toMatch(/FORBIDDEN OPENERS/);
+  });
+});
+
+describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
+  it("returns response tool for analyze (list-shaped, JSON wins)", () => {
+    const tools = getResponseToolSet(makeCtx("analyze", null));
+    expect(Object.keys(tools)).toContain("respond_analyze");
+  });
+
+  it("returns response tool for plan (list-shaped, JSON wins)", () => {
+    const tools = getResponseToolSet(makeCtx("plan", null));
+    expect(Object.keys(tools)).toContain("respond_plan");
+  });
+
+  it("returns empty toolset for generate (code-heavy, markdown wins)", () => {
+    expect(getResponseToolSet(makeCtx("generate", null))).toEqual({});
+  });
+
+  it("returns empty toolset for refactor (diff-heavy, markdown wins)", () => {
+    expect(getResponseToolSet(makeCtx("refactor", null))).toEqual({});
+  });
+
+  it("returns empty toolset for debug (diff-heavy, markdown wins)", () => {
+    expect(getResponseToolSet(makeCtx("debug", null))).toEqual({});
+  });
+
+  it("returns empty toolset for documentation (prose-heavy)", () => {
+    expect(getResponseToolSet(makeCtx("documentation", null))).toEqual({});
+  });
+
+  it("returns empty toolset for general (chitchat-fallback)", () => {
+    expect(getResponseToolSet(makeCtx("general", null))).toEqual({});
+  });
+
+  it("returns empty toolset when taskType is null", () => {
+    expect(getResponseToolSet(makeCtx(null, null))).toEqual({});
   });
 });
 
@@ -171,6 +229,21 @@ describe("layer6Output", () => {
     const result = await layer6Output(makeCtx(null));
     expect(result.layers[0].applied).toBe(false);
     expect(result.layers[0].delta).toBeNull();
+  });
+
+  it("chitchat short-circuit: skips suffix work, marks delta=skip:chitchat", async () => {
+    const brain = await getMockBrain();
+    const ctx: PipelineContext = { ...makeCtx("general", "concise"), intentKind: "chitchat" };
+    const result = await layer6Output(ctx);
+    expect(result.layers[0].applied).toBe(false);
+    expect(result.layers[0].delta).toBe("skip:chitchat");
+    expect(brain).not.toHaveBeenCalled();
+  });
+
+  it("applyPilSuffix: returns prompt unchanged when intentKind=chitchat", () => {
+    const ctx: PipelineContext = { ...makeCtx("general", "concise"), intentKind: "chitchat" };
+    const system = "SYSTEM";
+    expect(applyPilSuffix(system, ctx)).toBe(system);
   });
 
   it("enriched unchanged (Layer 6 modifies system prompt only)", async () => {

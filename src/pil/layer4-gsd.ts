@@ -41,6 +41,20 @@ function mapRouteToPhase(route: string): GsdPhase | null {
 const DIRECTIVE_BUDGET_FRACTION = 0.25;
 
 export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> {
+  // Short-circuit: chitchat / pure-greeting inputs (detected by layer1) should
+  // NOT be wrapped in a GSD directive. Injecting "STANDARD task — apply
+  // GSD-quick mindset" onto "hi" forces the model into tool-using mode and
+  // wastes both prompt budget and the user's wait.
+  if (ctx.intentKind === "chitchat") {
+    return {
+      ...ctx,
+      layers: [
+        ...ctx.layers,
+        { name: "gsd-workflow-structuring", applied: false, delta: "skip:chitchat" },
+      ],
+    };
+  }
+
   let phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? null;
   let routeSource = "preset";
 

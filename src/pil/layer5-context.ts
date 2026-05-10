@@ -77,6 +77,19 @@ async function fetchRecentFiles(cwd: string, budget: number): Promise<string> {
 }
 
 export async function layer5Context(ctx: PipelineContext): Promise<PipelineContext> {
+  // Chitchat short-circuit: greetings/small-talk don't need workspace context
+  // (recent-files, flow-state, principles). Inject nothing — keep the model's
+  // attention on a 5-character prompt instead of a 30K-token tool catalog.
+  if (ctx.intentKind === "chitchat") {
+    return {
+      ...ctx,
+      layers: [
+        ...ctx.layers,
+        { name: "context-enrichment", applied: false, delta: "skip:chitchat" },
+      ],
+    };
+  }
+
   const cwd = process.cwd();
   const parts: string[] = [];
   const deltaSegments: string[] = [];

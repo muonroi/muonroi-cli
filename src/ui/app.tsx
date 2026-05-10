@@ -794,6 +794,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       cancelled = true;
     };
   }, []);
+  // Sync React model state with status bar store so chat input reflects
+  // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
+  useEffect(() => {
+    return statusBarStore.subscribe((s) => {
+      if (s.model) setModel(s.model);
+    });
+  }, []);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -802,6 +809,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [isProcessing, setIsProcessing] = useState(false);
   const [liveTurnSourceLabel, setLiveTurnSourceLabel] = useState<string | null>(null);
   const [model, setModel] = useState(agent.getModel());
+  const modelRef = useRef(model);
+  modelRef.current = model;
   const [sandboxMode, setSandboxModeState] = useState<SandboxMode>(agent.getSandboxMode());
   const [mode, setModeState] = useState<AgentMode>(agent.getMode());
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -4468,6 +4477,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
       setTimeout(scrollToBottom, 10);
       return;
+    }
+    // Sync the displayed model (from status bar / router upgrade) to the agent
+    // so the next turn starts from the correct base model. This covers both
+    // routing upgrades (e.g. flash→pro) and downgrades (e.g. pro→flash).
+    const displayedModel = modelRef.current;
+    if (displayedModel && displayedModel !== agent.getModel()) {
+      agent.setModel(displayedModel);
     }
     processMessage(enhancedMessage, displayText, images.length > 0 ? images : undefined);
   }, [agent, clearLiveTurnUi, handleCommand, openApiKeyModal, processMessage, replacePasteBlocks, scrollToBottom]);

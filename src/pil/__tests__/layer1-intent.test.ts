@@ -199,10 +199,11 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     expect(result.taskType).toBeNull();
   });
 
-  it("brain returns 'none' → taskType stays null", async () => {
+  it("brain returns 'none' → marked as chitchat (intentKind), taskType=general", async () => {
     mockClassifyViaBrain.mockResolvedValue("none");
     const result = await layer1Intent(makeCtx("some ambiguous input"));
-    expect(result.taskType).toBeNull();
+    expect(result.taskType).toBe("general");
+    expect(result.intentKind).toBe("chitchat");
   });
 
   it("brain returns garbage → taskType stays null", async () => {

@@ -225,8 +225,9 @@ export async function* runDebate(
             chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls, traces: bTraces });
           }
 
-          b.position = bResponse;
-          a.position = aResponse;
+          // Only update positions when response is non-empty (avoid clearing on LLM error)
+          if (bResponse) b.position = bResponse;
+          if (aResponse) a.position = aResponse;
           return { key, chunks, error: null as string | null };
         } catch (err: unknown) {
           return { key, chunks, error: err instanceof Error ? err.message : String(err) };

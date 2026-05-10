@@ -2941,8 +2941,14 @@ export class Agent {
       layers: [],
       gsdPhase: null,
       activeRunId: null,
+      intentKind: null as "task" | "chitchat" | null,
       fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
     }));
+    // Cheap signal forwarded from PIL Layer 1 — true when input is greeting /
+    // small-talk (≤10 chars + ≤2 words OR brain-classified "none"). Used to
+    // skip the MCP tool catalog, which dominates input tokens (~20K) and is
+    // useless for "hi" / "ok" / "thanks".
+    const isChitchat = pilCtx.intentKind === "chitchat";
     const enrichedMessage = pilCtx.enriched;
     this._pilActive = pilCtx.taskType !== null;
     this._pilEnrichmentDelta =
@@ -3007,6 +3013,8 @@ export class Agent {
             domain: pilCtx.domain,
             confidence: pilCtx.confidence,
             outputStyle: pilCtx.outputStyle,
+            intentKind: pilCtx.intentKind ?? null,
+            mcpSkipped: isChitchat,
             fallbackReason: pilCtx.fallbackReason ?? null,
             eeMode: (await import("../ee/client-mode.js")).getCachedEEClientMode()?.mode ?? "unknown",
           },
@@ -3016,6 +3024,7 @@ export class Agent {
             raw_length: userMessage.length,
             enriched_length: enrichedMessage.length,
             taskType: pilCtx.taskType,
+            intentKind: pilCtx.intentKind ?? null,
             confidence: pilCtx.confidence,
             pilActive: this._pilActive,
           },
@@ -3316,7 +3325,10 @@ export class Agent {
             modelId: turnModelId,
           });
           let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
-          if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
+          // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
+          // worth of tool schemas (~20K input tokens). PIL Layer 1 already
+          // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
+          if (this.mode === "agent" && !isChitchat && runtime.modelInfo?.supportsClientTools !== false) {
             const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
           onOAuthRequired: (_serverId, url) => {
             const urlStr = url.toString();
