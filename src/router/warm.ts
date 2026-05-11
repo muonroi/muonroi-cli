@@ -37,7 +37,12 @@ export async function callWarmRoute(
   return {
     tier: r.tier === "fast" ? "hot" : r.tier === "premium" ? "cold" : "warm",
     model: r.model,
-    provider: detectProviderForModel(r.model),
+    // Intentionally empty: signals constrainToProvider() to leave the EE's
+    // model choice intact rather than re-routing it to the session default
+    // provider. Populating this causes warm decisions to be silently
+    // overridden whenever EE picks a different provider than the session
+    // (see src/router/warm.test.ts:137 and src/router/decide.test.ts:64).
+    provider: "",
     reason: `warm:${r.reason}`,
     confidence: r.confidence,
     taskHash: r.taskHash,
