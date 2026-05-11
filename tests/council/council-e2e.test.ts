@@ -142,6 +142,7 @@ vi.mock("../../src/orchestrator/agent-options.js", () => ({
 
 vi.mock("../../src/storage/index.js", () => ({
   appendSystemMessage: vi.fn(),
+  logInteraction: vi.fn(),
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════════
