@@ -114,6 +114,7 @@ import "./slash/ee.js";
 import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
+import "./slash/export.js";
 
 import {
   getEffectiveReasoningEffort,
@@ -2020,7 +2021,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     return true;
   }, [renderer, showCopyBanner]);
 
-  const handleRootMouseUp = useCallback((event?: { button?: number }) => {
+  // Double-click tracking: detect fast consecutive clicks at roughly the same
+  // position and copy any terminal-level word selection (like Claude Code / Codex CLI).
+  const lastClickRef = useRef<{ time: number; x: number; y: number }>({ time: 0, x: 0, y: 0 });
+
+  const handleRootMouseUp = useCallback((event?: { button?: number; type?: string; x?: number; y?: number }) => {
     // Right-click semantics:
     //   - With selection → copy (same as left).
     //   - Without selection → paste clipboard text into the input buffer.
@@ -2042,7 +2047,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       inputRef.current?.focus();
       return;
     }
-    copyTuiSelectionToHost();
+
+    // Double-click detection: left-click within 400ms and within 5 cells of last click
+    const now = Date.now();
+    const ex = event?.x ?? -1;
+    const ey = event?.y ?? -1;
+    const last = lastClickRef.current;
+    const isDoubleClick =
+      now - last.time < 400 &&
+      Math.abs(ex - last.x) <= 5 &&
+      Math.abs(ey - last.y) <= 5;
+    lastClickRef.current = { time: now, x: ex, y: ey };
+
+    if (isDoubleClick) {
+      // On double-click, the terminal emulator may select the word under cursor.
+      // Give the terminal a tick to populate the selection, then copy.
+      setTimeout(() => {
+        copyTuiSelectionToHost();
+      }, 10);
+    } else {
+      copyTuiSelectionToHost();
+    }
     inputRef.current?.focus();
   }, [copyTuiSelectionToHost]);
 
@@ -2693,6 +2718,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           defaultProvider: "anthropic",
           defaultModel: model,
           lastPrompt: messages[messages.length - 1]?.content,
+          sessionId: agent.getSessionId() ?? undefined,
         }).then(async (result) => {
           if (result === null) return;
 
@@ -3069,6 +3095,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultProvider: "anthropic",
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
+            sessionId: agent.getSessionId() ?? undefined,
           }).then((result) => {
             if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
           });
@@ -3085,6 +3112,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultProvider: "anthropic",
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
+            sessionId: agent.getSessionId() ?? undefined,
           }).then((result) => {
             if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
           });
@@ -3159,6 +3187,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultProvider: "anthropic",
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
+            sessionId: agent.getSessionId() ?? undefined,
           }).then(async (result) => {
             if (result === null) return;
             if (result.startsWith("__COMPACT__")) {
@@ -4503,7 +4532,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
       {hasMessages ? (
         <box flexGrow={1} flexDirection="column">
-          <SessionHeader t={t} modeInfo={modeInfo} sessionTitle={sessionTitle} sessionId={sessionId} />
+          <SessionHeader t={t} modeInfo={modeInfo} sessionTitle={sessionTitle} sessionId={sessionId} onCopySessionId={showCopyBanner} />
           <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
             {/* Scrollable messages */}
             {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
@@ -4861,12 +4890,21 @@ function SessionHeader({
   modeInfo,
   sessionTitle,
   sessionId,
+  onCopySessionId,
 }: {
   t: Theme;
   modeInfo: (typeof MODES)[number];
   sessionTitle: string | null;
   sessionId: string | null;
+  onCopySessionId?: () => void;
 }) {
+  const handleSessionIdClick = useCallback(() => {
+    if (sessionId) {
+      copyTextToHostClipboard(sessionId);
+      onCopySessionId?.();
+    }
+  }, [sessionId, onCopySessionId]);
+
   return (
     <box flexShrink={0} width="100%">
       <box flexDirection="row" width="100%" paddingTop={1} paddingBottom={1} paddingLeft={2} paddingRight={2}>
@@ -4884,7 +4922,11 @@ function SessionHeader({
           ) : null}
         </text>
         <box flexGrow={1} />
-        {sessionId ? <text fg={t.textDim}>{sessionId}</text> : null}
+        {sessionId ? (
+          <text fg={t.textDim} onMouseUp={handleSessionIdClick}>
+            {sessionId}
+          </text>
+        ) : null}
       </box>
     </box>
   );

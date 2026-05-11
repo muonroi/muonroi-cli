@@ -70,4 +70,5 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "ee-timeline", label: "ee timeline", description: "Principle evolution for a topic" },
   { id: "ee-graph", label: "ee graph", description: "Principle relationship graph" },
   { id: "ee-route", label: "ee route", description: "Route task to workflow" },
+  { id: "export", label: "export", description: "Export entire conversation to a .txt file" },
 ];

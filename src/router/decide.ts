@@ -8,8 +8,9 @@
 
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
-import { getModelByTier, getModelInfo } from "../models/registry.js";
+import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
 import { taskTypeToRole } from "../pil/task-tier-map.js";
 import { getRoleModel, isProviderDisabled } from "../utils/settings.js";
 import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
@@ -110,14 +111,84 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
   return ctx;
 }
 
+// ─── Disabled-provider guard: fallback providers ────────────────────────────
+
+const FALLBACK_PROVIDERS: ProviderId[] = [
+  "anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama",
+];
+
+/**
+ * When the configured default provider is disabled by user settings, find
+ * the first non-disabled provider and return its "balanced" tier model.
+ * Returns the original defaults if no alternative is available.
+ */
+function resolveEffectiveDefaults(opts: DecideOpts): { model: string; provider: string } {
+  if (!isProviderDisabled(opts.defaultProvider as ProviderId)) {
+    return { model: opts.defaultModel, provider: opts.defaultProvider };
+  }
+  for (const p of FALLBACK_PROVIDERS) {
+    if (!isProviderDisabled(p)) {
+      const m = getModelByTier("balanced", p);
+      // Guard: getModelByTier may return a model from a different provider
+      // when the preferred provider has no model for the requested tier.
+      if (m && m.provider === p) return { model: m.id, provider: m.provider ?? p };
+      const models = getModelsForProvider(p);
+      if (models.length > 0) return { model: models[0].id, provider: p };
+    }
+  }
+  // All providers disabled — respect the user's original default anyway
+  return { model: opts.defaultModel, provider: opts.defaultProvider };
+}
+
+/**
+ * Pick a single model from a non-disabled provider for the given tier.
+ * Returns undefined when the default provider is not disabled (no override needed).
+ */
+function resolveTierModel(tier: "fast" | "balanced" | "premium", defaultProvider: string): { id: string; provider: string } | undefined {
+  if (!isProviderDisabled(defaultProvider as ProviderId)) {
+    // Default provider is fine — use it
+    return undefined;
+  }
+  for (const p of FALLBACK_PROVIDERS) {
+    if (!isProviderDisabled(p)) {
+      const m = getModelByTier(tier, p);
+      // Guard: getModelByTier may return a model from a different provider
+      // when the preferred provider has no model for the requested tier.
+      if (m && m.provider === p) return { id: m.id, provider: m.provider ?? p };
+      const models = getModelsForProvider(p);
+      if (models.length > 0) return { id: models[0].id, provider: p };
+    }
+  }
+  return undefined;
+}
+
 // ─── Provider constraint: never route to a provider the user lacks a key for ─
 
 function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
   if (!decision.provider || decision.provider === opts.defaultProvider) return decision;
+  // If the default provider is disabled, don't constrain back to it —
+  // the EE already picked a model from a non-disabled provider.
+  if (isProviderDisabled(opts.defaultProvider as ProviderId)) {
+    return {
+      ...decision,
+      reason: `${decision.reason}|provider-not-constrained(disabled)`,
+    };
+  }
   const sameProviderModel = getModelByTier(
     decision.tier === "hot" ? "fast" : decision.tier === "cold" ? "premium" : "balanced",
     opts.defaultProvider,
   );
+  // Guard: getModelByTier may return a model from a different provider when
+  // the preferred provider has no model for the requested tier. Verify the
+  // returned model's provider before accepting it.
+  if (sameProviderModel && sameProviderModel.provider !== opts.defaultProvider) {
+    return {
+      ...decision,
+      model: opts.defaultModel,
+      provider: opts.defaultProvider,
+      reason: `${decision.reason}|provider-constrained(forced-default)`,
+    };
+  }
   return {
     ...decision,
     model: sameProviderModel?.id ?? opts.defaultModel,
@@ -270,12 +341,16 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   const pilTier = opts.pil?.taskType as "fast" | "balanced" | "premium" | undefined;
   const pilConf = opts.pil?.confidence ?? 0;
   if (pilTier && pilConf >= 0.6) {
-    const tierModel = getModelByTier(pilTier, opts.defaultProvider);
+    // Use effective (non-disabled) provider when default is disabled
+    const effective = resolveTierModel(pilTier, opts.defaultProvider);
+    const tierModel = effective ?? getModelByTier(pilTier, opts.defaultProvider);
     const d: RouteDecision = {
       tier: "hot",
       model: tierModel?.id ?? opts.defaultModel,
       provider: tierModel?.provider ?? opts.defaultProvider,
-      reason: `pil:${pilTier}(${pilConf.toFixed(2)})`,
+      reason: effective
+        ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)`
+        : `pil:${pilTier}(${pilConf.toFixed(2)})`,
       confidence: pilConf,
       source: "pil",
     };
@@ -293,12 +368,16 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 1: Hot-path local classifier
   const c = classify(prompt, opts.threshold ?? 0.55);
   if (c.tier === "hot") {
-    const tierModel = c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined;
+    // Use effective (non-disabled) provider when default is disabled
+    const effective = c.tierHint ? resolveTierModel(c.tierHint, opts.defaultProvider) : undefined;
+    const tierModel = effective ?? (c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined);
     const d: RouteDecision = {
       tier: "hot",
       model: tierModel?.id ?? opts.defaultModel,
       provider: tierModel?.provider ?? opts.defaultProvider,
-      reason: c.reason,
+      reason: effective
+        ? `${c.reason}-rerouted(disabled-default)`
+        : c.reason,
       confidence: c.confidence,
     };
     const checked = await capCheck(d, opts.homeOverride);
@@ -341,11 +420,14 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   }
 
   // Step 4: Final fallback when EE entirely unreachable
+  const effective = resolveEffectiveDefaults(opts);
   const fallback: RouteDecision = {
     tier: routerStore.getState().degraded ? "degraded" : "hot",
-    model: opts.defaultModel,
-    provider: opts.defaultProvider,
-    reason: "fallback:ee-unreachable",
+    model: effective.model,
+    provider: effective.provider,
+    reason: effective.provider !== opts.defaultProvider
+      ? "fallback:ee-unreachable+rerouted(disabled-default)"
+      : "fallback:ee-unreachable",
   };
   const checked = await capCheck(fallback, opts.homeOverride);
   routerStore.setState({

@@ -37,7 +37,7 @@ export async function callWarmRoute(
   return {
     tier: r.tier === "fast" ? "hot" : r.tier === "premium" ? "cold" : "warm",
     model: r.model,
-    provider: "",
+    provider: detectProviderForModel(r.model),
     reason: `warm:${r.reason}`,
     confidence: r.confidence,
     taskHash: r.taskHash,
