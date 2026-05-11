@@ -16,6 +16,7 @@ vi.mock("../../storage/index.js", () => ({
   appendSystemMessage: vi.fn(),
   appendMessages: vi.fn(),
   loadTranscript: vi.fn().mockReturnValue([]),
+  logInteraction: vi.fn(),
 }));
 
 vi.mock("../../ee/council-bridge.js", () => ({
