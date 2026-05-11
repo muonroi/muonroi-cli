@@ -213,6 +213,15 @@ export interface UserSettings {
   };
   /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
   disabledProviders?: ProviderId[];
+  /** Step-aware model routing: downgrade to cheaper model for tool-execution steps. */
+  stepRouter?: {
+    /** Enable step-aware routing. Default: true. */
+    enabled?: boolean;
+    /** Tier to use for tool-execution steps. Default: "fast". */
+    toolExecutionTier?: "fast" | "balanced";
+    /** Switch back to premium for final synthesis. Default: false. */
+    premiumSynthesis?: boolean;
+  };
 }
 
 export interface ProjectSettings {

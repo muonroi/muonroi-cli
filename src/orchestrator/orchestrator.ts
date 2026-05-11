@@ -19,6 +19,7 @@ import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../
 import { getTenantId } from "../ee/tenant.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { reportRouteOutcome } from "../router/decide.js";
+import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { taskTypeToTier, taskTypeToMaxTokens, taskTypeToReasoningEffort } from "../pil/task-tier-map.js";
@@ -93,6 +94,7 @@ import {
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
+  isProviderDisabled,
   loadMcpServers,
   loadValidSubAgents,
   type ModelRole,
@@ -1968,6 +1970,32 @@ export class Agent {
     return providers.size >= 2;
   }
 
+  /**
+   * When the session's default provider is disabled, find the first
+   * non-disabled provider with a reachable key and return its model.
+   * Falls back to the session model if no alternative is available.
+   */
+  private async _resolveNonDisabledFallback(): Promise<{ modelId: string }> {
+    const fallbackProviders: ProviderId[] = [
+      "anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama",
+    ];
+    for (const p of fallbackProviders) {
+      if (!isProviderDisabled(p)) {
+        const key = await loadKeyForProvider(p).catch(() => null);
+        if (key) {
+          const m = getModelByTier("balanced", p);
+          // Guard: getModelByTier may return a model from a different provider
+          // when the preferred provider has no model for the requested tier.
+          if (m && m.provider === p) return { modelId: m.id };
+          const models = getModelsForProvider(p);
+          if (models.length > 0) return { modelId: models[0].id };
+        }
+      }
+    }
+    // All fallback providers also disabled or unreachable — keep session model
+    return { modelId: this.modelId };
+  }
+
   private async _resolveSameProviderCandidates(
     providerId: ProviderId,
     roles: ModelRole[],
@@ -2167,7 +2195,9 @@ export class Agent {
       for (const role of ALL_ROLES) {
         const modelId = getRoleModel(role);
         if (!modelId) continue;
-        const canReach = await loadKeyForProvider(detectProviderForModel(modelId)).then(() => true).catch(() => false);
+        const provider = detectProviderForModel(modelId);
+        if (isProviderDisabled(provider as ProviderId)) continue;
+        const canReach = await loadKeyForProvider(provider).then(() => true).catch(() => false);
         if (canReach) candidates.push({ role, model: modelId });
       }
       if (candidates.length >= 2) {
@@ -2182,21 +2212,26 @@ export class Agent {
     // Default: same-provider mode — pick diverse models from the session's provider
     if (candidates.length < 2) {
       const mainProviderId = detectProviderForModel(this.modelId);
-      const sameCandidates = await this._resolveSameProviderCandidates(mainProviderId, ALL_ROLES);
-      if (sameCandidates.length >= 2) {
-        candidates.length = 0;
-        candidates.push(...sameCandidates);
-        const uniqueModels = new Set(sameCandidates.map((c) => c.model));
-        yield {
-          type: "content",
-          content: `\n[Same-provider mode: ${uniqueModels.size} ${mainProviderId} model(s) for ${sameCandidates.length} roles]\n`,
-        };
+      // Skip same-provider resolution if the session's provider is disabled
+      if (!isProviderDisabled(mainProviderId as ProviderId)) {
+        const sameCandidates = await this._resolveSameProviderCandidates(mainProviderId, ALL_ROLES);
+        if (sameCandidates.length >= 2) {
+          candidates.length = 0;
+          candidates.push(...sameCandidates);
+          const uniqueModels = new Set(sameCandidates.map((c) => c.model));
+          yield {
+            type: "content",
+            content: `\n[Same-provider mode: ${uniqueModels.size} ${mainProviderId} model(s) for ${sameCandidates.length} roles]\n`,
+          };
+        }
       }
     }
 
     // Final fallback: use main model for all roles
     if (candidates.length < 2) {
-      const mainCanReach = await loadKeyForProvider(detectProviderForModel(this.modelId)).then(() => true).catch(() => false);
+      const mainProviderId = detectProviderForModel(this.modelId);
+      const mainDisabled = isProviderDisabled(mainProviderId as ProviderId);
+      const mainCanReach = !mainDisabled && await loadKeyForProvider(mainProviderId).then(() => true).catch(() => false);
       if (mainCanReach) {
         candidates.length = 0;
         for (const role of ALL_ROLES) {
@@ -3094,9 +3129,11 @@ export class Agent {
         });
       }
     } catch {
-      // Router unavailable — use session default model
-      const eeRoute = await routeModel(userMessage, {}, "claude").catch(() => null);
-      taskHash = eeRoute?.taskHash ?? null;
+      // Router unavailable — use session default model (skip if provider is disabled)
+      if (!isProviderDisabled(this.providerId as ProviderId)) {
+        const eeRoute = await routeModel(userMessage, {}, this.providerId).catch(() => null);
+        taskHash = eeRoute?.taskHash ?? null;
+      }
     }
 
     // Interaction log: model routing
@@ -3113,13 +3150,23 @@ export class Agent {
     const turnProviderId = detectProviderForModel(turnModelId);
     let turnProvider: LegacyProvider;
     if (turnProviderId !== this.providerId) {
-      const turnKey = await loadKeyForProvider(turnProviderId).catch(() => null);
+      // Even if the key is reachable, skip disabled providers
+      const turnKey = !isProviderDisabled(turnProviderId as ProviderId)
+        ? await loadKeyForProvider(turnProviderId).catch(() => null)
+        : null;
       if (turnKey) {
         turnProvider = createProvider(turnProviderId, turnKey);
       } else {
-        turnModelId = this.modelId;
+        // Router's provider unreachable or disabled — fall back to a non-disabled provider
+        const fallback = await this._resolveNonDisabledFallback();
+        turnModelId = fallback.modelId;
         turnProvider = this.requireProvider();
       }
+    } else if (isProviderDisabled(this.providerId as ProviderId)) {
+      // Session provider is disabled — find a non-disabled alternative
+      const fallback = await this._resolveNonDisabledFallback();
+      turnModelId = fallback.modelId;
+      turnProvider = this.requireProvider();
     } else {
       turnProvider = this.requireProvider();
     }
@@ -3220,8 +3267,30 @@ export class Agent {
       ),
       turnModelId,
     );
-    const runtime = resolveModelRuntime(provider, turnModelId);
-    const modelInfo = runtime.modelInfo;
+    let runtime = resolveModelRuntime(provider, turnModelId);
+    let modelInfo = runtime.modelInfo;
+
+    // SAMR: Step-Aware Model Routing — downgrade to fast model for tool-execution
+    // steps after the initial reasoning step. The premium model decides WHAT to do;
+    // a cheaper model handles the mechanical "read results, call more tools" loop.
+    const stepRouterCfg = getStepRouterConfig();
+    const stepRouterDecision = decideStepRouting(turnModelId, this.providerId, stepRouterCfg);
+    let stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId
+      ? "phase1"
+      : "done";
+    const phase2Runtime =
+      stepRouterDecision.phase2ModelId
+        ? resolveModelRuntime(provider, stepRouterDecision.phase2ModelId)
+        : null;
+    if (stepRouterDecision.phase2ModelId && _debugOn) {
+      _debugSteps.push({
+        name: "StepRouter",
+        duration_ms: 0,
+        input_summary: `phase1=${turnModelId}`,
+        output_summary: stepRouterDecision.reason,
+      });
+    }
+
     this.planContext = null;
     let attemptedOverflowRecovery = false;
 
@@ -3288,6 +3357,12 @@ export class Agent {
 
     try {
       while (true) {
+        // SAMR Phase 2: switch to fast model for tool-execution steps
+        if (stepRouterPhase === "phase2" && phase2Runtime) {
+          runtime = phase2Runtime;
+          modelInfo = runtime.modelInfo;
+        }
+
         this._compactedThisTurn = false;
         let assistantText = "";
         let reasoningPreview = "";
@@ -3296,6 +3371,8 @@ export class Agent {
         let closeMcp: (() => Promise<void>) | undefined;
         let stepNumber = -1;
         const activeToolCalls: ToolCall[] = [];
+        // SAMR: track whether Phase 1 produced tool calls
+        let phase1HadToolCalls = false;
 
         try {
           const settings = attemptedOverflowRecovery
@@ -3402,7 +3479,10 @@ export class Agent {
               _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false
                 ? "auto"
                 : undefined,
-            stopWhen: stepCountIs(this.maxToolRounds),
+            stopWhen:
+              stepRouterPhase === "phase1"
+                ? stepCountIs(1) // SAMR Phase 1: stop after reasoning step
+                : stepCountIs(this.maxToolRounds),
             maxRetries: 0,
             abortSignal: signal,
             temperature: 0.7,
@@ -3463,6 +3543,8 @@ export class Agent {
               case "tool-call": {
                 const tc = toToolCall(part);
                 activeToolCalls.push(tc);
+                // SAMR: track that Phase 1 produced tool calls → transition to Phase 2
+                if (stepRouterPhase === "phase1") phase1HadToolCalls = true;
 
                 // EE PreToolUse hook: fire intercept before tool execution.
                 {
@@ -3749,6 +3831,29 @@ export class Agent {
                 yield { type: "content", content: "\n\n[Cancelled]" };
                 break;
             }
+          }
+
+          // ─── SAMR Phase 1 → Phase 2 transition ─────────────────────────
+          // Phase 1 (premium model) produced tool calls but the SDK stopped
+          // before executing them (stopWhen: stepCountIs(1)). Append the
+          // assistant message to this.messages and restart the loop with
+          // the fast execution model. Phase 2's streamText call will see
+          // the pending tool calls and execute them automatically.
+          if (stepRouterPhase === "phase1" && phase1HadToolCalls) {
+            try {
+              const phase1Response = await result.response;
+              // Append only new messages (assistant message with tool calls)
+              const newMsgs = phase1Response.messages.slice(this.messages.length);
+              for (const msg of newMsgs) {
+                if (msg.role === "assistant") {
+                  this.messages.push(msg);
+                }
+              }
+            } catch {
+              // If response extraction fails, fall through to normal completion
+            }
+            stepRouterPhase = "phase2";
+            continue; // Re-enter while loop with Phase 2 (fast) model
           }
 
           if (signal.aborted) {

@@ -11,6 +11,7 @@ export interface SlashContext {
   lastPrompt?: string;
   defaultProvider: string;
   defaultModel: string;
+  sessionId?: string;
 }
 
 export type SlashHandler = (args: string[], ctx: SlashContext) => Promise<string> | string;

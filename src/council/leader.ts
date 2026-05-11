@@ -1,4 +1,4 @@
-import { getRoleModel, getRoleModels, type ModelRole } from "../utils/settings.js";
+import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -42,7 +42,8 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
   const configuredProvider = configured ? detectProviderForModel(configured) : undefined;
   const configuredTier = configured ? tierOf(configured) : undefined;
 
-  const sessionReachable = await loadKeyForProvider(sessionProviderId)
+  const sessionDisabled = isProviderDisabled(sessionProviderId as ProviderId);
+  const sessionReachable = !sessionDisabled && await loadKeyForProvider(sessionProviderId)
     .then(() => true)
     .catch(() => false);
   if (!sessionReachable) {
@@ -128,7 +129,9 @@ export async function resolveParticipants(
     for (const role of ALL_ROLES) {
       const modelId = getRoleModel(role);
       if (!modelId) continue;
-      const canReach = await loadKeyForProvider(detectProviderForModel(modelId))
+      const provider = detectProviderForModel(modelId);
+      if (isProviderDisabled(provider as ProviderId)) continue;
+      const canReach = await loadKeyForProvider(provider)
         .then(() => true)
         .catch(() => false);
       if (canReach) candidates.push({ role, model: modelId });
@@ -137,10 +140,14 @@ export async function resolveParticipants(
   }
 
   const mainProviderId = detectProviderForModel(sessionModelId);
-  const sameCandidates = await resolveSameProviderCandidates(mainProviderId, sessionModelId, ALL_ROLES);
-  if (sameCandidates.length >= 2) return sameCandidates;
+  // Skip same-provider resolution if the provider is disabled
+  if (!isProviderDisabled(mainProviderId as ProviderId)) {
+    const sameCandidates = await resolveSameProviderCandidates(mainProviderId, sessionModelId, ALL_ROLES);
+    if (sameCandidates.length >= 2) return sameCandidates;
+  }
 
-  const canReach = await loadKeyForProvider(detectProviderForModel(sessionModelId))
+  const providerDisabled = isProviderDisabled(detectProviderForModel(sessionModelId) as ProviderId);
+  const canReach = !providerDisabled && await loadKeyForProvider(detectProviderForModel(sessionModelId))
     .then(() => true)
     .catch(() => false);
   if (canReach) {
@@ -155,6 +162,7 @@ async function resolveSameProviderCandidates(
   sessionModelId: string,
   roles: ModelRole[],
 ): Promise<Array<{ role: ModelRole; model: string }>> {
+  if (isProviderDisabled(providerId)) return [];
   const canReach = await loadKeyForProvider(providerId)
     .then(() => true)
     .catch(() => false);
