@@ -26,9 +26,9 @@
  */
 
 import { getModelByTier } from "../models/registry.js";
-import type { ModelInfo } from "../types/index.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import type { ModelInfo } from "../types/index.js";
 import { isProviderDisabled, loadUserSettings } from "../utils/settings.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -65,11 +65,29 @@ const DEFAULT_CONFIG: StepRouterConfig = {
 
 // ─── Config loader ───────────────────────────────────────────────────────────
 
+/**
+ * Double-opt-in: SAMR requires BOTH `stepRouter.enabled=true` in user-settings
+ * AND the env var `MUONROI_STEP_ROUTER_ACK=1`. The env var is the user's
+ * acknowledgement that they've read the SDK-compatibility caveats in the
+ * module docstring (a/b/c conditions). Without it, enabled silently degrades
+ * to false and a one-time warning is printed.
+ */
+const SAMR_ACK_ENV = "MUONROI_STEP_ROUTER_ACK";
+let _samrWarnedOnce = false;
+
 export function getStepRouterConfig(): StepRouterConfig {
   const raw = loadUserSettings().stepRouter;
   if (!raw) return { ...DEFAULT_CONFIG };
+  const userWantsEnabled = raw.enabled ?? DEFAULT_CONFIG.enabled;
+  const ack = process.env[SAMR_ACK_ENV] === "1";
+  if (userWantsEnabled && !ack && !_samrWarnedOnce) {
+    _samrWarnedOnce = true;
+    console.warn(
+      `[step-router] stepRouter.enabled=true ignored: set ${SAMR_ACK_ENV}=1 to acknowledge SDK-compatibility caveats (see src/router/step-router.ts header).`,
+    );
+  }
   return {
-    enabled: raw.enabled ?? DEFAULT_CONFIG.enabled,
+    enabled: userWantsEnabled && ack,
     toolExecutionTier: raw.toolExecutionTier ?? DEFAULT_CONFIG.toolExecutionTier,
     premiumSynthesis: raw.premiumSynthesis ?? DEFAULT_CONFIG.premiumSynthesis,
   };
@@ -104,11 +122,7 @@ export function decideStepRouting(
 
   // Find the cheapest model for the execution provider.
   // Prefer same provider as phase 1 to keep keychain simple.
-  const execModel = resolveExecutionModel(
-    defaultProvider,
-    cfg.toolExecutionTier,
-    phase1ModelId,
-  );
+  const execModel = resolveExecutionModel(defaultProvider, cfg.toolExecutionTier, phase1ModelId);
 
   if (!execModel) {
     return {
@@ -167,8 +181,11 @@ function resolveExecutionModel(
 }
 
 function getModelTier(modelId: string): string {
-  return getModelByTier("fast")?.id === modelId ? "fast"
-    : getModelByTier("balanced")?.id === modelId ? "balanced"
-    : getModelByTier("premium")?.id === modelId ? "premium"
-    : "unknown";
+  return getModelByTier("fast")?.id === modelId
+    ? "fast"
+    : getModelByTier("balanced")?.id === modelId
+      ? "balanced"
+      : getModelByTier("premium")?.id === modelId
+        ? "premium"
+        : "unknown";
 }
