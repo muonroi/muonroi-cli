@@ -1,0 +1,2 @@
+node scripts/check-secrets.mjs
+bunx lint-staged

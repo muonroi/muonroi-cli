@@ -7,7 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Pre-commit secret scanner (`scripts/check-secrets.mjs`) blocks `.claude/`,
+  `.env*`, `user-settings.json`, and inline credential patterns (Anthropic,
+  OpenAI, xAI, Google, AWS, GitHub tokens) before they enter git history.
+
+### Changed
+- **router**: `RouteDecision.provider === ""` is now expressed as
+  `PROVIDER_INHERIT` from `src/router/provider-sentinel.ts`. Reads gated
+  through `isInheritProvider()` helper. Behavior unchanged; coupling with
+  `constrainToProvider()` made explicit and grep-able.
+- **step-router (SAMR)**: requires BOTH `stepRouter.enabled=true` in
+  user-settings AND `MUONROI_STEP_ROUTER_ACK=1` env var. Without the
+  env-ack, enabled silently degrades to false and a one-time warning is
+  printed (acknowledges SDK compatibility caveats — see module header).
+
 ### Added
+- **storage**: `sweepStaleAtomicTemps(dir, maxAgeMs, depth)` removes
+  orphaned `.{pid}.{hex}.tmp` files older than 24h on boot. Best-effort,
+  swallows errors. Wired into `loadConfig()`.
+- **dev workflow**:
+  - `.husky/commit-msg` enforces Conventional Commits via
+    `scripts/check-commit-msg.mjs` (rejects vague titles like "add fix",
+    "addition advance SEO", "wip").
+  - `.github/pull_request_template.md` requires risk level, test coverage,
+    hidden-coupling notes, rollback plan.
+  - `docs/branch-protection.md` documents required GitHub branch-protect
+    settings; `scripts/setup-branch-protection.sh` applies them via `gh`.
+
 - Multi-model council with adversarial debate (`/council`) — dynamic prompts, convergence detection, leader synthesis
 - Role-based model routing — PIL task type maps to roles (leader/implement/verify/research), auto-routes to configured model
 - Auto-compact after every turn — silent context compression keeps token costs flat across long sessions

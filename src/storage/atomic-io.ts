@@ -1,6 +1,6 @@
+import * as crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import * as crypto from "node:crypto";
 
 // Unique tmp path per call so concurrent writers don't clobber each other's
 // .tmp before rename — required for Windows where rename of a file held by
@@ -71,6 +71,50 @@ export async function atomicWriteText(filePath: string, content: string): Promis
     });
     throw err;
   }
+}
+
+/**
+ * Best-effort sweep of stale atomic-write staging files in `dir`.
+ *
+ * Matches the per-call tmp shape `{name}.{pid}.{hex}.tmp` and removes any
+ * older than `maxAgeMs` (default 24h). Designed to run on boot — if a writer
+ * crashed mid-rename, its tmp will accumulate forever otherwise.
+ *
+ * Errors are swallowed: sweeping is opportunistic and must never block boot.
+ * Recurses one level (e.g. ~/.muonroi-cli/{sessions,usage}/) but stops there
+ * to keep cost bounded.
+ */
+export async function sweepStaleAtomicTemps(
+  dir: string,
+  maxAgeMs: number = 24 * 60 * 60 * 1000,
+  depth: number = 1,
+): Promise<number> {
+  let removed = 0;
+  const cutoff = Date.now() - maxAgeMs;
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const ent of entries) {
+    const full = path.join(dir, ent.name);
+    if (ent.isDirectory()) {
+      if (depth > 0) removed += await sweepStaleAtomicTemps(full, maxAgeMs, depth - 1);
+      continue;
+    }
+    if (!/\.\d+\.[0-9a-f]{12}\.tmp$/.test(ent.name)) continue;
+    try {
+      const st = await fs.stat(full);
+      if (st.mtimeMs < cutoff) {
+        await fs.unlink(full);
+        removed++;
+      }
+    } catch {
+      /* ignore individual failures */
+    }
+  }
+  return removed;
 }
 
 /**

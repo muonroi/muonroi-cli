@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
+import { atomicReadJSON, atomicWriteJSON, sweepStaleAtomicTemps } from "./atomic-io.js";
 
 let tmpDir: string;
 
@@ -57,5 +57,36 @@ describe("atomicReadJSON", () => {
     const filePath = path.join(tmpDir, "corrupt.json");
     await fs.writeFile(filePath, "{ this is not valid json }", "utf8");
     await expect(atomicReadJSON(filePath)).rejects.toThrow();
+  });
+});
+
+describe("sweepStaleAtomicTemps", () => {
+  it("Test 5: removes only matching .{pid}.{hex}.tmp older than cutoff", async () => {
+    const oldStale = path.join(tmpDir, "state.json.12345.abcdef012345.tmp");
+    const freshStale = path.join(tmpDir, "state.json.99999.fedcba543210.tmp");
+    const unrelated = path.join(tmpDir, "notes.tmp");
+    const real = path.join(tmpDir, "state.json");
+
+    await fs.writeFile(oldStale, "{}");
+    await fs.writeFile(freshStale, "{}");
+    await fs.writeFile(unrelated, "junk");
+    await fs.writeFile(real, "{}");
+
+    // Backdate oldStale by 48h
+    const old = Date.now() / 1000 - 48 * 3600;
+    await fs.utimes(oldStale, old, old);
+
+    const removed = await sweepStaleAtomicTemps(tmpDir, 24 * 60 * 60 * 1000);
+    expect(removed).toBe(1);
+
+    await expect(fs.access(oldStale)).rejects.toThrow();
+    await expect(fs.access(freshStale)).resolves.toBeUndefined();
+    await expect(fs.access(unrelated)).resolves.toBeUndefined();
+    await expect(fs.access(real)).resolves.toBeUndefined();
+  });
+
+  it("Test 6: returns 0 and does not throw when dir does not exist", async () => {
+    const removed = await sweepStaleAtomicTemps(path.join(tmpDir, "does-not-exist"));
+    expect(removed).toBe(0);
   });
 });

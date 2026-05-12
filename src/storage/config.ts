@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
+import { atomicReadJSON, atomicWriteJSON, sweepStaleAtomicTemps } from "./atomic-io.js";
 
 /**
  * TUI-owned cap configuration stored at ~/.muonroi-cli/config.json.
@@ -34,6 +34,10 @@ function muonroiHome(override?: string): string {
  */
 export async function loadConfig(homeOverride?: string): Promise<MuonroiConfig> {
   const home = muonroiHome(homeOverride);
+  // Best-effort cleanup of crashed-writer leftovers. Never throws.
+  sweepStaleAtomicTemps(home).catch(() => {
+    /* swallow */
+  });
   const filePath = path.join(home, "config.json");
   const existing = await atomicReadJSON<MuonroiConfig>(filePath);
   if (existing) {

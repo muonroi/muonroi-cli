@@ -7,6 +7,7 @@
 import { routeModel as bridgeRouteModel } from "../ee/bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { detectProviderForModel } from "../providers/runtime.js";
+import { PROVIDER_INHERIT } from "./provider-sentinel.js";
 import type { RouteDecision } from "./types.js";
 
 export async function callWarmRoute(
@@ -37,12 +38,12 @@ export async function callWarmRoute(
   return {
     tier: r.tier === "fast" ? "hot" : r.tier === "premium" ? "cold" : "warm",
     model: r.model,
-    // Intentionally empty: signals constrainToProvider() to leave the EE's
+    // PROVIDER_INHERIT signals constrainToProvider() to leave the EE's
     // model choice intact rather than re-routing it to the session default
-    // provider. Populating this causes warm decisions to be silently
-    // overridden whenever EE picks a different provider than the session
+    // provider. Populating this would silently override warm decisions
+    // whenever EE picks a different provider than the session
     // (see src/router/warm.test.ts:137 and src/router/decide.test.ts:64).
-    provider: "",
+    provider: PROVIDER_INHERIT,
     reason: `warm:${r.reason}`,
     confidence: r.confidence,
     taskHash: r.taskHash,
