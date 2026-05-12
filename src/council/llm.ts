@@ -1,5 +1,6 @@
 import { generateText, stepCountIs } from "ai";
 import type { ToolSet } from "ai";
+import * as fs from "node:fs";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
@@ -12,6 +13,55 @@ import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
+
+// ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──
+//
+// Writes a JSONL record per llm.{generate,debate,research} call with full input
+// sizes, output text, reasoning text, finish reason, usage tokens, and errors.
+// Used by scripts/e2e-council-debug.ts to confirm WHY a turn returned empty —
+// e.g. reasoning model exhausting maxTokens on thinking-only output.
+
+interface DebugCallRecord {
+  ts: string;
+  kind: "generate" | "debate" | "research";
+  modelId: string;
+  resolvedModelId?: string;
+  provider?: string;
+  systemChars: number;
+  promptChars: number;
+  maxTokens?: number;
+  durationMs: number;
+  ok: boolean;
+  textChars: number;
+  textHead: string;
+  reasoningChars?: number;
+  reasoningHead?: string;
+  finishReason?: string;
+  toolCallCount?: number;
+  toolNames?: string[];
+  usage?: unknown;
+  error?: string;
+}
+
+function getDebugLogPath(): string | null {
+  const p = process.env.MUONROI_COUNCIL_DEBUG_LOG;
+  return p && p.length > 0 ? p : null;
+}
+
+function writeDebugRecord(rec: DebugCallRecord): void {
+  const path = getDebugLogPath();
+  if (!path) return;
+  try {
+    fs.appendFileSync(path, JSON.stringify(rec) + "\n", "utf-8");
+  } catch {
+    // Logging must never break the council run.
+  }
+}
+
+function head(s: unknown, n = 300): string {
+  const str = typeof s === "string" ? s : (s == null ? "" : String(s));
+  return str.length > n ? str.slice(0, n) + "…" : str;
+}
 
 // ── Tool trace helpers (CQ-22) ────────────────────────────────────────────────
 
@@ -37,9 +87,45 @@ function emitToolTrace(
 }
 
 /**
- * Wrap each tool in the set with EE PreToolUse intercept check.
- * Before executing any tool, fires EE intercept and emits warnings via render sink.
- * CQ-15: wrapToolsWithEeCheck applied to all debate round tools.
+ * Maximum size (in characters) of any single tool result that we feed back to
+ * the model between debate steps. Without this cap a single grep / web-fetch
+ * can put 100s of KB into the next step's context, and with stepCountIs(4)
+ * the per-call message stack inflates quadratically across rounds — the root
+ * cause of "Request Entity Too Large" and 3M-token-against-1M-limit errors
+ * we observed in real sessions.
+ *
+ * 8KB per tool result × 4 steps × N participants × rounds keeps the worst
+ * case in the hundreds-of-KB range instead of the multi-MB range, while
+ * preserving enough content for evidence-based debate.
+ */
+const TOOL_RESULT_CAP_CHARS = 8000;
+
+function capToolResult(result: unknown): unknown {
+  if (result == null) return result;
+  if (typeof result === "string") {
+    return result.length > TOOL_RESULT_CAP_CHARS
+      ? result.slice(0, TOOL_RESULT_CAP_CHARS) + `\n…[truncated to ${TOOL_RESULT_CAP_CHARS} chars by council to protect context]`
+      : result;
+  }
+  try {
+    const serialized = JSON.stringify(result);
+    if (serialized.length <= TOOL_RESULT_CAP_CHARS) return result;
+    // Object too large — fall back to a string summary so the model still has
+    // a usable, smaller payload instead of the raw blob.
+    return {
+      _truncated: true,
+      _originalSize: serialized.length,
+      preview: serialized.slice(0, TOOL_RESULT_CAP_CHARS) + "…",
+    };
+  } catch {
+    return result;
+  }
+}
+
+/**
+ * Wrap each tool in the set with EE PreToolUse intercept check AND cap the
+ * result size that flows back into the LLM between steps. Both behaviors are
+ * applied for every debate-time tool call.
  */
 function wrapToolsWithEeCheck(tools: ToolSet, tenantId: string): ToolSet {
   const wrapped: ToolSet = {};
@@ -63,7 +149,8 @@ function wrapToolsWithEeCheck(tools: ToolSet, tenantId: string): ToolSet {
           });
           emitMatches(resp?.matches);
         } catch { /* fail-open — tool must execute regardless */ }
-        return (tool as { execute: (args: unknown, opts: unknown) => unknown }).execute(args, opts);
+        const raw = await (tool as { execute: (args: unknown, opts: unknown) => unknown }).execute(args, opts);
+        return capToolResult(raw);
       },
     };
   }
@@ -77,72 +164,186 @@ export function createCouncilLLM(
   stats: CouncilStats,
 ): CouncilLLM {
   return {
-    async generate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
+    async generate(modelId: string, system: string, prompt: string, maxTokens = 4096): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
       const runtime = resolveModelRuntime(factory, modelId);
-      const { text } = await generateText({
-        model: runtime.model,
-        system,
-        prompt,
-        maxOutputTokens: maxTokens,
-        temperature: 0.7,
-        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-      });
-      stats.calls++;
-      return text;
-    },
-
-    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
-      const providerId = detectProviderForModel(modelId);
-      const key = await loadKeyForProvider(providerId);
-      const { factory } = createProviderFactory(providerId, { apiKey: key });
-      const runtime = resolveModelRuntime(factory, modelId);
-
-      const builtinTools = createTools(bash, mode);
-
-      // Lazy MCP bundle — fail-open so builtins remain available
-      let mcpBundle: McpToolBundle | null = null;
-      try {
-        mcpBundle = await buildMcpToolSet(loadMcpServers());
-      } catch {
-        // MCP spawn failed — debate continues with builtin tools only
-      }
-
-      const mergedTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
-      const allTools: ToolSet = wrapToolsWithEeCheck(mergedTools, sessionId ?? "council");
-
+      const t0 = Date.now();
       try {
         const result = await generateText({
           model: runtime.model,
           system,
           prompt,
-          tools: allTools,
-          stopWhen: stepCountIs(4),
-          maxOutputTokens: 2048,
+          maxOutputTokens: maxTokens,
           temperature: 0.7,
+          // AI SDK default is 2 retries (3 attempts). SiliconFlow's per-key
+          // rate limit on DeepSeek V4 fires bursty 429s during council debate
+          // (parallel pairs + leader-eval + summary calls). Bumping to 5 with
+          // the SDK's default exponential backoff (2,4,8,16,32s) absorbs most
+          // short-window limits — session 9229af5db247 hit "Failed after 3
+          // attempts. Last error: Too Many Requests" on the leader research-
+          // need eval after the parallel debate burst.
+          maxRetries: 5,
+          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        });
+        stats.calls++;
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "generate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          maxTokens,
+          durationMs: Date.now() - t0,
+          ok: true,
+          textChars: (result.text ?? "").length,
+          textHead: head(result.text),
+          reasoningChars: (result as { reasoningText?: string }).reasoningText?.length,
+          reasoningHead: head((result as { reasoningText?: string }).reasoningText ?? ""),
+          finishReason: (result as { finishReason?: string }).finishReason,
+          usage: (result as { usage?: unknown }).usage,
+        });
+        return result.text;
+      } catch (err) {
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "generate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          maxTokens,
+          durationMs: Date.now() - t0,
+          ok: false,
+          textChars: 0,
+          textHead: "",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+    },
+
+    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter, options?: { enableVerificationTools?: boolean }): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
+      const providerId = detectProviderForModel(modelId);
+      const key = await loadKeyForProvider(providerId);
+      const { factory } = createProviderFactory(providerId, { apiKey: key });
+      const runtime = resolveModelRuntime(factory, modelId);
+
+      // Verification tools — re-introduced after the no-tools fix (session
+      // a7a5690d2049). The original failure was stepCountIs(4) + full toolset
+      // letting reasoning models exhaust steps on exploratory tool chains and
+      // return text="" finishReason="tool-calls". We now expose a TINY
+      // read-only set (grep, read_file) under stepCountIs(2) — at most one
+      // verification call, then forced text. Tier gate: only balanced/premium
+      // models get tools (fast/reasoning-heavy Flash variants skip them).
+      let verificationTools: ToolSet | undefined;
+      let mcpBundleForDebate: McpToolBundle | null = null;
+      if (options?.enableVerificationTools) {
+        try {
+          const builtins = createTools(bash, mode);
+          // Strict allowlist — NO bash/edit/write/task in debate verification.
+          const ALLOWED = new Set(["grep", "read_file"]);
+          const filtered: ToolSet = {};
+          for (const [name, tool] of Object.entries(builtins)) {
+            if (ALLOWED.has(name)) filtered[name] = tool;
+          }
+          // Optional MCP read-only tools (web_fetch / web_search / context7).
+          try {
+            mcpBundleForDebate = await buildMcpToolSet(loadMcpServers());
+            if (mcpBundleForDebate?.tools) {
+              for (const [name, tool] of Object.entries(mcpBundleForDebate.tools)) {
+                if (/tavily|web[_-]?fetch|web[_-]?search|context7|firecrawl|exa/i.test(name)) {
+                  filtered[name] = tool;
+                }
+              }
+            }
+          } catch { /* MCP optional — debate continues with builtins only */ }
+          verificationTools = wrapToolsWithEeCheck(filtered, sessionId ?? "council-debate");
+        } catch { /* fail-open: no tools */ }
+      }
+
+      const t0 = Date.now();
+      try {
+        const result = await generateText({
+          model: runtime.model,
+          system,
+          prompt,
+          ...(verificationTools && Object.keys(verificationTools).length > 0
+            ? { tools: verificationTools, stopWhen: stepCountIs(2) }
+            : {}),
+          // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
+          // of this budget on reasoning_tokens before producing user-visible
+          // text. E2E showed 2048 caused finishReason=length on 3KB debate
+          // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
+          // overhead and avoids cuts mid-thought.
+          maxOutputTokens: 6144,
+          temperature: 0.7,
+          // See generate() note — debate fires several pairs concurrently;
+          // 5 retries with SDK exponential backoff (2,4,8,16,32s) survive
+          // SiliconFlow's short-window 429s without escalating to user.
+          maxRetries: 5,
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
           ...(signal ? { abortSignal: signal } : {}),
         });
         stats.calls++;
+        // No tool calls expected, but the AI SDK shape still has the field —
+        // pass through for type compatibility.
         const toolCalls = (result.toolCalls ?? []) as Array<{ toolName: string; args?: unknown; input?: unknown; result?: unknown }>;
         for (const tc of toolCalls) {
           emitToolTrace(tc.toolName, tc.args ?? tc.input ?? {}, tc.result, persistTrace);
         }
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "debate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          maxTokens: 6144,
+          durationMs: Date.now() - t0,
+          ok: true,
+          textChars: (result.text ?? "").length,
+          textHead: head(result.text),
+          reasoningChars: (result as { reasoningText?: string }).reasoningText?.length,
+          reasoningHead: head((result as { reasoningText?: string }).reasoningText ?? ""),
+          finishReason: (result as { finishReason?: string }).finishReason,
+          toolCallCount: toolCalls.length,
+          toolNames: toolCalls.map((t) => t.toolName),
+          usage: (result as { usage?: unknown }).usage,
+        });
         return {
           text: result.text,
           toolCalls: toolCalls as Array<{ toolName: string; result?: unknown }>,
         };
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "debate",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          maxTokens: 6144,
+          durationMs: Date.now() - t0,
+          ok: false,
+          textChars: 0,
+          textHead: "",
+          error: errMsg,
+        });
         return { text: `[debate failed: ${errMsg}]`, toolCalls: [] };
       } finally {
-        await mcpBundle?.close().catch(() => {});
+        await mcpBundleForDebate?.close().catch(() => {});
       }
     },
 
-    async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter): Promise<string> {
+    async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter, options?: { internetFirst?: boolean }): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -158,16 +359,30 @@ export function createCouncilLLM(
         // MCP spawn failed — research continues with builtin tools only
       }
 
-      const allTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+      const mergedResearchTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
+      const allTools: ToolSet = wrapToolsWithEeCheck(mergedResearchTools, sessionId ?? "council-research");
 
       // CQ-04: Detect URL in topic — inject mandatory browser instruction into system prompt
       const hasUrl = /https?:\/\/\S+/.test(topic);
-      const systemPrompt = buildResearchSystemPrompt(hasUrl);
+      const internetFirst = options?.internetFirst === true;
+      const systemPrompt = buildResearchSystemPrompt(hasUrl, internetFirst);
+
+      // Warn early if internet-first mode is requested but no internet/browser tools are loaded.
+      const internetToolAvailable = Object.keys(allTools).some((n) =>
+        /tavily|web[_-]?fetch|web[_-]?search|playwright|chrome|context7|firecrawl|exa/i.test(n),
+      );
+      const internetGapWarning =
+        internetFirst && !internetToolAvailable
+          ? `\n\n## Research Gap\n- Internet-first mode requested but no browser/search tool ` +
+            `(tavily, web-fetch, playwright, chrome-devtools, context7) is available. ` +
+            `Findings will be limited to what the model already knows.`
+          : "";
 
       const userPrompt = conversationContext
         ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate and report findings.`
         : `## Research Topic\n${topic}\n\nInvestigate and report findings.`;
 
+      const t0 = Date.now();
       try {
         const result = await generateText({
           model: runtime.model,
@@ -177,8 +392,31 @@ export function createCouncilLLM(
           stopWhen: stepCountIs(15),
           maxOutputTokens: 4096,
           temperature: 0.3,
+          // See generate() note — research can fire after a heavy debate burst
+          // and hit the same SiliconFlow short-window 429s.
+          maxRetries: 5,
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
           ...(signal ? { abortSignal: signal } : {}),
+        });
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "research",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: systemPrompt.length,
+          promptChars: userPrompt.length,
+          maxTokens: 4096,
+          durationMs: Date.now() - t0,
+          ok: true,
+          textChars: (result.text ?? "").length,
+          textHead: head(result.text),
+          reasoningChars: (result as { reasoningText?: string }).reasoningText?.length,
+          reasoningHead: head((result as { reasoningText?: string }).reasoningText ?? ""),
+          finishReason: (result as { finishReason?: string }).finishReason,
+          toolCallCount: (result.toolCalls ?? []).length,
+          toolNames: (result.toolCalls ?? []).map((t) => (t as { toolName: string }).toolName),
+          usage: (result as { usage?: unknown }).usage,
         });
 
         // Emit tool traces (CQ-22)
@@ -207,9 +445,24 @@ export function createCouncilLLM(
         }
 
         stats.calls++;
-        return result.text;
+        return result.text + internetGapWarning;
       } catch (err: unknown) {
         const errMsg = err instanceof Error ? err.message : String(err);
+        writeDebugRecord({
+          ts: new Date().toISOString(),
+          kind: "research",
+          modelId,
+          resolvedModelId: runtime.modelInfo?.id,
+          provider: providerId,
+          systemChars: systemPrompt.length,
+          promptChars: userPrompt.length,
+          maxTokens: 4096,
+          durationMs: Date.now() - t0,
+          ok: false,
+          textChars: 0,
+          textHead: "",
+          error: errMsg,
+        });
         return (
           `## Source Code Findings\n[Research failed: ${errMsg}]\n\n` +
           `## Internet Findings\n_Not performed._\n\n` +

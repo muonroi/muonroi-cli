@@ -49,6 +49,13 @@ export interface LeaderEvaluation {
   evidenceDensity?: number;
   /** Count of [REFUTED] tags + explicit concessions found in the exchange text. */
   disagreementResolved?: number;
+  /**
+   * Leader-requested round extension. When set and `shouldContinue=true`, the
+   * debate loop bumps its max-rounds budget by this amount, capped at the
+   * absolute hard ceiling. Use sparingly — only when the debate is genuinely
+   * close to resolving the last unresolved point.
+   */
+  extendRounds?: number;
 }
 
 export interface DebateState {
@@ -58,6 +65,31 @@ export interface DebateState {
   roundCount: number;
   researchFindings?: string;
   active: CouncilParticipant[];  // mutated positions from debate rounds — NEW (Phase 14 CQ-02)
+  /** Evidence density from the final leader evaluation (0.0–1.0). Drives confidence badge. */
+  finalEvidenceDensity?: number;
+  /** Role-indexed per-round positions for follow-up citations. */
+  archive?: DebateArchiveEntry[];
+}
+
+/**
+ * Single position taken by a participant in one round. Used to answer
+ * "who said what" follow-ups after the debate ends.
+ *
+ * NOTE: stores an `excerpt` (head-truncated) instead of the full position
+ * text. The full content lives in `[Debate Transcript]`; the archive is a
+ * citation index only. Persisting full text here used to grow the
+ * `[Council Memory]` record to 70KB+ per session.
+ */
+export interface DebateArchiveEntry {
+  round: number;
+  role: ModelRole;
+  model: string;
+  stanceName?: string;
+  /** Head excerpt (~400 chars) for citation in follow-ups. */
+  excerpt: string;
+  /** Original full length so the digest can hint at how much was trimmed. */
+  length: number;
+  toolsUsed?: string[];
 }
 
 /**
@@ -126,6 +158,12 @@ export interface DebatePlan {
   stances: DebateStance[];
   /** Leader-proposed output schema for the synthesis step. */
   outputShape: OutputShape;
+  /**
+   * Leader-proposed initial round budget (1–5). Defaults to 3 when the
+   * planner omits it. The debate loop may extend up to a hard ceiling when
+   * the leader evaluation requests `extendRounds`.
+   */
+  plannedRounds?: number;
 }
 
 export interface EnhancedCouncilOutcome {
@@ -157,6 +195,38 @@ export interface CouncilConfig {
   observer?: ProcessMessageObserver;
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
+  /** When true, runDebate skips the research phase even if the leader requested it (user override). */
+  researchSkipOverride?: boolean;
+  /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
+  internetFirst?: boolean;
+  /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */
+  costAware?: boolean;
+}
+
+// ── Persisted Council Memory ─────────────────────────────────────────────────
+
+/**
+ * JSON shape persisted as `[Council Memory] {...}` in the session messages.
+ * Loaded on follow-up turns so the agent can answer "who is the leader?",
+ * "what did the X role say?", and cite specific positions.
+ */
+export interface CouncilMemoryRecord {
+  topic: string;
+  spec: ClarifiedSpec;
+  debatePlan: DebatePlan;
+  leaderModel: string;
+  participants: Array<{ role: string; model: string; stance?: DebateStance }>;
+  finalPositions: Array<{ role: string; position: string }>;
+  /** Role-indexed per-round archive — enables citation by role/round on follow-ups. */
+  archive: DebateArchiveEntry[];
+  synthesis: string;
+  confidence: {
+    level: "high" | "medium" | "low";
+    evidenceDensity: number;
+    rounds: number;
+  };
+  stats: { calls: number; durationMs: number; phases: Array<{ name: string; durationMs: number }> };
+  timestamp: string;
 }
 
 // ── Stats ────────────────────────────────────────────────────────────────────
@@ -179,6 +249,7 @@ export interface CouncilLLM {
     conversationContext: string,
     signal?: AbortSignal,
     persistTrace?: ToolTraceEmitter,
+    options?: { internetFirst?: boolean },
   ): Promise<string>;
   debate(
     modelId: string,
@@ -186,6 +257,7 @@ export interface CouncilLLM {
     prompt: string,
     signal?: AbortSignal,
     persistTrace?: ToolTraceEmitter,
+    options?: { enableVerificationTools?: boolean },
   ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
 }
 

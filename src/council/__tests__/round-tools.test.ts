@@ -1,18 +1,26 @@
 /**
- * CQ-06: debate() passes tools to generateText with stepCountIs(4)
- * CQ-07: debate() returns { text, toolCalls } object (not bare string)
- * CQ-09: Per-round persistence text contains "[Council Round N]"
+ * Debate-call shape contracts.
+ *
+ * History:
+ *  - CQ-06 required tools + stepCountIs(4) for evidence verification.
+ *  - Session a7a5690d2049 (DeepSeek V4 on SiliconFlow): 4/4 Round-1 turns
+ *    empty because reasoning models burned step budget on tool chains and
+ *    returned finishReason="tool-calls" text="".
+ *  - First fix removed tools entirely → debate worked but lost evidence
+ *    verification (training-data citations only — session f83c278f2162).
+ *  - Current: verification tools available ONLY when
+ *    options.enableVerificationTools=true, capped at stepCountIs(2)
+ *    (1 verification call + final text). The caller (debate.ts) only enables
+ *    it for balanced/premium tier; fast-tier reasoning models stay tool-free.
  */
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-// ── CQ-06: debate() uses tools with stopWhen: stepCountIs(4) ─────────────────
-
-describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
+describe("debate() call shape — tools off by default, on with explicit opt-in", () => {
   beforeEach(() => {
     vi.resetModules();
   });
 
-  it("passes merged builtin+MCP tools to generateText", async () => {
+  it("does NOT pass tools to generateText when enableVerificationTools is absent", async () => {
     const capturedArgs: Record<string, unknown>[] = [];
 
     vi.doMock("ai", () => ({
@@ -20,7 +28,7 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
         capturedArgs.push(args);
         return { text: "debate response", toolCalls: [], steps: [] };
       }),
-      stepCountIs: vi.fn().mockReturnValue({ __stepCountIs: 4 }),
+      stepCountIs: vi.fn().mockReturnValue({ __stepCountIs: 2 }),
     }));
     vi.doMock("../../providers/keychain.js", () => ({
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
@@ -29,19 +37,6 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
-    }));
-    vi.doMock("../../tools/registry.js", () => ({
-      createBuiltinTools: vi.fn().mockReturnValue({ builtin_bash: {} }),
-    }));
-    vi.doMock("../../mcp/runtime.js", () => ({
-      buildMcpToolSet: vi.fn().mockResolvedValue({
-        tools: { mcp_tavily__search: {} },
-        errors: [],
-        close: vi.fn().mockResolvedValue(undefined),
-      }),
-    }));
-    vi.doMock("../../utils/settings.js", () => ({
-      loadMcpServers: vi.fn().mockReturnValue([{ id: "tavily", enabled: true }]),
     }));
     vi.doMock("../prompts.js", () => ({
       buildResearchSystemPrompt: vi.fn().mockReturnValue("research system prompt"),
@@ -54,21 +49,21 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
     await llm.debate("gpt-4o", "system prompt", "user prompt", undefined);
 
     expect(capturedArgs).toHaveLength(1);
-    const args = capturedArgs[0] as { tools?: Record<string, unknown> };
-    expect(args.tools).toHaveProperty("builtin_bash");
-    expect(args.tools).toHaveProperty("mcp_tavily__search");
+    const args = capturedArgs[0] as { tools?: unknown; stopWhen?: unknown };
+    expect(args.tools).toBeUndefined();
+    expect(args.stopWhen).toBeUndefined();
   });
 
-  it("uses stopWhen stepCountIs(4) not stepCountIs(15)", async () => {
-    let capturedStopWhen: unknown;
-    const mockStepCountResult = { __stepCountIs: 4 };
+  it("passes tools + stopWhen=stepCountIs(2) when enableVerificationTools=true", async () => {
+    const capturedArgs: Record<string, unknown>[] = [];
+    const stepCountIsMock = vi.fn().mockReturnValue({ __stepCountIs: 2 });
 
     vi.doMock("ai", () => ({
-      generateText: vi.fn().mockImplementation(async (args: { stopWhen?: unknown }) => {
-        capturedStopWhen = args.stopWhen;
-        return { text: "response", toolCalls: [], steps: [] };
+      generateText: vi.fn().mockImplementation(async (args: Record<string, unknown>) => {
+        capturedArgs.push(args);
+        return { text: "verified response", toolCalls: [], steps: [] };
       }),
-      stepCountIs: vi.fn().mockImplementation((n: number) => ({ __stepCountIs: n })),
+      stepCountIs: stepCountIsMock,
     }));
     vi.doMock("../../providers/keychain.js", () => ({
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
@@ -78,8 +73,13 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
+    // Builtin tools — must contain grep+read_file so the filter keeps something
     vi.doMock("../../tools/registry.js", () => ({
-      createBuiltinTools: vi.fn().mockReturnValue({}),
+      createBuiltinTools: vi.fn().mockReturnValue({
+        grep: { execute: async () => "ok" },
+        read_file: { execute: async () => "ok" },
+        bash: { execute: async () => "ok" }, // must be filtered out
+      }),
     }));
     vi.doMock("../../mcp/runtime.js", () => ({
       buildMcpToolSet: vi.fn().mockResolvedValue({
@@ -99,13 +99,18 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
     const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
 
-    await llm.debate("gpt-4o", "system", "prompt");
+    await llm.debate("gpt-4o", "system", "prompt", undefined, undefined, { enableVerificationTools: true });
 
-    // stopWhen must be the result of stepCountIs(4) — __stepCountIs: 4
-    expect(capturedStopWhen).toEqual({ __stepCountIs: 4 });
+    expect(capturedArgs).toHaveLength(1);
+    const args = capturedArgs[0] as { tools?: Record<string, unknown>; stopWhen?: unknown };
+    expect(args.tools).toBeDefined();
+    // Allowlist: only grep + read_file pass through; bash is filtered out
+    expect(Object.keys(args.tools!).sort()).toEqual(["grep", "read_file"]);
+    expect(args.stopWhen).toEqual({ __stepCountIs: 2 });
+    expect(stepCountIsMock).toHaveBeenCalledWith(2);
   });
 
-  it("uses temperature 0.7 and maxOutputTokens 2048", async () => {
+  it("uses temperature 0.7 and maxOutputTokens 6144", async () => {
     let capturedArgs: { temperature?: number; maxOutputTokens?: number } = {};
 
     vi.doMock("ai", () => ({
@@ -147,7 +152,10 @@ describe("CQ-06: debate() passes tools and uses stepCountIs(4)", () => {
     await llm.debate("gpt-4o", "system", "prompt");
 
     expect(capturedArgs.temperature).toBe(0.7);
-    expect(capturedArgs.maxOutputTokens).toBe(2048);
+    // Reasoning models share output budget with reasoning_tokens — e2e showed
+    // 2048 truncated debate turns mid-thought (finishReason=length). Raised to
+    // 6144 so reasoning models still have ~4K text-token headroom.
+    expect(capturedArgs.maxOutputTokens).toBe(6144);
   });
 });
 
