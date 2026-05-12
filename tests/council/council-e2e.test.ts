@@ -88,7 +88,11 @@ function getContent(chunks: StreamChunk[]): string {
 }
 
 function getQuestions(chunks: StreamChunk[]): StreamChunk[] {
-  return chunks.filter((c) => c.type === "council_question");
+  // Only count clarification-phase questions — post-debate prompts are a
+  // separate UX surface and should not be conflated with clarification.
+  return chunks.filter(
+    (c) => c.type === "council_question" && c.councilQuestion?.phase === "clarify",
+  );
 }
 
 function getPreflights(chunks: StreamChunk[]): StreamChunk[] {
