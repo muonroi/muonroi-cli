@@ -304,6 +304,10 @@ export interface CouncilPreflightData {
   scope: string;
   participants: Array<{ role: string; model: string }>;
   researchNeeded: boolean;
+  /** True when the working directory has no source code — research should prefer internet. */
+  repoEmpty?: boolean;
+  /** True when the user can override the research decision after approving the brief. */
+  researchOverridable?: boolean;
 }
 
 export interface ExperienceWarningData {

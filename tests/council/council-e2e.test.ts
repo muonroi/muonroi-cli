@@ -47,6 +47,30 @@ function createMockLLM(responses: Record<string, string>): CouncilLLM {
     async research(_modelId: string, _topic: string, _ctx: string): Promise<string> {
       return responses._research ?? "## Research Findings\n- Found relevant code in src/foo.ts\n## Key Evidence\n- Function bar() handles this\n## Gaps\n- None";
     },
+    async debate(modelId: string, system: string, prompt: string) {
+      // Route debate calls through `generate` so the same keyword-based
+      // response table drives them (e.g. "continuing a discussion").
+      const text = await (
+        async () => {
+          // Match same keyword logic as `generate`
+          for (const [key, value] of Object.entries(responses)) {
+            if (system.includes(key) || prompt.includes(key)) return value;
+          }
+          if (system.includes("entering a discussion")) {
+            return responses._opening ?? "I think we should consider approach A because of X, Y, Z. What do you think?";
+          }
+          if (system.includes("responding to")) {
+            return responses._response ?? "I agree on X but disagree on Y. Here's my reasoning...";
+          }
+          if (system.includes("continuing a discussion")) {
+            return responses._followup ?? "Good point. I've updated my thinking on Y. Are we aligned now?";
+          }
+          return `[Mock debate response]`;
+        }
+      )();
+      callCount++;
+      return { text, toolCalls: [] };
+    },
   };
 }
 
@@ -115,6 +139,7 @@ vi.mock("../../src/utils/settings.js", () => ({
   isCouncilMultiProviderPreferred: () => false,
   loadUserSettings: () => ({}),
   getCouncilExperienceMode: () => "advisory",
+  isCouncilCostAware: () => false,
 }));
 
 vi.mock("../../src/pil/pipeline.js", () => ({
@@ -135,6 +160,7 @@ vi.mock("../../src/council/leader.js", async (importOriginal) => {
       { role: "research", model: "mock-fast" },
     ],
     hasMultiProviderConfig: () => false,
+    pickCouncilTaskModel: (_task: string, leaderModelId: string) => leaderModelId,
   };
 });
 

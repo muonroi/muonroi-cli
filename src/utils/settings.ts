@@ -200,6 +200,17 @@ export interface UserSettings {
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
+  /**
+   * Cost-aware council sub-task routing. When true (default), trivial leader
+   * sub-tasks (research-need decision, round summary, evaluation JSON parse,
+   * clarification question gen, spec synthesis) drop down to a cheaper
+   * fast/balanced tier model on the SAME provider, with fallback to the
+   * leader model when no cheaper model is reachable.
+   *
+   * Final synthesis and debate-plan ALWAYS use the leader model — those
+   * decide structure and quality, not throughput.
+   */
+  councilCostAware?: boolean;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
   providers?: {
@@ -835,6 +846,10 @@ export function isCouncilMultiProviderPreferred(): boolean {
 
 export function getCouncilExperienceMode(): CouncilExperienceMode {
   return loadUserSettings().councilExperienceMode ?? "advisory";
+}
+
+export function isCouncilCostAware(): boolean {
+  return loadUserSettings().councilCostAware ?? true;
 }
 
 export function getDisabledProviders(): ProviderId[] {

@@ -2,7 +2,7 @@ import type { ModelMessage } from "ai";
 import type { StreamChunk } from "../types/index.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
-import { isCouncilMultiProviderPreferred, getCouncilExperienceMode } from "../utils/settings.js";
+import { isCouncilMultiProviderPreferred, getCouncilExperienceMode, isCouncilCostAware } from "../utils/settings.js";
 import type {
   ClarifiedSpec,
   CouncilLLM,
@@ -15,7 +15,7 @@ import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { runClarification, buildSpecFromTopic } from "./clarifier.js";
 import { runPreflight } from "./preflight.js";
-import { runDebate } from "./debate.js";
+import { runDebate, evaluateResearchNeed } from "./debate.js";
 import { runPlanning } from "./planner.js";
 import { runExecution } from "./executor.js";
 import { planDebate } from "./debate-planner.js";
@@ -49,6 +49,7 @@ export async function* runCouncil(
   options?: RunCouncilOptions,
 ): AsyncGenerator<StreamChunk, string | null, unknown> {
   const stats: CouncilStats = options?.councilStats ?? { calls: 0, startMs: Date.now(), phases: [] };
+  const costAware = isCouncilCostAware();
 
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
@@ -71,13 +72,16 @@ export async function* runCouncil(
         `Set \`roleModels.leader\` to override.\n`,
     };
   }
-  yield { type: "content", content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}\n` };
+  yield { type: "content", content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n` };
 
   const baseContext = buildCouncilContext(messages);
-  const projectSnapshot = options?.cwd ? await buildProjectSnapshot(options.cwd) : "";
-  const conversationContext = projectSnapshot
-    ? `## Current Project\n${projectSnapshot}\n\n---\n\n${baseContext}`
+  const projectInfo = options?.cwd
+    ? await buildProjectSnapshot(options.cwd)
+    : { snapshot: "", isEmpty: true };
+  const conversationContext = projectInfo.snapshot
+    ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
+  const internetFirst = projectInfo.isEmpty;
   const active: CouncilParticipant[] = participants.map((p) => ({ ...p, position: "" }));
 
   // ── Phase A + B loop: Clarify → Confirm ─────────────────────────────────────
@@ -108,7 +112,7 @@ export async function* runCouncil(
           content: `\n> Clarification seeded by PIL (${pilSeed.length} gray-area question${pilSeed.length === 1 ? "" : "s"}).\n`,
         };
       }
-      const clarifyGen = runClarification(topic, leaderModelId, conversationContext, respondToQuestion, llm, options?.signal, pilSeed);
+      const clarifyGen = runClarification(topic, leaderModelId, conversationContext, respondToQuestion, llm, options?.signal, pilSeed, undefined, undefined, costAware);
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
         clarifyResult = await clarifyGen.next();
@@ -123,7 +127,10 @@ export async function* runCouncil(
     }
 
     const researchNeeded = true;
-    const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight);
+    const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
+      repoEmpty: internetFirst,
+      researchOverridable: true,
+    });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
       preflightResult = await preflightGen.next();
@@ -135,6 +142,51 @@ export async function* runCouncil(
   }
 
   stats.phases.push({ name: "clarify+preflight", durationMs: Date.now() - phaseAStart });
+
+  // ── Research-need check + user override ────────────────────────────────────
+  // Leader-LLM decides if research is required. If yes, give the user a chance
+  // to skip — research is the slowest part of council and trivial questions
+  // (e.g. "what did we just decide?") should not pay that cost.
+  let researchSkipOverride = false;
+  try {
+    const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
+    let needStep: IteratorResult<StreamChunk, boolean>;
+    let leaderNeedsResearch = true;
+    do {
+      needStep = await needGen.next();
+      if (!needStep.done && needStep.value) yield needStep.value;
+    } while (!needStep.done);
+    leaderNeedsResearch = needStep.value;
+
+    if (leaderNeedsResearch) {
+      const { randomUUID } = await import("crypto");
+      const overrideId = randomUUID();
+      yield {
+        type: "council_question",
+        content:
+          `\n## Research decision\nLeader recommends a research phase before debate` +
+          (internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)") +
+          `. Want to skip it?`,
+        councilQuestion: {
+          questionId: overrideId,
+          phase: "post-debate",
+          question: "Skip the research phase?",
+          context: internetFirst
+            ? "Workspace is empty — research will search the internet. Skip if you already have the answer."
+            : "Research will grep/read the codebase. Skip for trivial topics that don't need code evidence.",
+          isRequired: false,
+          options: [
+            { label: "No — run research (recommended)", description: "Leader thinks evidence is needed.", value: "no", kind: "choice" },
+            { label: "Yes — skip research", description: "Go straight to debate.", value: "yes", kind: "choice" },
+          ],
+          defaultIndex: 0,
+        },
+      } as StreamChunk;
+      const overrideAnswer = await respondToQuestion(overrideId);
+      researchSkipOverride = overrideAnswer === "yes";
+      yield { type: "content", content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n` };
+    }
+  } catch { /* fail-open — fall through to default behavior in runDebate */ }
 
   // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)
   const eeResult = await eePromise;
@@ -210,6 +262,9 @@ export async function* runCouncil(
     participants: active,
     debatePlan,
     signal: options?.signal,
+    researchSkipOverride,
+    internetFirst,
+    costAware,
   }, llm);
 
   let debateResult: IteratorResult<StreamChunk, import("./types.js").DebateState>;
@@ -222,11 +277,24 @@ export async function* runCouncil(
   const debateState = debateResult.value;
   stats.phases.push({ name: "debate", durationMs: Date.now() - debateStart });
 
-  // Store debate transcript as individual message
+  // Store debate transcript as individual message — strip failed/empty turns
+  // so future context loads don't carry noise. The failure metadata still
+  // exists in interaction_logs for debugging.
   if (sessionId && debateState.exchangeLogs) {
     try {
-      const logString = [...debateState.exchangeLogs.values()].flat().join("\n");
-      appendSystemMessage(sessionId, `[Debate Transcript]\nRounds: ${debateState.roundCount}\n\n${logString}`);
+      const filtered = [...debateState.exchangeLogs.values()]
+        .flat()
+        .filter((line) => {
+          const trimmed = line.trim();
+          if (!trimmed) return false;
+          return !/:\s*\[debate failed:/i.test(trimmed);
+        });
+      if (filtered.length > 0) {
+        appendSystemMessage(
+          sessionId,
+          `[Debate Transcript]\nRounds: ${debateState.roundCount}\n\n${filtered.join("\n")}`,
+        );
+      }
     } catch { /* non-critical */ }
   }
 
@@ -250,7 +318,7 @@ export async function* runCouncil(
     pilCtx?.outputStyle ?? undefined,  // CQ-18: propagate outputStyle
   );
 
-  let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string }>;
+  let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string; synthesisFailReason?: string }>;
   do {
     planResult = await planGen.next();
     if (!planResult.done && planResult.value) {
@@ -258,6 +326,7 @@ export async function* runCouncil(
     }
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
+  const synthesisFailReason = planResult.value.synthesisFailReason;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -289,16 +358,66 @@ export async function* runCouncil(
       const hasPlan = plan && plan.steps.length > 0;
       const hasEmptySections = refinementTopics.length > 0;
 
-      const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" }> = [];
+      // ── Confidence badge (CQ-6) ──────────────────────────────────────────
+      const evidenceDensity = debateState.finalEvidenceDensity ?? 0;
+      const synthesisFailed = !!synthesisFailReason || !outcome || synthesisText.trim().length < 20;
+      const confidenceLevel: "high" | "medium" | "low" =
+        synthesisFailed ? "low" : evidenceDensity >= 0.6 ? "high" : evidenceDensity >= 0.3 ? "medium" : "low";
+
+      // When synthesis genuinely failed, asking blind clarification questions
+      // ("what should go in Agreed Approach?") is useless — the user can't be
+      // expected to do the synthesizer's job. Surface WHY confidence is low
+      // and offer concrete recovery actions instead.
+      const confidenceReason: string = synthesisFailed
+        ? (synthesisFailReason ??
+          "The synthesizer produced no usable output. The debate exchanges above are still readable, but no structured outcome could be extracted.")
+        : confidenceLevel === "low"
+          ? `Only ${(evidenceDensity * 100).toFixed(0)}% of claims in the final round carried citations or were resolved — most positions remained asserted without backing evidence.`
+          : confidenceLevel === "medium"
+            ? `${(evidenceDensity * 100).toFixed(0)}% of claims carried citations or were resolved — some open points remain.`
+            : `${(evidenceDensity * 100).toFixed(0)}% of claims were cited or resolved.`;
+
+      const confidenceBadge = synthesisFailed
+        ? `❌ Synthesis failed — confidence cannot be computed`
+        : confidenceLevel === "high"
+          ? `✅ High confidence (evidence density ${evidenceDensity.toFixed(2)})`
+          : confidenceLevel === "medium"
+            ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
+            : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
+
+      // Recommendation surfaced to the user as the default action.
+      const recommendation: { value: "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis"; reason: string } =
+        synthesisFailed
+          ? { value: "retry_synthesis", reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures." }
+          : hasEmptySections
+            ? { value: "refine", reason: `Fill in ${refinementTopics.length} section(s) the debate left empty.` }
+            : confidenceLevel === "low"
+              ? { value: "ask_followup", reason: "Press the council on the weakest claims rather than accepting a thin synthesis." }
+              : !hasPlan
+                ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
+                : { value: "save_exit", reason: "Outcome looks solid — save and move on." };
+
+      const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
+
+      if (synthesisFailed) {
+        baseOptions.push({
+          label: "Retry Synthesis (compact)",
+          description: "Re-synthesize from final positions only (drop full exchange history). Fastest recovery from provider timeouts.",
+          value: "retry_synthesis",
+          kind: "choice",
+        });
+      }
 
       baseOptions.push({
         label: "Save & Exit",
-        description: "Save the debate outcome and finish",
+        description: synthesisFailed
+          ? "Save raw debate exchanges as-is; no structured outcome will be persisted"
+          : "Save the debate outcome and finish",
         value: "save_exit",
         kind: "choice",
       });
 
-      if (!hasPlan) {
+      if (!hasPlan && !synthesisFailed) {
         baseOptions.push({
           label: "Generate Action Plan",
           description: "Create a detailed implementation plan from the debate outcome",
@@ -307,7 +426,7 @@ export async function* runCouncil(
         });
       }
 
-      if (hasEmptySections) {
+      if (hasEmptySections && !synthesisFailed) {
         baseOptions.push({
           label: `Refine: ${refinementTopics.join(", ")}`,
           description: `Answer questions about ${refinementTopics.length} unresolved aspect(s)`,
@@ -315,6 +434,14 @@ export async function* runCouncil(
           kind: "choice",
         });
       }
+
+      // CQ-3: free-text follow-up to the council on the same debate context.
+      baseOptions.push({
+        label: "Ask Council a follow-up",
+        description: "Pose a new question that re-uses this debate's context (no new clarification).",
+        value: "ask_followup",
+        kind: "freetext",
+      });
 
       if (hasPlan) {
         baseOptions.push({
@@ -325,32 +452,86 @@ export async function* runCouncil(
         });
       }
 
-      const defaultIndex = hasEmptySections
-        ? baseOptions.findIndex((o) => o.value === "refine")
-        : 0;
+      const defaultIndex = Math.max(0, baseOptions.findIndex((o) => o.value === recommendation.value));
+
+      const heading = synthesisFailed ? "## Debate Synthesis Failed" : "## Debate Synthesis Complete";
+      const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendation.reason}`;
+      const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       yield {
         type: "council_question",
-        content: "## Debate Synthesis Complete\n\nThe council has reached a synthesis. What would you like to do next?",
+        content: headerBlock,
         councilQuestion: {
           questionId,
           phase: "post-debate",
-          question: hasEmptySections
-            ? `The debate identified ${refinementTopics.length} area(s) that need clarification. Would you like to refine them or save the current outcome?`
-            : "What would you like to do next?",
-          context: hasEmptySections
-            ? `Unresolved areas: ${refinementTopics.join(", ")}`
-            : "The council completed its debate and generated a synthesis.",
+          question: synthesisFailed
+            ? "Synthesis did not produce a structured outcome. How do you want to recover?"
+            : hasEmptySections
+              ? `The debate left ${refinementTopics.length} area(s) unresolved. Refine them or save the current outcome?`
+              : "What would you like to do next?",
+          context:
+            `${confidenceBadge}\n${confidenceReason}` +
+            (hasEmptySections ? `\nUnresolved areas: ${refinementTopics.join(", ")}` : "") +
+            `\n→ ${recommendation.reason}`,
           isRequired: false,
           options: baseOptions,
-          defaultIndex: defaultIndex >= 0 ? defaultIndex : 0,
+          defaultIndex,
         },
       } as StreamChunk;
 
       const answer = await respondToQuestion(questionId);
       yield { type: "content", content: `\n  ↳ ${answer}\n` };
 
-      if (answer === "generate_plan") {
+      // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
+      const knownValues = new Set(["save_exit", "generate_plan", "refine", "ask_followup", "implement", "retry_synthesis", ""]);
+      const isFollowupText =
+        answer === "ask_followup" ||
+        (typeof answer === "string" && answer.trim().length > 0 && !knownValues.has(answer));
+
+      if (answer === "retry_synthesis") {
+        yield { type: "content", content: "\n> Retrying synthesis with compact prompt (final positions only)…\n" };
+        const refineGen = runPlanning(
+          debateState,
+          spec,
+          debateState.active,
+          leaderModelId,
+          respondToPreflight,
+          llm,
+          debatePlan,
+          pilCtx?.outputStyle ?? undefined,
+        );
+        let refineResult;
+        do {
+          refineResult = await refineGen.next();
+          if (!refineResult.done && refineResult.value) yield refineResult.value;
+        } while (!refineResult.done);
+        outcome = refineResult.value.outcome;
+        plan = refineResult.value.plan;
+        synthesisText = refineResult.value.synthesisText;
+      } else if (isFollowupText && answer !== "ask_followup") {
+        // Re-synthesize with the follow-up framed as user input.
+        yield { type: "content", content: `\n> Council answering follow-up using prior debate context...\n` };
+        const followupCtx = `### Follow-up question from user\n${answer}\n\n_Use the debate exchanges above and cite the role(s) whose position you draw from._`;
+        const refineGen = runPlanning(
+          debateState,
+          spec,
+          debateState.active,
+          leaderModelId,
+          respondToPreflight,
+          llm,
+          debatePlan,
+          pilCtx?.outputStyle ?? undefined,
+          followupCtx,
+        );
+        let refineResult;
+        do {
+          refineResult = await refineGen.next();
+          if (!refineResult.done && refineResult.value) yield refineResult.value;
+        } while (!refineResult.done);
+        outcome = refineResult.value.outcome;
+        plan = refineResult.value.plan;
+        synthesisText = refineResult.value.synthesisText;
+      } else if (answer === "generate_plan") {
         yield { type: "content", content: "\n> Re-running planning with action plan focus...\n" };
         const refineGen = runPlanning(
           debateState,
@@ -436,13 +617,23 @@ export async function* runCouncil(
         appendSystemMessage(sessionId, `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`);
         appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
       }
-      const councilRecord = {
+      const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
+      const confidenceLevelPersist: "high" | "medium" | "low" =
+        evidenceDensityPersist >= 0.6 ? "high" : evidenceDensityPersist >= 0.3 ? "medium" : "low";
+      const councilRecord: import("./types.js").CouncilMemoryRecord = {
         topic,
         spec,
         debatePlan,
+        leaderModel: leaderModelId,
         participants: debateState.active.map((a) => ({ role: a.role, model: a.model, stance: a.stance })),
         finalPositions: debateState.active.map((a) => ({ role: a.role, position: a.position })),
+        archive: debateState.archive ?? [],
         synthesis: synthesisText,
+        confidence: {
+          level: confidenceLevelPersist,
+          evidenceDensity: evidenceDensityPersist,
+          rounds: debateState.roundCount,
+        },
         stats: { calls: stats.calls, durationMs: Date.now() - stats.startMs, phases: stats.phases },
         timestamp: new Date().toISOString(),
       };

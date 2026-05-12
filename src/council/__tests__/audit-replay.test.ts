@@ -69,7 +69,7 @@ vi.mock("../debate-planner.js", () => ({
 
 vi.mock("../context.js", () => ({
   buildCouncilContext: vi.fn().mockReturnValue("mock context"),
-  buildProjectSnapshot: vi.fn().mockResolvedValue(""),
+  buildProjectSnapshot: vi.fn().mockResolvedValue({ snapshot: "", isEmpty: true }),
 }));
 
 vi.mock("../../utils/settings.js", async (importOriginal) => {

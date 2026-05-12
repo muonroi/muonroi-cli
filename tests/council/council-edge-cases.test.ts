@@ -11,6 +11,7 @@ vi.mock("../../src/council/leader.js", () => ({
     { role: "verify", model: "mock-premium" },
   ],
   hasMultiProviderConfig: () => false,
+  pickCouncilTaskModel: (_task: string, leaderModelId: string) => leaderModelId,
 }));
 
 vi.mock("../../src/orchestrator/agent-options.js", () => ({
@@ -30,6 +31,7 @@ vi.mock("../../src/utils/settings.js", () => ({
   isCouncilMultiProviderPreferred: () => false,
   loadUserSettings: () => ({}),
   getCouncilExperienceMode: () => "advisory",
+  isCouncilCostAware: () => false,
 }));
 
 vi.mock("../../src/pil/pipeline.js", () => ({
@@ -79,6 +81,10 @@ describe("Council Edge Cases", () => {
         return "I think approach A is better because of performance.";
       },
       async research() { return "## Research\n- N/A"; },
+      async debate(modelId, system, prompt) {
+        const text = await llm.generate(modelId, system, prompt);
+        return { text, toolCalls: [] };
+      },
     };
 
     const gen = runCouncil(
@@ -99,8 +105,12 @@ describe("Council Edge Cases", () => {
     expect(evaluationModelId).toBe("mock-premium");
   });
 
-  // ── Safety valve: debate capped at 8 rounds ────────────────────────────────
-  it("debate stops at safety valve even if leader says continue", async () => {
+  // ── Safety valve: debate capped at the leader-decided budget (default 3) ───
+  // Previously this test relied on the hardcoded ABSOLUTE_MAX_ROUNDS=8. The
+  // budget is now leader-driven (DebatePlan.plannedRounds, default 3 when the
+  // planner is unavailable in the mock). Leader can still bump up to 8 via
+  // extendRounds, but without that signal the default budget stops the loop.
+  it("debate stops at leader-decided budget even if leader says continue", async () => {
     let roundsSeen = 0;
     const llm: CouncilLLM = {
       async generate(_modelId, system, _prompt, _max) {
@@ -126,6 +136,10 @@ describe("Council Edge Cases", () => {
         return "My analysis...";
       },
       async research() { return "## Research\n- N/A"; },
+      async debate(modelId, system, prompt) {
+        const text = await llm.generate(modelId, system, prompt);
+        return { text, toolCalls: [] };
+      },
     };
 
     const gen = runCouncil(
@@ -143,8 +157,9 @@ describe("Council Edge Cases", () => {
     const { chunks } = await collectChunks(gen);
     const content = getContent(chunks);
 
-    // Should have Discussion Round 8 (max) but NOT round 9
-    expect(content).toContain("Discussion Round 8");
+    // With the fallback DebatePlan (no plannedRounds), debate runs to the
+    // default budget of 3 and then stops. Never exceeds the hard ceiling of 8.
+    expect(content).toContain("Discussion Round 3");
     expect(content).not.toContain("Discussion Round 9");
   });
 
@@ -187,6 +202,10 @@ describe("Council Edge Cases", () => {
       async research(_modelId, topic) {
         researchCalled = true;
         return `## Research Findings\n- Found JWT impl in src/auth/jwt.ts\n- Uses RS256 with 1h expiry\n## Gaps\n- None`;
+      },
+      async debate(modelId, system, prompt) {
+        const text = await llm.generate(modelId, system, prompt);
+        return { text, toolCalls: [] };
       },
     };
 
@@ -237,6 +256,10 @@ describe("Council Edge Cases", () => {
         return "Analysis...";
       },
       async research() { return "N/A"; },
+      async debate(modelId, system, prompt) {
+        const text = await llm.generate(modelId, system, prompt);
+        return { text, toolCalls: [] };
+      },
     };
 
     const gen = runCouncil(
@@ -280,6 +303,10 @@ describe("Council Edge Cases", () => {
         return "Analysis...";
       },
       async research() { return "N/A"; },
+      async debate(modelId, system, prompt) {
+        const text = await llm.generate(modelId, system, prompt);
+        return { text, toolCalls: [] };
+      },
     };
 
     const gen = runCouncil(
