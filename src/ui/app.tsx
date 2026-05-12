@@ -1,16 +1,18 @@
+import * as path from "node:path";
 import type { KeyBinding, KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { deliberateCompact } from "../flow/compaction/index.js";
+import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
-import { deliberateCompact } from "../flow/compaction/index.js";
-import { setActiveEeYield } from "../index.js";
-import * as path from "node:path";
-import type { StructuredResponse } from "../types/index";
+import type { ProductStatusCardData } from "../product-loop/types.js";
+import { getConfiguredProviders } from "../providers/keychain.js";
+import type { ProviderId } from "../providers/types.js";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -23,29 +25,20 @@ import type {
   Plan,
   PlanQuestion,
   ReasoningEffort,
+  StructuredResponse,
   SubagentStatus,
   ToolCall,
   ToolResult,
 } from "../types/index";
-import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
-import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
-import { ProductStatusCard } from "./cards/product-status-card.js";
-import type { ProductStatusCardData } from "../product-loop/types.js";
-import {
-  CouncilQuestionCard,
-  initialCardState,
-  reduceCardKey,
-  type CouncilCardKey,
-  type CouncilCardState,
-} from "./components/council-question-card.js";
 import { MODES } from "../types/index";
 import { processAtMentions } from "../utils/at-mentions.js";
-import { FileIndex } from "../utils/file-index.js";
 import { readClipboardImage } from "../utils/clipboard-image";
+import { FileIndex } from "../utils/file-index.js";
 import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/host-clipboard";
 import {
   type CustomSubagentConfig,
   getApiKey,
+  getDisabledProviders,
   getTelegramBotToken,
   isReservedSubagentName,
   loadMcpServers,
@@ -63,11 +56,8 @@ import {
   savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
-  getDisabledProviders,
   setProviderDisabled,
 } from "../utils/settings";
-import { getConfiguredProviders } from "../providers/keychain.js";
-import type { ProviderId } from "../providers/types.js";
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
@@ -79,7 +69,17 @@ import {
   SubagentEditorModal,
   SubagentsBrowserModal,
 } from "./agents-modal";
+import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
+import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
+import {
+  type CouncilCardKey,
+  type CouncilCardState,
+  CouncilQuestionCard,
+  initialCardState,
+  reduceCardKey,
+} from "./components/council-question-card.js";
+import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { type TypeaheadState, useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
@@ -97,9 +97,9 @@ import { SLASH_MENU_ITEMS, type SlashMenuItem } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
+import { detectLang, type Lang, tokenize } from "./syntax-highlight.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark, type Theme } from "./theme";
-import { detectLang, tokenize, type Lang } from "./syntax-highlight.js";
 import "./slash/route.js";
 import "./slash/optimize.js";
 import "./slash/discuss.js";
@@ -121,8 +121,8 @@ import {
   getModelIds,
   getModelInfo,
   getSupportedReasoningEfforts,
-  MODELS,
   isLoading,
+  MODELS,
   normalizeModelId,
 } from "../models/registry.js";
 
@@ -149,7 +149,7 @@ function createTurnCoordinator(): any {
   };
 }
 
-function formatStructuredResponse(sr: StructuredResponse): string {
+function _formatStructuredResponse(sr: StructuredResponse): string {
   const d = sr.data;
   switch (sr.taskType) {
     case "refactor": {
@@ -160,22 +160,35 @@ function formatStructuredResponse(sr: StructuredResponse): string {
       return parts.join("\n");
     }
     case "debug": {
-      const r = d as { hypothesis?: string; root_cause?: string; fix?: { file: string; diff: string }; verify_command?: string };
+      const r = d as {
+        hypothesis?: string;
+        root_cause?: string;
+        fix?: { file: string; diff: string };
+        verify_command?: string;
+      };
       const parts = [`hypothesis: ${r.hypothesis}`, `root cause: ${r.root_cause}`];
       if (r.fix) parts.push(`\n── fix: ${r.fix.file} ──\n${r.fix.diff}`);
       if (r.verify_command) parts.push(`verify: ${r.verify_command}`);
       return parts.join("\n");
     }
     case "plan": {
-      const r = d as { steps?: Array<{ action: string; criterion: string; rationale?: string }>; assumptions?: string[]; risks?: string[] };
-      const lines = (r.steps ?? []).map((s, i) => `${i + 1}. ${s.action}\n   done when: ${s.criterion}${s.rationale ? `\n   why: ${s.rationale}` : ""}`);
+      const r = d as {
+        steps?: Array<{ action: string; criterion: string; rationale?: string }>;
+        assumptions?: string[];
+        risks?: string[];
+      };
+      const lines = (r.steps ?? []).map(
+        (s, i) => `${i + 1}. ${s.action}\n   done when: ${s.criterion}${s.rationale ? `\n   why: ${s.rationale}` : ""}`,
+      );
       if (r.assumptions?.length) lines.push(`\nassumptions:\n${r.assumptions.map((a) => `  - ${a}`).join("\n")}`);
       if (r.risks?.length) lines.push(`\nrisks:\n${r.risks.map((r2) => `  - ${r2}`).join("\n")}`);
       return lines.join("\n");
     }
     case "analyze": {
       const r = d as { findings?: Array<{ text: string; evidence: string; severity: string }> };
-      return (r.findings ?? []).map((f) => `[${f.severity.toUpperCase()}] ${f.text}\n  evidence: ${f.evidence}`).join("\n");
+      return (r.findings ?? [])
+        .map((f) => `[${f.severity.toUpperCase()}] ${f.text}\n  evidence: ${f.evidence}`)
+        .join("\n");
     }
     case "documentation": {
       const r = d as { content?: string; examples?: Array<{ code: string; description: string }> };
@@ -217,7 +230,7 @@ function buildPreflightQuestion(pf: {
   return {
     questionId: pf.preflightId,
     phase: "preflight",
-    question: `Approve discussion plan for: ${pf.problemStatement.slice(0, 200)}`,
+    question: `Approve discussion plan for: ${pf.problemStatement}`,
     context: pf.participants.length > 0 ? `Participants: ${pf.participants.map((p) => p.role).join(", ")}` : undefined,
     options: [
       { label: "Approve", value: "approve", kind: "choice", description: "Start the debate now" },
@@ -283,7 +296,14 @@ type ContextStats = {
   ratioUsed: number;
   ratioRemaining: number;
 };
-type PasteBlock = { id: number; content: string; lines: number; isImage?: boolean; clipboardBase64?: string; clipboardMediaType?: string };
+type PasteBlock = {
+  id: number;
+  content: string;
+  lines: number;
+  isImage?: boolean;
+  clipboardBase64?: string;
+  clipboardMediaType?: string;
+};
 type FileMentionBlock = { id: number; path: string };
 type QueuedMessage = { text: string; displayText: string };
 
@@ -779,7 +799,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       provider: agent.getProviderId(),
       model: agent.getModel(),
     });
-  }, []);
+  }, [agent.getModel, agent.getProviderId]);
   // Wire status bar subscriptions once at boot (Plan 06)
   useEffect(() => wireStatusBar(), []);
   useEffect(() => {
@@ -1052,7 +1072,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   modeInfoRef.current = modeInfo;
   const modelInfo = getModelInfo(model);
   const contextStats = modelInfo ? agent.getContextStats(modelInfo.contextWindow, streamContent) : null;
-  
+
   // UI Loading logic for dynamic models — restrict to providers that have API keys configured
   // and have not been explicitly disabled by the user. Catalog entries lacking a provider are
   // kept (defensive); models with an unknown provider are filtered out to avoid clutter.
@@ -1074,7 +1094,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           m.id.toLowerCase().includes(modelSearchQuery.toLowerCase()),
       )
     : [...modelList];
-    
+
   const filteredModelIds = filteredModels.map((m) => m.id);
   const filteredSlashItems = slashSearchQuery
     ? SLASH_MENU_ITEMS.filter(
@@ -1994,7 +2014,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           nextPromptMeta: { trigger: "session-end" as const, cwd, tenantId: "local" },
         }).catch(() => {});
       }
-
     } catch {
       // Swallow all errors — exit must never fail due to EE
     }
@@ -2025,51 +2044,55 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // position and copy any terminal-level word selection (like Claude Code / Codex CLI).
   const lastClickRef = useRef<{ time: number; x: number; y: number }>({ time: 0, x: 0, y: 0 });
 
-  const handleRootMouseUp = useCallback((event?: { button?: number; type?: string; x?: number; y?: number }) => {
-    // Right-click semantics:
-    //   - With selection → copy (same as left).
-    //   - Without selection → paste clipboard text into the input buffer.
-    // Left/middle-click keep the prior copy-on-release-with-selection behavior.
-    const isRightClick = event?.button === 2;
-    if (isRightClick) {
-      const copied = copyTuiSelectionToHost();
-      if (!copied) {
-        const ta = inputRef.current;
-        const text = readTextFromHostClipboard();
-        if (ta && text) {
-          const current = ta.plainText || "";
-          const insertAt = (typeof ta.cursorOffset === "number") ? ta.cursorOffset : current.length;
-          const next = current.slice(0, insertAt) + text + current.slice(insertAt);
-          ta.setText(next);
-          try { ta.cursorOffset = insertAt + text.length; } catch { /* noop */ }
+  const handleRootMouseUp = useCallback(
+    (event?: { button?: number; type?: string; x?: number; y?: number }) => {
+      // Right-click semantics:
+      //   - With selection → copy (same as left).
+      //   - Without selection → paste clipboard text into the input buffer.
+      // Left/middle-click keep the prior copy-on-release-with-selection behavior.
+      const isRightClick = event?.button === 2;
+      if (isRightClick) {
+        const copied = copyTuiSelectionToHost();
+        if (!copied) {
+          const ta = inputRef.current;
+          const text = readTextFromHostClipboard();
+          if (ta && text) {
+            const current = ta.plainText || "";
+            const insertAt = typeof ta.cursorOffset === "number" ? ta.cursorOffset : current.length;
+            const next = current.slice(0, insertAt) + text + current.slice(insertAt);
+            ta.setText(next);
+            try {
+              ta.cursorOffset = insertAt + text.length;
+            } catch {
+              /* noop */
+            }
+          }
         }
+        inputRef.current?.focus();
+        return;
+      }
+
+      // Double-click detection: left-click within 400ms and within 5 cells of last click
+      const now = Date.now();
+      const ex = event?.x ?? -1;
+      const ey = event?.y ?? -1;
+      const last = lastClickRef.current;
+      const isDoubleClick = now - last.time < 400 && Math.abs(ex - last.x) <= 5 && Math.abs(ey - last.y) <= 5;
+      lastClickRef.current = { time: now, x: ex, y: ey };
+
+      if (isDoubleClick) {
+        // On double-click, the terminal emulator may select the word under cursor.
+        // Give the terminal a tick to populate the selection, then copy.
+        setTimeout(() => {
+          copyTuiSelectionToHost();
+        }, 10);
+      } else {
+        copyTuiSelectionToHost();
       }
       inputRef.current?.focus();
-      return;
-    }
-
-    // Double-click detection: left-click within 400ms and within 5 cells of last click
-    const now = Date.now();
-    const ex = event?.x ?? -1;
-    const ey = event?.y ?? -1;
-    const last = lastClickRef.current;
-    const isDoubleClick =
-      now - last.time < 400 &&
-      Math.abs(ex - last.x) <= 5 &&
-      Math.abs(ey - last.y) <= 5;
-    lastClickRef.current = { time: now, x: ex, y: ey };
-
-    if (isDoubleClick) {
-      // On double-click, the terminal emulator may select the word under cursor.
-      // Give the terminal a tick to populate the selection, then copy.
-      setTimeout(() => {
-        copyTuiSelectionToHost();
-      }, 10);
-    } else {
-      copyTuiSelectionToHost();
-    }
-    inputRef.current?.focus();
-  }, [copyTuiSelectionToHost]);
+    },
+    [copyTuiSelectionToHost],
+  );
 
   const handleRootMouseDown = useCallback(() => {
     setTimeout(() => inputRef.current?.focus(), 0);
@@ -2545,6 +2568,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       scrollToBottom,
       sessionTitle,
       showLiveToolCalls,
+      flushPendingAssistantMessage,
     ],
   );
 
@@ -2719,6 +2743,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           defaultModel: model,
           lastPrompt: messages[messages.length - 1]?.content,
           sessionId: agent.getSessionId() ?? undefined,
+          getLiveEntries: () => messages,
         }).then(async (result) => {
           if (result === null) return;
 
@@ -2755,7 +2780,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const seq = agent.pinLastUserMessage();
             setMessages((prev) => [
               ...prev,
-              buildAssistantEntry(seq === null ? "No user message to pin." : `Pinned user message (seq=${seq}). It will survive compaction.`),
+              buildAssistantEntry(
+                seq === null
+                  ? "No user message to pin."
+                  : `Pinned user message (seq=${seq}). It will survive compaction.`,
+              ),
             ]);
             return;
           }
@@ -2764,7 +2793,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
             setMessages((prev) => [
               ...prev,
-              buildAssistantEntry(ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`),
+              buildAssistantEntry(
+                ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+              ),
             ]);
             return;
           }
@@ -2797,13 +2828,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
               return;
             }
-            const heading = payload.subcommand === "start"
-              ? `/ideal "${payload.idea ?? ""}"`
-              : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
+            const heading =
+              payload.subcommand === "start"
+                ? `/ideal "${payload.idea ?? ""}"`
+                : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
             setMessages((prev) => [
               ...prev,
               buildUserEntry(heading),
-              buildAssistantEntry(warningPrefix ? `${warningPrefix}\nProduct loop starting…\n` : "Product loop starting…\n"),
+              buildAssistantEntry(
+                warningPrefix ? `${warningPrefix}\nProduct loop starting…\n` : "Product loop starting…\n",
+              ),
             ]);
             // Fresh product-loop run — clear any persisted phase/status so old
             // runs don't bleed into the new one (phaseIds collide across runs).
@@ -2865,10 +2899,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), {
-                        ...last,
-                        content: (last.content ?? "") + `\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                      }];
+                      return [
+                        ...prev.slice(0, -1),
+                        {
+                          ...last,
+                          content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                        },
+                      ];
                     }
                     return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
                   });
@@ -2877,12 +2914,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), {
-                        ...last,
-                        content: (last.content ?? "") + `\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
-                      }];
+                      return [
+                        ...prev.slice(0, -1),
+                        {
+                          ...last,
+                          content: `${last.content ?? ""}\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                        },
+                      ];
                     }
-                    return [...prev, buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`)];
+                    return [
+                      ...prev,
+                      buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`),
+                    ];
                   });
                 }
                 if (chunk.type === "done") break;
@@ -2901,7 +2944,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (result.startsWith("__COUNCIL__")) {
             const lines = result.split("\n");
             const topic = lines.slice(2).join("\n");
-            setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
+            setMessages((prev) => [
+              ...prev,
+              buildUserEntry(`/council ${topic}`),
+              buildAssistantEntry("Council convening...\n"),
+            ]);
             // Fresh council run — clear any persisted phase timeline so old runs
             // don't bleed into the new one (phaseIds collide across runs).
             setCouncilPhases([]);
@@ -2950,10 +2997,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), {
-                        ...last,
-                        content: (last.content ?? "") + `\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                      }];
+                      return [
+                        ...prev.slice(0, -1),
+                        {
+                          ...last,
+                          content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                        },
+                      ];
                     }
                     return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
                   });
@@ -2962,12 +3012,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
                     if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), {
-                        ...last,
-                        content: (last.content ?? "") + `\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
-                      }];
+                      return [
+                        ...prev.slice(0, -1),
+                        {
+                          ...last,
+                          content: `${last.content ?? ""}\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                        },
+                      ];
                     }
-                    return [...prev, buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`)];
+                    return [
+                      ...prev,
+                      buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`),
+                    ];
                   });
                 }
                 if (chunk.type === "done") break;
@@ -3096,6 +3152,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
+            getLiveEntries: () => messages,
           }).then((result) => {
             if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
           });
@@ -3113,6 +3170,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
+            getLiveEntries: () => messages,
           }).then((result) => {
             if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
           });
@@ -3158,7 +3216,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               const lines = sessions.map((s, idx) => {
                 const ts = new Date(s.updatedAt).toLocaleString();
                 const title = s.title?.trim() || "(untitled)";
-                const truncTitle = title.length > 80 ? title.slice(0, 77) + "..." : title;
+                const truncTitle = title.length > 80 ? `${title.slice(0, 77)}...` : title;
                 return `${String(idx + 1).padStart(2)}. [${s.id}] ${ts}  ${s.model}\n    ${truncTitle}`;
               });
               body = [
@@ -3173,10 +3231,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           } catch (err) {
             body = `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`;
           }
-          setMessages((p) => [
-            ...p,
-            { type: "assistant", content: body, timestamp: new Date() },
-          ]);
+          setMessages((p) => [...p, { type: "assistant", content: body, timestamp: new Date() }]);
           break;
         }
         default: {
@@ -3188,6 +3243,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
+            getLiveEntries: () => messages,
           }).then(async (result) => {
             if (result === null) return;
             if (result.startsWith("__COMPACT__")) {
@@ -3220,7 +3276,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               const seq = agent.pinLastUserMessage();
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(seq === null ? "No user message to pin." : `Pinned user message (seq=${seq}). It will survive compaction.`),
+                buildAssistantEntry(
+                  seq === null
+                    ? "No user message to pin."
+                    : `Pinned user message (seq=${seq}). It will survive compaction.`,
+                ),
               ]);
               return;
             }
@@ -3229,7 +3289,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`),
+                buildAssistantEntry(
+                  ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                ),
               ]);
               return;
             }
@@ -3252,7 +3314,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             }
             if (result.startsWith("__COUNCIL__")) {
               const topic = result.replace(/^__COUNCIL__\n/, "");
-              setMessages((prev) => [...prev, buildUserEntry(`/council ${topic}`), buildAssistantEntry("Council convening...\n")]);
+              setMessages((prev) => [
+                ...prev,
+                buildUserEntry(`/council ${topic}`),
+                buildAssistantEntry("Council convening...\n"),
+              ]);
               try {
                 const gen = agent.runCouncilRound(topic);
                 for await (const chunk of gen) {
@@ -3805,8 +3871,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return;
         }
         if (key.name === "down") {
-          if (filteredSlashItems.length > 0)
-            setSlashMenuIndex((i) => Math.min(filteredSlashItems.length - 1, i + 1));
+          if (filteredSlashItems.length > 0) setSlashMenuIndex((i) => Math.min(filteredSlashItems.length - 1, i + 1));
           key.preventDefault?.();
           return;
         }
@@ -3829,7 +3894,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             if (ta) {
               ta.clear?.();
               ta.insertText?.(completion);
-              try { ta.cursorOffset = completion.length; } catch { /* opentui versions vary */ }
+              try {
+                ta.cursorOffset = completion.length;
+              } catch {
+                /* opentui versions vary */
+              }
             }
           }
           key.preventDefault?.();
@@ -3840,9 +3909,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           // Textarea is focused and handles the actual deletion. We only mirror
           // the resulting state into slashSearchQuery, and close the overlay
           // when the predicted next text no longer starts with "/".
-          const predicted = slashSearchQuery.length > 0
-            ? slashSearchQuery.slice(0, -1)
-            : "";
+          const predicted = slashSearchQuery.length > 0 ? slashSearchQuery.slice(0, -1) : "";
           setSlashSearchQuery(predicted);
           setSlashMenuIndex(0);
           // If the query is already empty, the next backspace will eat the
@@ -4197,7 +4264,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         const clip = readClipboardImage();
         if (clip) {
           const id = ++pasteCounterRef.current;
-          const block = { id, content: `__clipboard_image_${id}__`, lines: 1, isImage: true, clipboardBase64: clip.base64, clipboardMediaType: clip.mediaType } satisfies PasteBlock;
+          const block = {
+            id,
+            content: `__clipboard_image_${id}__`,
+            lines: 1,
+            isImage: true,
+            clipboardBase64: clip.base64,
+            clipboardMediaType: clip.mediaType,
+          } satisfies PasteBlock;
           replacePasteBlocks([...pasteBlocksRef.current, block]);
           inputRef.current?.insertText(getPasteBlockToken(block));
         }
@@ -4255,7 +4329,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (hist.length === 0) return;
         const browsing = historyIndexRef.current !== -1;
         const buffer = ta.plainText || "";
-        const caret = (typeof ta.cursorOffset === "number") ? ta.cursorOffset : buffer.length;
+        const caret = typeof ta.cursorOffset === "number" ? ta.cursorOffset : buffer.length;
         if (caret !== buffer.length) return;
         if (key.name === "up") {
           if (!browsing) {
@@ -4270,7 +4344,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           }
           const entry = hist[historyIndexRef.current] ?? "";
           ta.setText(entry);
-          try { ta.cursorOffset = entry.length; } catch { /* opentui versions vary */ }
+          try {
+            ta.cursorOffset = entry.length;
+          } catch {
+            /* opentui versions vary */
+          }
           key.preventDefault();
           key.stopPropagation();
           return;
@@ -4281,13 +4359,21 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             historyIndexRef.current += 1;
             const entry = hist[historyIndexRef.current] ?? "";
             ta.setText(entry);
-            try { ta.cursorOffset = entry.length; } catch { /* noop */ }
+            try {
+              ta.cursorOffset = entry.length;
+            } catch {
+              /* noop */
+            }
           } else {
             historyIndexRef.current = -1;
             const draft = historyDraftRef.current;
             historyDraftRef.current = "";
             ta.setText(draft);
-            try { ta.cursorOffset = draft.length; } catch { /* noop */ }
+            try {
+              ta.cursorOffset = draft.length;
+            } catch {
+              /* noop */
+            }
           }
           key.preventDefault();
           key.stopPropagation();
@@ -4376,7 +4462,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       councilCardState,
       pendingCouncilPreflight,
       preflightCardState,
-      agent,
+      slashSearchQuery.length,
+      slashSearchQuery.slice,
     ],
   );
   useKeyboard(handleKey);
@@ -4449,7 +4536,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       // Clipboard image (Alt+V): already has base64 data
       if (block.clipboardBase64) {
         message = message.replace(getPasteBlockToken(block), "[clipboard image]");
-        images.push({ path: "clipboard", mediaType: block.clipboardMediaType ?? "image/png", base64: block.clipboardBase64 });
+        images.push({
+          path: "clipboard",
+          mediaType: block.clipboardMediaType ?? "image/png",
+          base64: block.clipboardBase64,
+        });
         continue;
       }
       // File path image: read from disk
@@ -4462,9 +4553,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         const buf = fs.readFileSync(resolved);
         const ext = path.extname(resolved).toLowerCase().replace(".", "");
         const mimeMap: Record<string, string> = {
-          png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-          gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
-          bmp: "image/bmp", ico: "image/x-icon", tif: "image/tiff", tiff: "image/tiff",
+          png: "image/png",
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          gif: "image/gif",
+          webp: "image/webp",
+          svg: "image/svg+xml",
+          bmp: "image/bmp",
+          ico: "image/x-icon",
+          tif: "image/tiff",
+          tiff: "image/tiff",
         };
         images.push({ path: resolved, mediaType: mimeMap[ext] ?? "image/png", base64: buf.toString("base64") });
       } catch {
@@ -4515,7 +4613,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       agent.setModel(displayedModel);
     }
     processMessage(enhancedMessage, displayText, images.length > 0 ? images : undefined);
-  }, [agent, clearLiveTurnUi, handleCommand, openApiKeyModal, processMessage, replacePasteBlocks, scrollToBottom]);
+  }, [
+    agent,
+    clearLiveTurnUi,
+    handleCommand,
+    openApiKeyModal,
+    processMessage,
+    replacePasteBlocks,
+    scrollToBottom,
+    pendingCouncilQuestion.questionId,
+    pendingCouncilQuestion,
+  ]);
 
   const hasMessages = messages.length > 0 || streamContent || isProcessing;
 
@@ -4532,7 +4640,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
       {hasMessages ? (
         <box flexGrow={1} flexDirection="column">
-          <SessionHeader t={t} modeInfo={modeInfo} sessionTitle={sessionTitle} sessionId={sessionId} onCopySessionId={showCopyBanner} />
+          <SessionHeader
+            t={t}
+            modeInfo={modeInfo}
+            sessionTitle={sessionTitle}
+            sessionId={sessionId}
+            onCopySessionId={showCopyBanner}
+          />
           <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
             {/* Scrollable messages */}
             {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
@@ -4581,19 +4695,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 ),
               )}
               {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-              {councilPhases.length > 0 && (
-                <CouncilPhaseTimeline phases={councilPhases} theme={t} />
-              )}
+              {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
               {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-              {councilStatuses.length > 0 && (
-                <CouncilStatusList statuses={councilStatuses} theme={t} />
-              )}
+              {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
               {pendingCouncilQuestion && councilCardState && (
-                <CouncilQuestionCard
-                  question={pendingCouncilQuestion}
-                  theme={t}
-                  state={councilCardState}
-                />
+                <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
               )}
               {pendingCouncilPreflight && preflightCardState && (
                 <CouncilQuestionCard
@@ -4956,15 +5062,7 @@ function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
 
 const SLASH_MENU_MAX_VISIBLE = 8;
 
-function SlashInlineMenu({
-  t,
-  items,
-  selectedIndex,
-}: {
-  t: Theme;
-  items: SlashMenuItem[];
-  selectedIndex: number;
-}) {
+function SlashInlineMenu({ t, items, selectedIndex }: { t: Theme; items: SlashMenuItem[]; selectedIndex: number }) {
   const visible = items.slice(0, SLASH_MENU_MAX_VISIBLE);
 
   if (visible.length === 0) {
@@ -5603,7 +5701,8 @@ function MessageView({
       }
 
       if (name === "write_file" || name === "edit_file") {
-        const filePath = diff?.filePath || tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
+        const filePath =
+          diff?.filePath || tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
         const label = name === "write_file" ? `Write ${filePath}` : `Edit ${filePath}`;
         return (
           <box gap={0}>
@@ -5733,14 +5832,17 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
               })}
             </box>
           ))}
-          {r.verify_command && (
-            <text fg={t.textMuted} marginTop={1}>{`  verify: ${r.verify_command}`}</text>
-          )}
+          {r.verify_command && <text fg={t.textMuted} marginTop={1}>{`  verify: ${r.verify_command}`}</text>}
         </box>
       );
     }
     case "debug": {
-      const r = d as { hypothesis?: string; root_cause?: string; fix?: { file: string; diff: string }; verify_command?: string };
+      const r = d as {
+        hypothesis?: string;
+        root_cause?: string;
+        fix?: { file: string; diff: string };
+        verify_command?: string;
+      };
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>
           <text>
@@ -5765,14 +5867,16 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
               })}
             </box>
           )}
-          {r.verify_command && (
-            <text fg={t.textMuted} marginTop={1}>{`  verify: ${r.verify_command}`}</text>
-          )}
+          {r.verify_command && <text fg={t.textMuted} marginTop={1}>{`  verify: ${r.verify_command}`}</text>}
         </box>
       );
     }
     case "plan": {
-      const r = d as { steps?: Array<{ action: string; criterion: string; rationale?: string }>; assumptions?: string[]; risks?: string[] };
+      const r = d as {
+        steps?: Array<{ action: string; criterion: string; rationale?: string }>;
+        assumptions?: string[];
+        risks?: string[];
+      };
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>
           {(r.steps ?? []).map((s, i) => (
@@ -5806,7 +5910,7 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
     }
     case "analyze": {
       const r = d as { findings?: Array<{ text: string; evidence: string; severity: string }> };
-      const sevColor = (s: string) => s === "high" ? t.diffRemovedFg : s === "medium" ? t.planStepNum : t.textMuted;
+      const sevColor = (s: string) => (s === "high" ? t.diffRemovedFg : s === "medium" ? t.planStepNum : t.textMuted);
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>
           {(r.findings ?? []).map((f, i) => (
@@ -5973,7 +6077,7 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
               <box key={`rm-${row.oldNum}`} backgroundColor={t.diffRemoved} flexDirection="row">
                 <text fg={t.diffRemovedLineNum}>{pad(row.oldNum)}</text>
                 <text>
-                  <span style={{ fg: t.diffRemovedFg }}>{" "}</span>
+                  <span style={{ fg: t.diffRemovedFg }}> </span>
                   {renderHighlighted(row.text, lang, t, t.diffRemovedFg)}
                 </text>
               </box>
@@ -5984,7 +6088,7 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
               <box key={`add-${row.newNum}`} backgroundColor={t.diffAdded} flexDirection="row">
                 <text fg={t.diffAddedLineNum}>{pad(row.newNum)}</text>
                 <text>
-                  <span style={{ fg: t.diffAddedFg }}>{" "}</span>
+                  <span style={{ fg: t.diffAddedFg }}> </span>
                   {renderHighlighted(row.text, lang, t, t.diffAddedFg)}
                 </text>
               </box>
@@ -5994,7 +6098,7 @@ function DiffView({ t, diff }: { t: Theme; diff: FileDiff }) {
             <box key={`ctx-${row.oldNum}`} backgroundColor={t.diffContext} flexDirection="row">
               <text fg={t.diffLineNumber}>{pad(row.oldNum)}</text>
               <text>
-                <span style={{ fg: t.diffContextFg }}>{" "}</span>
+                <span style={{ fg: t.diffContextFg }}> </span>
                 {renderHighlighted(row.text, lang, t, t.diffContextFg)}
               </text>
             </box>
@@ -6558,7 +6662,7 @@ function UpdateModal({
   );
 }
 
-function SlashMenuModal({
+function _SlashMenuModal({
   t,
   selectedIndex,
   width,
@@ -6976,7 +7080,10 @@ function ModelPickerModal({
               const mark = enabled ? "✓" : "✗";
               const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
               return (
-                <text key={p} fg={fg}>{`${i === 0 ? "" : "  "}${focused ? "[" : " "}${mark} ${p}${focused ? "]" : " "}`}</text>
+                <text
+                  key={p}
+                  fg={fg}
+                >{`${i === 0 ? "" : "  "}${focused ? "[" : " "}${mark} ${p}${focused ? "]" : " "}`}</text>
               );
             })}
           </box>
