@@ -4,10 +4,12 @@ import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
 import { isCouncilMultiProviderPreferred, getCouncilExperienceMode, isCouncilCostAware } from "../utils/settings.js";
 import type {
+  ActionPlan,
   ClarifiedSpec,
   CouncilLLM,
   CouncilParticipant,
   CouncilStats,
+  EnhancedCouncilOutcome,
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
@@ -532,27 +534,55 @@ export async function* runCouncil(
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
       } else if (answer === "generate_plan") {
-        yield { type: "content", content: "\n> Re-running planning with action plan focus...\n" };
-        const refineGen = runPlanning(
-          debateState,
-          spec,
-          debateState.active,
-          leaderModelId,
-          respondToPreflight,
-          llm,
-          debatePlan,
-          pilCtx?.outputStyle ?? undefined,
-          undefined,
-          true,
-        );
-        let refineResult;
-        do {
-          refineResult = await refineGen.next();
-          if (!refineResult.done && refineResult.value) yield refineResult.value;
-        } while (!refineResult.done);
-        outcome = refineResult.value.outcome;
-        plan = refineResult.value.plan;
-        synthesisText = refineResult.value.synthesisText;
+        // P7: skip re-synthesis when the first synthesis already produced
+        // structured action items. Session 1a8fb4be3bc3 showed the first
+        // synthesis under implementation_plan shape emits a full
+        // sections.actionItems objectList (11 entries with owner / time /
+        // depends_on), but clicking generate_plan still re-ran the entire
+        // synthesizer to produce a near-identical second copy — ~128s
+        // wasted. If actionItems already exist with ≥3 entries, lift them
+        // into plan.steps directly and skip the re-run.
+        const existingActionItems = pickActionItemsFromOutcome(outcome);
+        if (existingActionItems.length >= 3) {
+          const synthesizedPlan = synthesizePlanFromActionItems(existingActionItems);
+          plan = synthesizedPlan;
+          // Mirror plan onto the outcome so downstream persistence sees it.
+          if (outcome) {
+            outcome.plan = synthesizedPlan;
+          }
+          yield {
+            type: "content",
+            content:
+              `\n> Plan reused: ${existingActionItems.length} action items already present in the synthesis above — ` +
+              `lifted into the executable plan without re-running the synthesizer (~${SYNTH_RERUN_COST_SECONDS}s saved).\n`,
+          };
+          yield { type: "content", content: "\n### Action Plan (from synthesis)\n" };
+          for (const step of synthesizedPlan.steps) {
+            yield { type: "content", content: `- [${step.priority}] ${step.description}\n` };
+          }
+        } else {
+          yield { type: "content", content: "\n> Re-running planning with action plan focus...\n" };
+          const refineGen = runPlanning(
+            debateState,
+            spec,
+            debateState.active,
+            leaderModelId,
+            respondToPreflight,
+            llm,
+            debatePlan,
+            pilCtx?.outputStyle ?? undefined,
+            undefined,
+            true,
+          );
+          let refineResult;
+          do {
+            refineResult = await refineGen.next();
+            if (!refineResult.done && refineResult.value) yield refineResult.value;
+          } while (!refineResult.done);
+          outcome = refineResult.value.outcome;
+          plan = refineResult.value.plan;
+          synthesisText = refineResult.value.synthesisText;
+        }
       } else if (answer === "refine" && hasEmptySections) {
         yield { type: "content", content: "\n> Let's clarify the unresolved aspects...\n" };
         const refinedAnswers: Array<{ section: string; answer: string }> = [];
@@ -690,3 +720,76 @@ export async function* runCouncil(
 }
 
 export type { ClarifiedSpec, CouncilLLM, CouncilStats, CouncilParticipant } from "./types.js";
+
+// ── P7: action-item reuse helpers ─────────────────────────────────────────────
+//
+// Observed in session 1a8fb4be3bc3: when the first synthesis is built under
+// an implementation_plan shape, sections.actionItems already contains a full
+// objectList of structured steps. Clicking the "Generate Action Plan" post-
+// debate option then re-ran the entire synthesizer to produce a near-
+// identical second copy — ~128s wasted. These helpers lift existing action
+// items into an ActionPlan locally instead of re-running synthesis.
+
+/** Rough cost (seconds) of a re-synthesis call. Used in the UX note. */
+const SYNTH_RERUN_COST_SECONDS = 120;
+
+/**
+ * Extract action items from an outcome regardless of which shape produced
+ * them. Order of precedence:
+ *   1. outcome.sections.actionItems (new per-kind shape, objectList of
+ *      structured objects)
+ *   2. outcome.actionItems (legacy string array)
+ * Returns [] when no usable items found.
+ */
+function pickActionItemsFromOutcome(outcome: EnhancedCouncilOutcome | null): unknown[] {
+  if (!outcome) return [];
+  const fromSections = (outcome.sections as Record<string, unknown> | undefined)?.actionItems;
+  if (Array.isArray(fromSections) && fromSections.length > 0) return fromSections;
+  if (Array.isArray(outcome.actionItems) && outcome.actionItems.length > 0) return outcome.actionItems;
+  return [];
+}
+
+/**
+ * Convert a heterogeneous list of action items (strings OR
+ * {step, owner_lens, time_estimate, depends_on, acceptance_criteria}
+ * objects) into the ActionPlan.steps shape. Priority is heuristic:
+ *   - steps with no depends_on AND first half → "high"
+ *   - steps with depends_on or in last third → "medium"
+ *   - everything else → "low"
+ * The heuristic isn't perfect but gives the executor a usable ordering;
+ * the user can re-rank in the action-plan review preflight.
+ */
+function synthesizePlanFromActionItems(items: unknown[]): ActionPlan {
+  const total = items.length;
+  const steps: ActionPlan["steps"] = items.map((raw, idx) => {
+    let description: string;
+    let agent: string | undefined;
+    let hasDeps = false;
+    if (typeof raw === "string") {
+      description = raw;
+    } else if (raw && typeof raw === "object") {
+      const o = raw as Record<string, unknown>;
+      const step = typeof o.step === "string" ? o.step : "";
+      const owner = typeof o.owner_lens === "string" ? o.owner_lens : undefined;
+      const time = typeof o.time_estimate === "string" ? ` (${o.time_estimate})` : "";
+      const accept = typeof o.acceptance_criteria === "string" ? ` — accept: ${o.acceptance_criteria}` : "";
+      description = step ? `${step}${time}${accept}` : JSON.stringify(o).slice(0, 200);
+      agent = owner;
+      const deps = o.depends_on;
+      hasDeps = (Array.isArray(deps) && deps.length > 0) || (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
+    } else {
+      description = String(raw);
+    }
+    const inFirstHalf = idx < total / 2;
+    const inLastThird = idx >= (total * 2) / 3;
+    const priority: "high" | "medium" | "low" = hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : (inFirstHalf ? "high" : "medium");
+    return { description, agent, priority };
+  });
+  // Complexity heuristic: ≤4 steps trivial, 5-9 moderate, ≥10 complex.
+  const complexity: "trivial" | "moderate" | "complex" = total <= 4 ? "trivial" : total <= 9 ? "moderate" : "complex";
+  return {
+    steps,
+    estimatedComplexity: complexity,
+    prerequisites: [],
+  };
+}

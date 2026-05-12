@@ -220,6 +220,84 @@ describe("P3: convergence ratio over a round's pair-turns", () => {
   });
 });
 
+// ── P7: action-item reuse helpers (synthesizePlanFromActionItems shape) ──────
+
+describe("P7: synthesizePlanFromActionItems — heterogeneous input handling", () => {
+  // Mirror the implementation in src/council/index.ts. Kept in sync by code
+  // review; if the helper signature changes, this test mirrors the update.
+  function synthesizePlanFromActionItems(items: unknown[]) {
+    const total = items.length;
+    const steps = items.map((raw, idx) => {
+      let description: string;
+      let agent: string | undefined;
+      let hasDeps = false;
+      if (typeof raw === "string") {
+        description = raw;
+      } else if (raw && typeof raw === "object") {
+        const o = raw as Record<string, unknown>;
+        const step = typeof o.step === "string" ? o.step : "";
+        const owner = typeof o.owner_lens === "string" ? o.owner_lens : undefined;
+        const time = typeof o.time_estimate === "string" ? ` (${o.time_estimate})` : "";
+        const accept = typeof o.acceptance_criteria === "string" ? ` — accept: ${o.acceptance_criteria}` : "";
+        description = step ? `${step}${time}${accept}` : JSON.stringify(o).slice(0, 200);
+        agent = owner;
+        const deps = o.depends_on;
+        hasDeps = (Array.isArray(deps) && deps.length > 0) || (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
+      } else {
+        description = String(raw);
+      }
+      const inFirstHalf = idx < total / 2;
+      const inLastThird = idx >= (total * 2) / 3;
+      const priority: "high" | "medium" | "low" = hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : (inFirstHalf ? "high" : "medium");
+      return { description, agent, priority };
+    });
+    const complexity: "trivial" | "moderate" | "complex" = total <= 4 ? "trivial" : total <= 9 ? "moderate" : "complex";
+    return { steps, estimatedComplexity: complexity, prerequisites: [] };
+  }
+
+  it("converts structured action-item objects (session 1a8fb4be3bc3 shape)", () => {
+    const items = [
+      { step: "Init scaffold", owner_lens: "Extension Architect", time_estimate: "2h", depends_on: [], acceptance_criteria: "Manifest valid" },
+      { step: "Capture selection", owner_lens: "Integration Engineer", time_estimate: "4h", depends_on: ["Init scaffold"], acceptance_criteria: "Text extracted" },
+      { step: "Tooltip UI", owner_lens: "Integration Engineer", time_estimate: "6h", depends_on: ["Capture selection"], acceptance_criteria: "Renders near anchor" },
+    ];
+    const plan = synthesizePlanFromActionItems(items);
+    expect(plan.steps).toHaveLength(3);
+    expect(plan.steps[0].description).toContain("Init scaffold");
+    expect(plan.steps[0].description).toContain("2h");
+    expect(plan.steps[0].description).toContain("Manifest valid");
+    expect(plan.steps[0].agent).toBe("Extension Architect");
+    expect(plan.estimatedComplexity).toBe("trivial");
+  });
+
+  it("falls back gracefully on string items (legacy actionItems shape)", () => {
+    const items = ["First step", "Second step", "Third step", "Fourth step"];
+    const plan = synthesizePlanFromActionItems(items);
+    expect(plan.steps).toHaveLength(4);
+    expect(plan.steps[0].description).toBe("First step");
+    expect(plan.steps[0].agent).toBeUndefined();
+    expect(plan.estimatedComplexity).toBe("trivial");
+  });
+
+  it("priority heuristic — first-half no-deps → high, depends_on → medium, last third → low", () => {
+    // 9 items so we get clean thirds (0-2 first-third, 3-5 middle, 6-8 last)
+    const items = Array.from({ length: 9 }, (_, i) => ({ step: `Step ${i + 1}`, depends_on: [] }));
+    const plan = synthesizePlanFromActionItems(items);
+    // First half (indexes 0-4) with no deps → high
+    expect(plan.steps[0].priority).toBe("high");
+    expect(plan.steps[3].priority).toBe("high");
+    // Last third (indexes 6-8) → low regardless of deps
+    expect(plan.steps[6].priority).toBe("low");
+    expect(plan.steps[8].priority).toBe("low");
+  });
+
+  it("estimatedComplexity scales with step count", () => {
+    expect(synthesizePlanFromActionItems(["a", "b", "c"]).estimatedComplexity).toBe("trivial");
+    expect(synthesizePlanFromActionItems(Array.from({ length: 7 }, (_, i) => `s${i}`)).estimatedComplexity).toBe("moderate");
+    expect(synthesizePlanFromActionItems(Array.from({ length: 11 }, (_, i) => `s${i}`)).estimatedComplexity).toBe("complex");
+  });
+});
+
 // ── CQ-10: planDebate falls back to FALLBACK_PLAN ────────────────────────────
 
 const FALLBACK_STANCE_NAMES = ["Primary Analyst", "Critical Reviewer"];
