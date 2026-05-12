@@ -12,6 +12,14 @@ export interface SlashContext {
   defaultProvider: string;
   defaultModel: string;
   sessionId?: string;
+  /**
+   * Returns the in-memory TUI scrollback (`messages` state in app.tsx). Used
+   * by /export to compare what was persisted to the DB against what the user
+   * actually saw on screen — they diverge when streaming chunks (council
+   * debate, tool traces) render to TUI but never get appended to `messages`
+   * as a ModelMessage. Optional so non-TUI callers (tests, MCP) can omit it.
+   */
+  getLiveEntries?: () => import("../../types/index.js").ChatEntry[];
 }
 
 export type SlashHandler = (args: string[], ctx: SlashContext) => Promise<string> | string;
