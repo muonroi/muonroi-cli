@@ -25,7 +25,7 @@ export async function* runPlanning(
   outputStyle?: string | null,
   refineContext?: string,    // User refinement answers from post-debate askcard
   planEmphasis?: boolean,     // If true, emphasize action plan generation
-): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string }, unknown> {
+): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string; synthesisFailReason?: string }, unknown> {
   const p3Start = Date.now();
   yield phaseStart({
     phaseId: "phase:synthesis",
@@ -47,34 +47,89 @@ export async function* runPlanning(
 
   let synthesisText = "";
   let outcome: EnhancedCouncilOutcome | null = null;
+  let synthesisFailReason: string | undefined;
 
   try {
-    const { system, prompt } = buildSynthesisPrompt({ spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined, refineContext, planEmphasis });
+    const baseArgs = { spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined, refineContext, planEmphasis };
+    const first = buildSynthesisPrompt(baseArgs);
     synthesisText = yield* tracedGenerate(llm, {
       phase: "synthesis",
       label: "Synthesizing action plan",
       modelId: leaderModelId,
-      system,
-      prompt,
+      system: first.system,
+      prompt: first.prompt,
       maxTokens: 8192,
     });
+
+    outcome = parseOutcome(synthesisText, debatePlan);
+
+    // ── Empty / unparseable synthesis recovery ─────────────────────────────
+    // Synthesis can return "" when the provider times out internally, or a
+    // blob without a parseable JSON object when the model went off-script.
+    // Retry ONCE with a compacted prompt (trim exchanges, demand JSON-only).
+    // Without this, the user sees "Synthesis (empty)" with no explanation
+    // and confidence locked at 0 — which is exactly the bug we're fixing.
+    const trimmed = synthesisText.trim();
+    const emptySynthesis = trimmed.length === 0;
+    const unparseable = !emptySynthesis && outcome === null;
+    if (emptySynthesis || unparseable) {
+      const initialReason = emptySynthesis
+        ? "synthesizer returned empty completion (likely provider timeout or token budget exhausted on the 8192-token slot)"
+        : "synthesizer output had no parseable JSON object (model produced markdown without the required JSON block)";
+      yield {
+        type: "content",
+        content: `\n> Synthesis attempt 1 failed: ${initialReason}. Retrying once with a compact prompt…\n`,
+      };
+      // Compact: keep final positions (already capped per-participant to 2k),
+      // drop the full exchange replay entirely, and ask explicitly for JSON.
+      const compactArgs = { ...baseArgs, allExchanges: "_(exchange history omitted for retry; rely on final positions above)_" };
+      const retry = buildSynthesisPrompt(compactArgs);
+      const retrySystem = retry.system +
+        `\n\n## Retry directive\n` +
+        `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
+        `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
+      const retryText = yield* tracedGenerate(llm, {
+        phase: "synthesis",
+        label: "Synthesizing action plan (retry, compact)",
+        modelId: leaderModelId,
+        system: retrySystem,
+        prompt: retry.prompt,
+        maxTokens: 4096,
+      });
+      if (retryText.trim().length > 0) {
+        synthesisText = retryText;
+        outcome = parseOutcome(synthesisText, debatePlan);
+      }
+      if (!synthesisText.trim() || outcome === null) {
+        synthesisFailReason = (synthesisText.trim().length === 0)
+          ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited or the model timed out twice — the debate exchanges above are still usable as raw notes."
+          : "Synthesizer produced text but no parseable JSON outcome on either attempt. Raw output is shown above; the structured sections could not be extracted.";
+      }
+    }
 
     const readablePart = synthesisText.includes("---READABLE---")
       ? synthesisText.split("---READABLE---")[1]?.trim()
       : synthesisText;
     yield { type: "content", content: "\n## Synthesis\n" };
-    yield { type: "content", content: (readablePart || synthesisText) + "\n" };
+    yield {
+      type: "content",
+      content: ((readablePart && readablePart.length > 0)
+        ? readablePart
+        : (synthesisText.trim().length > 0
+            ? synthesisText
+            : `_(empty — ${synthesisFailReason ?? "no output"})_`)) + "\n",
+    };
 
-    outcome = parseOutcome(synthesisText, debatePlan);
     yield phaseDone({
       phaseId: "phase:synthesis",
       kind: "synthesis",
       label: "Synthesis & planning",
       startedAt: p3Start,
-      detail: `via ${leaderModelId}`,
+      detail: synthesisFailReason ? `failed: ${synthesisFailReason.slice(0, 60)}…` : `via ${leaderModelId}`,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
+    synthesisFailReason = `Synthesizer call threw: ${msg}`;
     yield phaseError({
       phaseId: "phase:synthesis",
       kind: "synthesis",
@@ -124,11 +179,11 @@ export async function* runPlanning(
       detail: approved ? "approved" : "rejected by user",
     });
     if (!approved) {
-      return { outcome, plan: null, synthesisText };
+      return { outcome, plan: null, synthesisText, synthesisFailReason };
     }
   }
 
-  return { outcome, plan, synthesisText };
+  return { outcome, plan, synthesisText, synthesisFailReason };
 }
 
 function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedCouncilOutcome | null {

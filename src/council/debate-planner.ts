@@ -49,6 +49,7 @@ const DebatePlanSchema = z.object({
     sections: z.array(OutputSectionSchema),
     guardrails: z.array(z.string()).default([]),
   }),
+  plannedRounds: z.number().int().min(1).max(5).optional(),
 });
 
 // ── planDebate ────────────────────────────────────────────────────────────────
@@ -120,10 +121,16 @@ export async function* planDebate(
     const stances = sanitizeStances(object.stances);
     const outputShape = sanitizeShape(object.outputShape);
     if (stances.length >= 2 && outputShape) {
+      const rawPlanned = (object as { plannedRounds?: number }).plannedRounds;
+      const plannedRounds =
+        typeof rawPlanned === "number" && Number.isFinite(rawPlanned)
+          ? Math.max(1, Math.min(5, Math.floor(rawPlanned)))
+          : undefined;
       const plan: DebatePlan = {
         intentSummary: object.intentSummary || "(no intent summary provided)",
         stances,
         outputShape,
+        plannedRounds,
       };
       return injectAuditorStance(plan, eeWarnings, experienceMode);
     }
@@ -172,12 +179,19 @@ function parsePlan(raw: string): DebatePlan | null {
     const outputShape = sanitizeShape(obj.outputShape);
     if (!outputShape) return null;
 
+    const rawPlanned = (obj as { plannedRounds?: unknown }).plannedRounds;
+    const plannedRounds =
+      typeof rawPlanned === "number" && Number.isFinite(rawPlanned)
+        ? Math.max(1, Math.min(5, Math.floor(rawPlanned)))
+        : undefined;
+
     return {
       intentSummary: typeof obj.intentSummary === "string" && obj.intentSummary.trim()
         ? obj.intentSummary.trim()
         : "(no intent summary provided)",
       stances,
       outputShape,
+      plannedRounds,
     };
   } catch {
     return null;

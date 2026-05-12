@@ -11,6 +11,72 @@ function tierOf(modelId: string): "fast" | "balanced" | "premium" | undefined {
   return info?.tier;
 }
 
+// ─── Cost-aware sub-task routing ────────────────────────────────────────────
+
+/**
+ * Council sub-tasks that can be downshifted to a cheaper tier.
+ * Maps each task to the LOWEST tier acceptable for that work; the resolver
+ * picks the highest-quality reachable model that is still ≤ this tier.
+ *
+ * Keep this table in one place — it's the policy. Anything not listed here
+ * MUST keep using the leader model (final synthesis, debate planning).
+ */
+export type CouncilSubTask =
+  | "research_need" // 1-line JSON classifier
+  | "evaluate_round" // JSON criteria status; needs decent judgement
+  | "round_summary" // summarize 6 exchanges
+  | "clarify_questions" // generate 3-5 questions
+  | "spec_synthesis"; // merge Q&A into ClarifiedSpec
+
+const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced"> = {
+  research_need: "fast",
+  evaluate_round: "balanced",
+  round_summary: "fast",
+  clarify_questions: "balanced",
+  spec_synthesis: "balanced",
+};
+
+/**
+ * Pick a cheaper model for a council sub-task on the leader's provider,
+ * with fallback to the leader model itself when no cheaper model is
+ * reachable / cataloged.
+ *
+ * Hard rule (matches resolveLeaderModelDetailed): never cross providers.
+ * The leader's provider already has a key loaded, so this is zero-cost
+ * to reach.
+ *
+ * Returns the leader model unchanged when:
+ *   - cost-aware mode is disabled
+ *   - leader is already at or below the target tier
+ *   - no cataloged model on the leader's provider matches the target tier
+ */
+export function pickCouncilTaskModel(
+  task: CouncilSubTask,
+  leaderModelId: string,
+  costAware: boolean,
+): string {
+  if (!costAware) return leaderModelId;
+
+  const targetTier = SUB_TASK_TIER[task];
+  const leaderTier = tierOf(leaderModelId);
+
+  // Already at or below target — no benefit from switching.
+  if (leaderTier && TIER_RANK[leaderTier] <= TIER_RANK[targetTier]) {
+    return leaderModelId;
+  }
+
+  const leaderProvider = detectProviderForModel(leaderModelId);
+  const candidate = getModelByTier(targetTier, leaderProvider);
+
+  // Only accept a candidate that's on the same provider as the leader.
+  // getModelByTier may fall back to "any provider" — reject that to avoid
+  // billing surprises and silent key-misses.
+  if (candidate && candidate.provider === leaderProvider) {
+    return candidate.id;
+  }
+  return leaderModelId;
+}
+
 export interface LeaderResolution {
   modelId: string;
   /** Set when configured leader was auto-promoted to a higher tier. */
