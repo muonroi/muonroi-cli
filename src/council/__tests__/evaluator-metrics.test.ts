@@ -111,20 +111,112 @@ describe("CQ-08: evidence density calculation logic", () => {
     expect(citationCount).toBe(0);
   });
 
-  it("estimateClaims counts non-trivial sentences (length > 10)", () => {
-    // Mirror estimateClaims from debate.ts: split on [.!?]+ filter length > 10
-    const text = "First claim here. Short. Another long claim about something.";
-    const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 10);
-    expect(sentences.length).toBeGreaterThanOrEqual(2);
+  it("countUnverified matches [UNVERIFIED:...] tags", () => {
+    const text = "Some claim [UNVERIFIED: no source for this RTT number] and another [UNVERIFIED].";
+    const matches = text.match(/\[UNVERIFIED[^\]]*\]/g);
+    expect(matches?.length).toBe(2);
   });
 
-  it("evidenceDensity = citations / max(sentences, 1)", () => {
-    const text = "[REFUTED via bash:test]. [CONFIRMED via grep:found]. Long claim follows here. Another claim too.";
-    const citations = (text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g) ?? []).length;
-    const sentences = Math.max(text.split(/[.!?]+/).filter((s) => s.trim().length > 10).length, 1);
-    const density = citations / sentences;
-    expect(density).toBeGreaterThan(0);
-    expect(density).toBeLessThanOrEqual(1.5); // can exceed 1.0 if many tags in few sentences
+  it("evidenceDensity = cited / (cited + unverified) — flag-aware metric", () => {
+    // Mirror computeEvidenceDensity from debate.ts.
+    // Old metric was cited / total-sentences which couldn't exceed ~0.05 in
+    // any real debate (most sentences aren't citable claims). New metric only
+    // counts claims that participants explicitly flagged.
+    const text =
+      "Verified fact [CONFIRMED via web_fetch: x]. Verified again [CONFIRMED via grep:found]. " +
+      "Unsure number [UNVERIFIED: typical RTT]. Another unsure [UNVERIFIED: corpus coverage]. " +
+      "Lots of opinion prose that should not affect the density.";
+    const cited = (text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g) ?? []).length;
+    const unverified = (text.match(/\[UNVERIFIED[^\]]*\]/g) ?? []).length;
+    const totalTagged = cited + unverified;
+    const density = totalTagged > 0 ? cited / totalTagged : 0;
+    expect(cited).toBe(2);
+    expect(unverified).toBe(2);
+    expect(density).toBe(0.5);
+  });
+
+  it("evidenceDensity is 0 when no claims were tagged at all", () => {
+    const text = "This is pure opinion. No tags. No evidence awareness shown.";
+    const cited = (text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g) ?? []).length;
+    const unverified = (text.match(/\[UNVERIFIED[^\]]*\]/g) ?? []).length;
+    const totalTagged = cited + unverified;
+    const density = totalTagged > 0 ? cited / totalTagged : 0;
+    expect(density).toBe(0);
+  });
+
+  it("evidenceDensity is 1.0 when every tagged claim was verified", () => {
+    const text = "[CONFIRMED via bash:test]. [CONFIRMED via grep:found]. [REFUTED via web:no-match].";
+    const cited = (text.match(/\[(REFUTED|CONFIRMED) via [^\]]+\]/g) ?? []).length;
+    const unverified = (text.match(/\[UNVERIFIED[^\]]*\]/g) ?? []).length;
+    const totalTagged = cited + unverified;
+    const density = totalTagged > 0 ? cited / totalTagged : 0;
+    expect(density).toBe(1.0);
+  });
+});
+
+// ── P3: Lock-phrase convergence detection ────────────────────────────────────
+
+describe("P3: convergence ratio over a round's pair-turns", () => {
+  // Mirror LOCK_PHRASES and convergenceRatio from debate.ts — kept in sync
+  // by code review. If the production list grows, this test should mirror
+  // the addition so behaviour stays observable.
+  const LOCK_PHRASES = [
+    /\bever[yi]thing\s+(is\s+)?locked\b/i,
+    /\bfully\s+aligned\b/i,
+    /\bcomplete\s+agreement\b/i,
+    /\bno\s+remaining\s+(disputes|disagreements|concerns)\b/i,
+    /\bdesign\s+(is\s+)?locked\b/i,
+    /\barchitectural\s+decisions\s+(are\s+)?locked\b/i,
+    /\bagree\s+on\s+where\s+we['']?ve\s+landed\b/i,
+    /\bready\s+to\s+(proceed|move|start)\s+to\s+implementation\b/i,
+    /\blet['']?s\s+proceed\s+to\s+implementation\b/i,
+    /\bfinal\s+(position|confirmation)\b/i,
+  ];
+  function looksLocked(text: string): boolean {
+    if (!text || text.length < 20) return false;
+    return LOCK_PHRASES.some((re) => re.test(text));
+  }
+  function convergenceRatio(turns: string[]): number {
+    const usable = turns.filter((t) => t && t.trim().length >= 20);
+    if (usable.length === 0) return 0;
+    const locked = usable.filter(looksLocked).length;
+    return locked / usable.length;
+  }
+
+  it("session ea13da132dec round 3 turns trip the 0.8 lock threshold", () => {
+    // Excerpts taken verbatim from the export; each is one pair-turn.
+    const r3Turns = [
+      "I agree with your comprehensive summary. Everything else is locked. I'm satisfied with where we've landed.",
+      "We're fully aligned. Everything Locked. No remaining disputes. The pipeline spec is now: ...",
+      "We're aligned. Two quick confirmations from my side: ... Design locked. The implementation spec can proceed.",
+      "We are in complete agreement on every architectural decision. The implementation specification can proceed.",
+      "All architectural decisions are locked. The only outstanding UX tweak is the short selectionchange dismissal delay.",
+      "All architectural decisions are locked. I'm ready to start drafting the content-script and background-script.",
+    ];
+    const ratio = convergenceRatio(r3Turns);
+    expect(ratio).toBeGreaterThanOrEqual(0.8);
+  });
+
+  it("returns 0 when no turn contains lock phrases", () => {
+    const turns = [
+      "I still disagree about the debounce timing. 200ms feels sluggish for single-word selections.",
+      "Your argument for batch translation has merit but breaks the offline-first guarantee.",
+    ];
+    expect(convergenceRatio(turns)).toBe(0);
+  });
+
+  it("ignores empty / too-short turns when computing ratio", () => {
+    const turns = ["", "ok", "All architectural decisions are locked, no remaining disputes."];
+    expect(convergenceRatio(turns)).toBe(1.0);
+  });
+
+  it("partial convergence (1 of 3 turns locked) is below threshold", () => {
+    const turns = [
+      "Design is locked from my side, ready to proceed.",
+      "I still have concerns about rate-limit handling under high load.",
+      "The auth flow needs another pass — we haven't settled on token rotation.",
+    ];
+    expect(convergenceRatio(turns)).toBeLessThan(0.8);
   });
 });
 
