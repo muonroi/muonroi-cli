@@ -63,6 +63,27 @@ function sanitizeBase64InMessageJson(json: string): string {
   return scrubbed;
 }
 
+/**
+ * System messages with these prefixes are internal context markers used by
+ * the council layer for follow-up rehydration. They MUST NOT render in the
+ * TUI or chat export — they leak structured JSON / raw transcripts to the
+ * user and bloat exports. Council still relies on them being persisted; only
+ * the rendered view filters them out.
+ */
+const INTERNAL_COUNCIL_MARKER_PREFIXES = [
+  "[Debate Transcript]",
+  "[Council Round ",
+  "[Council Outcome]",
+  "[Council Memory]",
+  "[Council Tool Trace]",
+  "[NEEDS HUMAN REVIEW]",
+] as const;
+
+function isInternalCouncilMarker(content: string): boolean {
+  const head = content.trimStart();
+  return INTERNAL_COUNCIL_MARKER_PREFIXES.some((p) => head.startsWith(p));
+}
+
 function loadMessageRows(sessionId: string): MessageRow[] {
   const rows = getDatabase()
     .prepare(`
@@ -269,7 +290,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     if (message.role === "system") {
       const content =
         getCompactionSummaryText(message) ?? (typeof message.content === "string" ? message.content.trim() : "");
-      if (content) {
+      if (content && !isInternalCouncilMarker(content)) {
         entries.push({ type: "assistant", content, timestamp });
       }
       continue;

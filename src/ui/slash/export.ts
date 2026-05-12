@@ -1,14 +1,25 @@
 /**
  * src/ui/slash/export.ts
  *
- * /export slash command — exports the entire conversation to a .txt file.
- * Reads all messages via buildChatEntries and writes a formatted transcript.
+ * /export slash command — exports the conversation to a .txt file.
+ *
+ * Two sources of truth:
+ *   1. DB (`buildChatEntries`) — what was persisted as ModelMessages. Council
+ *      streams content via StreamChunks that never land in `messages`, so this
+ *      can come back empty even when the TUI is full of output.
+ *   2. Live TUI scrollback (`ctx.getLiveEntries`) — what the user actually
+ *      saw, including streamed council/tool/assistant chunks.
+ *
+ * The export writes BOTH (clearly labelled) when they diverge, so the user
+ * can compare what was persisted vs what was shown. When they match (typical
+ * resumed-session case), only one block is written.
  *
  * Self-registers on module import.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { ChatEntry } from "../../types/index.js";
 import { buildChatEntries } from "../../storage/transcript.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
@@ -19,15 +30,8 @@ function formatTimestamp(ts: Date | string | undefined): string {
   return d.toISOString().replace("T", " ").slice(0, 19);
 }
 
-function formatExport(entries: ReturnType<typeof buildChatEntries>): string {
-  const lines: string[] = [
-    "=" .repeat(72),
-    "  muonroi-cli — Chat Export",
-    "  Exported: " + formatTimestamp(new Date()),
-    "=" .repeat(72),
-    "",
-  ];
-
+function renderEntries(entries: readonly ChatEntry[]): string[] {
+  const lines: string[] = [];
   for (const entry of entries) {
     const ts = formatTimestamp(entry.timestamp);
     switch (entry.type) {
@@ -55,11 +59,102 @@ function formatExport(entries: ReturnType<typeof buildChatEntries>): string {
         break;
     }
   }
+  return lines;
+}
 
-  lines.push("=" .repeat(72));
-  lines.push("  End of export");
-  lines.push("=" .repeat(72));
-  return lines.join("\n");
+/**
+ * Quick structural signature so we can detect whether DB and live scrollback
+ * are telling the same story without doing a full content diff. We compare
+ * total entry count and the count of each kind — if those match, the two
+ * sources almost certainly agree and we can emit a single block.
+ */
+function signature(entries: readonly ChatEntry[]): string {
+  const counts: Record<string, number> = {};
+  for (const e of entries) counts[e.type] = (counts[e.type] ?? 0) + 1;
+  return `n=${entries.length} ` +
+    Object.entries(counts).sort().map(([k, v]) => `${k}:${v}`).join(" ");
+}
+
+function formatExport(
+  dbEntries: readonly ChatEntry[],
+  liveEntries: readonly ChatEntry[],
+): { text: string; mode: "db_only" | "live_only" | "merged" | "synced" } {
+  const dbSig = signature(dbEntries);
+  const liveSig = signature(liveEntries);
+  const header: string[] = [
+    "=".repeat(72),
+    "  muonroi-cli — Chat Export",
+    "  Exported: " + formatTimestamp(new Date()),
+    `  DB entries:    ${dbEntries.length}`,
+    `  Live entries:  ${liveEntries.length}`,
+    "=".repeat(72),
+    "",
+  ];
+
+  // Case 1: DB and live agree — single block, source=db (canonical).
+  if (dbSig === liveSig && dbEntries.length > 0) {
+    return {
+      text: [...header, "(DB and TUI scrollback match — single rendering)", "", ...renderEntries(dbEntries),
+        "=".repeat(72), "  End of export", "=".repeat(72)].join("\n"),
+      mode: "synced",
+    };
+  }
+
+  // Case 2: DB empty, live has content — common for council-only sessions
+  // where stream chunks bypass persistence. Use live as the source of truth.
+  if (dbEntries.length === 0 && liveEntries.length > 0) {
+    return {
+      text: [
+        ...header,
+        `NOTE: Database has 0 entries but TUI scrollback has ${liveEntries.length}. This usually`,
+        `means the conversation consisted of streamed chunks (council debate, tool traces)`,
+        `that render to the TUI but are not persisted as ModelMessages. Showing TUI scrollback.`,
+        "",
+        "── TUI Scrollback (in-memory) ──",
+        "",
+        ...renderEntries(liveEntries),
+        "=".repeat(72), "  End of export", "=".repeat(72),
+      ].join("\n"),
+      mode: "live_only",
+    };
+  }
+
+  // Case 3: Live empty, DB has content — slash invoked without TUI context
+  // (e.g., a non-interactive caller). Just render DB.
+  if (liveEntries.length === 0 && dbEntries.length > 0) {
+    return {
+      text: [...header, "(Live scrollback unavailable — showing DB only)", "",
+        ...renderEntries(dbEntries),
+        "=".repeat(72), "  End of export", "=".repeat(72)].join("\n"),
+      mode: "db_only",
+    };
+  }
+
+  // Case 4: Both have content but they disagree — emit both, side by side,
+  // so the caller can diff. This is the most useful mode for debugging why
+  // a council session "looked full" but persisted little.
+  return {
+    text: [
+      ...header,
+      `WARNING: DB and TUI scrollback disagree.`,
+      `  DB signature:    ${dbSig}`,
+      `  Live signature:  ${liveSig}`,
+      `Both renderings are included below for comparison.`,
+      "",
+      "─".repeat(72),
+      "── Section A: Persisted (DB)",
+      "─".repeat(72),
+      "",
+      ...renderEntries(dbEntries),
+      "─".repeat(72),
+      "── Section B: Live TUI Scrollback",
+      "─".repeat(72),
+      "",
+      ...renderEntries(liveEntries),
+      "=".repeat(72), "  End of export", "=".repeat(72),
+    ].join("\n"),
+    mode: "merged",
+  };
 }
 
 export const handleExportSlash: SlashHandler = async (_args, ctx) => {
@@ -68,20 +163,26 @@ export const handleExportSlash: SlashHandler = async (_args, ctx) => {
     return "No active session. Start a conversation first.";
   }
 
-  const entries = buildChatEntries(sessionId);
-  if (entries.length === 0) {
-    return "No messages in the current session to export.";
+  const dbEntries = buildChatEntries(sessionId);
+  const liveEntries = ctx.getLiveEntries?.() ?? [];
+
+  if (dbEntries.length === 0 && liveEntries.length === 0) {
+    return "No messages in the current session to export (both DB and TUI scrollback are empty).";
   }
 
-  const text = formatExport(entries);
+  const { text, mode } = formatExport(dbEntries, liveEntries);
 
-  // Write to current working directory
   const fileName = `chat-export-${sessionId}.txt`;
   const filePath = path.resolve(ctx.cwd, fileName);
 
   try {
     fs.writeFileSync(filePath, text, "utf-8");
-    return `Exported ${entries.length} messages to ${filePath} (${(text.length / 1024).toFixed(1)} KB)`;
+    const modeNote =
+      mode === "synced"   ? "DB and TUI matched"
+      : mode === "db_only"  ? "DB only (no TUI scrollback)"
+      : mode === "live_only" ? `TUI scrollback only (DB had 0 entries; ${liveEntries.length} live)`
+      : `DB and TUI diverged — both included (db=${dbEntries.length}, live=${liveEntries.length})`;
+    return `Exported to ${filePath} (${(text.length / 1024).toFixed(1)} KB) — ${modeNote}`;
   } catch (err) {
     return `Failed to write export file: ${err instanceof Error ? err.message : String(err)}`;
   }
