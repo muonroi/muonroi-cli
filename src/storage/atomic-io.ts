@@ -1,5 +1,13 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
+
+// Unique tmp path per call so concurrent writers don't clobber each other's
+// .tmp before rename — required for Windows where rename of a file held by
+// another writer fails EPERM/EBUSY.
+function tmpPathFor(filePath: string): string {
+  return `${filePath}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+}
 
 /**
  * Atomically write a JSON value to filePath using .tmp + rename pattern.
@@ -9,7 +17,7 @@ import * as path from "node:path";
  * On serialize failure, .tmp is never created. On rename failure, .tmp is cleaned up.
  */
 export async function atomicWriteJSON(filePath: string, value: unknown): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = tmpPathFor(filePath);
   let serialized: string;
   try {
     serialized = JSON.stringify(value, null, 2);
@@ -45,7 +53,7 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
  * Same durability guarantees as atomicWriteJSON but without JSON serialization.
  */
 export async function atomicWriteText(filePath: string, content: string): Promise<void> {
-  const tmpPath = `${filePath}.tmp`;
+  const tmpPath = tmpPathFor(filePath);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   try {
     await fs.writeFile(tmpPath, content, "utf8");
