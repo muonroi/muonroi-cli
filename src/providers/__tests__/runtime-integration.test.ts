@@ -1,7 +1,7 @@
-import { describe, expect, test, beforeAll } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
+import { loadCatalog } from "../../models/registry.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../runtime.js";
 import type { ProviderId } from "../types.js";
-import { loadCatalog } from "../../models/registry.js";
 
 beforeAll(async () => {
   await loadCatalog();
@@ -14,8 +14,12 @@ describe("model → provider detection", () => {
     ["gpt-4o", "openai"],
     ["gpt-4o-mini", "openai"],
     ["o3", "openai"],
-    ["deepseek-v4-flash", "deepseek"],
-    ["deepseek-v4-pro", "deepseek"],
+    // DeepSeek V4 models are served via SiliconFlow (see catalog.json).
+    // The catalog provider field — not the alias prefix — is the source of truth.
+    ["deepseek-v4-flash", "siliconflow"],
+    ["deepseek-v4-pro", "siliconflow"],
+    ["deepseek-ai/DeepSeek-V4-Flash", "siliconflow"],
+    ["deepseek-ai/DeepSeek-V4-Pro", "siliconflow"],
     ["grok-3", "xai"],
     ["grok-3-mini", "xai"],
     ["unknown-custom-model", "anthropic"],

@@ -1,7 +1,6 @@
 import { beforeAll, describe, expect, test } from "vitest";
-import { createProviderFactory, resolveModelRuntime, detectProviderForModel } from "../runtime.js";
 import { loadCatalog } from "../../models/registry.js";
-import type { ProviderId } from "../types.js";
+import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../runtime.js";
 
 beforeAll(async () => {
   await loadCatalog();
@@ -80,7 +79,11 @@ describe("resolveModelRuntime", () => {
 describe("detectProviderForModel", () => {
   test("detects anthropic", () => expect(detectProviderForModel("claude-sonnet-4-6")).toBe("anthropic"));
   test("detects openai", () => expect(detectProviderForModel("gpt-4o")).toBe("openai"));
-  test("detects deepseek", () => expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
+  // DeepSeek V4 catalog entries point at SiliconFlow (the actual host).
+  test("detects siliconflow for deepseek-v4 alias", () =>
+    expect(detectProviderForModel("deepseek-v4-flash")).toBe("siliconflow"));
+  test("prefix fallback for unknown deepseek id", () =>
+    expect(detectProviderForModel("deepseek-future-x")).toBe("deepseek"));
   test("detects xai", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
   test("falls back to anthropic for unknown", () => expect(detectProviderForModel("unknown-model")).toBe("anthropic"));
 });
