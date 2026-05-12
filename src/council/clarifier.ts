@@ -4,6 +4,7 @@ import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import { pickCouncilTaskModel } from "./leader.js";
 
 /**
  * Convert a PIL gray-area question into the clarifier's round-question shape.
@@ -100,6 +101,12 @@ export async function* runClarification(
    * a confirmation chunk is emitted instead.
    */
   prefillAnswers?: Map<string, string>,
+  /**
+   * When true, clarification question generation and spec synthesis run on
+   * a cheaper tier model on the same provider as the leader. Falls back to
+   * the leader model if no cheaper model is cataloged. Default false.
+   */
+  costAware = false,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : 3;
   const allQA: Array<{ id?: string; question: string; answer: string }> = [];
@@ -131,10 +138,11 @@ export async function* runClarification(
 
       let questionsRaw: string;
       try {
+        const clarifyModel = pickCouncilTaskModel("clarify_questions", leaderModelId, costAware);
         questionsRaw = yield* tracedGenerate(llm, {
           phase: "clarify",
           label: `Generating clarification questions (round ${round + 1})`,
-          modelId: leaderModelId,
+          modelId: clarifyModel,
           system,
           prompt,
           maxTokens: 2048,
@@ -219,7 +227,7 @@ export async function* runClarification(
     detail: allQA.length > 0 ? `${allQA.length} Q&A` : "no clarification needed",
   });
 
-  const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm);
+  const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm, costAware);
 
   yield { type: "content", content: `\n### Clarified Spec\n` };
   yield { type: "content", content: `\n#### Problem\n${spec.problemStatement}\n` };
@@ -240,15 +248,94 @@ export function buildSpecFromTopic(topic: string, conversationContext: string): 
   };
 }
 
+/**
+ * Generate richer success criteria from the topic alone when clarifier returned
+ * no questions. The single-criterion fallback ("Address the topic: …") made
+ * leader-eval meaningless: "1/1 criteria met" trivially trips on round 1 even
+ * for complex topics. Session ea13da132dec hit this because clarifier returned
+ * [] and the spec had only one auto-criterion → leader had nothing real to grade.
+ *
+ * We LLM-extract criteria/constraints/scope from the topic when QA is empty.
+ * Falls back to the original buildSpecFromTopic if the LLM call fails.
+ */
+async function* inferSpecFromTopicOnly(
+  topic: string,
+  conversationContext: string,
+  leaderModelId: string,
+  llm: CouncilLLM,
+  costAware: boolean,
+): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
+  const system =
+    `You are extracting an implicit specification from a short topic statement. ` +
+    `The user did not answer clarification questions, but the topic itself often ` +
+    `implies scope, criteria, and constraints. Tease them out.\n\n` +
+    `Output ONLY a JSON object (no markdown, no preamble):\n` +
+    `{\n` +
+    `  "problemStatement": "1-2 sentence problem statement in the user's language",\n` +
+    `  "constraints": ["constraint 1", "constraint 2"],\n` +
+    `  "successCriteria": ["criterion 1", "criterion 2", "criterion 3"],\n` +
+    `  "scope": "what is in and out of scope, in 1-2 sentences"\n` +
+    `}\n\n` +
+    `Rules:\n` +
+    `- successCriteria MUST have AT LEAST 3 entries. These should be observable, testable ` +
+    `outcomes — not "address the topic". For a feature topic, criteria look like ` +
+    `"User can do X in under Y", "System supports Z platform", "Performance budget P ms".\n` +
+    `- constraints should include any explicit limits the topic mentions (platforms, languages, ` +
+    `vendors). If no constraints are explicit, infer 1-2 likely-implicit ones (e.g. "Must work ` +
+    `offline" for a desktop app topic, "Must respect Manifest V3" for a Chrome extension).\n` +
+    `- scope should name 1 thing in-scope and 1 thing OUT-of-scope.\n` +
+    `- Write all fields in the user's language (detected from the topic).`;
+  const prompt =
+    `## Topic\n${topic}\n\n` +
+    (conversationContext ? `## Context\n${conversationContext}\n` : "");
+
+  try {
+    const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);
+    const raw = yield* tracedGenerate(llm, {
+      phase: "synthesis",
+      label: "Inferring spec from topic (no clarification answers)",
+      modelId: synthModel,
+      system,
+      prompt,
+      maxTokens: 1024,
+    });
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]) as Partial<ClarifiedSpec>;
+      const criteria = Array.isArray(parsed.successCriteria) && parsed.successCriteria.length >= 1
+        ? parsed.successCriteria
+        : [`Address the topic: ${topic.slice(0, 100)}`];
+      // Hard floor of 3 — pad with the default if model returned fewer.
+      while (criteria.length < 3) {
+        criteria.push(`Open success criterion ${criteria.length + 1} (not specified by user)`);
+      }
+      return {
+        problemStatement: parsed.problemStatement ?? topic,
+        constraints: Array.isArray(parsed.constraints) ? parsed.constraints : [],
+        successCriteria: criteria,
+        scope: parsed.scope ?? "Determined by conversation context",
+        rawQA: [],
+      };
+    }
+  } catch {
+    // Fall through to original buildSpecFromTopic shape
+  }
+  return buildSpecFromTopic(topic, conversationContext);
+}
+
 async function* synthesizeSpec(
   topic: string,
   conversationContext: string,
   qa: Array<{ id?: string; question: string; answer: string }>,
   leaderModelId: string,
   llm: CouncilLLM,
+  costAware = false,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   if (qa.length === 0) {
-    return buildSpecFromTopic(topic, conversationContext);
+    // Clarifier asked 0 questions OR user skipped all of them. Use the LLM to
+    // pull implicit criteria/constraints/scope from the topic alone instead of
+    // returning the single-criterion fallback that makes leader-eval trivial.
+    return yield* inferSpecFromTopicOnly(topic, conversationContext, leaderModelId, llm, costAware);
   }
 
   const { system, prompt } = buildSpecSynthesisPrompt(topic, conversationContext, qa);
@@ -260,10 +347,11 @@ async function* synthesizeSpec(
   }
 
   try {
+    const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
       phase: "synthesis",
       label: "Synthesizing clarified spec",
-      modelId: leaderModelId,
+      modelId: synthModel,
       system,
       prompt,
       maxTokens: 2048,
