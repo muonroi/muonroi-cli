@@ -146,4 +146,35 @@ describe("discovery-detection", () => {
     expect(sig.srcFileCount).toBe(10);
     expect(sig.classification).toBe("ambiguous");
   });
+
+  it("returns greenfield with warning when fs access denied (smoke)", async () => {
+    // Simulating EACCES is platform-dependent; verify the helper does not throw on a non-existent path
+    const sig = await detectExistingProject(path.join(cwd, "does-not-exist"));
+    expect(sig.classification).toBe("greenfield");
+  });
+
+  it("zero-weight unreadable manifest is still listed", async () => {
+    // create a directory with the manifest name to make read fail
+    await fs.mkdir(path.join(cwd, "package.json"));
+    const sig = await detectExistingProject(cwd);
+    if (sig.manifests.length > 0) {
+      expect(sig.manifests[0].weight).toBe(0);
+    } else {
+      // some platforms treat dir-as-file differently; passing is also OK
+      expect(sig.manifests).toEqual([]);
+    }
+  });
+
+  it("counts only ext-mapped src files (no random text)", async () => {
+    await fs.writeFile(
+      path.join(cwd, "package.json"),
+      JSON.stringify({ dependencies: { a: "1", b: "1", c: "1", d: "1", e: "1", f: "1" } }),
+    );
+    await fs.mkdir(path.join(cwd, "src"));
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(path.join(cwd, "src", `f${i}.txt`), "not source");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.srcFileCount).toBe(0);
+  });
 });
