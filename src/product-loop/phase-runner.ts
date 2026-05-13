@@ -1,11 +1,26 @@
 import * as path from "node:path";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import type { CustomerDecision, Phase, PhaseDigestEntry, PhaseHistoryEntry, PhasePlanArtifact, PhasePlanState, PhaseStatus, RunPhasesOptions } from "./types.js";
 import type { StreamChunk } from "../types/index.js";
-import { generatePhasePlan, readPhasePlan, writePhasePlan, validatePhasePlan, backupCorruptPhases } from "./phase-plan.js";
-import { generateSprintReview, runRetro, runStandup, shouldRunStandup } from "./phase-rituals.js";
 import { buildSprintContext, digestSprintIntoPhase, handoffPhaseToNext } from "./context-policy.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
+import {
+  backupCorruptPhases,
+  generatePhasePlan,
+  readPhasePlan,
+  validatePhasePlan,
+  writePhasePlan,
+} from "./phase-plan.js";
+import { generateSprintReview, runRetro, runStandup, shouldRunStandup } from "./phase-rituals.js";
+import type {
+  CustomerDecision,
+  Phase,
+  PhaseDigestEntry,
+  PhaseHistoryEntry,
+  PhasePlanArtifact,
+  PhasePlanState,
+  PhaseStatus,
+  RunPhasesOptions,
+} from "./types.js";
 
 function runDir(flowDir: string, runId: string): string {
   return path.join(flowDir, "runs", runId);
@@ -114,7 +129,7 @@ export async function appendCustomerDecision(
   const seq = items.reduce((m, d) => Math.max(m, d.seq), 0) + 1;
   let feedback = partial.feedback;
   if (feedback && feedback.length > 2000) {
-    feedback = feedback.slice(0, 2000) + "\n[…feedback truncated; full text in iterations.md]";
+    feedback = `${feedback.slice(0, 2000)}\n[…feedback truncated; full text in iterations.md]`;
   }
   items.push({
     seq,
@@ -149,11 +164,18 @@ export async function collectStuckPhases(flowDir: string, runId: string): Promis
 // ─── runPhases orchestrator ────────────────────────────────────────────────
 
 interface RunPhasesArgs extends RunPhasesOptions {
-  sprintRunner: (sprintCtx: any) => AsyncGenerator<StreamChunk, { scoreBefore: number; scoreAfter: number; criteriaMet: number; totalCriteria: number }>;
+  sprintRunner: (
+    sprintCtx: unknown,
+  ) => AsyncGenerator<
+    StreamChunk,
+    { scoreBefore: number; scoreAfter: number; criteriaMet: number; totalCriteria: number }
+  >;
 }
 
 function orderByDeps(phases: Phase[]): Phase[] {
-  const remaining = new Map(phases.map((p) => [p.id, new Set(p.dependsOn.filter((d) => phases.some((x) => x.id === d)))]));
+  const remaining = new Map(
+    phases.map((p) => [p.id, new Set(p.dependsOn.filter((d) => phases.some((x) => x.id === d)))]),
+  );
   const byId = new Map(phases.map((p) => [p.id, p]));
   const out: Phase[] = [];
   while (remaining.size > 0) {
@@ -184,12 +206,21 @@ async function getPhaseDigest(flowDir: string, runId: string, phaseId: string): 
   }
 }
 
-async function setPhaseDigest(flowDir: string, runId: string, phaseId: string, entries: PhaseDigestEntry[]): Promise<void> {
+async function setPhaseDigest(
+  flowDir: string,
+  runId: string,
+  phaseId: string,
+  entries: PhaseDigestEntry[],
+): Promise<void> {
   const map = (await readArtifact(runDir(flowDir, runId), "state.md")) ?? { preamble: "", sections: new Map() };
   const raw = map.sections.get("Phase Digest");
   let store: Record<string, { version: 1; entries: PhaseDigestEntry[] }> = {};
   if (raw) {
-    try { store = JSON.parse(raw); } catch { store = {}; }
+    try {
+      store = JSON.parse(raw);
+    } catch {
+      store = {};
+    }
   }
   store[phaseId] = { version: 1, entries };
   map.sections.set("Phase Digest", JSON.stringify(store, null, 2));
@@ -238,11 +269,18 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
   const last = await readLastActivity(args.flowDir, args.runId);
   if (await shouldRunStandup(last, args.flowDir, args.runId)) {
     const standup = await runStandup({
-      flowDir: args.flowDir, runId: args.runId, leader: args.leader,
-      capUsd: args.capUsd, remainingUsd: await args.remainingUsd(), backoffDelays: args.backoffDelays,
+      flowDir: args.flowDir,
+      runId: args.runId,
+      leader: args.leader,
+      capUsd: args.capUsd,
+      remainingUsd: await args.remainingUsd(),
+      backoffDelays: args.backoffDelays,
     });
     if (standup) {
-      const map = (await readArtifact(runDir(args.flowDir, args.runId), "state.md")) ?? { preamble: "", sections: new Map() };
+      const map = (await readArtifact(runDir(args.flowDir, args.runId), "state.md")) ?? {
+        preamble: "",
+        sections: new Map(),
+      };
       const prior = Number.parseInt(map.sections.get("Standup Count") ?? "0", 10) || 0;
       map.sections.set("Standup Count", String(prior + 1));
       await writeArtifact(runDir(args.flowDir, args.runId), "state.md", map);
@@ -251,17 +289,21 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
 
   let plan: PhasePlanArtifact | null = await readPhasePlan(args.flowDir, args.runId);
   if (plan) {
-    try { validatePhasePlan(plan, args.clarifiedSpec); }
-    catch {
+    try {
+      validatePhasePlan(plan, args.clarifiedSpec);
+    } catch {
       await backupCorruptPhases(args.flowDir, args.runId);
       plan = null;
     }
   }
   if (!plan) {
     plan = await generatePhasePlan({
-      projectContext: args.projectContext, clarifiedSpec: args.clarifiedSpec,
-      manifest: args.manifest, leader: args.leader,
-      capUsd: args.capUsd, remainingUsd: await args.remainingUsd(),
+      projectContext: args.projectContext,
+      clarifiedSpec: args.clarifiedSpec,
+      manifest: args.manifest,
+      leader: args.leader,
+      capUsd: args.capUsd,
+      remainingUsd: await args.remainingUsd(),
       backoffDelays: args.backoffDelays,
     });
     await writePhasePlan(args.flowDir, args.runId, plan);
@@ -277,7 +319,12 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
     await markPhaseStatus(args.flowDir, args.runId, phase.id, "in-progress");
 
     let totalSprints = 0;
-    let lastSprintState = { scoreBefore: 0, scoreAfter: 0, criteriaMet: 0, totalCriteria: phase.successCriteria.length };
+    let lastSprintState = {
+      scoreBefore: 0,
+      scoreAfter: 0,
+      criteriaMet: 0,
+      totalCriteria: phase.successCriteria.length,
+    };
 
     for (let sprintN = 1; sprintN <= phase.maxSprints; sprintN++) {
       const decisions = await getCustomerDecisions(args.flowDir, args.runId);
@@ -285,33 +332,44 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       const digest = await getPhaseDigest(args.flowDir, args.runId, phase.id);
       let projectContextFormatted: string;
       try {
-        projectContextFormatted = formatProjectContextForPrompt(args.projectContext as any);
+        projectContextFormatted = formatProjectContextForPrompt(args.projectContext);
       } catch {
-        projectContextFormatted = "## Project\n" + JSON.stringify((args.projectContext as any).context || {}).slice(0, 2000);
+        const ctx = (args.projectContext as { context?: unknown }).context ?? {};
+        projectContextFormatted = `## Project\n${JSON.stringify(ctx).slice(0, 2000)}`;
       }
       const ctxStr = buildSprintContext({
         projectContextFormatted,
-        customerDecisions: decisions, phaseHistory: history, currentPhase: phase,
-        phaseDigest: digest, sprintTail: "",
+        customerDecisions: decisions,
+        phaseHistory: history,
+        currentPhase: phase,
+        phaseDigest: digest,
+        sprintTail: "",
       });
 
       let sprintResult = lastSprintState;
       const sprintCtx = {
-        sprintN, conversationContext: ctxStr,
+        sprintN,
+        conversationContext: ctxStr,
         phaseScope: { criteria: phase.successCriteria, scope: phase.scope },
       };
       const sprintGen = args.sprintRunner(sprintCtx);
       while (true) {
         const n = await sprintGen.next();
-        if (n.done) { sprintResult = n.value; break; }
+        if (n.done) {
+          sprintResult = n.value;
+          break;
+        }
         yield n.value;
       }
       lastSprintState = sprintResult;
       totalSprints += 1;
 
       const review = await generateSprintReview({
-        sprintState: { sprintN, ...sprintResult }, phase, leader: args.leader,
-        capUsd: args.capUsd, remainingUsd: await args.remainingUsd(),
+        sprintState: { sprintN, ...sprintResult },
+        phase,
+        leader: args.leader,
+        capUsd: args.capUsd,
+        remainingUsd: await args.remainingUsd(),
         backoffDelays: args.backoffDelays,
       });
       if (!args.suppressPush) {
@@ -322,19 +380,25 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       const verdict = await args.awaitCustomerVerdict(args.flowDir, args.runId);
       await clearAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
       await appendCustomerDecision(args.flowDir, args.runId, {
-        phaseId: phase.id, sprintN, verdict: verdict.verdict, feedback: (verdict as any).feedback,
+        phaseId: phase.id,
+        sprintN,
+        verdict: verdict.verdict,
+        feedback: verdict.feedback,
       });
       if (verdict.verdict === "abort") return { pass: false, reason: "user-aborted" };
 
       await markRetroPending(args.flowDir, args.runId, phase.id, sprintN);
       try {
         const lessons = await runRetro({
-          sprintState: { sprintN, ...sprintResult }, leader: args.leader,
-          capUsd: args.capUsd, remainingUsd: await args.remainingUsd(),
+          sprintState: { sprintN, ...sprintResult },
+          leader: args.leader,
+          capUsd: args.capUsd,
+          remainingUsd: await args.remainingUsd(),
           backoffDelays: args.backoffDelays,
         });
         const newDigest = digestSprintIntoPhase(digest, {
-          sprintN, timestampUtc: new Date().toISOString(),
+          sprintN,
+          timestampUtc: new Date().toISOString(),
           lessonText: lessons.nextSprintFocus.slice(0, 500),
         });
         await setPhaseDigest(args.flowDir, args.runId, phase.id, newDigest);
@@ -348,14 +412,20 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
     }
 
     const handoff = await handoffPhaseToNext({
-      phaseId: phase.id, sprintsExecuted: totalSprints,
-      criteriaMet: lastSprintState.criteriaMet, totalCriteria: lastSprintState.totalCriteria,
-      leader: args.leader, capUsd: args.capUsd, remainingUsd: await args.remainingUsd(),
+      phaseId: phase.id,
+      sprintsExecuted: totalSprints,
+      criteriaMet: lastSprintState.criteriaMet,
+      totalCriteria: lastSprintState.totalCriteria,
+      leader: args.leader,
+      capUsd: args.capUsd,
+      remainingUsd: await args.remainingUsd(),
       backoffDelays: args.backoffDelays,
     });
     await appendPhaseHistory(args.flowDir, args.runId, {
-      phaseId: phase.id, exitedAtUtc: new Date().toISOString(),
-      exitSummary: handoff.exitSummary, sprintsExecuted: totalSprints,
+      phaseId: phase.id,
+      exitedAtUtc: new Date().toISOString(),
+      exitSummary: handoff.exitSummary,
+      sprintsExecuted: totalSprints,
       criteriaMetCount: lastSprintState.criteriaMet,
     });
     await markPhaseStatus(args.flowDir, args.runId, phase.id, "done");
