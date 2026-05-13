@@ -3,7 +3,7 @@ import {
   COUNCIL_PALETTE,
   COUNCIL_SIGILS,
   resolveRoleStyle,
-} from "../role-palette.js";
+} from "../../ui/components/role-palette.js";
 
 function makeRegistry() {
   const map = new Map<string, number>();
