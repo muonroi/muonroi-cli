@@ -243,17 +243,24 @@ export async function* runClarification(
 
   const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm, costAware);
 
-  yield { type: "content", content: `\n### Clarified Spec\n` };
-  yield { type: "content", content: `\n#### Problem\n${spec.problemStatement}\n` };
   yield {
-    type: "content",
-    content: `\n#### Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n`,
+    type: "council_info_card",
+    councilInfoCard: {
+      title: "Clarified Spec",
+      sections: [
+        { heading: "Problem", body: spec.problemStatement },
+        {
+          heading: "Constraints",
+          body: spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)",
+        },
+        {
+          heading: "Success Criteria",
+          body: spec.successCriteria.map((c) => `- ${c}`).join("\n"),
+        },
+        { heading: "Scope", body: spec.scope || "(unspecified)" },
+      ],
+    },
   };
-  yield {
-    type: "content",
-    content: `\n#### Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n`,
-  };
-  yield { type: "content", content: `\n#### Scope\n${spec.scope || "(unspecified)"}\n` };
 
   return spec;
 }

@@ -121,6 +121,15 @@ function getContent(chunks: StreamChunk[]): string {
         const tag = KIND_TAG[cm.kind] ?? cm.kind;
         return `\n${tag}\n${cm.text}\n`;
       }
+      // Info-card migration: Clarified Spec / Discussion Brief / Debate Plan
+      // moved from inline markdown to typed `council_info_card` events. Flatten
+      // title + section headings + bodies so existing string assertions still
+      // hit the haystack.
+      if (c.type === "council_info_card" && c.councilInfoCard) {
+        const card = c.councilInfoCard;
+        const body = card.sections.map((s) => `${s.heading}\n${s.body}`).join("\n");
+        return `\n${card.title}\n${body}\n`;
+      }
       return "";
     })
     .join("");

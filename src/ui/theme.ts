@@ -68,6 +68,9 @@ export const dark = {
   // ── Council bubble tokens ────────────────────────────────────────────────
   councilLeaderBorder: "#666666",
   councilSynthesisBorder: "#5c9cf5",
+  councilInfoCardBorder: "#4a4a4a",
+  councilInfoCardTitle: "#e5c07b",
+  councilInfoCardHeading: "#9cdcfe",
 } as const;
 
 export type Theme = typeof dark;
