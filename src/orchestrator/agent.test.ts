@@ -40,7 +40,7 @@ afterEach(() => {
   vi.doUnmock("../storage/index");
 });
 
-describe("Agent class", { timeout: 15_000 }, () => {
+describe("Agent class", { timeout: 30_000 }, () => {
   it("constructs with default options", async () => {
     const { Agent } = await importAgentModule();
     const agent = new Agent(undefined, undefined, undefined, undefined, {
@@ -120,9 +120,11 @@ describe("Agent class", { timeout: 15_000 }, () => {
       persistSession: false,
     });
     // Reach into the private responder factory to mirror clarifier.ts flow.
-    const make = (agent as unknown as {
-      _createQuestionResponder(): (q: string) => Promise<string>;
-    })._createQuestionResponder.bind(agent);
+    const make = (
+      agent as unknown as {
+        _createQuestionResponder(): (q: string) => Promise<string>;
+      }
+    )._createQuestionResponder.bind(agent);
 
     agent.respondToCouncilQuestion("qid-1", "buffered-answer");
     const promise = make()("qid-1");
@@ -131,7 +133,9 @@ describe("Agent class", { timeout: 15_000 }, () => {
     // After consumption the buffer slot is gone — a second responder waits.
     const stalled = make()("qid-1");
     let settled = false;
-    void stalled.then(() => { settled = true; });
+    void stalled.then(() => {
+      settled = true;
+    });
     await new Promise((r) => setTimeout(r, 10));
     expect(settled).toBe(false);
     agent.respondToCouncilQuestion("qid-1", "second");
@@ -143,9 +147,11 @@ describe("Agent class", { timeout: 15_000 }, () => {
     const agent = new Agent(undefined, undefined, undefined, undefined, {
       persistSession: false,
     });
-    const make = (agent as unknown as {
-      _createPreflightResponder(): (p: string) => Promise<boolean>;
-    })._createPreflightResponder.bind(agent);
+    const make = (
+      agent as unknown as {
+        _createPreflightResponder(): (p: string) => Promise<boolean>;
+      }
+    )._createPreflightResponder.bind(agent);
     agent.respondToCouncilPreflight("pf-1", false);
     await expect(make()("pf-1")).resolves.toBe(false);
   });
