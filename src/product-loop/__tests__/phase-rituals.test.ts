@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { generateSprintReview } from "../phase-rituals.js";
+import { generateSprintReview, runRetro } from "../phase-rituals.js";
 
 describe("generateSprintReview (subsystem E)", () => {
   const sprintState = {
@@ -68,5 +68,42 @@ describe("generateSprintReview (subsystem E)", () => {
       backoffDelays: [1, 1, 1],
     });
     expect(out.usedFallback).toBe(true);
+  });
+});
+
+describe("runRetro (subsystem E)", () => {
+  const sprintState = { sprintN: 1, scoreBefore: 0.3, scoreAfter: 0.75, criteriaMet: 3, totalCriteria: 4 };
+
+  it("returns LessonsLearned within shape limits", async () => {
+    const leader = {
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify({
+          wentWell: Array.from({ length: 8 }, (_, i) => `Win ${i}`),
+          toImprove: ["A".repeat(300)],
+          nextSprintFocus: "B".repeat(400),
+        }),
+        costUsd: 0.05,
+      }),
+    };
+    const out = await runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 1, backoffDelays: [1, 1, 1] });
+    expect(out.wentWell.length).toBeLessThanOrEqual(5);
+    expect(out.toImprove[0].length).toBeLessThanOrEqual(200);
+    expect(out.nextSprintFocus.length).toBeLessThanOrEqual(300);
+  });
+
+  it("throws RetroSkippedBudget when remaining below floor", async () => {
+    const leader = { generate: vi.fn() };
+    await expect(
+      runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 0.01, backoffDelays: [1, 1, 1] }),
+    ).rejects.toThrow(/RetroSkippedBudget/);
+  });
+
+  it("throws on 3 429s (caller marks Retro Skipped)", async () => {
+    const err: any = new Error("rate");
+    err.status = 429;
+    const leader = { generate: vi.fn().mockRejectedValue(err) };
+    await expect(
+      runRetro({ sprintState, leader, capUsd: 10, remainingUsd: 1, backoffDelays: [1, 1, 1] }),
+    ).rejects.toThrow();
   });
 });
