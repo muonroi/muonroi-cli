@@ -29,7 +29,7 @@
     "prepare": "husky"
   },
   "lint-staged": {
-    "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched"
+    "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"
   },
   "files": [
     "src/",
