@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // All external modules are mocked so the test exercises only sprint-runner orchestration.
 vi.mock("../../council/index.js", () => ({
@@ -48,21 +48,17 @@ vi.mock("../../providers/runtime.js", () => ({
   detectProviderForModel: vi.fn(() => "anthropic"),
 }));
 
-import { runSprint } from "../sprint-runner.js";
 import { runCouncil } from "../../council/index.js";
-import { runVerifyOrchestration } from "../../verify/orchestrator.js";
-import { evaluateDoneGate } from "../done-gate.js";
-import { appendIteration } from "../artifact-io.js";
-import {
-  CB1_costProjection,
-  CB2_oscillation,
-  CB3_verifyBlank,
-} from "../circuit-breakers.js";
-import { postSprintBoundary } from "../phase-tracker-bridge.js";
 import { release } from "../../usage/ledger.js";
-import { reserveForProduct } from "../cost-scoper.js";
-import type { ProductSpec, IterationState, RoleSlot } from "../types.js";
 import { CapBreachError } from "../../usage/types.js";
+import { runVerifyOrchestration } from "../../verify/orchestrator.js";
+import { appendIteration } from "../artifact-io.js";
+import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { reserveForProduct } from "../cost-scoper.js";
+import { evaluateDoneGate } from "../done-gate.js";
+import { postSprintBoundary } from "../phase-tracker-bridge.js";
+import { runSprint } from "../sprint-runner.js";
+import type { IterationState, ProductSpec, RoleSlot } from "../types.js";
 
 function makeCtx(overrides: any = {}): any {
   return {
@@ -103,7 +99,9 @@ function makeSpec(): ProductSpec {
 
 const NO_ROLES = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
 
-async function drain<T, R>(gen: AsyncGenerator<T, R, unknown>): Promise<{ chunks: T[]; result: R | undefined; error?: unknown }> {
+async function drain<T, R>(
+  gen: AsyncGenerator<T, R, unknown>,
+): Promise<{ chunks: T[]; result: R | undefined; error?: unknown }> {
   const chunks: T[] = [];
   try {
     while (true) {
@@ -156,9 +154,7 @@ describe("sprint-runner", () => {
     expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
     expect(evaluateDoneGate).toHaveBeenCalledTimes(1);
     expect(appendIteration).toHaveBeenCalledTimes(1);
-    expect(postSprintBoundary).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: "pass", sprintN: 1 }),
-    );
+    expect(postSprintBoundary).toHaveBeenCalledWith(expect.objectContaining({ outcome: "pass", sprintN: 1 }));
     expect(chunks.some((c: any) => c.type === "content")).toBe(true);
   });
 
@@ -188,8 +184,28 @@ describe("sprint-runner", () => {
     (evaluateDoneGate as any).mockResolvedValue({ pass: false, failedCondition: "weighted_score", score: 0.4 });
 
     const history: IterationState[] = [
-      { sprintN: 3, stage: "retrospective", scoreBefore: 0.5, scoreAfter: 0.5, criteriaMet: 0, criteriaPartial: 0, criteriaUnmet: 0, costUsd: 0, lastVerifyResult: "PASS" },
-      { sprintN: 4, stage: "retrospective", scoreBefore: 0.5, scoreAfter: 0.5, criteriaMet: 0, criteriaPartial: 0, criteriaUnmet: 0, costUsd: 0, lastVerifyResult: "PASS" },
+      {
+        sprintN: 3,
+        stage: "retrospective",
+        scoreBefore: 0.5,
+        scoreAfter: 0.5,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      },
+      {
+        sprintN: 4,
+        stage: "retrospective",
+        scoreBefore: 0.5,
+        scoreAfter: 0.5,
+        criteriaMet: 0,
+        criteriaPartial: 0,
+        criteriaUnmet: 0,
+        costUsd: 0,
+        lastVerifyResult: "PASS",
+      },
     ];
     const ctx = makeCtx();
     const { error } = await drain(
@@ -217,9 +233,7 @@ describe("sprint-runner", () => {
     );
     expect(result!.stage).toBe("retrospective");
     expect(result!.lastVerifyResult).toBe("FAIL");
-    const continueChunk = chunks.find(
-      (c: any) => typeof c.content === "string" && c.content.includes("Next focus"),
-    );
+    const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next focus"));
     expect(continueChunk).toBeDefined();
   });
 
@@ -280,5 +294,68 @@ describe("sprint-runner", () => {
       runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
     );
     expect((error as Error).message).toMatch(/Cost cap breached/);
+  });
+});
+
+describe("sprint-runner phaseScope (subsystem E)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
+    (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
+    (CB3_verifyBlank as any).mockReturnValue({ halt: false });
+    (runVerifyOrchestration as any).mockResolvedValue({
+      success: true,
+      output: "VERIFY_PASS\n",
+      verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+    });
+    (runCouncil as any).mockImplementation(async function* () {
+      yield { type: "content", content: "council planning..." };
+      return "synthesis text from council";
+    });
+  });
+
+  it("when phaseScope present, evaluateDoneGate receives only the scoped subset of criteria", async () => {
+    // Arrange: readCriteria returns 3 criteria; phaseScope restricts to 2 of them.
+    const { readCriteria } = await import("../artifact-io.js");
+    (readCriteria as any).mockResolvedValue([
+      { id: "crit-A", status: "met" },
+      { id: "crit-B", status: "unmet" },
+      { id: "crit-C", status: "partial" },
+    ]);
+    (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
+
+    const ctx = makeCtx();
+    const { result } = await drain(
+      runSprint({
+        sprintN: 1,
+        ctx,
+        productSpec: makeSpec(),
+        roleAssignments: NO_ROLES,
+        history: [],
+        phaseScope: { criteria: ["crit-A", "crit-B"], scope: "phase-1" },
+      }),
+    );
+
+    expect(result).toBeDefined();
+    // evaluateDoneGate must have been called with only the 2 scoped criteria, not all 3.
+    const gateCall = (evaluateDoneGate as any).mock.calls[0][0];
+    expect(gateCall.criteria).toHaveLength(2);
+    expect(gateCall.criteria.map((c: any) => c.id)).toEqual(["crit-A", "crit-B"]);
+  });
+
+  it("when phaseScope is absent, evaluateDoneGate receives all criteria (backwards-compat)", async () => {
+    const { readCriteria } = await import("../artifact-io.js");
+    (readCriteria as any).mockResolvedValue([
+      { id: "crit-A", status: "met" },
+      { id: "crit-B", status: "unmet" },
+      { id: "crit-C", status: "partial" },
+    ]);
+    (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
+
+    const ctx = makeCtx();
+    await drain(runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }));
+
+    const gateCall = (evaluateDoneGate as any).mock.calls[0][0];
+    expect(gateCall.criteria).toHaveLength(3);
   });
 });
