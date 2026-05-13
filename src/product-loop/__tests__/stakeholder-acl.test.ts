@@ -86,4 +86,9 @@ describe("stakeholder-acl", () => {
     const items = await listStakeholders("slug-x");
     expect(items.length).toBe(10);
   });
+
+  it("removeStakeholder on unknown slug is a no-op", async () => {
+    // Should not throw even if slug has no entry in the store
+    await expect(removeStakeholder("nonexistent-slug", "u1")).resolves.toBeUndefined();
+  });
 });

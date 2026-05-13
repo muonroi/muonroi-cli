@@ -69,4 +69,24 @@ describe("intent-prompt", () => {
     const out = parseConvoReply(JSON.stringify({ intent: "maybe", reply: "..." }));
     expect(out.intent).toBe("maybe");
   });
+
+  it("buildConvoPrompt with empty priorTurns renders (none) placeholder", () => {
+    const out = buildConvoPrompt({
+      reviewSummary: "Done.",
+      productName: "Test",
+      priorTurns: [],
+      newMessage: "ok?",
+    });
+    expect(out).toContain("(none)");
+  });
+
+  it("parseConvoReply falls back to discuss when intent field is missing", () => {
+    const out = parseConvoReply(JSON.stringify({ reply: "hi" }));
+    expect(out.intent).toBe("discuss");
+  });
+
+  it("parseConvoReply falls back to FALLBACK_REPLY when reply field is missing", () => {
+    const out = parseConvoReply(JSON.stringify({ intent: "accept" }));
+    expect(out.reply.length).toBeGreaterThan(0);
+  });
 });
