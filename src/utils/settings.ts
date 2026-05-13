@@ -9,11 +9,17 @@ import type {
   LspSettings,
   NormalizedLspSettings,
 } from "../lsp/types";
-import { MODELS, getEffectiveReasoningEffort, getModelIds, getModelInfo, normalizeModelId } from "../models/registry.js";
+import {
+  getEffectiveReasoningEffort,
+  getModelIds,
+  getModelInfo,
+  MODELS,
+  normalizeModelId,
+} from "../models/registry.js";
 import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
-import { type ShellSettings, normalizeShellSettings } from "./shell";
+import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
 
@@ -324,9 +330,7 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
     ...(partial.sandbox !== undefined
       ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
       : {}),
-    ...(partial.shell !== undefined
-      ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) }
-      : {}),
+    ...(partial.shell !== undefined ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) } : {}),
     ...(partial.lsp !== undefined
       ? {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
@@ -365,9 +369,7 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
     ...(partial.sandbox !== undefined
       ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
       : {}),
-    ...(partial.shell !== undefined
-      ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) }
-      : {}),
+    ...(partial.shell !== undefined ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) } : {}),
     ...(partial.lsp !== undefined
       ? {
           lsp: mergeLspSettings(current.lsp, partial.lsp),
@@ -391,7 +393,9 @@ export function getBaseURL(provider?: string): string {
  * Reads env vars + user-settings.json providers section.
  * Anthropic uses the main apiKey; others use providers.* keys.
  */
-export function getProviderConfigs(mainApiKey?: string): Record<string, { apiKey?: string; baseURL?: string; model?: string }> {
+export function getProviderConfigs(
+  mainApiKey?: string,
+): Record<string, { apiKey?: string; baseURL?: string; model?: string }> {
   const settings = loadUserSettings();
   const p = settings.providers ?? {};
 
@@ -819,7 +823,7 @@ export function isAutoCompactAfterTurnEnabled(): boolean {
 
 export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
-  if (typeof val === "number" && val >= 0.05 && val <= 0.50) return val;
+  if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
   return 0.15; // default 15%
 }
 
@@ -852,12 +856,21 @@ export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
 }
 
+export function getAutoCouncilConfidence(): number {
+  return (loadUserSettings() as { autoCouncilConfidence?: number }).autoCouncilConfidence ?? 0.7;
+}
+
+export function getAutoCouncilMinRoles(): number {
+  return (loadUserSettings() as { autoCouncilMinRoles?: number }).autoCouncilMinRoles ?? 2;
+}
+
 export function getDisabledProviders(): ProviderId[] {
   const raw = loadUserSettings().disabledProviders;
   if (!Array.isArray(raw)) return [];
-  return raw.filter((p): p is ProviderId =>
-    typeof p === "string" &&
-    ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"].includes(p),
+  return raw.filter(
+    (p): p is ProviderId =>
+      typeof p === "string" &&
+      ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"].includes(p),
   );
 }
 
@@ -873,4 +886,3 @@ export function setProviderDisabled(provider: ProviderId, disabled: boolean): Pr
   saveUserSettings({ disabledProviders: next });
   return next;
 }
-
