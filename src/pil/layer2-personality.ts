@@ -1,6 +1,15 @@
 import { truncateToBudget } from "./budget.js";
 import type { OutputStyle, PipelineContext } from "./types.js";
 
+// TODO(WhoAmI-L2): when EE v4.0 Who Am I profile is available, replace
+// static PERSONALITY_HINTS with a dynamically-built hint from the user profile:
+//   communication.brevity       → concise/detailed bias
+//   decision_speed              → skip exhaustive options, recommend once
+//   feedback_style              → implicit = don't re-explain on "ok"
+//   work_patterns.delegation    → autonomous = lead with action, not question
+// ctx.outputStyle from L1 becomes an override signal, not the primary source.
+// Until WhoAmI ships, L2 relies entirely on L1's per-turn detection.
+
 const DEFAULT_PERSONALITY: OutputStyle = "balanced";
 
 const PERSONALITY_HINTS: Record<OutputStyle, string> = {

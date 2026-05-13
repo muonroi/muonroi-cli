@@ -71,7 +71,10 @@ describe("layer3 experience_injected chunk emission (CQ-16b)", () => {
 
     expect(injectedChunk).toBeDefined();
     expect(injectedChunk?.type).toBe("experience_injected");
-    expect(injectedChunk?.experienceInjected?.pointCount).toBe(1);
+    // New behavior: queryEeBridge issues 2 parallel calls (principles + behavioral).
+    // The shared mock returns the same point for both, so it surfaces in both
+    // collections (passes principles floor 0.40 and behavioral floor 0.55).
+    expect(injectedChunk?.experienceInjected?.pointCount).toBe(2);
     expect(injectedChunk?.experienceInjected?.pointIds).toContain("point-1");
   });
 

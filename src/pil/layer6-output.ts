@@ -33,11 +33,31 @@ const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
 };
 
 // PIL-04 Tier 1.1: response-tool gating.
-// JSON-structured output saves tokens for list-shaped responses (analyze findings,
-// plan steps) where keys repeat instead of prose. It LOSES for code-heavy tasks
-// (generate/refactor/debug-with-diff) because escaping \n and \" in JSON strings
-// inflates tokens by 20-30%. Restrict response-tool activation accordingly.
-const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan"]);
+//
+// Structural enforcement (JSON schema via tool call) is the root-cause fix for
+// cheap-model verbosity: the model CANNOT add preamble/epilogue/padding because
+// there is no surface outside the schema to write into. Text-based OUTPUT RULES
+// rely on instruction compliance which budget models (DeepSeek/Qwen/Llama)
+// frequently ignore.
+//
+// Activation gate: enable when the schema's payload is bounded enough that JSON
+// escaping (\n → \\n, " → \") doesn't outweigh the eliminated padding cost.
+//   - analyze: list of findings — repeated keys, no large strings → big win
+//   - plan:    numbered steps    — same shape → big win
+//   - debug:   {hypothesis, root_cause, fix:{file,diff}, verify} — diff is
+//              normally one small hunk, escaping overhead <5%; structural
+//              enforcement of the hypothesis→root_cause→fix→verify format is
+//              exactly what cheap models drift away from in prose mode
+//   - general: {response, reasoning} — pure text, zero structural overhead;
+//              this task type has the weakest text suffix today and suffers the
+//              most from verbose padding
+//
+// Disabled (escaping cost dominates):
+//   - generate (large file contents in JSON strings)
+//   - refactor (multi-file diffs)
+//   - documentation (large markdown blocks)
+// For these, the orchestrator falls back to the markdown OUTPUT RULES suffix.
+const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan", "debug", "general"]);
 
 // PIL-04 Tier 1.2: per-task output token budget.
 // Hint to model. Empirically derived from interaction_logs avg output sizes;
@@ -95,6 +115,11 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   },
 };
 
+// TODO(WhoAmI-L6): when EE v4.0 Who Am I profile is available, skip
+// NO_PREAMBLE_RULE for users with feedback_style="explicit" who prefer
+// preamble. Also source TASK_TYPE_DEFAULT_STYLE from profile communication.brevity
+// instead of the hardcoded heuristic map above.
+
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
   // Chitchat: layer6Output already skipped suffix work; mirror that here so
   // direct callers (e.g. orchestrator) don't accidentally re-inject rules.
@@ -111,13 +136,22 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   const style: OutputStyle = ctx.outputStyle ?? "concise";
   const baseSuffix = SUFFIXES[ctx.taskType][style];
 
-  // PIL-04 Tier 1.2: output-budget hint. Generic per-task ceiling so model
-  // self-regulates length even when style="balanced" or "detailed".
+  // PIL-04 Tier 1.2: output-budget hint.
   const budget = TASK_OUTPUT_BUDGET[ctx.taskType as TaskType] ?? 600;
   const budgetHint = `\nOUTPUT BUDGET: aim for ≤${budget} tokens. Stop when the answer is complete; do not pad.`;
 
-  // PIL-04 Tier 1.3: ban preamble (applied to all styles — ~30 tokens saved/turn).
-  return systemPrompt + baseSuffix + budgetHint + NO_PREAMBLE_RULE;
+  // PIL-04 Tier 1.3: ban preamble (~30 tokens saved/turn).
+  let result = systemPrompt + baseSuffix + budgetHint + NO_PREAMBLE_RULE;
+
+  // T1 behavioral rules (proven-tier EE points set by Layer 3). These are
+  // project-specific reflexes the model MUST follow — injected as instructions,
+  // not as context hints, so they carry imperative weight rather than suggestion weight.
+  if (ctx.t1Rules && ctx.t1Rules.length > 0) {
+    const mandatoryLines = ctx.t1Rules.map((r) => `- ${r}`).join("\n");
+    result += `\nMANDATORY RULES (from experience — must follow):\n${mandatoryLines}`;
+  }
+
+  return result;
 }
 
 export function getResponseToolSet(ctx: PipelineContext): ToolSet {

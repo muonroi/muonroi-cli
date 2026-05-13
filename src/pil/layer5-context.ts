@@ -4,6 +4,13 @@ import { searchByText } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
+// TODO(WhoAmI-L5): when EE v4.0 Who Am I profile is available, replace the
+// hardcoded threshold with profile-derived value:
+//   work_patterns.session_length="medium-long (1-3h)" → 120 min stale threshold
+//   work_patterns.multitasking="sequential-deep"      → extend to 2h
+//   (task-switchers with short sessions → keep 15 min)
+// Also: deduplicate with L3 — if L3 already injected experience-principles,
+// skip that collection here to avoid double-injection.
 const STALE_THRESHOLD_MS = 30 * 60 * 1000;
 
 // Single round-trip for both collections via /api/search; topK=5 yields

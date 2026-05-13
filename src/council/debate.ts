@@ -1,4 +1,15 @@
+import { getModelInfo } from "../models/registry.js";
 import type { StreamChunk } from "../types/index.js";
+import { pickCouncilTaskModel } from "./leader.js";
+import { tracedAsync, tracedGenerate } from "./llm.js";
+import { phaseDone, phaseStart } from "./phase-events.js";
+import {
+  buildFollowupPrompt,
+  buildLeaderEvaluationPrompt,
+  buildOpeningPrompt,
+  buildResponsePrompt,
+  buildRoundSummaryPrompt,
+} from "./prompts.js";
 import type {
   ClarifiedSpec,
   CouncilConfig,
@@ -7,17 +18,6 @@ import type {
   DebateState,
   LeaderEvaluation,
 } from "./types.js";
-import {
-  buildOpeningPrompt,
-  buildResponsePrompt,
-  buildFollowupPrompt,
-  buildLeaderEvaluationPrompt,
-  buildRoundSummaryPrompt,
-} from "./prompts.js";
-import { tracedAsync, tracedGenerate } from "./llm.js";
-import { phaseDone, phaseStart } from "./phase-events.js";
-import { pickCouncilTaskModel } from "./leader.js";
-import { getModelInfo } from "../models/registry.js";
 
 /**
  * Verification tools default-on for balanced/premium tier.
@@ -69,10 +69,7 @@ const ARCHIVE_EXCERPT_CHARS = 400;
 function makeExcerpt(text: string): { excerpt: string; length: number } {
   const trimmed = text.trim();
   return {
-    excerpt:
-      trimmed.length > ARCHIVE_EXCERPT_CHARS
-        ? trimmed.slice(0, ARCHIVE_EXCERPT_CHARS) + "…"
-        : trimmed,
+    excerpt: trimmed.length > ARCHIVE_EXCERPT_CHARS ? trimmed.slice(0, ARCHIVE_EXCERPT_CHARS) + "…" : trimmed,
     length: trimmed.length,
   };
 }
@@ -135,6 +132,37 @@ function isFailedTurn(text: string): boolean {
  * was skipped. The outer try/catch in the pair runner still catches anything
  * that escapes this helper.
  */
+/**
+ * Retry wrapper for opening statements. `llm.generate` has no built-in retry,
+ * so a single timeout/error during the opening phase permanently removes that
+ * stance from `active[]` and disables it for every subsequent round. We retry
+ * up to MAX_OPENING_ATTEMPTS with linear backoff before giving up.
+ */
+const MAX_OPENING_ATTEMPTS = 3;
+async function openingWithRetry(
+  llm: CouncilLLM,
+  model: string,
+  system: string,
+  prompt: string,
+): Promise<{ text: string; attempts: number; error?: string }> {
+  let lastError: string | undefined;
+  for (let attempt = 1; attempt <= MAX_OPENING_ATTEMPTS; attempt++) {
+    try {
+      const text = await llm.generate(model, system, prompt);
+      if (text && text.trim().length > 0) {
+        return { text, attempts: attempt };
+      }
+      lastError = "empty completion";
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+    }
+    if (attempt < MAX_OPENING_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
+  }
+  return { text: "", attempts: MAX_OPENING_ATTEMPTS, error: lastError };
+}
+
 async function debateWithRetry(
   llm: CouncilLLM,
   model: string,
@@ -248,7 +276,15 @@ export async function* runDebate(
 
     const researchTraces: string[] = [];
     researchFindings = yield* tracedAsync(
-      () => llm.research(researchCandidate.model, spec.problemStatement, conversationContext, signal, (t) => researchTraces.push(t), { internetFirst }),
+      () =>
+        llm.research(
+          researchCandidate.model,
+          spec.problemStatement,
+          conversationContext,
+          signal,
+          (t) => researchTraces.push(t),
+          { internetFirst },
+        ),
       {
         phase: "research",
         label: internetFirst ? "Researching (internet-first)" : "Researching codebase",
@@ -294,16 +330,14 @@ export async function* runDebate(
       outputShape: debatePlan?.outputShape,
       conversationContext: enrichedContext,
     });
-    return llm
-      .generate(self.model, system, prompt)
-      .then((text) => ({ role: self.role, model: self.model, stance: self.stance, position: text, error: null as string | null }))
-      .catch((err: unknown) => ({
-        role: self.role,
-        model: self.model,
-        stance: self.stance,
-        position: "",
-        error: err instanceof Error ? err.message : String(err),
-      }));
+    return openingWithRetry(llm, self.model, system, prompt).then((r) => ({
+      role: self.role,
+      model: self.model,
+      stance: self.stance,
+      position: r.text,
+      error: r.text ? null : (r.error ?? "empty completion after retries"),
+      attempts: r.attempts,
+    }));
   });
 
   const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
@@ -394,11 +428,19 @@ export async function* runDebate(
       label: `Discussion round ${round}`,
     });
 
+    // Canonicalize key by sorting roles so symmetric pairs (A↔B and B↔A)
+    // collapse to a single entry. With only 2 active participants the ring
+    // topology would otherwise emit both (i=0,i=1) and run the same logical
+    // pair twice, producing duplicate "X → Y" turns in every round.
     const pairs: Array<{ a: CouncilParticipant; b: CouncilParticipant; key: string }> = [];
+    const seenPairKeys = new Set<string>();
     for (let i = 0; i < active.length; i++) {
       const a = active[i];
       const b = active[(i + 1) % active.length];
-      const key = `${a.role}<>${b.role}`;
+      const [r1, r2] = [a.role, b.role].sort();
+      const key = `${r1}<>${r2}`;
+      if (seenPairKeys.has(key)) continue;
+      seenPairKeys.add(key);
       if (droppedPairKeys.has(key)) continue;
       if (!exchangeLogs.has(key)) exchangeLogs.set(key, []);
       pairs.push({ a, b, key });
@@ -413,86 +455,170 @@ export async function* runDebate(
     }
 
     const pairResults = yield* tracedAsync(
-      () => Promise.all(
-        pairs.map(async ({ a, b, key }) => {
-        const log = exchangeLogs.get(key)!;
-        const chunks: Array<{ label: string; text: string; toolCalls?: Array<{ toolName: string; result?: unknown }>; traces?: string[]; failureReason?: string; attempts?: number }> = [];
+      () =>
+        Promise.all(
+          pairs.map(async ({ a, b, key }) => {
+            const log = exchangeLogs.get(key)!;
+            const chunks: Array<{
+              label: string;
+              text: string;
+              toolCalls?: Array<{ toolName: string; result?: unknown }>;
+              traces?: string[];
+              failureReason?: string;
+              attempts?: number;
+            }> = [];
 
-        try {
-          let aResponse: string;
-          let bResponse: string;
-          let aToolCalls: Array<{ toolName: string; result?: unknown }> = [];
-          let bToolCalls: Array<{ toolName: string; result?: unknown }> = [];
+            try {
+              let aResponse: string;
+              let bResponse: string;
+              let aToolCalls: Array<{ toolName: string; result?: unknown }> = [];
+              let bToolCalls: Array<{ toolName: string; result?: unknown }> = [];
 
-          const aLabel = a.stance?.name ?? a.role;
-          const bLabel = b.stance?.name ?? b.role;
-          if (round === 1) {
-            const aPrompt = buildResponsePrompt({
-              speakerRole: a.role, partnerRole: b.role,
-              speakerStance: a.stance, partnerStance: b.stance,
-              speakerPosition: a.position, partnerPosition: b.position,
-              spec,
-            });
-            const aTraces: string[] = [];
-            const aResult = await debateWithRetry(llm, a.model, aPrompt.system, aPrompt.prompt, signal, (t) => aTraces.push(t), toolBudget);
-            aResponse = aResult.text;
-            aToolCalls = aResult.toolCalls;
-            log.push(`[${aLabel}]: ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls, traces: aTraces, failureReason: aResult.failureReason, attempts: aResult.attempts });
+              const aLabel = a.stance?.name ?? a.role;
+              const bLabel = b.stance?.name ?? b.role;
+              if (round === 1) {
+                const aPrompt = buildResponsePrompt({
+                  speakerRole: a.role,
+                  partnerRole: b.role,
+                  speakerStance: a.stance,
+                  partnerStance: b.stance,
+                  speakerPosition: a.position,
+                  partnerPosition: b.position,
+                  spec,
+                });
+                const aTraces: string[] = [];
+                const aResult = await debateWithRetry(
+                  llm,
+                  a.model,
+                  aPrompt.system,
+                  aPrompt.prompt,
+                  signal,
+                  (t) => aTraces.push(t),
+                  toolBudget,
+                );
+                aResponse = aResult.text;
+                aToolCalls = aResult.toolCalls;
+                log.push(`[${aLabel}]: ${aResponse}`);
+                chunks.push({
+                  label: `[${aLabel}] → [${bLabel}]`,
+                  text: aResponse,
+                  toolCalls: aToolCalls,
+                  traces: aTraces,
+                  failureReason: aResult.failureReason,
+                  attempts: aResult.attempts,
+                });
 
-            const bPrompt = buildResponsePrompt({
-              speakerRole: b.role, partnerRole: a.role,
-              speakerStance: b.stance, partnerStance: a.stance,
-              speakerPosition: b.position, partnerPosition: aResponse,
-              spec,
-            });
-            const bTraces: string[] = [];
-            const bResult = await debateWithRetry(llm, b.model, bPrompt.system, bPrompt.prompt, signal, (t) => bTraces.push(t), toolBudget);
-            bResponse = bResult.text;
-            bToolCalls = bResult.toolCalls;
-            log.push(`[${bLabel}]: ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls, traces: bTraces, failureReason: bResult.failureReason, attempts: bResult.attempts });
-          } else {
-            // No longer pass the full exchange history — `runningSummary` (LLM-
-            // generated condensation) plus the partner's latest single position
-            // is enough for the next stance turn. Replaying every prior message
-            // is what caused the 3M-token requests in production.
-            const aPrompt = buildFollowupPrompt({
-              speakerRole: a.role, partnerRole: b.role,
-              speakerStance: a.stance, partnerStance: b.stance,
-              partnerPosition: b.position, speakerLastPosition: a.position, round,
-              runningSummary, spec,
-            });
-            const aTraces: string[] = [];
-            const aResult = await debateWithRetry(llm, a.model, aPrompt.system, aPrompt.prompt, signal, (t) => aTraces.push(t), toolBudget);
-            aResponse = aResult.text;
-            aToolCalls = aResult.toolCalls;
-            log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
-            chunks.push({ label: `[${aLabel}] → [${bLabel}]`, text: aResponse, toolCalls: aToolCalls, traces: aTraces, failureReason: aResult.failureReason, attempts: aResult.attempts });
+                const bPrompt = buildResponsePrompt({
+                  speakerRole: b.role,
+                  partnerRole: a.role,
+                  speakerStance: b.stance,
+                  partnerStance: a.stance,
+                  speakerPosition: b.position,
+                  partnerPosition: aResponse,
+                  spec,
+                });
+                const bTraces: string[] = [];
+                const bResult = await debateWithRetry(
+                  llm,
+                  b.model,
+                  bPrompt.system,
+                  bPrompt.prompt,
+                  signal,
+                  (t) => bTraces.push(t),
+                  toolBudget,
+                );
+                bResponse = bResult.text;
+                bToolCalls = bResult.toolCalls;
+                log.push(`[${bLabel}]: ${bResponse}`);
+                chunks.push({
+                  label: `[${bLabel}] → [${aLabel}]`,
+                  text: bResponse,
+                  toolCalls: bToolCalls,
+                  traces: bTraces,
+                  failureReason: bResult.failureReason,
+                  attempts: bResult.attempts,
+                });
+              } else {
+                // No longer pass the full exchange history — `runningSummary` (LLM-
+                // generated condensation) plus the partner's latest single position
+                // is enough for the next stance turn. Replaying every prior message
+                // is what caused the 3M-token requests in production.
+                const aPrompt = buildFollowupPrompt({
+                  speakerRole: a.role,
+                  partnerRole: b.role,
+                  speakerStance: a.stance,
+                  partnerStance: b.stance,
+                  partnerPosition: b.position,
+                  speakerLastPosition: a.position,
+                  round,
+                  runningSummary,
+                  spec,
+                });
+                const aTraces: string[] = [];
+                const aResult = await debateWithRetry(
+                  llm,
+                  a.model,
+                  aPrompt.system,
+                  aPrompt.prompt,
+                  signal,
+                  (t) => aTraces.push(t),
+                  toolBudget,
+                );
+                aResponse = aResult.text;
+                aToolCalls = aResult.toolCalls;
+                log.push(`[${aLabel}] (round ${round}): ${aResponse}`);
+                chunks.push({
+                  label: `[${aLabel}] → [${bLabel}]`,
+                  text: aResponse,
+                  toolCalls: aToolCalls,
+                  traces: aTraces,
+                  failureReason: aResult.failureReason,
+                  attempts: aResult.attempts,
+                });
 
-            const bPrompt = buildFollowupPrompt({
-              speakerRole: b.role, partnerRole: a.role,
-              speakerStance: b.stance, partnerStance: a.stance,
-              partnerPosition: aResponse, speakerLastPosition: b.position, round,
-              runningSummary, spec,
-            });
-            const bTraces: string[] = [];
-            const bResult = await debateWithRetry(llm, b.model, bPrompt.system, bPrompt.prompt, signal, (t) => bTraces.push(t), toolBudget);
-            bResponse = bResult.text;
-            bToolCalls = bResult.toolCalls;
-            log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
-            chunks.push({ label: `[${bLabel}] → [${aLabel}]`, text: bResponse, toolCalls: bToolCalls, traces: bTraces, failureReason: bResult.failureReason, attempts: bResult.attempts });
-          }
+                const bPrompt = buildFollowupPrompt({
+                  speakerRole: b.role,
+                  partnerRole: a.role,
+                  speakerStance: b.stance,
+                  partnerStance: a.stance,
+                  partnerPosition: aResponse,
+                  speakerLastPosition: b.position,
+                  round,
+                  runningSummary,
+                  spec,
+                });
+                const bTraces: string[] = [];
+                const bResult = await debateWithRetry(
+                  llm,
+                  b.model,
+                  bPrompt.system,
+                  bPrompt.prompt,
+                  signal,
+                  (t) => bTraces.push(t),
+                  toolBudget,
+                );
+                bResponse = bResult.text;
+                bToolCalls = bResult.toolCalls;
+                log.push(`[${bLabel}] (round ${round}): ${bResponse}`);
+                chunks.push({
+                  label: `[${bLabel}] → [${aLabel}]`,
+                  text: bResponse,
+                  toolCalls: bToolCalls,
+                  traces: bTraces,
+                  failureReason: bResult.failureReason,
+                  attempts: bResult.attempts,
+                });
+              }
 
-          // Only update positions when response is non-empty (avoid clearing on LLM error)
-          if (bResponse) b.position = bResponse;
-          if (aResponse) a.position = aResponse;
-          return { key, chunks, error: null as string | null };
-        } catch (err: unknown) {
-          return { key, chunks, error: err instanceof Error ? err.message : String(err) };
-        }
-      }),
-      ),
+              // Only update positions when response is non-empty (avoid clearing on LLM error)
+              if (bResponse) b.position = bResponse;
+              if (aResponse) a.position = aResponse;
+              return { key, chunks, error: null as string | null };
+            } catch (err: unknown) {
+              return { key, chunks, error: err instanceof Error ? err.message : String(err) };
+            }
+          }),
+        ),
       {
         phase: "exchange",
         label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
@@ -528,9 +654,7 @@ export async function* runDebate(
         const partnerName = labelParts?.[2] ?? "partner";
         const failed = isFailedTurn(chunk.text);
         if (labelParts && !failed) {
-          const speaker = active.find(
-            (a) => (a.stance?.name ?? a.role) === speakerName,
-          );
+          const speaker = active.find((a) => (a.stance?.name ?? a.role) === speakerName);
           if (speaker) {
             archive.push({
               round,
@@ -558,9 +682,7 @@ export async function* runDebate(
           //   ─────────────  Round N · Speaker → Partner  ─────────────
           //   <body>
           //                    ↳ tools: bash, grep
-          const toolList = chunk.toolCalls?.length
-            ? chunk.toolCalls.map((t) => t.toolName).join(", ")
-            : null;
+          const toolList = chunk.toolCalls?.length ? chunk.toolCalls.map((t) => t.toolName).join(", ") : null;
           const charCount = chunk.text.trim().length;
           const wordCount = chunk.text.trim().split(/\s+/).filter(Boolean).length;
           const stats = `${wordCount} words · ${charCount} chars`;
@@ -614,9 +736,7 @@ export async function* runDebate(
           const reason = c.failureReason ?? "no content produced";
           return `${c.label} (skipped): ${reason}`;
         }
-        const toolSuffix = c.toolCalls?.length
-          ? ` [tools: ${c.toolCalls.map((t) => t.toolName).join(", ")}]`
-          : "";
+        const toolSuffix = c.toolCalls?.length ? ` [tools: ${c.toolCalls.map((t) => t.toolName).join(", ")}]` : "";
         const retrySuffix = c.attempts && c.attempts > 1 ? " [recovered on retry]" : "";
         return `${c.label}${retrySuffix}: ${c.text}${toolSuffix}`;
       })
@@ -686,7 +806,10 @@ export async function* runDebate(
         const researchCandidate = participants.find((c) => c.role === "research") ?? participants[0];
         const midTraces: string[] = [];
         const findings = yield* tracedAsync(
-          () => llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal, (t) => midTraces.push(t)),
+          () =>
+            llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal, (t) =>
+              midTraces.push(t),
+            ),
           {
             phase: "research",
             label: "Mid-debate research",
@@ -711,10 +834,11 @@ export async function* runDebate(
         // showed a bare "### Mid-debate Research" with empty body which
         // looked like a rendering bug.
         const trimmedFindings = (findings ?? "").trim();
-        const renderedFindings = trimmedFindings.length > 0
-          ? trimmedFindings
-          : "_No new evidence found — the research call returned no content. " +
-            "This usually means the model could not verify the disputed claim with the available tools._";
+        const renderedFindings =
+          trimmedFindings.length > 0
+            ? trimmedFindings
+            : "_No new evidence found — the research call returned no content. " +
+              "This usually means the model could not verify the disputed claim with the available tools._";
         yield { type: "content", content: `\n### Mid-debate Research\n${renderedFindings}\n` };
         // Only feed real findings back into the exchange logs — empty/placeholder
         // text would bloat context without adding signal.
@@ -738,9 +862,7 @@ export async function* runDebate(
       // aligned", "ready to proceed"), we end the debate regardless of
       // leader judgment. The leader's per-round slice (-8 turns) sometimes
       // misses cross-pair convergence frequency; this catches it explicitly.
-      const lastRoundTurns = pairResults
-        .flatMap((pr) => pr.chunks)
-        .map((c) => c.text);
+      const lastRoundTurns = pairResults.flatMap((pr) => pr.chunks).map((c) => c.text);
       const lockRatio = convergenceRatio(lastRoundTurns);
       if (round >= 2 && lockRatio >= 0.8) {
         yield {
@@ -806,7 +928,12 @@ export async function* runDebate(
           prompt,
           maxTokens: 512,
         });
-        const headline = runningSummary.split("\n").filter((l) => l.trim()).slice(0, 1).join(" ").slice(0, 100);
+        const headline = runningSummary
+          .split("\n")
+          .filter((l) => l.trim())
+          .slice(0, 1)
+          .join(" ")
+          .slice(0, 100);
         yield phaseDone({
           phaseId: sumPhaseId,
           kind: "summary",
@@ -980,4 +1107,3 @@ function computeEvidenceDensity(text: string): number {
   if (totalTagged === 0) return 0;
   return cited / totalTagged;
 }
-

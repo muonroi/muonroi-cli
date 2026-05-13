@@ -30,42 +30,95 @@ const PIL_SCORE_FLOOR = (() => {
   return Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0.55;
 })();
 
-// Server-side `/api/search` whitelist (experience-engine/server.js):
-//   experience-behavioral  — extracted behavioral patterns (seeded by evolve/extract)
-//   experience-principles  — abstracted principles (seeded by evolution-abstraction)
-// experience-routes / experience-selfqa are intentionally NOT exposed.
-const PIL_SEARCH_COLLECTIONS = ["experience-behavioral", "experience-principles"];
+// T0 principles use a lower floor because they are pre-validated abstractions
+// from the evolution engine (cluster → abstract lifecycle). They are less
+// prompt-specific than behavioral patterns, so a lower cosine threshold is
+// acceptable — relevance comes from the principle's generality, not from
+// exact wording matching the current prompt.
+const PIL_PRINCIPLES_FLOOR = Math.max(0, PIL_SCORE_FLOOR - 0.15);
 
-async function queryEeBridge(raw: string): Promise<{ points: EEPoint[]; error?: string; filtered?: number }> {
+// hitCount threshold for promoting a behavioral point to T1 "proven" reflex.
+// Mirrors the EE evolution promotion rule (3 confirmed hits → T1).
+const T1_HIT_THRESHOLD = 3;
+
+// Server-side `/api/search` whitelist (experience-engine/server.js):
+//   experience-behavioral  — extracted behavioral patterns (T1/T2, seeded by evolve/extract)
+//   experience-principles  — abstracted principles (T0, seeded by evolution-abstraction)
+// experience-routes / experience-selfqa are intentionally NOT exposed.
+
+function extractPointText(p: EEPoint): string {
+  const payload = p.payload ?? {};
+  const text = (payload["text"] as string) ?? "";
+  if (text) return text;
   try {
-    const points = await searchByText(raw, PIL_SEARCH_COLLECTIONS, 5, AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS));
-    const kept = points.filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR);
-    return { points: kept, filtered: points.length - kept.length };
-  } catch (err) {
-    return { points: [], error: String(err) };
+    const parsed = JSON.parse((payload["json"] as string) || "{}") as {
+      solution?: string;
+      principle?: string;
+      judgment?: string;
+    };
+    return parsed.solution ?? parsed.principle ?? parsed.judgment ?? "";
+  } catch {
+    return "";
   }
+}
+
+function isT1Proven(p: EEPoint): boolean {
+  try {
+    const parsed = JSON.parse(((p.payload ?? {})["json"] as string) || "{}") as {
+      tier?: string;
+      hitCount?: number;
+    };
+    return parsed.tier === "proven" || (parsed.hitCount ?? 0) >= T1_HIT_THRESHOLD;
+  } catch {
+    return false;
+  }
+}
+
+interface BridgeResult {
+  principlePoints: EEPoint[];
+  behavioralPoints: EEPoint[];
+  t1Rules: string[];
+  error?: string;
+  filtered?: number;
+}
+
+async function queryEeBridge(raw: string): Promise<BridgeResult> {
+  try {
+    // Parallel queries: T0 principles (lower floor, pre-validated abstractions)
+    // and T1/T2 behavioral (standard floor, contextual patterns). Running both
+    // concurrently keeps total latency at ~1500ms rather than ~3000ms.
+    const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
+    const [principleRaw, behavioralRaw] = await Promise.all([
+      searchByText(raw, ["experience-principles"], 3, signal),
+      searchByText(raw, ["experience-behavioral"], 4, signal),
+    ]);
+
+    const principlePoints = principleRaw.filter((p) => (p.score ?? 0) >= PIL_PRINCIPLES_FLOOR);
+    const behavioralPoints = behavioralRaw.filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR);
+    const filtered = principleRaw.length - principlePoints.length + (behavioralRaw.length - behavioralPoints.length);
+
+    // T1 rules = proven-tier points from either collection. These get stored on
+    // ctx and appended as MANDATORY RULES by Layer 6 — they're behavioral
+    // reflexes, not hints.
+    const t1Rules = [...principlePoints, ...behavioralPoints].filter(isT1Proven).map(extractPointText).filter(Boolean);
+
+    return { principlePoints, behavioralPoints, t1Rules, filtered };
+  } catch (err) {
+    return { principlePoints: [], behavioralPoints: [], t1Rules: [], error: String(err) };
+  }
+}
+
+function formatPrincipleRules(points: EEPoint[]): string {
+  if (points.length === 0) return "";
+  const lines = points.map((p) => `- ${extractPointText(p)} [id:${p.id}]`).filter((l) => l !== "- ");
+  if (lines.length === 0) return "";
+  return `[rules: Generalized principles from past work]\n${lines.join("\n")}`;
 }
 
 function formatExperienceHints(points: EEPoint[]): string {
   if (points.length === 0) return "";
-  const lines = points.map((p) => {
-    const payload = p.payload ?? {};
-    let text = (payload["text"] as string) ?? "";
-    if (!text) {
-      try {
-        const parsed = JSON.parse((payload["json"] as string) || "{}") as {
-          solution?: string;
-          principle?: string;
-          judgment?: string;
-        };
-        // Prefer the most directly actionable field: solution > principle > judgment.
-        text = parsed.solution || parsed.principle || parsed.judgment || "";
-      } catch {
-        text = "";
-      }
-    }
-    return `- ${text} [id:${p.id}]`;
-  });
+  const lines = points.map((p) => `- ${extractPointText(p)} [id:${p.id}]`).filter((l) => l !== "- ");
+  if (lines.length === 0) return "";
   return `[experience: Relevant patterns from past work]\n${lines.join("\n")}`;
 }
 
@@ -116,10 +169,10 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
 
   // Legacy path: existing logic continues below — unchanged.
   const result = await queryEeBridge(ctx.raw);
-  const { points } = result;
+  const { principlePoints, behavioralPoints, t1Rules } = result;
+  const totalPoints = principlePoints.length + behavioralPoints.length;
 
   if (result.error) {
-    // EE detail log: injection failed
     try {
       if (ctx.sessionId) {
         logInteraction(ctx.sessionId, "ee_injection", {
@@ -141,8 +194,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     };
   }
 
-  if (points.length === 0) {
-    // EE detail log: no relevant experience found (or all filtered as noise)
+  if (totalPoints === 0) {
     try {
       if (ctx.sessionId) {
         logInteraction(ctx.sessionId, "ee_injection", {
@@ -166,18 +218,18 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     };
   }
 
-  // STALE-01: Register injected point IDs for prompt-stale reconciliation.
-  // Use String(p.id) since EEPoint.id is string | number from Qdrant.
-  updateLastSurfacedState(points.map((p) => String(p.id)));
+  const allPoints = [...principlePoints, ...behavioralPoints];
 
-  // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block
-  // showing which experience was applied (id, score, collection, snippet).
+  // STALE-01: Register injected point IDs for prompt-stale reconciliation.
+  updateLastSurfacedState(allPoints.map((p) => String(p.id)));
+
+  // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block.
   try {
     const injectedChunk = {
       type: "experience_injected" as const,
       experienceInjected: {
-        pointCount: points.length,
-        pointIds: points.map((p) => String(p.id)),
+        pointCount: totalPoints,
+        pointIds: allPoints.map((p) => String(p.id)),
         scoreFloor: PIL_SCORE_FLOOR,
         taskType: ctx.taskType ?? undefined,
         domain: ctx.domain ?? undefined,
@@ -189,11 +241,19 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     /* fail-open — never break injection path */
   }
 
-  const hint = formatExperienceHints(points);
-  const budgetShare = Math.floor(ctx.tokenBudget * 0.3);
-  const trimmed = truncateToBudget(hint, budgetShare);
+  // T0 principles get 15% of budget (pre-validated, always-relevant abstractions).
+  // T1/T2 behavioral get 15% of budget (contextual patterns).
+  // Total EE injection stays within the original 30% budget share.
+  const principlesBudget = Math.floor(ctx.tokenBudget * 0.15);
+  const behavioralBudget = Math.floor(ctx.tokenBudget * 0.15);
 
-  // EE detail log: experience points injected into agent context
+  const parts: string[] = [];
+  const rulesText = formatPrincipleRules(principlePoints);
+  if (rulesText) parts.push(truncateToBudget(rulesText, principlesBudget));
+  const hintsText = formatExperienceHints(behavioralPoints);
+  if (hintsText) parts.push(truncateToBudget(hintsText, behavioralBudget));
+  const injected = parts.join("\n");
+
   try {
     if (ctx.sessionId) {
       logInteraction(ctx.sessionId, "ee_injection", {
@@ -201,10 +261,11 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         data: {
           phase: "pil_enrichment",
           role: "knowledge_retriever",
-          pointCount: points.length,
-          pointIds: points.map((p) => String(p.id)),
-          budgetShare,
-          injectedChars: trimmed.length,
+          principleCount: principlePoints.length,
+          behavioralCount: behavioralPoints.length,
+          t1RuleCount: t1Rules.length,
+          pointIds: allPoints.map((p) => String(p.id)),
+          injectedChars: injected.length,
           taskType: ctx.taskType ?? null,
           domain: ctx.domain ?? null,
         },
@@ -216,10 +277,15 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
 
   return {
     ...ctx,
-    enriched: `${ctx.enriched}\n${trimmed}`,
+    enriched: `${ctx.enriched}\n${injected}`,
+    t1Rules: t1Rules.length > 0 ? t1Rules : ctx.t1Rules,
     layers: [
       ...ctx.layers,
-      { name: "ee-experience-injection", applied: true, delta: `points=${points.length} chars=${trimmed.length}` },
+      {
+        name: "ee-experience-injection",
+        applied: true,
+        delta: `principles=${principlePoints.length} behavioral=${behavioralPoints.length} t1=${t1Rules.length} chars=${injected.length}`,
+      },
     ],
   };
 }

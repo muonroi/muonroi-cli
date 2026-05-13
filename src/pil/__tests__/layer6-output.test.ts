@@ -94,16 +94,18 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     expect(getResponseToolSet(makeCtx("refactor", null))).toEqual({});
   });
 
-  it("returns empty toolset for debug (diff-heavy, markdown wins)", () => {
-    expect(getResponseToolSet(makeCtx("debug", null))).toEqual({});
+  it("returns response tool for debug (bounded schema, structural enforcement wins)", () => {
+    const tools = getResponseToolSet(makeCtx("debug", null));
+    expect(Object.keys(tools)).toContain("respond_debug");
   });
 
   it("returns empty toolset for documentation (prose-heavy)", () => {
     expect(getResponseToolSet(makeCtx("documentation", null))).toEqual({});
   });
 
-  it("returns empty toolset for general (chitchat-fallback)", () => {
-    expect(getResponseToolSet(makeCtx("general", null))).toEqual({});
+  it("returns response tool for general (pure text schema, zero escaping overhead)", () => {
+    const tools = getResponseToolSet(makeCtx("general", null));
+    expect(Object.keys(tools)).toContain("respond_general");
   });
 
   it("returns empty toolset when taskType is null", () => {
