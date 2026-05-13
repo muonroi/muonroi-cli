@@ -1,6 +1,6 @@
+import type { CouncilLLM, PreflightResponder } from "../council/types.js";
 import type { WorkflowKind } from "../gsd/types.js";
 import type { ToolResult, VerifyRecipe } from "../types/index.js";
-import type { CouncilLLM, PreflightResponder } from "../council/types.js";
 
 export type { WorkflowKind };
 
@@ -20,7 +20,12 @@ export interface ProductSpec {
   createdAt: Date;
 }
 
-export type DoneCondition = "engineering_floor" | "evidence_regex" | "weighted_score" | "customer_debate" | "user_approval";
+export type DoneCondition =
+  | "engineering_floor"
+  | "evidence_regex"
+  | "weighted_score"
+  | "customer_debate"
+  | "user_approval";
 
 export interface Criterion {
   id: string;
@@ -131,6 +136,12 @@ export interface DriverContext {
    * heuristic.
    */
   detectVerifyRecipe?: () => Promise<import("../types/index.js").VerifyRecipe | null>;
+  /**
+   * P5 opt-out: when true, the discover phase skips cross-run memory loading
+   * even if prior runs exist in this workspace. Used for greenfield starts
+   * where prior context would be misleading rather than helpful.
+   */
+  skipPriorContext?: boolean;
 }
 
 export interface DriverResult {

@@ -1,29 +1,23 @@
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
-import type { CouncilLLM, QuestionResponder, PreflightResponder } from "../council/types.js";
-import type { StreamChunk, VerifyRecipe } from "../types/index.js";
-import { createRun, loadRun } from "../flow/run-manager.js";
-import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import {
-  writeManifest,
-  readManifest,
-  readIterations,
-  markIterationCrashed,
-} from "./artifact-io.js";
-import { runLoopDriver, type DriverContext, type DriverResult } from "./loop-driver.js";
-import { runSprint } from "./sprint-runner.js";
-import { previewRunCost, formatCostPreview } from "./cost-preview.js";
-import { polishDelivery } from "./ship-polish.js";
-import type { ProductSpec, IterationState, RoleSlot } from "./types.js";
+import * as path from "node:path";
+import type { CouncilLLM, PreflightResponder, QuestionResponder } from "../council/types.js";
+import type { EERouteResult } from "../ee/bridge.js";
+import { routeModel as eeRouteModel } from "../ee/bridge.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
-import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
-import { resolveRoles } from "./role-registry.js";
+import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
-import type { ModelInfo } from "../types/index.js";
-import { routeModel as eeRouteModel } from "../ee/bridge.js";
-import type { EERouteResult } from "../ee/bridge.js";
+import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
+import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
+import { formatCostPreview, previewRunCost } from "./cost-preview.js";
+import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
+import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
+import { resolveRoles } from "./role-registry.js";
+import { polishDelivery } from "./ship-polish.js";
+import { runSprint } from "./sprint-runner.js";
+import type { IterationState, ProductSpec, RoleSlot } from "./types.js";
 
 export interface ProductLoopFlags {
   maxCost: number;
@@ -54,6 +48,8 @@ export interface ProductLoopOptions {
   detectVerifyRecipe?: () => Promise<VerifyRecipe | null>;
   /** Test hook: pre-resolved role assignments so the harness can pin model ids. */
   roleAssignments?: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
+  /** P5: when true, skip cross-run workspace memory injection. */
+  skipPriorContext?: boolean;
 }
 
 export interface ProductLoopResult extends DriverResult {
@@ -94,9 +90,7 @@ export async function* runProductLoop(
 }
 
 /** start: createRun → loop-driver (gather/research/scoping) → sprint loop → done|halted. */
-async function* runStart(
-  opts: ProductLoopOptions,
-): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, respondToQuestion, respondToPreflight } = opts;
   if (!idea || !idea.trim()) {
     yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
@@ -138,6 +132,7 @@ async function* runStart(
     cwd: opts.cwd,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
+    skipPriorContext: opts.skipPriorContext,
   };
 
   // Phase 1: outer FSM (gather → research → scoping → approved | halted).
@@ -164,8 +159,7 @@ async function* runStart(
 
   // Phase 2: sprint loop until done or halted.
   const productSpec = await loadProductSpec(flowDir, runId, idea, opts.flags.stack);
-  const roleAssignments =
-    opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+  const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
   return yield* drainSprints({
     ctx,
     productSpec,
@@ -239,7 +233,12 @@ async function* drainSprints(args: {
         await writeManifest(ctx.flowDir, ctx.runId, {
           ...manifest,
           doneAt: new Date(),
-          verdict: { pass: true, score: iter.scoreAfter, failedCondition: undefined as any, reason: "all_conditions_met" },
+          verdict: {
+            pass: true,
+            score: iter.scoreAfter,
+            failedCondition: undefined as any,
+            reason: "all_conditions_met",
+          },
         });
       }
       // Ship-time delivery polish: scaffold README, fill package.json
@@ -277,13 +276,17 @@ async function* drainSprints(args: {
     // surfaced from sprint-runner directly, but the iteration state encodes
     // enough — derive a synthetic verdict from criteria counts.
     carryOver = {
-      focus: iter.lastVerifyResult === "PASS"
-        ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
-        : `fix verify failures (last result: ${iter.lastVerifyResult})`,
+      focus:
+        iter.lastVerifyResult === "PASS"
+          ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
+          : `fix verify failures (last result: ${iter.lastVerifyResult})`,
     };
   }
 
-  yield { type: "content", content: `\n> Reached max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n` } as StreamChunk;
+  yield {
+    type: "content",
+    content: `\n> Reached max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
+  } as StreamChunk;
   return {
     runId: ctx.runId,
     stage: "halted",
@@ -293,12 +296,7 @@ async function* drainSprints(args: {
   };
 }
 
-async function loadProductSpec(
-  flowDir: string,
-  runId: string,
-  idea: string,
-  stack?: string,
-): Promise<ProductSpec> {
+async function loadProductSpec(flowDir: string, runId: string, idea: string, stack?: string): Promise<ProductSpec> {
   const runDir = path.join(flowDir, "runs", runId);
   const roadmap = await readArtifact(runDir, "roadmap.md");
   const raw = roadmap?.sections.get("Product Specification") ?? "";
@@ -340,9 +338,7 @@ async function loadProductSpec(
 
 // ── Subcommands: status / resume / abort / ship ─────────────────────────────
 
-async function* runStatus(
-  opts: ProductLoopOptions,
-): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const runsRoot = path.join(opts.flowDir, "runs");
   let entries: string[] = [];
   try {
@@ -374,17 +370,13 @@ async function* runStatus(
     const m = await readManifest(opts.flowDir, id).catch(() => null);
     const iters = await readIterations(opts.flowDir, id).catch(() => []);
     if (!m) continue;
-    lines.push(
-      `  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}  aborted=${m.aborted ?? false}`,
-    );
+    lines.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}  aborted=${m.aborted ?? false}`);
   }
   yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
   return { runId: "", stage: "approved", success: true };
 }
 
-async function* runAbort(
-  opts: ProductLoopOptions,
-): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   if (!opts.runId) {
     yield { type: "content", content: "error: abort requires a runId\n" } as StreamChunk;
     return { runId: "", stage: "error", success: false, reason: "missing_runId" };
@@ -402,14 +394,14 @@ async function* runAbort(
       phaseName: "product-loop",
       outcome: "aborted" as any,
     });
-  } catch { /* non-fatal */ }
+  } catch {
+    /* non-fatal */
+  }
   yield { type: "content", content: `Aborted run ${opts.runId}.\n` } as StreamChunk;
   return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
 }
 
-async function* runResume(
-  opts: ProductLoopOptions,
-): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   if (!opts.runId) {
     yield { type: "content", content: "error: resume requires a runId\n" } as StreamChunk;
     return { runId: "", stage: "error", success: false, reason: "missing_runId" };
@@ -455,7 +447,9 @@ async function* runResume(
       phaseName: `sprint-${Math.max(1, nextSprint - 1)}`,
       outcome: "resumed" as any,
     });
-  } catch { /* non-fatal */ }
+  } catch {
+    /* non-fatal */
+  }
 
   // Resume into sprint loop with reconstructed history + manifest flags.
   const productSpec = await loadProductSpec(opts.flowDir, opts.runId, manifest.idea, manifest.stack);
@@ -472,8 +466,7 @@ async function* runResume(
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
-  const roleAssignments =
-    opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+  const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
   return yield* drainSprints({
     ctx,
     productSpec,
@@ -560,9 +553,7 @@ function describeRoleTask(slot: RoleSlot): string {
   }
 }
 
-async function* runShip(
-  opts: ProductLoopOptions,
-): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runShip(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   if (!opts.runId) {
     yield { type: "content", content: "error: ship requires a runId\n" } as StreamChunk;
     return { runId: "", stage: "error", success: false, reason: "missing_runId" };
@@ -592,7 +583,11 @@ async function* runShip(
   if (!approved) {
     yield { type: "content", content: `Ship rejected by user.\n` } as StreamChunk;
     // Build feedback so caller can pipe back into a continue cycle.
-    buildContinueFeedback({ pass: false, failedCondition: "user_approval", score: last.scoreAfter, reason: "user_rejected" }, null, []);
+    buildContinueFeedback(
+      { pass: false, failedCondition: "user_approval", score: last.scoreAfter, reason: "user_rejected" },
+      null,
+      [],
+    );
     return { runId: opts.runId, stage: "halted", success: false, reason: "user_rejected" };
   }
   await writeManifest(opts.flowDir, opts.runId, {

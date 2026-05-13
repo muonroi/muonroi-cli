@@ -1,23 +1,24 @@
 import * as path from "node:path";
-import type { StreamChunk } from "../types/index.js";
 import { runClarification } from "../council/clarifier.js";
 import { runDebate } from "../council/debate.js";
-import { runPreflight } from "../council/preflight.js";
-import { phaseStart } from "../council/phase-events.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
-import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
-import { SEED_DIMENSIONS } from "./seed-questions.js";
+import { phaseStart } from "../council/phase-events.js";
+import { runPreflight } from "../council/preflight.js";
+import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { discoverProject, formatDiscoverySummary, type DiscoveryResult } from "./discover.js";
+import type { StreamChunk } from "../types/index.js";
+import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
+import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
+import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
 import {
+  additionalPrefills,
+  auditAsContextBlock,
   auditRepo,
   formatAuditSummary,
-  auditAsContextBlock,
-  additionalPrefills,
   type RepoAudit,
 } from "./repo-audit.js";
-import type { DriverContext, DriverResult, Stage, ProductSpec } from "./types.js";
-import type { ClarifiedSpec, DebateState, CouncilParticipant } from "../council/types.js";
+import { SEED_DIMENSIONS } from "./seed-questions.js";
+import type { DriverContext, DriverResult, ProductSpec, Stage } from "./types.js";
 
 export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamChunk, DriverResult, unknown> {
   let state: Stage = "idle";
@@ -34,10 +35,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   // and the provider would reject the request.
   const leaderResolution = await resolveLeaderModelDetailed(ctx.sessionModelId);
   const leaderModelId = leaderResolution.modelId;
-  const councilParticipants = await resolveParticipants(
-    ctx.sessionModelId,
-    isCouncilMultiProviderPreferred(),
-  );
+  const councilParticipants = await resolveParticipants(ctx.sessionModelId, isCouncilMultiProviderPreferred());
 
   while (true) {
     switch (state) {
@@ -54,10 +52,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
 
         // Run shallow manifest probe and deep repo audit in parallel.
-        const [discoveryResult, auditResult] = await Promise.all([
-          discoverProject(ctx.cwd),
-          auditRepo(ctx.cwd),
-        ]);
+        const [discoveryResult, auditResult] = await Promise.all([discoverProject(ctx.cwd), auditRepo(ctx.cwd)]);
         discovery = discoveryResult;
         audit = auditResult;
 
@@ -82,6 +77,27 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // Build conversationContext for clarifier + debate so prompts are
         // grounded in real repo state, not generic boilerplate.
         conversationContext = auditAsContextBlock(audit);
+
+        // P5 — cross-run workspace memory. Inject condensed digest of prior
+        // /ideal runs on this workspace so the team doesn't re-discover the
+        // same architecture decisions / abandoned approaches. Silent no-op
+        // when there are no qualifying prior runs (greenfield) or when the
+        // user passed --no-prior-context.
+        const prior = await buildPriorContext({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          idea: ctx.idea,
+          leaderModelId,
+          llm: ctx.llm,
+          optOut: ctx.skipPriorContext === true,
+        });
+        if (prior.digest) {
+          conversationContext += formatPriorContextForPrompt(prior.digest);
+          yield {
+            type: "content",
+            content: `\n> Loaded prior decisions context from ${prior.runs.length} earlier run(s) on this workspace.\n`,
+          } as StreamChunk;
+        }
 
         // Persist discovery evidence + repo audit so resume can replay.
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -123,19 +139,19 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           6, // maxRounds
           discovery?.prefilled,
         );
-        
+
         while (true) {
-           const { value, done } = await clarifierGen.next();
-           if (done) {
-             clarifiedSpec = value as ClarifiedSpec;
-             break;
-           }
-           yield value as StreamChunk;
+          const { value, done } = await clarifierGen.next();
+          if (done) {
+            clarifiedSpec = value as ClarifiedSpec;
+            break;
+          }
+          yield value as StreamChunk;
         }
 
         // Confidence metric: unresolvedDimensions.length
         const unresolvedDimensionsCount = SEED_DIMENSIONS.filter(
-          d => clarifiedSpec?.resolved?.[d.id] !== "answered"
+          (d) => clarifiedSpec?.resolved?.[d.id] !== "answered",
         ).length;
 
         if (unresolvedDimensionsCount <= 1) {
@@ -145,7 +161,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             grayMap.sections.set(qa.question, qa.answer);
           }
           await writeArtifact(runDir, "gray-areas.md", grayMap);
-          
+
           state = "research";
         } else {
           yield {
@@ -157,7 +173,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               question: "Please provide manual answers for the missing dimensions.",
               isRequired: true,
               options: [],
-            }
+            },
           } as StreamChunk;
           return { runId: ctx.runId, stage: "halted", success: false, reason: "insufficient_resolution" };
         }
@@ -208,7 +224,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             leaderModelId,
             participants,
           },
-          ctx.llm
+          ctx.llm,
         );
 
         // Suppress raw debate content so the user is not confused by inter-role
@@ -246,7 +262,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         state = "scoping";
         break;
       }
-      
+
       case "scoping": {
         if (!clarifiedSpec || !debateState) {
           return { runId: ctx.runId, stage: "error", success: false, reason: "missing_state_for_scoping" };
@@ -282,7 +298,11 @@ interface ProductSpec {
   costEstimate: number;
 }
 `;
-        const rawSpec = await ctx.llm.generate(leaderModelId, "You are a Product Owner synthesizing a technical specification.", synthesisPrompt);
+        const rawSpec = await ctx.llm.generate(
+          leaderModelId,
+          "You are a Product Owner synthesizing a technical specification.",
+          synthesisPrompt,
+        );
         let productSpec: ProductSpec;
         try {
           const match = rawSpec.match(/\{[\s\S]*\}/);
@@ -300,14 +320,15 @@ interface ProductSpec {
         // runPreflight — show resolved participants on the brief card. These
         // strings are display-only (no LLM call), but using real model ids
         // gives the user useful context.
-        const preflightParticipants = councilParticipants.length > 0
-          ? councilParticipants.map((p) => ({ role: p.role as string, model: p.model }))
-          : [{ role: "leader", model: leaderModelId }];
+        const preflightParticipants =
+          councilParticipants.length > 0
+            ? councilParticipants.map((p) => ({ role: p.role as string, model: p.model }))
+            : [{ role: "leader", model: leaderModelId }];
         const preflightGen = runPreflight(
           clarifiedSpec,
           preflightParticipants,
           !!debateState.researchFindings,
-          ctx.respondToPreflight
+          ctx.respondToPreflight,
         );
 
         let approved = false;
@@ -333,7 +354,7 @@ interface ProductSpec {
         yield { type: "content", content: "Ready to sprint!" } as StreamChunk;
         return { runId: ctx.runId, stage: "approved", success: true };
       }
-      
+
       default:
         return { runId: ctx.runId, stage: "error", success: false, reason: "unknown_state" };
     }

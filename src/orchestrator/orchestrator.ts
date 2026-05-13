@@ -2202,6 +2202,7 @@ export class Agent {
         doneThreshold: number;
         stack?: string;
         noCustomerDebate?: boolean;
+        noPriorContext?: boolean;
       };
     },
     options?: {
@@ -2239,6 +2240,7 @@ export class Agent {
       respondToPreflight: this._createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
+      skipPriorContext: payload.flags.noPriorContext === true,
     } as Parameters<typeof runProductLoop>[0]);
 
     for await (const chunk of gen) {

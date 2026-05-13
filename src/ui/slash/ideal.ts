@@ -37,6 +37,8 @@ export interface IdealFlags {
   stack?: string;
   /** Set internally when MUONROI_DEV=1; never accepted as a CLI flag. */
   noCustomerDebate?: boolean;
+  /** P5: --no-prior-context skips cross-run workspace memory injection. */
+  noPriorContext?: boolean;
 }
 
 export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "help";
@@ -70,6 +72,7 @@ const HELP_TEXT = [
   "  --max-sprints    <n>     default 8,   range 1..20",
   "  --done-threshold <0..1>  default 0.9, range 0.7..1.0 (clamped)",
   "  --stack          <hint>  free-form stack description",
+  "  --no-prior-context       skip cross-run workspace memory (greenfield)",
 ].join("\n");
 
 function parseIntInRange(min: number, max: number) {
@@ -156,6 +159,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
       DEFAULTS.doneThreshold,
     )
     .option("--stack <text>", "tech stack hint")
+    .option("--no-prior-context", "skip cross-run workspace memory (greenfield start)")
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
@@ -177,9 +181,14 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     maxSprints: number;
     doneThreshold: number;
     stack?: string;
+    /** Commander emits priorContext=false when user passes --no-prior-context. */
+    priorContext?: boolean;
   };
   const ideaParts = (parsed.args as string[]) ?? [];
-  const idea = ideaParts.join(" ").trim().replace(/^["']|["']$/g, "");
+  const idea = ideaParts
+    .join(" ")
+    .trim()
+    .replace(/^["']|["']$/g, "");
 
   if (!idea) {
     return {
@@ -198,6 +207,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
       doneThreshold: opts.doneThreshold,
       stack: opts.stack,
       noCustomerDebate,
+      noPriorContext: opts.priorContext === false ? true : undefined,
     },
     warnings,
   };
