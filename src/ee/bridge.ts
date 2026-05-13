@@ -6,10 +6,11 @@
 // BRIDGE-02: Graceful degradation — missing or corrupt core returns null/[]/false, never throws
 // BRIDGE-03: Config isolation — no config params in any function signature; core reads ~/.experience/config.json itself
 
-import { createRequire } from "node:module";
 import { promises as fs } from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
 
 // ─── Internal type contract (matches experience-core.js module.exports shape) ──
 // NOT exported — callers use the narrower return types from the public API below.
@@ -105,9 +106,7 @@ async function getEECore(): Promise<EECore | null> {
     const _require = createRequire(import.meta.url);
     _core = _require(corePath) as EECore;
   } catch (err) {
-    console.warn(
-      `[muonroi-cli] EE bridge: failed to load experience-core.js — ${(err as Error).message}`,
-    );
+    console.warn(`[muonroi-cli] EE bridge: failed to load experience-core.js — ${(err as Error).message}`);
     _core = null;
   }
 
@@ -333,4 +332,75 @@ export async function searchByText(
 export function resetBridge(): void {
   _core = null;
   _loadAttempted = false;
+}
+
+// ─── pilContext: unified brain call ────────────────────────────────────────────
+// Circuit breaker: 5 failures in 30s opens for 5min. Avoids thrashing the brain
+// when degraded. Resettable via resetPilContextCircuit() for tests.
+const PIL_CIRCUIT_FAIL_WINDOW_MS = 30_000;
+const PIL_CIRCUIT_FAIL_THRESHOLD = 5;
+const PIL_CIRCUIT_OPEN_MS = 5 * 60_000;
+let pilRecentFailures: number[] = [];
+let pilCircuitOpenUntil = 0;
+
+function pilShouldShortCircuit(): boolean {
+  if (Date.now() < pilCircuitOpenUntil) return true;
+  pilRecentFailures = pilRecentFailures.filter((t) => Date.now() - t < PIL_CIRCUIT_FAIL_WINDOW_MS);
+  if (pilRecentFailures.length >= PIL_CIRCUIT_FAIL_THRESHOLD) {
+    pilCircuitOpenUntil = Date.now() + PIL_CIRCUIT_OPEN_MS;
+    return true;
+  }
+  return false;
+}
+
+function pilRecordFailure(): void {
+  pilRecentFailures.push(Date.now());
+}
+
+export function resetPilContextCircuit(): void {
+  pilRecentFailures = [];
+  pilCircuitOpenUntil = 0;
+}
+
+/**
+ * Unified PIL brain call. One round-trip returns classification +
+ * experience retrieval. Returns null on any failure (timeout, schema reject,
+ * circuit open, brain unreachable). Caller falls back to legacy multi-call path.
+ */
+export async function pilContext(
+  prompt: string,
+  options: {
+    localeHint?: string;
+    projectCtx?: Record<string, unknown>;
+    budgetMs?: number;
+    signal?: AbortSignal;
+  } = {},
+): Promise<PilContextResponse | null> {
+  if (pilShouldShortCircuit()) return null;
+
+  try {
+    const { getCachedEEClientMode } = await import("./client-mode.js");
+    const modeInfo = getCachedEEClientMode();
+    const useRemote = modeInfo
+      ? modeInfo.mode === "thin" || modeInfo.mode === "thin-degraded"
+      : !!(await import("./auth.js")).getCachedServerBaseUrl();
+    if (!useRemote) return null; // fat-only deployments fall back to legacy paths
+
+    const { getDefaultEEClient } = await import("./intercept.js");
+    const raw = await getDefaultEEClient().pilContext(prompt, options);
+    if (!raw) {
+      pilRecordFailure();
+      return null;
+    }
+
+    const parsed = PilContextResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      pilRecordFailure();
+      return null;
+    }
+    return parsed.data;
+  } catch {
+    pilRecordFailure();
+    return null;
+  }
 }
