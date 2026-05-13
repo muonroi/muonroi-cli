@@ -8,7 +8,7 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../loop-driver.js", () => ({
   runLoopDriver: vi.fn(async function* () {
@@ -63,6 +63,10 @@ describe("runProductLoop integration", () => {
     // Keep existing tests on the legacy flat-sprint path so they don't
     // require the full phase-orchestrator stack (phase plans, project context, etc.).
     process.env.MUONROI_PHASE_MODE = "0";
+  });
+
+  afterEach(() => {
+    delete process.env.MUONROI_PHASE_MODE;
   });
 
   it("start: creates 6 artifact files and runs 1 sprint to shipped", async () => {
