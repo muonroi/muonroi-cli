@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { runClarification } from "../council/clarifier.js";
 import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
@@ -13,6 +12,7 @@ import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memo
 import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
+import { clarifiedSpecFromContext, runGatherPhase } from "./gather.js";
 import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import {
   additionalPrefills,
@@ -153,26 +153,20 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         stateMap.sections.set("Resume Digest", "Stage: Gather - Defining product dimensions");
         await writeArtifact(runDir, "state.md", stateMap);
 
-        const clarifierGen = runClarification(
+        const projectContext = await runGatherPhase(
+          ctx.flowDir,
+          ctx.runId,
           ctx.idea,
-          leaderModelId,
-          conversationContext,
-          ctx.respondToQuestion,
+          ctx.flags.maxCost,
           ctx.llm,
-          undefined,
-          SEED_DIMENSIONS,
-          6, // maxRounds
-          discovery?.prefilled,
+          ctx.sessionModelId,
         );
+        clarifiedSpec = clarifiedSpecFromContext(projectContext);
 
-        while (true) {
-          const { value, done } = await clarifierGen.next();
-          if (done) {
-            clarifiedSpec = value as ClarifiedSpec;
-            break;
-          }
-          yield value as StreamChunk;
-        }
+        yield {
+          type: "content",
+          content: `\n> Gather phase complete — project context captured (${Object.keys(projectContext.context ?? {}).length} fields).\n`,
+        } as StreamChunk;
 
         // Confidence metric: unresolvedDimensions.length
         const unresolvedDimensionsCount = SEED_DIMENSIONS.filter(
