@@ -67,6 +67,11 @@ function getContent(chunks: StreamChunk[]): string {
         const tag = KIND_TAG[cm.kind] ?? cm.kind;
         return `\n${tag}\n${cm.text}\n`;
       }
+      if (c.type === "council_info_card" && c.councilInfoCard) {
+        const card = c.councilInfoCard;
+        const body = card.sections.map((s) => `${s.heading}\n${s.body}`).join("\n");
+        return `\n${card.title}\n${body}\n`;
+      }
       return "";
     })
     .join("");

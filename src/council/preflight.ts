@@ -31,16 +31,30 @@ export async function* runPreflight(
       : "Yes — codebase-first"
     : "No — proceeding directly to debate";
 
-  const summary =
-    `### Discussion Brief\n\n` +
-    `#### Problem\n${spec.problemStatement}\n\n` +
-    `#### Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- None specified"}\n\n` +
-    `#### Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
-    `#### Scope\n${spec.scope || "Not specified"}\n\n` +
-    `#### Participants\n${participants.map((p) => `- ${p.role} → ${p.model}`).join("\n")}\n\n` +
-    `#### Research phase\n${researchMode}${options?.researchOverridable ? " _(you can skip it after approving)_" : ""}\n`;
-
-  yield { type: "content", content: summary };
+  const researchNote = options?.researchOverridable ? " (you can skip it after approving)" : "";
+  yield {
+    type: "council_info_card",
+    councilInfoCard: {
+      title: "Discussion Brief",
+      sections: [
+        { heading: "Problem", body: spec.problemStatement },
+        {
+          heading: "Constraints",
+          body: spec.constraints.map((c) => `- ${c}`).join("\n") || "- None specified",
+        },
+        {
+          heading: "Success Criteria",
+          body: spec.successCriteria.map((c) => `- ${c}`).join("\n"),
+        },
+        { heading: "Scope", body: spec.scope || "Not specified" },
+        {
+          heading: "Participants",
+          body: participants.map((p) => `- ${p.role} → ${p.model}`).join("\n"),
+        },
+        { heading: "Research phase", body: `${researchMode}${researchNote}` },
+      ],
+    },
+  };
 
   yield {
     type: "council_preflight" as StreamChunk["type"],

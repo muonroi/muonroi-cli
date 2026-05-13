@@ -328,6 +328,16 @@ export interface ExperienceInjectedData {
 
 export type CouncilMessageKind = "debate" | "leader" | "synthesis" | "research";
 
+export interface CouncilInfoCardSection {
+  heading: string;
+  body: string;
+}
+
+export interface CouncilInfoCard {
+  title: string;
+  sections: CouncilInfoCardSection[];
+}
+
 export interface CouncilMessage {
   kind: CouncilMessageKind;
   speaker: { role: string; model: string };
@@ -351,6 +361,7 @@ export interface StreamChunk {
     | "council_status"
     | "council_phase"
     | "council_message"
+    | "council_info_card"
     | "done"
     | "error"
     | "reasoning"
@@ -372,6 +383,7 @@ export interface StreamChunk {
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;
   councilMessage?: CouncilMessage;
+  councilInfoCard?: CouncilInfoCard;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
   experienceWarning?: ExperienceWarningData;
   experienceInjected?: ExperienceInjectedData;

@@ -17,6 +17,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  CouncilInfoCard,
   CouncilMessage,
   CouncilPhaseEvent,
   CouncilQuestionData,
@@ -73,6 +74,7 @@ import {
 import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
+import { CouncilInfoCardView } from "./components/council-info-card.js";
 import { CouncilLeaderBubble } from "./components/council-leader-bubble.js";
 import { CouncilMessageBubble } from "./components/council-message-bubble.js";
 import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
@@ -890,6 +892,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
   const [councilMessages, setCouncilMessages] = useState<CouncilMessage[]>([]);
+  const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
   >(new Map());
@@ -2530,6 +2533,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       return next;
                     });
                   }
+                }
+                break;
+              case "council_info_card":
+                if (chunk.councilInfoCard) {
+                  const card = chunk.councilInfoCard;
+                  setCouncilInfoCards((prev) => [...prev, card]);
                 }
                 break;
               case "council_status":
@@ -4847,6 +4856,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
               {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
               {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
+              {councilInfoCards.map((card, idx) => (
+                <CouncilInfoCardView
+                  key={`info-card-${idx}-${card.title}`}
+                  card={card}
+                  terminalCols={width}
+                  theme={t}
+                />
+              ))}
               {councilMessages.map((cm, idx) => {
                 const side: "left" | "right" =
                   cm.kind === "debate" && cm.partner

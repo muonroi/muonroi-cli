@@ -256,23 +256,24 @@ export async function* runCouncil(
     startedAt: planStartMs,
     detail: `${debatePlan.stances.length} stances · shape: ${debatePlan.outputShape.kind}`,
   });
-  yield { type: "content", content: `\n## Debate Plan\n` };
-  yield { type: "content", content: `\n#### Intent\n${debatePlan.intentSummary}\n` };
   yield {
-    type: "content",
-    content:
-      `\n#### Proposed Stances\n` +
-      debatePlan.stances
-        .map((s) => `- **${s.name}** — ${s.lens}${s.focus ? ` _(focus: ${s.focus})_` : ""}`)
-        .join("\n") +
-      "\n",
-  };
-  yield {
-    type: "content",
-    content:
-      `\n#### Output Shape (\`${debatePlan.outputShape.kind}\`)\n` +
-      debatePlan.outputShape.sections.map((s) => `- \`${s.key}\` → ${s.heading}`).join("\n") +
-      "\n",
+    type: "council_info_card",
+    councilInfoCard: {
+      title: "Debate Plan",
+      sections: [
+        { heading: "Intent", body: debatePlan.intentSummary },
+        {
+          heading: "Proposed Stances",
+          body: debatePlan.stances
+            .map((s) => `- ${s.name} — ${s.lens}${s.focus ? ` (focus: ${s.focus})` : ""}`)
+            .join("\n"),
+        },
+        {
+          heading: `Output Shape (${debatePlan.outputShape.kind})`,
+          body: debatePlan.outputShape.sections.map((s) => `- ${s.key} → ${s.heading}`).join("\n"),
+        },
+      ],
+    },
   };
   // Assign stances to active participants in proposal order; extras keep no stance.
   for (let i = 0; i < active.length && i < debatePlan.stances.length; i++) {
