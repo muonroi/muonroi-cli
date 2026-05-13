@@ -353,12 +353,21 @@ export async function* runDebate(
     detail: participants.map((p) => p.role).join(", "),
   });
 
-  yield { type: "content", content: "\n## Opening Analysis\n" };
+  yield { type: "content", content: "\n── Opening Analysis ──\n" };
   for (const o of openings) {
-    const heading = o.stance ? `${o.stance.name} (\`${o.role}\` · ${o.model})` : `\`[${o.role}]\` ${o.model}`;
-    yield { type: "content", content: `\n### ${heading}\n` };
+    const speakerRole = o.stance?.name ?? o.role;
     if (o.error) {
-      yield { type: "content", content: `[Error: ${o.error}]\n` };
+      yield {
+        type: "council_message",
+        councilMessage: {
+          kind: "debate",
+          speaker: { role: speakerRole, model: o.model },
+          round: 0,
+          text: `[Error: ${o.error}]`,
+          attempts: o.attempts,
+          failureReason: o.error,
+        },
+      };
     } else {
       active.push({ role: o.role as any, model: o.model, position: o.position, stance: o.stance });
       archive.push({
@@ -368,7 +377,16 @@ export async function* runDebate(
         stanceName: o.stance?.name,
         ...makeExcerpt(o.position),
       });
-      yield { type: "content", content: `${o.position}\n` };
+      yield {
+        type: "council_message",
+        councilMessage: {
+          kind: "debate",
+          speaker: { role: speakerRole, model: o.model },
+          round: 0,
+          text: o.position,
+          attempts: o.attempts,
+        },
+      };
     }
   }
 
