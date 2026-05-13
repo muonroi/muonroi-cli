@@ -146,7 +146,8 @@ export function divider(width = 56): string {
 
 /** Render a row with optional cursor highlight. */
 export function renderRow(text: string, selected: boolean, width = 56): string {
+  const visualPrefixWidth = 2; // "► " or "  " — same visual width regardless of ANSI codes
   const prefix = selected ? `${A.REVERSE}► ` : "  ";
   const suffix = selected ? A.RESET : "";
-  return prefix + text.padEnd(width - prefix.length) + suffix;
+  return prefix + text.padEnd(width - visualPrefixWidth) + suffix;
 }
