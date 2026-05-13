@@ -1215,9 +1215,9 @@ program
       console.error("muonroi share: MUONROI_DISCORD_TOKEN and MUONROI_DISCORD_GUILD_ID must both be set.");
       process.exit(1);
     }
-    const { DiscordRestClient } = await import("./discord/client.js");
+    const { DiscordChatProvider } = await import("./chat/providers/discord/client.js");
     const { runShareCommand } = await import("./cli/share-cmd.js");
-    const client = new DiscordRestClient(token);
+    const client = new DiscordChatProvider(token);
     const result = await runShareCommand({
       cwd: process.cwd(),
       user,

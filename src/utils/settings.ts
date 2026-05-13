@@ -198,11 +198,25 @@ export interface UserSettings {
   modeModels?: Partial<Record<AgentMode, string>>;
   ecosystem?: { name: string; patterns: string[] };
   autoCompactAfterTurn?: boolean;
-  /** Minimum % of context window to trigger post-turn auto-compact (default 0.15 = 15%, range 0.05-0.50). */
+  /** Minimum % of context window to trigger post-turn auto-compact (default 0.25 = 25%, range 0.05-0.50). */
   autoCompactThresholdPct?: number;
   roleModels?: Partial<Record<ModelRole, string>>;
   councilRounds?: number;
   autoCouncil?: boolean;
+  /**
+   * Minimum PIL confidence required to auto-trigger council for plan/analyze
+   * tasks. Default 0.85. Range 0.5-1.0. Lower values trigger council more
+   * eagerly (better debate coverage, higher cost); higher values restrict it
+   * to clearly-architectural prompts.
+   */
+  autoCouncilConfidence?: number;
+  /**
+   * Minimum number of configured roleModels required before auto-council
+   * triggers. Default 2 — a "debate" needs at least two participants. Range 1-4.
+   * Set to 1 to allow single-model auto-council (degenerate; mostly useful for
+   * preserving legacy behavior).
+   */
+  autoCouncilMinRoles?: number;
   councilPreferMultiProvider?: boolean;
   /** EE involvement level in council debates. Default: advisory. CQ-19. */
   councilExperienceMode?: CouncilExperienceMode;
@@ -824,7 +838,7 @@ export function isAutoCompactAfterTurnEnabled(): boolean {
 export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
   if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
-  return 0.15; // default 15%
+  return 0.25; // default 25% — compact later to reduce summarize-call frequency
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
@@ -844,6 +858,26 @@ export function isAutoCouncilEnabled(): boolean {
   return loadUserSettings().autoCouncil ?? true;
 }
 
+/** Pure validator extracted for testability; clamps user input to a sane range. */
+export function normalizeAutoCouncilConfidence(val: unknown): number {
+  if (typeof val === "number" && val >= 0.5 && val <= 1.0) return val;
+  return 0.85; // default — only trigger on clearly-architectural prompts
+}
+
+/** Pure validator extracted for testability; clamps user input to a sane range. */
+export function normalizeAutoCouncilMinRoles(val: unknown): number {
+  if (typeof val === "number" && Number.isInteger(val) && val >= 1 && val <= 4) return val;
+  return 2; // default — a "debate" needs at least two participants
+}
+
+export function getAutoCouncilConfidence(): number {
+  return normalizeAutoCouncilConfidence(loadUserSettings().autoCouncilConfidence);
+}
+
+export function getAutoCouncilMinRoles(): number {
+  return normalizeAutoCouncilMinRoles(loadUserSettings().autoCouncilMinRoles);
+}
+
 export function isCouncilMultiProviderPreferred(): boolean {
   return loadUserSettings().councilPreferMultiProvider ?? false;
 }
@@ -854,14 +888,6 @@ export function getCouncilExperienceMode(): CouncilExperienceMode {
 
 export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
-}
-
-export function getAutoCouncilConfidence(): number {
-  return (loadUserSettings() as { autoCouncilConfidence?: number }).autoCouncilConfidence ?? 0.7;
-}
-
-export function getAutoCouncilMinRoles(): number {
-  return (loadUserSettings() as { autoCouncilMinRoles?: number }).autoCouncilMinRoles ?? 2;
 }
 
 export function getDisabledProviders(): ProviderId[] {

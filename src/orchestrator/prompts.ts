@@ -1,8 +1,13 @@
+import { getModelInfo } from "../models/registry";
 import type { AgentMode, TaskRequest } from "../types/index";
 import { loadCustomInstructions } from "../utils/instructions";
-import { type CustomSubagentConfig, type SandboxMode, type SandboxSettings, loadValidSubAgents } from "../utils/settings";
+import {
+  type CustomSubagentConfig,
+  loadValidSubAgents,
+  type SandboxMode,
+  type SandboxSettings,
+} from "../utils/settings";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
-import { getModelInfo } from "../models/registry";
 
 export const MAX_TOOL_ROUNDS = 75;
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
@@ -111,14 +116,18 @@ IMPORTANT:
 - Use read_file instead of cat/head/tail for reading files.
 - When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
 - After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
-${process.platform === "win32" ? `
+${
+  process.platform === "win32"
+    ? `
 WINDOWS ENVIRONMENT:
 - The bash tool runs inside Git Bash (POSIX shell) on Windows — use POSIX syntax (grep, sed, wc), NOT cmd.exe or PowerShell commands.
 - Do NOT use \`findstr\`, \`dir\`, \`cd /d\`, \`for %%\`, or other cmd.exe syntax in bash.
 - Use forward slashes in paths or escape backslashes: \`grep -rn "pattern" src/\` not \`findstr /sn "pattern" src\\\\\`.
 - \`&&\` chaining works. \`cd\` followed by \`&&\` works. Avoid \`cd /d\`.
 - For Windows-specific commands, explicitly use: \`cmd.exe /c "command"\` or \`powershell -c "command"\`.
-` : ""}
+`
+    : ""
+}
 Be direct. Execute, don't just describe. Show results, not plans.`,
 
   plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
@@ -203,6 +212,16 @@ export function stripToolsSection(text: string): string {
   return text.replace(/\nTOOLS:\n[\s\S]*?\n(?=WORKFLOW:|BEHAVIOR:|IMPORTANT:|DEFAULT DELEGATION|EXAMPLES:|$)/g, "\n");
 }
 
+export interface SystemPromptOptions {
+  /**
+   * When true, drop sections that bloat the system prompt without helping
+   * one-shot chitchat (skills catalog, subagent catalog, sandbox detail).
+   * Cuts ~3-5K tokens for greetings like "Hi" / "1+1". Decided upstream by
+   * PIL Layer 1 (intentKind === "chitchat").
+   */
+  chitchat?: boolean;
+}
+
 export function buildSystemPromptParts(
   cwd: string,
   mode: AgentMode,
@@ -212,15 +231,21 @@ export function buildSystemPromptParts(
   sandboxSettings?: SandboxSettings,
   providerId?: string,
   resumeDigest?: string | null,
+  options?: SystemPromptOptions,
 ): SystemPromptParts {
+  const chitchat = options?.chitchat === true;
+
   const custom = loadCustomInstructions(cwd);
   const customSection = custom
     ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
     : "";
 
-  const skillsText = formatSkillsForPrompt(discoverSkills(cwd));
+  // Skip skills + subagents catalogs for chitchat — these are pure tool/agent
+  // routing context the model doesn't need to answer "Hi". On this codebase
+  // they account for ~3K tokens per call.
+  const skillsText = chitchat ? "" : formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
-  const subagentsSection = formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
+  const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
   const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
 
   let modePrompt = MODE_PROMPTS[mode];
@@ -252,8 +277,19 @@ export function buildSystemPrompt(
   sandboxSettings?: SandboxSettings,
   providerId?: string,
   resumeDigest?: string | null,
+  options?: SystemPromptOptions,
 ): string {
-  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(cwd, mode, sandboxMode, planContext, subagents, sandboxSettings, providerId, resumeDigest);
+  const { staticPrefix, dynamicSuffix } = buildSystemPromptParts(
+    cwd,
+    mode,
+    sandboxMode,
+    planContext,
+    subagents,
+    sandboxSettings,
+    providerId,
+    resumeDigest,
+    options,
+  );
   return `${staticPrefix}${dynamicSuffix}`;
 }
 

@@ -10,7 +10,27 @@ import * as os from "node:os";
 import * as path from "node:path";
 import lockfile from "proper-lockfile";
 
-export interface ProductLedgerEntry {
+/**
+ * Optional cost-attribution metadata. Lets `usage report --by callsite|role|phase`
+ * pinpoint WHERE the cost grew without changing the ledger contract.
+ * All fields optional → existing callers and old entries remain valid.
+ */
+export interface CostMeta {
+  callsite?: string;
+  role?: string;
+  phase?: string;
+  iteration?: number;
+  stepCount?: number;
+  systemChars?: number;
+  promptChars?: number;
+  estInputTokens?: number;
+  actualInputTokens?: number;
+  actualOutputTokens?: number;
+  cachedInputTokens?: number;
+  durationMs?: number;
+}
+
+export interface ProductLedgerEntry extends CostMeta {
   ts: number;
   productRunId: string;
   reservationId: string;
@@ -68,10 +88,7 @@ export async function appendProductLedger(
  * Read all entries for a specific product run.
  * Returns empty array if file does not exist.
  */
-export async function readProductLedger(
-  productRunId: string,
-  homeOverride?: string,
-): Promise<ProductLedgerEntry[]> {
+export async function readProductLedger(productRunId: string, homeOverride?: string): Promise<ProductLedgerEntry[]> {
   const filePath = getProductLedgerPath(productRunId, homeOverride);
   try {
     const content = await fs.readFile(filePath, "utf-8");
@@ -88,10 +105,7 @@ export async function readProductLedger(
 /**
  * Calculate total spent USD for a specific product run.
  */
-export async function getProductSpentUsd(
-  productRunId: string,
-  homeOverride?: string,
-): Promise<number> {
+export async function getProductSpentUsd(productRunId: string, homeOverride?: string): Promise<number> {
   const entries = await readProductLedger(productRunId, homeOverride);
   return entries.reduce((sum, entry) => sum + entry.actualUsd, 0);
 }

@@ -1,7 +1,7 @@
-import type { ModelRole } from "../utils/settings.js";
 import type { ModelMessage } from "ai";
-import type { StreamChunk } from "../types/index.js";
 import type { ProcessMessageObserver } from "../orchestrator/agent-options.js";
+import type { StreamChunk } from "../types/index.js";
+import type { ModelRole } from "../utils/settings.js";
 
 // ── Clarification Phase ─────────────────────────────────────────────────────
 
@@ -64,7 +64,7 @@ export interface DebateState {
   runningSummary: string;
   roundCount: number;
   researchFindings?: string;
-  active: CouncilParticipant[];  // mutated positions from debate rounds — NEW (Phase 14 CQ-02)
+  active: CouncilParticipant[]; // mutated positions from debate rounds — NEW (Phase 14 CQ-02)
   /** Evidence density from the final leader evaluation (0.0–1.0). Drives confidence badge. */
   finalEvidenceDensity?: number;
   /** Role-indexed per-round positions for follow-up citations. */
@@ -241,8 +241,27 @@ export interface CouncilStats {
 
 export type ToolTraceEmitter = (traceText: string) => void;
 
+/**
+ * Token usage snapshot from a single model call.
+ * Optional side-channel for callers (e.g. sprint-runner) that need real token
+ * counts instead of chars/4 estimates for cap accounting.
+ */
+export interface CouncilCallUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+}
+
+export type UsageCallback = (usage: CouncilCallUsage) => void;
+
 export interface CouncilLLM {
-  generate(modelId: string, system: string, prompt: string, maxTokens?: number): Promise<string>;
+  generate(
+    modelId: string,
+    system: string,
+    prompt: string,
+    maxTokens?: number,
+    onUsage?: UsageCallback,
+  ): Promise<string>;
   research(
     modelId: string,
     topic: string,
@@ -250,6 +269,7 @@ export interface CouncilLLM {
     signal?: AbortSignal,
     persistTrace?: ToolTraceEmitter,
     options?: { internetFirst?: boolean },
+    onUsage?: UsageCallback,
   ): Promise<string>;
   debate(
     modelId: string,
@@ -258,6 +278,7 @@ export interface CouncilLLM {
     signal?: AbortSignal,
     persistTrace?: ToolTraceEmitter,
     options?: { enableVerificationTools?: boolean },
+    onUsage?: UsageCallback,
   ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }>;
 }
 

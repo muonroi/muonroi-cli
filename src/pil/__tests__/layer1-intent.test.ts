@@ -289,10 +289,13 @@ describe("Layer 1 unified path", () => {
     expect(mockPilContext).not.toHaveBeenCalled();
   });
 
-  it("falls back to legacy classifyViaBrain when pilContext returns null", async () => {
+  it("does NOT fall back to legacy classifyViaBrain when pilContext returns null (cost optimization)", async () => {
+    // When unified PIL is enabled and its single call fails, calling the same
+    // backend a second time via classifyViaBrain wastes ~2.3s and tokens on a
+    // network that just timed out. We mark _brainData with a sentinel so L6
+    // also skips its rescue call.
     mockIsUnifiedPilEnabled.mockReturnValue(true);
     mockPilContext.mockResolvedValueOnce(null);
-    mockClassifyViaBrain.mockResolvedValueOnce("debug,balanced");
     const result = await layer1Intent({
       raw: "vague question",
       enriched: "",
@@ -304,8 +307,14 @@ describe("Layer 1 unified path", () => {
       metrics: null,
       layers: [],
     });
-    expect(result.taskType).toBe("debug");
-    expect(result._brainData).toBeNull();
+    expect(mockClassifyViaBrain).not.toHaveBeenCalled();
+    expect(result.taskType).toBeNull();
+    expect(result._brainData).toEqual({
+      t0_principles: [],
+      t1_rules: [],
+      t2_patterns: [],
+      retrieval_skipped_reason: "unified-failed",
+    });
     expect(result.layers[0].delta).toContain("unified=fail");
   });
 });

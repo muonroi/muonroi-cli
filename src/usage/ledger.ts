@@ -21,7 +21,7 @@ import lockfile from "proper-lockfile";
 import { atomicReadJSON, atomicWriteJSON } from "../storage/atomic-io.js";
 import type { UsageState } from "../storage/usage-cap.js";
 import { projectCostUSD } from "./estimator.js";
-import { appendProductLedger } from "./product-ledger.js";
+import { appendProductLedger, type CostMeta } from "./product-ledger.js";
 import { emit, evaluateThresholds } from "./thresholds.js";
 import { CapBreachError, type ReservationToken } from "./types.js";
 
@@ -223,6 +223,7 @@ export async function commitToProduct(
   actualInputTokens: number,
   actualOutputTokens: number,
   homeOverride?: string,
+  meta?: CostMeta,
 ): Promise<void> {
   // 1. Monthly commit
   await commit(token, actualInputTokens, actualOutputTokens, homeOverride);
@@ -238,6 +239,10 @@ export async function commitToProduct(
       actualUsd: actual,
       model: token.model,
       provider: token.provider,
+      estInputTokens: token.est_input_tokens,
+      actualInputTokens,
+      actualOutputTokens,
+      ...meta,
     },
     homeOverride,
   ).catch((err) => {
