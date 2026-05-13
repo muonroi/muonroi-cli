@@ -306,3 +306,84 @@ export interface DiscoveryState {
   userGatePassed: boolean;
   cumulativeRecommenderCostUsd: number;
 }
+
+// ── Subsystem E (Phase Orchestrator) ────────────────────────────────────────
+
+export interface Phase {
+  id: string;
+  name: string;
+  goal: string;
+  successCriteria: string[];
+  scope: string;
+  exitCondition: { type: "criteria-threshold"; min: number };
+  dependsOn: string[];
+  maxSprints: number;
+}
+
+export interface PhasePlanArtifact {
+  version: 1;
+  generatedAt: string;
+  phases: Phase[];
+}
+
+export type PhaseStatus = "pending" | "in-progress" | "done" | "blocked";
+
+export interface PhasePlanState {
+  version: 1;
+  currentPhaseId: string | null;
+  phasesStatus: Record<string, PhaseStatus>;
+  lastActivityUtc: string;
+}
+
+export interface LessonsLearned {
+  wentWell: string[];
+  toImprove: string[];
+  nextSprintFocus: string;
+}
+
+export interface StandupOutcome {
+  blockers: string[];
+  decisions: string[];
+  nextStep: string;
+}
+
+export interface CustomerDecision {
+  seq: number;
+  timestampUtc: string;
+  phaseId: string;
+  sprintN: number;
+  verdict: "accept" | "reject" | "abort";
+  feedback?: string;
+}
+
+export interface PhaseHistoryEntry {
+  phaseId: string;
+  exitedAtUtc: string;
+  exitSummary: string;
+  sprintsExecuted: number;
+  criteriaMetCount: number;
+}
+
+export interface PhaseDigestEntry {
+  sprintN: number;
+  timestampUtc: string;
+  lessonText: string;
+}
+
+export interface RunPhasesOptions {
+  flowDir: string;
+  runId: string;
+  manifest: ProductRunManifest;
+  clarifiedSpec: import("../council/types.js").ClarifiedSpec;
+  projectContext: ProjectContext;
+  leader: import("./discovery-prompt-parser.js").LeaderLike;
+  leaderModelId: string;
+  capUsd: number;
+  remainingUsd: () => Promise<number>;
+  awaitCustomerVerdict: (
+    flowDir: string,
+    runId: string,
+  ) => Promise<Omit<CustomerDecision, "seq" | "timestampUtc" | "phaseId" | "sprintN">>;
+  suppressPush?: boolean;
+  backoffDelays?: number[];
+}
