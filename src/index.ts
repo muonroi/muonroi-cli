@@ -7,10 +7,11 @@ import { redactor } from "./utils/redactor.js";
 redactor.installGlobalPatches();
 
 import { readFileSync } from "node:fs";
-import { createInterface } from "readline";
 import { InvalidArgumentError, program } from "commander";
+import { createInterface } from "readline";
 
 import packageJson from "../package.json";
+import { setRenderSink } from "./ee/render.js";
 import {
   type CouncilAnswersFile,
   type CouncilAutoAnswerer,
@@ -25,22 +26,25 @@ import {
   renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
-import {
-  loadCatalog,
-  normalizeModelId,
-} from "./models/registry.js";
+import { loadCatalog, normalizeModelId } from "./models/registry.js";
 // Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
 import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
 import { consoleUrlFor } from "./providers/endpoints.js";
-import { KEYCHAIN_PROVIDER_IDS, listStoredProviders, loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
+import {
+  KEYCHAIN_PROVIDER_IDS,
+  listStoredProviders,
+  loadKeyForProvider,
+  setKeyForProvider,
+} from "./providers/keychain.js";
 import { detectProviderForModel } from "./providers/runtime.js";
 import type { ProviderId } from "./providers/types.js";
 import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
+import type { StreamChunk } from "./types/index.js";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
 import type { PermissionMode } from "./utils/permission-mode.js";
@@ -57,8 +61,6 @@ import {
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
-import { setRenderSink } from "./ee/render.js";
-import type { StreamChunk } from "./types/index.js";
 
 const exitCleanlyOnSigterm = () => {
   process.exit(0);
@@ -67,14 +69,24 @@ const exitCleanlyOnSigterm = () => {
 process.on("SIGTERM", exitCleanlyOnSigterm);
 
 process.on("uncaughtException", (err) => {
-  try { require("fs").appendFileSync(require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"), `[${new Date().toISOString()}] UNCAUGHT: ${err.stack || err.message}\n`); } catch {}
+  try {
+    require("fs").appendFileSync(
+      require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"),
+      `[${new Date().toISOString()}] UNCAUGHT: ${err.stack || err.message}\n`,
+    );
+  } catch {}
   console.error("Fatal:", err.message);
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
-  const msg = reason instanceof Error ? (reason.stack || reason.message) : String(reason);
-  try { require("fs").appendFileSync(require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"), `[${new Date().toISOString()}] REJECTION: ${msg}\n`); } catch {}
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  try {
+    require("fs").appendFileSync(
+      require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"),
+      `[${new Date().toISOString()}] REJECTION: ${msg}\n`,
+    );
+  } catch {}
   console.error("Unhandled rejection:", reason);
   process.exit(1);
 });
@@ -115,7 +127,9 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
   try {
     const k = await loadKeyForProvider(provider);
     if (k) return k;
-  } catch { /* fall through to wizard */ }
+  } catch {
+    /* fall through to wizard */
+  }
   return null;
 }
 
@@ -128,8 +142,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
   let rl: ReturnType<typeof createInterface> | undefined;
   try {
     rl = createInterface({ input: process.stdin, output: process.stderr });
-    const ask = (q: string): Promise<string> =>
-      new Promise((resolve) => rl!.question(q, (answer) => resolve(answer)));
+    const ask = (q: string): Promise<string> => new Promise((resolve) => rl!.question(q, (answer) => resolve(answer)));
 
     process.stderr.write("\nWelcome to muonroi-cli!\n\n");
 
@@ -138,9 +151,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
       process.stderr.write(`Keys already in keychain for: ${stored.join(", ")}\n`);
       if (currentModel) {
         const provider = detectProviderForModel(currentModel);
-        process.stderr.write(
-          `Current model '${currentModel}' uses provider '${provider}', which has no stored key.\n`,
-        );
+        process.stderr.write(`Current model '${currentModel}' uses provider '${provider}', which has no stored key.\n`);
       }
       process.stderr.write(
         "\nOptions:\n" +
@@ -155,9 +166,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
     }
 
     const providers = KEYCHAIN_PROVIDER_IDS;
-    process.stderr.write(
-      "Pick a provider to set up first (more can be added later via 'muonroi-cli keys set'):\n\n",
-    );
+    process.stderr.write("Pick a provider to set up first (more can be added later via 'muonroi-cli keys set'):\n\n");
     providers.forEach((p, i) => {
       process.stderr.write(`  ${i + 1}. ${p.padEnd(12)}  ${consoleUrlFor(p)}\n`);
     });
@@ -267,8 +276,7 @@ async function startInteractive(
       const { loadUserSettings } = await import("./utils/settings.js");
       if (loadUserSettings().webResearchPrompted !== true) {
         const rl = createInterface({ input: process.stdin, output: process.stderr });
-        const ask = (q: string): Promise<string> =>
-          new Promise((resolve) => rl.question(q, (a) => resolve(a)));
+        const ask = (q: string): Promise<string> => new Promise((resolve) => rl.question(q, (a) => resolve(a)));
         try {
           const { runResearchMigrationPrompt } = await import("./mcp/research-onboarding.js");
           await runResearchMigrationPrompt({
@@ -397,25 +405,42 @@ async function startInteractive(
         try {
           const fs = require("node:fs") as typeof import("node:fs");
           fs.writeSync(1, seq);
-        } catch { /* fall back to async */
-          try { process.stdout.write(seq); } catch { /* noop */ }
+        } catch {
+          /* fall back to async */
+          try {
+            process.stdout.write(seq);
+          } catch {
+            /* noop */
+          }
         }
       };
       try {
         // 1. Take stdin out of raw mode + pause it so no buffered keystrokes
         //    (or in-flight mouse-event bytes) hit the child shell.
         if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-          try { process.stdin.setRawMode(false); } catch { /* noop */ }
+          try {
+            process.stdin.setRawMode(false);
+          } catch {
+            /* noop */
+          }
         }
-        try { process.stdin.pause(); } catch { /* noop */ }
-        try { (process.stdin as unknown as { unref?: () => void }).unref?.(); } catch { /* noop */ }
+        try {
+          process.stdin.pause();
+        } catch {
+          /* noop */
+        }
+        try {
+          (process.stdin as unknown as { unref?: () => void }).unref?.();
+        } catch {
+          /* noop */
+        }
         // 2. Disable extended-coords first (1006/1015/1005), then the basic
         //    tracking modes (1003→1002→1000). Wrong order leaves the terminal
         //    emitting SGR-formatted events after the base modes are off.
         writeSync("\x1B[?1006l\x1B[?1015l\x1B[?1005l");
         writeSync("\x1B[?1003l\x1B[?1002l\x1B[?1000l");
-        writeSync("\x1B[?2004l\x1B[?25h");           // bracketed paste off, cursor on
-        writeSync("\x1B[?1049l\x1B[0m\x1B[!p");      // exit alt-screen, reset SGR, soft reset
+        writeSync("\x1B[?2004l\x1B[?25h"); // bracketed paste off, cursor on
+        writeSync("\x1B[?1049l\x1B[0m\x1B[!p"); // exit alt-screen, reset SGR, soft reset
       } catch {
         // best-effort
       }
@@ -435,9 +460,10 @@ async function startInteractive(
           try {
             const { spawn } = require("node:child_process") as typeof import("node:child_process");
             const isWin = process.platform === "win32";
-            const shellCmd = process.env.MUONROI_EXIT_SHELL
-              || process.env.SHELL
-              || (isWin ? (process.env.COMSPEC || "cmd.exe") : "/bin/bash");
+            const shellCmd =
+              process.env.MUONROI_EXIT_SHELL ||
+              process.env.SHELL ||
+              (isWin ? process.env.COMSPEC || "cmd.exe" : "/bin/bash");
             writeSync("\nSession ended. Returning to shell — type `exit` to close this pane.\n\n");
             const child = spawn(shellCmd, [], { stdio: "inherit", shell: false });
             child.on("exit", (code) => process.exit(code ?? 0));
@@ -512,9 +538,13 @@ async function runHeadless(
     respondToQuestion: (id: string, a: string) => agent.respondToCouncilQuestion(id, a),
     respondToPreflight: (id: string, ok: boolean) => agent.respondToCouncilPreflight(id, ok),
   };
-  function maybeAutoAnswer(chunk: { type: string; councilQuestion?: import("./types/index.js").CouncilQuestionData; councilPreflight?: { preflightId: string } }): void {
+  function maybeAutoAnswer(chunk: {
+    type: string;
+    councilQuestion?: import("./types/index.js").CouncilQuestionData;
+    councilPreflight?: { preflightId: string };
+  }): void {
     const auditLine = handleCouncilChunk(chunk, councilAutoAnswer ?? null, councilSink);
-    if (auditLine) writeSafe(process.stderr, auditLine + "\n");
+    if (auditLine) writeSafe(process.stderr, `${auditLine}\n`);
   }
 
   try {
@@ -756,6 +786,17 @@ program
 
     changeDirectoryOrExit(options.directory);
 
+    // Boot model registry BEFORE any key resolution path runs —
+    // detectProviderForModel consults the catalog's alias map to route e.g.
+    // "deepseek-v4-flash" to provider "siliconflow". With an empty registry
+    // it falls back to a prefix match ("deepseek") and the CLI loads the
+    // wrong provider's key. Affects both runBackgroundDelegation and the
+    // main interactive/headless path below.
+    let catalogLoadFailed = false;
+    await loadCatalog().catch(() => {
+      catalogLoadFailed = true;
+    });
+
     if (options.backgroundTaskFile) {
       await runBackgroundDelegation(options.backgroundTaskFile, options);
       return;
@@ -796,20 +837,20 @@ program
     // Result is cached for downstream callsites (PIL layers, bridge.searchByText)
     // so each request doesn't re-probe.
     const { detectEEClientMode, describeMode } = await import("./ee/client-mode.js");
-    detectEEClientMode().then((info) => {
-      if (process.env.MUONROI_EE_DEBUG === "1") {
-        console.error(`[muonroi-cli] ${describeMode(info)}`);
-      }
-    }).catch(() => {});
+    detectEEClientMode()
+      .then((info) => {
+        if (process.env.MUONROI_EE_DEBUG === "1") {
+          console.error(`[muonroi-cli] ${describeMode(info)}`);
+        }
+      })
+      .catch(() => {});
 
     // Patch zod-to-json-schema for Zod v4 compat (fixes tool calls for DeepSeek etc.)
     const { patchZodToJsonSchema } = await import("./providers/patch-zod-schema.js");
     patchZodToJsonSchema();
 
-    // Boot model registry — load from centralized catalog (no provider API calls)
-    let catalogLoadFailed = false;
-    await loadCatalog().catch(() => { catalogLoadFailed = true; });
-
+    // Catalog already loaded above (before key resolution). Read the
+    // populated registry now to surface any load failure to the user.
     const { MODELS: loadedModels, getModelInfo: lookupModel } = await import("./models/registry.js");
 
     // No models loaded — check root cause
@@ -817,28 +858,28 @@ program
       if (catalogLoadFailed) {
         console.error(
           "\x1b[31mCould not load the model catalog. The installation may be corrupted.\x1b[0m\n" +
-          "  The file \x1b[33mdist/models/catalog.json\x1b[0m was not found.\n" +
-          "\nTry reinstalling:\n" +
-          "  \x1b[33mnpm install -g muonroi-cli\x1b[0m\n" +
-          "  # or: \x1b[33mbun install -g muonroi-cli\x1b[0m\n" +
-          "\nIf building from source:\n" +
-          "  \x1b[33mbun run build\x1b[0m\n",
+            "  The file \x1b[33mdist/models/catalog.json\x1b[0m was not found.\n" +
+            "\nTry reinstalling:\n" +
+            "  \x1b[33mnpm install -g muonroi-cli\x1b[0m\n" +
+            "  # or: \x1b[33mbun install -g muonroi-cli\x1b[0m\n" +
+            "\nIf building from source:\n" +
+            "  \x1b[33mbun run build\x1b[0m\n",
         );
       } else if (config.apiKey) {
         console.error(
           "\x1b[31mAPI key is invalid or expired. No models could be loaded.\x1b[0m\n" +
-          "Update your key:\n" +
-          "  muonroi-cli -k YOUR_NEW_KEY\n" +
-          "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
-          `\nGet a key at: ${consoleUrlFor("anthropic")}`,
+            "Update your key:\n" +
+            "  muonroi-cli -k YOUR_NEW_KEY\n" +
+            "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
+            `\nGet a key at: ${consoleUrlFor("anthropic")}`,
         );
       } else {
         console.error(
           "\x1b[31mNo API key configured and no models could be loaded.\x1b[0m\n" +
-          "Set your key:\n" +
-          "  muonroi-cli -k YOUR_API_KEY\n" +
-          "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
-          `\nGet a key at: ${consoleUrlFor("anthropic")}`,
+            "Set your key:\n" +
+            "  muonroi-cli -k YOUR_API_KEY\n" +
+            "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
+            `\nGet a key at: ${consoleUrlFor("anthropic")}`,
         );
       }
       process.exit(1);
@@ -861,17 +902,16 @@ program
         }
         console.error(
           "\n\x1b[33mSet your model:\x1b[0m\n" +
-          "  muonroi-cli -m MODEL_ID\n" +
-          "  # or add to ~/.muonroi-cli/user-settings.json:\n" +
-          '  # { "defaultModel": "MODEL_ID" }\n',
+            "  muonroi-cli -m MODEL_ID\n" +
+            "  # or add to ~/.muonroi-cli/user-settings.json:\n" +
+            '  # { "defaultModel": "MODEL_ID" }\n',
         );
         process.exit(1);
       }
     }
 
-    const councilAnswersFile = typeof options.councilAnswers === "string"
-      ? loadCouncilAnswersOrExit(options.councilAnswers)
-      : undefined;
+    const councilAnswersFile =
+      typeof options.councilAnswers === "string" ? loadCouncilAnswersOrExit(options.councilAnswers) : undefined;
     const councilAutoAnswer = createCouncilAutoAnswerer({
       enabled: options.yes === true,
       file: councilAnswersFile,
@@ -1078,17 +1118,14 @@ keys
     await runKeysCleanupSettings();
   });
 
-const mcp = program
-  .command("mcp")
-  .description("Manage MCP server configuration");
+const mcp = program.command("mcp").description("Manage MCP server configuration");
 
 mcp
   .command("setup-research")
   .description("Configure web research MCP servers (context7, fetch, tavily)")
   .action(async () => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
-    const ask = (q: string): Promise<string> =>
-      new Promise((resolve) => rl.question(q, (a) => resolve(a)));
+    const ask = (q: string): Promise<string> => new Promise((resolve) => rl.question(q, (a) => resolve(a)));
     try {
       const { runResearchOnboarding } = await import("./mcp/research-onboarding.js");
       const result = await runResearchOnboarding({
@@ -1114,7 +1151,9 @@ mcp
 
 mcp
   .command("import-bw [keys...]")
-  .description("Import MCP secrets (e.g. tavily) from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)")
+  .description(
+    "Import MCP secrets (e.g. tavily) from a Bitwarden vault into the OS keychain (requires bw CLI + BW_SESSION)",
+  )
   .option("--prefix <prefix>", "Vault item name prefix (default: 'muonroi-cli/')", "muonroi-cli/")
   .action(async (keys: string[], opts: { prefix: string }) => {
     const { runMcpImportBw } = await import("./cli/keys.js");
