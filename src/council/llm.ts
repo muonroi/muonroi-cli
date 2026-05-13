@@ -13,6 +13,7 @@ import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.
 import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
 import { loadMcpServers } from "../utils/settings.js";
+import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
 
@@ -227,22 +228,23 @@ export function createCouncilLLM(
       const runtime = resolveModelRuntime(factory, modelId);
       const t0 = Date.now();
       try {
-        const result = await generateText({
-          model: runtime.model,
-          system,
-          prompt,
-          maxOutputTokens: maxTokens,
-          temperature: 0.7,
-          // AI SDK default is 2 retries (3 attempts). SiliconFlow's per-key
-          // rate limit on DeepSeek V4 fires bursty 429s during council debate
-          // (parallel pairs + leader-eval + summary calls). Bumping to 5 with
-          // the SDK's default exponential backoff (2,4,8,16,32s) absorbs most
-          // short-window limits — session 9229af5db247 hit "Failed after 3
-          // attempts. Last error: Too Many Requests" on the leader research-
-          // need eval after the parallel debate burst.
-          maxRetries: 5,
-          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-        });
+        const result = await withVisibleRetry(
+          () =>
+            generateText({
+              model: runtime.model,
+              system,
+              prompt,
+              maxOutputTokens: maxTokens,
+              temperature: 0.7,
+              // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
+              // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
+              // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
+              // before attempt N/6" instead of a 62s blank window that looks hung.
+              maxRetries: 0,
+              ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+            }),
+          { label: "council.generate" },
+        );
         stats.calls++;
         const durMs = Date.now() - t0;
         const callUsage = logCouncilCost({
@@ -347,27 +349,32 @@ export function createCouncilLLM(
 
       const t0 = Date.now();
       try {
-        const result = await generateText({
-          model: runtime.model,
-          system,
-          prompt,
-          ...(verificationTools && Object.keys(verificationTools).length > 0
-            ? { tools: verificationTools, stopWhen: stepCountIs(2) }
-            : {}),
-          // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
-          // of this budget on reasoning_tokens before producing user-visible
-          // text. E2E showed 2048 caused finishReason=length on 3KB debate
-          // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
-          // overhead and avoids cuts mid-thought.
-          maxOutputTokens: 6144,
-          temperature: 0.7,
-          // See generate() note — debate fires several pairs concurrently;
-          // 5 retries with SDK exponential backoff (2,4,8,16,32s) survive
-          // SiliconFlow's short-window 429s without escalating to user.
-          maxRetries: 5,
-          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-          ...(signal ? { abortSignal: signal } : {}),
-        });
+        const result = await withVisibleRetry(
+          () =>
+            generateText({
+              model: runtime.model,
+              system,
+              prompt,
+              ...(verificationTools && Object.keys(verificationTools).length > 0
+                ? { tools: verificationTools, stopWhen: stepCountIs(2) }
+                : {}),
+              // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
+              // of this budget on reasoning_tokens before producing user-visible
+              // text. E2E showed 2048 caused finishReason=length on 3KB debate
+              // prompts. 6144 leaves ~4000 tokens for text after typical reasoning
+              // overhead and avoids cuts mid-thought.
+              maxOutputTokens: 6144,
+              temperature: 0.7,
+              // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
+              // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
+              // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
+              // before attempt N/6" instead of a 62s blank window that looks hung.
+              maxRetries: 0,
+              ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+              ...(signal ? { abortSignal: signal } : {}),
+            }),
+          { label: "council.debate" },
+        );
         stats.calls++;
         // No tool calls expected, but the AI SDK shape still has the field —
         // pass through for type compatibility.
@@ -488,20 +495,26 @@ export function createCouncilLLM(
 
       const t0 = Date.now();
       try {
-        const result = await generateText({
-          model: runtime.model,
-          system: systemPrompt,
-          prompt: userPrompt,
-          tools: allTools,
-          stopWhen: stepCountIs(15),
-          maxOutputTokens: 4096,
-          temperature: 0.3,
-          // See generate() note — research can fire after a heavy debate burst
-          // and hit the same SiliconFlow short-window 429s.
-          maxRetries: 5,
-          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-          ...(signal ? { abortSignal: signal } : {}),
-        });
+        const result = await withVisibleRetry(
+          () =>
+            generateText({
+              model: runtime.model,
+              system: systemPrompt,
+              prompt: userPrompt,
+              tools: allTools,
+              stopWhen: stepCountIs(15),
+              maxOutputTokens: 4096,
+              temperature: 0.3,
+              // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent
+              // exponential backoff (2,4,8,16,32s). When SiliconFlow rate-limits
+              // with 429, user now sees "[retry] rate-limited (429) — waiting Xs
+              // before attempt N/6" instead of a 62s blank window that looks hung.
+              maxRetries: 0,
+              ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+              ...(signal ? { abortSignal: signal } : {}),
+            }),
+          { label: "council.research" },
+        );
         const researchUsage = logCouncilCost({
           callsite: "council.research",
           role: "researcher",
