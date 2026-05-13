@@ -11,6 +11,7 @@ import { InvalidArgumentError, program } from "commander";
 import { createInterface } from "readline";
 
 import packageJson from "../package.json";
+import { buildConfigCommand } from "./cli/config/index.js";
 import { setRenderSink } from "./ee/render.js";
 import {
   type CouncilAnswersFile,
@@ -1118,6 +1119,46 @@ keys
     await runKeysCleanupSettings();
   });
 
+const usage = program.command("usage").description("Inspect cost ledger and find spend bloat");
+
+usage
+  .command("report")
+  .description("Aggregate per-call cost log + product ledger to find where spend grew")
+  .option("--by <dim>", "Group by: callsite | role | phase | model | provider", "callsite")
+  .option("--date <yyyy-mm-dd>", "Restrict cost-log to a single UTC date")
+  .option("--run <productRunId>", "Restrict product ledger to one runId")
+  .option("--source <src>", "cost-log | product | both", "both")
+  .option("--breakdown", "Show orchestrator system-prompt / tools / messages breakdown")
+  .option("--json", "Emit aggregated rows as JSON")
+  .action(
+    async (opts: { by: string; date?: string; run?: string; source: string; breakdown?: boolean; json?: boolean }) => {
+      const { runUsageReport } = await import("./cli/usage-report.js");
+      await runUsageReport({
+        by: opts.by as "callsite" | "role" | "phase" | "model" | "provider",
+        date: opts.date,
+        runId: opts.run,
+        source: opts.source as "cost-log" | "product" | "both",
+        breakdown: opts.breakdown,
+        json: opts.json,
+      });
+    },
+  );
+
+usage
+  .command("pil")
+  .description("Attribute system-prompt size growth to PIL layers (intent/personality/EE/GSD/context)")
+  .option("--date <yyyy-mm-dd>", "Restrict to a single UTC date")
+  .option("--top <n>", "Show top N largest prompts", "5")
+  .option("--json", "Emit aggregated rows as JSON")
+  .action(async (opts: { date?: string; top: string; json?: boolean }) => {
+    const { runPilReport } = await import("./cli/pil-report.js");
+    await runPilReport({
+      date: opts.date,
+      top: parseInt(opts.top, 10) || 5,
+      json: opts.json,
+    });
+  });
+
 const mcp = program.command("mcp").description("Manage MCP server configuration");
 
 mcp
@@ -1160,6 +1201,7 @@ mcp
     await runMcpImportBw({ keys, itemPrefix: opts.prefix });
   });
 
+program.addCommand(buildConfigCommand());
 program.parse();
 
 function formatContext(tokens: number): string {
