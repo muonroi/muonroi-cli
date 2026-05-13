@@ -17,6 +17,13 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+  type ChatSecretId,
+  deleteChatSecret,
+  getChatSecret,
+  listChatSecrets,
+  setChatSecret,
+} from "../chat/chat-keychain.js";
 import { type McpKeyId, setMcpKey } from "../mcp/mcp-keychain.js";
 import {
   deleteKeyForProvider,
@@ -30,6 +37,12 @@ const MCP_KEY_IDS: readonly McpKeyId[] = ["tavily"];
 
 function isMcpKeyId(value: string): value is McpKeyId {
   return (MCP_KEY_IDS as readonly string[]).includes(value);
+}
+
+const CHAT_SECRET_IDS: readonly ChatSecretId[] = ["discord-token", "discord-guild-id", "slack-token", "slack-team-id"];
+
+function isChatSecretId(value: string): value is ChatSecretId {
+  return (CHAT_SECRET_IDS as readonly string[]).includes(value);
 }
 
 const SETTINGS_PATH = path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
@@ -176,20 +189,43 @@ export async function runMcpKeysSet(id: string, options: KeysSetOptions = {}): P
 
 export async function runKeysList(): Promise<void> {
   const stored = await listStoredProviders();
-  if (stored.length === 0) {
+  const chatStored = await listChatSecrets();
+
+  if (stored.length === 0 && chatStored.length === 0) {
     console.log("No keys stored in OS keychain.");
     console.log("Run 'muonroi-cli keys set <provider>' or 'muonroi-cli keys import-bw' to add some.");
     return;
   }
-  console.log("Provider     Key");
-  console.log("-----------  --------");
-  const { loadKeyForProvider } = await import("../providers/keychain.js");
-  for (const p of stored) {
-    try {
-      const k = await loadKeyForProvider(p);
-      console.log(`${p.padEnd(12)} ${maskKey(k)}`);
-    } catch {
-      console.log(`${p.padEnd(12)} <unreadable>`);
+
+  if (stored.length > 0) {
+    console.log("Provider     Key");
+    console.log("-----------  --------");
+    const { loadKeyForProvider } = await import("../providers/keychain.js");
+    for (const p of stored) {
+      try {
+        const k = await loadKeyForProvider(p);
+        console.log(`${p.padEnd(12)} ${maskKey(k)}`);
+      } catch {
+        console.log(`${p.padEnd(12)} <unreadable>`);
+      }
+    }
+  }
+
+  if (chatStored.length > 0) {
+    console.log("");
+    console.log("Chat Secret              Value");
+    console.log("------------------------  --------");
+    for (const id of chatStored) {
+      try {
+        const v = await getChatSecret(id);
+        if (v) {
+          // For tokens (longer, sensitive), mask middle; for IDs, show in full
+          const displayValue = id.includes("token") ? maskKey(v) : v;
+          console.log(`${id.padEnd(24)} ${displayValue}`);
+        }
+      } catch {
+        console.log(`${id.padEnd(24)} <unreadable>`);
+      }
     }
   }
 }
@@ -356,6 +392,111 @@ export async function runMcpImportBw(opts: McpBwImportOptions = {}): Promise<voi
         process.exit(2);
       }
       console.log(`Imported MCP key '${id}' → keychain.`);
+      imported++;
+    } catch (e) {
+      console.warn(`Failed ${id}: ${(e as Error).message}`);
+      skipped++;
+    }
+  }
+  console.log(`\nDone. Imported: ${imported}, skipped: ${skipped}.`);
+}
+
+export async function runChatKeySet(id: ChatSecretId, value: string): Promise<void> {
+  if (!value || value.length < 8) {
+    console.error(`Value for chat secret '${id}' is too short (< 8 chars).`);
+    process.exit(1);
+  }
+
+  try {
+    const ok = await setChatSecret(id, value);
+    if (!ok) {
+      console.error("OS keychain unavailable on this platform (keytar failed to load).");
+      console.error(
+        `Falling back: set environment variable: export ${id.includes("token") ? "MUONROI_" : "MUONROI_"}${id.replace("-", "_").toUpperCase()}='<your value>'`,
+      );
+      process.exit(2);
+    }
+    console.log(`Stored chat secret '${id}' in OS keychain.`);
+  } catch (e) {
+    console.error(`Failed: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+interface ChatBwImportOptions {
+  ids?: ChatSecretId[];
+  itemPrefix?: string;
+}
+
+/**
+ * Import chat secrets (discord-token, discord-guild-id, slack-token, slack-team-id)
+ * from a Bitwarden vault into the OS keychain. Vault items are expected at
+ * `<prefix><id>` — default prefix `muonroi-cli/chat-`. The value is read from
+ * the item's notes field, mirroring the provider/MCP import-bw flow.
+ */
+export async function runChatImportBw(opts: ChatBwImportOptions = {}): Promise<void> {
+  const which = spawnSync("bw", ["--version"], { encoding: "utf8" });
+  if (which.status !== 0) {
+    console.error("Bitwarden CLI ('bw') not found in PATH.");
+    console.error("Install: https://bitwarden.com/help/cli/");
+    process.exit(2);
+  }
+
+  const session = process.env.BW_SESSION;
+  if (!session) {
+    console.error("BW_SESSION not set. Run:");
+    console.error("  export BW_SESSION=$(bw unlock --raw)");
+    process.exit(2);
+  }
+
+  const status = spawnSync("bw", ["status", "--session", session], { encoding: "utf8" });
+  if (status.status !== 0) {
+    console.error(`bw status failed: ${status.stderr || status.stdout}`);
+    process.exit(2);
+  }
+  let parsed: { status?: string };
+  try {
+    parsed = JSON.parse(status.stdout);
+  } catch {
+    parsed = {};
+  }
+  if (parsed.status !== "unlocked") {
+    console.error(`Bitwarden vault is not unlocked (status: ${parsed.status ?? "unknown"}).`);
+    console.error("Run: export BW_SESSION=$(bw unlock --raw)");
+    process.exit(2);
+  }
+
+  const requested = opts.ids && opts.ids.length > 0 ? opts.ids : CHAT_SECRET_IDS.slice();
+  const prefix = opts.itemPrefix ?? "muonroi-cli/chat-";
+
+  let imported = 0;
+  let skipped = 0;
+  for (const id of requested) {
+    if (!isChatSecretId(id)) {
+      console.warn(`Skip unknown chat secret: ${id}`);
+      skipped++;
+      continue;
+    }
+    const itemName = `${prefix}${id}`;
+    const got = spawnSync("bw", ["get", "notes", itemName, "--session", session], { encoding: "utf8" });
+    if (got.status !== 0) {
+      // bw prints "Not found." on stderr when the item is missing — treat as skip.
+      skipped++;
+      continue;
+    }
+    const value = got.stdout.trim();
+    if (!value || value.length < 8) {
+      console.warn(`Skip ${id}: vault item '${itemName}' empty or too short.`);
+      skipped++;
+      continue;
+    }
+    try {
+      const ok = await setChatSecret(id, value);
+      if (!ok) {
+        console.error("OS keychain unavailable. Aborting import.");
+        process.exit(2);
+      }
+      console.log(`Imported chat secret '${id}' → keychain.`);
       imported++;
     } catch (e) {
       console.warn(`Failed ${id}: ${(e as Error).message}`);
