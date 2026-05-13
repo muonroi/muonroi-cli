@@ -2,7 +2,11 @@ import type { ClarifiedSpec, DebatePlan, DebateStance, OutputSection, OutputShap
 
 // ── Clarification prompts ────────────────────────────────────────────────────
 
-export function buildClarificationPrompt(topic: string, conversationContext: string, previousQA?: Array<{ question: string; answer: string }>): {
+export function buildClarificationPrompt(
+  topic: string,
+  conversationContext: string,
+  previousQA?: Array<{ question: string; answer: string }>,
+): {
   system: string;
   prompt: string;
 } {
@@ -50,7 +54,11 @@ export function buildClarificationPrompt(topic: string, conversationContext: str
   };
 }
 
-export function buildSpecSynthesisPrompt(topic: string, conversationContext: string, qa: Array<{ question: string; answer: string }>): {
+export function buildSpecSynthesisPrompt(
+  topic: string,
+  conversationContext: string,
+  qa: Array<{ question: string; answer: string }>,
+): {
   system: string;
   prompt: string;
 } {
@@ -197,7 +205,10 @@ export function buildResponsePrompt(ctx: {
       `- Where you agree, say so briefly and build on it\n` +
       `- Where you disagree, explain why with your own reasoning\n` +
       `- Share what they might be missing from your stated lens\n\n` +
-      `End with a question back to them.`,
+      `End with a question back to them.\n\n` +
+      `Do NOT include round numbers (e.g. "Round N", "Round 2 Response", "Reply #3") ` +
+      `or any numeric counter referring to the discussion round in your output. ` +
+      `The orchestrator already prints round headers above your response.`,
     prompt:
       `Their analysis (${them.label}):\n${ctx.partnerPosition}\n\n` +
       `Your own analysis for context:\n${ctx.speakerPosition}`,
@@ -235,22 +246,22 @@ export function buildFollowupPrompt(ctx: {
       `- If you still disagree, bring new evidence or a different angle\n` +
       `- If you've changed your mind, say so explicitly\n\n` +
       `Stay within your lens; do not drift into the other specialist's role. ` +
-      `Be concise. End with: do you agree on where we've landed?`,
+      `Be concise. End with: do you agree on where we've landed?\n\n` +
+      `Do NOT include round numbers (e.g. "Round N", "Response Round 2", "Round 4") ` +
+      `or any numeric counter referring to the discussion round in your output. ` +
+      `The orchestrator already prints round headers above your response.`,
     prompt:
-      (ctx.speakerLastPosition
-        ? `Your previous position:\n${ctx.speakerLastPosition}\n\n`
-        : "") +
+      (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
   };
 }
 
 // ── Leader evaluation prompt (replaces convergence-check) ────────────────────
 
-export function buildLeaderEvaluationPrompt(ctx: {
-  spec: ClarifiedSpec;
-  exchangeLogs: string;
-  round: number;
-}): { system: string; prompt: string } {
+export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchangeLogs: string; round: number }): {
+  system: string;
+  prompt: string;
+} {
   return {
     system:
       `You are the discussion moderator evaluating whether a multi-expert debate has produced sufficient results.\n` +
@@ -287,7 +298,11 @@ export function buildLeaderEvaluationPrompt(ctx: {
 
 // ── Round summary ────────────────────────────────────────────────────────────
 
-export function buildRoundSummaryPrompt(allExchanges: string, topic: string, round: number): {
+export function buildRoundSummaryPrompt(
+  allExchanges: string,
+  topic: string,
+  round: number,
+): {
   system: string;
   prompt: string;
 } {
@@ -429,8 +444,8 @@ export function buildSynthesisPrompt(ctx: {
   allExchanges: string;
   debatePlan?: DebatePlan;
   outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
-  refineContext?: string;      // User answers from post-debate refinement askcard
-  planEmphasis?: boolean;       // If true, instruct LLM to produce a concrete action plan
+  refineContext?: string; // User answers from post-debate refinement askcard
+  planEmphasis?: boolean; // If true, instruct LLM to produce a concrete action plan
 }): { system: string; prompt: string } {
   const shape = ctx.debatePlan?.outputShape;
 
@@ -449,12 +464,8 @@ export function buildSynthesisPrompt(ctx: {
     ? `\n## What the user actually asked for\n${ctx.debatePlan.intentSummary}\n`
     : "";
 
-  const sectionLines = finalShape.sections
-    .map((s) => `  "${s.key}": ${shapeHint(s)}, // ${s.prompt}`)
-    .join("\n");
-  const headingLines = finalShape.sections
-    .map((s) => `## ${s.heading}\n${renderHintFor(s)}`)
-    .join("\n");
+  const sectionLines = finalShape.sections.map((s) => `  "${s.key}": ${shapeHint(s)}, // ${s.prompt}`).join("\n");
+  const headingLines = finalShape.sections.map((s) => `## ${s.heading}\n${renderHintFor(s)}`).join("\n");
   const guardrailBlock = finalShape.guardrails.length
     ? `\n## Guardrails\n${finalShape.guardrails.map((g) => `- ${g}`).join("\n")}\n`
     : "";
@@ -465,8 +476,8 @@ export function buildSynthesisPrompt(ctx: {
       (ctx.outputStyle === "concise"
         ? "Be brief and direct. Prefer bullet lists. Omit preamble."
         : ctx.outputStyle === "detailed"
-        ? "Be thorough. Include rationale and evidence for each point."
-        : "Balance clarity with completeness.") // balanced (default)
+          ? "Be thorough. Include rationale and evidence for each point."
+          : "Balance clarity with completeness.") // balanced (default)
     : "";
 
   let system =
@@ -497,7 +508,8 @@ export function buildSynthesisPrompt(ctx: {
     `{\n` +
     `  "type": "${finalShape.kind}",\n` +
     `  "summary": "1-2 sentence executive summary in the user's native language",\n` +
-    sectionLines + "\n" +
+    sectionLines +
+    "\n" +
     `}\n\n` +
     `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
     headingLines +

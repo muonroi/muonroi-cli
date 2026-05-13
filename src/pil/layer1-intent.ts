@@ -170,7 +170,14 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       }
     }
 
-    // Pass 2.5: hot-path chitchat short-circuit for ultra-short greetings.
+    // Pass 2.5: hot-path chitchat short-circuit for ultra-short greetings
+    // ("hi", "ok", "thanks", "ty") — mapped to taskType="general" without
+    // burning a brain round-trip. Both conditions required (AND) so we don't
+    // accidentally swallow phrases like "refactor this" or "fix the bug" that
+    // happen to be short.
+    //
+    // TODO(WhoAmI-Pass0): when EE v4.0 Who Am I profile is available, read
+    // communication.brevity + decision_speed here as outputStyle baseline.
     const trimmed = ctx.raw.trim();
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
     const noTaskSignal = taskType === null || (taskType === "general" && result.reason === "regex:short-message");
@@ -260,7 +267,15 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
         }
       }
 
-      // Pass 3b legacy: brain-only style detection when classifier gave a taskType.
+      // Pass 3.5 legacy: regex style check BEFORE the brain round-trip. If
+      // the user explicitly wrote "ngắn gọn", "concise", "chi tiết", etc. in
+      // the prompt, we can skip the 800ms Pass 3b call entirely — regex is free.
+      if (outputStyle === null) {
+        outputStyle = detectStyleFromText(ctx.raw);
+      }
+
+      // Pass 3b legacy: brain-only style detection when classifier gave a
+      // taskType AND regex found no explicit style signal.
       if (outputStyle === null && taskType !== null) {
         const brainRaw = await classifyViaBrain(
           `Detect the user's preferred output style. The prompt may be EN or VN.
@@ -273,10 +288,6 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
           const styleMatched = VALID_STYLES.find((s) => brainRaw.toLowerCase().includes(s));
           if (styleMatched) outputStyle = styleMatched;
         }
-      }
-
-      if (outputStyle === null) {
-        outputStyle = detectStyleFromText(ctx.raw);
       }
     }
 

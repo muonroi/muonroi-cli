@@ -25,6 +25,7 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
 
 describe("layer3EeInjection (bridge-based)", () => {
   beforeEach(() => {
+    vi.mocked(searchByText).mockReset();
     vi.mocked(searchByText).mockResolvedValue([]);
   });
 
@@ -105,8 +106,10 @@ describe("layer3EeInjection (bridge-based)", () => {
       const charsMatch = layer.delta.match(/chars=(\d+)/);
       if (charsMatch) {
         const chars = parseInt(charsMatch[1], 10);
-        // 30% of 100 tokens * 4 chars/token = 120 chars max; +3 for possible "..." suffix
-        expect(chars).toBeLessThanOrEqual(123);
+        // Two parallel collections, each at 15% of budget: 15% of 100 tokens * 4 chars/token
+        // = 60 chars per block + 3 for "..." suffix, joined with newline. Allow generous
+        // ceiling for header text + 2 blocks.
+        expect(chars).toBeLessThanOrEqual(260);
       }
     }
   });
@@ -115,12 +118,20 @@ describe("layer3EeInjection (bridge-based)", () => {
     vi.mocked(searchByText).mockResolvedValue([]);
 
     await layer3EeInjection(makeCtx({ taskType: "refactor" }));
+    // New behavior: two parallel calls, one per collection (different score floors).
     expect(vi.mocked(searchByText)).toHaveBeenCalledWith(
       expect.any(String),
-      ["experience-behavioral", "experience-principles"],
+      ["experience-principles"],
       expect.any(Number),
       expect.any(Object),
     );
+    expect(vi.mocked(searchByText)).toHaveBeenCalledWith(
+      expect.any(String),
+      ["experience-behavioral"],
+      expect.any(Number),
+      expect.any(Object),
+    );
+    expect(vi.mocked(searchByText)).toHaveBeenCalledTimes(2);
   });
 });
 
