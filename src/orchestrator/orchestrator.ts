@@ -353,6 +353,16 @@ export class Agent {
   private _councilQuestionResolvers = new Map<string, (answer: string) => void>();
   /** Pending council preflight resolvers (preflightId → resolve callback). */
   private _councilPreflightResolvers = new Map<string, (approved: boolean) => void>();
+  /**
+   * Buffered answers from headless auto-answer mode. The interceptor in
+   * `runHeadless` resolves askcards immediately after the chunk is yielded,
+   * which fires BEFORE the council generator registers its Promise resolver
+   * (`respondToQuestion` runs after the yield resumes). Without buffering the
+   * resolve is dropped and the generator awaits forever. Pre-supplied answers
+   * land here and `_createQuestionResponder` drains them on next call.
+   */
+  private _councilBufferedQuestionAnswers = new Map<string, string>();
+  private _councilBufferedPreflightApprovals = new Map<string, boolean>();
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
@@ -2039,6 +2049,10 @@ export class Agent {
     if (resolver) {
       resolver(answer);
       this._councilQuestionResolvers.delete(questionId);
+    } else {
+      // Headless auto-answer: response arrived before the generator registered
+      // its resolver. Buffer it; `_createQuestionResponder` will drain it.
+      this._councilBufferedQuestionAnswers.set(questionId, answer);
     }
   }
 
@@ -2047,12 +2061,20 @@ export class Agent {
     if (resolver) {
       resolver(approved);
       this._councilPreflightResolvers.delete(preflightId);
+    } else {
+      this._councilBufferedPreflightApprovals.set(preflightId, approved);
     }
   }
 
   private _createQuestionResponder(): (questionId: string) => Promise<string> {
     return (questionId: string) =>
       new Promise<string>((resolve) => {
+        const buffered = this._councilBufferedQuestionAnswers.get(questionId);
+        if (buffered !== undefined) {
+          this._councilBufferedQuestionAnswers.delete(questionId);
+          resolve(buffered);
+          return;
+        }
         this._councilQuestionResolvers.set(questionId, resolve);
       });
   }
@@ -2060,6 +2082,12 @@ export class Agent {
   private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
     return (preflightId: string) =>
       new Promise<boolean>((resolve) => {
+        const buffered = this._councilBufferedPreflightApprovals.get(preflightId);
+        if (buffered !== undefined) {
+          this._councilBufferedPreflightApprovals.delete(preflightId);
+          resolve(buffered);
+          return;
+        }
         this._councilPreflightResolvers.set(preflightId, resolve);
       });
   }

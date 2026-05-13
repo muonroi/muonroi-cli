@@ -110,6 +110,46 @@ describe("Agent class", { timeout: 15_000 }, () => {
     expect(agent.getSandboxSettings()).toEqual(settings);
   });
 
+  it("buffers council question answers that arrive before the resolver is registered", async () => {
+    // Headless auto-answer race: respondToCouncilQuestion fires after the
+    // chunk yields but BEFORE the council generator's await on
+    // respondToQuestion(qid) registers a resolver. The buffer must catch
+    // the answer so the eventual Promise resolves immediately.
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    // Reach into the private responder factory to mirror clarifier.ts flow.
+    const make = (agent as unknown as {
+      _createQuestionResponder(): (q: string) => Promise<string>;
+    })._createQuestionResponder.bind(agent);
+
+    agent.respondToCouncilQuestion("qid-1", "buffered-answer");
+    const promise = make()("qid-1");
+    await expect(promise).resolves.toBe("buffered-answer");
+
+    // After consumption the buffer slot is gone — a second responder waits.
+    const stalled = make()("qid-1");
+    let settled = false;
+    void stalled.then(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+    agent.respondToCouncilQuestion("qid-1", "second");
+    await expect(stalled).resolves.toBe("second");
+  });
+
+  it("buffers council preflight approvals before the resolver registers", async () => {
+    const { Agent } = await importAgentModule();
+    const agent = new Agent(undefined, undefined, undefined, undefined, {
+      persistSession: false,
+    });
+    const make = (agent as unknown as {
+      _createPreflightResponder(): (p: string) => Promise<boolean>;
+    })._createPreflightResponder.bind(agent);
+    agent.respondToCouncilPreflight("pf-1", false);
+    await expect(make()("pf-1")).resolves.toBe(false);
+  });
+
   it("respects MUONROI_MAX_TOKENS env var", async () => {
     vi.stubEnv("MUONROI_MAX_TOKENS", "32768");
     const { Agent } = await importAgentModule();

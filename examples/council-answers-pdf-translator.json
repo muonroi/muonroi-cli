@@ -1,0 +1,13 @@
+{
+  "_comment": "Replays session 1a8fb4be3bc3 — PDF translator browser extension.",
+  "clarify": [
+    "Browser extension (Chrome/Brave/Edge compatible)",
+    "Google Cloud Translation API (paid, reliable)",
+    "Auto-show tooltip/popup immediately on text highlight"
+  ],
+  "post-debate": [
+    "no",
+    "continue"
+  ],
+  "preflightApprove": true
+}

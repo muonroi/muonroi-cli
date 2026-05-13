@@ -1,0 +1,6 @@
+{
+  "_comment": "Smoke test for headless council auto-answer. Generic defaults for any short topic.",
+  "clarify": ["yes", "any reasonable default", "no constraints"],
+  "post-debate": ["no", "continue"],
+  "preflightApprove": true
+}
