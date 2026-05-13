@@ -27,6 +27,11 @@ describe("filterModels", () => {
   it("returns empty when no match", () => {
     expect(filterModels(SAMPLE, "zzz")).toHaveLength(0);
   });
+  it("filters by tier", () => {
+    const result = filterModels(SAMPLE, "balanced");
+    expect(result).toHaveLength(1);
+    expect(result[0]?.id).toBe("deepseek-v3");
+  });
 });
 
 describe("groupModels", () => {
