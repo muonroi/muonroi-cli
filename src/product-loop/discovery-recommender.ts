@@ -95,3 +95,137 @@ export function toEntry(out: RecommendOutput): RecommendationEntry {
     synthFailed: out.synthFailed,
   };
 }
+
+export interface DebateChunk {
+  type: "stance" | "cost" | "summary";
+  name?: string;
+  value?: any;
+  rationale?: string;
+  confidence?: number;
+  costUsd?: number;
+}
+
+export interface CouncilDebateRunner {
+  runDebate: (config: { questionId: string; intentSummary: string; context: any }) => AsyncIterable<DebateChunk>;
+}
+
+const SYNTH_SYSTEM =
+  "You break ties between three stance recommendations. Output JSON: " +
+  '{"primary":{"value":<any>,"rationale":"<why>"},"alternatives":[{"value":<any>,"rationale":"<why>"},{"value":<any>,"rationale":"<why>"}]}';
+
+async function consumeDebateChunks(it: AsyncIterable<DebateChunk>): Promise<{ stances: Array<{ name: string; value: any; rationale: string; confidence?: number }>; costUsd: number }> {
+  const stances: Array<{ name: string; value: any; rationale: string; confidence?: number }> = [];
+  let costUsd = 0;
+  for await (const c of it) {
+    if (c.type === "stance" && c.name && c.value !== undefined) {
+      stances.push({ name: c.name, value: c.value, rationale: c.rationale ?? "", confidence: c.confidence });
+    }
+    if (c.type === "cost" && typeof c.costUsd === "number") {
+      costUsd += c.costUsd;
+    }
+  }
+  return { stances, costUsd };
+}
+
+function tallyMajority(stances: Array<{ value: any }>): { value: any; count: number } | null {
+  const counts = new Map<string, { value: any; count: number }>();
+  for (const s of stances) {
+    const key = JSON.stringify(s.value);
+    const cur = counts.get(key) ?? { value: s.value, count: 0 };
+    cur.count += 1;
+    counts.set(key, cur);
+  }
+  let best: { value: any; count: number } | null = null;
+  for (const v of counts.values()) {
+    if (!best || v.count > best.count) best = v;
+  }
+  if (best && best.count >= 2) return best;
+  return null;
+}
+
+export async function councilRecommend(
+  input: RecommendInput,
+  leader: LeaderLike,
+  runner: CouncilDebateRunner,
+): Promise<RecommendOutput> {
+  let chunks: { stances: Awaited<ReturnType<typeof consumeDebateChunks>>["stances"]; costUsd: number };
+  try {
+    chunks = await consumeDebateChunks(
+      runner.runDebate({
+        questionId: input.question.id,
+        intentSummary: `Decide ${input.question.id} for product context: ${input.detection.classification}, langs=[${input.detection.languages?.join(",") ?? ""}]`,
+        context: input.context,
+      }),
+    );
+  } catch {
+    const fallback = await leaderRecommend(input, leader);
+    return fallback;
+  }
+
+  if (chunks.stances.length === 0) {
+    return await leaderRecommend(input, leader);
+  }
+
+  const majority = tallyMajority(chunks.stances);
+  if (majority) {
+    const winner = chunks.stances.find((s) => JSON.stringify(s.value) === JSON.stringify(majority.value))!;
+    const altsRaw = chunks.stances.filter((s) => JSON.stringify(s.value) !== JSON.stringify(majority.value));
+    const alts = dedupByValue(altsRaw).slice(0, 2);
+    return {
+      primary: { value: winner.value, rationale: winner.rationale },
+      alternatives: alts.map((a) => ({ value: a.value, rationale: a.rationale })),
+      source: "council",
+      costUsd: chunks.costUsd,
+      tiebreakUsed: false,
+    };
+  }
+
+  // Three-way split → synth tiebreak
+  const synthPrompt = chunks.stances
+    .map((s) => `[${s.name}] ${JSON.stringify(s.value)} :: ${s.rationale}`)
+    .join("\n");
+  let synthCost = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await leader.generate({ system: SYNTH_SYSTEM, prompt: synthPrompt, maxTokens: 800 });
+      synthCost += res.costUsd;
+      const parsed = parseLeaderResponse(res.content);
+      if (parsed) {
+        return {
+          primary: parsed.primary,
+          alternatives: parsed.alternatives,
+          source: "council",
+          costUsd: chunks.costUsd + synthCost,
+          tiebreakUsed: true,
+        };
+      }
+    } catch {
+      /* retry */
+    }
+  }
+  // Synth failed → confidence fallback
+  const byConfidence = [...chunks.stances].sort((a, b) => (b.confidence ?? 0) - (a.confidence ?? 0));
+  const winner = byConfidence[0];
+  const alts = byConfidence.slice(1, 3).map((s) => ({ value: s.value, rationale: s.rationale }));
+  return {
+    primary: { value: winner.value, rationale: winner.rationale },
+    alternatives: alts,
+    source: "council",
+    costUsd: chunks.costUsd + synthCost,
+    tiebreakUsed: true,
+    synthFailed: true,
+  };
+}
+
+function dedupByValue<T extends { value: any }>(arr: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const a of arr) {
+    const key = JSON.stringify(a.value);
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(a);
+    }
+  }
+  return out;
+}
