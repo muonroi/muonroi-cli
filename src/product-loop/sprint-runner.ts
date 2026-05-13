@@ -194,9 +194,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // against criteria belonging to this phase. Full criteria are kept for
   // counter fields so telemetry reflects the whole spec, but the gate itself
   // sees only the scoped subset.
-  const evalCriteria = phaseScope
-    ? currentCriteria.filter((c) => phaseScope.criteria.map((s) => s.trim()).includes(c.id.trim()))
-    : currentCriteria;
+  let evalCriteria = currentCriteria;
+  if (phaseScope && phaseScope.criteria.length > 0) {
+    const wanted = new Set(phaseScope.criteria.map((s) => s.trim()));
+    const filtered = currentCriteria.filter((c) => wanted.has(c.id.trim()));
+    // Permissive fallback: if phase.successCriteria text doesn't map to any Criterion.id
+    // (gray-areas headings are slugs, not verbatim spec text), fall back to full set
+    // rather than collapse to zero. Phase boundary tracking happens in phase-runner via
+    // sprintResult.criteriaMet/totalCriteria, not here.
+    evalCriteria = filtered.length > 0 ? filtered : currentCriteria;
+  }
 
   const verdict = await evaluateDoneGate({
     lastVerify: verifyResult,

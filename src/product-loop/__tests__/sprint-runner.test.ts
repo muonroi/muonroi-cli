@@ -343,6 +343,37 @@ describe("sprint-runner phaseScope (subsystem E)", () => {
     expect(gateCall.criteria.map((c: any) => c.id)).toEqual(["crit-A", "crit-B"]);
   });
 
+  it("when phaseScope criteria don't match any Criterion.id, falls back to full set", async () => {
+    // Arrange: readCriteria returns 3 criteria with slug ids.
+    // phaseScope.criteria contains verbatim spec text that doesn't match any id.
+    const { readCriteria } = await import("../artifact-io.js");
+    (readCriteria as any).mockResolvedValue([
+      { id: "crit-A", status: "met" },
+      { id: "crit-B", status: "unmet" },
+      { id: "crit-C", status: "partial" },
+    ]);
+    (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
+
+    const ctx = makeCtx();
+    await drain(
+      runSprint({
+        sprintN: 1,
+        ctx,
+        productSpec: makeSpec(),
+        roleAssignments: NO_ROLES,
+        history: [],
+        phaseScope: {
+          criteria: ["All API endpoints return 200", "Database migrations complete"],
+          scope: "phase-1",
+        },
+      }),
+    );
+
+    // None of the verbatim strings match slug ids → permissive fallback → all 3 passed.
+    const gateCall = (evaluateDoneGate as any).mock.calls[0][0];
+    expect(gateCall.criteria).toHaveLength(3);
+  });
+
   it("when phaseScope is absent, evaluateDoneGate receives all criteria (backwards-compat)", async () => {
     const { readCriteria } = await import("../artifact-io.js");
     (readCriteria as any).mockResolvedValue([
