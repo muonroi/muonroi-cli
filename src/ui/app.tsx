@@ -1103,6 +1103,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           item.description.toLowerCase().includes(slashSearchQuery.toLowerCase()),
       )
     : SLASH_MENU_ITEMS;
+  const slashInputIsMatched = useMemo(() => {
+    if (!showSlashMenu) return false;
+    const typed = slashSearchQuery.toLowerCase();
+    if (!typed) return false;
+    return filteredSlashItems.some((item) => item.id.toLowerCase() === typed || item.label.toLowerCase() === typed);
+  }, [showSlashMenu, filteredSlashItems, slashSearchQuery]);
   const mcpRows = buildMcpBrowseRows(mcpServers, POPULAR_MCP_CATALOG, mcpSearchQuery);
   const mcpEditorFields = mcpEditorDraft.transport === "stdio" ? MCP_STDIO_FIELDS : MCP_REMOTE_FIELDS;
   const agentRows = useMemo(
@@ -4759,6 +4765,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 typeahead={typeahead}
                 slashItems={filteredSlashItems}
                 slashSelectedIndex={slashMenuIndex}
+                slashInputIsMatched={slashInputIsMatched}
               />
             </box>
           </box>
@@ -4803,6 +4810,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 typeahead={typeahead}
                 slashItems={filteredSlashItems}
                 slashSelectedIndex={slashMenuIndex}
+                slashInputIsMatched={slashInputIsMatched}
               />
             </box>
             <box height={2} minHeight={0} flexShrink={1} />
@@ -5141,6 +5149,7 @@ function PromptBox({
   typeahead,
   slashItems,
   slashSelectedIndex,
+  slashInputIsMatched,
 }: {
   t: Theme;
   inputRef: React.RefObject<TextareaRenderable | null>;
@@ -5165,6 +5174,7 @@ function PromptBox({
   typeahead?: TypeaheadState;
   slashItems?: SlashMenuItem[];
   slashSelectedIndex?: number;
+  slashInputIsMatched?: boolean;
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
@@ -5233,7 +5243,7 @@ function PromptBox({
               placeholder={
                 isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
               }
-              textColor={t.text}
+              textColor={slashInputIsMatched ? "#3b82f6" : t.text}
               backgroundColor={t.backgroundElement}
               placeholderColor={t.textMuted}
               minHeight={1}
