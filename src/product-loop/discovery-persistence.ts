@@ -1,6 +1,9 @@
 // src/product-loop/discovery-persistence.ts
+
+import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { readProjectContextWithMigration } from "./discovery-migrations.js";
 import type { DiscoveryContext, DiscoveryState, ProjectContext, UserOverrideEntry } from "./types.js";
 
 const SECTION = "Discovery";
@@ -122,4 +125,95 @@ export async function markDone(flowDir: string, runId: string): Promise<void> {
   if (!state) throw new Error("discovery state not initialized");
   state.phase = "done";
   await writeDiscoveryState(flowDir, runId, state);
+}
+
+const ARTIFACT_SECTION = "Project Context";
+
+export function buildProjectContextFromState(
+  state: DiscoveryState,
+  idea: string,
+  detection: ProjectContext["detection"],
+): ProjectContext {
+  const recsByField: ProjectContext["recommendations"]["byField"] = {};
+  for (const [field, rec] of Object.entries(state.recommendations)) {
+    recsByField[field] = {
+      chosen: rec.chosen,
+      alternatives: rec.alternatives,
+      rationale: rec.rationale,
+      source: rec.source,
+      debateRef: rec.debateRef,
+      tiebreakUsed: rec.tiebreakUsed,
+      synthFailed: rec.synthFailed,
+    };
+  }
+  return {
+    version: 1,
+    schemaName: "project-context",
+    generatedAt: new Date().toISOString(),
+    idea,
+    detection,
+    context: state.answers as ProjectContext["context"],
+    recommendations: {
+      byField: recsByField,
+      constraints: { fePolicy: "headless-ui-only", feEnforced: true },
+    },
+    userOverrides: state.userOverrides,
+  };
+}
+
+export async function writeProjectContext(flowDir: string, runId: string, ctx: ProjectContext): Promise<void> {
+  const dir = runDir(flowDir, runId);
+  const map = (await readArtifact(dir, "project-context.md")) ?? { preamble: "", sections: new Map() };
+  map.sections.set(ARTIFACT_SECTION, JSON.stringify(ctx, null, 2));
+  await writeArtifact(dir, "project-context.md", map);
+}
+
+export async function readProjectContext(flowDir: string, runId: string): Promise<ProjectContext | null> {
+  const map = await readArtifact(runDir(flowDir, runId), "project-context.md");
+  const raw = map?.sections.get(ARTIFACT_SECTION);
+  if (!raw) return null;
+  return readProjectContextWithMigration(raw);
+}
+
+export async function resumeArtifactWriteIfNeeded(
+  flowDir: string,
+  runId: string,
+  idea: string,
+  detection: ProjectContext["detection"],
+): Promise<void> {
+  const state = await readDiscoveryState(flowDir, runId);
+  if (!state) return;
+  if (state.phase === "done") return;
+  if (state.phase !== "awaiting-artifact-write") return;
+  const existing = await readProjectContext(flowDir, runId);
+  if (!existing) {
+    const ctx = buildProjectContextFromState(state, idea, detection);
+    await writeProjectContext(flowDir, runId, ctx);
+  }
+  await markDone(flowDir, runId);
+}
+
+function lockPath(flowDir: string, runId: string): string {
+  return path.join(runDir(flowDir, runId), ".discovery.lock");
+}
+
+export async function acquireRunLock(flowDir: string, runId: string): Promise<void> {
+  const lock = lockPath(flowDir, runId);
+  await fs.mkdir(path.dirname(lock), { recursive: true });
+  try {
+    const fh = await fs.open(lock, "wx");
+    await fh.writeFile(String(process.pid));
+    await fh.close();
+  } catch (err: any) {
+    if (err?.code === "EEXIST") throw new Error(`run ${runId} is already running (lock held)`);
+    throw err;
+  }
+}
+
+export async function releaseRunLock(flowDir: string, runId: string): Promise<void> {
+  try {
+    await fs.unlink(lockPath(flowDir, runId));
+  } catch {
+    /* idempotent */
+  }
 }
