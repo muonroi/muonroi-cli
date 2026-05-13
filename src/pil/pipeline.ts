@@ -28,11 +28,11 @@ import { resolveAfter } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
 
 const PIPELINE_TIMEOUT_FAST_MS = 200;
-// Sized from measured /api/pil-context distribution (see
-// scripts/profile-classifier-latency.ts): classifier p99 ~3400ms + ~500ms
-// retrieval + 600ms safety margin. Reducing this without a corresponding
-// classifier improvement causes ~15% null-taskType regression.
-const PIPELINE_TIMEOUT_BRAIN_MS = 4500;
+// Sized from measured /api/pil-context distribution after server-side
+// classify+embed parallelization (commit 5b77bab in experience-engine).
+// 120-call sample: p50=1155ms, p95=2171ms, p99=2734ms, max=3105ms. 3500ms
+// gives ~800ms margin over p99. Drop further only after another infra win.
+const PIPELINE_TIMEOUT_BRAIN_MS = 3500;
 
 function pipelineTimeoutMs(): number {
   const mode = getCachedEEClientMode();
