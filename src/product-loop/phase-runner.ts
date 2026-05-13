@@ -359,6 +359,7 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       let sprintResult = lastSprintState;
       const sprintCtx = {
         sprintN,
+        phaseId: phase.id,
         conversationContext: ctxStr,
         phaseScope: { criteria: phase.successCriteria, scope: phase.scope },
       };

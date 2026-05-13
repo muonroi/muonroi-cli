@@ -351,22 +351,51 @@ async function* runPhasesPath(args: {
       })),
   };
 
-  // Build the sprintRunner adapter: runPhases passes { sprintN, conversationContext, phaseScope }
+  // Build the sprintRunner adapter: runPhases passes { sprintN, phaseId, conversationContext, phaseScope }
   // while runSprint expects the full RunSprintArgs shape.
-  const sprintRunner = (sprintCtx: unknown) => {
+  // History is accumulated per-phase so circuit-breaker CB-2 (oscillation detection)
+  // and carry-over between sprints within a phase work correctly.
+  let currentPhaseId: string | null = null;
+  let sprintHistory: IterationState[] = [];
+
+  const sprintRunner = async function* (sprintCtx: unknown) {
     const sc = sprintCtx as {
       sprintN: number;
+      phaseId?: string;
       conversationContext?: string;
       phaseScope?: { criteria: string[]; scope: string };
     };
-    return runSprint({
+
+    // Reset history when a new phase begins.
+    if ((sc.phaseId ?? null) !== currentPhaseId) {
+      currentPhaseId = sc.phaseId ?? null;
+      sprintHistory = [];
+    }
+
+    const inner = runSprint({
       sprintN: sc.sprintN,
       ctx,
       productSpec,
       roleAssignments,
-      history: [],
+      history: [...sprintHistory],
       phaseScope: sc.phaseScope,
     });
+
+    let result: IterationState | undefined;
+    while (true) {
+      const n = await inner.next();
+      if (n.done) {
+        result = n.value;
+        break;
+      }
+      yield n.value;
+    }
+
+    // Accumulate completed sprint into history for subsequent sprints in this phase.
+    if (result && typeof result === "object" && "criteriaMet" in result) {
+      sprintHistory.push(result);
+    }
+    return result!;
   };
 
   // awaitCustomerVerdict: use respondToQuestion (the existing user-prompt API).
