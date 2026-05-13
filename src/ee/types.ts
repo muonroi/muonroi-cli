@@ -380,4 +380,8 @@ export interface EEClient {
   user(): Promise<EEUserResponse | null>;
   // PIL brain proxy — used by thin clients to reach the VPS LLM router.
   brainProxy(prompt: string, timeoutMs?: number): Promise<string | null>;
+  pilContext(
+    prompt: string,
+    options?: { localeHint?: string; projectCtx?: Record<string, unknown>; budgetMs?: number; signal?: AbortSignal },
+  ): Promise<unknown | null>;
 }

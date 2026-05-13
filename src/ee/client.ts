@@ -1,3 +1,4 @@
+import { drainQueue, enqueue } from "./offline-queue.js";
 import type {
   ColdRouteRequest,
   ColdRouteResponse,
@@ -14,8 +15,8 @@ import type {
   ExtractRequest,
   ExtractResponse,
   FeedbackPayload,
-  InterceptRequest,
   InterceptMatch,
+  InterceptRequest,
   InterceptResponse,
   PostToolPayload,
   PromptStaleRequest,
@@ -26,7 +27,6 @@ import type {
   RouteTaskRequest,
   RouteTaskResponse,
 } from "./types.js";
-import { enqueue, drainQueue } from "./offline-queue.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
 
@@ -71,7 +71,11 @@ let _consecutiveFailures = 0;
 let _circuitOpenedAt = 0;
 let _lastFailureAt = 0;
 
-function recordCircuitSuccess(drainOpts?: { fetchImpl: typeof fetch; headers: Record<string, string>; baseUrl: string }): void {
+function recordCircuitSuccess(drainOpts?: {
+  fetchImpl: typeof fetch;
+  headers: Record<string, string>;
+  baseUrl: string;
+}): void {
   _circuitState = "closed";
   _consecutiveFailures = 0;
   if (drainOpts) {
@@ -529,7 +533,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       opts?: import("./types.js").EESearchOptions | number,
     ): Promise<EESearchResponse | null> {
       // Backwards-compat: allow `search(q, 5)` as well as `search(q, { limit: 5, collections: [...] })`.
-      const o = typeof opts === "number" ? { limit: opts } : opts ?? {};
+      const o = typeof opts === "number" ? { limit: opts } : (opts ?? {});
       const body: Record<string, unknown> = { query, limit: o.limit ?? 10 };
       if (Array.isArray(o.collections) && o.collections.length > 0) body.collections = o.collections;
       const timeoutMs = o.timeoutMs ?? 3000;
@@ -580,6 +584,29 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         const data = (await resp.json()) as { ok?: boolean; result?: string | null };
         if (!data.ok || typeof data.result !== "string") return null;
         return data.result;
+      } catch {
+        return null;
+      }
+    },
+
+    async pilContext(prompt, options = {}) {
+      const body = {
+        prompt,
+        locale_hint: options.localeHint,
+        project_ctx: options.projectCtx,
+        budget_ms: options.budgetMs,
+      };
+      const timeoutMs = options.budgetMs ?? 1500;
+      const signal = options.signal ?? AbortSignal.timeout(timeoutMs + 150);
+      try {
+        const resp = await f(`${baseUrl}/api/pil-context`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(body),
+          signal,
+        });
+        if (!resp.ok) return null;
+        return await resp.json();
       } catch {
         return null;
       }
