@@ -36,6 +36,8 @@ import { appendIteration, readCriteria } from "./artifact-io.js";
 import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
 import { reserveForProduct } from "./cost-scoper.js";
+import { formatProjectContextForPrompt } from "./discovery-context-format.js";
+import { readProjectContext } from "./discovery-persistence.js";
 import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
@@ -113,6 +115,9 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     /* non-critical */
   }
 
+  const projectCtx = await readProjectContext(ctx.flowDir, ctx.runId);
+  const projectContextStr = projectCtx ? "\nProject Context:\n" + formatProjectContextForPrompt(projectCtx) : "";
+
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
     `Persona: ${productSpec.persona}\n` +
@@ -120,7 +125,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `Architecture: ${productSpec.architecture}\n` +
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
-    `${carryOverContext}${focusContext}${assumptionContext}\n` +
+    `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
   const productLlm = createProductLlm(ctx.llm, ctx.runId, ctx.flags.maxCost);
@@ -303,6 +308,21 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
 }
 
 /**
+ * Heuristic role tag from the system prompt. Cheap pattern match — lets the
+ * cost report break out PO/Customer/moderator/leader spend without changing
+ * the CouncilLLM signature. Unknown → undefined (entry still tagged callsite).
+ */
+function detectRoleFromSystem(system: string): string | undefined {
+  const s = system.toLowerCase();
+  if (s.startsWith("you are the product owner")) return "po";
+  if (s.startsWith("you are the customer")) return "customer";
+  if (s.startsWith("you are the debate moderator")) return "moderator";
+  if (s.includes("leader") && s.includes("council")) return "leader";
+  if (s.includes("judge")) return "judge";
+  return undefined;
+}
+
+/**
  * Wraps a CouncilLLM with per-product reserve/commit semantics so every model
  * call is metered against BOTH the monthly and per-product ledgers (cost-scoper).
  */
@@ -320,10 +340,28 @@ function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): Coun
       if (tok instanceof CapBreachError) {
         throw new Error(`Cost cap breached: ${tok.message}`);
       }
+      const startedAt = Date.now();
+      // Capture real usage from the underlying council LLM via the onUsage
+      // side-channel (added in Session 4). When the provider returns no usage
+      // we fall back to chars/4 — preserves prior behavior.
+      let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
       try {
-        const text = await base.generate(modelId, system, prompt, maxTokens);
-        const actualOut = Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, estIn, actualOut);
+        const text = await base.generate(modelId, system, prompt, maxTokens, (u) => {
+          captured = u;
+        });
+        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+        const actualOut =
+          captured?.outputTokens && captured.outputTokens > 0
+            ? captured.outputTokens
+            : Math.max(1, Math.ceil(text.length / 4));
+        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+          callsite: "sprint.generate",
+          role: detectRoleFromSystem(system),
+          systemChars: system.length,
+          promptChars: prompt.length,
+          cachedInputTokens: captured?.cachedInputTokens,
+          durationMs: Date.now() - startedAt,
+        });
         return text;
       } catch (err) {
         await release(tok).catch(() => undefined);
@@ -342,10 +380,25 @@ function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): Coun
       if (tok instanceof CapBreachError) {
         throw new Error(`Cost cap breached: ${tok.message}`);
       }
+      const startedAt = Date.now();
+      let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
       try {
-        const text = await base.research(modelId, topic, conversationContext, signal);
-        const actualOut = Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, estIn, actualOut);
+        const text = await base.research(modelId, topic, conversationContext, signal, undefined, undefined, (u) => {
+          captured = u;
+        });
+        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+        const actualOut =
+          captured?.outputTokens && captured.outputTokens > 0
+            ? captured.outputTokens
+            : Math.max(1, Math.ceil(text.length / 4));
+        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+          callsite: "sprint.research",
+          role: "researcher",
+          systemChars: topic.length,
+          promptChars: conversationContext.length,
+          cachedInputTokens: captured?.cachedInputTokens,
+          durationMs: Date.now() - startedAt,
+        });
         return text;
       } catch (err) {
         await release(tok).catch(() => undefined);
