@@ -181,14 +181,28 @@ export async function runProviderScreen(): Promise<void> {
         }
 
         const baseURL = PROVIDER_ENDPOINTS[row.id].apiBase;
-        const live = await fetchProviderModels(baseURL, apiKey);
+        let live: Awaited<ReturnType<typeof fetchProviderModels>> = [];
+        try {
+          live = await fetchProviderModels(baseURL, apiKey);
+        } catch {
+          statusMsg = "Failed to fetch models from provider";
+          enterRawMode();
+          continue;
+        }
 
         if (live.length === 0) {
           process.stdout.write("Could not fetch models (check key/network). Using catalog only.\n");
         }
 
         const liveWithProvider = live.map((m) => ({ ...m, provider: row.id }));
-        const chosen = await openModelPicker(row.id, liveWithProvider);
+        let chosen: string | null = null;
+        try {
+          chosen = await openModelPicker(row.id, liveWithProvider);
+        } catch {
+          statusMsg = "Model picker error";
+          enterRawMode();
+          continue;
+        }
 
         if (chosen) {
           saveUserSettings({ defaultModel: chosen });
