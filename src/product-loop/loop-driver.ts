@@ -19,6 +19,7 @@ import {
   type RepoAudit,
 } from "./repo-audit.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
+import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, Stage } from "./types.js";
 
 export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamChunk, DriverResult, unknown> {
@@ -342,10 +343,21 @@ interface ProductSpec {
           return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec" };
         }
 
-        // Write ProductSpec to roadmap.md
+        // Write ProductSpec to roadmap.md (human-readable surface).
         const roadmapMap = (await readArtifact(runDir, "roadmap.md")) ?? { preamble: "", sections: new Map() };
         roadmapMap.sections.set("Product Specification", JSON.stringify(productSpec, null, 2));
         await writeArtifact(runDir, "roadmap.md", roadmapMap);
+
+        // P8 - derive tasks.json from the spec (canonical machine-readable
+        // surface for downstream /execute consumption). MVP items get
+        // sprint=1, phase2 gets sprint=2. Re-deriving the same spec is
+        // idempotent — ids are hash-stable across runs.
+        try {
+          const tasks = deriveTasksFromSpec(productSpec);
+          await writeTasks(ctx.flowDir, ctx.runId, tasks);
+        } catch {
+          /* non-critical */
+        }
 
         // runPreflight — show resolved participants on the brief card. These
         // strings are display-only (no LLM call), but using real model ids
