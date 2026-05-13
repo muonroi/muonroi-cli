@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient, resetEEClientState } from "./client.js";
-import { getLastSurfacedState, resetLastSurfacedState, setDefaultEEClient, updateLastSurfacedState } from "./intercept.js";
+import {
+  getLastSurfacedState,
+  resetLastSurfacedState,
+  setDefaultEEClient,
+  updateLastSurfacedState,
+} from "./intercept.js";
 import { setRenderSink } from "./render.js";
 import type { InterceptMatch, InterceptRequest } from "./types.js";
 
@@ -103,8 +108,7 @@ describe("intercept integration", () => {
     expect(resp.decision).toBe("allow");
     expect(resp.matches).toHaveLength(1);
     // The render sink captures StreamChunk objects; check rendered content
-    const getContent = (c: any): string =>
-      typeof c === "string" ? c : (c?.content ?? JSON.stringify(c));
+    const getContent = (c: any): string => (typeof c === "string" ? c : (c?.content ?? JSON.stringify(c)));
     expect(captured).toHaveLength(1);
     expect(getContent(captured[0])).toContain("Avoid destructive commands");
     expect(getContent(captured[0])).toContain("Dangerous command detected");

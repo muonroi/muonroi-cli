@@ -11,6 +11,7 @@ vi.mock("../ee/bridge.js", () => ({
 }));
 
 import { routeModel as bridgeRouteModel } from "../ee/bridge.js";
+
 const mockBridgeRouteModel = vi.mocked(bridgeRouteModel);
 
 describe("callWarmRoute bridge cascade", () => {

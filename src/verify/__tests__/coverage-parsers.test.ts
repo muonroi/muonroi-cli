@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
+  extractCoverageFromOutput,
   parseBunCoverage,
-  parseVitestCoverage,
   parseJestCoverage,
   parsePytestCoverage,
-  extractCoverageFromOutput
+  parseVitestCoverage,
 } from "../coverage-parsers.js";
 
 const BUN_OUTPUT = `

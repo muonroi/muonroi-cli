@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { writeBwSecureNote } from "../bw-vault.js";
 
 interface FakeCall {
@@ -59,9 +59,7 @@ describe("writeBwSecureNote", () => {
       { status: 0, stdout: '{"status":"unlocked"}' },
       {
         status: 0,
-        stdout: JSON.stringify([
-          { id: "existing-uuid", name: "muonroi-cli/tavily", notes: "old-key", type: 2 },
-        ]),
+        stdout: JSON.stringify([{ id: "existing-uuid", name: "muonroi-cli/tavily", notes: "old-key", type: 2 }]),
       },
       { status: 0, stdout: "ZW5jb2RlZA==" },
       { status: 0, stdout: '{"id":"existing-uuid"}' }, // bw edit

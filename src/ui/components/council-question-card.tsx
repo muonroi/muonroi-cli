@@ -1,8 +1,4 @@
-import type {
-  CouncilQuestionData,
-  CouncilQuestionOption,
-  CouncilQuestionPhase,
-} from "../../types/index.js";
+import type { CouncilQuestionData, CouncilQuestionOption, CouncilQuestionPhase } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 
 const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
@@ -40,12 +36,7 @@ export interface CouncilQuestionCardProps {
  * kind:"chat" submits a sentinel string that callers can use to pause and
  * resume the council loop.
  */
-export function CouncilQuestionCard({
-  question,
-  theme: t,
-  state,
-  freetextInputWidth = 60,
-}: CouncilQuestionCardProps) {
+export function CouncilQuestionCard({ question, theme: t, state, freetextInputWidth = 60 }: CouncilQuestionCardProps) {
   const options = question.options && question.options.length > 0 ? question.options : legacyFallback(question);
   const idx = clampIndex(state.idx, options.length);
   const hasRecommendation = typeof question.defaultIndex === "number";
@@ -89,9 +80,7 @@ export function CouncilQuestionCard({
             <box flexDirection="row">
               <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
               <text fg={labelColor}>{opt.label}</text>
-              {isRecommended && (
-                <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>
-              )}
+              {isRecommended && <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>}
             </box>
             {opt.description && (
               <box paddingLeft={5}>
@@ -106,7 +95,9 @@ export function CouncilQuestionCard({
         <box flexDirection="column" paddingTop={1}>
           <text fg={t.textMuted}>{"Type your answer · Enter to submit · Esc to go back"}</text>
           <box paddingLeft={1} paddingRight={1} width={freetextInputWidth}>
-            <text fg={t.planInputText} bg={t.planInputBg}>{freetext.length > 0 ? freetext : " "}</text>
+            <text fg={t.planInputText} bg={t.planInputBg}>
+              {freetext.length > 0 ? freetext : " "}
+            </text>
           </box>
         </box>
       )}
@@ -164,9 +155,7 @@ export type CouncilCardKey =
 export interface CouncilCardReduceResult {
   state: CouncilCardState;
   /** When set, parent should call `onAnswer`/`onCancel` with this. */
-  emit?:
-    | { type: "answer"; answer: CouncilQuestionAnswer }
-    | { type: "cancel" };
+  emit?: { type: "answer"; answer: CouncilQuestionAnswer } | { type: "cancel" };
 }
 
 export function reduceCardKey(

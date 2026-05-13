@@ -34,18 +34,20 @@ export type Phase =
   | "planning"
   | "review"
   | "retro"
-  | "standup";
+  | "standup"
+  | "verdict";
 
 const PHASE_HINTS: Record<Phase, number> = {
   discover: 0.05,
   gather: 0.1,
   research: 0.3,
   scoping: 0.1,
-  sprint: 0.3,
+  sprint: 0.28,
   planning: 0.03,
   review: 0.03,
   retro: 0.04,
   standup: 0.05,
+  verdict: 0.02,
 };
 
 const BUDGET_SCHEMA_VERSION = 2;

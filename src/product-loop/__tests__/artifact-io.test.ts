@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRun } from "../../flow/run-manager.js";
-import { readManifest, writeManifest, appendIteration, readIterations, markIterationCrashed } from "../artifact-io.js";
-import type { ProductRunManifest, IterationState } from "../types.js";
+import { appendIteration, markIterationCrashed, readIterations, readManifest, writeManifest } from "../artifact-io.js";
+import type { IterationState, ProductRunManifest } from "../types.js";
 
 describe("product-loop artifact-io", () => {
   let tmpDir: string;
@@ -27,12 +27,12 @@ describe("product-loop artifact-io", () => {
       maxSprints: 8,
       doneThreshold: 0.9,
       createdAt: new Date("2024-01-01T00:00:00Z"),
-      stack: "TypeScript, Vitest"
+      stack: "TypeScript, Vitest",
     };
 
     await writeManifest(tmpDir, runId, manifest);
     const loaded = await readManifest(tmpDir, runId);
-    
+
     expect(loaded).toEqual(manifest);
   });
 
@@ -46,7 +46,7 @@ describe("product-loop artifact-io", () => {
       criteriaPartial: 1,
       criteriaUnmet: 4,
       costUsd: 0.12,
-      lastVerifyResult: "PASS"
+      lastVerifyResult: "PASS",
     };
 
     const it2: IterationState = {
@@ -58,7 +58,7 @@ describe("product-loop artifact-io", () => {
       criteriaPartial: 1,
       criteriaUnmet: 2,
       costUsd: 0.25,
-      lastVerifyResult: "FAIL"
+      lastVerifyResult: "FAIL",
     };
 
     await appendIteration(tmpDir, runId, it1);
@@ -80,7 +80,7 @@ describe("product-loop artifact-io", () => {
       criteriaPartial: 0,
       criteriaUnmet: 6,
       costUsd: 0.05,
-      lastVerifyResult: "NONE"
+      lastVerifyResult: "NONE",
     };
 
     await appendIteration(tmpDir, runId, it1);

@@ -1,8 +1,23 @@
 import type { ModelMessage } from "ai";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilExperienceResult } from "../ee/council-bridge.js";
+import { queryExperience } from "../ee/council-bridge.js";
+import { judgeCouncilOutcome } from "../ee/judge.js";
+import { recordCouncilOutcome } from "../ee/phase-outcome.js";
+import { runPipeline } from "../pil/pipeline.js";
+import type { PipelineContext } from "../pil/types.js";
 import { appendSystemMessage, logInteraction } from "../storage/index.js";
 import { SessionStore } from "../storage/sessions.js";
-import { isCouncilMultiProviderPreferred, getCouncilExperienceMode, isCouncilCostAware } from "../utils/settings.js";
+import type { StreamChunk } from "../types/index.js";
+import { getCouncilExperienceMode, isCouncilCostAware, isCouncilMultiProviderPreferred } from "../utils/settings.js";
+import { buildSpecFromTopic, runClarification } from "./clarifier.js";
+import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
+import { evaluateResearchNeed, runDebate } from "./debate.js";
+import { planDebate } from "./debate-planner.js";
+import { runExecution } from "./executor.js";
+import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
+import { phaseDone, phaseStart } from "./phase-events.js";
+import { runPlanning } from "./planner.js";
+import { runPreflight } from "./preflight.js";
 import type {
   ActionPlan,
   ClarifiedSpec,
@@ -13,21 +28,6 @@ import type {
   PreflightResponder,
   QuestionResponder,
 } from "./types.js";
-import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
-import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
-import { runClarification, buildSpecFromTopic } from "./clarifier.js";
-import { runPreflight } from "./preflight.js";
-import { runDebate, evaluateResearchNeed } from "./debate.js";
-import { runPlanning } from "./planner.js";
-import { runExecution } from "./executor.js";
-import { planDebate } from "./debate-planner.js";
-import { phaseDone, phaseStart } from "./phase-events.js";
-import { runPipeline } from "../pil/pipeline.js";
-import type { PipelineContext } from "../pil/types.js";
-import { queryExperience } from "../ee/council-bridge.js";
-import type { CouncilExperienceResult } from "../ee/council-bridge.js";
-import { judgeCouncilOutcome } from "../ee/judge.js";
-import { recordCouncilOutcome } from "../ee/phase-outcome.js";
 
 export interface RunCouncilOptions {
   skipClarification?: boolean;
@@ -59,7 +59,10 @@ export async function* runCouncil(
   const participants = await resolveParticipants(sessionModelId, isCouncilMultiProviderPreferred());
 
   if (participants.length < 2) {
-    yield { type: "content", content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n" };
+    yield {
+      type: "content",
+      content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n",
+    };
     yield { type: "done" };
     return null;
   }
@@ -74,12 +77,13 @@ export async function* runCouncil(
         `Set \`roleModels.leader\` to override.\n`,
     };
   }
-  yield { type: "content", content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n` };
+  yield {
+    type: "content",
+    content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
+  };
 
   const baseContext = buildCouncilContext(messages);
-  const projectInfo = options?.cwd
-    ? await buildProjectSnapshot(options.cwd)
-    : { snapshot: "", isEmpty: true };
+  const projectInfo = options?.cwd ? await buildProjectSnapshot(options.cwd) : { snapshot: "", isEmpty: true };
   const conversationContext = projectInfo.snapshot
     ? `## Current Project\n${projectInfo.snapshot}\n\n---\n\n${baseContext}`
     : baseContext;
@@ -95,7 +99,9 @@ export async function* runCouncil(
   let pilCtx: PipelineContext | undefined;
   try {
     pilCtx = await runPipeline(topic, { sessionId });
-  } catch { /* fail-open — council runs without PIL context */ }
+  } catch {
+    /* fail-open — council runs without PIL context */
+  }
 
   const pilSeed = pilCtx?.grayAreas?.length ? pilCtx.grayAreas : undefined;
 
@@ -114,7 +120,18 @@ export async function* runCouncil(
           content: `\n> Clarification seeded by PIL (${pilSeed.length} gray-area question${pilSeed.length === 1 ? "" : "s"}).\n`,
         };
       }
-      const clarifyGen = runClarification(topic, leaderModelId, conversationContext, respondToQuestion, llm, options?.signal, pilSeed, undefined, undefined, costAware);
+      const clarifyGen = runClarification(
+        topic,
+        leaderModelId,
+        conversationContext,
+        respondToQuestion,
+        llm,
+        options?.signal,
+        pilSeed,
+        undefined,
+        undefined,
+        costAware,
+      );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {
         clarifyResult = await clarifyGen.next();
@@ -178,7 +195,12 @@ export async function* runCouncil(
             : "Research will grep/read the codebase. Skip for trivial topics that don't need code evidence.",
           isRequired: false,
           options: [
-            { label: "No — run research (recommended)", description: "Leader thinks evidence is needed.", value: "no", kind: "choice" },
+            {
+              label: "No — run research (recommended)",
+              description: "Leader thinks evidence is needed.",
+              value: "no",
+              kind: "choice",
+            },
             { label: "Yes — skip research", description: "Go straight to debate.", value: "yes", kind: "choice" },
           ],
           defaultIndex: 0,
@@ -186,9 +208,14 @@ export async function* runCouncil(
       } as StreamChunk;
       const overrideAnswer = await respondToQuestion(overrideId);
       researchSkipOverride = overrideAnswer === "yes";
-      yield { type: "content", content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n` };
+      yield {
+        type: "content",
+        content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n`,
+      };
     }
-  } catch { /* fail-open — fall through to default behavior in runDebate */ }
+  } catch {
+    /* fail-open — fall through to default behavior in runDebate */
+  }
 
   // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)
   const eeResult = await eePromise;
@@ -235,7 +262,9 @@ export async function* runCouncil(
     type: "content",
     content:
       `\n#### Proposed Stances\n` +
-      debatePlan.stances.map((s) => `- **${s.name}** — ${s.lens}${s.focus ? ` _(focus: ${s.focus})_` : ""}`).join("\n") +
+      debatePlan.stances
+        .map((s) => `- **${s.name}** — ${s.lens}${s.focus ? ` _(focus: ${s.focus})_` : ""}`)
+        .join("\n") +
       "\n",
   };
   yield {
@@ -257,17 +286,21 @@ export async function* runCouncil(
 
   // ── Phase C: Dynamic Debate ─────────────────────────────────────────────────
   const debateStart = Date.now();
-  const debateGen = runDebate(spec, {
-    topic,
-    conversationContext,
-    leaderModelId,
-    participants: active,
-    debatePlan,
-    signal: options?.signal,
-    researchSkipOverride,
-    internetFirst,
-    costAware,
-  }, llm);
+  const debateGen = runDebate(
+    spec,
+    {
+      topic,
+      conversationContext,
+      leaderModelId,
+      participants: active,
+      debatePlan,
+      signal: options?.signal,
+      researchSkipOverride,
+      internetFirst,
+      costAware,
+    },
+    llm,
+  );
 
   let debateResult: IteratorResult<StreamChunk, import("./types.js").DebateState>;
   do {
@@ -284,20 +317,20 @@ export async function* runCouncil(
   // exists in interaction_logs for debugging.
   if (sessionId && debateState.exchangeLogs) {
     try {
-      const filtered = [...debateState.exchangeLogs.values()]
-        .flat()
-        .filter((line) => {
-          const trimmed = line.trim();
-          if (!trimmed) return false;
-          return !/:\s*\[debate failed:/i.test(trimmed);
-        });
+      const filtered = [...debateState.exchangeLogs.values()].flat().filter((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return false;
+        return !/:\s*\[debate failed:/i.test(trimmed);
+      });
       if (filtered.length > 0) {
         appendSystemMessage(
           sessionId,
           `[Debate Transcript]\nRounds: ${debateState.roundCount}\n\n${filtered.join("\n")}`,
         );
       }
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical */
+    }
   }
 
   // Log interaction: debate complete
@@ -317,10 +350,18 @@ export async function* runCouncil(
     respondToPreflight,
     llm,
     debatePlan,
-    pilCtx?.outputStyle ?? undefined,  // CQ-18: propagate outputStyle
+    pilCtx?.outputStyle ?? undefined, // CQ-18: propagate outputStyle
   );
 
-  let planResult: IteratorResult<StreamChunk, { outcome: import("./types.js").EnhancedCouncilOutcome | null; plan: import("./types.js").ActionPlan | null; synthesisText: string; synthesisFailReason?: string }>;
+  let planResult: IteratorResult<
+    StreamChunk,
+    {
+      outcome: import("./types.js").EnhancedCouncilOutcome | null;
+      plan: import("./types.js").ActionPlan | null;
+      synthesisText: string;
+      synthesisFailReason?: string;
+    }
+  >;
   do {
     planResult = await planGen.next();
     if (!planResult.done && planResult.value) {
@@ -363,8 +404,13 @@ export async function* runCouncil(
       // ── Confidence badge (CQ-6) ──────────────────────────────────────────
       const evidenceDensity = debateState.finalEvidenceDensity ?? 0;
       const synthesisFailed = !!synthesisFailReason || !outcome || synthesisText.trim().length < 20;
-      const confidenceLevel: "high" | "medium" | "low" =
-        synthesisFailed ? "low" : evidenceDensity >= 0.6 ? "high" : evidenceDensity >= 0.3 ? "medium" : "low";
+      const confidenceLevel: "high" | "medium" | "low" = synthesisFailed
+        ? "low"
+        : evidenceDensity >= 0.6
+          ? "high"
+          : evidenceDensity >= 0.3
+            ? "medium"
+            : "low";
 
       // When synthesis genuinely failed, asking blind clarification questions
       // ("what should go in Agreed Approach?") is useless — the user can't be
@@ -388,23 +434,32 @@ export async function* runCouncil(
             : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
 
       // Recommendation surfaced to the user as the default action.
-      const recommendation: { value: "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis"; reason: string } =
-        synthesisFailed
-          ? { value: "retry_synthesis", reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures." }
-          : hasEmptySections
-            ? { value: "refine", reason: `Fill in ${refinementTopics.length} section(s) the debate left empty.` }
-            : confidenceLevel === "low"
-              ? { value: "ask_followup", reason: "Press the council on the weakest claims rather than accepting a thin synthesis." }
-              : !hasPlan
-                ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
-                : { value: "save_exit", reason: "Outcome looks solid — save and move on." };
+      const recommendation: {
+        value: "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
+        reason: string;
+      } = synthesisFailed
+        ? {
+            value: "retry_synthesis",
+            reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures.",
+          }
+        : hasEmptySections
+          ? { value: "refine", reason: `Fill in ${refinementTopics.length} section(s) the debate left empty.` }
+          : confidenceLevel === "low"
+            ? {
+                value: "ask_followup",
+                reason: "Press the council on the weakest claims rather than accepting a thin synthesis.",
+              }
+            : !hasPlan
+              ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
+              : { value: "save_exit", reason: "Outcome looks solid — save and move on." };
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
 
       if (synthesisFailed) {
         baseOptions.push({
           label: "Retry Synthesis (compact)",
-          description: "Re-synthesize from final positions only (drop full exchange history). Fastest recovery from provider timeouts.",
+          description:
+            "Re-synthesize from final positions only (drop full exchange history). Fastest recovery from provider timeouts.",
           value: "retry_synthesis",
           kind: "choice",
         });
@@ -454,7 +509,10 @@ export async function* runCouncil(
         });
       }
 
-      const defaultIndex = Math.max(0, baseOptions.findIndex((o) => o.value === recommendation.value));
+      const defaultIndex = Math.max(
+        0,
+        baseOptions.findIndex((o) => o.value === recommendation.value),
+      );
 
       const heading = synthesisFailed ? "## Debate Synthesis Failed" : "## Debate Synthesis Complete";
       const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendation.reason}`;
@@ -485,7 +543,15 @@ export async function* runCouncil(
       yield { type: "content", content: `\n  ↳ ${answer}\n` };
 
       // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
-      const knownValues = new Set(["save_exit", "generate_plan", "refine", "ask_followup", "implement", "retry_synthesis", ""]);
+      const knownValues = new Set([
+        "save_exit",
+        "generate_plan",
+        "refine",
+        "ask_followup",
+        "implement",
+        "retry_synthesis",
+        "",
+      ]);
       const isFollowupText =
         answer === "ask_followup" ||
         (typeof answer === "string" && answer.trim().length > 0 && !knownValues.has(answer));
@@ -598,7 +664,12 @@ export async function* runCouncil(
               context: `The debate did not produce a clear ${label}. Provide your input to be included in the final outcome.`,
               isRequired: false,
               options: [
-                { label: "Skip — leave as-is", description: "Keep the current (empty) value", value: "", kind: "choice" },
+                {
+                  label: "Skip — leave as-is",
+                  description: "Keep the current (empty) value",
+                  value: "",
+                  kind: "choice",
+                },
                 { label: "Type something", description: "Write your own input", value: "", kind: "freetext" },
               ],
             },
@@ -635,7 +706,9 @@ export async function* runCouncil(
         synthesisText = refineResult.value.synthesisText;
       }
       // "save_exit" and "implement" fall through to normal persistence
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical */
+    }
   }
 
   // ── Persist outcome ─────────────────────────────────────────────────────────
@@ -644,7 +717,10 @@ export async function* runCouncil(
       if (outcome) {
         const agreedLine = outcome.agreed?.length ? `\nAgreed: ${outcome.agreed.join("; ")}` : "";
         const recLine = outcome.recommendation ? `\nRecommendation: ${outcome.recommendation}` : "";
-        appendSystemMessage(sessionId, `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`);
+        appendSystemMessage(
+          sessionId,
+          `[Council Decision]\nTopic: ${topic}\n${outcome.summary}${agreedLine}${recLine}`,
+        );
         appendSystemMessage(sessionId, `[Council Outcome]\n${JSON.stringify(outcome)}`);
       }
       const evidenceDensityPersist = debateState.finalEvidenceDensity ?? 0;
@@ -668,34 +744,44 @@ export async function* runCouncil(
         timestamp: new Date().toISOString(),
       };
       appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical */
+    }
   }
 
   // Update session status to completed
   if (sessionId) {
     try {
       new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
-    } catch { /* non-critical */ }
+    } catch {
+      /* non-critical */
+    }
   }
 
   // CQ-16: Judge synthesis quality; confidence < 0.5 → [NEEDS HUMAN REVIEW] flag
   // CQ-17: Record council outcome to EE brain (fire-and-forget)
-  void judgeCouncilOutcome(synthesisText).then((verdict) => {
-    // CQ-16: Append review flag if confidence < 0.5
-    if (verdict.confidence < 0.5 && sessionId) {
-      try {
-        appendSystemMessage(
-          sessionId,
-          `[NEEDS HUMAN REVIEW] Council synthesis confidence: ${(verdict.confidence * 100).toFixed(0)}%. Reason: ${verdict.reason}`,
-        );
-      } catch { /* non-critical */ }
-    }
-    // CQ-17: Record to EE brain
-    recordCouncilOutcome(topic, synthesisText, verdict, {
-      sessionId,
-      durationMs: Date.now() - stats.startMs,
+  void judgeCouncilOutcome(synthesisText)
+    .then((verdict) => {
+      // CQ-16: Append review flag if confidence < 0.5
+      if (verdict.confidence < 0.5 && sessionId) {
+        try {
+          appendSystemMessage(
+            sessionId,
+            `[NEEDS HUMAN REVIEW] Council synthesis confidence: ${(verdict.confidence * 100).toFixed(0)}%. Reason: ${verdict.reason}`,
+          );
+        } catch {
+          /* non-critical */
+        }
+      }
+      // CQ-17: Record to EE brain
+      recordCouncilOutcome(topic, synthesisText, verdict, {
+        sessionId,
+        durationMs: Date.now() - stats.startMs,
+      });
+    })
+    .catch(() => {
+      /* non-critical */
     });
-  }).catch(() => { /* non-critical */ });
 
   // ── Phase E: Execute (if plan approved) ─────────────────────────────────────
   if (plan && plan.steps.length > 0) {
@@ -719,7 +805,7 @@ export async function* runCouncil(
   return synthesisText || null;
 }
 
-export type { ClarifiedSpec, CouncilLLM, CouncilStats, CouncilParticipant } from "./types.js";
+export type { ClarifiedSpec, CouncilLLM, CouncilParticipant, CouncilStats } from "./types.js";
 
 // ── P7: action-item reuse helpers ─────────────────────────────────────────────
 //
@@ -776,13 +862,16 @@ function synthesizePlanFromActionItems(items: unknown[]): ActionPlan {
       description = step ? `${step}${time}${accept}` : JSON.stringify(o).slice(0, 200);
       agent = owner;
       const deps = o.depends_on;
-      hasDeps = (Array.isArray(deps) && deps.length > 0) || (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
+      hasDeps =
+        (Array.isArray(deps) && deps.length > 0) ||
+        (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
     } else {
       description = String(raw);
     }
     const inFirstHalf = idx < total / 2;
     const inLastThird = idx >= (total * 2) / 3;
-    const priority: "high" | "medium" | "low" = hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : (inFirstHalf ? "high" : "medium");
+    const priority: "high" | "medium" | "low" =
+      hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : inFirstHalf ? "high" : "medium";
     return { description, agent, priority };
   });
   // Complexity heuristic: ≤4 steps trivial, 5-9 moderate, ≥10 complex.

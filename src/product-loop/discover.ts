@@ -1,5 +1,5 @@
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
+import * as path from "node:path";
 
 /**
  * High-confidence project discovery for /ideal — runs before gather so the
@@ -82,7 +82,13 @@ async function fillFromPackageJson(content: string, probe: ManifestProbe, out: D
   try {
     pkg = JSON.parse(content);
   } catch {
-    addPrefill(out, "tech-constraints", probe.language, probe.filename, `Detected ${probe.language} from package.json (unparseable, using default stack)`);
+    addPrefill(
+      out,
+      "tech-constraints",
+      probe.language,
+      probe.filename,
+      `Detected ${probe.language} from package.json (unparseable, using default stack)`,
+    );
     return;
   }
 
@@ -146,6 +152,8 @@ export function formatDiscoverySummary(d: DiscoveryResult): string | null {
     lines.push(`- \`${ev.dim}\` ← ${ev.value} _(from ${ev.source})_`);
   }
   lines.push("");
-  lines.push(`Skipping ${d.prefilled.size} clarification question${d.prefilled.size === 1 ? "" : "s"}; you'll only be asked the rest.`);
+  lines.push(
+    `Skipping ${d.prefilled.size} clarification question${d.prefilled.size === 1 ? "" : "s"}; you'll only be asked the rest.`,
+  );
   return lines.join("\n");
 }

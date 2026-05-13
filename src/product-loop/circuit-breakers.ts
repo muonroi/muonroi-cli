@@ -10,17 +10,17 @@ export function CB1_costProjection(
   history: { actualCost: number }[],
   capUsd: number,
   spentUsd: number,
-  baselineCost?: number
+  baselineCost?: number,
 ): { halt: boolean; projection: number; headroom: number } {
-  const recent = history.slice(-3).map(s => s.actualCost);
-  
+  const recent = history.slice(-3).map((s) => s.actualCost);
+
   let ewma: number;
   if (recent.length === 0) {
     ewma = baselineCost ?? 0;
   } else {
     ewma = recent.reduce((avg, c) => avg * 0.7 + c * 0.3, recent[0]);
   }
-  
+
   const projection = ewma * 1.2;
   const remaining = capUsd - spentUsd;
   const halt = projection > remaining * 1.5;
@@ -35,7 +35,7 @@ export function CB1_costProjection(
  */
 export function CB2_oscillation(
   history: { score: number }[],
-  sprintN: number
+  sprintN: number,
 ): { halt: boolean; delta_t: number; delta_t_minus_1: number } {
   if (sprintN < 3 || history.length < 3) {
     return { halt: false, delta_t: 0, delta_t_minus_1: 0 };
@@ -56,7 +56,7 @@ export function CB2_oscillation(
  */
 export function CB3_verifyBlank(
   sprintN: number,
-  recipe: VerifyRecipe | null
+  recipe: VerifyRecipe | null,
 ): { halt: boolean; reason?: "no_recipe" | "zero_coverage" } {
   if (sprintN !== 1) {
     return { halt: false };

@@ -72,10 +72,7 @@ export function patchZodToJsonSchema(): void {
   const originalFetch = globalThis.fetch;
   if ((originalFetch as any).__zodPatched) return;
 
-  globalThis.fetch = async function patchedFetch(
-    input: string | URL | Request,
-    init?: RequestInit,
-  ): Promise<Response> {
+  globalThis.fetch = async function patchedFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
     if (init?.method === "POST" && init.body && typeof init.body === "string") {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url.includes("/chat/completions")) {
@@ -93,10 +90,12 @@ export function patchZodToJsonSchema(): void {
 }
 
 function fixBrokenToolSchemas(body: Record<string, unknown>): boolean {
-  const tools = body.tools as Array<{
-    type: string;
-    function: { name: string; parameters: Record<string, unknown> };
-  }> | undefined;
+  const tools = body.tools as
+    | Array<{
+        type: string;
+        function: { name: string; parameters: Record<string, unknown> };
+      }>
+    | undefined;
   if (!Array.isArray(tools)) return false;
   let modified = false;
   for (const tool of tools) {
@@ -110,11 +109,9 @@ function fixBrokenToolSchemas(body: Record<string, unknown>): boolean {
     }
 
     // Check if schema is broken (empty properties or missing type)
-    const isBroken = !params.type || (
-      params.properties &&
-      typeof params.properties === "object" &&
-      Object.keys(params.properties).length === 0
-    );
+    const isBroken =
+      !params.type ||
+      (params.properties && typeof params.properties === "object" && Object.keys(params.properties).length === 0);
     if (!isBroken) continue;
     const cached = schemaRegistry.get(tool.function.name);
     if (cached) {

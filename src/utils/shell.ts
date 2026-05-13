@@ -131,7 +131,13 @@ function resolveShellInner(settings: ShellSettings): ResolvedShell {
 
 function classify(binary: string): ResolvedShell {
   const lower = binary.toLowerCase();
-  if (lower.endsWith("bash.exe") || lower.endsWith("/bash") || lower.endsWith("\\bash") || lower.endsWith("sh.exe") || lower.endsWith("/sh")) {
+  if (
+    lower.endsWith("bash.exe") ||
+    lower.endsWith("/bash") ||
+    lower.endsWith("\\bash") ||
+    lower.endsWith("sh.exe") ||
+    lower.endsWith("/sh")
+  ) {
     return { binary, isPosix: true, kind: "bash" };
   }
   if (lower.endsWith("wsl.exe") || lower.endsWith("\\wsl") || lower.endsWith("/wsl")) {

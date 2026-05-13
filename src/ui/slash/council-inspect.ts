@@ -5,9 +5,10 @@
  * Reads [Council Memory], [Council Round N], and [Council Tool Trace] system messages.
  * CQ-21
  */
+
+import { getDatabase } from "../../storage/db.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
-import { getDatabase } from "../../storage/db.js";
 
 interface CouncilMemoryRecord {
   topic: string;
@@ -36,7 +37,9 @@ function extractContent(messageJson: string): string {
     if (Array.isArray(parsed.content)) {
       return parsed.content.map((c) => (typeof c === "object" && c.text ? c.text : "")).join("");
     }
-  } catch { /* fall through */ }
+  } catch {
+    /* fall through */
+  }
   return messageJson;
 }
 
@@ -84,7 +87,9 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
     if (content.startsWith("[Council Memory] ")) {
       try {
         memoryRecord = JSON.parse(content.slice("[Council Memory] ".length)) as CouncilMemoryRecord;
-      } catch { /* skip malformed — T-17-06 */ }
+      } catch {
+        /* skip malformed — T-17-06 */
+      }
       continue;
     }
 
@@ -101,7 +106,6 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
 
     if (content.startsWith("[Council Tool Trace]")) {
       toolTraces.push(content);
-      continue;
     }
   }
 
@@ -118,7 +122,9 @@ export const handleCouncilInspectSlash: SlashHandler = async (args) => {
   lines.push(`## Council Session: ${sessionId}`);
   lines.push(`**Topic:** ${memoryRecord.topic}`);
   lines.push(`**Timestamp:** ${memoryRecord.timestamp}`);
-  lines.push(`**Stats:** ${memoryRecord.stats.calls} API calls · ${(memoryRecord.stats.durationMs / 1000).toFixed(1)}s`);
+  lines.push(
+    `**Stats:** ${memoryRecord.stats.calls} API calls · ${(memoryRecord.stats.durationMs / 1000).toFixed(1)}s`,
+  );
   lines.push("");
 
   // Participants

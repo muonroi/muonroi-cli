@@ -1,9 +1,15 @@
-import { getCachedAuthToken, getCachedServerBaseUrl, getCachedServerTimeoutMs, loadEEAuthToken, refreshAuthToken } from "./auth.js";
-import { getTenantId } from "./tenant.js";
+import {
+  getCachedAuthToken,
+  getCachedServerBaseUrl,
+  getCachedServerTimeoutMs,
+  loadEEAuthToken,
+  refreshAuthToken,
+} from "./auth.js";
 import type { CreateEEClientOpts } from "./client.js";
 import { createEEClient } from "./client.js";
 import { emitMatches } from "./render.js";
 import { buildScope } from "./scope.js";
+import { getTenantId } from "./tenant.js";
 import type { InterceptRequest, InterceptResponse, Scope } from "./types.js";
 
 // ─── Surfaced-state tracking for prompt-stale reconciliation ─────────────────

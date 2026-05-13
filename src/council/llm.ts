@@ -1,18 +1,20 @@
-import { generateText, stepCountIs } from "ai";
-import type { ToolSet } from "ai";
 import * as fs from "node:fs";
-import { loadKeyForProvider } from "../providers/keychain.js";
-import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
-import { createBuiltinTools as createTools } from "../tools/registry.js";
-import type { BashTool } from "../tools/bash.js";
-import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
-import type { CouncilLLM, CouncilStats, ToolTraceEmitter } from "./types.js";
-import { loadMcpServers } from "../utils/settings.js";
-import { buildMcpToolSet } from "../mcp/runtime.js";
-import type { McpToolBundle } from "../mcp/runtime.js";
-import { buildResearchSystemPrompt } from "./prompts.js";
+import type { ToolSet } from "ai";
+import { generateText, stepCountIs } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
+import type { McpToolBundle } from "../mcp/runtime.js";
+import { buildMcpToolSet } from "../mcp/runtime.js";
+import { loadKeyForProvider } from "../providers/keychain.js";
+import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
+import type { BashTool } from "../tools/bash.js";
+import { createBuiltinTools as createTools } from "../tools/registry.js";
+import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
+import { appendCostLog } from "../usage/cost-log.js";
+import { projectCostUSD } from "../usage/estimator.js";
+import { loadMcpServers } from "../utils/settings.js";
+import { buildResearchSystemPrompt } from "./prompts.js";
+import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
 
 // ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──
 //
@@ -59,7 +61,7 @@ function writeDebugRecord(rec: DebugCallRecord): void {
 }
 
 function head(s: unknown, n = 300): string {
-  const str = typeof s === "string" ? s : (s == null ? "" : String(s));
+  const str = typeof s === "string" ? s : s == null ? "" : String(s);
   return str.length > n ? str.slice(0, n) + "…" : str;
 }
 
@@ -72,17 +74,9 @@ function truncate(value: unknown): string {
   return s.length > TRACE_ARG_LIMIT ? s.slice(0, TRACE_ARG_LIMIT) + "…[truncated]" : s;
 }
 
-function emitToolTrace(
-  toolName: string,
-  args: unknown,
-  result: unknown,
-  persistTrace?: ToolTraceEmitter,
-): void {
+function emitToolTrace(toolName: string, args: unknown, result: unknown, persistTrace?: ToolTraceEmitter): void {
   if (!persistTrace) return;
-  const traceText =
-    `[Council Tool Trace] tool=${toolName} ` +
-    `args=${truncate(args)} ` +
-    `result=${truncate(result)}`;
+  const traceText = `[Council Tool Trace] tool=${toolName} ` + `args=${truncate(args)} ` + `result=${truncate(result)}`;
   persistTrace(traceText);
 }
 
@@ -104,7 +98,8 @@ function capToolResult(result: unknown): unknown {
   if (result == null) return result;
   if (typeof result === "string") {
     return result.length > TOOL_RESULT_CAP_CHARS
-      ? result.slice(0, TOOL_RESULT_CAP_CHARS) + `\n…[truncated to ${TOOL_RESULT_CAP_CHARS} chars by council to protect context]`
+      ? result.slice(0, TOOL_RESULT_CAP_CHARS) +
+          `\n…[truncated to ${TOOL_RESULT_CAP_CHARS} chars by council to protect context]`
       : result;
   }
   try {
@@ -148,13 +143,68 @@ function wrapToolsWithEeCheck(tools: ToolSet, tenantId: string): ToolSet {
             scope: { kind: "global" },
           });
           emitMatches(resp?.matches);
-        } catch { /* fail-open — tool must execute regardless */ }
+        } catch {
+          /* fail-open — tool must execute regardless */
+        }
         const raw = await (tool as { execute: (args: unknown, opts: unknown) => unknown }).execute(args, opts);
         return capToolResult(raw);
       },
     };
   }
   return wrapped;
+}
+
+/**
+ * Extract token counts from an AI SDK `generateText` result.usage object.
+ * Defensive — different providers expose slightly different field names.
+ */
+function extractUsage(raw: unknown): { inputTokens: number; outputTokens: number; cachedInputTokens: number } {
+  const u = (raw ?? {}) as Record<string, unknown>;
+  const details = (u.inputTokenDetails ?? {}) as Record<string, unknown>;
+  const rawNested = (u.raw ?? {}) as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  return {
+    inputTokens: num(u.inputTokens) || num(u.promptTokens),
+    outputTokens: num(u.outputTokens) || num(u.completionTokens),
+    cachedInputTokens:
+      num(u.cachedInputTokens) || num(details.cacheReadTokens) || num(rawNested.prompt_cache_hit_tokens),
+  };
+}
+
+/**
+ * Best-effort cost-log append for council LLM calls. Failures are swallowed.
+ * Returns the parsed usage so callers can forward it via an onUsage callback
+ * (sprint-runner uses this to commit with real token counts, not chars/4).
+ */
+function logCouncilCost(args: {
+  callsite: string;
+  role?: string;
+  provider: string;
+  modelId: string;
+  rawUsage: unknown;
+  systemChars: number;
+  promptChars: number;
+  durationMs: number;
+  stepCount?: number;
+}): { inputTokens: number; outputTokens: number; cachedInputTokens: number } {
+  const usage = extractUsage(args.rawUsage);
+  appendCostLog({
+    ts: Date.now() - args.durationMs,
+    provider: args.provider,
+    model: args.modelId,
+    estimatedUsd: projectCostUSD(args.provider, args.modelId, usage.inputTokens, usage.outputTokens),
+    callsite: args.callsite,
+    role: args.role,
+    phase: "council",
+    systemChars: args.systemChars,
+    promptChars: args.promptChars,
+    actualInputTokens: usage.inputTokens,
+    actualOutputTokens: usage.outputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    stepCount: args.stepCount,
+    durationMs: args.durationMs,
+  }).catch(() => undefined);
+  return usage;
 }
 
 export function createCouncilLLM(
@@ -164,7 +214,13 @@ export function createCouncilLLM(
   stats: CouncilStats,
 ): CouncilLLM {
   return {
-    async generate(modelId: string, system: string, prompt: string, maxTokens = 4096): Promise<string> {
+    async generate(
+      modelId: string,
+      system: string,
+      prompt: string,
+      maxTokens = 4096,
+      onUsage?: UsageCallback,
+    ): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -188,6 +244,17 @@ export function createCouncilLLM(
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         });
         stats.calls++;
+        const durMs = Date.now() - t0;
+        const callUsage = logCouncilCost({
+          callsite: "council.generate",
+          provider: providerId,
+          modelId,
+          rawUsage: (result as { usage?: unknown }).usage,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          durationMs: durMs,
+        });
+        onUsage?.(callUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "generate",
@@ -197,7 +264,7 @@ export function createCouncilLLM(
           systemChars: system.length,
           promptChars: prompt.length,
           maxTokens,
-          durationMs: Date.now() - t0,
+          durationMs: durMs,
           ok: true,
           textChars: (result.text ?? "").length,
           textHead: head(result.text),
@@ -227,7 +294,15 @@ export function createCouncilLLM(
       }
     },
 
-    async debate(modelId: string, system: string, prompt: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter, options?: { enableVerificationTools?: boolean }): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
+    async debate(
+      modelId: string,
+      system: string,
+      prompt: string,
+      signal?: AbortSignal,
+      persistTrace?: ToolTraceEmitter,
+      options?: { enableVerificationTools?: boolean },
+      onUsage?: UsageCallback,
+    ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -261,9 +336,13 @@ export function createCouncilLLM(
                 }
               }
             }
-          } catch { /* MCP optional — debate continues with builtins only */ }
+          } catch {
+            /* MCP optional — debate continues with builtins only */
+          }
           verificationTools = wrapToolsWithEeCheck(filtered, sessionId ?? "council-debate");
-        } catch { /* fail-open: no tools */ }
+        } catch {
+          /* fail-open: no tools */
+        }
       }
 
       const t0 = Date.now();
@@ -292,10 +371,27 @@ export function createCouncilLLM(
         stats.calls++;
         // No tool calls expected, but the AI SDK shape still has the field —
         // pass through for type compatibility.
-        const toolCalls = (result.toolCalls ?? []) as Array<{ toolName: string; args?: unknown; input?: unknown; result?: unknown }>;
+        const toolCalls = (result.toolCalls ?? []) as Array<{
+          toolName: string;
+          args?: unknown;
+          input?: unknown;
+          result?: unknown;
+        }>;
         for (const tc of toolCalls) {
           emitToolTrace(tc.toolName, tc.args ?? tc.input ?? {}, tc.result, persistTrace);
         }
+        const debateUsage = logCouncilCost({
+          callsite: "council.debate",
+          role: "debater",
+          provider: providerId,
+          modelId,
+          rawUsage: (result as { usage?: unknown }).usage,
+          systemChars: system.length,
+          promptChars: prompt.length,
+          durationMs: Date.now() - t0,
+          stepCount: toolCalls.length,
+        });
+        onUsage?.(debateUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "debate",
@@ -343,7 +439,15 @@ export function createCouncilLLM(
       }
     },
 
-    async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal, persistTrace?: ToolTraceEmitter, options?: { internetFirst?: boolean }): Promise<string> {
+    async research(
+      modelId: string,
+      topic: string,
+      conversationContext: string,
+      signal?: AbortSignal,
+      persistTrace?: ToolTraceEmitter,
+      options?: { internetFirst?: boolean },
+      onUsage?: UsageCallback,
+    ): Promise<string> {
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -398,6 +502,18 @@ export function createCouncilLLM(
           ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
           ...(signal ? { abortSignal: signal } : {}),
         });
+        const researchUsage = logCouncilCost({
+          callsite: "council.research",
+          role: "researcher",
+          provider: providerId,
+          modelId,
+          rawUsage: (result as { usage?: unknown }).usage,
+          systemChars: systemPrompt.length,
+          promptChars: userPrompt.length,
+          durationMs: Date.now() - t0,
+          stepCount: (result.toolCalls ?? []).length,
+        });
+        onUsage?.(researchUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "research",
@@ -420,7 +536,12 @@ export function createCouncilLLM(
         });
 
         // Emit tool traces (CQ-22)
-        const researchToolCalls = (result.toolCalls ?? []) as Array<{ toolName: string; args?: unknown; input?: unknown; result?: unknown }>;
+        const researchToolCalls = (result.toolCalls ?? []) as Array<{
+          toolName: string;
+          args?: unknown;
+          input?: unknown;
+          result?: unknown;
+        }>;
         for (const tc of researchToolCalls) {
           emitToolTrace(tc.toolName, tc.args ?? tc.input ?? {}, tc.result, persistTrace);
         }
@@ -429,9 +550,7 @@ export function createCouncilLLM(
         if (hasUrl) {
           // Use result.toolCalls (flat array across all steps) — more reliably typed than steps[].toolCalls
           const browserUsed = researchToolCalls.some(
-            (tc) =>
-              tc.toolName.includes("playwright") ||
-              tc.toolName.includes("chrome"),
+            (tc) => tc.toolName.includes("playwright") || tc.toolName.includes("chrome"),
           );
           if (!browserUsed) {
             stats.calls++;

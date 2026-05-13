@@ -13,7 +13,7 @@
  *    (1 verification call + final text). The caller (debate.ts) only enables
  *    it for balanced/premium tier; fast-tier reasoning models stay tool-free.
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 describe("debate() call shape — tools off by default, on with explicit opt-in", () => {
   beforeEach(() => {
@@ -170,10 +170,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("ai", () => ({
       generateText: vi.fn().mockResolvedValue({
         text: "debate answer",
-        toolCalls: [
-          { toolName: "bash", result: "ls output" },
-          { toolName: "grep" },
-        ],
+        toolCalls: [{ toolName: "bash", result: "ls output" }, { toolName: "grep" }],
         steps: [],
       }),
       stepCountIs: vi.fn().mockReturnValue({}),
@@ -329,9 +326,7 @@ describe("CQ-09: Per-round persistence output format", () => {
   it("persistence text includes tool usage suffix when toolCalls present", () => {
     // Validate the suffix format: "[tools: bash, grep]"
     const toolCalls = [{ toolName: "bash" }, { toolName: "grep" }];
-    const toolSuffix = toolCalls.length
-      ? ` [tools: ${toolCalls.map((t) => t.toolName).join(", ")}]`
-      : "";
+    const toolSuffix = toolCalls.length ? ` [tools: ${toolCalls.map((t) => t.toolName).join(", ")}]` : "";
     const chunkText = `some response${toolSuffix}`;
 
     expect(chunkText).toContain("[tools: bash, grep]");

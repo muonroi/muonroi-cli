@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { describe, expect, it } from "vitest";
 import type { VerifyRecipe } from "../../types/index.js";
+import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 
 describe("CB-1 cost projection — coverage gaps", () => {
   it("returns zero projection when history empty and no baseline", () => {
@@ -52,10 +52,7 @@ describe("CB-2 oscillation — coverage gaps", () => {
   });
 
   it("halts when both deltas are exactly zero", () => {
-    const r = CB2_oscillation(
-      [{ score: 0.5 }, { score: 0.5 }, { score: 0.5 }],
-      3,
-    );
+    const r = CB2_oscillation([{ score: 0.5 }, { score: 0.5 }, { score: 0.5 }], 3);
     expect(r.halt).toBe(true);
     expect(r.delta_t).toBe(0);
     expect(r.delta_t_minus_1).toBe(0);
@@ -63,10 +60,7 @@ describe("CB-2 oscillation — coverage gaps", () => {
 
   it("does not halt when delta_t is positive even if delta_t-1 was non-positive", () => {
     // recovery scenario: stagnated then improved
-    const r = CB2_oscillation(
-      [{ score: 0.5 }, { score: 0.5 }, { score: 0.7 }],
-      3,
-    );
+    const r = CB2_oscillation([{ score: 0.5 }, { score: 0.5 }, { score: 0.7 }], 3);
     expect(r.halt).toBe(false);
     expect(r.delta_t).toBeCloseTo(0.2);
   });

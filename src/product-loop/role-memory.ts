@@ -59,7 +59,7 @@ export async function appendRoleMemory(
         break;
       }
     }
-    
+
     // If even the last block is too big, just keep the last block (best effort)
     if (!found && matches.length > 0) {
       newContent = newContent.slice(matches[matches.length - 1].index!);

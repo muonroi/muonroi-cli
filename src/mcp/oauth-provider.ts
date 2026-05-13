@@ -89,9 +89,7 @@ export class CliOAuthProvider {
     return getStore(this.serverId).discovery;
   }
 
-  invalidateCredentials(
-    scope: "all" | "client" | "tokens" | "verifier" | "discovery",
-  ): void {
+  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier" | "discovery"): void {
     const s = getStore(this.serverId);
     if (scope === "all" || scope === "tokens") s.tokens = undefined;
     if (scope === "all" || scope === "client") s.clientInfo = undefined;

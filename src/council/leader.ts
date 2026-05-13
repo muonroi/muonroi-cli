@@ -1,8 +1,8 @@
-import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
-import { detectProviderForModel } from "../providers/runtime.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 
 const TIER_RANK: Record<string, number> = { fast: 1, balanced: 2, premium: 3 };
 
@@ -50,11 +50,7 @@ const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced"> = {
  *   - leader is already at or below the target tier
  *   - no cataloged model on the leader's provider matches the target tier
  */
-export function pickCouncilTaskModel(
-  task: CouncilSubTask,
-  leaderModelId: string,
-  costAware: boolean,
-): string {
+export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string, costAware: boolean): string {
   if (!costAware) return leaderModelId;
 
   const targetTier = SUB_TASK_TIER[task];
@@ -109,9 +105,11 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
   const configuredTier = configured ? tierOf(configured) : undefined;
 
   const sessionDisabled = isProviderDisabled(sessionProviderId as ProviderId);
-  const sessionReachable = !sessionDisabled && await loadKeyForProvider(sessionProviderId)
-    .then(() => true)
-    .catch(() => false);
+  const sessionReachable =
+    !sessionDisabled &&
+    (await loadKeyForProvider(sessionProviderId)
+      .then(() => true)
+      .catch(() => false));
   if (!sessionReachable) {
     return { modelId: configured ?? sessionModelId };
   }
@@ -213,9 +211,11 @@ export async function resolveParticipants(
   }
 
   const providerDisabled = isProviderDisabled(detectProviderForModel(sessionModelId) as ProviderId);
-  const canReach = !providerDisabled && await loadKeyForProvider(detectProviderForModel(sessionModelId))
-    .then(() => true)
-    .catch(() => false);
+  const canReach =
+    !providerDisabled &&
+    (await loadKeyForProvider(detectProviderForModel(sessionModelId))
+      .then(() => true)
+      .catch(() => false));
   if (canReach) {
     return ALL_ROLES.map((role) => ({ role, model: sessionModelId }));
   }

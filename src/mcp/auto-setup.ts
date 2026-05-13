@@ -74,11 +74,7 @@ function migrateServers(servers: McpServerConfig[]): boolean {
       server.args = server.args!.map((a) => PACKAGE_MIGRATIONS[a] ?? a);
       changed = true;
     }
-    if (
-      server.id === "figma" &&
-      server.args?.includes("figma-developer-mcp") &&
-      !server.args.includes("--stdio")
-    ) {
+    if (server.id === "figma" && server.args?.includes("figma-developer-mcp") && !server.args.includes("--stdio")) {
       server.args = [...server.args, "--stdio"];
       changed = true;
     }
@@ -94,8 +90,7 @@ export function ensureDefaultMcpServers(): McpServerConfig[] {
     const toAdd = DEFAULT_CONFIGS.filter((s) => !existingIds.has(s.id));
     if (toAdd.length > 0) dirty = true;
     if (!dirty) return existing;
-    const merged =
-      toAdd.length > 0 ? [...toAdd, ...existing] : existing;
+    const merged = toAdd.length > 0 ? [...toAdd, ...existing] : existing;
     saveMcpServers(merged);
     return merged;
   } catch {

@@ -17,7 +17,12 @@ vi.mock("./intercept.js", async (importOriginal) => {
   };
 });
 
-import { getDefaultEEClient, getLastSurfacedState, resetLastSurfacedState, updateLastSurfacedState } from "./intercept.js";
+import {
+  getDefaultEEClient,
+  getLastSurfacedState,
+  resetLastSurfacedState,
+  updateLastSurfacedState,
+} from "./intercept.js";
 import { reconcilePromptStale } from "./prompt-stale.js";
 
 describe("reconcilePromptStale", () => {

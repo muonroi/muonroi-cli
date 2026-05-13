@@ -19,8 +19,8 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ChatEntry } from "../../types/index.js";
 import { buildChatEntries } from "../../storage/transcript.js";
+import type { ChatEntry } from "../../types/index.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
@@ -71,8 +71,13 @@ function renderEntries(entries: readonly ChatEntry[]): string[] {
 function signature(entries: readonly ChatEntry[]): string {
   const counts: Record<string, number> = {};
   for (const e of entries) counts[e.type] = (counts[e.type] ?? 0) + 1;
-  return `n=${entries.length} ` +
-    Object.entries(counts).sort().map(([k, v]) => `${k}:${v}`).join(" ");
+  return (
+    `n=${entries.length} ` +
+    Object.entries(counts)
+      .sort()
+      .map(([k, v]) => `${k}:${v}`)
+      .join(" ")
+  );
 }
 
 function formatExport(
@@ -94,8 +99,15 @@ function formatExport(
   // Case 1: DB and live agree — single block, source=db (canonical).
   if (dbSig === liveSig && dbEntries.length > 0) {
     return {
-      text: [...header, "(DB and TUI scrollback match — single rendering)", "", ...renderEntries(dbEntries),
-        "=".repeat(72), "  End of export", "=".repeat(72)].join("\n"),
+      text: [
+        ...header,
+        "(DB and TUI scrollback match — single rendering)",
+        "",
+        ...renderEntries(dbEntries),
+        "=".repeat(72),
+        "  End of export",
+        "=".repeat(72),
+      ].join("\n"),
       mode: "synced",
     };
   }
@@ -113,7 +125,9 @@ function formatExport(
         "── TUI Scrollback (in-memory) ──",
         "",
         ...renderEntries(liveEntries),
-        "=".repeat(72), "  End of export", "=".repeat(72),
+        "=".repeat(72),
+        "  End of export",
+        "=".repeat(72),
       ].join("\n"),
       mode: "live_only",
     };
@@ -123,9 +137,15 @@ function formatExport(
   // (e.g., a non-interactive caller). Just render DB.
   if (liveEntries.length === 0 && dbEntries.length > 0) {
     return {
-      text: [...header, "(Live scrollback unavailable — showing DB only)", "",
+      text: [
+        ...header,
+        "(Live scrollback unavailable — showing DB only)",
+        "",
         ...renderEntries(dbEntries),
-        "=".repeat(72), "  End of export", "=".repeat(72)].join("\n"),
+        "=".repeat(72),
+        "  End of export",
+        "=".repeat(72),
+      ].join("\n"),
       mode: "db_only",
     };
   }
@@ -151,7 +171,9 @@ function formatExport(
       "─".repeat(72),
       "",
       ...renderEntries(liveEntries),
-      "=".repeat(72), "  End of export", "=".repeat(72),
+      "=".repeat(72),
+      "  End of export",
+      "=".repeat(72),
     ].join("\n"),
     mode: "merged",
   };
@@ -178,10 +200,13 @@ export const handleExportSlash: SlashHandler = async (_args, ctx) => {
   try {
     fs.writeFileSync(filePath, text, "utf-8");
     const modeNote =
-      mode === "synced"   ? "DB and TUI matched"
-      : mode === "db_only"  ? "DB only (no TUI scrollback)"
-      : mode === "live_only" ? `TUI scrollback only (DB had 0 entries; ${liveEntries.length} live)`
-      : `DB and TUI diverged — both included (db=${dbEntries.length}, live=${liveEntries.length})`;
+      mode === "synced"
+        ? "DB and TUI matched"
+        : mode === "db_only"
+          ? "DB only (no TUI scrollback)"
+          : mode === "live_only"
+            ? `TUI scrollback only (DB had 0 entries; ${liveEntries.length} live)`
+            : `DB and TUI diverged — both included (db=${dbEntries.length}, live=${liveEntries.length})`;
     return `Exported to ${filePath} (${(text.length / 1024).toFixed(1)} KB) — ${modeNote}`;
   } catch (err) {
     return `Failed to write export file: ${err instanceof Error ? err.message : String(err)}`;

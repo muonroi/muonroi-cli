@@ -1,7 +1,7 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { resolveRoles } from "../role-registry.js";
-import type { ModelInfo } from "../../types/index.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { EERouteResult } from "../../ee/bridge.js";
+import type { ModelInfo } from "../../types/index.js";
+import { resolveRoles } from "../role-registry.js";
 
 const inventory: ModelInfo[] = [
   { id: "anthropic-premium-1", provider: "anthropic", tier: "premium" } as ModelInfo,
@@ -45,14 +45,16 @@ describe("resolveRoles + EE override", () => {
   });
 
   it("ignores EE override when model is not in inventory", async () => {
-    const eeRouteOverride = vi.fn(async (): Promise<EERouteResult | null> => ({
-      tier: "premium",
-      model: "ghost-model-not-in-inventory",
-      confidence: 0.99,
-      source: "history",
-      reason: "phantom",
-      taskHash: "h",
-    }));
+    const eeRouteOverride = vi.fn(
+      async (): Promise<EERouteResult | null> => ({
+        tier: "premium",
+        model: "ghost-model-not-in-inventory",
+        confidence: 0.99,
+        source: "history",
+        reason: "phantom",
+        taskHash: "h",
+      }),
+    );
 
     const result = await resolveRoles({ inventory, eeRouteOverride });
     expect(result.kind).toBe("ok");

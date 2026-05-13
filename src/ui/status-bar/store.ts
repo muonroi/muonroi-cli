@@ -6,10 +6,10 @@
  * and subscribeDowngrade (Plan 05).
  */
 
+import { getCircuitState } from "../../ee/client.js";
 import { routerStore } from "../../router/store.js";
 import { subscribeDowngrade } from "../../usage/downgrade.js";
 import { subscribeThresholds } from "../../usage/thresholds.js";
-import { getCircuitState } from "../../ee/client.js";
 
 export interface StatusBarState {
   provider: string;
@@ -116,7 +116,9 @@ export function wireStatusBar(): () => void {
     const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
     if (cfg.serverBaseUrl) eeBaseUrl = cfg.serverBaseUrl;
     eeAuthToken = cfg.serverReadAuthToken || cfg.serverAuthToken || "";
-  } catch { /* config unreadable — try localhost */ }
+  } catch {
+    /* config unreadable — try localhost */
+  }
 
   async function checkEEHealth() {
     try {
@@ -139,7 +141,9 @@ export function wireStatusBar(): () => void {
         const serverOk = data.ok !== false;
         // Green only if: server healthy AND circuit closed (integration fully working)
         // Half-open means the circuit is probing again — if health passes, treat as ok
-        statusBarStore.setState({ ee_status: serverOk && (circuit === "closed" || circuit === "half-open") ? "ok" : "warn" });
+        statusBarStore.setState({
+          ee_status: serverOk && (circuit === "closed" || circuit === "half-open") ? "ok" : "warn",
+        });
       } else {
         statusBarStore.setState({ ee_status: "warn" });
       }

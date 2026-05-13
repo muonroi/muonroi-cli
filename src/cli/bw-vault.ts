@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 
 /**
  * Thin wrapper around the Bitwarden CLI for writing secrets into the user's
@@ -25,8 +25,7 @@ interface BwListItem {
 
 type Runner = (cmd: string, args: string[], input?: string) => SpawnSyncReturns<string>;
 
-const defaultRunner: Runner = (cmd, args, input) =>
-  spawnSync(cmd, args, { encoding: "utf8", input });
+const defaultRunner: Runner = (cmd, args, input) => spawnSync(cmd, args, { encoding: "utf8", input });
 
 function ensureUnlocked(session: string, run: Runner): { ok: true } | { ok: false; error: string } {
   const status = run("bw", ["status", "--session", session]);

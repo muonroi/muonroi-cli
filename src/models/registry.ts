@@ -1,5 +1,5 @@
 import type { ModelInfo, ReasoningEffort } from "../types";
-import { fetchCatalog, catalogModelToModelInfo } from "./catalog-client.js";
+import { catalogModelToModelInfo, fetchCatalog } from "./catalog-client.js";
 
 const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 

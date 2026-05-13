@@ -101,11 +101,7 @@ export function upsertStatus(prev: CouncilStatusData[], next: CouncilStatusData)
 }
 
 /** Remove `done` rows that finished more than DONE_HOLD_MS ago. */
-export function reapStatuses(
-  prev: CouncilStatusData[],
-  doneAt: Map<string, number>,
-  now: number,
-): CouncilStatusData[] {
+export function reapStatuses(prev: CouncilStatusData[], doneAt: Map<string, number>, now: number): CouncilStatusData[] {
   return prev.filter((s) => {
     if (s.state !== "done") return true;
     const t = doneAt.get(s.statusId);

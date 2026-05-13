@@ -5,9 +5,9 @@
  * Enforces two-cap semantics: halt on first cap hit (monthly OR per-product).
  */
 
+import { projectCostUSD } from "../usage/estimator.js";
 import { reserve } from "../usage/ledger.js";
 import { getProductSpentUsd } from "../usage/product-ledger.js";
-import { projectCostUSD } from "../usage/estimator.js";
 import { CapBreachError, type ReservationToken } from "../usage/types.js";
 
 /**

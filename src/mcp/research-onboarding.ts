@@ -1,6 +1,6 @@
-import { loadMcpServers, saveMcpServers, saveUserSettings, loadUserSettings } from "../utils/settings.js";
-import { setMcpKey } from "./mcp-keychain.js";
+import { loadMcpServers, loadUserSettings, saveMcpServers, saveUserSettings } from "../utils/settings.js";
 import { ensureDefaultMcpServers } from "./auto-setup.js";
+import { setMcpKey } from "./mcp-keychain.js";
 
 export interface OnboardingIO {
   askYesNo: (prompt: string) => Promise<string>;
@@ -55,7 +55,10 @@ function setTavilyEnabled(enabled: boolean): void {
   saveMcpServers(servers);
 }
 
-async function promptForKeyWithRetry(io: { askText: (p: string) => Promise<string>; log: (m: string) => void }): Promise<string | null> {
+async function promptForKeyWithRetry(io: {
+  askText: (p: string) => Promise<string>;
+  log: (m: string) => void;
+}): Promise<string | null> {
   for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
     const raw = await io.askText(
       attempt === 1

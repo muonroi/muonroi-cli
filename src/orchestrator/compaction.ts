@@ -200,9 +200,10 @@ function dedupToolResultsWithState(messages: ModelMessage[], seenHashes: Set<str
       if (serialized.length < DEDUP_MIN_CHARS) return part;
       const hash = hashString(serialized);
       if (seenHashes.has(hash)) {
-        const toolName = typeof (part as Record<string, unknown>).toolName === "string"
-          ? ((part as Record<string, unknown>).toolName as string)
-          : "tool";
+        const toolName =
+          typeof (part as Record<string, unknown>).toolName === "string"
+            ? ((part as Record<string, unknown>).toolName as string)
+            : "tool";
         return {
           ...(part as Record<string, unknown>),
           output: `[Identical to earlier ${toolName} result; ${serialized.length} chars elided]`,
@@ -301,9 +302,7 @@ function messageToString(message: ModelMessage): string {
     case "tool":
       return extractToolResultText(message.content).join("\n");
     case "system":
-      return typeof message.content === "string"
-        ? message.content
-        : getTextParts(message.content).join("\n");
+      return typeof message.content === "string" ? message.content : getTextParts(message.content).join("\n");
     default:
       return stringifyForSummary((message as { content?: unknown }).content);
   }
@@ -387,9 +386,7 @@ export function prepareCompaction(
   const cutPoint = findCutPoint(messages, boundaryStart, settings.keepRecentTokens);
   const historyEnd = cutPoint.isSplitTurn ? cutPoint.turnStartIndex : cutPoint.firstKeptIndex;
   const rawHistory = messages.slice(boundaryStart, Math.max(boundaryStart, historyEnd));
-  const rawTurnPrefix = cutPoint.isSplitTurn
-    ? messages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptIndex)
-    : [];
+  const rawTurnPrefix = cutPoint.isSplitTurn ? messages.slice(cutPoint.turnStartIndex, cutPoint.firstKeptIndex) : [];
   // Shared dedup state — second occurrence of a duplicate tool-result gets stubbed
   // even when the first occurrence is in the history slice and the second in the prefix.
   const dedupState = new Set<string>();
@@ -492,16 +489,18 @@ export interface CompactionSummaryResult {
 
 function readUsage(usage: unknown): CompactionUsage {
   if (!isRecord(usage)) return { promptTokens: 0, completionTokens: 0 };
-  const prompt = typeof usage.inputTokens === "number"
-    ? usage.inputTokens
-    : typeof (usage as Record<string, unknown>).promptTokens === "number"
-      ? (usage as { promptTokens: number }).promptTokens
-      : 0;
-  const completion = typeof usage.outputTokens === "number"
-    ? usage.outputTokens
-    : typeof (usage as Record<string, unknown>).completionTokens === "number"
-      ? (usage as { completionTokens: number }).completionTokens
-      : 0;
+  const prompt =
+    typeof usage.inputTokens === "number"
+      ? usage.inputTokens
+      : typeof (usage as Record<string, unknown>).promptTokens === "number"
+        ? (usage as { promptTokens: number }).promptTokens
+        : 0;
+  const completion =
+    typeof usage.outputTokens === "number"
+      ? usage.outputTokens
+      : typeof (usage as Record<string, unknown>).completionTokens === "number"
+        ? (usage as { completionTokens: number }).completionTokens
+        : 0;
   return { promptTokens: prompt, completionTokens: completion };
 }
 

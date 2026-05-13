@@ -1,6 +1,6 @@
+import { handleCouncilInspectSlash } from "./council-inspect.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
-import { handleCouncilInspectSlash } from "./council-inspect.js";
 
 export const handleCouncilSlash: SlashHandler = async (args, ctx) => {
   // Delegate sub-command: /council inspect <session-id>
@@ -17,9 +17,11 @@ export const handleCouncilSlash: SlashHandler = async (args, ctx) => {
 
   const topic = args.join(" ") || ctx.lastPrompt || "";
   if (!topic) {
-    return "/council [rounds] <topic> — multi-model discussion\n" +
+    return (
+      "/council [rounds] <topic> — multi-model discussion\n" +
       "Default: uses models from the same provider. Set councilPreferMultiProvider + roleModels for cross-provider.\n" +
-      "Example: /council 3 REST vs gRPC for our microservices";
+      "Example: /council 3 REST vs gRPC for our microservices"
+    );
   }
 
   return `__COUNCIL__\n${rounds ?? ""}\n${topic}`;

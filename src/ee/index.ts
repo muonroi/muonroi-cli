@@ -1,6 +1,16 @@
 export { getCachedAuthToken, getEmbeddingModelVersion, loadEEAuthToken, refreshAuthToken } from "./auth.js";
+export type { EEPoint, EERouteResult } from "./bridge.js";
+export {
+  classifyViaBrain,
+  getEmbeddingRaw,
+  resetBridge,
+  routeFeedback,
+  routeModel,
+  searchByText,
+  searchCollection,
+} from "./bridge.js";
 export { type CreateEEClientOpts, createEEClient } from "./client.js";
-export { health, healthDetailed, type EEHealthResult } from "./health.js";
+export { type EEHealthResult, health, healthDetailed } from "./health.js";
 export {
   bootstrapEEClient,
   getDefaultEEClient,
@@ -21,13 +31,3 @@ export type {
   PostToolPayload,
   Scope,
 } from "./types.js";
-export {
-  classifyViaBrain,
-  getEmbeddingRaw,
-  resetBridge,
-  routeFeedback,
-  routeModel,
-  searchByText,
-  searchCollection,
-} from "./bridge.js";
-export type { EEPoint, EERouteResult } from "./bridge.js";

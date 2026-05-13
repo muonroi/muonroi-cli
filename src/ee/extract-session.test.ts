@@ -15,10 +15,10 @@
  */
 import type { ModelMessage } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEEClient } from "./client.js";
-import { setDefaultEEClient } from "./intercept.js";
 import { startStubEEServer } from "../__test-stubs__/ee-server.js";
+import { createEEClient } from "./client.js";
 import { buildExtractTranscript, extractSession } from "./extract-session.js";
+import { setDefaultEEClient } from "./intercept.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -91,12 +91,7 @@ describe("extractSession — unit (mocked client)", () => {
 
   // Test 1: fewer than 5 user messages → skip
   it("Test 1: returns immediately when < 5 user messages", async () => {
-    const messages: ModelMessage[] = [
-      makeUserMsg("a"),
-      makeAssistantMsg("b"),
-      makeUserMsg("c"),
-      makeAssistantMsg("d"),
-    ];
+    const messages: ModelMessage[] = [makeUserMsg("a"), makeAssistantMsg("b"), makeUserMsg("c"), makeAssistantMsg("d")];
     await extractSession(messages, "/proj", "cli-exit");
     expect(mockExtract).not.toHaveBeenCalled();
   });

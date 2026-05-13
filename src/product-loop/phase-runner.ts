@@ -388,7 +388,13 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       }
       await markAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
 
-      const verdict = await args.awaitCustomerVerdict(args.flowDir, args.runId);
+      const verdict = await args.awaitCustomerVerdict({
+        flowDir: args.flowDir,
+        runId: args.runId,
+        phaseId: phase.id,
+        sprintN,
+        reviewSummary: review.summary,
+      });
       await clearAwaitingCustomerReview(args.flowDir, args.runId, phase.id, sprintN);
       await appendCustomerDecision(args.flowDir, args.runId, {
         phaseId: phase.id,

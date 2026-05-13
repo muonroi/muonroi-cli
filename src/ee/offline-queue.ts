@@ -94,11 +94,7 @@ export async function enqueue(entry: QueueEntry, homeOverride?: string): Promise
   await fs.writeFile(path.join(dir, filename), JSON.stringify(entry), "utf8");
 
   if (process.env.MUONROI_DEBUG) {
-    console.debug(
-      "[muonroi-cli] EE offline queue: enqueued %s (cap=%d)",
-      entry.endpoint,
-      MAX_QUEUE_SIZE,
-    );
+    console.debug("[muonroi-cli] EE offline queue: enqueued %s (cap=%d)", entry.endpoint, MAX_QUEUE_SIZE);
   }
 }
 
@@ -159,10 +155,7 @@ async function drainQueueInternal(
         await fs.unlink(filePath).catch(() => {});
 
         if (process.env.MUONROI_DEBUG) {
-          console.debug(
-            "[muonroi-cli] EE offline queue: replayed %s",
-            entry.endpoint,
-          );
+          console.debug("[muonroi-cli] EE offline queue: replayed %s", entry.endpoint);
         }
       } else {
         // D-07: server returned error — stop drain, leave file + remaining

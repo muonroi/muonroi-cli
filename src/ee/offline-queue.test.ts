@@ -18,12 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { startStubEEServer } from "../__test-stubs__/ee-server.js";
-import {
-  drainQueue,
-  drainQueueAsync,
-  enqueue,
-  getQueueDir,
-} from "./offline-queue.js";
+import { drainQueue, drainQueueAsync, enqueue, getQueueDir } from "./offline-queue.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -80,10 +75,7 @@ describe("enqueue()", () => {
     expect(files).toBeNull(); // dir does not exist yet
 
     // Call enqueue — should create dir
-    await enqueue(
-      { endpoint: "/api/feedback", body: { test: 1 }, enqueuedAt: 1000 },
-      tmpDir,
-    );
+    await enqueue({ endpoint: "/api/feedback", body: { test: 1 }, enqueuedAt: 1000 }, tmpDir);
 
     // Dir should now exist
     const filesAfter = await readdir(dir);
@@ -93,10 +85,7 @@ describe("enqueue()", () => {
   // ─── Test 9: Filename format ───────────────────────────────────────────────
 
   it("creates exactly 1 file with correct filename pattern after one enqueue", async () => {
-    await enqueue(
-      { endpoint: "/api/feedback", body: { test: 1 }, enqueuedAt: 1000 },
-      tmpDir,
-    );
+    await enqueue({ endpoint: "/api/feedback", body: { test: 1 }, enqueuedAt: 1000 }, tmpDir);
 
     const files = await readdir(queueDir());
     expect(files).toHaveLength(1);
@@ -115,9 +104,7 @@ describe("enqueue()", () => {
 
     const dir = queueDir();
     const files = await readdir(dir);
-    const raw = await import("node:fs/promises").then((fs) =>
-      fs.readFile(path.join(dir, files[0]), "utf8"),
-    );
+    const raw = await import("node:fs/promises").then((fs) => fs.readFile(path.join(dir, files[0]), "utf8"));
     const parsed = JSON.parse(raw);
 
     expect(parsed).toEqual(entry);
@@ -159,16 +146,12 @@ describe("enqueue()", () => {
 describe("getQueueDir()", () => {
   it("returns path under os.homedir() when no override given", () => {
     const result = getQueueDir();
-    expect(result).toBe(
-      path.join(os.homedir(), ".muonroi-cli", "ee-offline-queue"),
-    );
+    expect(result).toBe(path.join(os.homedir(), ".muonroi-cli", "ee-offline-queue"));
   });
 
   it("returns path under homeOverride when provided", () => {
     const result = getQueueDir("/tmp/test");
-    expect(result).toBe(
-      path.join("/tmp/test", ".muonroi-cli", "ee-offline-queue"),
-    );
+    expect(result).toBe(path.join("/tmp/test", ".muonroi-cli", "ee-offline-queue"));
   });
 });
 
@@ -182,12 +165,7 @@ describe("drainQueueAsync()", () => {
     const stub = await startStubEEServer({ feedback: () => {} });
 
     try {
-      await drainQueueAsync(
-        fetch,
-        { "Content-Type": "application/json" },
-        `http://127.0.0.1:${stub.port}`,
-        tmpDir,
-      );
+      await drainQueueAsync(fetch, { "Content-Type": "application/json" }, `http://127.0.0.1:${stub.port}`, tmpDir);
 
       // 3 requests received in order
       expect(stub.calls.feedback).toHaveLength(3);
@@ -245,20 +223,12 @@ describe("drainQueueAsync()", () => {
       }
     });
 
-    await new Promise<void>((resolve) =>
-      customServer.listen(0, "127.0.0.1", () => resolve()),
-    );
+    await new Promise<void>((resolve) => customServer.listen(0, "127.0.0.1", () => resolve()));
     const addr = customServer.address();
-    const port =
-      typeof addr === "object" && addr ? (addr as { port: number }).port : 0;
+    const port = typeof addr === "object" && addr ? (addr as { port: number }).port : 0;
 
     try {
-      await drainQueueAsync(
-        fetch,
-        { "Content-Type": "application/json" },
-        `http://127.0.0.1:${port}`,
-        tmpDir,
-      );
+      await drainQueueAsync(fetch, { "Content-Type": "application/json" }, `http://127.0.0.1:${port}`, tmpDir);
 
       // 1st success, 2nd failure → should have made 2 requests total
       expect(reqCount).toBe(2);
@@ -276,12 +246,7 @@ describe("drainQueueAsync()", () => {
   it("returns cleanly when queue directory does not exist", async () => {
     // No queue dir created — just call drainQueueAsync with a fresh tmpDir
     await expect(
-      drainQueueAsync(
-        fetch,
-        { "Content-Type": "application/json" },
-        "http://127.0.0.1:9999",
-        tmpDir,
-      ),
+      drainQueueAsync(fetch, { "Content-Type": "application/json" }, "http://127.0.0.1:9999", tmpDir),
     ).resolves.toBeUndefined();
   });
 
@@ -301,21 +266,12 @@ describe("drainQueueAsync()", () => {
       body: { valid: true },
       enqueuedAt: 2000,
     };
-    await writeFile(
-      path.join(dir, "2000-good.json"),
-      JSON.stringify(validEntry),
-      "utf8",
-    );
+    await writeFile(path.join(dir, "2000-good.json"), JSON.stringify(validEntry), "utf8");
 
     const stub = await startStubEEServer({ feedback: () => {} });
 
     try {
-      await drainQueueAsync(
-        fetch,
-        { "Content-Type": "application/json" },
-        `http://127.0.0.1:${stub.port}`,
-        tmpDir,
-      );
+      await drainQueueAsync(fetch, { "Content-Type": "application/json" }, `http://127.0.0.1:${stub.port}`, tmpDir);
 
       // Corrupt file should be deleted
       const remaining = await readdir(dir);
@@ -338,12 +294,7 @@ describe("drainQueueAsync()", () => {
 describe("drainQueue() fire-and-forget wrapper", () => {
   it("returns void (undefined), not a Promise", () => {
     // Call drainQueue (the fire-and-forget wrapper) — should return undefined immediately
-    const result = drainQueue(
-      fetch,
-      { "Content-Type": "application/json" },
-      "http://127.0.0.1:9999",
-      tmpDir,
-    );
+    const result = drainQueue(fetch, { "Content-Type": "application/json" }, "http://127.0.0.1:9999", tmpDir);
 
     // drainQueue() must return void (undefined), not a Promise
     expect(result).toBeUndefined();

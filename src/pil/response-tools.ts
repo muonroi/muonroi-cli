@@ -1,5 +1,5 @@
-import { z } from "zod";
 import type { ToolSet } from "ai";
+import { z } from "zod";
 
 const RefactorSchema = z.object({
   summary: z.string().describe("One-line summary of what changed"),
@@ -107,4 +107,4 @@ export function buildResponseTools(taskType: string): ToolSet {
   };
 }
 
-export { RefactorSchema, DebugSchema, PlanSchema, AnalyzeSchema, DocsSchema, GenerateSchema, GeneralSchema };
+export { AnalyzeSchema, DebugSchema, DocsSchema, GeneralSchema, GenerateSchema, PlanSchema, RefactorSchema };

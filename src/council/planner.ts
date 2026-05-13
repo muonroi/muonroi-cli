@@ -1,4 +1,7 @@
 import type { StreamChunk } from "../types/index.js";
+import { tracedGenerate } from "./llm.js";
+import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
+import { buildSynthesisPrompt } from "./prompts.js";
 import type {
   ActionPlan,
   ClarifiedSpec,
@@ -9,9 +12,6 @@ import type {
   EnhancedCouncilOutcome,
   PreflightResponder,
 } from "./types.js";
-import { buildSynthesisPrompt } from "./prompts.js";
-import { tracedGenerate } from "./llm.js";
-import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 
 export async function* runPlanning(
   debateState: DebateState,
@@ -23,9 +23,18 @@ export async function* runPlanning(
   debatePlan?: DebatePlan,
   // CQ-18: PIL outputStyle from runCouncil
   outputStyle?: string | null,
-  refineContext?: string,    // User refinement answers from post-debate askcard
-  planEmphasis?: boolean,     // If true, emphasize action plan generation
-): AsyncGenerator<StreamChunk, { outcome: EnhancedCouncilOutcome | null; plan: ActionPlan | null; synthesisText: string; synthesisFailReason?: string }, unknown> {
+  refineContext?: string, // User refinement answers from post-debate askcard
+  planEmphasis?: boolean, // If true, emphasize action plan generation
+): AsyncGenerator<
+  StreamChunk,
+  {
+    outcome: EnhancedCouncilOutcome | null;
+    plan: ActionPlan | null;
+    synthesisText: string;
+    synthesisFailReason?: string;
+  },
+  unknown
+> {
   const p3Start = Date.now();
   yield phaseStart({
     phaseId: "phase:synthesis",
@@ -50,7 +59,15 @@ export async function* runPlanning(
   let synthesisFailReason: string | undefined;
 
   try {
-    const baseArgs = { spec, finalPositions, allExchanges, debatePlan, outputStyle: outputStyle ?? undefined, refineContext, planEmphasis };
+    const baseArgs = {
+      spec,
+      finalPositions,
+      allExchanges,
+      debatePlan,
+      outputStyle: outputStyle ?? undefined,
+      refineContext,
+      planEmphasis,
+    };
     const first = buildSynthesisPrompt(baseArgs);
     synthesisText = yield* tracedGenerate(llm, {
       phase: "synthesis",
@@ -82,9 +99,13 @@ export async function* runPlanning(
       };
       // Compact: keep final positions (already capped per-participant to 2k),
       // drop the full exchange replay entirely, and ask explicitly for JSON.
-      const compactArgs = { ...baseArgs, allExchanges: "_(exchange history omitted for retry; rely on final positions above)_" };
+      const compactArgs = {
+        ...baseArgs,
+        allExchanges: "_(exchange history omitted for retry; rely on final positions above)_",
+      };
       const retry = buildSynthesisPrompt(compactArgs);
-      const retrySystem = retry.system +
+      const retrySystem =
+        retry.system +
         `\n\n## Retry directive\n` +
         `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
         `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
@@ -101,23 +122,29 @@ export async function* runPlanning(
         outcome = parseOutcome(synthesisText, debatePlan);
       }
       if (!synthesisText.trim() || outcome === null) {
-        synthesisFailReason = (synthesisText.trim().length === 0)
-          ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited or the model timed out twice — the debate exchanges above are still usable as raw notes."
-          : "Synthesizer produced text but no parseable JSON outcome on either attempt. Raw output is shown above; the structured sections could not be extracted.";
+        synthesisFailReason =
+          synthesisText.trim().length === 0
+            ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited or the model timed out twice — the debate exchanges above are still usable as raw notes."
+            : "Synthesizer produced text but no parseable JSON outcome on either attempt. Raw output is shown above; the structured sections could not be extracted.";
       }
     }
 
     const readablePart = synthesisText.includes("---READABLE---")
       ? synthesisText.split("---READABLE---")[1]?.trim()
       : synthesisText;
-    yield { type: "content", content: "\n## Synthesis\n" };
-    yield {
-      type: "content",
-      content: ((readablePart && readablePart.length > 0)
+    const synthBody =
+      readablePart && readablePart.length > 0
         ? readablePart
-        : (synthesisText.trim().length > 0
-            ? synthesisText
-            : `_(empty — ${synthesisFailReason ?? "no output"})_`)) + "\n",
+        : synthesisText.trim().length > 0
+          ? synthesisText
+          : `_(empty — ${synthesisFailReason ?? "no output"})_`;
+    yield {
+      type: "council_message" as const,
+      councilMessage: {
+        kind: "synthesis" as const,
+        speaker: { role: "Leader", model: leaderModelId },
+        text: synthBody,
+      },
     };
 
     yield phaseDone({
@@ -189,9 +216,11 @@ export async function* runPlanning(
 function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedCouncilOutcome | null {
   const shape = debatePlan.outputShape;
   // Extract summary: first line with >= 20 non-whitespace chars
-  const summary = synthesisText.split("\n")
-    .map((l) => l.trim())
-    .find((l) => l.length >= 20) ?? "";
+  const summary =
+    synthesisText
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length >= 20) ?? "";
   if (!summary) return null;
   // Simple markdown heading-based extraction for each section
   const sections: Record<string, unknown> = {};
@@ -202,7 +231,7 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
     let found = false;
     for (const line of synthesisText.split("\n")) {
       const trimmed = line.trim();
-      if (trimmed.match(new RegExp("^#{1,3}\s+" + heading.replace(/\s+/g, "\s+"), "i"))) {
+      if (trimmed.match(new RegExp("^#{1,3}s+" + heading.replace(/\s+/g, "s+"), "i"))) {
         found = true;
         continue;
       }
@@ -228,9 +257,7 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
 
 function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedCouncilOutcome | null {
   // Target only JSON before the ---READABLE--- separator to avoid matching curly braces in markdown
-  const jsonPart = synthesisText.includes("---READABLE---")
-    ? synthesisText.split("---READABLE---")[0]
-    : synthesisText;
+  const jsonPart = synthesisText.includes("---READABLE---") ? synthesisText.split("---READABLE---")[0] : synthesisText;
   const jsonMatch = jsonPart.match(/\{[\s\S]*\}/);
   if (jsonMatch) {
     try {

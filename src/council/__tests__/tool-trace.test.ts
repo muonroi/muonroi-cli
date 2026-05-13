@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CouncilLLM, ToolTraceEmitter } from "../types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -9,9 +9,15 @@ import type { CouncilLLM, ToolTraceEmitter } from "../types.js";
  */
 function makeLLM(overrides: Partial<CouncilLLM>): CouncilLLM {
   return {
-    async generate() { return ""; },
-    async research() { return ""; },
-    async debate() { return { text: "", toolCalls: [] }; },
+    async generate() {
+      return "";
+    },
+    async research() {
+      return "";
+    },
+    async debate() {
+      return { text: "", toolCalls: [] };
+    },
     ...overrides,
   };
 }
@@ -138,7 +144,9 @@ describe("[Council Tool Trace] — llm.debate() (CQ-22)", () => {
 describe("ToolTraceEmitter type export", () => {
   it("ToolTraceEmitter is exported from types.ts and is a function type", () => {
     // This test verifies the type exists at runtime by checking we can assign it.
-    const emitter: ToolTraceEmitter = (text: string) => { void text; };
+    const emitter: ToolTraceEmitter = (text: string) => {
+      void text;
+    };
     expect(typeof emitter).toBe("function");
   });
 });

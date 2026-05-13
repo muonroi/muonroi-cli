@@ -11,10 +11,10 @@
 import { readFile } from "fs/promises";
 import os from "os";
 import path from "path";
-import { healthDetailed } from "../ee/health.js";
 import type { EEHealthResult } from "../ee/health.js";
-import { getDatabase } from "../storage/db.js";
+import { healthDetailed } from "../ee/health.js";
 import { listStoredProviders } from "../providers/keychain.js";
+import { getDatabase } from "../storage/db.js";
 import { loadMcpServers, loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
@@ -94,7 +94,8 @@ async function checkKeyPresence(): Promise<CheckResult> {
       return {
         name: "key_presence",
         status: "warn",
-        detail: "API key in plaintext user-settings.json — run 'muonroi-cli keys cleanup-settings' to migrate to OS keychain",
+        detail:
+          "API key in plaintext user-settings.json — run 'muonroi-cli keys cleanup-settings' to migrate to OS keychain",
       };
     }
   } catch {
@@ -141,9 +142,10 @@ async function checkEEDetailed(): Promise<CheckResult> {
     }
 
     if (!isHealthy) {
-      const hint = result.mode === "thin-client"
-        ? "Hint: check VPS 72.61.127.154:8082 is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
-        : "Hint: start EE locally or configure thin-client in ~/.experience/config.json";
+      const hint =
+        result.mode === "thin-client"
+          ? "Hint: check VPS 72.61.127.154:8082 is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
+          : "Hint: start EE locally or configure thin-client in ~/.experience/config.json";
       return {
         name: "ee.health",
         status: "warn",
@@ -258,7 +260,8 @@ async function checkRecentErrorRate(): Promise<CheckResult> {
 
 // CQ-23: threshold for qualifying council sessions to trigger MCP nudge
 const COUNCIL_MCP_NUDGE_THRESHOLD = 3;
-const RESEARCH_KEYWORDS = /research|find\s|look\s*up|search\s|investigate|what\s+is\s|latest|current\s+version|news\s|documentation|compare\s/i;
+const RESEARCH_KEYWORDS =
+  /research|find\s|look\s*up|search\s|investigate|what\s+is\s|latest|current\s+version|news\s|documentation|compare\s/i;
 
 async function checkCouncilMcpNudge(): Promise<CheckResult> {
   try {
@@ -266,13 +269,9 @@ async function checkCouncilMcpNudge(): Promise<CheckResult> {
     const mcpServers = loadMcpServers();
     // McpServerConfig has: id, label, enabled, transport, command?, ...
     // Match tavily/playwright by id or label (case-insensitive)
-    const serverNames = mcpServers.map((s) =>
-      `${s.id ?? ""} ${s.label ?? ""} ${s.command ?? ""}`.toLowerCase(),
-    );
+    const serverNames = mcpServers.map((s) => `${s.id ?? ""} ${s.label ?? ""} ${s.command ?? ""}`.toLowerCase());
     const tavilyEnabled = serverNames.some((n) => n.includes("tavily"));
-    const playwrightEnabled = serverNames.some(
-      (n) => n.includes("playwright") || n.includes("chrome"),
-    );
+    const playwrightEnabled = serverNames.some((n) => n.includes("playwright") || n.includes("chrome"));
 
     if (tavilyEnabled && playwrightEnabled) {
       return { name: "council.mcp", status: "pass", detail: "tavily + playwright enabled" };
@@ -322,9 +321,7 @@ async function checkCouncilMcpNudge(): Promise<CheckResult> {
     }
 
     if (qualifyingCount >= COUNCIL_MCP_NUDGE_THRESHOLD) {
-      const missing = [!tavilyEnabled && "tavily", !playwrightEnabled && "playwright"]
-        .filter(Boolean)
-        .join(", ");
+      const missing = [!tavilyEnabled && "tavily", !playwrightEnabled && "playwright"].filter(Boolean).join(", ");
       return {
         name: "council.mcp",
         status: "warn",
@@ -360,8 +357,8 @@ export async function runDoctor(): Promise<CheckResult[]> {
     checkOS(),
     checkKeyPresence(),
     checkOllamaHealth(),
-    checkEEDetailed(),       // replaces checkEE() — CQ-16c
-    checkBrainEmptiness(),   // NEW — CQ-16d
+    checkEEDetailed(), // replaces checkEE() — CQ-16c
+    checkBrainEmptiness(), // NEW — CQ-16d
     checkQdrant(),
     checkRecentErrorRate(),
     checkCouncilMcpNudge(), // NEW — CQ-23

@@ -25,7 +25,7 @@ describe("phase-budget (P7)", () => {
   it("old hints (discover/gather/research/scoping/sprint) sum correctly", () => {
     const oldTotal =
       PHASE_HINTS.discover + PHASE_HINTS.gather + PHASE_HINTS.research + PHASE_HINTS.scoping + PHASE_HINTS.sprint;
-    expect(oldTotal).toBeCloseTo(0.85, 2);
+    expect(oldTotal).toBeCloseTo(0.83, 2);
   });
 
   it("returns null warning when phase stays within hint", async () => {
@@ -104,7 +104,7 @@ describe("phase-budget (P7)", () => {
 });
 
 describe("phase-budget v2 (subsystem E)", () => {
-  it("PHASE_HINTS includes new keys planning/review/retro/standup summing to 1.0", () => {
+  it("PHASE_HINTS includes new keys planning/review/retro/standup summing to 0.98 (before verdict)", () => {
     const total =
       PHASE_HINTS.discover +
       PHASE_HINTS.gather +
@@ -115,7 +115,7 @@ describe("phase-budget v2 (subsystem E)", () => {
       (PHASE_HINTS as any).review +
       (PHASE_HINTS as any).retro +
       (PHASE_HINTS as any).standup;
-    expect(total).toBeCloseTo(1.0, 2);
+    expect(total).toBeCloseTo(0.98, 2);
   });
 
   it("recordPhaseStart accepts new phase 'planning'", async () => {
@@ -138,5 +138,35 @@ describe("phase-budget v2 (subsystem E)", () => {
     await fs.writeFile(statePath, `## Phase Budget\n\n${JSON.stringify(legacy)}\n`);
     const summary = await renderBudgetSummary(flowDir, runId);
     expect(summary).toContain("no phase budget data");
+  });
+});
+
+describe("phase-budget verdict bucket (subsystem F)", () => {
+  it("PHASE_HINTS includes 'verdict' bucket, sum still 1.0", () => {
+    const total =
+      PHASE_HINTS.discover +
+      PHASE_HINTS.gather +
+      PHASE_HINTS.research +
+      PHASE_HINTS.scoping +
+      PHASE_HINTS.sprint +
+      PHASE_HINTS.planning +
+      PHASE_HINTS.review +
+      PHASE_HINTS.retro +
+      PHASE_HINTS.standup +
+      (PHASE_HINTS as any).verdict;
+    expect(total).toBeCloseTo(1.0, 2);
+  });
+
+  it("sprint hint reduced to 0.28 to make room for verdict 0.02", () => {
+    expect(PHASE_HINTS.sprint).toBe(0.28);
+    expect((PHASE_HINTS as any).verdict).toBe(0.02);
+  });
+
+  it("recordPhaseStart accepts new phase 'verdict'", async () => {
+    const flowDir = path.join(os.tmpdir(), `budget-verdict-${Math.random().toString(36).slice(2)}`);
+    await fs.mkdir(flowDir, { recursive: true });
+    mockGetSpent.mockResolvedValueOnce(0);
+    const marker = await recordPhaseStart({ flowDir, runId: "rv", phase: "verdict" as any });
+    expect(marker.phase).toBe("verdict");
   });
 });

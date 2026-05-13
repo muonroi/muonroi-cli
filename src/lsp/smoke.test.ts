@@ -41,22 +41,24 @@ afterAll(() => {
 
 describe("LSP smoke test — createLspClientSession", () => {
   it.skipIf(!tsServerAvailable || !!process.env.CI)(
-    "initializes LSP session with typescript-language-server", { timeout: 30000 }, async () => {
+    "initializes LSP session with typescript-language-server",
+    { timeout: 30000 },
+    async () => {
+      const session = await createLspClientSession({
+        serverId: "ts-smoke",
+        root: tmpDir,
+        launch: { command: "bunx", args: ["typescript-language-server", "--stdio"] },
+        startupTimeoutMs: 15000,
+        diagnosticsDebounceMs: 500,
+      });
 
-    const session = await createLspClientSession({
-      serverId: "ts-smoke",
-      root: tmpDir,
-      launch: { command: "bunx", args: ["typescript-language-server", "--stdio"] },
-      startupTimeoutMs: 15000,
-      diagnosticsDebounceMs: 500,
-    });
+      expect(session.serverId).toBe("ts-smoke");
 
-    expect(session.serverId).toBe("ts-smoke");
+      await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
 
-    await session.openOrChangeFile(path.join(tmpDir, "test.ts"), "typescript", "const x: number = 1;");
-
-    await session.stop();
-  });
+      await session.stop();
+    },
+  );
 
   it("createLspClientSession rejects for non-existent command", { timeout: 10000 }, async () => {
     await expect(

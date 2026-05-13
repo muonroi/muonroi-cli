@@ -72,14 +72,7 @@ async function loadKeytar(): Promise<KeytarLike | null> {
   }
 }
 
-export const KEYCHAIN_PROVIDER_IDS: ProviderId[] = [
-  "anthropic",
-  "openai",
-  "google",
-  "deepseek",
-  "siliconflow",
-  "xai",
-];
+export const KEYCHAIN_PROVIDER_IDS: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai"];
 
 /**
  * Store a provider API key in the OS keychain. Returns true on success.
@@ -116,9 +109,7 @@ export async function listStoredProviders(): Promise<ProviderId[]> {
   try {
     const creds = await kt.findCredentials(KEYCHAIN_SERVICE);
     const validAccounts = new Set(Object.values(ACCOUNT_BY_PROVIDER));
-    return creds
-      .filter((c) => validAccounts.has(c.account))
-      .map((c) => c.account as ProviderId);
+    return creds.filter((c) => validAccounts.has(c.account)).map((c) => c.account as ProviderId);
   } catch {
     return [];
   }

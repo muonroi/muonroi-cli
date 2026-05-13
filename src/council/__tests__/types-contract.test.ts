@@ -7,8 +7,8 @@
  * Runtime assertions are used only where TypeScript's structural typing makes them necessary.
  */
 
-import type { LeaderEvaluation, CouncilLLM } from "../types.js";
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
+import type { CouncilLLM, LeaderEvaluation } from "../types.js";
 
 describe("LeaderEvaluation type contract", () => {
   it("accepts evidenceDensity as optional number", () => {

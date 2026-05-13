@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CouncilStats, DebateState, CouncilParticipant } from "../types.js";
+import type { CouncilParticipant, CouncilStats, DebateState } from "../types.js";
 
 // ── CQ-01: stats.calls accuracy ─────────────────────────────────────────────
 
@@ -7,7 +7,7 @@ describe("CQ-01: council stats accounting", () => {
   it("RunCouncilOptions accepts councilStats field", async () => {
     // Type-level test: if this compiles, the interface is correct
     const stats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
-    const { } = await import("../index.js"); // ensure module resolves
+    const {} = await import("../index.js"); // ensure module resolves
     const options: import("../index.js").RunCouncilOptions = {
       councilStats: stats,
     };
@@ -17,7 +17,9 @@ describe("CQ-01: council stats accounting", () => {
   it("shared CouncilStats object is mutated by reference — same object tracks calls", () => {
     const sharedStats: CouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
     // Simulate what createCouncilLLM.generate does: stats.calls++
-    const simulateLLMCall = (s: CouncilStats) => { s.calls++; };
+    const simulateLLMCall = (s: CouncilStats) => {
+      s.calls++;
+    };
     simulateLLMCall(sharedStats);
     simulateLLMCall(sharedStats);
     expect(sharedStats.calls).toBe(2);
@@ -41,7 +43,7 @@ describe("CQ-02: finalPositions reflects debate-mutated positions", () => {
       exchangeLogs: new Map(),
       runningSummary: "summary",
       roundCount: 1,
-      active: fakeActive,  // This field must exist — fails if Plan 01 not done
+      active: fakeActive, // This field must exist — fails if Plan 01 not done
     };
     expect(fakeDebateState.active).toHaveLength(2);
     expect(fakeDebateState.active[0].position).toBe("Position after debate round");
@@ -49,9 +51,7 @@ describe("CQ-02: finalPositions reflects debate-mutated positions", () => {
   });
 
   it("positions read from debateState.active are non-empty after debate mutations", () => {
-    const active: CouncilParticipant[] = [
-      { role: "primary" as any, model: "gpt-4", position: "" },
-    ];
+    const active: CouncilParticipant[] = [{ role: "primary" as any, model: "gpt-4", position: "" }];
     // Simulate what debate.ts does during rounds
     active[0].position = "Mutated position from round 1";
     // Simulate what index.ts SHOULD do after fix (read from debateState.active)

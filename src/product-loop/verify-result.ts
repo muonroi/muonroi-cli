@@ -12,7 +12,7 @@ export type VerifyVerdict = "PASS" | "FAIL" | "ERROR" | "UNKNOWN";
 
 /**
  * Parses a ToolResult from the verify sub-agent into a deterministic verdict.
- * 
+ *
  * PASS when: tr.success is true AND output contains a pass marker
  * FAIL when: tr.success is false OR output contains a fail marker
  * ERROR when: tr.error is present and non-empty

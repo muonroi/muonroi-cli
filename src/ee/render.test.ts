@@ -49,8 +49,7 @@ describe("emitMatches + setRenderSink", () => {
   });
 
   // emitMatches now emits StreamChunk objects; extract renderable content for assertions
-  const getContent = (c: any): string =>
-    typeof c === "string" ? c : (c?.content ?? JSON.stringify(c));
+  const getContent = (c: any): string => (typeof c === "string" ? c : (c?.content ?? JSON.stringify(c)));
 
   it("emits each match via the sink", () => {
     const matches: InterceptMatch[] = [

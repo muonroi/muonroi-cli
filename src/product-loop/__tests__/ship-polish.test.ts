@@ -1,7 +1,7 @@
-import { describe, expect, it, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { polishDelivery } from "../ship-polish.js";
 import type { ProductSpec } from "../types.js";
 

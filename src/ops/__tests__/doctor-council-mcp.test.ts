@@ -102,9 +102,7 @@ describe("checkCouncilMcpNudge (CQ-23)", () => {
   });
 
   it("Test 2: tavily enabled + 3 URL-topic sessions → pass", async () => {
-    mockLoadMcpServers.mockReturnValue([
-      { id: "tavily", label: "Tavily", enabled: true, transport: "stdio" },
-    ]);
+    mockLoadMcpServers.mockReturnValue([{ id: "tavily", label: "Tavily", enabled: true, transport: "stdio" }]);
     mockAll.mockReturnValue([
       councilRow("https://example.com analysis"),
       councilRow("https://foo.io changelog"),
@@ -117,10 +115,7 @@ describe("checkCouncilMcpNudge (CQ-23)", () => {
 
   it("Test 3: no MCP + only 2 qualifying sessions → pass (threshold not met)", async () => {
     mockLoadMcpServers.mockReturnValue([]);
-    mockAll.mockReturnValue([
-      councilRow("https://example.com analysis"),
-      councilRow("review https://foo.io"),
-    ]);
+    mockAll.mockReturnValue([councilRow("https://example.com analysis"), councilRow("review https://foo.io")]);
 
     const result = await getCouncilMcpResult();
     expect(result.status).toBe("pass");

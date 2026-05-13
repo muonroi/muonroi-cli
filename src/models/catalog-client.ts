@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelInfo, ModelTier, ReasoningEffort } from "../types/index.js";
@@ -115,7 +115,7 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
 
   throw new Error(
     "Cannot find catalog.json. The package may be installed incorrectly. " +
-    "Try reinstalling or setting MUONROI_API_KEY if you haven't already.",
+      "Try reinstalling or setting MUONROI_API_KEY if you haven't already.",
   );
 }
 

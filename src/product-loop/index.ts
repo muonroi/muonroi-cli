@@ -304,6 +304,13 @@ async function* drainSprints(args: {
   };
 }
 
+function chatEnvConfig(): { client: import("../chat/types.js").ChatClient } | null {
+  // Lazy load to avoid circular imports
+  const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
+  const client = readChatProvider();
+  return client ? { client } : null;
+}
+
 /**
  * Phase-orchestrated sprint path (Subsystem E).
  *
@@ -398,9 +405,19 @@ async function* runPhasesPath(args: {
     return result!;
   };
 
-  // awaitCustomerVerdict: use respondToQuestion (the existing user-prompt API).
+  // Chat setup (opt-in via env vars; no-op when unset).
+  const chatCfg = chatEnvConfig();
+  let chatClient: import("../chat/types.js").ChatClient | null = null;
+  let slug: string | null = null;
+  if (chatCfg) {
+    chatClient = chatCfg.client;
+    const { productSlug } = await import("./product-identity.js");
+    slug = productSlug(manifest.idea);
+  }
+
+  // Terminal fallback: use respondToQuestion (the existing user-prompt API).
   // QuestionResponder takes a questionId string; the UI layer resolves the prompt text.
-  const awaitCustomerVerdict = async (_flowDir: string, _runId: string) => {
+  const terminalFallback = async (): Promise<{ verdict: "accept" | "reject" | "abort"; feedback?: string }> => {
     const ans = await ctx.respondToQuestion("customer-review-verdict");
     const lower = (ans ?? "").trim().toLowerCase();
     if (lower.startsWith("x")) return { verdict: "abort" as const };
@@ -409,6 +426,43 @@ async function* runPhasesPath(args: {
       return { verdict: "reject" as const, feedback: fb ?? "" };
     }
     return { verdict: "accept" as const };
+  };
+
+  const awaitCustomerVerdict = async (verdictArgs: {
+    flowDir: string;
+    runId: string;
+    phaseId: string;
+    sprintN: number;
+    reviewSummary: string;
+  }): Promise<{ verdict: "accept" | "reject" | "abort"; feedback?: string }> => {
+    if (!chatClient || !slug) return terminalFallback();
+    const { ensureChannel } = await import("../chat/channel-manager.js");
+    const { discordAwaitVerdict } = await import("../chat/verdict-resolver.js");
+    const ch = await ensureChannel({
+      client: chatClient,
+      guildId: process.env.MUONROI_DISCORD_GUILD_ID ?? "unknown",
+      slug,
+      displayName: manifest.idea,
+    });
+    if (!ch) return terminalFallback();
+    return discordAwaitVerdict({
+      flowDir: verdictArgs.flowDir,
+      runId: verdictArgs.runId,
+      phaseId: verdictArgs.phaseId,
+      sprintN: verdictArgs.sprintN,
+      productSlug: slug,
+      channelId: ch.channelId,
+      client: chatClient,
+      leader,
+      capUsd: manifest.capUsd,
+      remainingUsd: async () => {
+        const { getProductSpentUsd } = await import("../usage/product-ledger.js");
+        const spent = await getProductSpentUsd(verdictArgs.runId);
+        return Math.max(0, manifest.capUsd - spent);
+      },
+      reviewSummary: verdictArgs.reviewSummary,
+      fallback: terminalFallback,
+    });
   };
 
   const phaseGen = runPhases({
@@ -432,7 +486,30 @@ async function* runPhasesPath(args: {
       phaseOutcome = step.value as { pass: boolean; reason?: string };
       break;
     }
-    yield step.value as StreamChunk;
+    const chunk = step.value as StreamChunk;
+    if (chunk.type === "push_notification" && chatClient && slug) {
+      try {
+        const { ensureChannel } = await import("../chat/channel-manager.js");
+        const { publish } = await import("../chat/broadcast-bus.js");
+        const ch = await ensureChannel({
+          client: chatClient,
+          guildId: process.env.MUONROI_DISCORD_GUILD_ID ?? "unknown",
+          slug,
+          displayName: manifest.idea,
+        });
+        if (ch) {
+          await publish({
+            client: chatClient,
+            channelId: ch.channelId,
+            type: "phase-event",
+            content: chunk.content ?? "",
+          });
+        }
+      } catch (e) {
+        console.warn("muonroi: chat broadcast failed", e);
+      }
+    }
+    yield chunk;
   }
 
   if (!phaseOutcome.pass) {

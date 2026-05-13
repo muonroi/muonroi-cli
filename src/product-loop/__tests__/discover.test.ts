@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import * as path from "node:path";
-import * as os from "node:os";
 import { promises as fs } from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { describe, expect, it } from "vitest";
 import { discoverProject, formatDiscoverySummary } from "../discover.js";
 
 async function tmpDir(): Promise<string> {

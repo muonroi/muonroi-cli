@@ -17,6 +17,7 @@ import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
+  CouncilMessage,
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilStatusData,
@@ -71,7 +72,11 @@ import {
 } from "./agents-modal";
 import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
+import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
+import { CouncilLeaderBubble } from "./components/council-leader-bubble.js";
+import { CouncilMessageBubble } from "./components/council-message-bubble.js";
 import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
+import { CouncilPlaceholderBubble } from "./components/council-placeholder-bubble.js";
 import {
   type CouncilCardKey,
   type CouncilCardState,
@@ -80,7 +85,10 @@ import {
   reduceCardKey,
 } from "./components/council-question-card.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
+import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
+import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
+import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
 import { type TypeaheadState, useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
@@ -881,6 +889,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [councilStatuses, setCouncilStatuses] = useState<CouncilStatusData[]>([]);
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
+  const [councilMessages, setCouncilMessages] = useState<CouncilMessage[]>([]);
+  const [councilPlaceholders, setCouncilPlaceholders] = useState<
+    Map<string, { role: string; side: "left" | "right"; color: string }>
+  >(new Map());
+
+  const resolveStyle = useRolePalette();
+  const getSide = usePairSideMap();
+  const { store: storeQuote, getPartnerLast } = usePairQuoteBuffer();
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
@@ -2499,11 +2515,43 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 break;
+              case "council_message":
+                if (chunk.councilMessage) {
+                  const cm = chunk.councilMessage;
+                  setCouncilMessages((prev) => [...prev, cm]);
+                  if (cm.kind === "debate" && cm.partner) {
+                    const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
+                    storeQuote(pairKey, cm.speaker.role, cm.text);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      for (const [id, p] of next) {
+                        if (p.role === cm.speaker.role) next.delete(id);
+                      }
+                      return next;
+                    });
+                  }
+                }
+                break;
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
+                  if (cs.state === "start" && cs.label) {
+                    const placeholderRole = cs.label;
+                    const styleForRole = resolveStyle(placeholderRole);
+                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      return next;
+                    });
+                  }
                   if (cs.state === "done" || cs.state === "error") {
                     councilDoneAtRef.current.set(cs.statusId, Date.now());
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.delete(cs.statusId);
+                      return next;
+                    });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
@@ -2870,10 +2918,40 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setPendingCouncilPreflight(chunk.councilPreflight);
                   setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
+                if (chunk.type === "council_message" && chunk.councilMessage) {
+                  const cm = chunk.councilMessage;
+                  setCouncilMessages((prev) => [...prev, cm]);
+                  if (cm.kind === "debate" && cm.partner) {
+                    const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
+                    storeQuote(pairKey, cm.speaker.role, cm.text);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      for (const [id, p] of next) {
+                        if (p.role === cm.speaker.role) next.delete(id);
+                      }
+                      return next;
+                    });
+                  }
+                }
                 if (chunk.type === "council_status" && chunk.councilStatus) {
                   const cs = chunk.councilStatus;
+                  if (cs.state === "start" && cs.label) {
+                    const placeholderRole = cs.label;
+                    const styleForRole = resolveStyle(placeholderRole);
+                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      return next;
+                    });
+                  }
                   if (cs.state === "done" || cs.state === "error") {
                     councilDoneAtRef.current.set(cs.statusId, Date.now());
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.delete(cs.statusId);
+                      return next;
+                    });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
@@ -2988,10 +3066,40 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   setPendingCouncilPreflight(chunk.councilPreflight);
                   setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
+                if (chunk.type === "council_message" && chunk.councilMessage) {
+                  const cm = chunk.councilMessage;
+                  setCouncilMessages((prev) => [...prev, cm]);
+                  if (cm.kind === "debate" && cm.partner) {
+                    const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
+                    storeQuote(pairKey, cm.speaker.role, cm.text);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      for (const [id, p] of next) {
+                        if (p.role === cm.speaker.role) next.delete(id);
+                      }
+                      return next;
+                    });
+                  }
+                }
                 if (chunk.type === "council_status" && chunk.councilStatus) {
                   const cs = chunk.councilStatus;
+                  if (cs.state === "start" && cs.label) {
+                    const placeholderRole = cs.label;
+                    const styleForRole = resolveStyle(placeholderRole);
+                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      return next;
+                    });
+                  }
                   if (cs.state === "done" || cs.state === "error") {
                     councilDoneAtRef.current.set(cs.statusId, Date.now());
+                    setCouncilPlaceholders((prev) => {
+                      const next = new Map(prev);
+                      next.delete(cs.statusId);
+                      return next;
+                    });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
                 }
@@ -4715,6 +4823,43 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
               {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
               {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
+              {councilMessages.map((cm, idx) => {
+                const side: "left" | "right" =
+                  cm.kind === "debate" && cm.partner
+                    ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
+                    : "left";
+
+                if (cm.kind === "leader") {
+                  return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
+                }
+                if (cm.kind === "synthesis") {
+                  return <CouncilSynthesisBanner key={idx} msg={cm} />;
+                }
+                const pairKey = cm.partner ? makePairKey(cm.speaker.role, cm.partner.role) : `solo::${cm.speaker.role}`;
+                const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
+                return (
+                  <CouncilMessageBubble
+                    key={idx}
+                    msg={cm}
+                    terminalCols={width}
+                    side={side}
+                    resolveStyle={resolveStyle}
+                    partnerLastText={partnerLastText}
+                    partnerRole={cm.partner?.role}
+                    theme={t}
+                  />
+                );
+              })}
+              {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
+                <CouncilPlaceholderBubble
+                  key={id}
+                  role={p.role}
+                  side={p.side}
+                  terminalCols={width}
+                  color={p.color}
+                  theme={t}
+                />
+              ))}
               {pendingCouncilQuestion && councilCardState && (
                 <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
               )}

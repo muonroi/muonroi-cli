@@ -13,8 +13,8 @@
  * | #5 user_approval     | "user feedback: <text>" — full re-plan |
  */
 
-import type { DoneVerdict, Criterion, RoleSlot } from "./types.js";
 import type { ToolResult } from "../types/index.js";
+import type { Criterion, DoneVerdict, RoleSlot } from "./types.js";
 
 export interface ContinueFeedback {
   focus: string;

@@ -1,14 +1,11 @@
 import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
-import {
-  StdioClientTransport,
-  getDefaultEnvironment,
-} from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ToolSet } from "ai";
 import type { McpServerConfig } from "../utils/settings.js";
-import { validateMcpServerConfig } from "./validate.js";
-import { createOAuthProviderWithCallback } from "./oauth-provider.js";
 import { getMcpKey, type McpKeyId } from "./mcp-keychain.js";
+import { createOAuthProviderWithCallback } from "./oauth-provider.js";
+import { validateMcpServerConfig } from "./validate.js";
 
 // Map MCP server id → keychain id + env var name for env hydration at spawn.
 // When a server's env value is empty/missing, we look up the key from the
@@ -31,17 +28,12 @@ function mcpToolPrefix(server: McpServerConfig): string {
   return `mcp_${server.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-function toTransport(
-  server: McpServerConfig,
-  authProvider?: OAuthClientProvider,
-) {
+function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider) {
   if (server.transport === "stdio") {
     return new StdioClientTransport({
       command: server.command ?? "",
       args: server.args,
-      env: server.env
-        ? { ...getDefaultEnvironment(), ...server.env }
-        : undefined,
+      env: server.env ? { ...getDefaultEnvironment(), ...server.env } : undefined,
       cwd: server.cwd,
       stderr: "pipe",
     });
@@ -65,10 +57,7 @@ export interface McpBuildOptions {
   onOAuthRequired?: (serverId: string, url: URL) => void;
 }
 
-export async function buildMcpToolSet(
-  servers: McpServerConfig[],
-  opts?: McpBuildOptions,
-): Promise<McpToolBundle> {
+export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuildOptions): Promise<McpToolBundle> {
   const tools: ToolSet = {};
   const errors: string[] = [];
   const clients: MCPClient[] = [];
@@ -128,9 +117,7 @@ export async function buildMcpToolSet(
     errors,
     async close() {
       for (const fn of cleanups) fn();
-      await Promise.all(
-        clients.map((client) => client.close().catch(() => {})),
-      );
+      await Promise.all(clients.map((client) => client.close().catch(() => {})));
     },
   };
 }

@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { appendRoleMemory, readRoleMemory } from "../role-memory.js";
 import { promises as fs } from "node:fs";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { beforeEach, describe, expect, it } from "vitest";
+import { appendRoleMemory, readRoleMemory } from "../role-memory.js";
 
 describe("role-memory management", () => {
   let tempDir: string;
@@ -15,7 +15,7 @@ describe("role-memory management", () => {
   it("appends and reads back small blocks", async () => {
     const runId = "run-123";
     const slot = "PO";
-    
+
     await appendRoleMemory(tempDir, runId, slot, 1, "Initial requirements");
     await appendRoleMemory(tempDir, runId, slot, 2, "Refined requirements");
 
@@ -29,22 +29,22 @@ describe("role-memory management", () => {
   it("truncates oldest blocks when exceeding 2KB", async () => {
     const runId = "run-cap";
     const slot = "Architect";
-    
+
     // Each block is ~100 bytes
     const largeBlock = "X".repeat(100);
-    
+
     for (let i = 1; i <= 30; i++) {
       await appendRoleMemory(tempDir, runId, slot, i, `Block ${i}: ${largeBlock}`);
     }
 
     const content = await readRoleMemory(tempDir, runId, slot);
     expect(content.length).toBeLessThanOrEqual(2048);
-    
+
     // Sprint 1 should definitely be gone
     expect(content).not.toContain("### Sprint 1\n");
     // Latest sprint should be there
     expect(content).toContain("### Sprint 30\n");
-    
+
     // Verify it starts with a "### Sprint" line (boundary preserved)
     expect(content.trim().startsWith("### Sprint")).toBe(true);
   });
@@ -56,7 +56,7 @@ describe("role-memory management", () => {
 
   it("handles concurrent appends to different slots", async () => {
     const runId = "run-parallel";
-    
+
     await Promise.all([
       appendRoleMemory(tempDir, runId, "PO", 1, "PO content"),
       appendRoleMemory(tempDir, runId, "Customer", 1, "Customer content"),

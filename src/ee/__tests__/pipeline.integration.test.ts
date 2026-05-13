@@ -14,9 +14,9 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type StubHandle, startStubEEServer } from "../../__test-stubs__/ee-server.js";
+import { executeEventHooks, resetHookState } from "../../hooks/index.js";
 import { createEEClient, resetEEClientState } from "../client.js";
 import { setDefaultEEClient } from "../intercept.js";
-import { executeEventHooks, resetHookState } from "../../hooks/index.js";
 import type { InterceptMatch } from "../types.js";
 
 const sampleMatch: InterceptMatch = {
@@ -84,10 +84,10 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
     await new Promise((r) => setTimeout(r, 500));
 
     // Assert all 5 pipeline stages fired
-    expect(stub.calls.intercept).toHaveLength(1);   // Stage 1: PreToolUse
-    expect(stub.calls.posttool).toHaveLength(1);    // Stage 2: PostToolUse
-    expect(stub.calls.feedback.length).toBeGreaterThanOrEqual(1);    // Stage 3+4: Judge FOLLOWED -> Feedback
-    expect(stub.calls.touch.length).toBeGreaterThanOrEqual(1);     // Stage 5: Touch (FOLLOWED path)
+    expect(stub.calls.intercept).toHaveLength(1); // Stage 1: PreToolUse
+    expect(stub.calls.posttool).toHaveLength(1); // Stage 2: PostToolUse
+    expect(stub.calls.feedback.length).toBeGreaterThanOrEqual(1); // Stage 3+4: Judge FOLLOWED -> Feedback
+    expect(stub.calls.touch.length).toBeGreaterThanOrEqual(1); // Stage 5: Touch (FOLLOWED path)
 
     // Verify feedback classification
     expect(stub.calls.feedback[0]).toMatchObject({
@@ -183,7 +183,7 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
     expect(stub.calls.intercept).toHaveLength(1);
     expect(stub.calls.posttool).toHaveLength(1);
     expect(stub.calls.feedback).toHaveLength(1); // IGNORED: feedback fires
-    expect(stub.calls.touch).toHaveLength(0);    // IGNORED: touch does NOT fire
+    expect(stub.calls.touch).toHaveLength(0); // IGNORED: touch does NOT fire
 
     expect(stub.calls.feedback[0]).toMatchObject({
       principle_uuid: "P1",

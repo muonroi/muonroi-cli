@@ -4,11 +4,11 @@ import {
   classifyOutcome,
   endPhase,
   markAborted,
+  type PhaseSnapshot,
   recordIntercept,
   recordPostTool,
   resetPhaseTracker,
   setPhase,
-  type PhaseSnapshot,
 } from "./phase-tracker.js";
 
 const refA = { collection: "code", pointId: "a" };
@@ -113,9 +113,13 @@ describe("classifyOutcome", () => {
   function snap(over: Partial<PhaseSnapshot>): PhaseSnapshot {
     return {
       phaseName: "implement",
-      startedAt: 0, endedAt: 1, toolCount: 0,
-      principleRefs: [], verifyResult: null,
-      hadFailure: false, aborted: false,
+      startedAt: 0,
+      endedAt: 1,
+      toolCount: 0,
+      principleRefs: [],
+      verifyResult: null,
+      hadFailure: false,
+      aborted: false,
       ...over,
     };
   }

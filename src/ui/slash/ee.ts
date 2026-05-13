@@ -9,14 +9,14 @@
 
 import { getDefaultEEClient } from "../../ee/intercept.js";
 import type {
-  EEStatsResponse,
-  EEGraphResponse,
-  EETimelineResponse,
-  EEGatesResponse,
   EEEvolveResponse,
-  EEShareResponse,
-  RouteTaskResponse,
+  EEGatesResponse,
+  EEGraphResponse,
   EESearchResponse,
+  EEShareResponse,
+  EEStatsResponse,
+  EETimelineResponse,
+  RouteTaskResponse,
 } from "../../ee/types.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
@@ -40,7 +40,9 @@ function fmtStats(s: EEStatsResponse): string {
     const e = s.evolution;
     lines.push("");
     lines.push("**Evolution**");
-    lines.push(`  Promoted: ${e.promoted}  |  Demoted: ${e.demoted}  |  Abstracted: ${e.abstracted}  |  Archived: ${e.archived}`);
+    lines.push(
+      `  Promoted: ${e.promoted}  |  Demoted: ${e.demoted}  |  Abstracted: ${e.abstracted}  |  Archived: ${e.archived}`,
+    );
   }
 
   // Per-project
@@ -58,13 +60,25 @@ function fmtStats(s: EEStatsResponse): string {
     lines.push("");
     lines.push("**Routing**");
     if (r.byTier && Object.keys(r.byTier).length > 0) {
-      lines.push(`  By tier: ${Object.entries(r.byTier).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+      lines.push(
+        `  By tier: ${Object.entries(r.byTier)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ")}`,
+      );
     }
     if (r.bySource && Object.keys(r.bySource).length > 0) {
-      lines.push(`  By source: ${Object.entries(r.bySource).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+      lines.push(
+        `  By source: ${Object.entries(r.bySource)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ")}`,
+      );
     }
     if (r.outcomes && Object.keys(r.outcomes).length > 0) {
-      lines.push(`  Outcomes: ${Object.entries(r.outcomes).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+      lines.push(
+        `  Outcomes: ${Object.entries(r.outcomes)
+          .map(([k, v]) => `${k}=${v}`)
+          .join(", ")}`,
+      );
     }
   }
 
@@ -74,7 +88,9 @@ function fmtStats(s: EEStatsResponse): string {
     lines.push("**Cost Ledger** (recent)");
     for (const row of s.costLedger.slice(-5)) {
       const total = row.embed + row.brain + row.judge + row.extract;
-      lines.push(`  ${row.date}: $${total.toFixed(4)} (embed=$${row.embed.toFixed(4)} brain=$${row.brain.toFixed(4)} judge=$${row.judge.toFixed(4)} extract=$${row.extract.toFixed(4)})`);
+      lines.push(
+        `  ${row.date}: $${total.toFixed(4)} (embed=$${row.embed.toFixed(4)} brain=$${row.brain.toFixed(4)} judge=$${row.judge.toFixed(4)} extract=$${row.extract.toFixed(4)})`,
+      );
     }
   }
 

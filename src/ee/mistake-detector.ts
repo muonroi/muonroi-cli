@@ -155,9 +155,7 @@ export class MistakeDetector {
     if (!path) return [];
     if (this.priorBatch.length === 0) return [];
 
-    const matches = this.priorBatch.filter(
-      (e) => isEditTool(e.toolName) && e.filePath === path && e.hadWarnings,
-    );
+    const matches = this.priorBatch.filter((e) => isEditTool(e.toolName) && e.filePath === path && e.hadWarnings);
     if (matches.length === 0) return [];
 
     return matches.map<MistakeEvent>((e) => ({

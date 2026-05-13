@@ -1,6 +1,6 @@
-import * as path from "node:path";
-import { promises as fs } from "node:fs";
 import { execSync } from "node:child_process";
+import { promises as fs } from "node:fs";
+import * as path from "node:path";
 
 /**
  * Deeper repo audit beyond {@link discoverProject}. The latter only detects
@@ -42,7 +42,21 @@ const COVERAGE_HINTS = [
   "pyproject.toml",
 ];
 
-const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".rs", ".java", ".kt", ".rb", ".php"]);
+const CODE_EXTENSIONS = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".py",
+  ".go",
+  ".rs",
+  ".java",
+  ".kt",
+  ".rb",
+  ".php",
+]);
 const TEST_FILE_RE = /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py)$/i;
 
 export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
@@ -137,11 +151,7 @@ export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
 
   audit.hasProject = audit.srcFileCount > 0 || audit.testFileCount > 0 || !!audit.readmeExcerpt;
 
-  if (
-    audit.srcFileCount >= 3 &&
-    audit.testFileCount >= 1 &&
-    (audit.hasDocs || !!audit.readmeExcerpt)
-  ) {
+  if (audit.srcFileCount >= 3 && audit.testFileCount >= 1 && (audit.hasDocs || !!audit.readmeExcerpt)) {
     audit.mode = "upgrade-existing";
   } else if (audit.hasProject) {
     audit.mode = "scratch-dir";
@@ -152,11 +162,7 @@ export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
   return audit;
 }
 
-async function countCodeFiles(
-  dir: string,
-  depth: number,
-  budget: number,
-): Promise<{ code: number; tests: number }> {
+async function countCodeFiles(dir: string, depth: number, budget: number): Promise<{ code: number; tests: number }> {
   if (depth > 6 || budget <= 0) return { code: 0, tests: 0 };
   let code = 0;
   let tests = 0;
@@ -184,9 +190,7 @@ async function countCodeFiles(
   return { code, tests };
 }
 
-async function findReadme(
-  cwd: string,
-): Promise<{ excerpt: string; sections: string[] } | null> {
+async function findReadme(cwd: string): Promise<{ excerpt: string; sections: string[] } | null> {
   const candidates = ["README.md", "Readme.md", "readme.md", "README", "README.txt"];
   for (const c of candidates) {
     const raw = await readIfExists(path.join(cwd, c));
@@ -251,10 +255,7 @@ export function additionalPrefills(a: RepoAudit): Map<string, string> {
 
   // success-metric — refine when we know the test framework
   if (a.testFramework && a.hasCoverageConfig) {
-    out.set(
-      "success-metric",
-      `100% test pass with >80% coverage (runner: ${a.testFramework})`,
-    );
+    out.set("success-metric", `100% test pass with >80% coverage (runner: ${a.testFramework})`);
   }
 
   // core-features — for upgrade-existing mode the user's idea is "improve
@@ -282,7 +283,8 @@ export function auditAsContextBlock(a: RepoAudit): string {
   }
   lines.push(`Top-level dirs: ${a.topLevelDirs.join(", ")}`);
   lines.push(`Source files: ${a.srcFileCount}, test files: ${a.testFileCount}`);
-  if (a.testFramework) lines.push(`Test runner: ${a.testFramework}${a.hasCoverageConfig ? " (coverage configured)" : ""}`);
+  if (a.testFramework)
+    lines.push(`Test runner: ${a.testFramework}${a.hasCoverageConfig ? " (coverage configured)" : ""}`);
   if (a.readmeExcerpt) {
     lines.push("");
     lines.push("README excerpt:");

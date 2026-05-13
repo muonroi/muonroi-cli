@@ -1,13 +1,13 @@
 import { generateObject } from "ai";
 import { z } from "zod";
-import type { StreamChunk } from "../types/index.js";
-import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 import type { CouncilWarning } from "../ee/council-bridge.js";
-import type { CouncilExperienceMode } from "../utils/settings.js";
-import { buildDebatePlanPrompt } from "./prompts.js";
-import { tracedGenerate } from "./llm.js";
-import { detectProviderForModel, createProviderFactory, resolveModelRuntime } from "../providers/runtime.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
+import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
+import type { StreamChunk } from "../types/index.js";
+import type { CouncilExperienceMode } from "../utils/settings.js";
+import { tracedGenerate } from "./llm.js";
+import { buildDebatePlanPrompt } from "./prompts.js";
+import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 
 const FALLBACK_PLAN: DebatePlan = {
   intentSummary: "(planner unavailable — using generic stances)",
@@ -65,7 +65,10 @@ function injectAuditorStance(
   const auditorStance: DebateStance = {
     name: "Experience Auditor",
     lens: "Challenge all claims against known past mistakes and principles recorded in the experience brain.",
-    focus: eeWarnings.map((w) => w.text).join("; ").slice(0, 300),
+    focus: eeWarnings
+      .map((w) => w.text)
+      .join("; ")
+      .slice(0, 300),
   };
   const stances = [...plan.stances];
   // advisory: append as 3rd voice; enforcing: replace last generic stance
@@ -81,10 +84,10 @@ export async function* planDebate(
   spec: ClarifiedSpec,
   leaderModelId: string,
   llm: CouncilLLM,
-  eeWarnings?: CouncilWarning[],          // CQ-13: experience snippets to seed prompt
+  eeWarnings?: CouncilWarning[], // CQ-13: experience snippets to seed prompt
   experienceMode?: CouncilExperienceMode, // CQ-14: controls Experience Auditor injection
-  taskType?: string,                       // CQ-11: task type from PIL (e.g. "architecture", "bugfix")
-  complexityTier?: string,                 // CQ-11: complexity tier from PIL (e.g. "heavy", "medium", "light")
+  taskType?: string, // CQ-11: task type from PIL (e.g. "architecture", "bugfix")
+  complexityTier?: string, // CQ-11: complexity tier from PIL (e.g. "heavy", "medium", "light")
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
   const eeSnippets = eeWarnings?.map((w) => w.text).filter(Boolean) ?? [];
   const { system: baseSystem, prompt } = buildDebatePlanPrompt(spec);
@@ -186,9 +189,10 @@ function parsePlan(raw: string): DebatePlan | null {
         : undefined;
 
     return {
-      intentSummary: typeof obj.intentSummary === "string" && obj.intentSummary.trim()
-        ? obj.intentSummary.trim()
-        : "(no intent summary provided)",
+      intentSummary:
+        typeof obj.intentSummary === "string" && obj.intentSummary.trim()
+          ? obj.intentSummary.trim()
+          : "(no intent summary provided)",
       stances,
       outputShape,
       plannedRounds,

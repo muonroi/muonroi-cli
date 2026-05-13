@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { appendProductLedger, readProductLedger, getProductSpentUsd } from "../product-ledger.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { appendProductLedger, getProductSpentUsd, readProductLedger } from "../product-ledger.js";
 
 const TEST_HOME = path.join(os.tmpdir(), `muonroi-test-${Math.random().toString(36).slice(2)}`);
 
@@ -31,8 +31,16 @@ describe("product-ledger", () => {
 
   it("calculates spent USD correctly", async () => {
     const runId = "test-run-spent";
-    await appendProductLedger(runId, { ts: 1, productRunId: runId, reservationId: "r1", actualUsd: 0.1, model: "m", provider: "p" }, TEST_HOME);
-    await appendProductLedger(runId, { ts: 2, productRunId: runId, reservationId: "r2", actualUsd: 0.2, model: "m", provider: "p" }, TEST_HOME);
+    await appendProductLedger(
+      runId,
+      { ts: 1, productRunId: runId, reservationId: "r1", actualUsd: 0.1, model: "m", provider: "p" },
+      TEST_HOME,
+    );
+    await appendProductLedger(
+      runId,
+      { ts: 2, productRunId: runId, reservationId: "r2", actualUsd: 0.2, model: "m", provider: "p" },
+      TEST_HOME,
+    );
 
     const spent = await getProductSpentUsd(runId, TEST_HOME);
     expect(spent).toBeCloseTo(0.3);
@@ -51,14 +59,20 @@ describe("product-ledger", () => {
     const count = 10;
     const promises = [];
     for (let i = 0; i < count; i++) {
-      promises.push(appendProductLedger(runId, {
-        ts: Date.now(),
-        productRunId: runId,
-        reservationId: `r${i}`,
-        actualUsd: 0.01,
-        model: "m",
-        provider: "p"
-      }, TEST_HOME));
+      promises.push(
+        appendProductLedger(
+          runId,
+          {
+            ts: Date.now(),
+            productRunId: runId,
+            reservationId: `r${i}`,
+            actualUsd: 0.01,
+            model: "m",
+            provider: "p",
+          },
+          TEST_HOME,
+        ),
+      );
     }
 
     await Promise.all(promises);

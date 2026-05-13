@@ -5,8 +5,8 @@
  * Verifies observable behaviors locked after Wave 1-2 render.ts changes.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { emitMatches, getRenderSink, setRenderSink, warningToChunk } from "../render.js";
 import type { StreamChunk } from "../../types/index.js";
+import { emitMatches, getRenderSink, setRenderSink, warningToChunk } from "../render.js";
 
 const FAKE_MATCH = {
   confidence: 0.85,

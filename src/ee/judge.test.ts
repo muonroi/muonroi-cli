@@ -101,10 +101,7 @@ describe("judge() deterministic classifier", () => {
     const ctx = makeCtx({
       warningResponse: {
         decision: "allow",
-        matches: [
-          makeMatch({ confidence: 0.1 }),
-          makeMatch({ confidence: 0.2 }),
-        ],
+        matches: [makeMatch({ confidence: 0.1 }), makeMatch({ confidence: 0.2 })],
       },
     });
     expect(judge(ctx)).toBe("IRRELEVANT");
@@ -114,10 +111,7 @@ describe("judge() deterministic classifier", () => {
     const ctx = makeCtx({
       warningResponse: {
         decision: "allow",
-        matches: [
-          makeMatch({ confidence: 0.1 }),
-          makeMatch({ confidence: 0.8 }),
-        ],
+        matches: [makeMatch({ confidence: 0.1 }), makeMatch({ confidence: 0.8 })],
       },
     });
     expect(judge(ctx)).toBe("FOLLOWED");

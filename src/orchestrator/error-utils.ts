@@ -60,4 +60,4 @@ function extractResponseDetail(body: string | undefined): string | null {
   return null;
 }
 
-export { STATUS_MESSAGES, extractResponseDetail };
+export { extractResponseDetail, STATUS_MESSAGES };

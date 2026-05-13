@@ -2,9 +2,9 @@
  * Tests for Step-Aware Model Routing (SAMR).
  */
 
-import { describe, expect, it, beforeAll } from "vitest";
-import { decideStepRouting, getStepRouterConfig, type StepRouterConfig } from "../step-router.js";
+import { beforeAll, describe, expect, it } from "vitest";
 import { loadCatalog, MODELS } from "../../models/registry.js";
+import { decideStepRouting, getStepRouterConfig, type StepRouterConfig } from "../step-router.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -25,11 +25,7 @@ describe("decideStepRouting", () => {
   });
 
   it("returns phase2ModelId=null when disabled", () => {
-    const decision = decideStepRouting(
-      "claude-sonnet-4-6",
-      "anthropic",
-      mockConfig({ enabled: false }),
-    );
+    const decision = decideStepRouting("claude-sonnet-4-6", "anthropic", mockConfig({ enabled: false }));
     expect(decision.phase2ModelId).toBeNull();
     expect(decision.reason).toContain("disabled");
   });
@@ -38,11 +34,7 @@ describe("decideStepRouting", () => {
     const fastModel = MODELS.find((m) => m.tier === "fast" && m.provider);
     if (!fastModel || !fastModel.provider) return;
 
-    const decision = decideStepRouting(
-      fastModel.id,
-      fastModel.provider,
-      mockConfig({ toolExecutionTier: "fast" }),
-    );
+    const decision = decideStepRouting(fastModel.id, fastModel.provider, mockConfig({ toolExecutionTier: "fast" }));
     expect(decision.phase1ModelId).toBe(fastModel.id);
   });
 
@@ -50,11 +42,7 @@ describe("decideStepRouting", () => {
     const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
     if (!premiumModel || !premiumModel.provider) return;
 
-    const decision = decideStepRouting(
-      premiumModel.id,
-      premiumModel.provider,
-      mockConfig(),
-    );
+    const decision = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
 
     if (decision.phase2ModelId) {
       expect(decision.phase2ModelId).not.toBe(premiumModel.id);
@@ -67,11 +55,7 @@ describe("decideStepRouting", () => {
     if (!premiumModel || !premiumModel.provider) return;
 
     const balancedCfg = mockConfig({ toolExecutionTier: "balanced" });
-    const decision = decideStepRouting(
-      premiumModel.id,
-      premiumModel.provider,
-      balancedCfg,
-    );
+    const decision = decideStepRouting(premiumModel.id, premiumModel.provider, balancedCfg);
 
     if (decision.phase2ModelId) {
       const execModel = MODELS.find((m) => m.id === decision.phase2ModelId);
@@ -80,11 +64,7 @@ describe("decideStepRouting", () => {
   });
 
   it("phase1ModelId is always preserved", () => {
-    const decision = decideStepRouting(
-      "claude-sonnet-4-6",
-      "anthropic",
-      mockConfig({ enabled: false }),
-    );
+    const decision = decideStepRouting("claude-sonnet-4-6", "anthropic", mockConfig({ enabled: false }));
     expect(decision.phase1ModelId).toBe("claude-sonnet-4-6");
   });
 });
@@ -104,11 +84,7 @@ describe("default-off safety", () => {
   // DEFAULT_CONFIG behavior by passing { enabled: false } explicitly — what
   // a user with no stepRouter setting would get.
   it("explicit enabled=false returns phase2ModelId=null", () => {
-    const decision = decideStepRouting(
-      "claude-opus-4-7",
-      "anthropic",
-      mockConfig({ enabled: false }),
-    );
+    const decision = decideStepRouting("claude-opus-4-7", "anthropic", mockConfig({ enabled: false }));
     expect(decision.phase2ModelId).toBeNull();
     expect(decision.reason).toContain("disabled");
   });

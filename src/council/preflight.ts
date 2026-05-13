@@ -1,6 +1,6 @@
 import type { StreamChunk } from "../types/index.js";
-import type { ClarifiedSpec, PreflightResponder } from "./types.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
+import type { ClarifiedSpec, PreflightResponder } from "./types.js";
 
 export interface RunPreflightOptions {
   repoEmpty?: boolean;

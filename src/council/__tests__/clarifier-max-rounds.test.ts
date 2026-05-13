@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import type { StreamChunk } from "../../types/index.js";
 import { runClarification } from "../clarifier.js";
 import type { CouncilLLM, QuestionResponder } from "../types.js";
-import type { StreamChunk } from "../../types/index.js";
 
 describe("runClarification maxRounds parameterization", () => {
   const mockLLM: CouncilLLM = {
-    generate: vi.fn().mockResolvedValue('["Next question?"]')
+    generate: vi.fn().mockResolvedValue('["Next question?"]'),
   } as any;
 
   const mockResponder: QuestionResponder = vi.fn().mockResolvedValue("answer");
@@ -20,11 +20,15 @@ describe("runClarification maxRounds parameterization", () => {
       mockLLM,
       undefined,
       undefined,
-      6 // maxRounds
+      6, // maxRounds
     );
 
     for await (const chunk of gen) {
-      if (chunk.type === "council_phase" && chunk.councilPhase?.kind === "clarification_round" && chunk.councilPhase.state === "active") {
+      if (
+        chunk.type === "council_phase" &&
+        chunk.councilPhase?.kind === "clarification_round" &&
+        chunk.councilPhase.state === "active"
+      ) {
         rounds.push(chunk.councilPhase.phaseId);
       }
     }
@@ -42,12 +46,16 @@ describe("runClarification maxRounds parameterization", () => {
       mockResponder,
       mockLLM,
       undefined,
-      undefined
+      undefined,
       // maxRounds omitted
     );
 
     for await (const chunk of gen) {
-      if (chunk.type === "council_phase" && chunk.councilPhase?.kind === "clarification_round" && chunk.councilPhase.state === "active") {
+      if (
+        chunk.type === "council_phase" &&
+        chunk.councilPhase?.kind === "clarification_round" &&
+        chunk.councilPhase.state === "active"
+      ) {
         rounds.push(chunk.councilPhase.phaseId);
       }
     }
@@ -65,11 +73,15 @@ describe("runClarification maxRounds parameterization", () => {
       mockLLM,
       undefined,
       undefined,
-      -1 // invalid maxRounds
+      -1, // invalid maxRounds
     );
 
     for await (const chunk of gen) {
-      if (chunk.type === "council_phase" && chunk.councilPhase?.kind === "clarification_round" && chunk.councilPhase.state === "active") {
+      if (
+        chunk.type === "council_phase" &&
+        chunk.councilPhase?.kind === "clarification_round" &&
+        chunk.councilPhase.state === "active"
+      ) {
         rounds.push(chunk.councilPhase.phaseId);
       }
     }

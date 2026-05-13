@@ -13,11 +13,13 @@ function q(over: Partial<CouncilQuestionData>): CouncilQuestionData {
 
 describe("parseCouncilAnswersFile", () => {
   it("parses a valid object with phase queues + preflightApprove", () => {
-    const out = parseCouncilAnswersFile(JSON.stringify({
-      clarify: ["python", "mongo"],
-      "post-debate": ["generate_plan"],
-      preflightApprove: false,
-    }));
+    const out = parseCouncilAnswersFile(
+      JSON.stringify({
+        clarify: ["python", "mongo"],
+        "post-debate": ["generate_plan"],
+        preflightApprove: false,
+      }),
+    );
     expect(out.clarify).toEqual(["python", "mongo"]);
     expect(out["post-debate"]).toEqual(["generate_plan"]);
     expect(out.preflightApprove).toBe(false);
@@ -49,27 +51,31 @@ describe("createCouncilAutoAnswerer", () => {
   it("--yes alone picks defaultIndex value", () => {
     const a = createCouncilAutoAnswerer({ enabled: true });
     expect(a).not.toBeNull();
-    const answer = a!.answerQuestion(q({
-      phase: "post-debate",
-      defaultIndex: 1,
-      options: [
-        { label: "A", value: "a", kind: "choice" },
-        { label: "B", value: "b", kind: "choice" },
-      ],
-    }));
+    const answer = a!.answerQuestion(
+      q({
+        phase: "post-debate",
+        defaultIndex: 1,
+        options: [
+          { label: "A", value: "a", kind: "choice" },
+          { label: "B", value: "b", kind: "choice" },
+        ],
+      }),
+    );
     expect(answer).toBe("b");
   });
 
   it("falls back to first option when defaultIndex is out of range", () => {
     const a = createCouncilAutoAnswerer({ enabled: true });
-    const answer = a!.answerQuestion(q({
-      phase: "post-debate",
-      defaultIndex: 99,
-      options: [
-        { label: "A", value: "a", kind: "choice" },
-        { label: "B", value: "b", kind: "choice" },
-      ],
-    }));
+    const answer = a!.answerQuestion(
+      q({
+        phase: "post-debate",
+        defaultIndex: 99,
+        options: [
+          { label: "A", value: "a", kind: "choice" },
+          { label: "B", value: "b", kind: "choice" },
+        ],
+      }),
+    );
     expect(answer).toBe("a");
   });
 
@@ -130,11 +136,7 @@ describe("handleCouncilChunk (interception wiring)", () => {
 
   it("returns null and is a no-op when answerer is null", () => {
     const sink = makeSink();
-    const out = handleCouncilChunk(
-      { type: "council_question", councilQuestion: q({ phase: "clarify" }) },
-      null,
-      sink,
-    );
+    const out = handleCouncilChunk({ type: "council_question", councilQuestion: q({ phase: "clarify" }) }, null, sink);
     expect(out).toBeNull();
     expect(sink.respondToQuestion).not.toHaveBeenCalled();
   });
@@ -191,11 +193,7 @@ describe("handleCouncilChunk (interception wiring)", () => {
   it("approves preflight chunks by default", () => {
     const sink = makeSink();
     const a = createCouncilAutoAnswerer({ enabled: true });
-    const audit = handleCouncilChunk(
-      { type: "council_preflight", councilPreflight: { preflightId: "pf-1" } },
-      a,
-      sink,
-    );
+    const audit = handleCouncilChunk({ type: "council_preflight", councilPreflight: { preflightId: "pf-1" } }, a, sink);
     expect(sink.respondToPreflight).toHaveBeenCalledWith("pf-1", true);
     expect(audit).toContain("approve");
   });
@@ -206,11 +204,7 @@ describe("handleCouncilChunk (interception wiring)", () => {
       enabled: false,
       file: { preflightApprove: false },
     });
-    handleCouncilChunk(
-      { type: "council_preflight", councilPreflight: { preflightId: "pf-2" } },
-      a,
-      sink,
-    );
+    handleCouncilChunk({ type: "council_preflight", councilPreflight: { preflightId: "pf-2" } }, a, sink);
     expect(sink.respondToPreflight).toHaveBeenCalledWith("pf-2", false);
   });
 
@@ -231,7 +225,11 @@ describe("handleCouncilChunk (interception wiring)", () => {
       },
     });
     const order: string[] = [];
-    const fakeStream: Array<{ type: string; councilQuestion?: CouncilQuestionData; councilPreflight?: { preflightId: string } }> = [
+    const fakeStream: Array<{
+      type: string;
+      councilQuestion?: CouncilQuestionData;
+      councilPreflight?: { preflightId: string };
+    }> = [
       { type: "council_question", councilQuestion: q({ phase: "clarify", questionId: "c1" }) },
       { type: "council_question", councilQuestion: q({ phase: "clarify", questionId: "c2" }) },
       { type: "council_question", councilQuestion: q({ phase: "clarify", questionId: "c3" }) },

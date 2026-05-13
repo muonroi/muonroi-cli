@@ -58,11 +58,10 @@ export function createCouncilAutoAnswerer(opts: {
 
 function defaultAnswerFor(q: CouncilQuestionData): string {
   if (q.options && q.options.length > 0) {
-    const idx = typeof q.defaultIndex === "number"
-      && q.defaultIndex >= 0
-      && q.defaultIndex < q.options.length
-      ? q.defaultIndex
-      : 0;
+    const idx =
+      typeof q.defaultIndex === "number" && q.defaultIndex >= 0 && q.defaultIndex < q.options.length
+        ? q.defaultIndex
+        : 0;
     return q.options[idx].value;
   }
   return "";

@@ -57,11 +57,7 @@ export function readTextFromHostClipboard(): string {
 
   if (platform === "win32") {
     // Powershell Get-Clipboard returns text content, with a trailing CRLF.
-    const r = spawnSync(
-      "powershell",
-      ["-NoProfile", "-Command", "Get-Clipboard -Raw"],
-      { encoding: "utf8" },
-    );
+    const r = spawnSync("powershell", ["-NoProfile", "-Command", "Get-Clipboard -Raw"], { encoding: "utf8" });
     if (r.status === 0 && typeof r.stdout === "string") {
       return r.stdout.replace(/\r\n$/, "");
     }

@@ -1,3 +1,4 @@
+import { getDefaultEEClient } from "../ee/intercept.js";
 import {
   cronMatchesDate,
   getScheduleDaemonStatus,
@@ -9,7 +10,6 @@ import {
   startDetachedHeadlessRun,
   writeScheduleDaemonPid,
 } from "../tools/schedule";
-import { getDefaultEEClient } from "../ee/intercept.js";
 
 export class SchedulerDaemon {
   private readonly schedules = new ScheduleManager();

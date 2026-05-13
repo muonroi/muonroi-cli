@@ -31,7 +31,7 @@ describe("phase-orchestrator integration (subsystem E)", () => {
       leaderModelId: "m1",
       capUsd: 10,
       remainingUsd: async () => 5,
-      awaitCustomerVerdict: async () => ({ verdict: "accept" }),
+      awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
       sprintRunner: vi.fn(async function* () {

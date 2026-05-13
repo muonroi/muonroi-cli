@@ -23,23 +23,23 @@ export function evidenceLooksValid(text: string): boolean {
     /\btest\(['"`].+['"`]\)|describe\(['"`].+['"`]\)/,
     /\b[a-f0-9]{7,40}\b/,
     /\b(?:lighthouse|p95|p99|qps|throughput)[\s:=]+\d+/i,
-    /\b(GET|POST|PUT|DELETE|PATCH)\s+\/[^\s]+\s*→\s*\d{3}\b/
+    /\b(GET|POST|PUT|DELETE|PATCH)\s+\/[^\s]+\s*→\s*\d{3}\b/,
   ];
 
-  return patterns.some(regex => regex.test(text));
+  return patterns.some((regex) => regex.test(text));
 }
 
 /**
  * Annotates each criterion with evidenceValid: boolean based on the evidence field.
  */
 export function wrapSynthesisWithEvidence(criteria: Criterion[]): Criterion[] {
-  return criteria.map(c => {
+  return criteria.map((c) => {
     if (c.status === "unmet") {
       return { ...c, evidenceValid: true }; // Unmet criteria don't need evidence
     }
     return {
       ...c,
-      evidenceValid: c.evidence ? evidenceLooksValid(c.evidence) : false
+      evidenceValid: c.evidence ? evidenceLooksValid(c.evidence) : false,
     };
   });
 }
