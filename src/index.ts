@@ -1202,6 +1202,52 @@ mcp
   });
 
 program.addCommand(buildConfigCommand());
+
+program
+  .command("share <user>")
+  .description("Add a stakeholder to the current product's Discord channel")
+  .option("--product <slug>", "Override product slug (default: most recent run)")
+  .option("--display <name>", "Display name for the stakeholder")
+  .action(async (user: string, opts: { product?: string; display?: string }) => {
+    const token = process.env.MUONROI_DISCORD_TOKEN;
+    const guildId = process.env.MUONROI_DISCORD_GUILD_ID;
+    if (!token || !guildId) {
+      console.error("muonroi share: MUONROI_DISCORD_TOKEN and MUONROI_DISCORD_GUILD_ID must both be set.");
+      process.exit(1);
+    }
+    const { DiscordRestClient } = await import("./discord/client.js");
+    const { runShareCommand } = await import("./cli/share-cmd.js");
+    const client = new DiscordRestClient(token);
+    const result = await runShareCommand({
+      cwd: process.cwd(),
+      user,
+      product: opts.product,
+      display: opts.display,
+      client,
+    });
+    switch (result.kind) {
+      case "granted":
+        console.log(`Granted channel access to <@${result.userId}> in product ${result.slug}.`);
+        break;
+      case "acl-only":
+        console.log(`Added <@${result.userId}> to product ${result.slug}. Channel will be granted access on creation.`);
+        break;
+      case "already-stakeholder":
+        console.log(`User <@${result.userId}> is already a stakeholder of ${result.slug}.`);
+        break;
+      case "perm-error":
+        console.error(
+          `Failed to grant Discord permission (status=${result.status}). ACL was still updated; user can join when bot has permission.`,
+        );
+        process.exit(1);
+        break;
+      case "error":
+        console.error(`muonroi share: ${result.message}`);
+        process.exit(1);
+        break;
+    }
+  });
+
 program.parse();
 
 function formatContext(tokens: number): string {
