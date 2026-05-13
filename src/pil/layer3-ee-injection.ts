@@ -8,8 +8,8 @@
  * search server-side). Otherwise falls back to in-process embed + Qdrant.
  */
 
-import { searchByText } from "../ee/bridge.js";
 import type { EEPoint } from "../ee/bridge.js";
+import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
 import { getRenderSink } from "../ee/render.js";
 import { logInteraction } from "../storage/interaction-log.js";
@@ -70,6 +70,51 @@ function formatExperienceHints(points: EEPoint[]): string {
 }
 
 export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineContext> {
+  // Formatter mode: when L1 populated ctx._brainData via the unified call,
+  // we just render — zero network round-trips.
+  if (ctx._brainData) {
+    const principlesBudget = Math.floor(ctx.tokenBudget * 0.15);
+    const behavioralBudget = Math.floor(ctx.tokenBudget * 0.15);
+    const parts: string[] = [];
+    const deltas: string[] = [];
+
+    if (ctx._brainData.t0_principles.length > 0) {
+      const lines = ctx._brainData.t0_principles.map((p) => `- ${p.text.slice(0, 120)}`);
+      const block = truncateToBudget(
+        `[principles: Generalized principles from past work]\n${lines.join("\n")}`,
+        principlesBudget,
+      );
+      parts.push(block);
+      deltas.push(`principles=${ctx._brainData.t0_principles.length}`);
+    }
+    if (ctx._brainData.t2_patterns.length > 0) {
+      const lines = ctx._brainData.t2_patterns.map((p) => `- ${p.text.slice(0, 120)}`);
+      const block = truncateToBudget(
+        `[experience: Relevant patterns from past work]\n${lines.join("\n")}`,
+        behavioralBudget,
+      );
+      parts.push(block);
+      deltas.push(`behavioral=${ctx._brainData.t2_patterns.length}`);
+    }
+    deltas.push(`t1=${ctx._brainData.t1_rules.length}`);
+    deltas.push(`src=unified`);
+
+    return {
+      ...ctx,
+      enriched: parts.length > 0 ? `${ctx.enriched}\n${parts.join("\n")}` : ctx.enriched,
+      t1Rules: ctx._brainData.t1_rules,
+      layers: [
+        ...ctx.layers,
+        {
+          name: "ee-experience-injection",
+          applied: parts.length > 0,
+          delta: deltas.join(" "),
+        },
+      ],
+    };
+  }
+
+  // Legacy path: existing logic continues below — unchanged.
   const result = await queryEeBridge(ctx.raw);
   const { points } = result;
 
@@ -87,7 +132,9 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           },
         });
       }
-    } catch { /* fail-open */ }
+    } catch {
+      /* fail-open */
+    }
     return {
       ...ctx,
       layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: `error=${result.error}` }],
@@ -110,7 +157,9 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           },
         });
       }
-    } catch { /* fail-open */ }
+    } catch {
+      /* fail-open */
+    }
     return {
       ...ctx,
       layers: [...ctx.layers, { name: "ee-experience-injection", applied: false, delta: "no-points" }],
@@ -136,7 +185,9 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     getRenderSink()(injectedChunk as any);
-  } catch { /* fail-open — never break injection path */ }
+  } catch {
+    /* fail-open — never break injection path */
+  }
 
   const hint = formatExperienceHints(points);
   const budgetShare = Math.floor(ctx.tokenBudget * 0.3);
@@ -159,7 +210,9 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         },
       });
     }
-  } catch { /* fail-open */ }
+  } catch {
+    /* fail-open */
+  }
 
   return {
     ...ctx,
