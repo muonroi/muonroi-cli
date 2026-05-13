@@ -1,5 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { slugify } from "../utils/slugify.js";
 import type { ProductSpec } from "./types.js";
 
 /**
@@ -56,7 +57,7 @@ async function maybeWriteReadme(opts: PolishOptions, out: PolishResult): Promise
 
   const spec = opts.productSpec;
   const lines: string[] = [];
-  const title = spec.idea.split(/[\.\!\?\n]/)[0]?.trim() || "Project";
+  const title = spec.idea.split(/[.!?\n]/)[0]?.trim() || "Project";
   lines.push(`# ${title.slice(0, 80)}`);
   lines.push("");
   if (spec.idea && spec.idea !== title) {
@@ -115,7 +116,8 @@ async function maybeFillPackageJson(opts: PolishOptions, out: PolishResult): Pro
   }
 
   let touched = false;
-  const slugged = slugifyTitle(opts.productSpec.idea);
+  const first = opts.productSpec.idea.split(/[.!?\n]/)[0]?.trim();
+  const slugged = first ? slugify(first).slice(0, 60) || undefined : undefined;
   if (!pkg.name && slugged) {
     pkg.name = slugged;
     touched = true;
@@ -150,17 +152,6 @@ async function writeDeliveryNotes(opts: PolishOptions, out: PolishResult): Promi
   if (lines.length === 2) lines.push("- nothing to scaffold (all artifacts already present)");
   lines.push("");
   await fs.writeFile(notesPath, lines.join("\n"), "utf-8");
-}
-
-function slugifyTitle(idea: string): string | undefined {
-  const first = idea.split(/[\.\!\?\n]/)[0]?.trim();
-  if (!first) return undefined;
-  const slug = first
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
-  return slug || undefined;
 }
 
 async function fileExists(p: string): Promise<boolean> {
