@@ -326,6 +326,20 @@ export interface ExperienceInjectedData {
   domain?: string;
 }
 
+export type CouncilMessageKind = "debate" | "leader" | "synthesis" | "research";
+
+export interface CouncilMessage {
+  kind: CouncilMessageKind;
+  speaker: { role: string; model: string };
+  partner?: { role: string };       // debate turns only
+  round?: number;                   // debate / leader only
+  text: string;                     // raw markdown body
+  toolCalls?: { name: string }[];
+  attempts?: number;                // >1 → "recovered on retry" badge
+  failureReason?: string;           // present → render inline skipped line, not a bubble
+  runId?: string;                   // reserved for future multi-session demux
+}
+
 export interface StreamChunk {
   type:
     | "content"
@@ -336,6 +350,7 @@ export interface StreamChunk {
     | "council_preflight"
     | "council_status"
     | "council_phase"
+    | "council_message"
     | "done"
     | "error"
     | "reasoning"
@@ -356,6 +371,7 @@ export interface StreamChunk {
   councilPreflight?: CouncilPreflightData;
   councilStatus?: CouncilStatusData;
   councilPhase?: CouncilPhaseEvent;
+  councilMessage?: CouncilMessage;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
   experienceWarning?: ExperienceWarningData;
   experienceInjected?: ExperienceInjectedData;
