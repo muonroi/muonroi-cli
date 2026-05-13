@@ -304,6 +304,17 @@ async function* drainSprints(args: {
   };
 }
 
+function discordEnvConfig(): { token: string; guildId: string } | null {
+  const token = process.env.MUONROI_DISCORD_TOKEN;
+  const guildId = process.env.MUONROI_DISCORD_GUILD_ID;
+  if (!token && !guildId) return null;
+  if (!token || !guildId) {
+    console.warn("muonroi: MUONROI_DISCORD_TOKEN/_GUILD_ID partially configured; Discord disabled.");
+    return null;
+  }
+  return { token, guildId };
+}
+
 /**
  * Phase-orchestrated sprint path (Subsystem E).
  *
@@ -398,9 +409,20 @@ async function* runPhasesPath(args: {
     return result!;
   };
 
-  // awaitCustomerVerdict: use respondToQuestion (the existing user-prompt API).
+  // Discord setup (opt-in via env vars; no-op when unset).
+  const discordCfg = discordEnvConfig();
+  let discordClient: import("../discord/types.js").DiscordClient | null = null;
+  let slug: string | null = null;
+  if (discordCfg) {
+    const { DiscordRestClient } = await import("../discord/client.js");
+    discordClient = new DiscordRestClient(discordCfg.token);
+    const { productSlug } = await import("./product-identity.js");
+    slug = productSlug(manifest.idea);
+  }
+
+  // Terminal fallback: use respondToQuestion (the existing user-prompt API).
   // QuestionResponder takes a questionId string; the UI layer resolves the prompt text.
-  const awaitCustomerVerdict = async (_flowDir: string, _runId: string) => {
+  const terminalFallback = async (): Promise<{ verdict: "accept" | "reject" | "abort"; feedback?: string }> => {
     const ans = await ctx.respondToQuestion("customer-review-verdict");
     const lower = (ans ?? "").trim().toLowerCase();
     if (lower.startsWith("x")) return { verdict: "abort" as const };
@@ -409,6 +431,43 @@ async function* runPhasesPath(args: {
       return { verdict: "reject" as const, feedback: fb ?? "" };
     }
     return { verdict: "accept" as const };
+  };
+
+  const awaitCustomerVerdict = async (verdictArgs: {
+    flowDir: string;
+    runId: string;
+    phaseId: string;
+    sprintN: number;
+    reviewSummary: string;
+  }): Promise<{ verdict: "accept" | "reject" | "abort"; feedback?: string }> => {
+    if (!discordClient || !discordCfg || !slug) return terminalFallback();
+    const { ensureChannel } = await import("../discord/channel-manager.js");
+    const { discordAwaitVerdict } = await import("../discord/verdict-resolver.js");
+    const ch = await ensureChannel({
+      client: discordClient,
+      guildId: discordCfg.guildId,
+      slug,
+      displayName: manifest.idea,
+    });
+    if (!ch) return terminalFallback();
+    return discordAwaitVerdict({
+      flowDir: verdictArgs.flowDir,
+      runId: verdictArgs.runId,
+      phaseId: verdictArgs.phaseId,
+      sprintN: verdictArgs.sprintN,
+      productSlug: slug,
+      channelId: ch.channelId,
+      client: discordClient,
+      leader,
+      capUsd: manifest.capUsd,
+      remainingUsd: async () => {
+        const { getProductSpentUsd } = await import("../usage/product-ledger.js");
+        const spent = await getProductSpentUsd(verdictArgs.runId);
+        return Math.max(0, manifest.capUsd - spent);
+      },
+      reviewSummary: verdictArgs.reviewSummary,
+      fallback: terminalFallback,
+    });
   };
 
   const phaseGen = runPhases({
@@ -432,7 +491,30 @@ async function* runPhasesPath(args: {
       phaseOutcome = step.value as { pass: boolean; reason?: string };
       break;
     }
-    yield step.value as StreamChunk;
+    const chunk = step.value as StreamChunk;
+    if (chunk.type === "push_notification" && discordClient && discordCfg && slug) {
+      try {
+        const { ensureChannel } = await import("../discord/channel-manager.js");
+        const { publish } = await import("../discord/broadcast-bus.js");
+        const ch = await ensureChannel({
+          client: discordClient,
+          guildId: discordCfg.guildId,
+          slug,
+          displayName: manifest.idea,
+        });
+        if (ch) {
+          await publish({
+            client: discordClient,
+            channelId: ch.channelId,
+            type: "phase-event",
+            content: chunk.content ?? "",
+          });
+        }
+      } catch (e) {
+        console.warn("muonroi: discord broadcast failed", e);
+      }
+    }
+    yield chunk;
   }
 
   if (!phaseOutcome.pass) {

@@ -144,7 +144,7 @@ describe("runPhases orchestrator (subsystem E)", () => {
       leaderModelId: "m1",
       capUsd: 10,
       remainingUsd: async () => 5,
-      awaitCustomerVerdict: async () => ({ verdict: "accept" as const }),
+      awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
       sprintRunner: vi.fn(async function* () {
@@ -211,7 +211,7 @@ describe("runPhases orchestrator (subsystem E)", () => {
   });
 
   it("customer abort → returns immediately with user-aborted reason", async () => {
-    const args = baseArgs({ awaitCustomerVerdict: async () => ({ verdict: "abort" }) });
+    const args = baseArgs({ awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "abort" }) });
     // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
     let res: OrchestratorResult | undefined;
@@ -227,7 +227,9 @@ describe("runPhases orchestrator (subsystem E)", () => {
   });
 
   it("customer reject feedback persisted verbatim", async () => {
-    const args = baseArgs({ awaitCustomerVerdict: async () => ({ verdict: "reject", feedback: "needs more polish" }) });
+    const args = baseArgs({
+      awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "reject", feedback: "needs more polish" }),
+    });
     // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
     let count = 0;
@@ -311,7 +313,7 @@ describe("resume protocol (subsystem E)", () => {
       leaderModelId: "m1",
       capUsd: 10,
       remainingUsd: async () => 5,
-      awaitCustomerVerdict: async () => ({ verdict: "accept" as const }),
+      awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
       sprintRunner: vi.fn(async function* () {
