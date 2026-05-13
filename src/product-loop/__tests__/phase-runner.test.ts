@@ -290,3 +290,107 @@ describe("runPhases orchestrator (subsystem E)", () => {
     expect(res?.reason).toMatch(/phases-deadlocked/);
   });
 });
+
+describe("resume protocol (subsystem E)", () => {
+  let flowDir: string;
+  const runId = "r-res";
+  beforeEach(async () => {
+    flowDir = path.join(os.tmpdir(), `res-${Math.random().toString(36).slice(2)}`);
+    await fs.mkdir(path.join(flowDir, "runs", runId), { recursive: true });
+  });
+
+  // biome-ignore lint/suspicious/noExplicitAny: test helper accepts partial overrides for ease
+  function baseArgs(over: Partial<any> = {}) {
+    return {
+      flowDir,
+      runId,
+      manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
+      clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
+      projectContext: { context: {}, prefillSource: {}, version: 1 },
+      leader: { generate: vi.fn().mockResolvedValue({ content: "fallback", costUsd: 0 }) },
+      leaderModelId: "m1",
+      capUsd: 10,
+      remainingUsd: async () => 5,
+      awaitCustomerVerdict: async () => ({ verdict: "accept" as const }),
+      suppressPush: true,
+      backoffDelays: [1, 1, 1],
+      sprintRunner: vi.fn(async function* () {
+        yield { type: "info", content: "" };
+        return { scoreBefore: 0.5, scoreAfter: 0.9, criteriaMet: 1, totalCriteria: 1 };
+      }),
+      ...over,
+    };
+  }
+
+  it("resume with retro-pending marker replays retro for sprint", async () => {
+    const { writePhasePlan } = await import("../phase-plan.js");
+    await writePhasePlan(flowDir, runId, {
+      version: 1,
+      generatedAt: "t",
+      phases: [
+        {
+          id: "phase-1",
+          name: "n",
+          goal: "g",
+          successCriteria: ["A", "B"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 1,
+        },
+      ],
+    });
+    await markRetroPending(flowDir, runId, "phase-1", 1);
+    await appendCustomerDecision(flowDir, runId, { phaseId: "phase-1", sprintN: 1, verdict: "accept" });
+    await markPhaseStatus(flowDir, runId, "phase-1", "in-progress");
+
+    const retroContent = JSON.stringify({ wentWell: ["w"], toImprove: ["i"], nextSprintFocus: "focus" });
+    const args2 = {
+      ...baseArgs(),
+      leader: { generate: vi.fn().mockResolvedValue({ content: retroContent, costUsd: 0.05 }) },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
+    const gen = (await import("../phase-runner.js")).runPhases(args2 as any);
+    while (true) {
+      const n = await gen.next();
+      if (n.done) break;
+    }
+    const { readArtifact } = await import("../../flow/artifact-io.js");
+    const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
+    expect(map?.sections.has("retro-pending:phase-1:sprint-1")).toBe(false);
+  });
+
+  it("resume with plan corruption regenerates plan", async () => {
+    const phasesPath = path.join(flowDir, "runs", runId, "phases.md");
+    await fs.writeFile(phasesPath, "## Plan\n\n{not json\n");
+
+    const goodPlan = {
+      version: 1,
+      generatedAt: "t",
+      phases: [
+        {
+          id: "phase-1",
+          name: "n",
+          goal: "g",
+          successCriteria: ["A", "B"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 1,
+        },
+      ],
+    };
+    const args2 = {
+      ...baseArgs(),
+      leader: { generate: vi.fn().mockResolvedValue({ content: JSON.stringify(goodPlan), costUsd: 0.1 }) },
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
+    const gen = (await import("../phase-runner.js")).runPhases(args2 as any);
+    while (true) {
+      const n = await gen.next();
+      if (n.done) break;
+    }
+    const entries = await fs.readdir(path.join(flowDir, "runs", runId));
+    expect(entries.some((e) => e.startsWith("phases.md.corrupt-"))).toBe(true);
+  });
+});

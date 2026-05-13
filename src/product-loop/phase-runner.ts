@@ -295,6 +295,16 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       await backupCorruptPhases(args.flowDir, args.runId);
       plan = null;
     }
+  } else {
+    // readPhasePlan returns null both when file is absent and when JSON is corrupt.
+    // If the file exists but parse failed, back it up before regenerating.
+    const { promises: fsp } = await import("node:fs");
+    try {
+      await fsp.access(path.join(runDir(args.flowDir, args.runId), "phases.md"));
+      await backupCorruptPhases(args.flowDir, args.runId);
+    } catch {
+      /* file doesn't exist — first-run path, nothing to back up */
+    }
   }
   if (!plan) {
     plan = await generatePhasePlan({
