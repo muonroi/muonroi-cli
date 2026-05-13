@@ -65,4 +65,85 @@ describe("discovery-detection", () => {
     expect(sig.manifests[0].type).toBe("go.mod");
     expect(sig.languages).toContain("Go");
   });
+
+  it("classifies empty package.json (no deps) as ambiguous", async () => {
+    await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({}));
+    await fs.mkdir(path.join(cwd, "src"));
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(path.join(cwd, "src", `f${i}.ts`), "export const x = 1;");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.classification).toBe("ambiguous");
+  });
+
+  it("classifies scaffolded but untouched project as ambiguous", async () => {
+    await fs.writeFile(path.join(cwd, "package.json"), JSON.stringify({ dependencies: { next: "^14" } }));
+    // only 2 src files = scaffold
+    await fs.mkdir(path.join(cwd, "src"));
+    await fs.writeFile(path.join(cwd, "src", "index.ts"), "export {}");
+    await fs.writeFile(path.join(cwd, "src", "app.tsx"), "export {}");
+    const sig = await detectExistingProject(cwd);
+    expect(sig.classification).toBe("ambiguous");
+  });
+
+  it("classifies multiple manifests (polyglot) as ambiguous", async () => {
+    await fs.writeFile(
+      path.join(cwd, "package.json"),
+      JSON.stringify({ dependencies: { react: "^18", a: "1", b: "1", c: "1", d: "1", e: "1" } }),
+    );
+    await fs.writeFile(
+      path.join(cwd, "pyproject.toml"),
+      "[tool.poetry]\nname='x'\ndependencies = ['a','b','c','d','e']",
+    );
+    await fs.mkdir(path.join(cwd, "src"));
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(path.join(cwd, "src", `f${i}.ts`), "export {}");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.manifests.length).toBeGreaterThanOrEqual(2);
+    expect(sig.classification).toBe("ambiguous");
+  });
+
+  it("treats no-git+src as still classifiable on manifest", async () => {
+    await fs.writeFile(
+      path.join(cwd, "package.json"),
+      JSON.stringify({ dependencies: { a: "1", b: "1", c: "1", d: "1", e: "1", f: "1" } }),
+    );
+    await fs.mkdir(path.join(cwd, "src"));
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(path.join(cwd, "src", `f${i}.ts`), "export {}");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.isGitRepo).toBe(false);
+    expect(sig.classification).toBe("existing");
+  });
+
+  it("counts srcFiles ignoring node_modules and dist", async () => {
+    await fs.writeFile(
+      path.join(cwd, "package.json"),
+      JSON.stringify({ dependencies: { a: "1", b: "1", c: "1", d: "1", e: "1", f: "1" } }),
+    );
+    await fs.mkdir(path.join(cwd, "node_modules", "lib"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "node_modules", "lib", "f.ts"), "export {}");
+    await fs.mkdir(path.join(cwd, "dist"), { recursive: true });
+    await fs.writeFile(path.join(cwd, "dist", "out.js"), "export {}");
+    await fs.mkdir(path.join(cwd, "src"));
+    for (let i = 0; i < 6; i++) {
+      await fs.writeFile(path.join(cwd, "src", `f${i}.ts`), "export {}");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.srcFileCount).toBe(6);
+  });
+
+  it("vendored node_modules without root manifest is ambiguous", async () => {
+    await fs.mkdir(path.join(cwd, "node_modules", "lib"), { recursive: true });
+    await fs.mkdir(path.join(cwd, "vendor"), { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      await fs.writeFile(path.join(cwd, "vendor", `f${i}.ts`), "export {}");
+    }
+    const sig = await detectExistingProject(cwd);
+    expect(sig.manifests.length).toBe(0);
+    expect(sig.srcFileCount).toBe(10);
+    expect(sig.classification).toBe("ambiguous");
+  });
 });
