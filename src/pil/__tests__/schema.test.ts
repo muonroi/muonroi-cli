@@ -191,3 +191,43 @@ describe("PilContextResponseSchema", () => {
     expect(r.success).toBe(true);
   });
 });
+
+describe("PipelineContext _brainData field", () => {
+  it("PipelineContextSchema accepts optional _brainData", () => {
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "a", score: 0.8 }],
+        t1_rules: ["b"],
+        t2_patterns: [],
+        retrieval_skipped_reason: null,
+      },
+    };
+    const r = PipelineContextSchema.safeParse(ctx);
+    expect(r.success).toBe(true);
+  });
+
+  it("PipelineContextSchema accepts missing _brainData (legacy path)", () => {
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+    };
+    const r = PipelineContextSchema.safeParse(ctx);
+    expect(r.success).toBe(true);
+  });
+});

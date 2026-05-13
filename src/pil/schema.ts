@@ -61,6 +61,15 @@ export const PipelineContextSchema = z.object({
   fallbackReason: z.string().nullable().optional(),
   // T1 behavioral rules from EE proven-tier points, injected as mandatory suffix by Layer 6.
   t1Rules: z.array(z.string()).optional(),
+  _brainData: z
+    .object({
+      t0_principles: z.array(z.object({ text: z.string(), score: z.number() })),
+      t1_rules: z.array(z.string()),
+      t2_patterns: z.array(z.object({ text: z.string(), score: z.number() })),
+      retrieval_skipped_reason: z.string().nullable(),
+    })
+    .nullable()
+    .optional(),
 });
 
 const ScoredText = z.object({ text: z.string(), score: z.number() });

@@ -4,14 +4,14 @@
  * Core type definitions for the Prompt Intelligence Layer (PIL) pipeline.
  */
 
-import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import type { ComplexityTier } from "../gsd/complexity.js";
+import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 
 export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "general";
 
 export type OutputStyle = "concise" | "detailed" | "balanced";
 
-export type { GrayAreaQuestion, ComplexityTier };
+export type { ComplexityTier, GrayAreaQuestion };
 
 export interface LayerResult {
   name: string;
@@ -65,4 +65,28 @@ export interface PipelineContext {
    * because schema validation failed" when reading interaction_logs.
    */
   fallbackReason?: string | null;
+  /**
+   * T1 behavioral rules extracted by Layer 3 from EE proven-tier points.
+   * These are high-hitCount / tier=proven entries that have been promoted to
+   * behavioral reflex status. Layer 6 appends them as MANDATORY RULES to the
+   * output suffix so the model treats them as instructions, not just context.
+   *
+   * TODO(WhoAmI): when EE v4.0 Who Am I is implemented, merge project-level
+   * t1Rules with user-level personality directives from the profile model.
+   */
+  t1Rules?: string[];
+  /**
+   * Brain-derived data populated by Layer 1 when the unified /api/pil-context
+   * call succeeds. Layers 3, 5, 6 read from here instead of issuing their own
+   * brain calls. Null when L1 took the legacy path (brain unreachable, low
+   * pipeline budget, or feature flag disabled).
+   */
+  _brainData?: BrainData | null;
+}
+
+export interface BrainData {
+  t0_principles: Array<{ text: string; score: number }>;
+  t1_rules: string[];
+  t2_patterns: Array<{ text: string; score: number }>;
+  retrieval_skipped_reason: string | null;
 }
