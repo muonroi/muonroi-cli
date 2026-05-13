@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearChannelCreatedHooks, ensureChannel, registerChannelCreatedHook } from "../channel-manager.js";
-import type { DiscordClient } from "../types.js";
+import type { ChatClient } from "../types.js";
 
-function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
+function makeClient(over: Partial<ChatClient> = {}): ChatClient {
   return {
     createChannel: vi.fn().mockResolvedValue({ id: "newc" }),
     getChannelMessages: vi.fn().mockResolvedValue([]),

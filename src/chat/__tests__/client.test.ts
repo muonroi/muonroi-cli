@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { DiscordRestClient } from "../client.js";
+import { DiscordChatProvider } from "../providers/discord/client.js";
 
-describe("DiscordRestClient", () => {
+describe("DiscordChatProvider", () => {
   function mockFetch(impl: (url: string, init: any) => Promise<Response>) {
     return vi.fn(impl);
   }
@@ -22,7 +22,7 @@ describe("DiscordRestClient", () => {
       expect(body.name).toBe("muonroi-test");
       return jsonResponse({ id: "c1" });
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const out = await client.createChannel("g1", "muonroi-test", { topic: "t", isPrivate: true });
     expect(out.id).toBe("c1");
   });
@@ -34,7 +34,7 @@ describe("DiscordRestClient", () => {
       expect(body.content).toBe("hello 🚀");
       return jsonResponse({ id: "m1" });
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const out = await client.postMessage("c1", "hello 🚀");
     expect(out.id).toBe("m1");
   });
@@ -44,7 +44,7 @@ describe("DiscordRestClient", () => {
       expect(url).toContain("?after=m0&limit=50");
       return jsonResponse([{ id: "m1", author: { id: "u1", username: "alice" }, content: "hi", timestamp: "t" }]);
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const msgs = await client.getChannelMessages("c1", { afterId: "m0", limit: 50 });
     expect(msgs).toHaveLength(1);
   });
@@ -56,7 +56,7 @@ describe("DiscordRestClient", () => {
       if (calls === 1) return new Response("rate limit", { status: 429, headers: { "Retry-After": "0" } });
       return jsonResponse({ id: "m1" });
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const out = await client.postMessage("c1", "hi");
     expect(out.id).toBe("m1");
     expect(calls).toBe(2);
@@ -64,7 +64,7 @@ describe("DiscordRestClient", () => {
 
   it("throws on 401 with status attached", async () => {
     const fetch = mockFetch(async () => new Response("unauthorized", { status: 401 }));
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     await expect(client.postMessage("c1", "hi")).rejects.toMatchObject({ status: 401 });
   });
 
@@ -77,7 +77,7 @@ describe("DiscordRestClient", () => {
       expect(body.allow).toBe("1024");
       return new Response(null, { status: 204 });
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     await client.addChannelPermission("c1", "u1", 1024, 0);
   });
 
@@ -87,7 +87,7 @@ describe("DiscordRestClient", () => {
       calls += 1;
       return jsonResponse({ id: "me-123" });
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const first = await client.getCurrentUserId();
     const second = await client.getCurrentUserId();
     expect(first).toBe("me-123");
@@ -100,7 +100,7 @@ describe("DiscordRestClient", () => {
       expect(url).toContain("/guilds/g1/channels");
       return jsonResponse([{ id: "c1", name: "general" }]);
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const channels = await client.listGuildChannels("g1");
     expect(channels).toHaveLength(1);
     expect(channels[0].id).toBe("c1");
@@ -111,7 +111,7 @@ describe("DiscordRestClient", () => {
       expect(url).not.toContain("?");
       return jsonResponse([]);
     });
-    const client = new DiscordRestClient("tok", fetch as any);
+    const client = new DiscordChatProvider("tok", fetch as any);
     const msgs = await client.getChannelMessages("c1", {});
     expect(msgs).toHaveLength(0);
   });

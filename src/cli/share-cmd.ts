@@ -1,9 +1,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { publish } from "../discord/broadcast-bus.js";
-import type { DiscordChannelMapping, DiscordClient } from "../discord/types.js";
-import { STAKEHOLDER_ALLOW } from "../discord/types.js";
+import { publish } from "../chat/broadcast-bus.js";
+import type { ChatChannelMapping, ChatClient } from "../chat/types.js";
+import { STAKEHOLDER_ALLOW } from "../chat/types.js";
 import { productSlug } from "../product-loop/product-identity.js";
 import { addStakeholder, listStakeholders } from "../product-loop/stakeholder-acl.js";
 
@@ -19,7 +19,7 @@ export interface RunShareArgs {
   user: string;
   product?: string;
   display?: string;
-  client: DiscordClient;
+  client: ChatClient;
 }
 
 function parseUserId(input: string): string | null {
@@ -62,14 +62,14 @@ async function resolveSlug(cwd: string, productArg: string | undefined): Promise
 
 interface ChannelStore {
   version: number;
-  items: Record<string, DiscordChannelMapping>;
+  items: Record<string, ChatChannelMapping>;
 }
 
 function muonroiHome(): string {
   return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
-async function readChannelMapping(slug: string): Promise<DiscordChannelMapping | null> {
+async function readChannelMapping(slug: string): Promise<ChatChannelMapping | null> {
   const fp = path.join(muonroiHome(), "discord-channels.json");
   let raw: string;
   try {

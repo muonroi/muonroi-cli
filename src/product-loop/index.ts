@@ -304,15 +304,11 @@ async function* drainSprints(args: {
   };
 }
 
-function discordEnvConfig(): { token: string; guildId: string } | null {
-  const token = process.env.MUONROI_DISCORD_TOKEN;
-  const guildId = process.env.MUONROI_DISCORD_GUILD_ID;
-  if (!token && !guildId) return null;
-  if (!token || !guildId) {
-    console.warn("muonroi: MUONROI_DISCORD_TOKEN/_GUILD_ID partially configured; Discord disabled.");
-    return null;
-  }
-  return { token, guildId };
+function chatEnvConfig(): { client: import("../chat/types.js").ChatClient } | null {
+  // Lazy load to avoid circular imports
+  const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
+  const client = readChatProvider();
+  return client ? { client } : null;
 }
 
 /**
@@ -409,13 +405,12 @@ async function* runPhasesPath(args: {
     return result!;
   };
 
-  // Discord setup (opt-in via env vars; no-op when unset).
-  const discordCfg = discordEnvConfig();
-  let discordClient: import("../discord/types.js").DiscordClient | null = null;
+  // Chat setup (opt-in via env vars; no-op when unset).
+  const chatCfg = chatEnvConfig();
+  let chatClient: import("../chat/types.js").ChatClient | null = null;
   let slug: string | null = null;
-  if (discordCfg) {
-    const { DiscordRestClient } = await import("../discord/client.js");
-    discordClient = new DiscordRestClient(discordCfg.token);
+  if (chatCfg) {
+    chatClient = chatCfg.client;
     const { productSlug } = await import("./product-identity.js");
     slug = productSlug(manifest.idea);
   }
@@ -440,12 +435,12 @@ async function* runPhasesPath(args: {
     sprintN: number;
     reviewSummary: string;
   }): Promise<{ verdict: "accept" | "reject" | "abort"; feedback?: string }> => {
-    if (!discordClient || !discordCfg || !slug) return terminalFallback();
-    const { ensureChannel } = await import("../discord/channel-manager.js");
-    const { discordAwaitVerdict } = await import("../discord/verdict-resolver.js");
+    if (!chatClient || !slug) return terminalFallback();
+    const { ensureChannel } = await import("../chat/channel-manager.js");
+    const { discordAwaitVerdict } = await import("../chat/verdict-resolver.js");
     const ch = await ensureChannel({
-      client: discordClient,
-      guildId: discordCfg.guildId,
+      client: chatClient,
+      guildId: process.env.MUONROI_DISCORD_GUILD_ID ?? "unknown",
       slug,
       displayName: manifest.idea,
     });
@@ -457,7 +452,7 @@ async function* runPhasesPath(args: {
       sprintN: verdictArgs.sprintN,
       productSlug: slug,
       channelId: ch.channelId,
-      client: discordClient,
+      client: chatClient,
       leader,
       capUsd: manifest.capUsd,
       remainingUsd: async () => {
@@ -492,26 +487,26 @@ async function* runPhasesPath(args: {
       break;
     }
     const chunk = step.value as StreamChunk;
-    if (chunk.type === "push_notification" && discordClient && discordCfg && slug) {
+    if (chunk.type === "push_notification" && chatClient && slug) {
       try {
-        const { ensureChannel } = await import("../discord/channel-manager.js");
-        const { publish } = await import("../discord/broadcast-bus.js");
+        const { ensureChannel } = await import("../chat/channel-manager.js");
+        const { publish } = await import("../chat/broadcast-bus.js");
         const ch = await ensureChannel({
-          client: discordClient,
-          guildId: discordCfg.guildId,
+          client: chatClient,
+          guildId: process.env.MUONROI_DISCORD_GUILD_ID ?? "unknown",
           slug,
           displayName: manifest.idea,
         });
         if (ch) {
           await publish({
-            client: discordClient,
+            client: chatClient,
             channelId: ch.channelId,
             type: "phase-event",
             content: chunk.content ?? "",
           });
         }
       } catch (e) {
-        console.warn("muonroi: discord broadcast failed", e);
+        console.warn("muonroi: chat broadcast failed", e);
       }
     }
     yield chunk;

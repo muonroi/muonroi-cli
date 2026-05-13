@@ -1,8 +1,8 @@
-import type { BroadcastType, DiscordClient } from "./types.js";
+import type { BroadcastType, ChatClient } from "./types.js";
 import { DISCORD_CONTENT_BUDGET } from "./verdict-constants.js";
 
 export interface PublishArgs {
-  client: DiscordClient;
+  client: ChatClient;
   channelId: string;
   type: BroadcastType;
   content: string;
