@@ -1,0 +1,183 @@
+// src/product-loop/discovery-interview.ts
+
+import {
+  appendUserOverride,
+  buildProjectContextFromState,
+  markDone,
+  markUserGatePassed,
+  readDiscoveryState,
+  recordRecommendation,
+  saveDiscoveryAnswer,
+  writeProjectContext,
+} from "./discovery-persistence.js";
+import { type RecommendInput, type RecommendOutput, toEntry } from "./discovery-recommender.js";
+import {
+  DISCOVERY_QUESTIONS,
+  isFePolicyAccepted,
+  isRequiredForPlatform,
+  REQUIRED_QUESTION_IDS,
+  validateAnswer,
+} from "./discovery-schema.js";
+import type { ExistingProjectSignals, PlatformT, ProjectContext } from "./types.js";
+
+export type UserPromptResult =
+  | { action: "accept" }
+  | { action: "override"; value: any; reason: string }
+  | { action: "skip" }
+  | { action: "more-options" }
+  | { action: "proceed" }
+  | { action: "ask-more" }
+  | { action: "abort" };
+
+export interface UserPromptArgs {
+  questionId: string;
+  recommendation?: RecommendOutput;
+  prefilled?: any;
+  message?: string;
+}
+
+export type UserPromptFn = (args: UserPromptArgs) => Promise<UserPromptResult>;
+
+export interface RecommenderLike {
+  leaderRecommend: (input: RecommendInput) => Promise<RecommendOutput>;
+  councilRecommend: (input: RecommendInput) => Promise<RecommendOutput>;
+}
+
+export interface IterateOpts {
+  flowDir: string;
+  runId: string;
+  idea: string;
+  capUsd: number;
+  detection: ExistingProjectSignals;
+  userPrompt: UserPromptFn;
+  recommender: RecommenderLike;
+}
+
+export async function iterateInterview(opts: IterateOpts): Promise<ProjectContext> {
+  const { flowDir, runId, detection } = opts;
+  const state0 = await readDiscoveryState(flowDir, runId);
+  if (!state0) throw new Error("discovery state not initialized — call initDiscoveryState first");
+
+  for (const question of DISCOVERY_QUESTIONS) {
+    const state = await readDiscoveryState(flowDir, runId);
+    if (!state) throw new Error("state lost mid-iteration");
+    const isPrefilled =
+      state.prefillSource.fromDetection.includes(question.id) || state.prefillSource.fromPrompt.includes(question.id);
+    if (state.questionsAnswered.includes(question.id) || isPrefilled) continue;
+
+    const isOptional = !question.required;
+    const platforms = (state.answers.targetPlatform ?? []) as PlatformT[];
+    const platformRequires = isRequiredForPlatform(question.id, platforms);
+    const effectivelyRequired = question.required || platformRequires;
+
+    const recInput: RecommendInput = {
+      question,
+      context: state.answers,
+      detection,
+    };
+
+    let recommendation: RecommendOutput;
+    if (question.recommendMode === "council") {
+      recommendation = await opts.recommender.councilRecommend(recInput);
+    } else {
+      recommendation = await opts.recommender.leaderRecommend(recInput);
+    }
+
+    for (;;) {
+      const ans = await opts.userPrompt({
+        questionId: question.id,
+        recommendation,
+      });
+
+      if (ans.action === "skip") {
+        if (effectivelyRequired) {
+          await opts.userPrompt({ questionId: question.id, message: "Required question cannot be skipped" });
+          continue;
+        }
+        break;
+      }
+
+      let chosenValue: any;
+      if (ans.action === "accept") {
+        chosenValue = recommendation.primary.value;
+      } else if (ans.action === "override") {
+        chosenValue = ans.value;
+      } else if (ans.action === "more-options") {
+        // current iteration: re-prompt; future ext could fetch more
+        continue;
+      } else if (ans.action === "abort") {
+        throw new Error("discovery aborted by user");
+      } else {
+        continue;
+      }
+
+      const validation = validateAnswer(question.id, chosenValue);
+      if (!validation.ok) {
+        // For frontendApproach, the FE policy block below handles rejection (no extra message call)
+        if (question.id !== "frontendApproach") {
+          await opts.userPrompt({ questionId: question.id, message: validation.reason ?? "invalid answer" });
+        }
+        continue;
+      }
+
+      // FE policy hard-block
+      if (question.id === "frontendApproach") {
+        const lib = (chosenValue as any)?.library;
+        if (lib && !isFePolicyAccepted(lib)) {
+          await opts.userPrompt({
+            questionId: question.id,
+            message: "FE policy: library must be shadcn, radix, headlessui, or none",
+          });
+          continue;
+        }
+      }
+
+      if (ans.action === "override") {
+        await appendUserOverride(flowDir, runId, question.id, recommendation.primary.value, chosenValue, ans.reason);
+      }
+
+      await recordRecommendation(flowDir, runId, question.id, toEntry(recommendation), recommendation.costUsd);
+      await saveDiscoveryAnswer(flowDir, runId, question.id, chosenValue);
+      break;
+    }
+
+    // After each required answered, check if we've satisfied all effectively-required questions for user gate
+    const refreshed = await readDiscoveryState(flowDir, runId);
+    const refreshedPlatforms = (refreshed?.answers.targetPlatform ?? []) as PlatformT[];
+    if (
+      refreshed &&
+      allRequiredAnswered(refreshed.questionsAnswered, refreshedPlatforms) &&
+      !refreshed.userGatePassed
+    ) {
+      const gate = await opts.userPrompt({ questionId: "__user_gate__" });
+      if (gate.action === "proceed") {
+        await markUserGatePassed(flowDir, runId);
+        break;
+      }
+      if (gate.action === "abort") throw new Error("discovery aborted at user gate");
+      // ask-more: continue iterating optional questions
+    }
+  }
+
+  const finalState = await readDiscoveryState(flowDir, runId);
+  if (!finalState) throw new Error("state lost at end");
+  if (!finalState.userGatePassed) {
+    await markUserGatePassed(flowDir, runId);
+  }
+  const ctx = buildProjectContextFromState(finalState, opts.idea, detection);
+  await writeProjectContext(flowDir, runId, ctx);
+  await markDone(flowDir, runId);
+  return ctx;
+}
+
+function allRequiredAnswered(answered: string[], platforms: PlatformT[]): boolean {
+  const baseRequired = REQUIRED_QUESTION_IDS.every((id) => answered.includes(id));
+  if (!baseRequired) return false;
+  // Also check platform-required optional questions (e.g. frontendApproach for web)
+  for (const q of DISCOVERY_QUESTIONS) {
+    if (!q.required && isRequiredForPlatform(q.id, platforms) && !answered.includes(q.id)) {
+      return false;
+    }
+  }
+  return true;
+}
