@@ -25,7 +25,7 @@ Out of scope (deferred to later specs):
 
 - Capture 10 structured product dimensions before research phase starts
 - Adaptive: skip questions already answered by prompt parsing or existing-project detection
-- Cost-bounded: realistic ~$0.80–$1.50 total discovery spend, cost guard prevents runaway
+- Cost-bounded: realistic ~$1.00–$2.30 total discovery spend, cost guard prevents runaway
 - Resumable: crash mid-interview → resume from last good state with no torn writes
 - Single source of truth: `project-context.md` injected into all downstream prompts
 
@@ -184,6 +184,7 @@ Section header in markdown file: `# Section: Project Context`. Body is a JSON bl
 Invariants:
 - `version: 1` — readers must consult `discovery-migrations.ts` for handling other versions (see §14)
 - `userOverrides[]` is append-only with monotonic `seq` and UTC `timestampUtc` — reorder detectable, history preserved
+- `seq` is assigned at append time in `discovery-persistence.ts` as `max(existingSeq) + 1`. Concurrent-write hazard is ruled out by the single-writer invariant enforced via lockfile check (see §9 row "Concurrent /ideal run")
 - `debateRef` links to council session for audit
 - `tiebreakUsed: true` indicates synthesizer pass was needed (see §6)
 
@@ -260,23 +261,40 @@ Stances live inside `config.debatePlan: DebatePlan` and are normally leader-prop
 ```typescript
 async function councilRecommend(input: RecommendInput): Promise<Recommendation> {
   const plan: DebatePlan = {
+    intentSummary: buildIntentSummaryForBig4(input),  // e.g., "Decide backend architecture for <productType>, scale <scale>, ..."
     stances: [
-      { role: "pragmatist", lens: "team skill, delivery speed, ecosystem maturity" },
-      { role: "scaler",     lens: "audience scale, performance, future growth" },
-      { role: "cost-optimizer", lens: "infra cost, dev hours, total TCO" },
+      { name: "pragmatist",    lens: "team skill, delivery speed, ecosystem maturity" },
+      { name: "scaler",        lens: "audience scale, performance, future growth" },
+      { name: "cost-optimizer", lens: "infra cost, dev hours, total TCO" },
     ],
+    outputShape: {
+      primary: "string",
+      alternatives: "string[]",
+      rationale: "string",
+    },
     plannedRounds: 1,
-    kindCap: 1,
-    costAware: true,
   };
   const spec = buildSpecForBig4Question(input);
-  const config = buildConfigWithPlan(plan);
+  const config: CouncilConfig = {
+    topic: input.question.id,
+    conversationContext: formatPartialContextForPrompt(input.context),
+    leaderModelId: resolveLeaderModel(),
+    participants: defaultBig4Participants(),
+    debatePlan: plan,
+    costAware: true,                                  // CouncilConfig flag, NOT on DebatePlan
+  };
   const llm = createCouncilLLM();
-  const chunks = [];
+  const chunks: StreamChunk[] = [];
   for await (const c of runDebate(spec, config, llm)) chunks.push(c);
   return synthesizeRecommendationFromDebate(chunks, input);
 }
 ```
+
+Notes on the API surface (verified against `src/council/types.ts` and `src/council/debate.ts`):
+- `DebatePlan` requires `intentSummary`, `stances`, `outputShape`, `plannedRounds`. Stance field is `name`, not `role`. `kindCap` does not exist on this type.
+- `costAware` lives on `CouncilConfig`, not `DebatePlan`.
+- `CouncilConfig` additionally requires `topic`, `conversationContext`, `leaderModelId`, `participants`. The builder must supply all four — they are not optional.
+- `runDebate` is an `async function*` generator yielding `StreamChunk`. Consume via `for await`.
 
 ### 6.3 Deadlock / tiebreak protocol
 
@@ -290,36 +308,42 @@ If stances agree on a primary (2 of 3 or 3 of 3): no synthesizer needed, top vot
 
 ### 6.4 Realistic cost budget
 
-Per the cost-feasibility review:
+Per the cost-feasibility re-review (against actual `runDebate` mechanics in `src/council/debate.ts` — research-need eval, optional research with tools, 3 parallel openings with retries, 1–N round exchanges with verification tools, leader evaluation, possible synth tiebreak):
 
-- Council debate (1 round, 3 stances, with eval + possible synth): **$0.18–$0.35 each**
-- 4 big-4 debates: **$0.72–$1.40**
+- Council debate (1 round, 3 stances, `costAware: true`, with eval + possible synth): **$0.25–$0.55 each**
+- 4 big-4 debates: **$1.00–$2.20**
 - 6 leader-only recommends: **$0.03–$0.12**
 - Prompt-parser leader call: **$0.01–$0.02**
-- **Total discovery realistic: $0.80–$1.55**
+- **Total discovery realistic: $1.00–$2.30**
 
-This is significantly above the original $0.15 target. The acceptance criteria in §13 are revised accordingly.
+This is significantly above the original $0.15 target and modestly above the v2 spec's $0.80–$1.55. Numbers verified by reading actual debate execution flow. The acceptance criteria in §13 are pinned to this range.
 
 ### 6.5 Cost guard
 
 The guard prevents runaway when cap is low or unexpected debate cost overruns hit:
 
 ```typescript
-const COUNCIL_HARD_FLOOR_USD = 1.50;   // absolute minimum reserved for big-4 even at low caps
+const COUNCIL_HARD_FLOOR_USD = 2.50;   // absolute minimum reserved for big-4 even at low caps
 const guard = Math.max(COUNCIL_HARD_FLOOR_USD, 0.15 * capUsd);
 
 // Before each council debate:
-const estimatedNextCost = 0.35;  // pessimistic per-debate
+const estimatedNextCost = 0.45;  // P95 per-debate (slightly above $0.55/2 to account for variance)
 if (cumulativeRecommenderSpent + estimatedNextCost > guard) {
   // fallback this question and all subsequent to leaderRecommend
 }
+
+// Post-call reconcile: after each debate, compare actual cost vs estimate.
+// If actual > 1.5 * estimatedNextCost on two consecutive debates, raise estimatedNextCost.
 ```
 
-At `capUsd = $50` → guard $7.50 (room for ~20 leader calls plus all 4 debates).
-At `capUsd = $20` → guard $3.00 (room for all 4 debates).
-At `capUsd = $10` → guard $1.50 (room for ~4 debates if cheap, fallback path absorbs overruns).
+At `capUsd = $50` → guard $7.50 (3.4× the $2.20 worst case; comfortable).
+At `capUsd = $20` → guard $3.00 (1.4× worst case; tight, may fallback last debate).
+At `capUsd = $10` → guard $2.50 (≈ worst case; first 1–2 debates run, rest fallback to leader).
+At `capUsd <= $5` → guard $2.50 is 50%+ of cap. Discovery WILL fallback to leader-only for most big-4 from question #2 onwards. Document this in user-facing warning when `--max-cost <= 5`.
 
-If cumulative spend approaches the absolute CB-1 cost cap during interview, CB-1 hard-stops the run (existing behavior, unchanged).
+**Relationship with CB-1**: The §6.5 guard is a *local* circuit breaker for the discovery phase only. CB-1 (in `loop-driver.ts`) is the *global* EWMA-based hard-stop tracking total run spend. Both run in parallel: §6.5 may downgrade council→leader inside discovery, while CB-1 may hard-stop the entire run if total projected spend exceeds `capUsd`. Discovery cost flows into the product-ledger via existing `appendProductLedger` plumbing, so CB-1's projection includes discovery spend automatically — no special integration needed.
+
+Future improvement (not in this spec): replace the hardcoded `estimatedNextCost = 0.45` with a rolling median of recent product-ledger entries for `council` source. Tracked in §12.
 
 ## 7. Detection module
 
@@ -356,7 +380,7 @@ interface ExistingProjectSignals {
   - multiple manifests competing (polyglot — return all weighted, ambiguous classification, user picks primary)
   - vendored `node_modules/` detected but no root `package.json`
 
-Ambiguous classification routes to the user gate: a one-shot confirmation step before pre-fill computation, asking "I detected X, Y, Z — which best describes this project?"
+Ambiguous classification routes to the user gate: a one-shot **forced-choice** picker before pre-fill computation, asking "I detected X, Y, Z — which best describes this project?" The user must pick exactly one of `greenfield` / `existing` / `multi-component-monorepo` / `abort-run`. There is no free-text input here, so the gate cannot itself become ambiguous and no recursive loop is possible.
 
 ### 7.3 Manifest types covered
 
@@ -379,6 +403,7 @@ When prompt-parser claim and detection result disagree:
 | Leader timeout on prompt-parser | Skip parsing, all 10 questions ask from scratch. Log warning. |
 | Leader returns malformed JSON for recommender | Retry once with strict JSON instruction. If still bad → fallback to user-only for that question. |
 | Leader fail on `leaderRecommend` after retry | Ask user directly, mark `source: "user-only"` |
+| LLM rate-limit (HTTP 429) | Exponential backoff up to 3 retries (1s, 4s, 16s). After third fail → fallback per same chain as leader-fail (council→leader→user-only). Cost reconcile not charged for failed attempts. |
 | Council fail on big-4 | Fallback to `leaderRecommend`. If leader fails too → user-only. All three paths tested. |
 | Council deadlock (3 different stances, synth call fails) | Use stance position with highest confidence score as primary; mark `tiebreakUsed: true` with `synthFailed: true` |
 | Detection fail (FS permission) | Treat as greenfield. Log warning. Confirm with user. |
@@ -432,6 +457,7 @@ Prompt parser (8):
 18. Prompt parser timeout → fallback ask all
 19. Prompt parser returns malformed JSON → retry once → fallback
 20. Prompt parser returns extra fields → strip, warn
+20a. LLM HTTP 429 rate-limit during recommender → exponential backoff (1s/4s/16s), then fallback chain. Failed attempts not charged to ledger.
 
 Interview (14):
 21. Pre-fill density: greenfield minimal / existing heavy / ambiguous via user gate
@@ -529,7 +555,7 @@ No e2e/TUI tests in this spec — manual TUI validation deferred.
 - ≥92% line coverage on discovery-* modules; 100% on `discovery-persistence.ts` + `discovery-migrations.ts`
 - Existing `/ideal` greenfield run produces non-empty `project-context.md` with all 6 required fields populated
 - Existing `/ideal` on a populated repo correctly classifies as `existing` and pre-fills detected fields
-- Discovery phase realistic cost in range $0.80–$1.55; cost-guard prevents exceeding `max(0.15 * capUsd, $1.50)`
+- Discovery phase realistic cost in range $1.00–$2.30; cost-guard prevents exceeding `max(0.15 * capUsd, $2.50)`. At `capUsd <= $5`, discovery emits explicit fallback warning before starting big-4.
 - Resume from any question index OR from `awaiting-artifact-write` state produces identical final `project-context.md` as continuous run
 - FE policy hard-block: image-based UI choices never reachable via any code path
 - Council deadlock cases always produce a primary recommendation (synth pass or confidence-fallback)
@@ -556,3 +582,5 @@ Read path:
 3. If no migrator chains to `CURRENT_VERSION`: return null; caller surfaces user gate to ask "incompatible artifact, restart discovery?"
 
 Forward-compat policy: readers do not silently drop unknown fields they cannot interpret — they preserve them through the migration chain so downstream tools can still see them. v0→v1 demo migrator and v1→v1 no-op are both shipped with this spec to prove the chain works.
+
+**Null-context handling**: when `readProjectContextWithMigration` returns `null` (unmigratable version, corrupted file, schema chain break), the caller in `gather.ts` MUST surface the user gate to ask "incompatible artifact, restart discovery?". A `null` ProjectContext is **never** passed into `formatProjectContextForPrompt(ctx)` or any downstream phase — research, sprint, done-gate, and future `/gsd execute` handoff all treat artifact presence as a precondition. Tests #55, #56, #64 verify this assertion.
