@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
-import { applyPilSuffix, layer6Output, getResponseToolSet } from "../layer6-output.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { applyPilSuffix, getResponseToolSet, layer6Output } from "../layer6-output.js";
 import type { OutputStyle, PipelineContext, TaskType } from "../types.js";
 
 // Mock bridge for PIL-03 classifyViaBrain tests
@@ -63,7 +63,7 @@ describe("applyPilSuffix — per-task-type suffixes", () => {
     for (const style of ["concise", "balanced", "detailed"] as OutputStyle[]) {
       const result = applyPilSuffix("S", makeCtx("plan", style));
       expect(result).toMatch(/FORBIDDEN OPENERS/);
-      expect(result).toMatch(/Tôi sẽ/);  // bilingual
+      expect(result).toMatch(/Tôi sẽ/); // bilingual
     }
   });
 
@@ -137,7 +137,9 @@ describe("applyPilSuffix — outputStyle variants", () => {
 });
 
 describe("layer6Output — style resolution", () => {
-  beforeEach(() => { vi.clearAllMocks(); });
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it("uses ctx.outputStyle from L1 directly when already set — no brain call", async () => {
     const brain = await getMockBrain();
@@ -189,6 +191,17 @@ describe("layer6Output — style resolution", () => {
   it("PIL-03b: task-heuristic for refactor→concise", async () => {
     const result = await layer6Output(makeCtx("refactor", null));
     expect(result.outputStyle).toBe("concise");
+  });
+
+  it("skips classifyViaBrain rescue when ctx._brainData is populated (style guaranteed by L1)", async () => {
+    const brain = await getMockBrain();
+    brain.mockClear();
+    const ctx: PipelineContext = {
+      ...makeCtx("plan", "balanced"),
+      _brainData: { t0_principles: [], t1_rules: [], t2_patterns: [], retrieval_skipped_reason: null },
+    };
+    await layer6Output(ctx);
+    expect(brain).not.toHaveBeenCalled();
   });
 
   it("PIL-03: resolved outputStyle propagated back onto ctx", async () => {

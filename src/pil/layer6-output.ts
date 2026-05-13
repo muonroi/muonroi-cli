@@ -15,20 +15,20 @@
 
 import type { ToolSet } from "ai";
 import { classifyViaBrain } from "../ee/bridge.js";
-import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 import { buildResponseTools } from "./response-tools.js";
+import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
 
 // Per-task-type fallback style when brain is unavailable.
 // Reflects the information density each task type genuinely needs.
 const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
-  debug: "balanced",        // needs root cause + fix context
-  plan: "balanced",         // balanced by default; user requests detail explicitly
-  analyze: "balanced",      // findings need brief evidence
-  documentation: "balanced",// examples + explanation
-  generate: "concise",      // code speaks for itself
-  refactor: "concise",      // diff is the output
+  debug: "balanced", // needs root cause + fix context
+  plan: "balanced", // balanced by default; user requests detail explicitly
+  analyze: "balanced", // findings need brief evidence
+  documentation: "balanced", // examples + explanation
+  generate: "concise", // code speaks for itself
+  refactor: "concise", // diff is the output
   general: "balanced",
 };
 
@@ -55,8 +55,7 @@ const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
 // PIL-04 Tier 1.3: ban preamble openers.
 // Measured ~30 tokens/turn wasted on "I'll help you...", "Sure, let me..." etc.
 // Bilingual EN+VN. Skipped for response-tools path (JSON has no preamble surface).
-const NO_PREAMBLE_RULE =
-  `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.`;
+const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.`;
 
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
@@ -138,10 +137,7 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     if (ctx.intentKind === "chitchat") {
       return {
         ...ctx,
-        layers: [
-          ...ctx.layers,
-          { name: "output-optimization", applied: false, delta: "skip:chitchat" },
-        ],
+        layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: "skip:chitchat" }],
       };
     }
 
@@ -157,21 +153,25 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     let styleSource = "inherited";
 
     if (outputStyle === null) {
-      // Pass a: 50ms brain rescue — catches multilingual prompts that regex/L1 missed
-      try {
-        const brainRaw = await classifyViaBrain(
-          `Task type: ${ctx.taskType}. Reply ONE word only: concise | balanced | detailed\nPrompt: "${ctx.raw.slice(0, 150)}"`,
-          50,
-        );
-        if (brainRaw) {
-          const matched = VALID_STYLES.find(s => brainRaw.toLowerCase().includes(s));
-          if (matched) {
-            outputStyle = matched;
-            styleSource = "brain-rescue";
+      // Pass a: 50ms brain rescue — catches multilingual prompts that regex/L1 missed.
+      // Skip when ctx._brainData is already populated: L1's unified brain call had its
+      // chance to set style; a second classifyViaBrain here is redundant work.
+      if (!ctx._brainData) {
+        try {
+          const brainRaw = await classifyViaBrain(
+            `Task type: ${ctx.taskType}. Reply ONE word only: concise | balanced | detailed\nPrompt: "${ctx.raw.slice(0, 150)}"`,
+            50,
+          );
+          if (brainRaw) {
+            const matched = VALID_STYLES.find((s) => brainRaw.toLowerCase().includes(s));
+            if (matched) {
+              outputStyle = matched;
+              styleSource = "brain-rescue";
+            }
           }
+        } catch {
+          // fall through to pass b
         }
-      } catch {
-        // fall through to pass b
       }
 
       // Pass b: task-type heuristic — fires when brain is also unavailable
@@ -195,7 +195,7 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     const suffix = suffixEntry[style];
     return {
       ...ctx,
-      outputStyle,  // propagate resolved style to orchestrator's applyPilSuffix
+      outputStyle, // propagate resolved style to orchestrator's applyPilSuffix
       layers: [
         ...ctx.layers,
         {
