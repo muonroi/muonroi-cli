@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ClarifiedSpec } from "../../council/types.js";
-import { fallbackSinglePhase, parsePhasePlanJson, validatePhasePlan } from "../phase-plan.js";
+import { fallbackSinglePhase, generatePhasePlan, parsePhasePlanJson, validatePhasePlan } from "../phase-plan.js";
 
 const spec: ClarifiedSpec = {
   problemStatement: "Build X",
@@ -117,5 +117,106 @@ describe("phase-plan schema/parse/validate (subsystem E)", () => {
     expect(fb.phases[0].successCriteria).toEqual(spec.successCriteria);
     expect(fb.phases[0].exitCondition.min).toBe(manifest.doneThreshold);
     expect(fb.phases[0].dependsOn).toEqual([]);
+  });
+});
+
+describe("generatePhasePlan (subsystem E)", () => {
+  const baseArgs = {
+    projectContext: { context: {}, prefillSource: {}, version: 1 } as any,
+    clarifiedSpec: spec,
+    manifest,
+    capUsd: 10,
+    remainingUsd: 5,
+    backoffDelays: [1, 1, 1],
+  };
+
+  it("happy path returns valid plan", async () => {
+    const validPlan = {
+      version: 1,
+      generatedAt: "2026-05-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-1",
+          name: "Setup",
+          goal: "g",
+          successCriteria: ["criterion A"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 2,
+        },
+        {
+          id: "phase-2",
+          name: "Build",
+          goal: "g",
+          successCriteria: ["criterion B", "criterion C"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: ["phase-1"],
+          maxSprints: 4,
+        },
+      ],
+    };
+    const leader = { generate: vi.fn().mockResolvedValue({ content: JSON.stringify(validPlan), costUsd: 0.1 }) };
+    const result = await generatePhasePlan({ ...baseArgs, leader });
+    expect(result.phases).toHaveLength(2);
+  });
+
+  it("retries on malformed JSON twice then succeeds", async () => {
+    const validPlan = {
+      version: 1,
+      generatedAt: "2026-05-13T00:00:00Z",
+      phases: [
+        {
+          id: "phase-1",
+          name: "Full",
+          goal: "g",
+          successCriteria: spec.successCriteria,
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 6,
+        },
+      ],
+    };
+    const leader = {
+      generate: vi
+        .fn()
+        .mockResolvedValueOnce({ content: "not json", costUsd: 0.1 })
+        .mockResolvedValueOnce({ content: "{bad", costUsd: 0.1 })
+        .mockResolvedValueOnce({ content: JSON.stringify(validPlan), costUsd: 0.1 }),
+    };
+    const result = await generatePhasePlan({ ...baseArgs, leader });
+    expect(result.phases[0].id).toBe("phase-1");
+    expect(leader.generate).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back when remainingUsd < floor", async () => {
+    const leader = { generate: vi.fn() };
+    const result = await generatePhasePlan({ ...baseArgs, leader, remainingUsd: 0.05, capUsd: 10 });
+    expect(leader.generate).not.toHaveBeenCalled();
+    expect(result.phases).toHaveLength(1);
+  });
+
+  it("fallback at high capUsd boundary", async () => {
+    const leader = { generate: vi.fn() };
+    const result = await generatePhasePlan({ ...baseArgs, leader, remainingUsd: 1.99, capUsd: 100 });
+    expect(leader.generate).not.toHaveBeenCalled();
+    expect(result.phases).toHaveLength(1);
+  });
+
+  it("falls back after 3 malformed responses", async () => {
+    const leader = { generate: vi.fn().mockResolvedValue({ content: "not json", costUsd: 0.1 }) };
+    const result = await generatePhasePlan({ ...baseArgs, leader });
+    expect(result.phases).toHaveLength(1);
+    expect(leader.generate).toHaveBeenCalledTimes(3);
+  });
+
+  it("falls back after 3 429s", async () => {
+    const err: any = new Error("rate limit");
+    err.status = 429;
+    const leader = { generate: vi.fn().mockRejectedValue(err) };
+    const result = await generatePhasePlan({ ...baseArgs, leader });
+    expect(result.phases).toHaveLength(1);
   });
 });
