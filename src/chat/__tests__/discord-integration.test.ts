@@ -6,10 +6,10 @@ import { productSlug } from "../../product-loop/product-identity.js";
 import { addStakeholder } from "../../product-loop/stakeholder-acl.js";
 import { publish } from "../broadcast-bus.js";
 import { clearChannelCreatedHooks, ensureChannel } from "../channel-manager.js";
-import type { DiscordClient, DiscordMessage } from "../types.js";
+import type { ChatClient, ChatMessage } from "../types.js";
 import { discordAwaitVerdict } from "../verdict-resolver.js";
 
-function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
+function makeClient(over: Partial<ChatClient> = {}): ChatClient {
   return {
     createChannel: vi.fn().mockResolvedValue({ id: "newc" }),
     getChannelMessages: vi.fn().mockResolvedValue([]),
@@ -21,11 +21,11 @@ function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
   };
 }
 
-function customerMsg(id: string, content: string): DiscordMessage {
+function customerMsg(id: string, content: string): ChatMessage {
   return { id, content, author: { id: "u1", username: "alice" }, timestamp: new Date().toISOString() };
 }
 
-describe("discord-integration (subsystem F)", () => {
+describe("chat-integration (subsystem F)", () => {
   let tmpHome: string;
   let flowDir: string;
   let prevHome: string | undefined;

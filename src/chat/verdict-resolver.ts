@@ -3,7 +3,7 @@ import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { LeaderLike } from "../product-loop/discovery-prompt-parser.js";
 import { publish } from "./broadcast-bus.js";
 import { buildConvoPrompt, type ConvoTurn, parseConvoReply, SYSTEM_PROMPT } from "./intent-prompt.js";
-import type { DiscordClient, PollCursor } from "./types.js";
+import type { ChatClient, PollCursor } from "./types.js";
 import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_TIMEOUT_MS,
@@ -21,7 +21,7 @@ export interface DiscordAwaitVerdictArgs {
   sprintN: number;
   productSlug: string;
   channelId: string;
-  client: DiscordClient;
+  client: ChatClient;
   leader: LeaderLike;
   capUsd: number;
   remainingUsd: () => Promise<number>;
@@ -134,7 +134,7 @@ export async function discordAwaitVerdict(
     }
 
     // Poll for new messages
-    let msgs: Awaited<ReturnType<DiscordClient["getChannelMessages"]>>;
+    let msgs: Awaited<ReturnType<ChatClient["getChannelMessages"]>>;
     try {
       msgs = await args.client.getChannelMessages(args.channelId, {
         afterId: lastSeenId,

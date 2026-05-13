@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { publish } from "../broadcast-bus.js";
-import type { DiscordClient } from "../types.js";
+import type { ChatClient } from "../types.js";
 import { DISCORD_CONTENT_BUDGET } from "../verdict-constants.js";
 
-function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
+function makeClient(over: Partial<ChatClient> = {}): ChatClient {
   return {
     createChannel: vi.fn(),
     getChannelMessages: vi.fn().mockResolvedValue([]),

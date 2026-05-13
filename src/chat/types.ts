@@ -1,20 +1,20 @@
-export interface DiscordMessage {
+export interface ChatMessage {
   id: string;
   author: { id: string; username: string };
   content: string;
   timestamp: string;
 }
 
-export interface DiscordClient {
+export interface ChatClient {
   createChannel(guildId: string, name: string, opts: { topic?: string; isPrivate?: boolean }): Promise<{ id: string }>;
-  getChannelMessages(channelId: string, opts: { afterId?: string; limit?: number }): Promise<DiscordMessage[]>;
+  getChannelMessages(channelId: string, opts: { afterId?: string; limit?: number }): Promise<ChatMessage[]>;
   postMessage(channelId: string, content: string): Promise<{ id: string }>;
   addChannelPermission(channelId: string, userId: string, allow: number, deny: number): Promise<void>;
   getCurrentUserId(): Promise<string>;
   listGuildChannels(guildId: string): Promise<Array<{ id: string; name: string }>>;
 }
 
-export interface DiscordChannelMapping {
+export interface ChatChannelMapping {
   productSlug: string;
   channelId: string;
   guildId: string;

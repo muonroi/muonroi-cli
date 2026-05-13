@@ -4,13 +4,13 @@ import * as path from "node:path";
 import { listStakeholders } from "../product-loop/stakeholder-acl.js";
 import { atomicWriteText } from "../storage/atomic-io.js";
 import { withFileLock } from "../utils/file-lock.js";
-import { type DiscordChannelMapping, type DiscordClient, STAKEHOLDER_ALLOW } from "./types.js";
+import { type ChatChannelMapping, type ChatClient, STAKEHOLDER_ALLOW } from "./types.js";
 
 const SCHEMA_VERSION = 1;
 
 interface ChannelStore {
   version: number;
-  items: Record<string, DiscordChannelMapping>;
+  items: Record<string, ChatChannelMapping>;
 }
 
 function muonroiHome(): string {
@@ -62,7 +62,7 @@ export function clearChannelCreatedHooks(): void {
 const inFlight = new Map<string, Promise<{ channelId: string; created: boolean } | null>>();
 
 export interface EnsureChannelArgs {
-  client: DiscordClient;
+  client: ChatClient;
   guildId: string;
   slug: string;
   displayName: string;
@@ -97,7 +97,7 @@ async function ensureChannelInner(args: EnsureChannelArgs): Promise<{ channelId:
         const live = await args.client.listGuildChannels(args.guildId);
         const named = live.find((c) => c.name === `muonroi-${args.slug}`);
         if (named) {
-          const mapping: DiscordChannelMapping = {
+          const mapping: ChatChannelMapping = {
             productSlug: args.slug,
             channelId: named.id,
             guildId: args.guildId,
@@ -120,7 +120,7 @@ async function ensureChannelInner(args: EnsureChannelArgs): Promise<{ channelId:
         await args.client.addChannelPermission(created.id, s.discordUserId, STAKEHOLDER_ALLOW, 0).catch(() => {});
       }
 
-      const mapping: DiscordChannelMapping = {
+      const mapping: ChatChannelMapping = {
         productSlug: args.slug,
         channelId: created.id,
         guildId: args.guildId,
@@ -138,7 +138,7 @@ async function ensureChannelInner(args: EnsureChannelArgs): Promise<{ channelId:
     });
   } catch (e: any) {
     if (e?.status === 401 || e?.status === 403) {
-      console.warn(`Discord channel-manager: ${e.status} (token/permission); F disabled for this run`);
+      console.warn(`Chat channel-manager: ${e.status} (token/permission); F disabled for this run`);
       return null;
     }
     throw e;

@@ -1,5 +1,5 @@
-import { withRateLimitBackoff } from "../utils/rate-limit.js";
-import type { DiscordClient, DiscordMessage } from "./types.js";
+import { withRateLimitBackoff } from "../../../utils/rate-limit.js";
+import type { ChatClient, ChatMessage } from "../../types.js";
 
 const API_BASE = "https://discord.com/api/v10";
 
@@ -18,7 +18,7 @@ function makeError(res: Response, body: string): DiscordError {
   return err;
 }
 
-export class DiscordRestClient implements DiscordClient {
+export class DiscordChatProvider implements ChatClient {
   private readonly headers: Record<string, string>;
   private cachedUserId?: string;
 
@@ -57,7 +57,7 @@ export class DiscordRestClient implements DiscordClient {
     return this.call("POST", `/guilds/${guildId}/channels`, body);
   }
 
-  async getChannelMessages(channelId: string, opts: { afterId?: string; limit?: number }): Promise<DiscordMessage[]> {
+  async getChannelMessages(channelId: string, opts: { afterId?: string; limit?: number }): Promise<ChatMessage[]> {
     const params = new URLSearchParams();
     if (opts.afterId) params.set("after", opts.afterId);
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));

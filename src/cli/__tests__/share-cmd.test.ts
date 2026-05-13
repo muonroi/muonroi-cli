@@ -2,10 +2,10 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DiscordClient } from "../../discord/types.js";
+import type { ChatClient } from "../../chat/types.js";
 import { runShareCommand } from "../share-cmd.js";
 
-function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
+function makeClient(over: Partial<ChatClient> = {}): ChatClient {
   return {
     createChannel: vi.fn(),
     getChannelMessages: vi.fn(),

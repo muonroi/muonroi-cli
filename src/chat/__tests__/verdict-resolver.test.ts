@@ -2,10 +2,10 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DiscordClient, DiscordMessage } from "../types.js";
+import type { ChatClient, ChatMessage } from "../types.js";
 import { discordAwaitVerdict } from "../verdict-resolver.js";
 
-function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
+function makeClient(over: Partial<ChatClient> = {}): ChatClient {
   return {
     createChannel: vi.fn(),
     getChannelMessages: vi.fn().mockResolvedValue([]),
@@ -17,7 +17,7 @@ function makeClient(over: Partial<DiscordClient> = {}): DiscordClient {
   };
 }
 
-function msg(id: string, content: string, authorId = "user"): DiscordMessage {
+function msg(id: string, content: string, authorId = "user"): ChatMessage {
   return { id, content, author: { id: authorId, username: "u" }, timestamp: new Date().toISOString() };
 }
 
