@@ -1,145 +1,58 @@
 <p align="center">
   <h1 align="center">muonroi-cli</h1>
   <p align="center">
-    <strong>BYOK AI coding agent that costs $5/month instead of $100 — with multi-model orchestration, role-based routing, and auto-compact.</strong>
-  </p>
-  <p align="center">
-    <a href="#quick-start">Quick Start</a> ·
-    <a href="#cli-usage">CLI Usage</a> ·
-    <a href="#multi-model-council">Council</a> ·
-    <a href="#role-based-routing">Routing</a> ·
-    <a href="#shuru-sandbox">Sandbox</a> ·
-    <a href="#experience-engine">EE</a>
+    <em>An AI coding agent where models argue with each other before answering.</em>
   </p>
   <p align="center">
     <a href="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml"><img alt="CI" src="https://github.com/muonroi/muonroi-cli/actions/workflows/ci-matrix.yml/badge.svg"></a>
     <a href="https://www.npmjs.com/package/muonroi-cli"><img alt="npm" src="https://img.shields.io/npm/v/muonroi-cli.svg"></a>
-    <img alt="Multi-Provider" src="https://img.shields.io/badge/providers-7%20supported-blue">
-    <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow">
-    <img alt="Bun 1.3+" src="https://img.shields.io/badge/bun-1.3%2B-orange">
-    <img alt="Multi-Model" src="https://img.shields.io/badge/council-multi--model%20debate-brightgreen">
+    <img alt="Providers" src="https://img.shields.io/badge/providers-7%20supported-blue">
+    <img alt="License" src="https://img.shields.io/badge/license-MIT-yellow">
+    <img alt="Runtime" src="https://img.shields.io/badge/runtime-Bun%201.3%2B-orange">
   </p>
 </p>
 
 ---
 
-Bring your own API keys. Use the cheapest model for each task. Let multiple models debate your architecture decisions.
+> **muonroi-cli** introduces three architectural contributions to AI-assisted software engineering:
+> a **multi-model adversarial council** for high-stakes decisions,
+> a **Prompt Intelligence Layer** that routes each task to the optimal model,
+> and an **Experience Engine** that accumulates behavioral memory across sessions.
+> Bring your own API keys. Total cost: ~$5/month.
 
-```
-Without muonroi-cli:
-  You pick one model. You pay for every token at the same rate.
-  Planning? Same model. Debugging? Same model. Docs? Same model.
-  $100/month for a subscription, or $20-50/month on API calls.
+<p align="center">
+  <img src="docs/demo.gif" alt="Council debate — REST vs gRPC decision" width="840" />
+</p>
 
-With muonroi-cli:
-  "Plan the auth system"     -> Claude (leader, deep reasoning)
-  "Refactor user service"    -> DeepSeek (implement, fast + cheap)
-  "Fix the race condition"   -> Claude (verify, catches subtle bugs)
-  "Document the API"         -> DeepSeek (research, good enough for docs)
-  Architecture decision?     -> All models debate, converge, leader synthesizes.
-  $5-8/month. Same quality. Multiple perspectives.
-```
+<p align="center">
+  <a href="#quick-start">Quick Start</a> ·
+  <a href="#-multi-model-council">Council</a> ·
+  <a href="#-prompt-intelligence-layer">PIL</a> ·
+  <a href="#-experience-engine">Experience Engine</a> ·
+  <a href="#architecture">Architecture</a>
+</p>
 
-**The only coding CLI where models argue with each other before giving you an answer.**
+---
 
-Current version: **v1.2.3**.
+## The Problem with Single-Model Agents
 
-## Why Multi-Model?
+Every AI coding tool today operates with one model at a time. You select Claude, GPT-4o, or DeepSeek — and it handles planning, implementation, debugging, and documentation at the same cost with the same perspective.
 
-Every coding CLI uses one model at a time. You pick Claude or GPT or DeepSeek. But different tasks have different needs:
+This design has three structural limitations:
 
-- **Model selection**: Single-model CLIs = you pick one, it does everything. muonroi-cli = PIL auto-detects task type, routes to the right model.
-- **Architecture decisions**: Single-model CLIs = one model's opinion. muonroi-cli = multiple models debate, challenge, converge.
-- **Cost**: Single-model CLIs = premium model for every task. muonroi-cli = premium only when needed; cheap models for routine work.
-- **Blind spots**: Single-model CLIs = one model's training biases. muonroi-cli = models catch each other's blind spots.
-- **Provider lock-in**: Single-model CLIs = switch manually, reconfigure. muonroi-cli = 7 providers, auto-key loading, switch per-turn.
+| Limitation | Consequence |
+|---|---|
+| **No adversarial pressure** | A single model answers with overconfidence — no outside perspective challenges it |
+| **Task-agnostic cost** | Premium pricing for writing docstrings and for designing distributed systems alike |
+| **Session amnesia** | Every conversation starts cold; lessons from prior failures vanish |
 
-## Quick Start
+muonroi-cli addresses each limitation with a dedicated subsystem.
 
-**Option A — install via Bun (recommended):**
+---
 
-```bash
-bun add -g muonroi-cli
-muonroi-cli                    # first run asks for API key — start coding
-```
+## §1 — Multi-Model Council
 
-**Option B — install via script (no Bun required):**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash
-```
-
-Add more providers for multi-model features:
-
-```json
-// ~/.muonroi-cli/user-settings.json
-{
-  "apiKey": "sk-your-main-key",
-  "defaultModel": "deepseek-v4-flash",
-  "providers": {
-    "anthropic": { "apiKey": "sk-ant-..." },
-    "deepseek": { "apiKey": "sk-..." },
-    "siliconflow": { "apiKey": "sk-..." }
-  },
-  "roleModels": {
-    "leader": "claude-sonnet-4-6",
-    "implement": "deepseek-v4-flash",
-    "verify": "claude-sonnet-4-6",
-    "research": "deepseek-v4-flash"
-  }
-}
-```
-
-That's it. The CLI now routes tasks to the right model and can run multi-model debates.
-
-```bash
-muonroi-cli                                    # interactive TUI
-muonroi-cli fix the flaky test in auth.test.ts  # with starting prompt
-muonroi-cli --prompt "run tests" --format json  # headless mode (CI/scripts)
-muonroi-cli --verify                            # built-in verify flow headlessly
-muonroi-cli models                              # list available models with pricing
-muonroi-cli doctor                              # diagnose dependencies
-muonroi-cli bug-report                          # generate diagnostic bundle
-```
-
-## CLI Usage
-
-### Options
-
-- `-k, --api-key <key>` — API key (overrides settings)
-- `-u, --base-url <url>` — API base URL override
-- `-m, --model <model>` — Model to use
-- `-d, --directory <dir>` — Working directory (default: cwd)
-- `-p, --prompt <prompt>` — Run a single prompt headlessly
-- `--verify` — Run the built-in verify flow headlessly
-- `--format <format>` — Headless output: `text` or `json` (default: text)
-- `--sandbox` — Run shell commands inside a Shuru sandbox
-- `--no-sandbox` — Run shell commands directly on the host
-- `--allow-net` — Enable network access inside the sandbox
-- `--allow-host <pattern>` — Restrict sandbox network to specific hosts (repeatable)
-- `--port <mapping>` — Forward host:guest port (repeatable)
-- `-s, --session <id>` — Continue a saved session by id, or use `latest`
-- `--max-tool-rounds <n>` — Max tool execution rounds (default: 400)
-- `--batch-api` — Use xAI Batch API for async model calls
-- `--permission <mode>` — Permission mode: `safe`, `auto-edit`, `yolo`
-- `--update` — Update to the latest version and exit
-- `--background-task-file <path>` — Run a persisted background delegation
-- `--smoke-boot-only` — CI smoke test: validate boot and exit 0
-
-### Subcommands
-
-- `muonroi-cli models` — List all available models with pricing, context window, and capabilities
-- `muonroi-cli update` — Update to the latest release
-- `muonroi-cli uninstall` — Remove muonroi-cli binary and optional data (`--dry-run`, `--force`, `--keep-config`, `--keep-data`)
-- `muonroi-cli daemon` — Start the schedule daemon (`--background` to detach)
-- `muonroi-cli doctor` — Run health checks for dependencies and services
-- `muonroi-cli bug-report` — Generate anonymized diagnostic bundle for issue submission
-
-## Multi-Model Council
-
-The headline feature. Multiple models discuss a topic through structured debate with convergence detection.
-
-- **Council** — multi-model adversarial debate with tool grounding. See [docs/Council.md](docs/Council.md) for the full pipeline reference.
+**The insight:** architectural decisions benefit from adversarial pressure. A single model produces confident answers; multiple models with distinct roles produce *challenged* answers with genuine trade-off analysis.
 
 ```
 /council Should we use REST or gRPC for internal microservices?
@@ -149,507 +62,289 @@ The headline feature. Multiple models discuss a topic through structured debate 
 ### How it works
 
 ```
-Phase 1 — Opening (parallel)
-  Each role model shares their analysis + asks open questions.
-  All models run simultaneously -> 3 openings in the time of 1.
+Phase 1 — Opening  (parallel)
+  Each role model independently analyzes the question and surfaces
+  what they want the other perspectives to challenge.
+  All models run simultaneously → 3 openings in the time of 1.
 
-Phase 2 — Discussion (parallel pairs)
-  Pairs exchange views naturally:
-    implement: "Here's my analysis. What do you think?"
-    verify:    "I agree on X, but disagree on Y because... Do you see it differently?"
-    implement: "Valid point on Y. I'd adjust to... Are we aligned now?"
+Phase 2 — Discussion  (parallel pairs)
+  implement: "Here's my analysis. Where do you see it differently?"
+  verify:    "I agree on X. On Y — I'd push back because... thoughts?"
+  implement: "Valid point. I'd revise to... are we aligned now?"
 
-  Convergence check after each exchange.
+  Convergence is checked after each round.
   Debate stops early when all pairs genuinely agree.
-  Independent pairs run in parallel.
 
-Phase 3 — Leader Synthesis
-  Leader reads the full debate log.
-  Identifies agreement, genuine trade-offs, and makes a decisive recommendation.
+Phase 3 — Synthesis
+  The leader reads the full debate log, identifies genuine trade-offs,
+  and produces a recommendation grounded in the evolved positions —
+  not the originals.
 ```
-
-### Council TUI
-
-While a council runs, the TUI shows:
-- **Phase timeline** — which phase each model is in (opening, discussing, synthesizing)
-- **Status list** — per-model status (running, waiting, done, error) with timing
-- **Question cards** — interactive preflight clarification before the debate starts
 
 ### What makes the debate real
 
-The prompts are **dynamic, not hardcoded**. Each is generated from the conversation context:
-
-- Opening: "Share your analysis. End with what you'd like the other's perspective on."
-- Response: "Where you agree, build on it. Where you disagree, explain why. Ask back."
-- Followup: "If they raised valid points, update your thinking. If you changed your mind, say so."
-- Convergence: System checks if both sides genuinely agree — not just politely nodding.
-
-Models **update their positions** after each exchange. Round 2 debates evolved positions, not the originals.
+Prompts are **dynamically generated from context** — models don't respond to hardcoded templates. They update their positions after each round. Round 2 debates evolved stances, not the originals. Convergence detection distinguishes genuine agreement from polite nodding.
 
 ### Auto-council
 
-When the Prompt Intelligence Layer detects a `plan` or `analyze` task with high confidence (>= 75%) and 2+ role models are configured, council triggers automatically instead of a single-model response.
-
-Disable with `"autoCouncil": false` in settings.
-
-### Performance
+When the Prompt Intelligence Layer detects a `plan` or `analyze` task with ≥85% confidence and at least 2 role models are configured, council triggers automatically — no `/council` required.
 
 | Metric | Sequential | Parallel |
 |--------|-----------|----------|
 | 3 openings | ~90s | ~30s |
 | 3 pair debates | ~180s | ~60s |
-| Total council | ~310s | ~130s |
+| Full council | ~310s | ~130s |
 
-Council results are saved to session memory for reference in future conversations.
+Council results are persisted to session memory for future reference.
 
-## Role-Based Routing
+---
 
-Assign models to task roles. The PIL detects what you're doing and routes automatically.
+## §2 — Prompt Intelligence Layer
+
+**The insight:** task type determines optimal model. Planning needs deep reasoning; implementation needs fast generation; documentation needs adequate quality at minimal cost. Routing every task to the same model is expensive and often suboptimal.
+
+```
+"Plan the auth system"     → leader    (claude-sonnet-4-6 — deep reasoning)
+"Refactor user service"    → implement (deepseek-v4-flash — fast + cheap)
+"Fix the race condition"   → verify    (claude-sonnet-4-6 — catches subtle bugs)
+"Document the API"         → research  (deepseek-v4-flash — adequate, $0.001/call)
+```
+
+### The pipeline
+
+PIL runs on every prompt in under 200ms and is fail-open — if any layer fails, the request proceeds with available context.
+
+```
+intent detection  →  personality enrichment  →  EE pattern lookup
+      ↓
+workflow classification  →  codebase context injection  →  output shaping
+```
+
+The six layers enrich each prompt before it reaches any model. Layer 3 (EE pattern lookup) injects warnings from the Experience Engine when similar prompts have caused problems before.
+
+### Role-based routing
 
 ```json
 {
   "roleModels": {
-    "leader": "claude-sonnet-4-6",
+    "leader":    "claude-sonnet-4-6",
     "implement": "deepseek-v4-flash",
-    "verify": "claude-sonnet-4-6",
-    "research": "deepseek-v4-flash"
+    "verify":    "claude-sonnet-4-6",
+    "research":  "deepseek-v4-flash"
   }
 }
 ```
 
-| Task type | Role | What happens |
-|-----------|------|-------------|
-| plan, analyze | **leader** | Routes to your strongest reasoning model |
-| generate, refactor | **implement** | Routes to your fastest code generation model |
-| debug | **verify** | Routes to the model best at catching subtle bugs |
-| documentation | **research** | Routes to the cheapest adequate model |
+| Task type | Role | Example |
+|---|---|---|
+| plan, analyze | **leader** | "Design the caching strategy" |
+| generate, refactor | **implement** | "Rewrite this function" |
+| debug | **verify** | "Find the race condition" |
+| docs | **research** | "Document this module" |
 
-**Resolution priority:** role model > PIL tier > router warm/cold > session default.
+**Resolution priority:** role model → PIL tier → session default.
 
-When no role models are configured, falls back to 3-tier routing (hot/warm/cold) with budget-aware auto-downgrade via the ledger system.
+When role models are absent, PIL falls back to 3-tier budget-aware routing with automatic downgrade if the ledger approaches the configured monthly limit.
 
-### Mode models
-
-You can also set per-mode defaults:
-
-```json
-{
-  "modeModels": {
-    "agent": "deepseek-v4-flash",
-    "plan": "claude-sonnet-4-6",
-    "ask": "deepseek-v4-flash"
-  }
-}
-```
-
-The `MUONROI_MODEL` env var takes absolute precedence over both roleModels and modeModels.
-
-## Auto-Compact
-
-After every input/output cycle, the conversation is silently compressed into a structured summary. Context stays small, costs stay flat, sessions run indefinitely.
+### Cost comparison
 
 ```
-Without auto-compact:
-  Turn 1:   5K tokens
-  Turn 5:  25K tokens
-  Turn 20: 100K tokens -> context window hit -> forced compaction or session death
+Single-model setup (Claude for everything):
+  100 tasks/day × $0.02/task average = ~$60/month
 
-With auto-compact:
-  Turn 1:   5K tokens
-  Turn 5:   6K tokens (summary + current turn)
-  Turn 20:  7K tokens (same — flat forever)
+muonroi-cli with role routing:
+  70% cheap tasks → deepseek-v4-flash @ $0.001
+  30% quality tasks → claude-sonnet-4-6 @ $0.015
+  = ~$5–8/month. Same output quality where it matters.
 ```
 
-The summary preserves: goal, progress, key decisions, file paths, function names, error messages. Everything needed to continue the work.
+---
 
-Toggle with `"autoCompactAfterTurn": false`. Adjust threshold with `"autoCompactThresholdPct": 0.15` (range 0.05-0.50).
+## §3 — Experience Engine
+
+**The insight:** an agent that forgets everything between sessions cannot improve. The Experience Engine builds persistent behavioral memory from session outcomes — incidents evolve into rules, rules evolve into principles.
+
+```
+Session 1:   DbContext singleton → state corruption bug → incident captured
+Session 2:   About to repeat    → PreToolUse hook fires → warning shown
+Session 15:  3 similar incidents → evolution cycle runs →
+             principle: "Stateful objects must be scoped, never singleton"
+Session 16:  RedisConnection singleton (never seen before) →
+             principle matches → avoided preemptively
+```
+
+### How it works
+
+- **PreToolUse warnings** — before each tool call, EE checks if semantically similar actions caused problems. Warnings appear inline in the TUI with a `Why:` rationale.
+- **PostToolUse learning** — outcomes are evaluated asynchronously by a judge model and stored as observations.
+- **Principle evolution** — observations compress into behavioral rules, rules compress into principles via periodic evolution cycles.
+- **Cross-project sharing** — lessons from one codebase inform all others in the same ecosystem.
+- **Semantic search** — `/ee search <query>` retrieves relevant past lessons in natural language.
+
+The EE client communicates with [experience-engine](https://github.com/muonroi/experience-engine) via an in-process JS bridge. Self-host or connect to a shared instance. All hooks fail open — the agent runs normally if EE is unavailable.
+
+---
 
 ## Architecture
 
 ```
 User prompt
-  |
-  v
-Redactor (log scrubbing) --- Layer 1 regex + Layer 2 enrolled secrets
-  |
-  v
-PIL (Prompt Intelligence Layer) --- 6-layer enrichment, <200ms, fail-open
-  |                                  intent -> personality -> EE -> workflow -> context -> output
-  v
-Router --- role-based (roleModels) or tier-based (hot/warm/cold)
-  |         budget-aware downgrade via ledger system
-  |         EE bridge for learned routing
-  v
-Provider --- auto-detect from model ID, load correct API key
-  |           keychain > env var > settings.json
-  |           7 providers via AI SDK v6
-  v
-Hybrid Vision Proxy (input side) --- text-only models get auto-image-description
-  |                                    proxyVision() rewrites image parts in user
-  |                                    messages to text via Qwen3-VL fallback chain
-  v
-Tool Loop --- bash, file, grep, LSP, schedule, registry
-  |           Shuru sandbox isolation for shell commands
-  v
-Hybrid Vision Bridge (output side) --- bridgeMcpToolResult() intercepts ANY tool
-  |                                     returning images (Playwright screenshot,
-  |                                     Figma export, computer_screenshot, ...)
-  |                                     extract -> Qwen3-VL -> cache -> strip bytes
-  |                                     -> inject description into response.messages
-  v
-Tool-output guardrails --- scrubImagePayloadsInMessages() before persist:
-  |                         (1) strip leftover base64 from AI-SDK message tree
-  |                         (2) inject bridged vision description by toolCallId
-  |                         (3) cap non-image tool outputs at 200KB head+tail
-  |                             (env: MUONROI_TOOL_OUTPUT_MAX_BYTES)
-  v
-Post-turn auto-compact --- silent context compression
-  |                         keeps token costs flat across sessions
-  v
-Session storage --- SQLite persistence, crash recovery via pending-calls log
-                    Flow system (.muonroi-flow/) for multi-session workflows
+  │
+  ▼
+Redactor ─────────────── two-layer secret scrubbing (static regex + enrolled values)
+  │
+  ▼
+PIL ──────────────────── 6-layer enrichment, <200ms, fail-open
+  │                      intent → personality → EE → workflow → context → output
+  ▼
+Router ───────────────── role-based (roleModels) or tier-based (hot/warm/cold)
+  │                      budget-aware downgrade via ledger
+  ▼
+Provider ─────────────── auto-detect from model ID, load correct API key
+  │                      7 providers via AI SDK v6
+  ▼
+Vision Proxy (input) ─── text-only models auto-receive image descriptions
+  │                      Qwen3-VL fallback chain on SiliconFlow
+  ▼
+Tool Loop ────────────── bash, file ops, grep, LSP, schedule
+  │                      optional Shuru sandbox isolation
+  ▼
+Vision Bridge (output) ── intercepts tool results returning images
+  │                       (Playwright screenshots, Figma exports, etc.)
+  │                       extract → Qwen3-VL → cache → strip bytes → inject text
+  ▼
+Output guardrails ─────── scrub base64 before persist, cap tool output at 200KB
+  │
+  ▼
+Auto-compact ─────────── silent context compression after every turn
+  │                      context stays flat at ~6–7K tokens regardless of session length
+  ▼
+Session storage ──────── SQLite persistence, crash recovery via pending-calls log
 ```
 
 ### Supported providers
 
-| Provider | Models in catalog | Key source |
-|----------|------------------|------------|
-| **Anthropic** | Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5 / Opus 4.6 / Sonnet 4.5 | `MUONROI_API_KEY` or `apiKey` |
-| **OpenAI** | GPT-4o, GPT-4o-mini, o3, o3-mini, o4-mini | `OPENAI_API_KEY` or `providers.openai.apiKey` |
-| **Google** | Gemini 2.5 Pro, Gemini 2.5 Flash | `GOOGLE_API_KEY` or `providers.google.apiKey` |
-| **DeepSeek** | DeepSeek V4 Flash, DeepSeek V4 Pro | `DEEPSEEK_API_KEY` or `providers.deepseek.apiKey` |
-| **xAI** | Grok 3, Grok 3 Mini (w/ reasoning effort) | `XAI_API_KEY` or `providers.xai.apiKey` |
-| **SiliconFlow** | Qwen, GLM, InternLM (+ vision proxy) | `SILICONFLOW_API_KEY` or `providers.siliconflow.apiKey` |
+| Provider | Models | Key source |
+|---|---|---|
+| **Anthropic** | Claude Opus 4.7 / Sonnet 4.6 / Haiku 4.5 | `MUONROI_API_KEY` |
+| **OpenAI** | GPT-4o, GPT-4o-mini, o3, o4-mini | `OPENAI_API_KEY` |
+| **Google** | Gemini 2.5 Pro / Flash | `GOOGLE_API_KEY` |
+| **DeepSeek** | DeepSeek V4 Flash / Pro | `DEEPSEEK_API_KEY` |
+| **xAI** | Grok 3, Grok 3 Mini | `XAI_API_KEY` |
+| **SiliconFlow** | Qwen, GLM, InternLM (+ vision proxy) | `SILICONFLOW_API_KEY` |
 | **Ollama** | Any local model | Keyless — `http://localhost:11434` |
 
-Provider auto-detection: model IDs are matched by prefix (`deepseek-*` -> DeepSeek, `gpt-*` -> OpenAI, `grok-*` -> xAI, etc.) so you can use models not in the built-in catalog.
+Model IDs are matched by prefix (`deepseek-*`, `gpt-*`, `grok-*`, etc.) so models outside the built-in catalog work automatically.
 
-### Hybrid vision proxy
+---
 
-Two cooperating layers turn any text-only model (DeepSeek, etc.) into a vision-capable agent. Both gate on `needsVisionProxy(modelId)` and share the same `Qwen3-VL-8B → 30B-A3B → 32B` fallback chain on SiliconFlow, plus an SVG fast-path that decodes `image/svg+xml` straight to source instead of paying for a vision call.
-
-| Layer | Source file | Direction | Triggers on | Behavior |
-|-------|-------------|-----------|-------------|----------|
-| **1. Input proxy** | `vision-proxy.ts` (`proxyVision`) | user → model | image parts in user messages (paste, drag-drop, file mentions) | extract image part → Qwen3-VL → replace with text description before the LLM call |
-| **2. Output bridge** | `mcp-vision-bridge.ts` (`bridgeMcpToolResult`) | tool → model | image-bearing tool results (Playwright `browser_take_screenshot`, Figma `export_frame`, generic `computer_screenshot`, any MCP tool returning base64) | extract → Qwen3-VL → cache (20 images × 15 min TTL) → strip bytes → inject description into the tool result the model sees |
-
-The bridge layer also exposes three follow-up tools to the agent: `analyze_image` (analyze a file path / data URI / base64 on demand), `ask_vision_proxy` (re-query a cached image with a specific question), and `list_vision_cache` (enumerate currently cached images by ID).
-
-**Persistence guardrails** — `scrubImagePayloadsInMessages` runs over `response.messages` before SQLite write to (1) strip any base64 the AI SDK kept in its internal tool-result representation, (2) re-inject the vision description by `toolCallId` so the next turn still has the visual context (without this, screenshots leave the model blind on subsequent turns), and (3) cap any non-image tool output at 200KB (head 70% + tail 20% with a truncation marker) — tunable via `MUONROI_TOOL_OUTPUT_MAX_BYTES`. The cap stops accidental megabyte payloads (recursive `directory_tree`, large `find` listings) from accumulating across turns and overflowing the model's context window.
-
-## Shuru Sandbox
-
-muonroi-cli supports running agent shell commands inside a **Shuru sandbox** for security isolation.
+## Quick Start
 
 ```bash
-muonroi-cli --sandbox                                    # enable sandbox
-muonroi-cli --sandbox --allow-net                         # with network
-muonroi-cli --sandbox --allow-host api.github.com         # restrict to specific hosts
-muonroi-cli --sandbox --port 3000:3000                    # forward host port to sandbox
+# Install
+bun add -g muonroi-cli
+
+# First run — prompts for API key, then drops into TUI
+muonroi-cli
 ```
 
-In the TUI, use `/sandbox` to toggle sandbox mode and configure:
-- CPU/memory limits (`cpus`, `memory`, `diskSize`)
-- Network rules (`allowNet`, `allowedHosts`, `ports`)
-- Secrets from host env vars (`secrets`)
-- Ephemeral installs, shell init scripts, workspace sync
-- Browser/verify base images
+Add multiple providers for council and role routing:
 
-Options: `off` (no sandbox), `shuru` (Shuru container isolation).
+```json
+// ~/.muonroi-cli/user-settings.json
+{
+  "apiKey": "sk-ant-your-key",
+  "providers": {
+    "anthropic": { "apiKey": "sk-ant-..." },
+    "deepseek":  { "apiKey": "sk-..." }
+  },
+  "roleModels": {
+    "leader":    "claude-sonnet-4-6",
+    "implement": "deepseek-v4-flash",
+    "verify":    "claude-sonnet-4-6",
+    "research":  "deepseek-v4-flash"
+  }
+}
+```
+
+```bash
+muonroi-cli                                      # interactive TUI
+muonroi-cli "fix the flaky test in auth.test.ts" # with starting prompt
+muonroi-cli --prompt "run tests" --format json   # headless / CI mode
+muonroi-cli models                               # list models with pricing
+muonroi-cli doctor                               # health check
+```
+
+**Alternative install (no Bun required):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash
+```
+
+---
 
 ## Configuration
 
-### User settings (`~/.muonroi-cli/user-settings.json`)
+Full settings reference: `~/.muonroi-cli/user-settings.json`
 
 ```json
 {
-  "apiKey": "sk-your-default-key",
+  "apiKey": "sk-ant-...",
   "defaultModel": "claude-sonnet-4-6",
-
-  "roleModels": {
-    "leader": "claude-sonnet-4-6",
-    "implement": "deepseek-v4-flash",
-    "verify": "claude-sonnet-4-6",
-    "research": "deepseek-v4-flash"
-  },
-
-  "modeModels": {
-    "agent": "deepseek-v4-flash",
-    "plan": "claude-sonnet-4-6",
-    "ask": "deepseek-v4-flash"
-  },
-
+  "roleModels":   { "leader": "...", "implement": "...", "verify": "...", "research": "..." },
+  "modeModels":   { "agent": "...", "plan": "...", "ask": "..." },
   "councilRounds": 3,
   "autoCouncil": true,
+  "autoCouncilConfidence": 0.85,
   "autoCompactAfterTurn": true,
-  "autoCompactThresholdPct": 0.15,
-
-  "providers": {
-    "anthropic": { "apiKey": "sk-ant-..." },
-    "openai": { "apiKey": "sk-..." },
-    "deepseek": { "apiKey": "sk-..." },
-    "siliconflow": { "apiKey": "sk-..." },
-    "xai": { "apiKey": "xai-..." },
-    "ollama": { "baseURL": "http://localhost:11434" }
-  },
-
+  "autoCompactThresholdPct": 0.25,
+  "providers": { "anthropic": {}, "openai": {}, "deepseek": {}, "xai": {}, "siliconflow": {}, "ollama": {} },
   "sandboxMode": "off",
-  "sandbox": {
-    "allowNet": false,
-    "cpus": 2,
-    "memory": "4GB"
-  },
-
-  "lsp": {
-    "enabled": true,
-    "tool": true,
-    "autoInstall": false,
-    "builtins": { "typescript": { "enabled": true } },
-    "servers": []
-  }
+  "lsp": { "enabled": true }
 }
 ```
 
-Key nested objects:
+Per-project overrides: `.muonroi-cli/settings.json` in the repo root.
+Absolute model override: `MUONROI_MODEL=<model-id>` env var (suppresses all routing).
 
-- `roleModels` — per-role model assignment (leader/implement/verify/research)
-- `modeModels` — per-mode model assignment (agent/plan/ask)
-- `providers` — per-provider API keys and base URLs
-- `sandbox` — Shuru sandbox settings
-- `lsp` — Language server settings with built-in servers (typescript, pyright, gopls, rust-analyzer, bash-language-server, yaml-language-server, clangd, jdtls, sourcekit-lsp)
-- `subAgents` — custom sub-agent definitions
-- `mcp` — MCP server configurations
-- `telegram` — Telegram bot settings
-- `hooks` — pre/post hooks configuration
-
-### Project settings (`.muonroi-cli/settings.json`)
-
-Per-project overrides:
-
-```json
-{ "model": "claude-sonnet-4-6" }
-```
-
-### Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `MUONROI_API_KEY` | Primary Anthropic API key (overrides settings) |
-| `MUONROI_BASE_URL` | Override base URL for the primary (Anthropic) provider |
-| `MUONROI_MODEL` | Absolute model override (suppresses roleModels and modeModels) |
-| `MUONROI_MAX_TOKENS` | Override max tokens per turn |
-| `MUONROI_CLI_HOME` | Override `~/.muonroi-cli` data directory |
-| `MUONROI_NO_SHELL_HOLD` | Set to `1` to disable WezTerm shell-on-exit hold |
-| `MUONROI_EXIT_SHELL` | Custom shell command for the exit hold |
-| `MUONROI_EE_DEBUG` | Set to `1` to log EE client mode detection |
-| `MUONROI_DEBUG` | Enable debug logging in EE offline queue |
-| `MUONROI_PIL_SCORE_FLOOR` | Override EE similarity score floor (0.0-1.0, default 0.55) |
-| `MUONROI_TOOL_OUTPUT_MAX_BYTES` | Per-tool-result size cap before persist (default 200000, min 1024). Larger outputs are truncated head+tail with a marker. |
-| `ANTHROPIC_API_KEY` | Anthropic API key (alternative) |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `GOOGLE_API_KEY` | Google/Gemini API key |
-| `DEEPSEEK_API_KEY` | DeepSeek API key |
-| `SILICONFLOW_API_KEY` | SiliconFlow API key |
-| `XAI_API_KEY` | xAI/Grok API key |
-
-## Slash Commands
-
-### Built-in TUI commands
-
-| Command | Description |
-|---------|-------------|
-| `/council [n] <topic>` | Multi-model adversarial debate |
-| `/plan` | Show active GSD plan |
-| `/discuss` | Discuss phase gray areas |
-| `/execute` | Execute active GSD plan |
-| `/verify` | Run local verification |
-| `/review` | Review recent changes |
-| `/compact` | Manual context compression |
-| `/expand` | Expand last compacted context |
-| `/cost` | Session cost breakdown |
-| `/route` | Show current model routing info |
-| `/optimize` | Optimize prompt for token savings |
-| `/debug` | Toggle debug trace mode |
-| `/debug-on` | Enable pipeline debug tracing |
-| `/debug-off` | Disable pipeline debug tracing |
-| `/debug-status` | Show session debug summary |
-| `/debug-last` | Show last recorded trace |
-| `/ee` | Experience Engine panel |
-| `/ee search <query>` | Semantic search across knowledge base |
-| `/ee timeline <topic>` | Principle evolution for a topic |
-| `/ee graph <topic>` | Principle relationship graph |
-| `/ee route <task>` | Route task to workflow |
-| `/ee stats` | Knowledge base statistics |
-| `/ee gates` | Quality gate checklist |
-| `/ee evolve` | Trigger EE evolution cycle |
-| `/ee user` | Current EE user identity |
-| `/agents` / `/agent` | Manage custom sub-agents |
-| `/mcp` / `/mcps` | Configure MCP servers |
-| `/schedule` / `/schedules` | Manage scheduled tasks |
-| `/sandbox` | Select shell sandbox mode |
-| `/model` / `/models` | Select a model |
-| `/wallet` | Wallet and payment settings |
-| `/remote-control` | Telegram bot pairing |
-| `/skills` | Manage skills |
-| `/btw <question>` | Ask a side question without interrupting |
-| `/commit-push` | Commit and push |
-| `/commit-pr` | Commit and open PR |
-| `/new` | Start a new session |
-| `/clear` | Clear conversation and start fresh |
-| `/update` | Update muonroi-cli to the latest version |
-| `/quit` / `/exit` / `/q` | Quit the CLI |
-
-## Sub-Agents
-
-| Agent | Purpose | Mode |
-|-------|---------|------|
-| **general** | Multi-step editing tasks | Foreground |
-| **explore** | Codebase search and analysis | Background (read-only) |
-| **verify** | Build, test, smoke-check | Foreground |
-| **computer** | Desktop automation | Foreground |
-| **custom** | User-defined with any model | Configurable |
-
-Define custom sub-agents in settings:
-
-```json
-{
-  "subAgents": [
-    {
-      "name": "security-review",
-      "model": "claude-sonnet-4-6",
-      "instruction": "Focus on security implications. Suggest concrete fixes."
-    }
-  ]
-}
-```
-
-In the TUI, `/agents` opens a full sub-agent browser with inline editor for creating, editing, deleting, and toggling custom agents.
-
-## Sessions
-
-Conversations persist automatically via SQLite. Resume anytime:
-
-```bash
-muonroi-cli --session latest       # pick up where you left off
-muonroi-cli -s <session-id>        # resume a specific session
-```
-
-Sessions survive crashes via **pending-call recovery** — orphaned `.tmp` files from a prior crash are reconciled on boot.
-
-The **flow system** (`.muonroi-flow/`) tracks multi-session workflows with run management, compaction snapshots, and warning persistence. Use `run-manager.ts` to organize work into named runs with delegations, gray areas, and state tracking.
-
-## Experience Engine
-
-Optional persistent learning system that gives your agent memory across sessions. Fully implemented with in-process JS bridge.
-
-```
-Session 1:  DbContext singleton -> bug -> lesson extracted
-Session 2:  About to repeat    -> hook fires -> "Last time this caused state corruption"
-Session 15: 3 similar lessons  -> evolved into principle:
-            "Stateful objects must be scoped, never singleton"
-Session 16: RedisConnection singleton (NEVER SEEN) -> principle matches -> avoided
-```
-
-### Capabilities
-
-- **PreToolUse warnings** — checks if similar actions caused problems before; shows inline warnings in TUI
-- **PostToolUse learning** — captures outcomes, evaluates with async judge
-- **Principle evolution** — incidents compress into behavioral rules, then into principles via evolution cycles
-- **Cross-project sharing** — lessons from one project help all others in your ecosystem
-- **Semantic search** — query across all learned observations, rules, and principles
-- **Session extraction** — auto-extract lessons from session trajectories
-- **Mistake detection** — identify recurring patterns and surface them proactively
-- **Offline queue** — queue EE events when offline, flush on reconnect
-- **Client mode detection** — auto-detects thin/thin-degraded/fat/disabled modes
-- **Health checks** — `muonroi-cli doctor` checks EE connectivity
-
-### Architecture
-
-The EE client communicates with [experience-engine](https://github.com/muonroi/experience-engine) via a typed in-process bridge (`bridge.ts`) that wraps the `experience-core.js` npm module. Auth is loaded from `~/.experience/config.json` at startup.
-
-### Modes
-
-- **Fat** (default) — full EE client with search, intercept, posttool, and evolution
-- **Thin** — remote-only, no local Qdrant index
-- **Thin-degraded** — thin but with connectivity issues
-- **Disabled** — EE not configured, all hooks fail open
-
-Works without EE (all hooks fail open). Self-host with [experience-engine](https://github.com/muonroi/experience-engine).
-
-## MCP Servers
-
-Model Context Protocol integration with full lifecycle management.
-
-```bash
-# In TUI, use /mcp to open the MCP browser
-# Configure in settings.json:
-{
-  "mcp": {
-    "servers": [
-      {
-        "id": "my-server",
-        "command": "node",
-        "args": ["server.js"],
-        "env": { "KEY": "value" }
-      }
-    ]
-  }
-}
-```
-
-Features:
-- **Catalog** — browse popular MCP servers from the built-in catalog (`POPULAR_MCP_CATALOG`)
-- **OAuth** — built-in OAuth callback server for MCP transport authorization
-- **Auto-setup** — automatic installation from npm/pypi/go
-- **Validation** — config validation before connection
-- **Runtime** — managed server lifecycle with reconnection
+---
 
 ## Development
 
 ```bash
 git clone https://github.com/muonroi/muonroi-cli.git
-cd muonroi-cli
-bun install
-bun run dev          # run from source
-bun run typecheck    # type check
-bun run test         # run tests (vitest)
-bun run test:watch   # watch mode
-bun run lint         # biome check
-bun run format       # biome format
-bun run build        # compile TypeScript
-bun run build:binary # standalone binary
+cd muonroi-cli && bun install
+
+bun run dev           # run from source
+bun run typecheck     # type check
+bun run test          # vitest
+bun run lint          # biome check
+bun run build:binary  # standalone binary
+```
+
+**Generate the demo GIF** (requires [vhs](https://github.com/charmbracelet/vhs)):
+
+```bash
+vhs docs/demo.tape    # outputs docs/demo.gif
 ```
 
 ### Project structure
 
 | Path | Purpose |
-|------|---------|
-| `src/orchestrator/` | Agent class, compaction, delegations, council |
-| `src/providers/` | Multi-provider factory, keychain, vision proxy |
-| `src/router/` | Per-turn model routing with role-based resolution |
+|---|---|
+| `src/orchestrator/` | Agent loop, auto-compact, council runner |
+| `src/council/` | Multi-model debate engine, convergence detection |
 | `src/pil/` | Prompt Intelligence Layer (6-layer pipeline) |
+| `src/router/` | Role-based and tier-based model routing |
+| `src/providers/` | Multi-provider factory, keychain, vision proxy |
+| `src/ee/` | Experience Engine client and PreToolUse hooks |
+| `src/usage/` | Budget ledger, downgrade chain |
+| `src/tools/` | Built-in tools (bash, file, grep, LSP, schedule) |
+| `src/mcp/` | MCP server lifecycle and catalog |
+| `src/storage/` | SQLite session persistence |
 | `src/ui/` | React TUI, status bar, slash commands |
-| `src/storage/` | SQLite session/message persistence |
-| `src/tools/` | Builtin tools (bash, file ops, grep, LSP, schedule) |
-| `src/mcp/` | Model Context Protocol server integration |
-| `src/models/` | Model catalog and pricing registry |
-| `src/ee/` | Experience Engine client and hooks |
-| `src/flow/` | Multi-session flow system with compaction |
-| `src/usage/` | Budget ledger, downgrade chain, midstream policy |
-| `src/lsp/` | LSP client, manager, built-in server configs |
-| `src/verify/` | Sandbox-aware verification system |
-| `src/ops/` | Doctor, bug-report diagnostics |
-| `src/daemon/` | Background schedule daemon |
-| `src/utils/` | Settings, redactor, skills, permissions |
-| `tests/` | Integration, E2E, perf, and live provider tests |
 
-## Security
-
-- **Log redactor** (`redactor.ts`) — two-layer secret scrubbing installed at process boot: static regex patterns for known secret shapes + enrolled live values registered at runtime
-- **API keys** — never logged, auto-enrolled at load time
-- **Sandbox** — isolate agent shell commands in Shuru containers
-- **Permission modes** — `safe` (confirm all), `auto-edit` (auto-approve file ops), `yolo` (auto-approve all)
-- **Crash safety** — pending-call log survives crashes, reconciled on next boot
+---
 
 ## License
 

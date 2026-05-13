@@ -82,6 +82,54 @@ export interface PipelineContext {
    * pipeline budget, or feature flag disabled).
    */
   _brainData?: BrainData | null;
+  /**
+   * Step-by-step task detection trace from Layer 1. Captures which Pass set
+   * the final taskType + style, so cost reports can answer "are we wasting
+   * brain calls when regex would have answered?". Optional — `pipeline.ts`
+   * forwards it to the PIL budget log when present.
+   */
+  _intentTrace?: IntentDetectionTrace | null;
+}
+
+/**
+ * One-shot snapshot of Layer 1's three-pass intent detection cascade.
+ * Cheaper passes hit first; later passes only run when earlier ones abstain.
+ * Each `*Hit` flag answers "did this pass decide the final taskType/style?"
+ * — at most one of `pass1/2/3` should be true for `*Hit` fields.
+ */
+export interface IntentDetectionTrace {
+  /** Classifier reason string (e.g. "regex:debug", "tree-sitter:typescript"). */
+  pass1Reason: string;
+  /** Confidence reported by the classifier (0..1). */
+  pass1Confidence: number;
+  /** taskType derived from pass1Reason via REASON_TO_TASK_TYPE; null if no map. */
+  pass1TaskType: string | null;
+  /** Pass 1 alone decided the final taskType (no later pass overrode it). */
+  pass1Hit: boolean;
+  /** Pass 2 keyword fallback matched. */
+  pass2Hit: boolean;
+  /** Which keyword pattern matched (string repr of regex source) — only set when pass2Hit. */
+  pass2Pattern?: string;
+  /** Pass 2.5 hot-path chitchat short-circuit fired (≤10 chars + ≤2 words). */
+  pass25ChitchatHit: boolean;
+  /** Unified /api/pil-context attempted (feature flag on + weak local signal). */
+  pass3UnifiedAttempted: boolean;
+  /** Unified call returned a non-null response. */
+  pass3UnifiedSucceeded: boolean;
+  /** Legacy brain call attempted for TASK classification (1500ms budget). */
+  pass3LegacyTaskAttempted: boolean;
+  /** Legacy task-classification call returned a non-null response. */
+  pass3LegacyTaskSucceeded: boolean;
+  /** Legacy brain call attempted for STYLE detection (800ms budget). */
+  pass3LegacyStyleAttempted: boolean;
+  /** Legacy style-detection call returned a non-null response. */
+  pass3LegacyStyleSucceeded: boolean;
+  /** How the final outputStyle was resolved. */
+  styleSource: "explicit-regex" | "brain-unified" | "brain-legacy" | "chitchat-default" | "none";
+  /** Final taskType emitted by Layer 1. */
+  finalTaskType: string | null;
+  /** Final confidence emitted by Layer 1. */
+  finalConfidence: number;
 }
 
 export interface BrainData {

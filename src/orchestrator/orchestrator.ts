@@ -98,11 +98,16 @@ import type {
 } from "../types/index";
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
+import { appendCostLog } from "../usage/cost-log.js";
+import { appendDecisionLog } from "../usage/decision-log.js";
+import { projectCostUSD } from "../usage/estimator.js";
 import { loadCustomInstructions } from "../utils/instructions";
 import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
   getAutoCompactThresholdPct,
+  getAutoCouncilConfidence,
+  getAutoCouncilMinRoles,
   getCouncilRounds,
   getCurrentModel,
   getCurrentShellSettings,
@@ -338,6 +343,13 @@ export class Agent {
   /** PIL context for current turn — set after runPipeline, cleared after recordUsage. */
   private _pilActive = false;
   private _pilEnrichmentDelta = 0;
+  /**
+   * Breakdown of the system prompt + messages + tools sent on the last call.
+   * Captured immediately before streamText and consumed by recordUsage to
+   * attach to the cost-log entry. Cleared after recordUsage so subsequent
+   * non-message calls don't reuse stale data.
+   */
+  private _lastPromptBreakdown: Record<string, number> | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -870,6 +882,28 @@ export class Agent {
       provider: this.providerId,
       model,
     });
+
+    // Append to cost-log JSONL so `usage report --by callsite` can surface
+    // where orchestrator/task/title traffic is actually spending.
+    // Best-effort: failures inside appendCostLog are swallowed (see cost-log.ts).
+    const breakdown = source === "message" ? (this._lastPromptBreakdown ?? undefined) : undefined;
+    appendCostLog({
+      ts: Date.now(),
+      provider: this.providerId,
+      model,
+      estimatedUsd: turnCostMicros / 1_000_000,
+      callsite: `orchestrator.${source}`,
+      phase: source,
+      actualInputTokens: totalInput,
+      actualOutputTokens: output,
+      cachedInputTokens: cacheRead,
+      systemChars: breakdown?.systemChars,
+      promptChars: breakdown?.messagesChars,
+      breakdown,
+    }).catch(() => undefined);
+    // Don't clear breakdown — onStepFinish fires recordUsage per step within
+    // the same streamText call, and they all share the same prompt structure.
+    // It is overwritten on the next streamText setup, which is the right scope.
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {
@@ -1572,6 +1606,7 @@ export class Agent {
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactModelId = this._resolveCompactModel();
+    const compactStartedAt = Date.now();
     const { summary, usage: compactUsage } = await generateCompactionSummary(
       provider,
       compactModelId,
@@ -1579,6 +1614,28 @@ export class Agent {
       undefined,
       signal,
     );
+
+    // Record compaction call in cost-log — bypasses recordUsage because
+    // compaction returns usage separately and isn't routed through the
+    // status-bar / usage event pipeline (intentional: it's overhead, not user spend).
+    const compactProvider = detectProviderForModel(compactModelId);
+    appendCostLog({
+      ts: compactStartedAt,
+      provider: compactProvider,
+      model: compactModelId,
+      estimatedUsd: projectCostUSD(
+        compactProvider,
+        compactModelId,
+        compactUsage.promptTokens,
+        compactUsage.completionTokens,
+      ),
+      callsite: "orchestrator.compaction",
+      phase: "compaction",
+      iteration: this._compactionStats.count + 1,
+      actualInputTokens: compactUsage.promptTokens,
+      actualOutputTokens: compactUsage.completionTokens,
+      durationMs: Date.now() - compactStartedAt,
+    }).catch(() => undefined);
 
     appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
 
@@ -1665,12 +1722,30 @@ export class Agent {
     contextWindow: number,
     signal: AbortSignal,
   ): Promise<void> {
-    if (this._compactedThisTurn) return;
-    if (!isAutoCompactAfterTurnEnabled()) return;
+    const log = (taken: boolean, reason: string, extra?: Record<string, unknown>): void => {
+      appendDecisionLog({
+        ts: Date.now(),
+        sessionId: this.session?.id ?? null,
+        kind: "post-turn-compact",
+        taken,
+        reason,
+        meta: { contextWindow, ...extra },
+      }).catch(() => undefined);
+    };
+
+    if (this._compactedThisTurn) return log(false, "already-compacted-this-turn");
+    if (!isAutoCompactAfterTurnEnabled()) return log(false, "feature-disabled");
     const tokens = estimateConversationTokens(system, this.messages);
     const thresholdPct = getAutoCompactThresholdPct();
     const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
-    if (tokens < minMeaningfulTokens) return;
+    if (tokens < minMeaningfulTokens) {
+      return log(false, `under-threshold (${tokens} < ${minMeaningfulTokens})`, {
+        tokens,
+        thresholdPct,
+        minMeaningfulTokens,
+      });
+    }
+    log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, { tokens, thresholdPct, minMeaningfulTokens });
     await this.compactForContext(
       provider,
       system,
@@ -3400,9 +3475,17 @@ export class Agent {
       this.bash.getSandboxSettings(),
       this.providerId,
       this._resumeDigest,
+      { chitchat: isChitchat },
     );
     if (this._resumeDigest) this._resumeDigest = null;
-    const playwrightGuidance = getVisionGuidanceForTextOnly(turnModelId);
+    // Skip vision/playwright guidance unless the user's message has a URL
+    // or browser/screenshot vocabulary. ~400 tokens of routing hints
+    // the model only needs when it might call a browser MCP.
+    const _browserGuidanceNeeded =
+      /https?:\/\/\S+|\b(screenshot|browser|playwright|chrome|figma|canva|render|webpage|website|url|hyperlink|navigate|click|scrape)\b/i.test(
+        userMessage,
+      );
+    const playwrightGuidance = isChitchat || !_browserGuidanceNeeded ? "" : getVisionGuidanceForTextOnly(turnModelId);
     const system = applyModelConstraints(
       applyPilSuffix(
         `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
@@ -3446,12 +3529,51 @@ export class Agent {
     const councilRoles = getRoleModels();
     const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
     const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
-    const taskTypeMatch = pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= 0.75;
+    const autoCouncilConfidence = getAutoCouncilConfidence();
+    const autoCouncilMinRoles = getAutoCouncilMinRoles();
+    const taskTypeMatch =
+      pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= autoCouncilConfidence;
     const shouldAutoCouncil =
       !this._isCouncilContinuation &&
       isAutoCouncilEnabled() &&
-      configuredRoleCount >= 1 &&
+      configuredRoleCount >= autoCouncilMinRoles &&
       (taskTypeMatch || heavyTier);
+
+    // Always log the auto-council decision (taken or skipped) with the gate
+    // values that decided it. Lets reports answer "why did this turn cost
+    // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
+    const autoCouncilSkipReason = (() => {
+      if (this._isCouncilContinuation) return "continuation-turn";
+      if (!isAutoCouncilEnabled()) return "feature-disabled";
+      if (configuredRoleCount < autoCouncilMinRoles)
+        return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
+      if (!taskTypeMatch && !heavyTier) {
+        if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
+          return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
+        if (pilCtx.confidence < autoCouncilConfidence)
+          return `confidence<${autoCouncilConfidence} (got ${pilCtx.confidence.toFixed(2)})`;
+        return "no-trigger";
+      }
+      return "taken";
+    })();
+    appendDecisionLog({
+      ts: Date.now(),
+      sessionId: this.session?.id ?? null,
+      kind: "auto-council",
+      taken: shouldAutoCouncil,
+      reason: autoCouncilSkipReason,
+      meta: {
+        taskType: pilCtx.taskType ?? null,
+        confidence: pilCtx.confidence,
+        complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
+        configuredRoleCount,
+        autoCouncilConfidence,
+        autoCouncilMinRoles,
+        heavyTier,
+        isContinuation: this._isCouncilContinuation,
+      },
+    }).catch(() => undefined);
+
     if (shouldAutoCouncil) {
       const reason = heavyTier
         ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
@@ -3541,12 +3663,31 @@ export class Agent {
             sessionId: this.session?.id ?? undefined,
             modelId: turnModelId,
           });
-          let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
+          // Chitchat: drop builtin tools too (not just MCP). A 1-word greeting
+          // never needs bash/read_file/edit_file/grep — those schemas alone
+          // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
+          // every non-chitchat turn (PIL gates conservatively).
+          let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseTools;
           // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
           // worth of tool schemas (~20K input tokens). PIL Layer 1 already
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
           if (this.mode === "agent" && !isChitchat && runtime.modelInfo?.supportsClientTools !== false) {
-            const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+            // Smart MCP filter: skip browser/vision MCP servers unless the
+            // user's current message has a URL or explicitly invokes the
+            // browser/screenshot/design vocabulary. Local code work — which
+            // is the majority of turns — does not need Playwright/Figma/Canva
+            // tool schemas (each MCP contributes 8-15 tools at ~150 tok each).
+            // Override with MUONROI_DISABLE_SMART_MCP=1.
+            const smartMcp = process.env.MUONROI_DISABLE_SMART_MCP !== "1";
+            const browserSignal =
+              /https?:\/\/\S+|\b(screenshot|browser|playwright|chrome|figma|canva|render|webpage|website|url|hyperlink|navigate|click|scrape)\b/i.test(
+                userMessage,
+              );
+            const SKIP_WHEN_NO_BROWSER = /playwright|chrome|browser|devtools|vision|figma|canva/i;
+            const allServers = loadMcpServers();
+            const filteredServers =
+              smartMcp && !browserSignal ? allServers.filter((s) => !SKIP_WHEN_NO_BROWSER.test(s.id)) : allServers;
+            const mcpBundle = await buildMcpToolSet(filteredServers, {
               onOAuthRequired: (_serverId, url) => {
                 const urlStr = url.toString();
                 import("child_process").then(({ exec }) => {
@@ -3616,6 +3757,50 @@ export class Agent {
                 { role: "system" as const, content: system.slice(systemParts.staticPrefix.length) },
               ]
             : system;
+
+          // Capture prompt-size breakdown so recordUsage can attach it to the
+          // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
+          // chars/4 ≈ tokens for English; reported as chars to keep math obvious.
+          const messagesChars = this.messages.reduce((s, m) => {
+            const c = m.content;
+            if (typeof c === "string") return s + c.length;
+            if (Array.isArray(c)) {
+              for (const part of c) {
+                if (typeof (part as { text?: unknown }).text === "string") {
+                  s += (part as { text: string }).text.length;
+                }
+              }
+            }
+            return s;
+          }, 0);
+          let toolsChars = 0;
+          let toolsCount = 0;
+          for (const [name, t] of Object.entries(tools)) {
+            toolsCount += 1;
+            toolsChars += name.length;
+            const desc = (t as { description?: string }).description;
+            if (typeof desc === "string") toolsChars += desc.length;
+            try {
+              // Schemas often dominate tool size on non-Anthropic providers
+              // (Zod-derived JSON schemas can be 2-5K chars per tool).
+              const params =
+                (t as { parameters?: unknown; inputSchema?: unknown }).parameters ??
+                (t as { inputSchema?: unknown }).inputSchema;
+              if (params) toolsChars += JSON.stringify(params).length;
+            } catch {
+              /* best-effort */
+            }
+          }
+          this._lastPromptBreakdown = {
+            systemChars: system.length,
+            staticPrefixChars: systemParts.staticPrefix.length,
+            dynamicSuffixChars: systemParts.dynamicSuffix.length,
+            playwrightGuidanceChars: playwrightGuidance.length,
+            messagesChars,
+            messagesCount: this.messages.length,
+            toolsChars,
+            toolsCount,
+          };
 
           const result = streamText({
             model: runtime.model,
