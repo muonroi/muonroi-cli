@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ClarifiedSpec } from "../../council/types.js";
-import { fallbackSinglePhase, generatePhasePlan, parsePhasePlanJson, validatePhasePlan } from "../phase-plan.js";
+import {
+  fallbackSinglePhase,
+  generatePhasePlan,
+  PHASE_PLAN_MIGRATORS,
+  parsePhasePlanJson,
+  validatePhasePlan,
+} from "../phase-plan.js";
 
 const spec: ClarifiedSpec = {
   problemStatement: "Build X",
@@ -218,5 +224,18 @@ describe("generatePhasePlan (subsystem E)", () => {
     const leader = { generate: vi.fn().mockRejectedValue(err) };
     const result = await generatePhasePlan({ ...baseArgs, leader });
     expect(result.phases).toHaveLength(1);
+  });
+});
+
+describe("schema migration (subsystem E)", () => {
+  it("v0 → v1 adds generatedAt when missing", () => {
+    const v0 = { version: 0, phases: [{ id: "phase-1" }] } as any;
+    const migrated = PHASE_PLAN_MIGRATORS[0](v0) as any;
+    expect(migrated.version).toBe(1);
+    expect(migrated.generatedAt).toBeTruthy();
+  });
+  it("v1 → v1 is no-op", () => {
+    const v1 = { version: 1, generatedAt: "2026-05-13T00:00:00Z", phases: [] };
+    expect(PHASE_PLAN_MIGRATORS[1](v1 as any)).toEqual(v1);
   });
 });

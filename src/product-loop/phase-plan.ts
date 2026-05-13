@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { ClarifiedSpec } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import type { Migrator } from "./discovery-migrations.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { withRateLimitBackoff } from "./discovery-recommender.js";
 import type { Phase, PhasePlanArtifact, ProductRunManifest } from "./types.js";
@@ -150,3 +151,8 @@ export async function backupCorruptPhases(flowDir: string, runId: string): Promi
   }
   return dst;
 }
+
+export const PHASE_PLAN_MIGRATORS: Record<number, Migrator> = {
+  0: (raw: any) => ({ ...raw, version: 1, generatedAt: raw.generatedAt ?? new Date().toISOString() }),
+  1: (raw: any) => raw,
+};
