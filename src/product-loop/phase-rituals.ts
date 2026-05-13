@@ -14,8 +14,8 @@ export interface SprintState {
 
 const REVIEW_FLOOR_FRACTION = 0.01;
 const REVIEW_FLOOR_MIN = 0.12;
-const _STANDUP_FLOOR_FRACTION = 0.04;
-const _STANDUP_FLOOR_MIN = 0.6;
+const STANDUP_FLOOR_FRACTION = 0.04;
+const STANDUP_FLOOR_MIN = 0.6;
 
 function reviewFloor(capUsd: number): number {
   return Math.max(REVIEW_FLOOR_MIN, REVIEW_FLOOR_FRACTION * capUsd);
@@ -106,7 +106,21 @@ export async function runRetro(args: {
   };
 }
 
-export async function runStandup(_args: {
+export const STANDUP_HARD_CAP = 3;
+
+async function readStandupCount(flowDir: string, runId: string): Promise<number> {
+  const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
+  const raw = map?.sections.get("Standup Count");
+  if (!raw) return 0;
+  const n = Number.parseInt(raw.trim(), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function standupFloor(capUsd: number): number {
+  return Math.max(STANDUP_FLOOR_MIN, STANDUP_FLOOR_FRACTION * capUsd);
+}
+
+export async function runStandup(args: {
   flowDir: string;
   runId: string;
   leader: LeaderLike;
@@ -114,6 +128,31 @@ export async function runStandup(_args: {
   remainingUsd: number;
   backoffDelays?: number[];
 }): Promise<StandupOutcome | null> {
-  // Stub - implemented in Task 9
-  return null;
+  if (args.remainingUsd < standupFloor(args.capUsd)) return null;
+  const prior = await readStandupCount(args.flowDir, args.runId);
+  if (prior >= STANDUP_HARD_CAP) return null;
+
+  const prompt =
+    `Daily standup. Output strict JSON: { blockers: string[] (≤5, ≤200 each), decisions: string[] (≤5, ≤200 each), nextStep: string (≤300) }. ` +
+    `Be specific and decisive.`;
+  try {
+    const res = await withRateLimitBackoff(
+      () => args.leader.generate({ system: "You facilitate a council daily standup.", prompt, maxTokens: 600 }),
+      { delays: args.backoffDelays },
+    );
+    const parsed = JSON.parse(
+      res.content
+        .replace(/^```(?:json)?\s*/, "")
+        .replace(/\s*```$/, "")
+        .trim(),
+    ) as StandupOutcome;
+    const cap = (arr: string[], n: number, len: number) => (arr ?? []).slice(0, n).map((s) => String(s).slice(0, len));
+    return {
+      blockers: cap(parsed.blockers, 5, 200),
+      decisions: cap(parsed.decisions, 5, 200),
+      nextStep: String(parsed.nextStep ?? "").slice(0, 300),
+    };
+  } catch {
+    return null;
+  }
 }
