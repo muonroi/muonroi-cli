@@ -5,10 +5,10 @@
  * run discovery, crashed-sprint detection).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import * as path from "node:path";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../loop-driver.js", () => ({
   runLoopDriver: vi.fn(async function* () {
@@ -25,10 +25,10 @@ vi.mock("../../ee/phase-outcome.js", () => ({
   fireAndForgetPhaseOutcome: vi.fn(),
 }));
 
+import { fireAndForgetPhaseOutcome } from "../../ee/phase-outcome.js";
+import { readIterations, readManifest } from "../artifact-io.js";
 import { runProductLoop } from "../index.js";
 import { runSprint } from "../sprint-runner.js";
-import { fireAndForgetPhaseOutcome } from "../../ee/phase-outcome.js";
-import { readManifest, readIterations } from "../artifact-io.js";
 import type { IterationState } from "../types.js";
 
 async function tmpFlowDir(): Promise<string> {
@@ -60,6 +60,9 @@ async function drain<T, R>(gen: AsyncGenerator<T, R, unknown>): Promise<{ chunks
 describe("runProductLoop integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Keep existing tests on the legacy flat-sprint path so they don't
+    // require the full phase-orchestrator stack (phase plans, project context, etc.).
+    process.env.MUONROI_PHASE_MODE = "0";
   });
 
   it("start: creates 6 artifact files and runs 1 sprint to shipped", async () => {
@@ -83,9 +86,7 @@ describe("runProductLoop integration", () => {
       return iter;
     });
 
-    const { result } = await drain(
-      runProductLoop(makeOpts({ flowDir, idea: "build a markdown todo CLI" })),
-    );
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, idea: "build a markdown todo CLI" })));
 
     expect(result.success).toBe(true);
     expect(result.shipped).toBe(true);
@@ -107,13 +108,12 @@ describe("runProductLoop integration", () => {
 
   it("start: halted run when sprint-runner throws (CB)", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       throw new Error("Halted by circuit breaker: cost projection 99 exceeds headroom 1");
     });
 
-    const { result } = await drain(
-      runProductLoop(makeOpts({ flowDir, idea: "ship product X" })),
-    );
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, idea: "ship product X" })));
     expect(result.success).toBe(false);
     expect(result.stage).toBe("halted");
     expect(result.reason).toMatch(/cost projection/);
@@ -122,6 +122,7 @@ describe("runProductLoop integration", () => {
   it("status: lists active runs", async () => {
     const flowDir = await tmpFlowDir();
     // Create two runs by invoking start twice with quick-pass sprints.
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementation(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -139,9 +140,7 @@ describe("runProductLoop integration", () => {
     await drain(runProductLoop(makeOpts({ flowDir, idea: "first idea" })));
     await drain(runProductLoop(makeOpts({ flowDir, idea: "second idea" })));
 
-    const { chunks } = await drain(
-      runProductLoop(makeOpts({ flowDir, subcommand: "status" })),
-    );
+    const { chunks } = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "status" })));
     const text = chunks.map((c: any) => c.content ?? "").join("");
     expect(text).toContain("Active runs");
     expect(text).toContain("first idea");
@@ -150,6 +149,7 @@ describe("runProductLoop integration", () => {
 
   it("abort: marks manifest aborted=true and fires phase-outcome=aborted", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -167,9 +167,7 @@ describe("runProductLoop integration", () => {
     const startResult = await drain(runProductLoop(makeOpts({ flowDir, idea: "to abort" })));
     const runId = (startResult.result as any).runId;
 
-    const abortRes = await drain(
-      runProductLoop(makeOpts({ flowDir, subcommand: "abort", runId })),
-    );
+    const abortRes = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "abort", runId })));
     expect(abortRes.result.reason).toBe("aborted");
 
     const manifest = await readManifest(flowDir, runId);
@@ -181,6 +179,7 @@ describe("runProductLoop integration", () => {
 
   it("ship: refuses when last verify is not PASS", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -211,15 +210,14 @@ describe("runProductLoop integration", () => {
       costUsd: 0,
       lastVerifyResult: "FAIL",
     });
-    const { chunks } = await drain(
-      runProductLoop(makeOpts({ flowDir, subcommand: "ship", runId })),
-    );
+    const { chunks } = await drain(runProductLoop(makeOpts({ flowDir, subcommand: "ship", runId })));
     const text = chunks.map((c: any) => c.content ?? "").join("");
     expect(text).toContain("not ready to ship");
   });
 
   it("ship: forces final approval when last verify=PASS", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -234,7 +232,9 @@ describe("runProductLoop integration", () => {
       };
       return iter;
     });
-    const start = await drain(runProductLoop(makeOpts({ flowDir, idea: "x", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.9 } })));
+    const start = await drain(
+      runProductLoop(makeOpts({ flowDir, idea: "x", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.9 } })),
+    );
     const runId = (start.result as any).runId;
     // Persist a passing iteration so ship can read it back.
     const { appendIteration } = await import("../artifact-io.js");
@@ -264,6 +264,7 @@ describe("runProductLoop integration", () => {
   it("resume: detects crashed sprint and re-enters cleanly", async () => {
     const flowDir = await tmpFlowDir();
     // First run a sprint that ships to seed the manifest + iterations.md.
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -279,7 +280,9 @@ describe("runProductLoop integration", () => {
       return iter;
     });
     const start = await drain(
-      runProductLoop(makeOpts({ flowDir, idea: "to resume", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } })),
+      runProductLoop(
+        makeOpts({ flowDir, idea: "to resume", flags: { maxCost: 50, maxSprints: 1, doneThreshold: 0.95 } }),
+      ),
     );
     const runId = (start.result as any).runId;
     expect(start.result.success).toBe(false); // halted at max-sprints
@@ -299,6 +302,7 @@ describe("runProductLoop integration", () => {
     });
 
     // Resume should detect the crashed sprint, mark it, and try again.
+    // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 3,
@@ -315,7 +319,9 @@ describe("runProductLoop integration", () => {
     });
 
     const { chunks, result } = await drain(
-      runProductLoop(makeOpts({ flowDir, subcommand: "resume", runId, flags: { maxCost: 50, maxSprints: 5, doneThreshold: 0.9 } })),
+      runProductLoop(
+        makeOpts({ flowDir, subcommand: "resume", runId, flags: { maxCost: 50, maxSprints: 5, doneThreshold: 0.9 } }),
+      ),
     );
     const text = chunks.map((c: any) => c.content ?? "").join("");
     expect(text).toContain("Detected crashed sprint");
