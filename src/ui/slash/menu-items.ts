@@ -26,6 +26,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "exit", label: "exit", description: "Quit the CLI" },
   { id: "help", label: "help", description: "Show available commands" },
   { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
+  { id: "config", label: "config", description: "Open provider and council configuration" },
   { id: "compact", label: "compact", description: "Compact conversation context" },
   { id: "remote-control", label: "remote-control", description: "Remote control" },
   { id: "agents", label: "agents", description: "Manage custom sub-agents" },
