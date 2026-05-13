@@ -1,15 +1,15 @@
 import { useState, useCallback } from "react";
 
-/** 8-slot Ink color palette for council roles. */
+/** 8-slot HEX color palette for council roles (@opentui/react fg prop). */
 export const COUNCIL_PALETTE: readonly string[] = [
-  "cyan",
-  "magenta",
-  "yellow",
-  "green",
-  "blue",
-  "red",
-  "white",
-  "gray",
+  "#22d3ee", // cyan
+  "#e879f9", // magenta
+  "#facc15", // yellow
+  "#4ade80", // green
+  "#60a5fa", // blue
+  "#f87171", // red
+  "#e0e0e0", // white
+  "#888888", // gray
 ] as const;
 
 /** Sigils for NO_COLOR mode — ensures role identity survives color-off. */
@@ -38,9 +38,9 @@ export interface RoleStyle {
 export function resolveRoleStyle(slot: number, noColor: boolean): RoleStyle {
   const sigil = COUNCIL_SIGILS[slot % COUNCIL_SIGILS.length] ?? "●";
   if (noColor) {
-    return { color: "white", sigil };
+    return { color: "#e0e0e0", sigil };
   }
-  const color = COUNCIL_PALETTE[slot % COUNCIL_PALETTE.length] ?? "white";
+  const color = COUNCIL_PALETTE[slot % COUNCIL_PALETTE.length] ?? "#e0e0e0";
   return { color, sigil };
 }
 
