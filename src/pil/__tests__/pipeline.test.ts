@@ -173,7 +173,7 @@ describe("runPipeline()", () => {
 
   it("skip-path timings use canonical layerN-* names (no 'layer-' prefix)", async () => {
     // Force classifier to abstain so taskType stays null and skip-path triggers.
-    mockClassify.mockReturnValue({ tier: "cold", confidence: 0, reason: "regex:no-match" });
+    mockClassify.mockReturnValue({ tier: "abstain", confidence: 0, reason: "regex:no-match" });
     const { runPipeline } = await import("../pipeline.js");
     const result = await runPipeline("@@@@@ @@@@@ @@@@@ @@@@@");
     const timingNames = result.metrics?.layerTimings.map((t) => t.name) ?? [];
