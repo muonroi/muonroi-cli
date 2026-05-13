@@ -4,6 +4,7 @@
 // buildGatherUserPrompt      ← Task 17
 
 import { resolveLeaderModel } from "../council/leader.js";
+import type { ClarifiedSpec } from "../council/types.js";
 import { detectExistingProject } from "./discovery-detection.js";
 import {
   iterateInterview,
@@ -23,7 +24,7 @@ import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { parsePromptForContext } from "./discovery-prompt-parser.js";
 import type { CouncilDebateRunner } from "./discovery-recommender.js";
 import { councilRecommend, leaderRecommend, shouldFallbackToLeader } from "./discovery-recommender.js";
-import type { ProjectContext } from "./types.js";
+import type { DiscoveryContext, ProjectContext } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Forward-reference stubs (replaced in Tasks 16 and 17)
@@ -144,4 +145,47 @@ export async function runGatherPhase(
   } finally {
     await releaseRunLock(flowDir, runId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// ClarifiedSpec bridge
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a completed ProjectContext (from runGatherPhase) into the ClarifiedSpec
+ * shape expected by the research/scoping stages.  All six SEED_DIMENSIONS are
+ * marked "answered" because iterateInterview only returns after the user gate
+ * has passed (or all required questions are answered).
+ */
+export function clarifiedSpecFromContext(pc: ProjectContext): ClarifiedSpec {
+  const ctx: DiscoveryContext = pc.context;
+
+  const problemStatement = pc.idea;
+
+  const constraints: string[] = [];
+  if (ctx.backendStack?.language) constraints.push(`Language: ${ctx.backendStack.language}`);
+  if (ctx.backendStack?.framework) constraints.push(`Framework: ${ctx.backendStack.framework}`);
+  if (ctx.backendArchitecture) constraints.push(`Architecture: ${ctx.backendArchitecture}`);
+
+  const successCriteria: string[] = [];
+  if (ctx.audience?.persona) successCriteria.push(`Persona: ${ctx.audience.persona}`);
+  if (ctx.audience?.scale) successCriteria.push(`Scale: ${ctx.audience.scale}`);
+
+  const scope = ctx.productType ?? "unknown";
+
+  const rawQA = Object.entries(ctx).map(([key, value]) => ({
+    question: key,
+    answer: typeof value === "object" ? JSON.stringify(value) : String(value ?? ""),
+  }));
+
+  const resolved: Record<string, "answered" | "unspecified" | "skipped"> = {
+    persona: ctx.audience?.persona ? "answered" : "unspecified",
+    "core-features": ctx.productType ? "answered" : "unspecified",
+    "non-functional": ctx.audience?.scale || ctx.deployment?.target ? "answered" : "unspecified",
+    "tech-constraints": ctx.backendStack?.language || ctx.backendStack?.framework ? "answered" : "unspecified",
+    "success-metric": ctx.audience?.persona ? "answered" : "unspecified",
+    "cost-tolerance": ctx.deployment?.target ? "answered" : "unspecified",
+  };
+
+  return { problemStatement, constraints, successCriteria, scope, rawQA, resolved };
 }
