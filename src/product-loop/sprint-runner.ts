@@ -57,6 +57,13 @@ export interface RunSprintArgs {
    * Sprint-runner prepends it to the planner topic so the council plans for it.
    */
   carryOver?: ContinueFeedback;
+  /**
+   * Optional phase scope for subsystem E phase-orchestrator.
+   * When present the done-gate evaluates only the subset of criteria whose ids
+   * are listed in `criteria`; all other criteria are excluded from the gate
+   * scoring. Prompts still receive the full criteria set for agent context.
+   */
+  phaseScope?: { criteria: string[]; scope: string };
 }
 
 /**
@@ -67,7 +74,7 @@ export interface RunSprintArgs {
  * the appropriate halt state to manifest/state.
  */
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
-  const { sprintN, ctx, productSpec, roleAssignments, history, carryOver } = args;
+  const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
   const cwd = ctx.cwd ?? runDir;
 
@@ -183,10 +190,18 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   yield { type: "content", content: `\n## Sprint ${sprintN} — Judgment\n` };
   const currentCriteria = await readCriteria(ctx.flowDir, ctx.runId);
 
+  // When a phaseScope is provided (subsystem E), evaluate the done-gate only
+  // against criteria belonging to this phase. Full criteria are kept for
+  // counter fields so telemetry reflects the whole spec, but the gate itself
+  // sees only the scoped subset.
+  const evalCriteria = phaseScope
+    ? currentCriteria.filter((c) => phaseScope.criteria.map((s) => s.trim()).includes(c.id.trim()))
+    : currentCriteria;
+
   const verdict = await evaluateDoneGate({
     lastVerify: verifyResult,
     recipe: recipeFromVerify,
-    criteria: currentCriteria,
+    criteria: evalCriteria,
     history,
     roleAssignments,
     doneThreshold: ctx.flags.doneThreshold,
