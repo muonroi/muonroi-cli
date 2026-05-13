@@ -395,6 +395,39 @@ describe("resume protocol (subsystem E)", () => {
   });
 });
 
+describe("phase-runner coverage gaps (subsystem E)", () => {
+  let flowDir: string;
+  const runId = "r-gaps";
+  beforeEach(async () => {
+    flowDir = path.join(os.tmpdir(), `gaps-${Math.random().toString(36).slice(2)}`);
+    await fs.mkdir(path.join(flowDir, "runs", runId), { recursive: true });
+  });
+
+  it("markPhaseStatus no-op when same status", async () => {
+    await markPhaseStatus(flowDir, runId, "phase-1", "done");
+    const before = await import("../../flow/artifact-io.js").then((m) =>
+      m.readArtifact(path.join(flowDir, "runs", runId), "state.md"),
+    );
+    // calling with same status should be a no-op (no write)
+    await markPhaseStatus(flowDir, runId, "phase-1", "done");
+    const after = await import("../../flow/artifact-io.js").then((m) =>
+      m.readArtifact(path.join(flowDir, "runs", runId), "state.md"),
+    );
+    expect(JSON.parse(after!.sections.get("Phase Plan State")!).phasesStatus["phase-1"]).toBe("done");
+    // lastActivityUtc should NOT change on no-op (same content)
+    expect(before?.sections.get("Phase Plan State")).toBe(after?.sections.get("Phase Plan State"));
+  });
+
+  it("clearAwaitingCustomerReview on missing state.md is a no-op", async () => {
+    // file does not exist — should return without throwing
+    await expect(clearAwaitingCustomerReview(flowDir, runId, "phase-1", 1)).resolves.toBeUndefined();
+  });
+
+  it("clearRetroPending on missing state.md is a no-op", async () => {
+    await expect(clearRetroPending(flowDir, runId, "phase-1", 1)).resolves.toBeUndefined();
+  });
+});
+
 describe("customer decision feedback truncation (subsystem E)", () => {
   let flowDirFb: string;
   const runIdFb = "r-fb";
