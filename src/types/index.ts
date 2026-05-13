@@ -327,7 +327,23 @@ export interface ExperienceInjectedData {
 }
 
 export interface StreamChunk {
-  type: "content" | "tool_calls" | "tool_result" | "tool_approval_request" | "council_question" | "council_preflight" | "council_status" | "council_phase" | "done" | "error" | "reasoning" | "structured_response" | "product_status_card" | "experience_warning" | "experience_injected";
+  type:
+    | "content"
+    | "tool_calls"
+    | "tool_result"
+    | "tool_approval_request"
+    | "council_question"
+    | "council_preflight"
+    | "council_status"
+    | "council_phase"
+    | "done"
+    | "error"
+    | "reasoning"
+    | "structured_response"
+    | "product_status_card"
+    | "experience_warning"
+    | "experience_injected"
+    | "push_notification";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
