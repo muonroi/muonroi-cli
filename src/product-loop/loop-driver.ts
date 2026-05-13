@@ -11,6 +11,8 @@ import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
 import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
 import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
+import { formatProjectContextForPrompt } from "./discovery-context-format.js";
+import { readProjectContext } from "./discovery-persistence.js";
 import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import {
   additionalPrefills,
@@ -232,6 +234,12 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
         stateMap.sections.set("Resume Digest", "Stage: Research - Multi-expert debate");
         await writeArtifact(runDir, "state.md", stateMap);
+
+        // inside research phase, before building councilTopic:
+        const projectCtx = await readProjectContext(ctx.flowDir, ctx.runId);
+        if (projectCtx) {
+          conversationContext += "\n\nProject Context:\n" + formatProjectContextForPrompt(projectCtx);
+        }
 
         const stances = [
           { name: "Researcher", lens: "Focus on technical implementation details and codebase constraints" },
