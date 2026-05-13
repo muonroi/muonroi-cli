@@ -53,7 +53,23 @@ async function collectChunks(gen: AsyncGenerator<StreamChunk, string | null, unk
 }
 
 function getContent(chunks: StreamChunk[]): string {
-  return chunks.filter((c) => c.type === "content").map((c) => c.content ?? "").join("");
+  return chunks
+    .map((c) => {
+      if (c.type === "content") return c.content ?? "";
+      if (c.type === "council_message" && c.councilMessage) {
+        const cm = c.councilMessage;
+        const KIND_TAG: Record<string, string> = {
+          debate: `Discussion Round ${cm.round ?? ""}`,
+          leader: "Leader evaluation",
+          research: "Research findings",
+          synthesis: "Synthesis",
+        };
+        const tag = KIND_TAG[cm.kind] ?? cm.kind;
+        return `\n${tag}\n${cm.text}\n`;
+      }
+      return "";
+    })
+    .join("");
 }
 
 describe("Council Edge Cases", () => {
