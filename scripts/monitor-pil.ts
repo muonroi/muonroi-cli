@@ -5,10 +5,10 @@
 // rows, and prints distribution + latency + fallback breakdown. Used during Phase 4
 // dogfood and Phase 6 observation to gate the rollout transitions.
 //
-// Usage:
-//   npx tsx scripts/monitor-pil.ts                # last 24h (default)
-//   npx tsx scripts/monitor-pil.ts --hours 168    # last 7 days
-//   npx tsx scripts/monitor-pil.ts --json         # machine-readable output
+// Usage (requires Bun runtime — DB layer uses bun:sqlite):
+//   bun scripts/monitor-pil.ts                # last 24h (default)
+//   bun scripts/monitor-pil.ts --hours 168    # last 7 days
+//   bun scripts/monitor-pil.ts --json         # machine-readable output
 
 import { getDatabase } from "../src/storage/db.js";
 
