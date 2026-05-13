@@ -1,4 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("../../ee/bridge.js", () => ({
+  routeTask: vi.fn().mockResolvedValue(null),
+}));
+
 import { layer4Gsd } from "../layer4-gsd";
 import type { PipelineContext } from "../types";
 
@@ -43,8 +48,7 @@ describe("layer4Gsd (gsd-native)", () => {
   });
 
   it("emits a HEAVY directive for wholesale, multi-step prompts", async () => {
-    const heavy =
-      "redo the entire architecture and produce a deep-map across all repos, including business rules";
+    const heavy = "redo the entire architecture and produce a deep-map across all repos, including business rules";
     const result = await layer4Gsd(makeCtx({ raw: heavy, tokenBudget: 4000 }));
     const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
     expect(layer!.delta).toContain("tier=heavy");
@@ -82,5 +86,24 @@ describe("layer4Gsd (gsd-native)", () => {
   it("updates gsdPhase on context when keyword detection fires", async () => {
     const result = await layer4Gsd(makeCtx({ raw: "review the pull request" }));
     expect(["review", "discuss", "execute"]).toContain(result.gsdPhase);
+  });
+
+  it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
+    const { routeTask } = await import("../../ee/bridge.js");
+    vi.mocked(routeTask).mockClear();
+    await layer4Gsd({
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      gsdPhase: "execute",
+      _brainData: { t0_principles: [], t1_rules: [], t2_patterns: [], retrieval_skipped_reason: null },
+    });
+    expect(routeTask).not.toHaveBeenCalled();
   });
 });
