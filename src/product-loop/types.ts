@@ -24,6 +24,7 @@ export type DoneCondition =
   | "engineering_floor"
   | "evidence_regex"
   | "weighted_score"
+  | "assumption_ledger"
   | "customer_debate"
   | "user_approval";
 
@@ -160,4 +161,12 @@ export interface DoneGateContext {
   doneThreshold?: number;
   llm: CouncilLLM;
   respondToPreflight: PreflightResponder;
+  /**
+   * P6: location of the assumption ledger so condition #6 can read the
+   * current set of unresolved high-confidence assumptions. Optional so
+   * legacy callers (tests, scripts) that don't touch the ledger still
+   * compile — the condition becomes a no-op when absent.
+   */
+  flowDir?: string;
+  runId?: string;
 }

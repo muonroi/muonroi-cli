@@ -8,6 +8,7 @@ import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
+import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
 import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
 import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
 import {
@@ -258,6 +259,35 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           delegationsMap.sections.set("Research Findings", debateState.researchFindings);
         }
         await writeArtifact(runDir, "delegations.md", delegationsMap);
+
+        // P6 - extract assumptions from the research debate so foundational
+        // claims (perf budgets, SDK contracts, etc.) become trackable across
+        // sprints rather than buried in stance prose. Silent skip on
+        // extraction failure: sprint-feedback can still populate the ledger
+        // retroactively, and the done-gate only blocks when high-confidence
+        // assumptions remain unverified — never on absence.
+        try {
+          const extracted = await extractAssumptionsFromDebate({
+            debateState,
+            leaderModelId,
+            llm: ctx.llm,
+            phase: "research",
+          });
+          if (extracted.length > 0) {
+            const ledger = await mergeAssumptions(ctx.flowDir, ctx.runId, extracted);
+            yield {
+              type: "content",
+              content:
+                "\n> Recorded " +
+                extracted.length +
+                " assumption(s) from research debate. Ledger: " +
+                renderLedgerSummary(ledger) +
+                "\n",
+            } as StreamChunk;
+          }
+        } catch {
+          /* non-critical */
+        }
 
         state = "scoping";
         break;

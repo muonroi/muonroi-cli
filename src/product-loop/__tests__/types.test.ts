@@ -1,13 +1,13 @@
-import { describe, it, expectTypeOf } from "vitest";
-import type { 
-  WorkflowKind, 
-  RoleSlot, 
-  DoneCondition, 
-  ProductSpec, 
-  IterationState, 
-  DoneVerdict, 
-  ProductRunManifest, 
-  ProductStatusCardData 
+import { describe, expectTypeOf, it } from "vitest";
+import type {
+  DoneCondition,
+  DoneVerdict,
+  IterationState,
+  ProductRunManifest,
+  ProductSpec,
+  ProductStatusCardData,
+  RoleSlot,
+  WorkflowKind,
 } from "../types.js";
 
 describe("product-loop types", () => {
@@ -24,8 +24,22 @@ describe("product-loop types", () => {
   });
 
   it("should have correct DoneCondition values", () => {
-    const conditions: DoneCondition[] = ["engineering_floor", "evidence_regex", "weighted_score", "customer_debate", "user_approval"];
-    expectTypeOf<DoneCondition>().toMatchTypeOf<"engineering_floor" | "evidence_regex" | "weighted_score" | "customer_debate" | "user_approval">();
+    const conditions: DoneCondition[] = [
+      "engineering_floor",
+      "evidence_regex",
+      "weighted_score",
+      "assumption_ledger",
+      "customer_debate",
+      "user_approval",
+    ];
+    expectTypeOf<DoneCondition>().toMatchTypeOf<
+      | "engineering_floor"
+      | "evidence_regex"
+      | "weighted_score"
+      | "assumption_ledger"
+      | "customer_debate"
+      | "user_approval"
+    >();
   });
 
   it("should have correct ProductSpec shape", () => {
@@ -39,7 +53,7 @@ describe("product-loop types", () => {
       folderStructure: "test",
       sprintEstimate: 1,
       costEstimate: 10,
-      createdAt: new Date()
+      createdAt: new Date(),
     };
   });
 
@@ -53,14 +67,14 @@ describe("product-loop types", () => {
       criteriaPartial: 2,
       criteriaUnmet: 3,
       costUsd: 0.5,
-      lastVerifyResult: "PASS"
+      lastVerifyResult: "PASS",
     };
   });
 
   it("should have correct DoneVerdict shape", () => {
     const verdict: DoneVerdict = {
       pass: true,
-      score: 0.95
+      score: 0.95,
     };
   });
 
@@ -70,7 +84,7 @@ describe("product-loop types", () => {
       capUsd: 50,
       maxSprints: 8,
       doneThreshold: 0.9,
-      createdAt: new Date()
+      createdAt: new Date(),
     };
   });
 
@@ -83,7 +97,7 @@ describe("product-loop types", () => {
       criteriaMet: 1,
       criteriaPartial: 2,
       criteriaUnmet: 3,
-      currentStage: "implement"
+      currentStage: "implement",
     };
   });
 });
