@@ -28,7 +28,7 @@ import { resolveAfter } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
 
 const PIPELINE_TIMEOUT_FAST_MS = 200;
-const PIPELINE_TIMEOUT_BRAIN_MS = 3000;
+const PIPELINE_TIMEOUT_BRAIN_MS = 2500;
 
 function pipelineTimeoutMs(): number {
   const mode = getCachedEEClientMode();
@@ -38,11 +38,11 @@ function pipelineTimeoutMs(): number {
   return PIPELINE_TIMEOUT_FAST_MS;
 }
 
-const SKIPPED_LAYERS = [
-  "personality-adaptation",
-  "ee-experience-injection",
-  "gsd-workflow-structuring",
-  "context-enrichment",
+const SKIPPED_LAYERS: Array<{ timingName: string; deltaName: string }> = [
+  { timingName: "layer2-personality", deltaName: "personality-adaptation" },
+  { timingName: "layer3-ee-injection", deltaName: "ee-experience-injection" },
+  { timingName: "layer4-gsd-structuring", deltaName: "gsd-workflow-structuring" },
+  { timingName: "layer5-context-enrichment", deltaName: "context-enrichment" },
 ];
 
 async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
@@ -63,14 +63,18 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
     await timed("layer4-gsd-structuring", layer4Gsd);
     await timed("layer5-context-enrichment", layer5Context);
   } else {
-    for (const name of SKIPPED_LAYERS) {
-      timings.push({ name: `layer-${name}`, ms: 0 });
+    for (const { timingName } of SKIPPED_LAYERS) {
+      timings.push({ name: timingName, ms: 0 });
     }
     ctx = {
       ...ctx,
       layers: [
         ...ctx.layers,
-        ...SKIPPED_LAYERS.map((name) => ({ name, applied: false, delta: "skipped:null-taskType" })),
+        ...SKIPPED_LAYERS.map(({ deltaName }) => ({
+          name: deltaName,
+          applied: false,
+          delta: "skipped:null-taskType",
+        })),
       ],
     };
   }
