@@ -394,3 +394,26 @@ describe("resume protocol (subsystem E)", () => {
     expect(entries.some((e) => e.startsWith("phases.md.corrupt-"))).toBe(true);
   });
 });
+
+describe("customer decision feedback truncation (subsystem E)", () => {
+  let flowDirFb: string;
+  const runIdFb = "r-fb";
+  beforeEach(async () => {
+    flowDirFb = path.join(os.tmpdir(), `fb-${Math.random().toString(36).slice(2)}`);
+    await fs.mkdir(path.join(flowDirFb, "runs", runIdFb), { recursive: true });
+  });
+  it("feedback > 2000 chars is truncated with marker", async () => {
+    const long = "X".repeat(3000);
+    await appendCustomerDecision(flowDirFb, runIdFb, {
+      phaseId: "phase-1",
+      sprintN: 1,
+      verdict: "reject",
+      feedback: long,
+    });
+    const { readArtifact } = await import("../../flow/artifact-io.js");
+    const map = await readArtifact(path.join(flowDirFb, "runs", runIdFb), "state.md");
+    const items = JSON.parse(map!.sections.get("Customer Decisions")!).items;
+    expect(items[0].feedback.length).toBeLessThanOrEqual(2100);
+    expect(items[0].feedback).toContain("feedback truncated");
+  });
+});
