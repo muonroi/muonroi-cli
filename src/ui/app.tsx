@@ -891,7 +891,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
   const [councilMessages, setCouncilMessages] = useState<CouncilMessage[]>([]);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
-    Map<string, { role: string; side: "left" | "right"; color: string }>
+    Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
   >(new Map());
 
   const resolveStyle = useRolePalette();
@@ -2537,11 +2537,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   const cs = chunk.councilStatus;
                   if (cs.state === "start" && cs.label) {
                     const placeholderRole = cs.label;
-                    const styleForRole = resolveStyle(placeholderRole);
-                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    const isLeader = /^leader\b/i.test(placeholderRole);
+                    const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
+                    const side: "left" | "right" = isLeader
+                      ? "left"
+                      : getSide(`placeholder::${placeholderRole}`, placeholderRole);
                     setCouncilPlaceholders((prev) => {
                       const next = new Map(prev);
-                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      next.set(cs.statusId, {
+                        role: placeholderRole,
+                        side,
+                        color: styleForRole?.color ?? t.councilLeaderBorder,
+                        variant: isLeader ? "leader" : "participant",
+                      });
                       return next;
                     });
                   }
@@ -2937,11 +2945,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   const cs = chunk.councilStatus;
                   if (cs.state === "start" && cs.label) {
                     const placeholderRole = cs.label;
-                    const styleForRole = resolveStyle(placeholderRole);
-                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    const isLeader = /^leader\b/i.test(placeholderRole);
+                    const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
+                    const side: "left" | "right" = isLeader
+                      ? "left"
+                      : getSide(`placeholder::${placeholderRole}`, placeholderRole);
                     setCouncilPlaceholders((prev) => {
                       const next = new Map(prev);
-                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      next.set(cs.statusId, {
+                        role: placeholderRole,
+                        side,
+                        color: styleForRole?.color ?? t.councilLeaderBorder,
+                        variant: isLeader ? "leader" : "participant",
+                      });
                       return next;
                     });
                   }
@@ -3085,11 +3101,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   const cs = chunk.councilStatus;
                   if (cs.state === "start" && cs.label) {
                     const placeholderRole = cs.label;
-                    const styleForRole = resolveStyle(placeholderRole);
-                    const side = getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                    const isLeader = /^leader\b/i.test(placeholderRole);
+                    const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
+                    const side: "left" | "right" = isLeader
+                      ? "left"
+                      : getSide(`placeholder::${placeholderRole}`, placeholderRole);
                     setCouncilPlaceholders((prev) => {
                       const next = new Map(prev);
-                      next.set(cs.statusId, { role: placeholderRole, side, color: styleForRole.color });
+                      next.set(cs.statusId, {
+                        role: placeholderRole,
+                        side,
+                        color: styleForRole?.color ?? t.councilLeaderBorder,
+                        variant: isLeader ? "leader" : "participant",
+                      });
                       return next;
                     });
                   }
@@ -4858,6 +4882,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   terminalCols={width}
                   color={p.color}
                   theme={t}
+                  variant={p.variant}
                 />
               ))}
               {pendingCouncilQuestion && councilCardState && (
