@@ -110,14 +110,18 @@ export async function* runPlanning(
     const readablePart = synthesisText.includes("---READABLE---")
       ? synthesisText.split("---READABLE---")[1]?.trim()
       : synthesisText;
-    yield { type: "content", content: "\n## Synthesis\n" };
+    const synthBody = readablePart && readablePart.length > 0
+      ? readablePart
+      : synthesisText.trim().length > 0
+        ? synthesisText
+        : `_(empty — ${synthesisFailReason ?? "no output"})_`;
     yield {
-      type: "content",
-      content: ((readablePart && readablePart.length > 0)
-        ? readablePart
-        : (synthesisText.trim().length > 0
-            ? synthesisText
-            : `_(empty — ${synthesisFailReason ?? "no output"})_`)) + "\n",
+      type: "council_message" as const,
+      councilMessage: {
+        kind: "synthesis" as const,
+        speaker: { role: "Leader", model: leaderModelId },
+        text: synthBody,
+      },
     };
 
     yield phaseDone({
