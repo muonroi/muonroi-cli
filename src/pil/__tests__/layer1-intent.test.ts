@@ -5,16 +5,24 @@ vi.mock("../../router/classifier/index.js", () => ({
   classify: vi.fn(),
 }));
 
-vi.mock("../../ee/bridge.js", () => ({
-  classifyViaBrain: vi.fn().mockResolvedValue(null),
+vi.mock("../config.js", () => ({
+  isUnifiedPilEnabled: vi.fn(() => false),
 }));
 
+vi.mock("../../ee/bridge.js", () => ({
+  classifyViaBrain: vi.fn().mockResolvedValue(null),
+  pilContext: vi.fn().mockResolvedValue(null),
+}));
+
+import { classifyViaBrain, pilContext } from "../../ee/bridge.js";
 import { classify } from "../../router/classifier/index.js";
-import { classifyViaBrain } from "../../ee/bridge.js";
+import { isUnifiedPilEnabled } from "../config.js";
 import { layer1Intent } from "../layer1-intent.js";
 
 const mockClassify = vi.mocked(classify);
 const mockClassifyViaBrain = vi.mocked(classifyViaBrain);
+const mockPilContext = vi.mocked(pilContext);
+const mockIsUnifiedPilEnabled = vi.mocked(isUnifiedPilEnabled);
 
 const makeCtx = (raw = "test prompt"): PipelineContext => ({
   raw,
@@ -166,10 +174,7 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
   it("classifyViaBrain called when classifier and keywords both miss", async () => {
     await layer1Intent(makeCtx("some ambiguous input without keywords"));
     expect(mockClassifyViaBrain).toHaveBeenCalled();
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("multilingual prompt classifier"),
-      1500,
-    );
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.stringContaining("multilingual prompt classifier"), 1500);
   });
 
   it("classifyViaBrain called with prompt containing task type and style instruction", async () => {
@@ -215,18 +220,93 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
   it("classifyViaBrain called for style detection even when classifier returns high confidence", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
     await layer1Intent(makeCtx("refactor this"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("preferred output style"),
-      800,
-    );
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
   });
 
   it("classifyViaBrain called for style detection even when keyword match found", async () => {
     await layer1Intent(makeCtx("there is a bug here"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(
-      expect.stringContaining("preferred output style"),
-      800,
-    );
+    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
+  });
+});
+
+describe("Layer 1 unified path", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // default: low-signal classifier so unified path becomes eligible
+    mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.2, reason: "low-confidence" });
+  });
+
+  it("calls pilContext when flag enabled AND local classify is low confidence", async () => {
+    mockIsUnifiedPilEnabled.mockReturnValue(true);
+    mockPilContext.mockResolvedValueOnce({
+      taskType: "debug",
+      intentKind: "task",
+      outputStyle: "balanced",
+      confidence: 0.85,
+      domain: "typescript",
+      gsd_phase: "execute",
+      gsd_route_source: "ee",
+      t0_principles: [{ text: "p1", score: 0.9 }],
+      t1_rules: ["r1"],
+      t2_patterns: [{ text: "x", score: 0.7 }],
+      retrieval_skipped_reason: null,
+      cache_hit: false,
+      inference_ms: 200,
+      schema_version: "1.0",
+    });
+    const result = await layer1Intent({
+      raw: "ambiguous prompt",
+      enriched: "",
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+    });
+    expect(result.taskType).toBe("debug");
+    expect(result.outputStyle).toBe("balanced");
+    expect(result._brainData?.t0_principles).toHaveLength(1);
+    expect(result._brainData?.t1_rules).toEqual(["r1"]);
+    expect(result.layers[0].delta).toContain("unified=ok");
+  });
+
+  it("skips pilContext when local classify yields high confidence (>= 0.7)", async () => {
+    mockIsUnifiedPilEnabled.mockReturnValue(true);
+    mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
+    await layer1Intent({
+      raw: "refactor this function please",
+      enriched: "",
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+    });
+    expect(mockPilContext).not.toHaveBeenCalled();
+  });
+
+  it("falls back to legacy classifyViaBrain when pilContext returns null", async () => {
+    mockIsUnifiedPilEnabled.mockReturnValue(true);
+    mockPilContext.mockResolvedValueOnce(null);
+    mockClassifyViaBrain.mockResolvedValueOnce("debug,balanced");
+    const result = await layer1Intent({
+      raw: "vague question",
+      enriched: "",
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+    });
+    expect(result.taskType).toBe("debug");
+    expect(result._brainData).toBeNull();
+    expect(result.layers[0].delta).toContain("unified=fail");
   });
 });
 
