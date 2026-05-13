@@ -132,6 +132,62 @@ describe("buildSprintContext (subsystem E)", () => {
   });
 });
 
+describe("buildSprintContext truncOldestFirst history path (subsystem E)", () => {
+  const basePhase = {
+    id: "phase-1",
+    name: "n",
+    goal: "g",
+    successCriteria: ["A"],
+    scope: "s",
+    exitCondition: { type: "criteria-threshold" as const, min: 0.8 },
+    dependsOn: [],
+    maxSprints: 2,
+  };
+
+  it("large phaseHistory is truncated oldest-first within cap", () => {
+    const bigHistory = Array.from({ length: 100 }, (_, i) => ({
+      phaseId: `phase-${i}`,
+      exitedAtUtc: "2026-05-13T00:00:00Z",
+      exitSummary: "S".repeat(80),
+      sprintsExecuted: 1,
+      criteriaMetCount: 1,
+    }));
+    const out = buildSprintContext({
+      projectContextFormatted: fakeProject,
+      customerDecisions: [],
+      phaseHistory: bigHistory,
+      currentPhase: basePhase,
+      phaseDigest: [],
+      sprintTail: "",
+    });
+    // should contain truncation marker and be under total cap with some slack
+    expect(out).toMatch(/\[…truncated \d+ oldest entries\]/);
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(CONTEXT_CAPS.SPRINT_CONTEXT_BYTES + 300);
+  });
+
+  it("single-entry history that is oversized: truncOldestFirst keeps one entry", () => {
+    const singleBig = [
+      {
+        phaseId: "phase-big",
+        exitedAtUtc: "2026-05-13T00:00:00Z",
+        exitSummary: "X".repeat(9000),
+        sprintsExecuted: 1,
+        criteriaMetCount: 1,
+      },
+    ];
+    const out = buildSprintContext({
+      projectContextFormatted: fakeProject,
+      customerDecisions: [],
+      phaseHistory: singleBig,
+      currentPhase: basePhase,
+      phaseDigest: [],
+      sprintTail: "",
+    });
+    // single-entry path: while loop condition `lines.length > 1` exits early, entry stays
+    expect(out).toContain("phase-big");
+  });
+});
+
 describe("digestSprintIntoPhase (subsystem E)", () => {
   it("appends entry when under cap", () => {
     const out = digestSprintIntoPhase([], { sprintN: 1, timestampUtc: "t", lessonText: "L" });
