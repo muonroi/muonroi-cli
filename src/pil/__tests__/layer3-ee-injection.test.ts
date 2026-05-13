@@ -30,8 +30,18 @@ describe("layer3EeInjection (bridge-based)", () => {
 
   test("Test 1: returns enriched context with hints when searchByText returns points with payload.text", async () => {
     vi.mocked(searchByText).mockResolvedValue([
-      { id: "abc1", score: 0.92, payload: { text: "Always check null before accessing .user" }, collection: "experience-behavioral" },
-      { id: "def2", score: 0.88, payload: { text: "Use try-catch around DB calls" }, collection: "experience-behavioral" },
+      {
+        id: "abc1",
+        score: 0.92,
+        payload: { text: "Always check null before accessing .user" },
+        collection: "experience-behavioral",
+      },
+      {
+        id: "def2",
+        score: 0.88,
+        payload: { text: "Use try-catch around DB calls" },
+        collection: "experience-behavioral",
+      },
     ]);
 
     const result = await layer3EeInjection(makeCtx());
@@ -68,7 +78,12 @@ describe("layer3EeInjection (bridge-based)", () => {
 
   test("Test 4: extracts text from payload.json containing solution field", async () => {
     vi.mocked(searchByText).mockResolvedValue([
-      { id: "xyz9", score: 0.75, payload: { json: JSON.stringify({ solution: "Always validate inputs at boundary" }) }, collection: "experience-behavioral" },
+      {
+        id: "xyz9",
+        score: 0.75,
+        payload: { json: JSON.stringify({ solution: "Always validate inputs at boundary" }) },
+        collection: "experience-behavioral",
+      },
     ]);
 
     const result = await layer3EeInjection(makeCtx());
@@ -106,5 +121,50 @@ describe("layer3EeInjection (bridge-based)", () => {
       expect.any(Number),
       expect.any(Object),
     );
+  });
+});
+
+describe("Layer 3 formatter mode (ctx._brainData populated)", () => {
+  test("emits principles + experience blocks from ctx._brainData without brain call", async () => {
+    const { layer3EeInjection } = await import("../layer3-ee-injection.js");
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "always run tests", score: 0.9 }],
+        t1_rules: ["never skip tests"],
+        t2_patterns: [{ text: "mock fs in unit tests", score: 0.7 }],
+        retrieval_skipped_reason: null,
+      },
+    };
+    const result = await layer3EeInjection(ctx);
+    expect(result.enriched).toContain("always run tests");
+    expect(result.enriched).toContain("mock fs in unit tests");
+    expect(result.t1Rules).toEqual(["never skip tests"]);
+  });
+
+  test("emits no block when ctx._brainData is null AND legacy disabled by flag", async () => {
+    const { layer3EeInjection } = await import("../layer3-ee-injection.js");
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: null,
+    };
+    const result = await layer3EeInjection(ctx);
+    expect(result.layers[0].name).toBe("ee-experience-injection");
   });
 });
