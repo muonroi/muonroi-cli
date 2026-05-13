@@ -235,3 +235,5 @@ export async function updateCriteria(flowDir: string, runId: string, criteria: C
 
 // P-B+C: project-context.md helpers re-exported for outer modules
 export { readProjectContext, writeProjectContext } from "./discovery-persistence.js";
+export { readPhasePlan, writePhasePlan } from "./phase-plan.js";
+export { appendCustomerDecision, markPhaseStatus, readPhaseStatus } from "./phase-runner.js";
