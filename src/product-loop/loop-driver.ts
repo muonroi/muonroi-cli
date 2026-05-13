@@ -5,25 +5,105 @@ import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import type { StreamChunk } from "../types/index.js";
+import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
 import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
-import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
+import { type DiscoveryResult, discoverProject } from "./discover.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "./gather.js";
 import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
-import {
-  additionalPrefills,
-  auditAsContextBlock,
-  auditRepo,
-  formatAuditSummary,
-  type RepoAudit,
-} from "./repo-audit.js";
+import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } from "./repo-audit.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, Stage } from "./types.js";
+
+function buildWorkspaceDiscoveryCard(d: DiscoveryResult, a: RepoAudit, priorRunCount: number): CouncilInfoCard | null {
+  const sections: CouncilInfoCard["sections"] = [];
+
+  if (!d.hasProject) {
+    sections.push({ heading: "Project", body: "Greenfield — no existing project manifest detected." });
+  } else if (d.prefilled.size === 0) {
+    sections.push({ heading: "Project", body: "Existing project detected; no dimensions auto-filled." });
+  } else {
+    const lines = d.evidence.map((ev) => `- ${ev.dim} ← ${ev.value} (from ${ev.source})`);
+    sections.push({ heading: "Auto-filled dimensions", body: lines.join("\n") });
+    sections.push({
+      heading: "Coverage",
+      body: `Skipping ${d.prefilled.size} clarification question${d.prefilled.size === 1 ? "" : "s"}.`,
+    });
+  }
+
+  if (a.hasProject) {
+    const bits: string[] = [`mode=${a.mode}`];
+    if (a.packageMeta?.name) bits.push(`pkg ${a.packageMeta.name}`);
+    bits.push(`src=${a.srcFileCount}`);
+    bits.push(`tests=${a.testFileCount}`);
+    if (a.testFramework) bits.push(`runner=${a.testFramework}`);
+    if (a.hasDocs) bits.push("docs ✓");
+    sections.push({ heading: "Repo audit", body: bits.join(" · ") });
+  }
+
+  if (priorRunCount > 0) {
+    sections.push({
+      heading: "Prior context",
+      body: `Loaded decisions from ${priorRunCount} earlier run${priorRunCount === 1 ? "" : "s"} on this workspace.`,
+    });
+  }
+
+  if (sections.length === 0) return null;
+  return { title: "Workspace Discovery", sections };
+}
+
+function buildGatherCompleteCard(fieldCount: number, unresolvedCount: number): CouncilInfoCard {
+  return {
+    title: "Project Context Captured",
+    sections: [
+      { heading: "Fields", body: `${fieldCount} dimension${fieldCount === 1 ? "" : "s"} captured.` },
+      {
+        heading: "Resolution",
+        body:
+          unresolvedCount === 0
+            ? "All seed dimensions resolved."
+            : `${unresolvedCount} dimension${unresolvedCount === 1 ? "" : "s"} still unresolved.`,
+      },
+    ],
+  };
+}
+
+function buildResearchSummaryCard(summaryText: string, findings?: string): CouncilInfoCard {
+  const sections: CouncilInfoCard["sections"] = [{ heading: "Summary", body: summaryText }];
+  if (findings && findings.trim()) {
+    sections.push({ heading: "Findings", body: findings.trim() });
+  }
+  return { title: "Research Summary", sections };
+}
+
+function buildAssumptionsCard(count: number, ledgerSummary: string): CouncilInfoCard {
+  return {
+    title: "Assumptions Recorded",
+    sections: [
+      { heading: "From research debate", body: `${count} assumption${count === 1 ? "" : "s"} extracted.` },
+      { heading: "Ledger", body: ledgerSummary },
+    ],
+  };
+}
+
+function buildReadyToSprintCard(productSpec: ProductSpec): CouncilInfoCard {
+  const mvp = (productSpec.mvp ?? []).map((m) => `- ${m}`).join("\n") || "- (none)";
+  return {
+    title: "Ready to Sprint",
+    sections: [
+      { heading: "Persona", body: productSpec.persona || "(unspecified)" },
+      { heading: "MVP", body: mvp },
+      {
+        heading: "Estimate",
+        body: `Sprints: ${productSpec.sprintEstimate ?? "?"}  ·  Cost: $${productSpec.costEstimate ?? "?"}`,
+      },
+    ],
+  };
+}
 
 export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamChunk, DriverResult, unknown> {
   let state: Stage = "idle";
@@ -31,6 +111,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
   let debateState: DebateState | undefined;
   let discovery: DiscoveryResult | undefined;
   let audit: RepoAudit | undefined;
+  let productSpec: ProductSpec | undefined;
   let conversationContext = "";
 
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
@@ -75,15 +156,6 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           }
         }
 
-        const discoverSummary = formatDiscoverySummary(discovery);
-        if (discoverSummary) {
-          yield { type: "content", content: `\n${discoverSummary}\n` } as StreamChunk;
-        }
-        const auditSummary = formatAuditSummary(audit);
-        if (auditSummary) {
-          yield { type: "content", content: `\n${auditSummary}\n` } as StreamChunk;
-        }
-
         // Build conversationContext for clarifier + debate so prompts are
         // grounded in real repo state, not generic boilerplate.
         conversationContext = auditAsContextBlock(audit);
@@ -103,10 +175,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         });
         if (prior.digest) {
           conversationContext += formatPriorContextForPrompt(prior.digest);
-          yield {
-            type: "content",
-            content: `\n> Loaded prior decisions context from ${prior.runs.length} earlier run(s) on this workspace.\n`,
-          } as StreamChunk;
+        }
+
+        const discoveryCard = buildWorkspaceDiscoveryCard(discovery, audit, prior.runs.length);
+        if (discoveryCard) {
+          yield { type: "council_info_card", councilInfoCard: discoveryCard } as StreamChunk;
         }
 
         // Persist discovery evidence + repo audit so resume can replay.
@@ -163,15 +236,18 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         );
         clarifiedSpec = clarifiedSpecFromContext(projectContext);
 
-        yield {
-          type: "content",
-          content: `\n> Gather phase complete — project context captured (${Object.keys(projectContext.context ?? {}).length} fields).\n`,
-        } as StreamChunk;
-
         // Confidence metric: unresolvedDimensions.length
         const unresolvedDimensionsCount = SEED_DIMENSIONS.filter(
           (d) => clarifiedSpec?.resolved?.[d.id] !== "answered",
         ).length;
+
+        yield {
+          type: "council_info_card",
+          councilInfoCard: buildGatherCompleteCard(
+            Object.keys(projectContext.context ?? {}).length,
+            unresolvedDimensionsCount,
+          ),
+        } as StreamChunk;
 
         if (unresolvedDimensionsCount <= 1) {
           // Write resolved dimensions to gray-areas.md
@@ -287,8 +363,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           (debateState?.runningSummary && debateState.runningSummary.trim()) ||
           "(debate produced no summary — using empty research findings)";
         yield {
-          type: "content",
-          content: `\n### Research summary\n${summaryText}\n`,
+          type: "council_info_card",
+          councilInfoCard: buildResearchSummaryCard(summaryText, debateState?.researchFindings),
         } as StreamChunk;
 
         // Append research summary to delegations.md
@@ -315,13 +391,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           if (extracted.length > 0) {
             const ledger = await mergeAssumptions(ctx.flowDir, ctx.runId, extracted);
             yield {
-              type: "content",
-              content:
-                "\n> Recorded " +
-                extracted.length +
-                " assumption(s) from research debate. Ledger: " +
-                renderLedgerSummary(ledger) +
-                "\n",
+              type: "council_info_card",
+              councilInfoCard: buildAssumptionsCard(extracted.length, renderLedgerSummary(ledger)),
             } as StreamChunk;
           }
         } catch {
@@ -387,11 +458,10 @@ interface ProductSpec {
           "You are a Product Owner synthesizing a technical specification.",
           synthesisPrompt,
         );
-        let productSpec: ProductSpec;
         try {
           const match = rawSpec.match(/\{[\s\S]*\}/);
           productSpec = match ? JSON.parse(match[0]) : ({} as ProductSpec);
-          productSpec.createdAt = new Date();
+          productSpec!.createdAt = new Date();
         } catch (err) {
           return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec" };
         }
@@ -406,7 +476,7 @@ interface ProductSpec {
         // sprint=1, phase2 gets sprint=2. Re-deriving the same spec is
         // idempotent — ids are hash-stable across runs.
         try {
-          const tasks = deriveTasksFromSpec(productSpec);
+          const tasks = deriveTasksFromSpec(productSpec!);
           await writeTasks(ctx.flowDir, ctx.runId, tasks);
         } catch {
           /* non-critical */
@@ -456,7 +526,14 @@ interface ProductSpec {
       }
 
       case "approved": {
-        yield { type: "content", content: "Ready to sprint!" } as StreamChunk;
+        if (productSpec) {
+          yield {
+            type: "council_info_card",
+            councilInfoCard: buildReadyToSprintCard(productSpec),
+          } as StreamChunk;
+        } else {
+          yield { type: "content", content: "Ready to sprint!" } as StreamChunk;
+        }
         return { runId: ctx.runId, stage: "approved", success: true };
       }
 
