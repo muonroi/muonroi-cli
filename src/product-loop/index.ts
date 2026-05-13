@@ -1,10 +1,11 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { resolveLeaderModel } from "../council/leader.js";
 import type { CouncilLLM, PreflightResponder, QuestionResponder } from "../council/types.js";
 import type { EERouteResult } from "../ee/bridge.js";
 import { routeModel as eeRouteModel } from "../ee/bridge.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
-import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { readArtifact } from "../flow/artifact-io.js";
 import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -83,7 +84,6 @@ export async function* runProductLoop(
       return yield* runAbort(opts);
     case "ship":
       return yield* runShip(opts);
-    case "start":
     default:
       return yield* runStart(opts);
   }
@@ -160,6 +160,14 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   // Phase 2: sprint loop until done or halted.
   const productSpec = await loadProductSpec(flowDir, runId, idea, opts.flags.stack);
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+
+  // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
+  if (process.env.MUONROI_PHASE_MODE !== "0") {
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    if (phaseResult !== null) return phaseResult;
+    // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
+  }
+
   return yield* drainSprints({
     ctx,
     productSpec,
@@ -293,6 +301,135 @@ async function* drainSprints(args: {
     success: false,
     reason: "max_sprints_reached",
     sprintsRun,
+  };
+}
+
+/**
+ * Phase-orchestrated sprint path (Subsystem E).
+ *
+ * Returns a ProductLoopResult when it ran to completion (pass or abort),
+ * or null when prerequisites were unavailable (no projectContext) so the
+ * caller can fall through to the legacy drainSprints path.
+ *
+ * Gated behind MUONROI_PHASE_MODE !== "0" by both callers (runStart / runResume).
+ */
+async function* runPhasesPath(args: {
+  ctx: DriverContext;
+  productSpec: ProductSpec;
+  roleAssignments: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
+}): AsyncGenerator<StreamChunk, ProductLoopResult | null, unknown> {
+  const { ctx, productSpec, roleAssignments } = args;
+
+  // Load prerequisites: projectContext and manifest.
+  const { readProjectContext } = await import("./discovery-persistence.js");
+  const { getProductSpentUsd } = await import("../usage/product-ledger.js");
+  const { runPhases } = await import("./phase-runner.js");
+
+  const projectContext = await readProjectContext(ctx.flowDir, ctx.runId);
+  const manifest = await readManifest(ctx.flowDir, ctx.runId);
+
+  if (!projectContext || !manifest) {
+    // Prerequisites unavailable — signal fall-through to legacy path.
+    yield {
+      type: "content",
+      content: "\n> [phase-mode] projectContext or manifest unavailable — falling back to legacy sprint loop.\n",
+    } as StreamChunk;
+    return null;
+  }
+
+  // Build a ClarifiedSpec from the stored projectContext.
+  const { clarifiedSpecFromContext } = await import("./gather.js");
+  const clarifiedSpec = clarifiedSpecFromContext(projectContext);
+
+  // Resolve leader model id and build a LeaderLike adapter over ctx.llm.
+  const leaderModelId = resolveLeaderModel(ctx.sessionModelId);
+  const leader = {
+    generate: (leaderArgs: { system: string; prompt: string; maxTokens: number }) =>
+      ctx.llm.generate(leaderModelId, leaderArgs.system, leaderArgs.prompt).then((text) => ({
+        content: text,
+        costUsd: 0,
+      })),
+  };
+
+  // Build the sprintRunner adapter: runPhases passes { sprintN, conversationContext, phaseScope }
+  // while runSprint expects the full RunSprintArgs shape.
+  const sprintRunner = (sprintCtx: unknown) => {
+    const sc = sprintCtx as {
+      sprintN: number;
+      conversationContext?: string;
+      phaseScope?: { criteria: string[]; scope: string };
+    };
+    return runSprint({
+      sprintN: sc.sprintN,
+      ctx,
+      productSpec,
+      roleAssignments,
+      history: [],
+      phaseScope: sc.phaseScope,
+    });
+  };
+
+  // awaitCustomerVerdict: use respondToQuestion (the existing user-prompt API).
+  // QuestionResponder takes a questionId string; the UI layer resolves the prompt text.
+  const awaitCustomerVerdict = async (_flowDir: string, _runId: string) => {
+    const ans = await ctx.respondToQuestion("customer-review-verdict");
+    const lower = (ans ?? "").trim().toLowerCase();
+    if (lower.startsWith("x")) return { verdict: "abort" as const };
+    if (lower.startsWith("r")) {
+      const fb = await ctx.respondToQuestion("customer-review-feedback");
+      return { verdict: "reject" as const, feedback: fb ?? "" };
+    }
+    return { verdict: "accept" as const };
+  };
+
+  const phaseGen = runPhases({
+    flowDir: ctx.flowDir,
+    runId: ctx.runId,
+    manifest,
+    clarifiedSpec,
+    projectContext,
+    leader: leader as any,
+    leaderModelId,
+    capUsd: manifest.capUsd,
+    remainingUsd: async () => Math.max(0, manifest.capUsd - (await getProductSpentUsd(ctx.runId))),
+    awaitCustomerVerdict,
+    sprintRunner,
+  } as any);
+
+  let phaseOutcome: { pass: boolean; reason?: string } = { pass: false };
+  while (true) {
+    const step = await phaseGen.next();
+    if (step.done) {
+      phaseOutcome = step.value as { pass: boolean; reason?: string };
+      break;
+    }
+    yield step.value as StreamChunk;
+  }
+
+  if (!phaseOutcome.pass) {
+    return {
+      runId: ctx.runId,
+      stage: "halted",
+      success: false,
+      reason: phaseOutcome.reason ?? "phase-orchestrator-halt",
+    };
+  }
+
+  // All phases done — write final manifest.
+  const finalManifest = await readManifest(ctx.flowDir, ctx.runId);
+  if (finalManifest) {
+    await writeManifest(ctx.flowDir, ctx.runId, {
+      ...finalManifest,
+      doneAt: new Date(),
+      verdict: { pass: true, score: 1, failedCondition: undefined as any, reason: "phases_complete" },
+    });
+  }
+  return {
+    runId: ctx.runId,
+    stage: "approved",
+    success: true,
+    reason: "phases_complete",
+    shipped: true,
   };
 }
 
@@ -467,6 +604,14 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+
+  // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
+  if (process.env.MUONROI_PHASE_MODE !== "0") {
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    if (phaseResult !== null) return phaseResult;
+    // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
+  }
+
   return yield* drainSprints({
     ctx,
     productSpec,
