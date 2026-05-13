@@ -113,7 +113,9 @@ const SYNTH_SYSTEM =
   "You break ties between three stance recommendations. Output JSON: " +
   '{"primary":{"value":<any>,"rationale":"<why>"},"alternatives":[{"value":<any>,"rationale":"<why>"},{"value":<any>,"rationale":"<why>"}]}';
 
-async function consumeDebateChunks(it: AsyncIterable<DebateChunk>): Promise<{ stances: Array<{ name: string; value: any; rationale: string; confidence?: number }>; costUsd: number }> {
+async function consumeDebateChunks(
+  it: AsyncIterable<DebateChunk>,
+): Promise<{ stances: Array<{ name: string; value: any; rationale: string; confidence?: number }>; costUsd: number }> {
   const stances: Array<{ name: string; value: any; rationale: string; confidence?: number }> = [];
   let costUsd = 0;
   for await (const c of it) {
@@ -181,9 +183,7 @@ export async function councilRecommend(
   }
 
   // Three-way split → synth tiebreak
-  const synthPrompt = chunks.stances
-    .map((s) => `[${s.name}] ${JSON.stringify(s.value)} :: ${s.rationale}`)
-    .join("\n");
+  const synthPrompt = chunks.stances.map((s) => `[${s.name}] ${JSON.stringify(s.value)} :: ${s.rationale}`).join("\n");
   let synthCost = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -228,4 +228,35 @@ function dedupByValue<T extends { value: any }>(arr: T[]): T[] {
     }
   }
   return out;
+}
+
+export const COUNCIL_HARD_FLOOR_USD = 2.5;
+export const ESTIMATED_NEXT_COUNCIL_COST_USD = 0.45;
+
+export function computeCostGuard(capUsd: number): number {
+  return Math.max(COUNCIL_HARD_FLOOR_USD, 0.15 * capUsd);
+}
+
+export function shouldFallbackToLeader(opts: { cumulative: number; capUsd: number }): boolean {
+  return opts.cumulative + ESTIMATED_NEXT_COUNCIL_COST_USD > computeCostGuard(opts.capUsd);
+}
+
+export async function withRateLimitBackoff<T>(
+  fn: () => Promise<T>,
+  opts: { baseDelayMs?: number; maxRetries?: number } = {},
+): Promise<T> {
+  const baseDelay = opts.baseDelayMs ?? 1000;
+  const maxRetries = opts.maxRetries ?? 3;
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const is429 = err?.status === 429 || /429|rate limit/i.test(err?.message ?? "");
+      if (!is429 || attempt >= maxRetries) throw err;
+      const delay = baseDelay * 4 ** attempt;
+      attempt += 1;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
 }
