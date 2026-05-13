@@ -243,20 +243,22 @@ export function shouldFallbackToLeader(opts: { cumulative: number; capUsd: numbe
 
 export async function withRateLimitBackoff<T>(
   fn: () => Promise<T>,
-  opts: { baseDelayMs?: number; maxRetries?: number } = {},
+  opts: { delays?: number[]; maxRetries?: number } = {},
 ): Promise<T> {
-  const baseDelay = opts.baseDelayMs ?? 1000;
+  const delays = opts.delays ?? [1000, 4000, 16000];
   const maxRetries = opts.maxRetries ?? 3;
-  let attempt = 0;
-  for (;;) {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       return await fn();
-    } catch (err: any) {
-      const is429 = err?.status === 429 || /429|rate limit/i.test(err?.message ?? "");
-      if (!is429 || attempt >= maxRetries) throw err;
-      const delay = baseDelay * 4 ** attempt;
-      attempt += 1;
-      await new Promise((r) => setTimeout(r, delay));
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message ?? e ?? "");
+      const is429 = e?.status === 429 || /429|rate.?limit/i.test(msg);
+      if (!is429 || attempt === maxRetries - 1) throw e;
+      const ms = delays[Math.min(attempt, delays.length - 1)];
+      await new Promise((r) => setTimeout(r, ms));
     }
   }
+  throw lastErr;
 }

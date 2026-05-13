@@ -204,26 +204,26 @@ describe("discovery-recommender — cost guard + 429", () => {
     expect(shouldFallbackToLeader({ cumulative: 2.1, capUsd: 10 })).toBe(true); // 2.10 + 0.45 > 2.50
   });
 
-  it("withRateLimitBackoff retries 429 up to 3 times then throws", async () => {
+  it("withRateLimitBackoff retries 429 and succeeds on third attempt", async () => {
     const fn = vi
       .fn()
       .mockRejectedValueOnce(Object.assign(new Error("rate"), { status: 429 }))
       .mockRejectedValueOnce(Object.assign(new Error("rate"), { status: 429 }))
       .mockResolvedValueOnce("ok");
-    const result = await withRateLimitBackoff(fn, { baseDelayMs: 1 });
+    const result = await withRateLimitBackoff(fn, { delays: [1] });
     expect(result).toBe("ok");
     expect(fn).toHaveBeenCalledTimes(3);
   });
 
-  it("withRateLimitBackoff gives up after 3 retries", async () => {
+  it("withRateLimitBackoff gives up after maxRetries attempts", async () => {
     const fn = vi.fn().mockRejectedValue(Object.assign(new Error("rate"), { status: 429 }));
-    await expect(withRateLimitBackoff(fn, { baseDelayMs: 1 })).rejects.toThrow();
-    expect(fn).toHaveBeenCalledTimes(4); // initial + 3 retries
+    await expect(withRateLimitBackoff(fn, { delays: [1] })).rejects.toThrow();
+    expect(fn).toHaveBeenCalledTimes(3); // maxRetries=3 total attempts
   });
 
   it("withRateLimitBackoff does not retry non-429 errors", async () => {
     const fn = vi.fn().mockRejectedValue(new Error("network"));
-    await expect(withRateLimitBackoff(fn, { baseDelayMs: 1 })).rejects.toThrow("network");
+    await expect(withRateLimitBackoff(fn, { delays: [1] })).rejects.toThrow("network");
     expect(fn).toHaveBeenCalledTimes(1);
   });
 });
