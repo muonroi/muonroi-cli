@@ -61,7 +61,7 @@ Run `scripts/monitor-pil.ts` (added in this rollout — see below). It reads the
 
 Sample command:
 ```
-npx tsx scripts/monitor-pil.ts --hours 24
+bun scripts/monitor-pil.ts --hours 24
 ```
 
 ### Decision
