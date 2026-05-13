@@ -17,11 +17,11 @@
  * the agent, into the user's language.
  */
 
-import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
-import { scoreComplexity } from "../gsd/complexity.js";
-import { detectGrayAreas } from "../gsd/gray-areas.js";
-import { buildDirective } from "../gsd/directives.js";
 import { routeTask } from "../ee/bridge.js";
+import { scoreComplexity } from "../gsd/complexity.js";
+import { buildDirective } from "../gsd/directives.js";
+import { detectGrayAreas } from "../gsd/gray-areas.js";
+import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -48,22 +48,24 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   if (ctx.intentKind === "chitchat") {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "gsd-workflow-structuring", applied: false, delta: "skip:chitchat" },
-      ],
+      layers: [...ctx.layers, { name: "gsd-workflow-structuring", applied: false, delta: "skip:chitchat" }],
     };
   }
 
   let phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? null;
   let routeSource = "preset";
 
-  if (!phase) {
+  // Skip brain routeTask when L1's unified call already supplied brain data:
+  // any phase L1 derived is already on ctx.gsdPhase, and a separate routeTask
+  // round-trip would duplicate the brain hit the unified endpoint replaces.
+  if (!phase && !ctx._brainData) {
     const eeRoute = await routeTask(ctx.raw).catch(() => null);
     if (eeRoute?.route && !eeRoute.needs_disambiguation && eeRoute.confidence >= 0.6) {
       phase = mapRouteToPhase(eeRoute.route);
       routeSource = `ee:${eeRoute.source}`;
     }
+  } else if (ctx._brainData) {
+    routeSource = "unified";
   }
 
   if (!phase) {
