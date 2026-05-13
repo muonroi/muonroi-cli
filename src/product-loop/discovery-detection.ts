@@ -150,8 +150,12 @@ function classify(
   srcFileCount: number,
 ): ExistingProjectSignals["classification"] {
   if (srcFileCount === 0 && manifests.length === 0) return "greenfield";
-  const hasManifest = manifests.length > 0;
-  const strongManifest = manifests.some((m) => m.weight > 0.5);
-  if (srcFileCount > 5 && (strongManifest || (hasManifest && manifests.length === 1))) return "existing";
+  // Polyglot (multiple manifests) = ambiguous — cannot confidently pick one stack
+  if (manifests.length > 1) return "ambiguous";
+  const singleManifest = manifests.length === 1 ? manifests[0] : null;
+  // Empty manifest (no deps, weight=0) with src files = ambiguous (might be scaffold)
+  if (!singleManifest || singleManifest.weight === 0) return "ambiguous";
+  // Single manifest with any declared deps + enough src files = existing
+  if (srcFileCount > 5) return "existing";
   return "ambiguous";
 }
