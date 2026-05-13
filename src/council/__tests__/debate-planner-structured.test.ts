@@ -6,7 +6,7 @@
  * 2. Retries once via tracedGenerate when generateObject fails
  * 3. Returns FALLBACK_PLAN after both attempts fail
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const FALLBACK_STANCES = ["Primary Analyst", "Critical Reviewer"];
 
@@ -223,7 +223,9 @@ describe("CQ-10: planDebate uses generateObject as first attempt", () => {
     }
 
     // The injected error feedback must not exceed 200 chars (T-15-07)
-    const errorInPrompt = capturedPrompt.slice(capturedPrompt.indexOf("Schema validation failed:") + "Schema validation failed: ".length);
+    const errorInPrompt = capturedPrompt.slice(
+      capturedPrompt.indexOf("Schema validation failed:") + "Schema validation failed: ".length,
+    );
     // First token after "Schema validation failed: " must be at most 200 chars before next period/sentence
     // Simple check: the injected error segment is <= 200 chars
     const match = capturedPrompt.match(/Schema validation failed: (.{1,220})/);

@@ -59,7 +59,10 @@ describe("decide()", () => {
   });
 
   it("falls through to warm when classifier abstains (stub classifier always abstains)", async () => {
-    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
+    const result = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      BASE_OPTS,
+    );
     expect(result.tier).toBe("warm");
     expect(result.model).toBe("qwen2.5-coder");
     expect(routerStore.getState().lastDecision).toEqual(result);
@@ -79,7 +82,10 @@ describe("decide()", () => {
     });
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldOnlyStub.port}` }));
 
-    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
+    const result = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      BASE_OPTS,
+    );
     expect(result.tier).toBe("cold");
     expect(result.model).toBe(BASE_OPTS.defaultModel);
 
@@ -93,7 +99,10 @@ describe("decide()", () => {
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
 
-    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
+    const result = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      BASE_OPTS,
+    );
     expect(result.model).toBe("claude-sonnet-4-20250514");
     expect(result.reason).toBe("fallback:ee-unreachable");
 
@@ -106,7 +115,10 @@ describe("decide()", () => {
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
     routerStore.setState({ degraded: true });
 
-    const result = await decide("I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services", BASE_OPTS);
+    const result = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      BASE_OPTS,
+    );
     expect(result.tier).toBe("degraded");
     expect(result.reason).toBe("fallback:ee-unreachable");
 

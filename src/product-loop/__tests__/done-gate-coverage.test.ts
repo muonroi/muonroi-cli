@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ToolResult } from "../../types/index.js";
 import { evaluateDoneGate } from "../done-gate.js";
 import type { DoneGateContext, RoleSlot } from "../types.js";
-import type { ToolResult } from "../../types/index.js";
 import { VERIFY_PASS_MARKER } from "../verify-result.js";
 
 function buildBaseCtx(overrides: Partial<DoneGateContext> = {}): DoneGateContext {
@@ -142,11 +142,7 @@ describe("evaluateDoneGate — coverage gaps", () => {
 
   it("Cond #4: WAIT decision without explicit reason returns customer_dissent", async () => {
     const llm = {
-      generate: vi
-        .fn()
-        .mockResolvedValueOnce("po")
-        .mockResolvedValueOnce("cust")
-        .mockResolvedValueOnce("WAIT:"), // empty reason
+      generate: vi.fn().mockResolvedValueOnce("po").mockResolvedValueOnce("cust").mockResolvedValueOnce("WAIT:"), // empty reason
     } as any;
     const v = await evaluateDoneGate(buildBaseCtx({ llm }));
     expect(v.pass).toBe(false);

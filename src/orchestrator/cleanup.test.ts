@@ -10,10 +10,10 @@
  */
 import type { ModelMessage } from "ai";
 import { afterAll, describe, expect, it } from "vitest";
-import { createEEClient } from "../ee/client.js";
-import { setDefaultEEClient } from "../ee/intercept.js";
-import { extractSession } from "../ee/extract-session.js";
 import { startStubEEServer } from "../__test-stubs__/ee-server.js";
+import { createEEClient } from "../ee/client.js";
+import { extractSession } from "../ee/extract-session.js";
+import { setDefaultEEClient } from "../ee/intercept.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,9 +78,7 @@ describe("cleanup -> extractSession -> /api/extract integration", () => {
 
     try {
       // Must resolve (not throw) even when server is unreachable
-      await expect(
-        extractSession(buildTestMessages(6), "/tmp/test-project", "cli-exit"),
-      ).resolves.toBeUndefined();
+      await expect(extractSession(buildTestMessages(6), "/tmp/test-project", "cli-exit")).resolves.toBeUndefined();
     } finally {
       setDefaultEEClient(null as any);
     }

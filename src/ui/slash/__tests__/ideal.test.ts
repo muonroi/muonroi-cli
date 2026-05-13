@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { parseIdealArgs, handleIdealSlash, getIdealHelpText } from "../ideal.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getIdealHelpText, handleIdealSlash, parseIdealArgs } from "../ideal.js";
 
 const NOOP_CTX: any = {
   cwd: "/tmp",

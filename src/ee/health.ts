@@ -1,6 +1,6 @@
 import { getCachedAuthToken, getCachedServerBaseUrl } from "./auth.js";
-import { getDefaultEEClient } from "./intercept.js";
 import { getCircuitState } from "./client.js";
+import { getDefaultEEClient } from "./intercept.js";
 
 export interface EEHealthResult {
   ok: boolean;

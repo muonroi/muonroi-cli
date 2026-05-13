@@ -1,9 +1,6 @@
-import { asNumber } from "./batch-utils";
-import type {
-  ProcessMessageFinishReason,
-  ProcessMessageUsage,
-} from "./agent-options";
 import type { Plan, ToolCall, ToolResult } from "../types/index";
+import type { ProcessMessageFinishReason, ProcessMessageUsage } from "./agent-options";
+import { asNumber } from "./batch-utils";
 
 export function toToolCall(part: { toolCallId: string; toolName: string; args?: unknown; input?: unknown }): ToolCall {
   return {

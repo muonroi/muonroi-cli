@@ -10,7 +10,7 @@
  * app.tsx accumulates the latest snapshot and renders this component.
  */
 
-import * as React from "react";
+import type * as React from "react";
 import type { ProductStatusCardData } from "../../product-loop/types.js";
 import type { Theme } from "../theme.js";
 
@@ -54,9 +54,7 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
 
   // Sparkline = met / total ratio per sprint. Higher is better.
   const criteriaSpark = data.criteriaHistory?.length
-    ? sparkline(
-        data.criteriaHistory.map((h) => (h.total > 0 ? h.met / h.total : 0)),
-      )
+    ? sparkline(data.criteriaHistory.map((h) => (h.total > 0 ? h.met / h.total : 0)))
     : "";
   // Cost burn = cumulative / cap ratio. Caller supplies cumulative.
   const costSpark = data.costHistory?.length

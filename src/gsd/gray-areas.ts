@@ -47,12 +47,14 @@ interface DimensionRule {
   build: (prompt: string) => GrayAreaQuestion;
 }
 
-const SCOPE_TOKENS = /\b(this file|in (src|lib|app)\/|module |package |only |chỉ |duy nhất|specific (file|function))\b/i;
+const SCOPE_TOKENS =
+  /\b(this file|in (src|lib|app)\/|module |package |only |chỉ |duy nhất|specific (file|function))\b/i;
 const TARGET_TOKENS = /\b(repo|repository|project|service|component|module)\b/i;
 const FORMAT_TOKENS = /\b(json|markdown|md|yaml|toml|tsx?|jsx?|csv|html|xml|format)\b/i;
 const CONVENTION_TOKENS = /\b(eslint|prettier|style guide|coding standard|convention|naming)\b/i;
 const DEPTH_TOKENS = /\b(deep|shallow|high[-\s]level|detailed|exhaustive|brief|tóm tắt|chi tiết)\b/i;
-const AUDIENCE_TOKENS = /\b(for (devs?|engineers?|users?|customers?|onboarding|reviewers?)|new joiners?|junior|senior)\b/i;
+const AUDIENCE_TOKENS =
+  /\b(for (devs?|engineers?|users?|customers?|onboarding|reviewers?)|new joiners?|junior|senior)\b/i;
 
 const RULES: DimensionRule[] = [
   {
@@ -132,9 +134,7 @@ export function detectGrayAreas(prompt: string): GrayAreaResult {
 
   const questions: GrayAreaQuestion[] = [];
   for (const rule of RULES) {
-    const specified =
-      (rule.present && rule.present.test(prompt)) ||
-      (rule.missing && !rule.missing.test(prompt));
+    const specified = (rule.present && rule.present.test(prompt)) || (rule.missing && !rule.missing.test(prompt));
     if (!specified) {
       questions.push(rule.build(prompt));
       if (questions.length >= MAX_QUESTIONS) break;

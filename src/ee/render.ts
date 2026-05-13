@@ -11,8 +11,9 @@
  *   │ Scope: {scope_label}
  *   └──────────────────────────────────────────────┘
  */
-import type { InterceptMatch } from "./types.js";
+
 import type { StreamChunk } from "../types/index.js";
+import type { InterceptMatch } from "./types.js";
 
 const BORDER_WIDTH = 46;
 const TOP_BORDER = `┌─ ⚠ Experience Warning ${"─".repeat(BORDER_WIDTH - 22)}┐`;

@@ -40,9 +40,7 @@ function maybePruneOld(): void {
   _pruneInflight = true;
   try {
     const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000).toISOString();
-    getDatabase()
-      .prepare(`DELETE FROM interaction_logs WHERE created_at < ?`)
-      .run(cutoff);
+    getDatabase().prepare(`DELETE FROM interaction_logs WHERE created_at < ?`).run(cutoff);
   } catch {
     // Fail-open
   } finally {

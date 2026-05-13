@@ -1,7 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { buildContinueFeedback } from "../feedback-routing.js";
-import type { DoneVerdict, Criterion } from "../types.js";
+import { describe, expect, it } from "vitest";
 import type { ToolResult } from "../../types/index.js";
+import { buildContinueFeedback } from "../feedback-routing.js";
+import type { Criterion, DoneVerdict } from "../types.js";
 
 describe("feedback-routing", () => {
   const criteria: Criterion[] = [

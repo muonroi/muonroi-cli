@@ -1,13 +1,8 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  auditRepo,
-  formatAuditSummary,
-  auditAsContextBlock,
-  additionalPrefills,
-} from "../repo-audit.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { additionalPrefills, auditAsContextBlock, auditRepo, formatAuditSummary } from "../repo-audit.js";
 
 async function makeFixture(layout: Record<string, string>): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "audit-"));

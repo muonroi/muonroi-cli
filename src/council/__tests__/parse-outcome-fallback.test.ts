@@ -1,12 +1,18 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { DebatePlan, CouncilLLM } from "../types.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { CouncilLLM, DebatePlan } from "../types.js";
 
 // Build a minimal mock CouncilLLM that returns a fixed synthesisText
 function makeMockLLM(synthesisText: string): CouncilLLM {
   return {
-    async generate() { return synthesisText; },
-    async research() { return ""; },
-    async debate() { return { text: "", toolCalls: [] }; },
+    async generate() {
+      return synthesisText;
+    },
+    async research() {
+      return "";
+    },
+    async debate() {
+      return { text: "", toolCalls: [] };
+    },
   };
 }
 
@@ -39,7 +45,10 @@ async function runPlanningWith(synthesisText: string, debatePlan?: DebatePlan) {
   let result: { outcome: any; plan: any; synthesisText: string } | undefined;
   while (true) {
     const step = await gen.next();
-    if (step.done) { result = step.value; break; }
+    if (step.done) {
+      result = step.value;
+      break;
+    }
   }
   return result;
 }
@@ -82,10 +91,7 @@ describe("parseOutcome — raw log + shape-based fallback (CQ-20)", () => {
     const malformed = '{"summary": "ok"'; // missing closing brace — no valid JSON match
     const result = await runPlanningWith(malformed);
     expect(result?.outcome).toBeNull();
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[Council] parseOutcome failed"),
-      expect.any(String),
-    );
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("[Council] parseOutcome failed"), expect.any(String));
   });
 
   it("Test 3: JSON parse fails + debatePlan sections → returns object with kind and summary", async () => {

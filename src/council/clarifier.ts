@@ -1,10 +1,10 @@
+import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
-import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
-import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
+import { pickCouncilTaskModel } from "./leader.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
-import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
-import { pickCouncilTaskModel } from "./leader.js";
+import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
+import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 
 /**
  * Convert a PIL gray-area question into the clarifier's round-question shape.
@@ -50,10 +50,7 @@ export interface ClarifyOptionsResult {
  * returned `defaultIndex` points to it. Otherwise `defaultIndex` is omitted
  * so the UI knows to suppress the "(Recommended)" tag.
  */
-export function buildClarifyOptions(
-  suggestions: string[] | undefined,
-  recommended?: string,
-): ClarifyOptionsResult {
+export function buildClarifyOptions(suggestions: string[] | undefined, recommended?: string): ClarifyOptionsResult {
   const choices: CouncilQuestionOption[] = (suggestions ?? [])
     .filter((s) => typeof s === "string" && s.trim().length > 0)
     .map((s) => ({ label: s.trim(), value: s.trim(), kind: "choice" as const }));
@@ -126,15 +123,26 @@ export async function* runClarification(
       label: useSeed ? `Clarification round ${round + 1} (PIL-seeded)` : `Clarification round ${round + 1}`,
     });
 
-    let questions: Array<{ id?: string; question: string; why: string; suggestions?: string[]; recommended?: string; isRequired: boolean }>;
+    let questions: Array<{
+      id?: string;
+      question: string;
+      why: string;
+      suggestions?: string[];
+      recommended?: string;
+      isRequired: boolean;
+    }>;
 
     if (useSeed) {
-      questions = (seedQuestions ?? []).map(g => ({
+      questions = (seedQuestions ?? []).map((g) => ({
         id: g.id,
-        ...grayAreaToRoundQuestion(g)
+        ...grayAreaToRoundQuestion(g),
       }));
     } else {
-      const { system, prompt } = buildClarificationPrompt(topic, conversationContext, allQA.length > 0 ? allQA : undefined);
+      const { system, prompt } = buildClarificationPrompt(
+        topic,
+        conversationContext,
+        allQA.length > 0 ? allQA : undefined,
+      );
 
       let questionsRaw: string;
       try {
@@ -149,7 +157,13 @@ export async function* runClarification(
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        yield phaseError({ phaseId: roundId, kind: "clarification_round", label: `Clarification round ${round + 1}`, startedAt: roundStart, errorMessage: msg });
+        yield phaseError({
+          phaseId: roundId,
+          kind: "clarification_round",
+          label: `Clarification round ${round + 1}`,
+          startedAt: roundStart,
+          errorMessage: msg,
+        });
         yield { type: "content", content: `[Clarification error: ${msg}]\n` };
         break;
       }
@@ -231,8 +245,14 @@ export async function* runClarification(
 
   yield { type: "content", content: `\n### Clarified Spec\n` };
   yield { type: "content", content: `\n#### Problem\n${spec.problemStatement}\n` };
-  yield { type: "content", content: `\n#### Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n` };
-  yield { type: "content", content: `\n#### Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n` };
+  yield {
+    type: "content",
+    content: `\n#### Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n`,
+  };
+  yield {
+    type: "content",
+    content: `\n#### Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n`,
+  };
   yield { type: "content", content: `\n#### Scope\n${spec.scope || "(unspecified)"}\n` };
 
   return spec;
@@ -285,9 +305,7 @@ async function* inferSpecFromTopicOnly(
     `offline" for a desktop app topic, "Must respect Manifest V3" for a Chrome extension).\n` +
     `- scope should name 1 thing in-scope and 1 thing OUT-of-scope.\n` +
     `- Write all fields in the user's language (detected from the topic).`;
-  const prompt =
-    `## Topic\n${topic}\n\n` +
-    (conversationContext ? `## Context\n${conversationContext}\n` : "");
+  const prompt = `## Topic\n${topic}\n\n` + (conversationContext ? `## Context\n${conversationContext}\n` : "");
 
   try {
     const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);
@@ -302,9 +320,10 @@ async function* inferSpecFromTopicOnly(
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<ClarifiedSpec>;
-      const criteria = Array.isArray(parsed.successCriteria) && parsed.successCriteria.length >= 1
-        ? parsed.successCriteria
-        : [`Address the topic: ${topic.slice(0, 100)}`];
+      const criteria =
+        Array.isArray(parsed.successCriteria) && parsed.successCriteria.length >= 1
+          ? parsed.successCriteria
+          : [`Address the topic: ${topic.slice(0, 100)}`];
       // Hard floor of 3 — pad with the default if model returned fewer.
       while (criteria.length < 3) {
         criteria.push(`Open success criterion ${criteria.length + 1} (not specified by user)`);
@@ -372,5 +391,12 @@ async function* synthesizeSpec(
     // Fall through to default
   }
 
-  return { problemStatement: topic, constraints: [], successCriteria: [`Address: ${topic.slice(0, 100)}`], scope: "", rawQA: qa, resolved };
+  return {
+    problemStatement: topic,
+    constraints: [],
+    successCriteria: [`Address: ${topic.slice(0, 100)}`],
+    scope: "",
+    rawQA: qa,
+    resolved,
+  };
 }

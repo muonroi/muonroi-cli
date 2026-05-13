@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { reserveForProduct } from "../cost-scoper.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as ledger from "../../usage/ledger.js";
 import * as productLedger from "../../usage/product-ledger.js";
 import { CapBreachError } from "../../usage/types.js";
+import { reserveForProduct } from "../cost-scoper.js";
 
 const TEST_HOME = path.join(os.tmpdir(), `muonroi-test-${Math.random().toString(36).slice(2)}`);
 
@@ -28,14 +28,14 @@ describe("cost-scoper", () => {
       projected_usd: 0.05,
       est_input_tokens: 100,
       est_output_tokens: 100,
-      createdAtMs: Date.now()
+      createdAtMs: Date.now(),
     });
 
     const result = await reserveForProduct(
       { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 100, estOutputTokens: 100 },
       "run-1",
       1.0,
-      TEST_HOME
+      TEST_HOME,
     );
 
     expect(result).not.toBeInstanceOf(CapBreachError);
@@ -53,7 +53,7 @@ describe("cost-scoper", () => {
       { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 10000, estOutputTokens: 10000 },
       "run-1",
       1.0,
-      TEST_HOME
+      TEST_HOME,
     );
 
     expect(result instanceof CapBreachError || (result as any).name === "CapBreachError").toBe(true);
@@ -68,7 +68,7 @@ describe("cost-scoper", () => {
       { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 100, estOutputTokens: 100 },
       "run-1",
       1.0,
-      TEST_HOME
+      TEST_HOME,
     );
 
     expect(result instanceof CapBreachError || (result as any).name === "CapBreachError").toBe(true);

@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type McpKeyId, setMcpKey } from "../mcp/mcp-keychain.js";
 import {
   deleteKeyForProvider,
   KEYCHAIN_PROVIDER_IDS,
@@ -24,7 +25,6 @@ import {
   setKeyForProvider,
 } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
-import { setMcpKey, type McpKeyId } from "../mcp/mcp-keychain.js";
 
 const MCP_KEY_IDS: readonly McpKeyId[] = ["tavily"];
 
@@ -240,9 +240,7 @@ export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void>
     process.exit(2);
   }
 
-  const requested = opts.providers && opts.providers.length > 0
-    ? opts.providers
-    : KEYCHAIN_PROVIDER_IDS.slice();
+  const requested = opts.providers && opts.providers.length > 0 ? opts.providers : KEYCHAIN_PROVIDER_IDS.slice();
   const prefix = opts.itemPrefix ?? "muonroi-cli/";
 
   let imported = 0;

@@ -303,7 +303,14 @@ export async function* runDebate(
       startedAt: p0Start,
       detail: `via ${researchCandidate.model}`,
     });
-    yield { type: "content", content: `\n### Research findings\n${researchFindings}\n` };
+    yield {
+      type: "council_message" as const,
+      councilMessage: {
+        kind: "research" as const,
+        speaker: { role: researchCandidate.role, model: researchCandidate.model },
+        text: researchFindings ?? "",
+      },
+    };
   }
 
   const enrichedContext = researchFindings
@@ -626,7 +633,7 @@ export async function* runDebate(
       },
     );
 
-    yield { type: "content", content: `\n## Discussion Round ${round}\n` };
+    yield { type: "content", content: `\n── Round ${round} ──\n` };
     // Track failures so the circuit breaker can fire after this round.
     let failedPairCount = 0;
     for (const pr of pairResults) {
@@ -677,22 +684,19 @@ export async function* runDebate(
             content: `\n>  ⨯  **${speakerName}** → ${partnerName} _(skipped: ${reason})_\n`,
           };
         } else {
-          // Structured per-turn card so the debate is scannable instead of an
-          // unbroken wall of free-form markdown. Layout:
-          //   ─────────────  Round N · Speaker → Partner  ─────────────
-          //   <body>
-          //                    ↳ tools: bash, grep
-          const toolList = chunk.toolCalls?.length ? chunk.toolCalls.map((t) => t.toolName).join(", ") : null;
-          const charCount = chunk.text.trim().length;
-          const wordCount = chunk.text.trim().split(/\s+/).filter(Boolean).length;
-          const stats = `${wordCount} words · ${charCount} chars`;
-          const separator = "─".repeat(2);
-          const turnHeader = `${separator}  Round ${round} · **${speakerName}** → ${partnerName}  ${separator}`;
-          yield { type: "content", content: `\n${turnHeader}\n\n${chunk.text.trim()}\n` };
-          const footerBits: string[] = [stats];
-          if (toolList) footerBits.push(`tools: \`${toolList}\``);
-          if (chunk.attempts && chunk.attempts > 1) footerBits.push(`recovered on retry`);
-          yield { type: "content", content: `\n>    ↳ ${footerBits.join(" · ")}\n` };
+          const modelId = active.find((a) => (a.stance?.name ?? a.role) === speakerName)?.model ?? "";
+          yield {
+            type: "council_message" as const,
+            councilMessage: {
+              kind: "debate" as const,
+              speaker: { role: speakerName, model: modelId },
+              partner: { role: partnerName },
+              round,
+              text: chunk.text.trim(),
+              toolCalls: chunk.toolCalls?.map((t) => ({ name: t.toolName })),
+              attempts: chunk.attempts,
+            },
+          };
         }
         for (const trace of chunk.traces ?? []) {
           yield { type: "council_status" as const, content: trace };
@@ -790,8 +794,13 @@ export async function* runDebate(
         detail: `${metCount}/${total} criteria met · ${evaluation.reason.slice(0, 80)}`,
       });
       yield {
-        type: "content",
-        content: `\n> **Leader evaluation:** ${metCount}/${total} criteria met — ${evaluation.reason}\n`,
+        type: "council_message" as const,
+        councilMessage: {
+          kind: "leader" as const,
+          speaker: { role: "Leader", model: leaderModelId },
+          round,
+          text: `${metCount}/${total} criteria met — ${evaluation.reason}`,
+        },
       };
 
       if (evaluation.needsResearch && evaluation.researchQuery) {

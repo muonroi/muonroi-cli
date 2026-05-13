@@ -41,7 +41,9 @@ describe("matchRegex", () => {
   });
 
   it('returns tier "abstain" for long complex input', () => {
-    const result = matchRegex("I need you to analyze the distributed system architecture across all microservices and identify race conditions in the payment processing pipeline");
+    const result = matchRegex(
+      "I need you to analyze the distributed system architecture across all microservices and identify race conditions in the payment processing pipeline",
+    );
     expect(result.tier).toBe("abstain");
   });
 });

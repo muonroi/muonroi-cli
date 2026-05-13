@@ -7,7 +7,7 @@
  * 3. stats.calls > 0 after a full run (accounting not broken)
  * 4. synthesis contains evidence signals from research output
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { appendSystemMessage } from "../../storage/index.js";
 
 // ── Module-level mocks — declared before any dynamic import ─────────────────
@@ -58,9 +58,7 @@ vi.mock("../debate-planner.js", () => ({
       ],
       outputShape: {
         kind: "evaluation",
-        sections: [
-          { key: "findings", heading: "Findings", prompt: "List key findings", shape: "list" },
-        ],
+        sections: [{ key: "findings", heading: "Findings", prompt: "List key findings", shape: "list" }],
         guardrails: [],
       },
     };
@@ -92,7 +90,8 @@ vi.mock("../../utils/settings.js", async (importOriginal) => {
 
 const SYNTHESIS_JSON = JSON.stringify({
   type: "evaluation",
-  summary: "Council found strong evidence from docs/Council.md, tavily research, and snapshot:pw-001 of localhost:3010.",
+  summary:
+    "Council found strong evidence from docs/Council.md, tavily research, and snapshot:pw-001 of localhost:3010.",
   findings: [
     "docs/Council.md:42 shows the flow",
     "tavily found https://tavily.example.com/results",
@@ -142,11 +141,9 @@ describe("audit-replay", () => {
 
   beforeEach(() => {
     capturedMessages = [];
-    (appendSystemMessage as ReturnType<typeof vi.fn>).mockImplementation(
-      (sessionId: string, content: string) => {
-        capturedMessages.push({ sessionId, content });
-      },
-    );
+    (appendSystemMessage as ReturnType<typeof vi.fn>).mockImplementation((sessionId: string, content: string) => {
+      capturedMessages.push({ sessionId, content });
+    });
   });
 
   it("persists [Council Memory] after a full run", async () => {
@@ -173,9 +170,7 @@ describe("audit-replay", () => {
 
     await drainCouncil(gen);
 
-    const councilMemoryMessages = capturedMessages.filter((m) =>
-      m.content.startsWith("[Council Memory]"),
-    );
+    const councilMemoryMessages = capturedMessages.filter((m) => m.content.startsWith("[Council Memory]"));
     expect(councilMemoryMessages).toHaveLength(1);
     expect(councilMemoryMessages[0].sessionId).toBe("test-session-001");
   });

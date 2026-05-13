@@ -16,8 +16,8 @@
  * caller explicitly awaits the returned Promise.
  */
 
-import type { Scope } from "./types.js";
 import type { CouncilJudgeResult } from "./judge.js";
+import type { Scope } from "./types.js";
 
 export type PhaseOutcomeKind = "pass" | "fail" | "abandoned" | "aborted" | "resumed";
 
@@ -112,10 +112,7 @@ export async function firePhaseOutcome(
 }
 
 /** Fire-and-forget wrapper that never throws. */
-export function fireAndForgetPhaseOutcome(
-  payload: PhaseOutcomePayload,
-  opts: FirePhaseOutcomeOpts = {},
-): void {
+export function fireAndForgetPhaseOutcome(payload: PhaseOutcomePayload, opts: FirePhaseOutcomeOpts = {}): void {
   void firePhaseOutcome(payload, opts).catch(() => {
     /* swallow */
   });
@@ -145,9 +142,7 @@ export function recordCouncilOutcome(
   opts: RecordCouncilOutcomeOpts = {},
 ): void {
   const outcomeKind: PhaseOutcomeKind =
-    verdict.verdict === "pass" ? "pass"
-    : verdict.verdict === "needs_review" ? "fail"
-    : "abandoned";
+    verdict.verdict === "pass" ? "pass" : verdict.verdict === "needs_review" ? "fail" : "abandoned";
 
   const payload: PhaseOutcomePayload = {
     sessionId: opts.sessionId ?? "council",
@@ -161,6 +156,7 @@ export function recordCouncilOutcome(
     },
   };
 
-  void firePhaseOutcome(payload, { baseUrl: opts.baseUrl, authToken: opts.authToken })
-    .catch(() => { /* swallow — non-critical */ });
+  void firePhaseOutcome(payload, { baseUrl: opts.baseUrl, authToken: opts.authToken }).catch(() => {
+    /* swallow — non-critical */
+  });
 }

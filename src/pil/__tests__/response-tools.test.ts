@@ -9,8 +9,8 @@ import {
   getResponseTaskType,
   isResponseTool,
   PlanSchema,
-  RefactorSchema,
   RESPONSE_TOOL_PREFIX,
+  RefactorSchema,
 } from "../response-tools";
 
 describe("isResponseTool", () => {
@@ -54,8 +54,17 @@ describe("buildResponseTools", () => {
 
   it("execute returns input unchanged", async () => {
     const tools = buildResponseTools("debug");
-    const input = { hypothesis: "test", root_cause: "bug", fix: { file: "a.ts", diff: "+" }, verify_command: "npm test" };
-    const result = await tools.respond_debug.execute!(input, { toolCallId: "1", messages: [], abortSignal: new AbortController().signal });
+    const input = {
+      hypothesis: "test",
+      root_cause: "bug",
+      fix: { file: "a.ts", diff: "+" },
+      verify_command: "npm test",
+    };
+    const result = await tools.respond_debug.execute!(input, {
+      toolCallId: "1",
+      messages: [],
+      abortSignal: new AbortController().signal,
+    });
     expect(result).toEqual(input);
   });
 

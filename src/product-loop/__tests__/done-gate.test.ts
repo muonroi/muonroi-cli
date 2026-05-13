@@ -1,7 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ToolResult } from "../../types/index.js";
 import { evaluateDoneGate } from "../done-gate.js";
 import type { DoneGateContext, RoleSlot } from "../types.js";
-import type { ToolResult } from "../../types/index.js";
 import { VERIFY_PASS_MARKER } from "../verify-result.js";
 
 describe("evaluateDoneGate", () => {
@@ -29,9 +29,7 @@ describe("evaluateDoneGate", () => {
         success: true,
         output: VERIFY_PASS_MARKER,
       } as ToolResult,
-      criteria: [
-        { id: "feat-1", status: "met", evidence: "src/feat1.ts:10" },
-      ],
+      criteria: [{ id: "feat-1", status: "met", evidence: "src/feat1.ts:10" }],
       history: [],
       roleAssignments,
       llm: mockLlm,
@@ -79,9 +77,7 @@ describe("evaluateDoneGate", () => {
   });
 
   it("fails Cond #3: weighted_score (below threshold)", async () => {
-    ctx.criteria = [
-      { id: "feat-1", status: "partial", evidence: "src/feat1.ts:10" },
-    ]; // score 0.5
+    ctx.criteria = [{ id: "feat-1", status: "partial", evidence: "src/feat1.ts:10" }]; // score 0.5
     const verdict = await evaluateDoneGate(ctx);
     expect(verdict.pass).toBe(false);
     expect(verdict.failedCondition).toBe("weighted_score");
@@ -125,12 +121,12 @@ describe("evaluateDoneGate", () => {
       { id: "f6", status: "partial", evidence: "f.ts:6" }, // score = 5.5 / 6 = 0.916
     ];
     ctx.doneThreshold = 0.7; // Lower threshold to pass Cond #3
-    
+
     // Now make it < 0.85
     ctx.criteria.push({ id: "f7", status: "unmet" }); // score = 5.5 / 7 = 0.785
-    
+
     ctx.roleAssignments.set("Customer", { modelId: "gpt-4", provider: "openai", tier: "pro" }); // echo_chamber if debate runs
-    
+
     const verdict = await evaluateDoneGate(ctx);
     expect(verdict.pass).toBe(true); // Should pass because debate is skipped (score 0.785 < 0.85)
   });

@@ -1,5 +1,5 @@
-import { detectProviderForModel } from "../providers/runtime.js";
 import { lookupPricing } from "../providers/pricing.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import { projectCostUSDWithCache } from "../usage/estimator.js";
 
 /**
@@ -82,13 +82,7 @@ export function previewRunCost(args: {
   const inputHit = Math.round(inputPerSprint * hitRate);
   const inputMiss = inputPerSprint - inputHit;
 
-  const estPerSprintUsd = projectCostUSDWithCache(
-    provider,
-    args.sessionModelId,
-    inputMiss,
-    inputHit,
-    outputPerSprint,
-  );
+  const estPerSprintUsd = projectCostUSDWithCache(provider, args.sessionModelId, inputMiss, inputHit, outputPerSprint);
   const estTotalUsd = estPerSprintUsd * args.maxSprints;
   const willExceedCap = estTotalUsd > args.capUsd;
   const recommendedMaxSprints =

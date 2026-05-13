@@ -13,10 +13,8 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "filesystem",
     name: "Filesystem",
-    description:
-      "Read/write access to the local filesystem with safety controls.",
-    directoryUrl:
-      "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
+    description: "Read/write access to the local filesystem with safety controls.",
+    directoryUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem",
     sourceUrl: "https://github.com/modelcontextprotocol/servers",
     starterTransport: "stdio",
   },
@@ -32,8 +30,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
     id: "memory",
     name: "Memory",
     description: "Persistent knowledge graph memory for context recall.",
-    directoryUrl:
-      "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
+    directoryUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/memory",
     sourceUrl: "https://github.com/modelcontextprotocol/servers",
     starterTransport: "stdio",
   },
@@ -42,8 +39,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
     name: "GitHub",
     description: "Integration with GitHub issues and related workflows.",
     directoryUrl: "https://cursor.directory/plugins/mcp-github",
-    sourceUrl:
-      "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+    sourceUrl: "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
     starterTransport: "stdio",
   },
   {
@@ -73,8 +69,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "notion",
     name: "Notion",
-    description:
-      "Databases, pages, blocks, and search inside Notion workspaces.",
+    description: "Databases, pages, blocks, and search inside Notion workspaces.",
     directoryUrl: "https://cursor.directory/plugins/mcp-notion",
   },
   {
@@ -86,8 +81,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "sentry",
     name: "Sentry",
-    description:
-      "Issue analysis and debugging workflows for Sentry projects.",
+    description: "Issue analysis and debugging workflows for Sentry projects.",
     directoryUrl: "https://cursor.directory/plugins/mcp-sentry",
   },
   {
@@ -99,8 +93,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "context7",
     name: "Context7 (Library Docs)",
-    description:
-      "Version-pinned, chunked library documentation for Claude/Gemini/Codex-style coding agents.",
+    description: "Version-pinned, chunked library documentation for Claude/Gemini/Codex-style coding agents.",
     directoryUrl: "https://context7.com",
     sourceUrl: "https://github.com/upstash/context7",
     starterTransport: "http",
@@ -108,8 +101,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "fetch",
     name: "Fetch (URL → markdown)",
-    description:
-      "Fetches a URL and converts HTML to markdown for the agent to read.",
+    description: "Fetches a URL and converts HTML to markdown for the agent to read.",
     directoryUrl: "https://www.npmjs.com/package/mcp-fetch-server",
     sourceUrl: "https://www.npmjs.com/package/mcp-fetch-server",
     starterTransport: "stdio",
@@ -117,8 +109,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "tavily",
     name: "Tavily Web Search",
-    description:
-      "LLM-tuned web search with answer summaries and rerank. Free tier 1k/month. Requires TAVILY_API_KEY.",
+    description: "LLM-tuned web search with answer summaries and rerank. Free tier 1k/month. Requires TAVILY_API_KEY.",
     directoryUrl: "https://tavily.com",
     sourceUrl: "https://github.com/tavily-ai/tavily-mcp",
     starterTransport: "stdio",
@@ -145,8 +136,7 @@ export const POPULAR_MCP_CATALOG: McpCatalogEntry[] = [
   {
     id: "mongodb",
     name: "MongoDB",
-    description:
-      "Read-only exploration, queries, and aggregation for MongoDB.",
+    description: "Read-only exploration, queries, and aggregation for MongoDB.",
     directoryUrl: "https://cursor.directory/plugins/mcp-mongodb",
   },
   {

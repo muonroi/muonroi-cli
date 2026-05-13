@@ -106,6 +106,21 @@ function getContent(chunks: StreamChunk[]): string {
         const legacy = KIND_TO_LEGACY_PHASE[p.kind] ?? "";
         return `\n${[legacy, p.label, p.detail].filter(Boolean).join(" ")}\n`;
       }
+      // Bubble-UI migration: debate/leader/research/synthesis turns moved
+      // from inline `content` chunks to typed `council_message` events.
+      // Flatten the visible body (and a kind tag) so legacy assertions on
+      // the rendered haystack still work without coupling to the transport.
+      if (c.type === "council_message" && c.councilMessage) {
+        const cm = c.councilMessage;
+        const KIND_TAG: Record<string, string> = {
+          debate: `Discussion Round ${cm.round ?? ""}`,
+          leader: "Leader evaluation",
+          research: "Research findings",
+          synthesis: "Synthesis",
+        };
+        const tag = KIND_TAG[cm.kind] ?? cm.kind;
+        return `\n${tag}\n${cm.text}\n`;
+      }
       return "";
     })
     .join("");

@@ -9,8 +9,8 @@
  * EE mode: thin-client only. Fat-mode is OUT OF SCOPE for v1.6.
  */
 
-import { searchByText } from "./bridge.js";
 import type { EEPoint } from "./bridge.js";
+import { searchByText } from "./bridge.js";
 
 // Hard cap for council critical path (CONTEXT.md: 1.5s hard cap, pre-fetch parallel with clarifier)
 const COUNCIL_EE_TIMEOUT_MS = 1500;
@@ -52,17 +52,10 @@ export async function queryExperience(
 
   // Use the shorter of: caller signal or 1.5s hard cap
   const timeoutSignal = AbortSignal.timeout(COUNCIL_EE_TIMEOUT_MS);
-  const effectiveSignal = signal
-    ? AbortSignal.any([signal, timeoutSignal])
-    : timeoutSignal;
+  const effectiveSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
   try {
-    const points = await searchByText(
-      query,
-      COUNCIL_SEARCH_COLLECTIONS,
-      COUNCIL_SEARCH_TOP_K,
-      effectiveSignal,
-    );
+    const points = await searchByText(query, COUNCIL_SEARCH_COLLECTIONS, COUNCIL_SEARCH_TOP_K, effectiveSignal);
 
     const kept = points.filter((p) => (p.score ?? 0) >= COUNCIL_SCORE_FLOOR);
 

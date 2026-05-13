@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tmpHome = path.join(os.tmpdir(), `muonroi-cli-auto-setup-${process.pid}`);
 
@@ -59,7 +59,14 @@ describe("ensureDefaultMcpServers — research servers", () => {
       JSON.stringify({
         mcp: {
           servers: [
-            { id: "tavily", label: "Tavily Web Search", enabled: true, transport: "stdio", command: "npx", args: ["-y", "tavily-mcp"] },
+            {
+              id: "tavily",
+              label: "Tavily Web Search",
+              enabled: true,
+              transport: "stdio",
+              command: "npx",
+              args: ["-y", "tavily-mcp"],
+            },
           ],
         },
       }),

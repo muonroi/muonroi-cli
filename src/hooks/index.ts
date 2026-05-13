@@ -36,15 +36,15 @@ export type {
 export { getMatchQuery, HOOK_EVENTS, isHookEvent } from "./types.js";
 
 import { interceptWithDefaults } from "../ee/intercept.js";
-import { getRenderSink, setRenderSink } from "../ee/render.js";
-import { getTenantId } from "../ee/tenant.js";
-import { judge, type JudgeContext } from "../ee/judge.js";
+import { type JudgeContext, judge } from "../ee/judge.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
 import * as phaseTracker from "../ee/phase-tracker.js";
 import { posttool } from "../ee/posttool.js";
 import { reconcilePromptStale } from "../ee/prompt-stale.js";
+import { getRenderSink, setRenderSink } from "../ee/render.js";
 import { buildScope } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
+import { getTenantId } from "../ee/tenant.js";
 import type { InterceptResponse, PostToolOutcome, Scope } from "../ee/types.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import type {
@@ -101,7 +101,7 @@ export async function executeEventHooks(
       const capturedWarnings: string[] = [];
       const originalSink = getRenderSink();
       setRenderSink((chunk) => {
-        capturedWarnings.push(typeof chunk === "string" ? chunk : (chunk as { content?: string }).content ?? "");
+        capturedWarnings.push(typeof chunk === "string" ? chunk : ((chunk as { content?: string }).content ?? ""));
       });
       let r: Awaited<ReturnType<typeof interceptWithDefaults>>;
       try {
@@ -124,7 +124,9 @@ export async function executeEventHooks(
           .map((m) => ({ collection: m.collection ?? "", pointId: m.principle_uuid }))
           .filter((ref) => ref.collection && ref.pointId);
         if (refs.length > 0) phaseTracker.recordIntercept(refs);
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       // P0 native observation: record into mistake-detector ring buffer,
       // then check for file-revert against the prior batch (across-turn
@@ -160,7 +162,9 @@ export async function executeEventHooks(
             );
           }
         }
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       // P0 trajectory log — append-only, fire-and-forget.
       const sid = preInput.session_id;
@@ -194,9 +198,7 @@ export async function executeEventHooks(
           // r.decision can be empty when the server short-circuits (budget cap,
           // read-only fast-path, missing embedding). Use a stable fallback so
           // analytics queries can group these without losing rows.
-          const subtype = (typeof r.decision === "string" && r.decision.trim().length > 0)
-            ? r.decision
-            : "no-decision";
+          const subtype = typeof r.decision === "string" && r.decision.trim().length > 0 ? r.decision : "no-decision";
           logInteraction(sid, "ee_intercept", {
             eventSubtype: subtype,
             data: {
@@ -216,7 +218,9 @@ export async function executeEventHooks(
             },
           });
         }
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       const eeMatches = (r.matches ?? []).map((m) => ({
         id: m.principle_uuid,
@@ -265,7 +269,9 @@ export async function executeEventHooks(
             evidence: retry.evidence,
           };
         }
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       const richOutcome: PostToolOutcome = {
         success: true,
@@ -309,13 +315,16 @@ export async function executeEventHooks(
               noise_analysis: hadWarnings
                 ? {
                     all_low_confidence: matches.every((m) => m.confidence < 0.5),
-                    forced_feedback_on_noise: matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                    forced_feedback_on_noise:
+                      matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
                   }
                 : null,
             },
           });
         }
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
@@ -351,7 +360,9 @@ export async function executeEventHooks(
           success: true,
           ...(richOutcome.verifyResult ? { verifyResult: richOutcome.verifyResult } : {}),
         });
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();
@@ -364,7 +375,9 @@ export async function executeEventHooks(
       // P0 native observation: mark detector entry as failure (no retry detection on failure).
       try {
         getMistakeDetector().recordPostTool(failInput.tool_name, false);
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       const failOutcome: PostToolOutcome = {
         success: false,
@@ -399,19 +412,20 @@ export async function executeEventHooks(
               cwdMatched: judgeCtx.cwdMatchedAtPretool,
               outcomeSuccess: false,
               errorPreview: failInput.error?.slice(0, 120) ?? null,
-              agent_response_to_ee: hadWarnings
-                ? "tool_failed_after_warning"
-                : "tool_failed_no_warning",
+              agent_response_to_ee: hadWarnings ? "tool_failed_after_warning" : "tool_failed_no_warning",
               noise_analysis: hadWarnings
                 ? {
                     all_low_confidence: matches.every((m) => m.confidence < 0.5),
-                    forced_feedback_on_noise: matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                    forced_feedback_on_noise:
+                      matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
                   }
                 : null,
             },
           });
         }
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
 
       _lastWarningResponse = null; // reset after use — prevents cross-turn contamination
       await posttool(
@@ -446,7 +460,9 @@ export async function executeEventHooks(
           success: false,
           ...(failOutcome.verifyResult ? { verifyResult: failOutcome.verifyResult } : {}),
         });
-      } catch { /* fail-open */ }
+      } catch {
+        /* fail-open */
+      }
       // STALE-02/STALE-03: fire-and-forget per-turn prompt-stale reconciliation
       reconcilePromptStale(cwd); // void — does not block (B-4)
       return emptyResult();

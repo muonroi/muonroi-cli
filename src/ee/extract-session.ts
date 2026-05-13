@@ -62,7 +62,9 @@ export async function extractSession(
     );
 
     // Trigger evolve after successful extraction — fire-and-forget
-    getDefaultEEClient().evolve("post-extract").catch(() => {});
+    getDefaultEEClient()
+      .evolve("post-extract")
+      .catch(() => {});
   } catch {
     // D-05: swallow all errors silently
   }

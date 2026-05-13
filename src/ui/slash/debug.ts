@@ -16,7 +16,7 @@ import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
 let debugEnabled = false;
-let turnTraces: TurnTrace[] = [];
+const turnTraces: TurnTrace[] = [];
 
 export interface PipelineStep {
   name: string;
@@ -78,11 +78,11 @@ function formatTrace(trace: TurnTrace): string {
   }
 
   lines.push("│");
-  const routeLabel = trace.routed
-    ? `${trace.model_requested} → ${trace.model_used} (routed)`
-    : trace.model_used;
+  const routeLabel = trace.routed ? `${trace.model_requested} → ${trace.model_used} (routed)` : trace.model_used;
   lines.push(`│ Model: ${routeLabel}`);
-  lines.push(`│ Tokens: ↑${trace.input_tokens} ↓${trace.output_tokens}${trace.cache_read_tokens ? ` ⊚${trace.cache_read_tokens}` : ""} | Cost: $${trace.cost_usd.toFixed(4)}`);
+  lines.push(
+    `│ Tokens: ↑${trace.input_tokens} ↓${trace.output_tokens}${trace.cache_read_tokens ? ` ⊚${trace.cache_read_tokens}` : ""} | Cost: $${trace.cost_usd.toFixed(4)}`,
+  );
 
   const s = trace.estimated_savings;
   if (s.total_tokens_saved > 0 || s.total_cost_saved_usd > 0) {

@@ -13,7 +13,7 @@
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
 import { isUnifiedPilEnabled } from "./config.js";
-import type { BrainData, OutputStyle, PipelineContext, TaskType } from "./types.js";
+import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 // Maps every classifier reason string to a TaskType (or null for non-coding signals).
 const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
@@ -150,12 +150,24 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
   try {
     // Pass 1: local classifier.
     const result = classify(ctx.raw);
-    let taskType: TaskType | null = REASON_TO_TASK_TYPE[result.reason] ?? null;
+    const pass1TaskType: TaskType | null = REASON_TO_TASK_TYPE[result.reason] ?? null;
+    let taskType: TaskType | null = pass1TaskType;
     let confidence = result.confidence;
     const domain = extractDomain(result.reason, ctx.raw);
     let outputStyle: OutputStyle | null = null;
     let intentKind: "task" | "chitchat" | null = null;
     let brainData: BrainData | null = null;
+    // Step-by-step trace — populated as each pass runs so cost reports can
+    // attribute which pass actually decided the outcome.
+    let pass2Pattern: string | undefined;
+    let pass2Hit = false;
+    let pass25ChitchatHit = false;
+    let pass3UnifiedSucceeded = false;
+    let pass3LegacyTaskAttempted = false;
+    let pass3LegacyTaskSucceeded = false;
+    let pass3LegacyStyleAttempted = false;
+    let pass3LegacyStyleSucceeded = false;
+    let styleSource: IntentDetectionTrace["styleSource"] = "none";
 
     // Pass 2: keyword fallback. Runs when classifier abstains OR when the
     // classifier match was a low-signal "general" (regex:short-message).
@@ -165,6 +177,8 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
         if (pattern.test(ctx.raw)) {
           taskType = kwType;
           confidence = kwConf;
+          pass2Hit = true;
+          pass2Pattern = pattern.source;
           break;
         }
       }
@@ -186,6 +200,8 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       confidence = 0.5;
       intentKind = "chitchat";
       outputStyle = "concise";
+      pass25ChitchatHit = true;
+      styleSource = "chitchat-default";
     }
 
     // Pass 3 UNIFIED: single /api/pil-context call replaces the multi-call
@@ -205,7 +221,10 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
       if (resp) {
         if (resp.taskType) taskType = resp.taskType;
         if (resp.intentKind) intentKind = resp.intentKind;
-        if (resp.outputStyle) outputStyle = resp.outputStyle;
+        if (resp.outputStyle) {
+          outputStyle = resp.outputStyle;
+          styleSource = "brain-unified";
+        }
         if (resp.confidence) confidence = resp.confidence;
         brainData = {
           t0_principles: resp.t0_principles,
@@ -213,17 +232,24 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
           t2_patterns: resp.t2_patterns,
           retrieval_skipped_reason: resp.retrieval_skipped_reason,
         };
+        pass3UnifiedSucceeded = true;
       } else {
         unifiedFailed = true;
       }
     }
 
-    // Pass 3 LEGACY FALLBACK: only runs when flag off OR unified call failed.
-    // Preserves the pre-unified behaviour (classifier rescue via brain LLM +
-    // regex style detection safety net) so dual-run and feature-disabled paths
-    // stay identical to the prior release.
-    if (!isUnifiedPilEnabled() || unifiedFailed) {
+    // Pass 3 LEGACY FALLBACK: only runs when flag off.
+    // Cost optimization: when unified call FAILED, we skip the legacy brain
+    // round-trips entirely. The unified pilContext already tried the same
+    // backend; a second classifyViaBrain ~1.5s after a failure almost always
+    // fails too, wasting tokens and ~2.3s of wall time. The cheap regex style
+    // detector still runs below to recover explicit "ngắn gọn"/"detailed" cues.
+    const runLegacyBrain = !isUnifiedPilEnabled();
+    let legacyBrainAttempted = false;
+    if (runLegacyBrain) {
       if (taskType === null) {
+        legacyBrainAttempted = true;
+        pass3LegacyTaskAttempted = true;
         const brainRaw = await classifyViaBrain(
           `You are a multilingual prompt classifier. The user's prompt may be in English, Vietnamese, or a mix of both.
 Classify the prompt's INTENT (not its language). Reply with TWO lowercase words separated by a comma: <category>,<style>
@@ -250,6 +276,7 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
           1500,
         );
         if (brainRaw) {
+          pass3LegacyTaskSucceeded = true;
           const lower = brainRaw.toLowerCase();
           const matched = VALID_TASK_TYPES.find((t) => lower.includes(t));
           if (matched) {
@@ -260,40 +287,109 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
             taskType = "general";
             confidence = 0.6;
             intentKind = "chitchat";
-            if (outputStyle === null) outputStyle = "concise";
+            if (outputStyle === null) {
+              outputStyle = "concise";
+              styleSource = "chitchat-default";
+            }
           }
           const styleMatched = VALID_STYLES.find((s) => lower.includes(s));
-          if (styleMatched) outputStyle = styleMatched;
+          if (styleMatched) {
+            outputStyle = styleMatched;
+            styleSource = "brain-legacy";
+          }
         }
       }
 
-      // Pass 3.5 legacy: regex style check BEFORE the brain round-trip. If
-      // the user explicitly wrote "ngắn gọn", "concise", "chi tiết", etc. in
-      // the prompt, we can skip the 800ms Pass 3b call entirely — regex is free.
+      // Pass 3b legacy: brain-only style detection when classifier gave a
+      // taskType AND regex found no explicit style signal. Regex Pass 3.5 (below)
+      // runs FIRST so explicit cues skip this 800ms call.
       if (outputStyle === null) {
-        outputStyle = detectStyleFromText(ctx.raw);
+        const regexStyle = detectStyleFromText(ctx.raw);
+        if (regexStyle) {
+          outputStyle = regexStyle;
+          styleSource = "explicit-regex";
+        }
       }
 
-      // Pass 3b legacy: brain-only style detection when classifier gave a
-      // taskType AND regex found no explicit style signal.
       if (outputStyle === null && taskType !== null) {
-        const brainRaw = await classifyViaBrain(
+        legacyBrainAttempted = true;
+        pass3LegacyStyleAttempted = true;
+        const brainRawStyle = await classifyViaBrain(
           `Detect the user's preferred output style. The prompt may be EN or VN.
 Reply with ONE word: concise (ngắn gọn) | balanced (bình thường) | detailed (chi tiết).
 
 Prompt: "${ctx.raw.slice(0, 300)}"`,
           800,
         );
-        if (brainRaw) {
-          const styleMatched = VALID_STYLES.find((s) => brainRaw.toLowerCase().includes(s));
-          if (styleMatched) outputStyle = styleMatched;
+        if (brainRawStyle) {
+          pass3LegacyStyleSucceeded = true;
+          const styleMatched = VALID_STYLES.find((s) => brainRawStyle.toLowerCase().includes(s));
+          if (styleMatched) {
+            outputStyle = styleMatched;
+            styleSource = "brain-legacy";
+          }
         }
+      }
+    } else if (unifiedFailed && outputStyle === null) {
+      // Cheap rescue path when unified PIL is enabled but its call failed:
+      // run only the free regex style detector. The L6 brain-rescue call is
+      // suppressed below by the `_brainData` sentinel so we don't repeat the
+      // same network round-trip that just timed out.
+      const regexStyle = detectStyleFromText(ctx.raw);
+      if (regexStyle) {
+        outputStyle = regexStyle;
+        styleSource = "explicit-regex";
       }
     }
 
     if (intentKind === null && taskType !== null && taskType !== "general") {
       intentKind = "task";
     }
+
+    // L6 brain-rescue suppression sentinel. L6 only checks truthiness of
+    // _brainData to decide whether to spend another 50ms brain round-trip on
+    // style detection. If we either (a) succeeded with unified pilContext,
+    // (b) failed unified (network already down), or (c) attempted a legacy
+    // brain call here, then L6 has nothing new to learn — set a sentinel.
+    const brainDataOut: BrainData | null =
+      brainData ??
+      (unifiedFailed || legacyBrainAttempted
+        ? {
+            t0_principles: [],
+            t1_rules: [],
+            t2_patterns: [],
+            retrieval_skipped_reason: unifiedFailed ? "unified-failed" : "legacy-attempted",
+          }
+        : null);
+
+    // pass1Hit = Pass 1 alone decided the final outcome (no later pass overrode).
+    // Note: chitchat short-circuit overrides Pass 1, so we exclude that case.
+    const pass1Hit =
+      pass1TaskType !== null &&
+      taskType === pass1TaskType &&
+      !pass2Hit &&
+      !pass25ChitchatHit &&
+      !pass3UnifiedSucceeded &&
+      !pass3LegacyTaskSucceeded;
+
+    const intentTrace: IntentDetectionTrace = {
+      pass1Reason: result.reason,
+      pass1Confidence: result.confidence,
+      pass1TaskType,
+      pass1Hit,
+      pass2Hit,
+      pass2Pattern,
+      pass25ChitchatHit,
+      pass3UnifiedAttempted: needsBrain,
+      pass3UnifiedSucceeded,
+      pass3LegacyTaskAttempted,
+      pass3LegacyTaskSucceeded,
+      pass3LegacyStyleAttempted,
+      pass3LegacyStyleSucceeded,
+      styleSource,
+      finalTaskType: taskType,
+      finalConfidence: confidence,
+    };
 
     return {
       ...ctx,
@@ -302,7 +398,8 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
       confidence,
       outputStyle,
       intentKind,
-      _brainData: brainData,
+      _brainData: brainDataOut,
+      _intentTrace: intentTrace,
       layers: [
         ...ctx.layers,
         {
@@ -311,7 +408,9 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
           delta:
             taskType !== null
               ? `taskType=${taskType},kind=${intentKind ?? "unknown"},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},unified=${brainData ? "ok" : unifiedFailed ? "fail" : "skip"}`
-              : null,
+              : unifiedFailed
+                ? `taskType=null,unified=fail`
+                : null,
         },
       ],
     };

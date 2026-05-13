@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock dependencies before importing the module under test
 vi.mock("../router/classifier/index.js", () => ({
@@ -9,9 +9,9 @@ vi.mock("../ee/bridge.js", () => ({
   classifyViaBrain: vi.fn(),
 }));
 
-import { layer1Intent } from "./layer1-intent";
-import { classify } from "../router/classifier/index.js";
 import { classifyViaBrain } from "../ee/bridge.js";
+import { classify } from "../router/classifier/index.js";
+import { layer1Intent } from "./layer1-intent";
 import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);

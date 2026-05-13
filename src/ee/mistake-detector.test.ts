@@ -1,5 +1,5 @@
-import { describe, expect, it, beforeEach } from "vitest";
-import { MistakeDetector, _internals } from "./mistake-detector.js";
+import { beforeEach, describe, expect, it } from "vitest";
+import { _internals, MistakeDetector } from "./mistake-detector.js";
 
 describe("mistake-detector / tokenize + jaccard", () => {
   it("tokenizes JSON tool input into normalized tokens", () => {
@@ -32,15 +32,11 @@ describe("mistake-detector / path extraction", () => {
   });
 
   it("extracts path from MCP edit_file tool input", () => {
-    expect(_internals.extractFilePath("mcp__filesystem__edit_file", { path: "src/foo.ts" })).toBe(
-      "src/foo.ts",
-    );
+    expect(_internals.extractFilePath("mcp__filesystem__edit_file", { path: "src/foo.ts" })).toBe("src/foo.ts");
   });
 
   it("extracts path from lowercase write_file tool input", () => {
-    expect(_internals.extractFilePath("write_file", { path: "src/foo.ts", content: "x" })).toBe(
-      "src/foo.ts",
-    );
+    expect(_internals.extractFilePath("write_file", { path: "src/foo.ts", content: "x" })).toBe("src/foo.ts");
   });
 
   it("returns null for non-edit tools", () => {
@@ -49,9 +45,7 @@ describe("mistake-detector / path extraction", () => {
   });
 
   it("normalizes Windows drive letters and backslashes", () => {
-    expect(_internals.extractFilePath("Edit", { file_path: "D:\\src\\Foo.ts" })).toBe(
-      "d:/src/Foo.ts",
-    );
+    expect(_internals.extractFilePath("Edit", { file_path: "D:\\src\\Foo.ts" })).toBe("d:/src/Foo.ts");
   });
 
   it("returns null for missing/empty path", () => {

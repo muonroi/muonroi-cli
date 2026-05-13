@@ -1,6 +1,6 @@
-import type { ModelMessage } from "ai";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import type { ModelMessage } from "ai";
 import type { CouncilMemoryRecord } from "./types.js";
 
 interface MessageLike {
@@ -73,8 +73,7 @@ export async function buildProjectSnapshot(cwd: string): Promise<ProjectSnapshot
   } else {
     // Fall back to README first paragraph
     const readme =
-      (await readSafe(path.join(cwd, "README.md"), 1200)) ??
-      (await readSafe(path.join(cwd, "README"), 1200));
+      (await readSafe(path.join(cwd, "README.md"), 1200)) ?? (await readSafe(path.join(cwd, "README"), 1200));
     if (readme) {
       hasReadme = true;
       parts.push(`### README.md (head)\n${readme.trim()}`);
@@ -229,9 +228,7 @@ function formatCouncilMemoryDigest(raw: string): string {
       // Modern entries store `excerpt` (already capped to ~400 chars). Old
       // entries used `position` — keep that fallback so historical records
       // still render correctly when reloaded.
-      const rawText = String(
-        (e as { excerpt?: unknown }).excerpt ?? (e as { position?: unknown }).position ?? "",
-      );
+      const rawText = String((e as { excerpt?: unknown }).excerpt ?? (e as { position?: unknown }).position ?? "");
       const text = rawText.length > 400 ? rawText.slice(0, 400) + "…" : rawText;
       const lengthHint =
         typeof (e as { length?: unknown }).length === "number" && (e as { length: number }).length > rawText.length

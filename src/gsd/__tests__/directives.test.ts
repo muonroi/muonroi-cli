@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildDirective } from "../directives";
 import { scoreComplexity } from "../complexity";
+import { buildDirective } from "../directives";
 import { detectGrayAreas } from "../gray-areas";
 
 describe("buildDirective", () => {

@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { describe, expect, it } from "vitest";
 import type { VerifyRecipe } from "../../types/index.js";
+import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 
 describe("CB-1 Cost Projection", () => {
   it("should calculate projection from baseline when history is empty", () => {

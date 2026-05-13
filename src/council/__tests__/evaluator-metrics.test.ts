@@ -2,7 +2,7 @@
  * CQ-08: LeaderEvaluation evidenceDensity/disagreementResolved fields + <0.3 trigger
  * CQ-10: debate-planner falls back to FALLBACK_PLAN when both generateObject and parsePlan fail
  */
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LeaderEvaluation } from "../types.js";
 
 // ── CQ-08: LeaderEvaluation type accepts new metric fields ───────────────────
@@ -242,13 +242,16 @@ describe("P7: synthesizePlanFromActionItems — heterogeneous input handling", (
         description = step ? `${step}${time}${accept}` : JSON.stringify(o).slice(0, 200);
         agent = owner;
         const deps = o.depends_on;
-        hasDeps = (Array.isArray(deps) && deps.length > 0) || (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
+        hasDeps =
+          (Array.isArray(deps) && deps.length > 0) ||
+          (typeof deps === "string" && deps.trim().length > 0 && deps !== "none");
       } else {
         description = String(raw);
       }
       const inFirstHalf = idx < total / 2;
       const inLastThird = idx >= (total * 2) / 3;
-      const priority: "high" | "medium" | "low" = hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : (inFirstHalf ? "high" : "medium");
+      const priority: "high" | "medium" | "low" =
+        hasDeps || inLastThird ? (inLastThird ? "low" : "medium") : inFirstHalf ? "high" : "medium";
       return { description, agent, priority };
     });
     const complexity: "trivial" | "moderate" | "complex" = total <= 4 ? "trivial" : total <= 9 ? "moderate" : "complex";
@@ -257,9 +260,27 @@ describe("P7: synthesizePlanFromActionItems — heterogeneous input handling", (
 
   it("converts structured action-item objects (session 1a8fb4be3bc3 shape)", () => {
     const items = [
-      { step: "Init scaffold", owner_lens: "Extension Architect", time_estimate: "2h", depends_on: [], acceptance_criteria: "Manifest valid" },
-      { step: "Capture selection", owner_lens: "Integration Engineer", time_estimate: "4h", depends_on: ["Init scaffold"], acceptance_criteria: "Text extracted" },
-      { step: "Tooltip UI", owner_lens: "Integration Engineer", time_estimate: "6h", depends_on: ["Capture selection"], acceptance_criteria: "Renders near anchor" },
+      {
+        step: "Init scaffold",
+        owner_lens: "Extension Architect",
+        time_estimate: "2h",
+        depends_on: [],
+        acceptance_criteria: "Manifest valid",
+      },
+      {
+        step: "Capture selection",
+        owner_lens: "Integration Engineer",
+        time_estimate: "4h",
+        depends_on: ["Init scaffold"],
+        acceptance_criteria: "Text extracted",
+      },
+      {
+        step: "Tooltip UI",
+        owner_lens: "Integration Engineer",
+        time_estimate: "6h",
+        depends_on: ["Capture selection"],
+        acceptance_criteria: "Renders near anchor",
+      },
     ];
     const plan = synthesizePlanFromActionItems(items);
     expect(plan.steps).toHaveLength(3);
@@ -293,8 +314,12 @@ describe("P7: synthesizePlanFromActionItems — heterogeneous input handling", (
 
   it("estimatedComplexity scales with step count", () => {
     expect(synthesizePlanFromActionItems(["a", "b", "c"]).estimatedComplexity).toBe("trivial");
-    expect(synthesizePlanFromActionItems(Array.from({ length: 7 }, (_, i) => `s${i}`)).estimatedComplexity).toBe("moderate");
-    expect(synthesizePlanFromActionItems(Array.from({ length: 11 }, (_, i) => `s${i}`)).estimatedComplexity).toBe("complex");
+    expect(synthesizePlanFromActionItems(Array.from({ length: 7 }, (_, i) => `s${i}`)).estimatedComplexity).toBe(
+      "moderate",
+    );
+    expect(synthesizePlanFromActionItems(Array.from({ length: 11 }, (_, i) => `s${i}`)).estimatedComplexity).toBe(
+      "complex",
+    );
   });
 });
 

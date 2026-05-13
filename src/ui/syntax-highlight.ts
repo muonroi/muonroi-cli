@@ -2,19 +2,7 @@ import type { Theme } from "./theme";
 
 export type Token = { text: string; fg: string };
 
-export type Lang =
-  | "ts"
-  | "tsx"
-  | "js"
-  | "jsx"
-  | "json"
-  | "py"
-  | "sh"
-  | "yaml"
-  | "css"
-  | "html"
-  | "md"
-  | "plain";
+export type Lang = "ts" | "tsx" | "js" | "jsx" | "json" | "py" | "sh" | "yaml" | "css" | "html" | "md" | "plain";
 
 export function detectLang(filePath: string | undefined): Lang {
   if (!filePath) return "plain";
@@ -66,44 +54,195 @@ export function detectLang(filePath: string | undefined): Lang {
 }
 
 const TS_KEYWORDS = new Set([
-  "abstract", "as", "async", "await", "break", "case", "catch", "class", "const",
-  "continue", "debugger", "declare", "default", "delete", "do", "else", "enum",
-  "export", "extends", "finally", "for", "from", "function", "get", "if",
-  "implements", "import", "in", "instanceof", "interface", "is", "keyof", "let",
-  "namespace", "new", "of", "override", "package", "private", "protected",
-  "public", "readonly", "return", "satisfies", "set", "static", "super",
-  "switch", "this", "throw", "try", "type", "typeof", "var", "void", "while",
-  "with", "yield",
+  "abstract",
+  "as",
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "declare",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "get",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "is",
+  "keyof",
+  "let",
+  "namespace",
+  "new",
+  "of",
+  "override",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "readonly",
+  "return",
+  "satisfies",
+  "set",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "try",
+  "type",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
 ]);
 
 const TS_BUILTINS = new Set([
-  "Array", "Boolean", "Date", "Error", "Function", "JSON", "Map", "Math",
-  "Number", "Object", "Promise", "RegExp", "Set", "String", "Symbol", "WeakMap",
-  "WeakSet", "console", "globalThis", "undefined", "NaN", "Infinity",
-  "Record", "Partial", "Required", "Readonly", "Pick", "Omit", "Exclude",
-  "Extract", "ReturnType", "Parameters", "Awaited", "string", "number",
-  "boolean", "any", "unknown", "never", "object", "bigint", "symbol",
+  "Array",
+  "Boolean",
+  "Date",
+  "Error",
+  "Function",
+  "JSON",
+  "Map",
+  "Math",
+  "Number",
+  "Object",
+  "Promise",
+  "RegExp",
+  "Set",
+  "String",
+  "Symbol",
+  "WeakMap",
+  "WeakSet",
+  "console",
+  "globalThis",
+  "undefined",
+  "NaN",
+  "Infinity",
+  "Record",
+  "Partial",
+  "Required",
+  "Readonly",
+  "Pick",
+  "Omit",
+  "Exclude",
+  "Extract",
+  "ReturnType",
+  "Parameters",
+  "Awaited",
+  "string",
+  "number",
+  "boolean",
+  "any",
+  "unknown",
+  "never",
+  "object",
+  "bigint",
+  "symbol",
 ]);
 
 const TS_LITERALS = new Set(["true", "false", "null", "undefined"]);
 
 const PY_KEYWORDS = new Set([
-  "False", "None", "True", "and", "as", "assert", "async", "await", "break",
-  "class", "continue", "def", "del", "elif", "else", "except", "finally",
-  "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
-  "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
-  "match", "case",
+  "False",
+  "None",
+  "True",
+  "and",
+  "as",
+  "assert",
+  "async",
+  "await",
+  "break",
+  "class",
+  "continue",
+  "def",
+  "del",
+  "elif",
+  "else",
+  "except",
+  "finally",
+  "for",
+  "from",
+  "global",
+  "if",
+  "import",
+  "in",
+  "is",
+  "lambda",
+  "nonlocal",
+  "not",
+  "or",
+  "pass",
+  "raise",
+  "return",
+  "try",
+  "while",
+  "with",
+  "yield",
+  "match",
+  "case",
 ]);
 
 const PY_BUILTINS = new Set([
-  "print", "len", "range", "str", "int", "float", "bool", "list", "dict",
-  "set", "tuple", "type", "isinstance", "open", "self", "cls",
+  "print",
+  "len",
+  "range",
+  "str",
+  "int",
+  "float",
+  "bool",
+  "list",
+  "dict",
+  "set",
+  "tuple",
+  "type",
+  "isinstance",
+  "open",
+  "self",
+  "cls",
 ]);
 
 const SH_KEYWORDS = new Set([
-  "if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case",
-  "esac", "in", "function", "return", "exit", "export", "local", "readonly",
-  "set", "unset", "echo", "printf",
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "for",
+  "while",
+  "do",
+  "done",
+  "case",
+  "esac",
+  "in",
+  "function",
+  "return",
+  "exit",
+  "export",
+  "local",
+  "readonly",
+  "set",
+  "unset",
+  "echo",
+  "printf",
 ]);
 
 const ID_RE = /[A-Za-z_$][A-Za-z0-9_$]*/y;
@@ -144,8 +283,14 @@ function tokenizeJsLike(line: string, t: Theme, lang: Lang): Token[] {
       const quote = ch;
       let j = i + 1;
       while (j < n) {
-        if (line[j] === "\\") { j += 2; continue; }
-        if (line[j] === quote) { j++; break; }
+        if (line[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (line[j] === quote) {
+          j++;
+          break;
+        }
         j++;
       }
       out.push({ text: line.slice(i, j), fg: t.syntaxString });
@@ -166,7 +311,7 @@ function tokenizeJsLike(line: string, t: Theme, lang: Lang): Token[] {
     if (isJsx && ch === "<" && (next === "/" || (next >= "A" && next <= "z"))) {
       let j = i + 1;
       if (line[j] === "/") j++;
-      while (j < n && /[A-Za-z0-9_.\-]/.test(line[j])) j++;
+      while (j < n && /[A-Za-z0-9_.-]/.test(line[j])) j++;
       out.push({ text: line.slice(i, j), fg: t.syntaxTag });
       i = j;
       continue;
@@ -236,8 +381,14 @@ function tokenizePython(line: string, t: Theme): Token[] {
       const quote = ch;
       let j = i + 1;
       while (j < n) {
-        if (line[j] === "\\") { j += 2; continue; }
-        if (line[j] === quote) { j++; break; }
+        if (line[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (line[j] === quote) {
+          j++;
+          break;
+        }
         j++;
       }
       out.push({ text: line.slice(i, j), fg: t.syntaxString });
@@ -315,8 +466,14 @@ function tokenizeShell(line: string, t: Theme): Token[] {
       const quote = ch;
       let j = i + 1;
       while (j < n) {
-        if (line[j] === "\\") { j += 2; continue; }
-        if (line[j] === quote) { j++; break; }
+        if (line[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (line[j] === quote) {
+          j++;
+          break;
+        }
         j++;
       }
       out.push({ text: line.slice(i, j), fg: t.syntaxString });
@@ -375,8 +532,14 @@ function tokenizeJson(line: string, t: Theme): Token[] {
     if (ch === '"') {
       let j = i + 1;
       while (j < n) {
-        if (line[j] === "\\") { j += 2; continue; }
-        if (line[j] === '"') { j++; break; }
+        if (line[j] === "\\") {
+          j += 2;
+          continue;
+        }
+        if (line[j] === '"') {
+          j++;
+          break;
+        }
         j++;
       }
       let k = j;

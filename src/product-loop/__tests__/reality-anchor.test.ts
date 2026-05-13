@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { evidenceLooksValid, wrapSynthesisWithEvidence, type Criterion } from "../reality-anchor.js";
+import { describe, expect, it } from "vitest";
+import { type Criterion, evidenceLooksValid, wrapSynthesisWithEvidence } from "../reality-anchor.js";
 
 describe("evidenceLooksValid", () => {
   it("should accept file:line format", () => {
@@ -45,7 +45,7 @@ describe("wrapSynthesisWithEvidence", () => {
       { id: "C1", status: "met", evidence: "src/main.ts:10" },
       { id: "C2", status: "partial", evidence: "invalid evidence" },
       { id: "C3", status: "unmet" },
-      { id: "C4", status: "met" } // missing evidence
+      { id: "C4", status: "met" }, // missing evidence
     ];
 
     const wrapped = wrapSynthesisWithEvidence(criteria);

@@ -34,7 +34,11 @@ const HEAVY_PATTERNS: Array<{ tag: string; pattern: RegExp; weight: number }> = 
   { tag: "wholesale", pattern: /\b(toàn bộ|all of|entire|whole|everything|tất cả)\b/i, weight: 3 },
   { tag: "deep-map", pattern: /\b(deep[-\s]?map|repo[-\s]?map|map (the )?(codebase|project|repo))\b/i, weight: 3 },
   { tag: "redo", pattern: /\b(redo|rewrite|rebuild|migrate (the )?entire|port (the )?(whole|entire))\b/i, weight: 3 },
-  { tag: "from-scratch", pattern: /\b(from[-\s]scratch|greenfield|new project|khởi tạo (project|dự án))\b/i, weight: 2 },
+  {
+    tag: "from-scratch",
+    pattern: /\b(from[-\s]scratch|greenfield|new project|khởi tạo (project|dự án))\b/i,
+    weight: 2,
+  },
   { tag: "architecture", pattern: /\b(architect(?:ure)?|system design|design contract|domain model)\b/i, weight: 2 },
   { tag: "milestone", pattern: /\b(milestone|roadmap|epic|phase \d+|sprint \d+)\b/i, weight: 2 },
   { tag: "multi-repo", pattern: /\b(multi[-\s]repo|across repos|every repo|all repos|cross[-\s]repo)\b/i, weight: 3 },
@@ -48,7 +52,11 @@ const HEAVY_PATTERNS: Array<{ tag: string; pattern: RegExp; weight: number }> = 
 const QUICK_PATTERNS: Array<{ tag: string; pattern: RegExp; weight: number }> = [
   { tag: "typo", pattern: /\b(typo|misspell|spelling)\b/i, weight: -3 },
   { tag: "rename", pattern: /\b(rename (this|the|a) (var|variable|function|file)|đổi tên)\b/i, weight: -2 },
-  { tag: "read-explain", pattern: /^(what (does|is)|how (does|do|is)|explain|giải thích|là gì|nghĩa là)\b/i, weight: -2 },
+  {
+    tag: "read-explain",
+    pattern: /^(what (does|is)|how (does|do|is)|explain|giải thích|là gì|nghĩa là)\b/i,
+    weight: -2,
+  },
   { tag: "single-line", pattern: /\b(one[-\s]liner|single line|một dòng)\b/i, weight: -2 },
   { tag: "lookup", pattern: /\b(where is|find the|locate|tìm)\b/i, weight: -1 },
 ];

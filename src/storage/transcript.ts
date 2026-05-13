@@ -56,10 +56,7 @@ function sanitizeBase64InMessageJson(json: string): string {
   );
   // Then strip any remaining oversized base64 string literals — likely raw
   // image payloads in MCP tool result fields (e.g. {"data":"iVBORw0KGgo..."}).
-  scrubbed = scrubbed.replace(
-    /"[A-Za-z0-9+/]{2000,}={0,2}"/g,
-    '"[image data removed on resume]"',
-  );
+  scrubbed = scrubbed.replace(/"[A-Za-z0-9+/]{2000,}={0,2}"/g, '"[image data removed on resume]"');
   return scrubbed;
 }
 

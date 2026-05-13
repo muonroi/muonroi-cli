@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../mcp-keychain.js", () => ({
   setMcpKey: vi.fn(async () => true),
@@ -12,18 +12,15 @@ vi.mock("../../utils/settings.js", () => ({
   loadUserSettings: vi.fn(() => ({ ...settingsStore })),
   saveUserSettings: vi.fn((p: any) => Object.assign(settingsStore, p)),
   loadMcpServers: vi.fn(() => [...mcpServers]),
-  saveMcpServers: vi.fn((s: any[]) => { mcpServers.length = 0; mcpServers.push(...s); }),
+  saveMcpServers: vi.fn((s: any[]) => {
+    mcpServers.length = 0;
+    mcpServers.push(...s);
+  }),
 }));
 
-global.fetch = vi.fn(async () =>
-  new Response(JSON.stringify({ results: [] }), { status: 200 }),
-) as any;
+global.fetch = vi.fn(async () => new Response(JSON.stringify({ results: [] }), { status: 200 })) as any;
 
-import {
-  runResearchOnboarding,
-  runResearchMigrationPrompt,
-  validateTavilyKey,
-} from "../research-onboarding.js";
+import { runResearchMigrationPrompt, runResearchOnboarding, validateTavilyKey } from "../research-onboarding.js";
 
 describe("validateTavilyKey", () => {
   it("returns true on HTTP 200", async () => {
@@ -50,7 +47,15 @@ describe("runResearchOnboarding", () => {
     settingsStore.webResearchPrompted = undefined;
     mcpServers.length = 0;
     // Pre-populate a tavily entry as Task 3's auto-setup would have done.
-    mcpServers.push({ id: "tavily", label: "Tavily Web Search", enabled: false, transport: "stdio", command: "npx", args: ["-y", "tavily-mcp"], env: { TAVILY_API_KEY: "" } });
+    mcpServers.push({
+      id: "tavily",
+      label: "Tavily Web Search",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "tavily-mcp"],
+      env: { TAVILY_API_KEY: "" },
+    });
     vi.clearAllMocks();
   });
 
@@ -98,7 +103,10 @@ describe("runResearchOnboarding", () => {
     let calls = 0;
     const result = await runResearchOnboarding({
       askYesNo: async () => "y",
-      askText: async () => { calls++; return "tvly-bad-keykeykeykey"; },
+      askText: async () => {
+        calls++;
+        return "tvly-bad-keykeykeykey";
+      },
       log: () => {},
     });
     expect(calls).toBe(3);
@@ -111,7 +119,15 @@ describe("runResearchMigrationPrompt", () => {
   beforeEach(() => {
     settingsStore.webResearchPrompted = undefined;
     mcpServers.length = 0;
-    mcpServers.push({ id: "tavily", label: "Tavily Web Search", enabled: false, transport: "stdio", command: "npx", args: ["-y", "tavily-mcp"], env: { TAVILY_API_KEY: "" } });
+    mcpServers.push({
+      id: "tavily",
+      label: "Tavily Web Search",
+      enabled: false,
+      transport: "stdio",
+      command: "npx",
+      args: ["-y", "tavily-mcp"],
+      env: { TAVILY_API_KEY: "" },
+    });
     vi.clearAllMocks();
   });
 

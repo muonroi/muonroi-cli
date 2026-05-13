@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { pickCouncilTaskModel } from "../leader.js";
 import * as registry from "../../models/registry.js";
 import * as runtime from "../../providers/runtime.js";
 import type { ModelInfo } from "../../types/index.js";
+import { pickCouncilTaskModel } from "../leader.js";
 
 const catalog: ModelInfo[] = [
   { id: "premium-x", provider: "anthropic", tier: "premium" } as ModelInfo,
@@ -13,9 +13,7 @@ const catalog: ModelInfo[] = [
 
 describe("pickCouncilTaskModel", () => {
   beforeEach(() => {
-    vi.spyOn(registry, "getModelInfo").mockImplementation((id) =>
-      catalog.find((m) => m.id === id),
-    );
+    vi.spyOn(registry, "getModelInfo").mockImplementation((id) => catalog.find((m) => m.id === id));
     vi.spyOn(registry, "getModelByTier").mockImplementation((tier, prefer) => {
       const onPrefer = catalog.find((m) => m.tier === tier && m.provider === prefer);
       return onPrefer ?? catalog.find((m) => m.tier === tier);

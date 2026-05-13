@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { previewRunCost, formatCostPreview, DEFAULT_HEURISTIC } from "../cost-preview.js";
+import { DEFAULT_HEURISTIC, formatCostPreview, previewRunCost } from "../cost-preview.js";
 
 describe("previewRunCost", () => {
   it("uses cached_input price when model has one (DeepSeek flash)", () => {

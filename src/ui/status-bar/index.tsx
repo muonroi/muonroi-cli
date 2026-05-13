@@ -19,10 +19,10 @@ function useStatusBarState(): StatusBarState {
 }
 
 const EE_DOT: Record<string, { color: string; symbol: string }> = {
-  ok: { color: "green", symbol: "●" },      // ●
-  warn: { color: "yellow", symbol: "●" },    // ●
-  down: { color: "red", symbol: "●" },        // ●
-  unknown: { color: "gray", symbol: "○" },    // ○
+  ok: { color: "green", symbol: "●" }, // ●
+  warn: { color: "yellow", symbol: "●" }, // ●
+  down: { color: "red", symbol: "●" }, // ●
+  unknown: { color: "gray", symbol: "○" }, // ○
 };
 
 function fmtTokens(n: number): string {
@@ -39,32 +39,29 @@ function fmtCost(usd: number): string {
 
 /** Pure render function -- testable without React hooks context. */
 export function renderStatusBar(s: StatusBarState): React.ReactElement {
-  const modelLabel = s.routed_from && s.routed_from !== s.model
-    ? `${s.provider || "-"}/${s.routed_from}→${s.model}`
-    : `${s.provider || "-"}/${s.model || "-"}`;
+  const modelLabel =
+    s.routed_from && s.routed_from !== s.model
+      ? `${s.provider || "-"}/${s.routed_from}→${s.model}`
+      : `${s.provider || "-"}/${s.model || "-"}`;
 
   const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${s.cache_read_tokens ? ` ⊚${fmtTokens(s.cache_read_tokens)}` : ""}`;
   const ee = EE_DOT[s.ee_status] ?? EE_DOT.unknown;
 
   const slots: React.ReactNode[] = [
+    React.createElement("text", { key: "pm", fg: "#5c9cf5", "data-testid": "slot-provider-model" }, modelLabel),
+    React.createElement(TierBadge, { key: "tier", tier: s.tier }),
     React.createElement(
       "text",
-      { key: "pm", fg: "#5c9cf5", "data-testid": "slot-provider-model" },
-      modelLabel,
+      { key: "tok", fg: "cyan", "data-testid": "slot-tokens" },
+      `${tokenStr}${s.ctx_tokens !== undefined ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]` : ""}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`,
     ),
-    React.createElement(TierBadge, { key: "tier", tier: s.tier }),
-    React.createElement("text", { key: "tok", fg: "cyan", "data-testid": "slot-tokens" }, `${tokenStr}${s.ctx_tokens !== undefined ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]` : ""}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`),
     React.createElement(UsdMeter, {
       key: "usd",
       session_usd: s.session_usd,
       month_usd: s.month_usd,
       current_pct: s.current_pct,
     }),
-    React.createElement(
-      "text",
-      { key: "ee", fg: ee.color, "data-testid": "slot-ee" },
-      ee.symbol,
-    ),
+    React.createElement("text", { key: "ee", fg: ee.color, "data-testid": "slot-ee" }, ee.symbol),
   ];
 
   if (s.degraded) {

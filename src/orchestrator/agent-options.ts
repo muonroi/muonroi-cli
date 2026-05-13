@@ -1,11 +1,10 @@
 import type { ProviderFactory, ResolvedModelRuntime } from "../providers/runtime.js";
-import type { ModelInfo } from "../types/index";
-import type { ToolCall, ToolResult } from "../types/index";
+import type { ModelInfo, ToolCall, ToolResult } from "../types/index";
 import type { PermissionMode } from "../utils/permission-mode.js";
-import type { AbortContext } from "./abort.js";
-import type { PendingCallsLog } from "./pending-calls.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import type { ShellSettings } from "../utils/shell";
+import type { AbortContext } from "./abort.js";
+import type { PendingCallsLog } from "./pending-calls.js";
 
 // ---------------------------------------------------------------------------
 // Re-export types from shared runtime module for back-compat
@@ -36,17 +35,17 @@ export interface CouncilOutcome {
 
 // Council role ANSI color codes for terminal UI
 export const COUNCIL_ROLE_COLORS: Record<string, string> = {
-  implement: "\x1b[36m",    // Cyan
-  verify: "\x1b[33m",       // Yellow
-  research: "\x1b[35m",     // Magenta
-  leader: "\x1b[32m",       // Green
+  implement: "\x1b[36m", // Cyan
+  verify: "\x1b[33m", // Yellow
+  research: "\x1b[35m", // Magenta
+  leader: "\x1b[32m", // Green
 };
 export const COUNCIL_COLOR_RESET = "\x1b[0m";
 export const COUNCIL_COLOR_BG: Record<string, string> = {
-  implement: "\x1b[46m",    // Cyan background
-  verify: "\x1b[43m",       // Yellow background
-  research: "\x1b[45m",     // Magenta background
-  leader: "\x1b[42m",       // Green background
+  implement: "\x1b[46m", // Cyan background
+  verify: "\x1b[43m", // Yellow background
+  research: "\x1b[45m", // Magenta background
+  leader: "\x1b[42m", // Green background
 };
 
 export interface BatchChatMessage {

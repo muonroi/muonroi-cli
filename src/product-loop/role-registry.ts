@@ -1,6 +1,6 @@
-import type { RoleSlot } from "./types.js";
-import type { ModelInfo, ModelTier } from "../types/index.js";
 import type { EERouteResult } from "../ee/bridge.js";
+import type { ModelInfo, ModelTier } from "../types/index.js";
+import type { RoleSlot } from "./types.js";
 
 export interface ModelAssignment {
   slot: RoleSlot;
@@ -137,7 +137,7 @@ export async function resolveRoles(opts: {
         const inInventory = inventory.find((m) => m.id === override.model);
         if (inInventory) {
           const currentAssignment = assignments[slot]!;
-          
+
           // If we are overriding PO or Customer, we MUST ensure they remain different
           if (slot === "PO") {
             if (override.model === assignments.Customer!.model) continue;

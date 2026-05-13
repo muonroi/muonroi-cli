@@ -380,10 +380,13 @@ export interface RunPhasesOptions {
   leaderModelId: string;
   capUsd: number;
   remainingUsd: () => Promise<number>;
-  awaitCustomerVerdict: (
-    flowDir: string,
-    runId: string,
-  ) => Promise<Omit<CustomerDecision, "seq" | "timestampUtc" | "phaseId" | "sprintN">>;
+  awaitCustomerVerdict: (args: {
+    flowDir: string;
+    runId: string;
+    phaseId: string;
+    sprintN: number;
+    reviewSummary: string;
+  }) => Promise<Omit<CustomerDecision, "seq" | "timestampUtc" | "phaseId" | "sprintN">>;
   suppressPush?: boolean;
   backoffDelays?: number[];
 }

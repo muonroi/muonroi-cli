@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { CouncilQuestionData } from "../../../types/index.js";
-import {
-  clampIndex,
-  initialCardState,
-  reduceCardKey,
-  type CouncilCardState,
-} from "../council-question-card.js";
+import { type CouncilCardState, clampIndex, initialCardState, reduceCardKey } from "../council-question-card.js";
 
 function makeQuestion(overrides: Partial<CouncilQuestionData> = {}): CouncilQuestionData {
   return {

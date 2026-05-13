@@ -7,14 +7,13 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
+import { needsVisionProxy } from "../providers/vision-proxy.js";
+import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import type { BashTool } from "./bash.js";
-import { readFile, writeFile, editFile } from "./file.js";
+import { editFile, readFile, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import { executeGrep } from "./grep.js";
-import { askVisionProxy, analyzeImageFromSource, listCachedImages } from "../providers/mcp-vision-bridge.js";
-import { needsVisionProxy } from "../providers/vision-proxy.js";
-import type { ToolResult, TaskRequest } from "../types/index.js";
-import type { AgentMode } from "../types/index.js";
 
 interface ToolRegistryOpts {
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
@@ -39,11 +38,7 @@ function formatResult(result: ToolResult): string {
   return `ERROR: ${result.error ?? result.output ?? "Unknown error"}`;
 }
 
-export function createBuiltinTools(
-  bash: BashTool,
-  mode: AgentMode,
-  opts?: ToolRegistryOpts,
-): ToolSet {
+export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {
   const tools: ToolSet = {};
   // One tracker per tool registry instance — shared across read/write/edit
   // calls in the same session. Enforces "must read before edit/overwrite".
@@ -69,7 +64,8 @@ export function createBuiltinTools(
 
   // grep
   tools.grep = dynamicTool({
-    description: "Fast regex content search across the codebase using ripgrep. Returns matching lines with file paths and line numbers.",
+    description:
+      "Fast regex content search across the codebase using ripgrep. Returns matching lines with file paths and line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -160,7 +156,8 @@ export function createBuiltinTools(
   if (mode === "agent") {
     // write_file
     tools.write_file = dynamicTool({
-      description: "Create a new file or overwrite an existing file with full content. SAFETY: overwriting an existing file requires you to call read_file on it first in the same session. New-file creation does not.",
+      description:
+        "Create a new file or overwrite an existing file with full content. SAFETY: overwriting an existing file requires you to call read_file on it first in the same session. New-file creation does not.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -182,7 +179,8 @@ export function createBuiltinTools(
 
     // edit_file
     tools.edit_file = dynamicTool({
-      description: "Replace a unique string in a file with new content. The old_string must appear exactly once. SAFETY: you must call read_file on the target in the same session before editing; if the file changed on disk after your read, re-read it first.",
+      description:
+        "Replace a unique string in a file with new content. The old_string must appear exactly once. SAFETY: you must call read_file on the target in the same session before editing; if the file changed on disk after your read, re-read it first.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -207,20 +205,22 @@ export function createBuiltinTools(
     if (opts?.runTask) {
       const runTask = opts.runTask;
       tools.task = dynamicTool({
-        description: "Delegate a focused foreground task to a sub-agent. Types: general (edit/execute), explore (read-only research), verify (sandbox validation), computer (desktop interaction).",
+        description:
+          "Delegate a focused foreground task to a sub-agent. Types: general (edit/execute), explore (read-only research), verify (sandbox validation), computer (desktop interaction).",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
-            agent: { type: "string", description: "Sub-agent type: general, explore, verify, computer, or a custom sub-agent name" },
+            agent: {
+              type: "string",
+              description: "Sub-agent type: general, explore, verify, computer, or a custom sub-agent name",
+            },
             description: { type: "string", description: "Short description of the task" },
             prompt: { type: "string", description: "Detailed instructions for the sub-agent" },
           },
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          const result = await runTask(
-            { agent: input.agent, description: input.description, prompt: input.prompt },
-          );
+          const result = await runTask({ agent: input.agent, description: input.description, prompt: input.prompt });
           return formatResult(result);
         },
       });
@@ -241,9 +241,11 @@ export function createBuiltinTools(
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          const result = await runDelegation(
-            { agent: input.agent, description: input.description, prompt: input.prompt },
-          );
+          const result = await runDelegation({
+            agent: input.agent,
+            description: input.description,
+            prompt: input.prompt,
+          });
           return formatResult(result);
         },
       });
@@ -305,7 +307,8 @@ export function createBuiltinTools(
           },
           question: {
             type: "string",
-            description: "Optional specific question to focus the analysis (e.g. 'what text is in this image?', 'describe the layout')",
+            description:
+              "Optional specific question to focus the analysis (e.g. 'what text is in this image?', 'describe the layout')",
           },
         },
         required: ["image_source"],
@@ -329,7 +332,8 @@ export function createBuiltinTools(
           },
           image_id_or_path: {
             type: "string",
-            description: "Cached image ID (e.g. img_1) OR a file path to a new image. If omitted, uses the most recent image.",
+            description:
+              "Cached image ID (e.g. img_1) OR a file path to a new image. If omitted, uses the most recent image.",
           },
         },
         required: ["question"],
@@ -352,9 +356,9 @@ export function createBuiltinTools(
         if (cached.length === 0) {
           return "No cached images. Use analyze_image to analyze an image file, or take a screenshot with browser_take_screenshot.";
         }
-        return cached.map((c) =>
-          `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`,
-        ).join("\n");
+        return cached
+          .map((c) => `${c.id}: ${c.label} (${c.source}, ${c.age})${c.hasDescription ? " [analyzed]" : ""}`)
+          .join("\n");
       },
     });
   }

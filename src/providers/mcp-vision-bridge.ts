@@ -860,7 +860,9 @@ function capString(text: string, toolName: string): string {
   if (bytes <= TOOL_OUTPUT_MAX_BYTES) return text;
 
   const head = Buffer.from(text, "utf8").subarray(0, TOOL_OUTPUT_HEAD_BYTES).toString("utf8");
-  const tail = Buffer.from(text, "utf8").subarray(bytes - TOOL_OUTPUT_TAIL_BYTES).toString("utf8");
+  const tail = Buffer.from(text, "utf8")
+    .subarray(bytes - TOOL_OUTPUT_TAIL_BYTES)
+    .toString("utf8");
   const omitted = bytes - TOOL_OUTPUT_HEAD_BYTES - TOOL_OUTPUT_TAIL_BYTES;
   const marker =
     `\n\n[... ${omitted.toLocaleString()} bytes truncated by muonroi-cli ` +

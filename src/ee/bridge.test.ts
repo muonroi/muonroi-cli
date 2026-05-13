@@ -96,14 +96,7 @@ describe("bridge — loaded core", () => {
   it("Test 4: routeFeedback returns true when core loaded", async () => {
     const result = await routeFeedback("abc123", "balanced", "claude-sonnet-4-6", "success", 0, 1500);
     expect(result).toBe(true);
-    expect(mockCore.routeFeedback).toHaveBeenCalledWith(
-      "abc123",
-      "balanced",
-      "claude-sonnet-4-6",
-      "success",
-      0,
-      1500,
-    );
+    expect(mockCore.routeFeedback).toHaveBeenCalledWith("abc123", "balanced", "claude-sonnet-4-6", "success", 0, 1500);
   });
 
   it("Test 5: getEmbeddingRaw returns number[] when core loaded", async () => {

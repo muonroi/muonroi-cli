@@ -7,25 +7,25 @@ describe("SEED_DIMENSIONS", () => {
   });
 
   it("has all required IDs in order", () => {
-    const ids = SEED_DIMENSIONS.map(d => d.id);
+    const ids = SEED_DIMENSIONS.map((d) => d.id);
     expect(ids).toEqual([
       "persona",
       "core-features",
       "non-functional",
       "tech-constraints",
       "success-metric",
-      "cost-tolerance"
+      "cost-tolerance",
     ]);
   });
 
   it("has required flag set to true for all", () => {
-    SEED_DIMENSIONS.forEach(d => {
+    SEED_DIMENSIONS.forEach((d) => {
       expect(d.isRequired).toBe(true);
     });
   });
 
   it("has non-empty question text ending with ?", () => {
-    SEED_DIMENSIONS.forEach(d => {
+    SEED_DIMENSIONS.forEach((d) => {
       expect(d.question).toMatch(/\?$/);
       expect(d.question.length).toBeGreaterThan(10);
     });

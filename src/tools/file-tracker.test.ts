@@ -1,4 +1,4 @@
-import { mkdtemp, readFile as fsRead, rm, writeFile as fsWrite } from "fs/promises";
+import { readFile as fsRead, writeFile as fsWrite, mkdtemp, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";

@@ -60,16 +60,17 @@ function readWin32(): ClipboardImage | null {
   } catch {
     return null;
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
 function readDarwin(): ClipboardImage | null {
   try {
-    const check = execSync(
-      "osascript -e 'clipboard info' 2>/dev/null",
-      { timeout: 3000, encoding: "utf8" },
-    );
+    const check = execSync("osascript -e 'clipboard info' 2>/dev/null", { timeout: 3000, encoding: "utf8" });
     if (!check.includes("«class PNGf»") && !check.includes("public.png") && !check.includes("TIFF")) {
       return null;
     }
@@ -97,19 +98,25 @@ function readDarwin(): ClipboardImage | null {
   } catch {
     return null;
   } finally {
-    try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
 function readLinux(): ClipboardImage | null {
   try {
     const targets = execSync("xclip -selection clipboard -t TARGETS -o 2>/dev/null", {
-      timeout: 3000, encoding: "utf8",
+      timeout: 3000,
+      encoding: "utf8",
     });
     if (!targets.includes("image/png")) return null;
 
     const buf = execSync("xclip -selection clipboard -t image/png -o 2>/dev/null", {
-      timeout: 5000, maxBuffer: 50 * 1024 * 1024,
+      timeout: 5000,
+      maxBuffer: 50 * 1024 * 1024,
     });
     if (buf.length < 100) return null;
     return { base64: buf.toString("base64"), mediaType: "image/png" };
@@ -118,7 +125,8 @@ function readLinux(): ClipboardImage | null {
     if (process.env.WAYLAND_DISPLAY) {
       try {
         const buf = execSync("wl-paste -t image/png 2>/dev/null", {
-          timeout: 5000, maxBuffer: 50 * 1024 * 1024,
+          timeout: 5000,
+          maxBuffer: 50 * 1024 * 1024,
         });
         if (buf.length < 100) return null;
         return { base64: buf.toString("base64"), mediaType: "image/png" };

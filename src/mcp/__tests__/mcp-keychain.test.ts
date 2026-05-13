@@ -1,11 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("keytar", () => {
   const store = new Map<string, string>();
   return {
-    getPassword: vi.fn(async (service: string, account: string) =>
-      store.get(`${service}:${account}`) ?? null,
-    ),
+    getPassword: vi.fn(async (service: string, account: string) => store.get(`${service}:${account}`) ?? null),
     setPassword: vi.fn(async (service: string, account: string, password: string) => {
       store.set(`${service}:${account}`, password);
     }),
@@ -15,7 +13,7 @@ vi.mock("keytar", () => {
   };
 });
 
-import { setMcpKey, getMcpKey, deleteMcpKey } from "../mcp-keychain.js";
+import { deleteMcpKey, getMcpKey, setMcpKey } from "../mcp-keychain.js";
 
 describe("mcp-keychain", () => {
   beforeEach(async () => {

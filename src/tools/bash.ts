@@ -7,7 +7,7 @@ import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
-import { type ResolvedShell, type ShellSettings, posixToNative, resolveShell } from "../utils/shell";
+import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;

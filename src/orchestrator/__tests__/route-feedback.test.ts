@@ -1,5 +1,5 @@
 // Test stubs for ROUTE-11 routeFeedback wiring in orchestrator
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../ee/bridge.js", () => ({
   routeFeedback: vi.fn().mockResolvedValue(true),
