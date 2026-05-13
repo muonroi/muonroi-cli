@@ -24,32 +24,25 @@
 
 import * as path from "node:path";
 import { runCouncil } from "../council/index.js";
-import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
-import { evaluateDoneGate } from "./done-gate.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
-import { buildContinueFeedback } from "./feedback-routing.js";
-import { parseVerifyResult } from "./verify-result.js";
-import {
-  appendIteration,
-  readCriteria,
-} from "./artifact-io.js";
+import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { detectProviderForModel } from "../providers/runtime.js";
+import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
+import { commitToProduct, release } from "../usage/ledger.js";
+import { CapBreachError } from "../usage/types.js";
+import type { SandboxSettings } from "../utils/settings.js";
+import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
+import { appendIteration, readCriteria } from "./artifact-io.js";
+import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
+import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
+import { reserveForProduct } from "./cost-scoper.js";
+import { evaluateDoneGate } from "./done-gate.js";
+import type { ContinueFeedback } from "./feedback-routing.js";
+import { buildContinueFeedback } from "./feedback-routing.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { appendRoleMemory } from "./role-memory.js";
-import { commitToProduct, release } from "../usage/ledger.js";
-import { reserveForProduct } from "./cost-scoper.js";
-import { CapBreachError } from "../usage/types.js";
-import { detectProviderForModel } from "../providers/runtime.js";
-import type {
-  DriverContext,
-  IterationState,
-  ProductSpec,
-  RoleSlot,
-} from "./types.js";
-import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
-import type { CouncilLLM } from "../council/types.js";
-import type { SandboxSettings } from "../utils/settings.js";
-import type { ContinueFeedback } from "./feedback-routing.js";
+import type { DriverContext, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { parseVerifyResult } from "./verify-result.js";
 
 export interface RunSprintArgs {
   sprintN: number;
@@ -71,18 +64,13 @@ export interface RunSprintArgs {
  * Throws on circuit-breaker halt — caller (loop driver) catches and writes
  * the appropriate halt state to manifest/state.
  */
-export async function* runSprint(
-  args: RunSprintArgs,
-): AsyncGenerator<StreamChunk, IterationState, unknown> {
+export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
   const cwd = ctx.cwd ?? runDir;
 
   // ── Step 1: Cost projection (CB-1) BEFORE incurring sprint cost ───────────
-  const spentUsd = history.reduce(
-    (s, h) => s + (h.actualCost ?? h.costUsd ?? 0),
-    0,
-  );
+  const spentUsd = history.reduce((s, h) => s + (h.actualCost ?? h.costUsd ?? 0), 0);
   const cb1History = history.map((h) => ({ actualCost: h.actualCost ?? h.costUsd ?? 0 }));
   const cb1 = CB1_costProjection(cb1History, ctx.flags.maxCost, spentUsd, productSpec.costEstimate);
   if (cb1.halt) {
@@ -103,13 +91,27 @@ export async function* runSprint(
   // ── Step 3: Plan stage (council, skipClarification=true) ──────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Planning\n` };
 
-  const carryOverContext = history.length > 0
-    ? `\nCarry-over from prior sprints:\n${history
-        .map((h) => `- Sprint ${h.sprintN}: verify=${h.lastVerifyResult}, score=${h.scoreAfter.toFixed(2)}`)
-        .join("\n")}\n`
-    : "";
+  const carryOverContext =
+    history.length > 0
+      ? `\nCarry-over from prior sprints:\n${history
+          .map((h) => `- Sprint ${h.sprintN}: verify=${h.lastVerifyResult}, score=${h.scoreAfter.toFixed(2)}`)
+          .join("\n")}\n`
+      : "";
 
   const focusContext = carryOver?.focus ? `\nFOCUS for this sprint:\n${carryOver.focus}\n` : "";
+
+  // P6: surface unverified assumptions so the sprint plan prioritizes
+  // validation work over feature work when foundational claims remain
+  // unchecked. Silent skip on ledger read failure (e.g. fresh greenfield
+  // run before research has written the ledger).
+  let assumptionContext = "";
+  try {
+    const ledger = await readLedger(ctx.flowDir, ctx.runId);
+    const formatted = formatUnverifiedForSprintContext(ledger);
+    if (formatted) assumptionContext = "\n" + formatted;
+  } catch {
+    /* non-critical */
+  }
 
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
@@ -118,17 +120,16 @@ export async function* runSprint(
     `Architecture: ${productSpec.architecture}\n` +
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
-    `${carryOverContext}${focusContext}\n` +
+    `${carryOverContext}${focusContext}${assumptionContext}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
   const productLlm = createProductLlm(ctx.llm, ctx.runId, ctx.flags.maxCost);
   const sessionModelId =
-    roleAssignments.get("Architect")?.modelId ??
-    roleAssignments.get("PO")?.modelId ??
-    ctx.sessionModelId;
+    roleAssignments.get("Architect")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
 
-  const noopProcess: NonNullable<DriverContext["processMessageFn"]> =
-    async function* () { /* no host orchestrator wired during planning */ };
+  const noopProcess: NonNullable<DriverContext["processMessageFn"]> = async function* () {
+    /* no host orchestrator wired during planning */
+  };
 
   const planGen = runCouncil(
     councilTopic,
@@ -171,8 +172,7 @@ export async function* runSprint(
   const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
   const verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
-    (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ??
-    verifyRecipe;
+    (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
 
   // ── Step 6: Read current criteria + judge stage ──────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Judgment\n` };
@@ -187,12 +187,15 @@ export async function* runSprint(
     doneThreshold: ctx.flags.doneThreshold,
     llm: productLlm,
     respondToPreflight: ctx.respondToPreflight,
+    // P6: pass run location so done-gate condition #6 can read the
+    // assumption ledger and block ship when high-confidence assumptions
+    // remain unverified.
+    flowDir: ctx.flowDir,
+    runId: ctx.runId,
   });
 
   // ── Step 7: CB-2 oscillation check (now we know this sprint's score) ─────
-  const cb2History = history
-    .map((h) => ({ score: h.score ?? h.scoreAfter ?? 0 }))
-    .concat([{ score: verdict.score }]);
+  const cb2History = history.map((h) => ({ score: h.score ?? h.scoreAfter ?? 0 })).concat([{ score: verdict.score }]);
   const cb2 = CB2_oscillation(cb2History, sprintN);
   if (cb2.halt) {
     throw new Error(
@@ -220,8 +223,7 @@ export async function* runSprint(
   await appendIteration(ctx.flowDir, ctx.runId, iter);
 
   // Update Resume Digest in state.md so PIL Layer 5 + future resume can pick it up
-  const stateMap =
-    (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
+  const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
   stateMap.sections.set(
     "Resume Digest",
     `Sprint: ${sprintN} | Stage: ${iter.stage} | Score: ${verdict.score.toFixed(2)} | Verify: ${verifyVerdict}`,
@@ -236,7 +238,9 @@ export async function* runSprint(
       slot,
       sprintN,
       `Sprint ${sprintN}: verify=${verifyVerdict}, score=${verdict.score.toFixed(2)}, pass=${verdict.pass}`,
-    ).catch(() => { /* memory failure is non-fatal */ });
+    ).catch(() => {
+      /* memory failure is non-fatal */
+    });
   }
 
   // Fire EE phase-outcome on the sprint boundary (fire-and-forget)
@@ -245,7 +249,9 @@ export async function* runSprint(
     sprintN,
     outcome: verdict.pass ? "pass" : "fail",
     evidence: { score: verdict.score, verifyResult: verifyVerdict },
-  }).catch(() => { /* EE failures must not derail the loop */ });
+  }).catch(() => {
+    /* EE failures must not derail the loop */
+  });
 
   // ── Step 9: If not done, surface continue-feedback to the user ───────────
   if (!verdict.pass) {

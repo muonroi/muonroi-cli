@@ -1,7 +1,8 @@
-import { parseVerifyResult } from "./verify-result.js";
-import { evidenceLooksValid } from "./reality-anchor.js";
-import type { DoneGateContext, DoneVerdict, DoneCondition, Criterion } from "./types.js";
 import { runPreflight } from "../council/preflight.js";
+import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
+import { evidenceLooksValid } from "./reality-anchor.js";
+import type { Criterion, DoneCondition, DoneGateContext, DoneVerdict } from "./types.js";
+import { parseVerifyResult } from "./verify-result.js";
 
 /**
  * The 5-condition Definition-of-Done gate.
@@ -18,7 +19,7 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   const verifyPassed = ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) === "PASS" : false;
 
   const floorPassed = ctx.recipe !== null && hasTests && hasCoverage && verifyPassed;
-  
+
   if (!floorPassed) {
     let reason = "unknown";
     if (!ctx.recipe) reason = "no_recipe";
@@ -31,40 +32,66 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
 
   // 2. Evidence regex
   // Every "met" or "partial" criterion must have a valid evidence string
-  const invalidCriteria = ctx.criteria.filter(c => 
-    (c.status === "met" || c.status === "partial") && (!c.evidence || !evidenceLooksValid(c.evidence))
+  const invalidCriteria = ctx.criteria.filter(
+    (c) => (c.status === "met" || c.status === "partial") && (!c.evidence || !evidenceLooksValid(c.evidence)),
   );
   if (invalidCriteria.length > 0) {
-    return { 
-      pass: false, 
-      failedCondition: "evidence_regex", 
-      reason: `missing_evidence: ${invalidCriteria.map(c => c.id).join(", ")}`,
-      score 
+    return {
+      pass: false,
+      failedCondition: "evidence_regex",
+      reason: `missing_evidence: ${invalidCriteria.map((c) => c.id).join(", ")}`,
+      score,
     };
   }
 
   // 3. Weighted score
   if (score < threshold) {
-    return { 
-      pass: false, 
-      failedCondition: "weighted_score", 
-      reason: `score_below_threshold: ${score.toFixed(2)} < ${threshold}`, 
-      score 
+    return {
+      pass: false,
+      failedCondition: "weighted_score",
+      reason: `score_below_threshold: ${score.toFixed(2)} < ${threshold}`,
+      score,
     };
+  }
+
+  // 6. Assumption ledger — block ship when high-confidence assumptions
+  // surfaced during the research debate were never validated. Medium/low
+  // confidence assumptions are surfaced as warnings via the sprint context
+  // but do NOT block here, matching the policy in
+  // assumption-ledger.blockingAssumptions(). Skipped when flowDir/runId
+  // are missing (test contexts or legacy callers).
+  if (ctx.flowDir && ctx.runId) {
+    try {
+      const ledger = await readLedger(ctx.flowDir, ctx.runId);
+      const blockers = blockingAssumptions(ledger);
+      if (blockers.length > 0) {
+        const blockerList = blockers.map((a) => a.id + " (" + a.claim.slice(0, 60) + "...)").join("; ");
+        return {
+          pass: false,
+          failedCondition: "assumption_ledger",
+          reason: "unverified_critical_assumptions: " + blockerList,
+          score,
+        };
+      }
+    } catch {
+      // Ledger read failure is non-fatal — a missing/corrupt ledger should
+      // not block ship that otherwise passes #1-#3. The user can still
+      // catch via the customer debate or final approval gates.
+    }
   }
 
   // 4. PO ↔ Customer cross-model debate (R5: SKIP when score < 0.85)
   const isDevHatch = process.env.MUONROI_DEV === "1";
-  const skipDebate = isDevHatch || (score < 0.85);
+  const skipDebate = isDevHatch || score < 0.85;
 
   if (!skipDebate) {
     const debateVerdict = await runCustomerDebate(ctx);
     if (!debateVerdict.pass) {
-      return { 
-        pass: false, 
-        failedCondition: "customer_debate", 
-        reason: debateVerdict.reason, 
-        score 
+      return {
+        pass: false,
+        failedCondition: "customer_debate",
+        reason: debateVerdict.reason,
+        score,
       };
     }
   }
@@ -84,10 +111,10 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
  */
 function calculateScore(criteria: Criterion[]): number {
   if (criteria.length === 0) return 0;
-  
+
   // Currently assuming uniform weight of 1.0 as weights are not yet in the schema.
-  const weights = criteria.map(() => 1.0); 
-  const values: number[] = criteria.map(c => {
+  const weights = criteria.map(() => 1.0);
+  const values: number[] = criteria.map((c) => {
     if (c.status === "met") return 1.0;
     if (c.status === "partial") return 0.5;
     return 0.0;
@@ -95,7 +122,7 @@ function calculateScore(criteria: Criterion[]): number {
 
   const sumWeights = weights.reduce((a, b) => a + b, 0);
   const sumValues = values.reduce((sum, val, i) => sum + val * weights[i], 0);
-  
+
   return sumValues / sumWeights;
 }
 
@@ -129,7 +156,7 @@ async function runCustomerDebate(ctx: DoneGateContext): Promise<{ pass: boolean;
   }
 
   const criteriaText = ctx.criteria
-    .map(c => `- ${c.id}: ${c.status}${c.evidence ? ` (Evidence: ${c.evidence})` : ""}`)
+    .map((c) => `- ${c.id}: ${c.status}${c.evidence ? ` (Evidence: ${c.evidence})` : ""}`)
     .join("\n");
 
   let conversation = `System: You are in a "Definition of Done" debate. 
@@ -155,9 +182,9 @@ Criteria:\n${criteriaText}\n`;
       if (finalDecision.trim().toUpperCase().startsWith("SHIP")) {
         return { pass: true };
       } else {
-        return { 
-          pass: false, 
-          reason: finalDecision.replace(/^WAIT:\s*/i, "").trim() || "customer_dissent" 
+        return {
+          pass: false,
+          reason: finalDecision.replace(/^WAIT:\s*/i, "").trim() || "customer_dissent",
         };
       }
     }
@@ -173,10 +200,10 @@ async function runUserApproval(ctx: DoneGateContext, score: number): Promise<boo
   const spec = {
     problemStatement: `Ship product? (Current Score: ${(score * 100).toFixed(1)}%)`,
     constraints: ["All criteria must be met or justified"],
-    successCriteria: ctx.criteria.map(c => `${c.id} [${c.status}]`),
+    successCriteria: ctx.criteria.map((c) => `${c.id} [${c.status}]`),
     rawQA: [],
     resolved: {},
-    scope: "Final Project Approval"
+    scope: "Final Project Approval",
   };
 
   const poModelId = ctx.roleAssignments.get("PO")?.modelId ?? "(unresolved)";
@@ -184,7 +211,7 @@ async function runUserApproval(ctx: DoneGateContext, score: number): Promise<boo
     spec,
     [{ role: "PO", model: poModelId }],
     false, // researchAlreadyDone
-    ctx.respondToPreflight
+    ctx.respondToPreflight,
   );
 
   while (true) {
