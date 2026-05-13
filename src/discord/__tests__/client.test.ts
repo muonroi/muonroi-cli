@@ -80,4 +80,39 @@ describe("DiscordRestClient", () => {
     const client = new DiscordRestClient("tok", fetch as any);
     await client.addChannelPermission("c1", "u1", 1024, 0);
   });
+
+  it("getCurrentUserId caches result after first call", async () => {
+    let calls = 0;
+    const fetch = mockFetch(async () => {
+      calls += 1;
+      return jsonResponse({ id: "me-123" });
+    });
+    const client = new DiscordRestClient("tok", fetch as any);
+    const first = await client.getCurrentUserId();
+    const second = await client.getCurrentUserId();
+    expect(first).toBe("me-123");
+    expect(second).toBe("me-123");
+    expect(calls).toBe(1);
+  });
+
+  it("listGuildChannels returns array of channel stubs", async () => {
+    const fetch = mockFetch(async (url) => {
+      expect(url).toContain("/guilds/g1/channels");
+      return jsonResponse([{ id: "c1", name: "general" }]);
+    });
+    const client = new DiscordRestClient("tok", fetch as any);
+    const channels = await client.listGuildChannels("g1");
+    expect(channels).toHaveLength(1);
+    expect(channels[0].id).toBe("c1");
+  });
+
+  it("getChannelMessages without params omits query string", async () => {
+    const fetch = mockFetch(async (url) => {
+      expect(url).not.toContain("?");
+      return jsonResponse([]);
+    });
+    const client = new DiscordRestClient("tok", fetch as any);
+    const msgs = await client.getChannelMessages("c1", {});
+    expect(msgs).toHaveLength(0);
+  });
 });

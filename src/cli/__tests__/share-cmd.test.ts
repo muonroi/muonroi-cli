@@ -170,4 +170,28 @@ describe("runShareCommand", () => {
     const result = await runShareCommand({ cwd, user: "111111111111111111", client });
     expect(result.kind).toBe("acl-only");
   });
+
+  it("skips corrupt manifest JSON when scanning runs dir", async () => {
+    const flowDir = path.join(cwd, ".flow", "runs", "r1");
+    await fs.mkdir(flowDir, { recursive: true });
+    // Write a corrupt manifest — should be skipped gracefully
+    await fs.writeFile(path.join(flowDir, "manifest.json"), "{ bad json");
+    const client = makeClient();
+    // Should fall through to "no manifest found" → error
+    const result = await runShareCommand({ cwd, user: "111111111111111111", client });
+    expect(result.kind).toBe("error");
+  });
+
+  it("corrupt channel mapping JSON → treated as missing channel (acl-only)", async () => {
+    await fs.writeFile(path.join(tmpHome, "discord-channels.json"), "{ corrupt }");
+    const client = makeClient();
+    const result = await runShareCommand({
+      cwd,
+      user: "111111111111111111",
+      product: "abc",
+      client,
+    });
+    // Corrupt mapping = null mapping = acl-only result
+    expect(result.kind).toBe("acl-only");
+  });
 });

@@ -271,4 +271,66 @@ describe("discordAwaitVerdict", () => {
     await discordAwaitVerdict(baseArgs({ client, leader }));
     expect(order).toEqual(["leaderCall", "postReply"]);
   });
+
+  it("403 on getChannelMessages → fallback", async () => {
+    const err = Object.assign(new Error("403"), { status: 403 });
+    const client = makeClient({ getChannelMessages: vi.fn().mockRejectedValue(err) });
+    const fallback = vi.fn().mockResolvedValue({ verdict: "reject", feedback: "via-fallback" });
+    const out = await discordAwaitVerdict(baseArgs({ client, fallback }));
+    expect(fallback).toHaveBeenCalled();
+    expect(out.verdict).toBe("reject");
+  });
+
+  it("cursor update replaces existing entry (not appended)", async () => {
+    // Two verdicts on different sprints, cursor for phase-1/sprint-1 gets updated
+    const client = makeClient({
+      getChannelMessages: vi
+        .fn()
+        .mockResolvedValueOnce([msg("m10", "I accept")])
+        .mockResolvedValueOnce([msg("m20", "I accept")])
+        .mockResolvedValue([]),
+    });
+    const leader = {
+      generate: vi.fn().mockResolvedValue({
+        content: JSON.stringify({ intent: "accept", reply: "ok" }),
+        costUsd: 0.01,
+      }),
+    };
+    // First run
+    await discordAwaitVerdict(baseArgs({ client, leader }));
+    // Second run same phase/sprint - cursor entry should be updated (same idx)
+    const client2 = makeClient({
+      getChannelMessages: vi
+        .fn()
+        .mockResolvedValueOnce([msg("m20", "I accept")])
+        .mockResolvedValue([]),
+    });
+    await discordAwaitVerdict(baseArgs({ client: client2, leader }));
+    const stateFile = path.join(flowDir, "runs", runId, "state.md");
+    const content = await fs.readFile(stateFile, "utf8");
+    // Should have exactly one cursor entry, not two
+    const matches = content.match(/"phaseId"/g);
+    expect(matches?.length).toBe(1);
+  });
+
+  it("budget-exhausted during poll loop aborts with feedback", async () => {
+    let remaining = 10;
+    const client = makeClient({
+      getChannelMessages: vi
+        .fn()
+        .mockResolvedValueOnce([msg("m1", "discuss")])
+        .mockResolvedValue([]),
+    });
+    const leader = {
+      generate: vi.fn().mockImplementation(async () => {
+        remaining = 0; // exhaust budget after first process
+        return { content: JSON.stringify({ intent: "discuss", reply: "ok" }), costUsd: 0.01 };
+      }),
+    };
+    const out = await discordAwaitVerdict(
+      baseArgs({ client, leader, capUsd: 10, remainingUsd: async () => remaining }),
+    );
+    expect(out.verdict).toBe("abort");
+    expect(out.feedback).toBe("budget-exhausted");
+  });
 });

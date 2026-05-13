@@ -80,4 +80,11 @@ describe("publish", () => {
     expect(calls[0][1]).toContain("(continued)");
     expect(calls[1][1]).toContain("(continued)");
   });
+
+  it("re-throws non-403/404 errors from postMessage", async () => {
+    const err: any = new Error("500 Internal Server Error");
+    err.status = 500;
+    const client = makeClient({ postMessage: vi.fn().mockRejectedValue(err) });
+    await expect(publish({ client, channelId: "c1", type: "phase-event", content: "hi" })).rejects.toThrow("500");
+  });
 });
