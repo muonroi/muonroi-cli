@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { loadCatalog } from "../../models/registry.js";
 import { listStoredProviders } from "../../providers/keychain.js";
 import { getDisabledProviders, getRoleModels } from "../../utils/settings.js";
 import { runCouncilScreen } from "./screen-council.js";
@@ -97,6 +98,11 @@ export function buildConfigCommand(): Command {
       console.error("muonroi-cli config requires an interactive terminal (TTY).");
       process.exit(1);
     }
+    // Populate MODELS registry — the picker reads from it, and `muonroi-cli config`
+    // does not go through the main entrypoint that boots the catalog.
+    await loadCatalog().catch(() => {
+      // Picker handles empty registry gracefully (shows no rows) — surface no error here.
+    });
     await runConfigMenu();
   });
 }
