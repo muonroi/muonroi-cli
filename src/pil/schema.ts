@@ -59,4 +59,36 @@ export const PipelineContextSchema = z.object({
     )
     .optional(),
   fallbackReason: z.string().nullable().optional(),
+  // T1 behavioral rules from EE proven-tier points, injected as mandatory suffix by Layer 6.
+  t1Rules: z.array(z.string()).optional(),
 });
+
+const ScoredText = z.object({ text: z.string(), score: z.number() });
+
+export const PilContextResponseSchema = z
+  .object({
+    // Classification
+    taskType: TaskTypeSchema.nullable(),
+    intentKind: z.enum(["task", "chitchat"]).nullable(),
+    outputStyle: OutputStyleSchema,
+    confidence: z.number().min(0).max(1),
+    domain: z.string().nullable(),
+
+    // GSD routing hint
+    gsd_phase: z.enum(["discuss", "execute"]).nullable(),
+    gsd_route_source: z.enum(["ee", "preset", "none"]),
+
+    // Experience retrieval
+    t0_principles: z.array(ScoredText),
+    t1_rules: z.array(z.string()),
+    t2_patterns: z.array(ScoredText),
+    retrieval_skipped_reason: z.string().nullable(),
+
+    // Meta
+    cache_hit: z.boolean(),
+    inference_ms: z.number().min(0),
+    schema_version: z.string(),
+  })
+  .passthrough(); // forward-compat: ignore unknown fields from future server versions
+
+export type PilContextResponse = z.infer<typeof PilContextResponseSchema>;
