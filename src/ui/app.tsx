@@ -3204,6 +3204,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           agent.clearHistory();
           resetToNewSession();
           break;
+        case "config":
+          setMessages((p) => [
+            ...p,
+            {
+              type: "assistant",
+              content:
+                "To configure providers and council settings, run in a separate terminal:\n\n  muonroi-cli config\n\nThis opens the interactive configuration TUI.",
+              timestamp: new Date(),
+            },
+          ]);
+          break;
         case "sessions": {
           // List recent sessions in this workspace so the user can pick one
           // to resume on next launch (`muonroi-cli --session <id>`).
