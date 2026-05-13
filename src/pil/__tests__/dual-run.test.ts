@@ -2,6 +2,19 @@
 // classifications on a representative fixture set. Divergence > 10% fails.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// Stub the EE bridge so both legacy and unified paths behave identically
+// in CI (no experience-engine server available). Without this, unified=1
+// triggers a real HTTP call that either times out (exceeding the 200ms pipeline
+// timeout) or returns null — producing different taskType results from legacy=0,
+// which skips the HTTP call entirely.
+vi.mock("../../ee/bridge.js", () => ({
+  classifyViaBrain: vi.fn().mockResolvedValue(null),
+  searchCollection: vi.fn().mockResolvedValue([]),
+  getEmbeddingRaw: vi.fn().mockResolvedValue(null),
+  routeTask: vi.fn().mockResolvedValue(null),
+  pilContext: vi.fn().mockResolvedValue(null),
+}));
+
 const FIXTURES = [
   "tại sao test fail?",
   "refactor this function",

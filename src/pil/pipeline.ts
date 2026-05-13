@@ -16,6 +16,7 @@
 
 import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
+import { appendPilLog } from "./budget-log.js";
 import { layer1Intent } from "./layer1-intent.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection } from "./layer3-ee-injection.js";
@@ -35,6 +36,13 @@ const PIPELINE_TIMEOUT_FAST_MS = 200;
 const PIPELINE_TIMEOUT_BRAIN_MS = 3500;
 
 function pipelineTimeoutMs(): number {
+  // Allow test environments to override the timeout to avoid flaky races when
+  // the test process is under load (e.g., running 1600+ tests concurrently).
+  const envOverride = process.env.MUONROI_TEST_PIPELINE_TIMEOUT_MS;
+  if (envOverride) {
+    const parsed = parseInt(envOverride, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
   const mode = getCachedEEClientMode();
   if (mode && (mode.mode === "thin" || mode.mode === "thin-degraded" || mode.mode === "fat")) {
     return PIPELINE_TIMEOUT_BRAIN_MS;
@@ -52,11 +60,24 @@ const SKIPPED_LAYERS: Array<{ timingName: string; deltaName: string }> = [
 async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
   const pipelineStart = Date.now();
   const timings: Array<{ name: string; ms: number }> = [];
+  // Track each layer's contribution to the enriched-prompt size so the
+  // PIL budget log can attribute system-prompt bloat to a specific layer.
+  const layerSnapshots: Array<{
+    name: string;
+    charsBefore: number;
+    charsAfter: number;
+    charsDelta: number;
+    durationMs: number;
+  }> = [];
 
   async function timed(name: string, fn: (c: PipelineContext) => Promise<PipelineContext>): Promise<void> {
     const start = Date.now();
+    const charsBefore = ctx.enriched.length;
     ctx = await fn(ctx);
-    timings.push({ name, ms: Date.now() - start });
+    const ms = Date.now() - start;
+    const charsAfter = ctx.enriched.length;
+    timings.push({ name, ms });
+    layerSnapshots.push({ name, charsBefore, charsAfter, charsDelta: charsAfter - charsBefore, durationMs: ms });
   }
 
   await timed("layer1-intent", layer1Intent);
@@ -101,6 +122,23 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
       enrichmentTokensAdded: Math.round(enrichmentCharsAdded / 4),
     },
   };
+
+  // Best-effort PIL budget log — attributes prompt-size growth to each layer.
+  // Fire-and-forget; never await on the hot path.
+  appendPilLog({
+    ts: pipelineStart,
+    sessionId: ctx.sessionId ?? null,
+    taskType: ctx.taskType ?? null,
+    domain: ctx.domain ?? null,
+    confidence: ctx.confidence ?? 0,
+    rawChars: ctx.raw.length,
+    enrichedChars: ctx.enriched.length,
+    totalDeltaChars: ctx.enriched.length - ctx.raw.length,
+    totalMs: Date.now() - pipelineStart,
+    layers: layerSnapshots,
+    fallbackReason: ctx.fallbackReason ?? null,
+    intentDetection: ctx._intentTrace ?? null,
+  }).catch(() => undefined);
 
   return ctx;
 }
