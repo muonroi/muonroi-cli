@@ -170,3 +170,139 @@ export interface DoneGateContext {
   flowDir?: string;
   runId?: string;
 }
+
+// ===== Discovery (B+C spec) =====
+
+export type ProductTypeT = "saas" | "internal-tool" | "consumer-app" | "b2b-platform" | "marketplace" | "other";
+
+export type PlatformT =
+  | "web"
+  | "mobile-ios"
+  | "mobile-android"
+  | "desktop-win"
+  | "desktop-mac"
+  | "desktop-linux"
+  | "cli";
+
+export type ScaleT = "1-100" | "100-1k" | "1k-100k" | "100k-1M" | "1M+";
+
+export type BackendArchT = "monolith" | "modular-monolith" | "microservices" | "serverless" | "none";
+
+export type DbModeT = "greenfield" | "existing-schema" | "migrate-from";
+
+export type FeLibraryT = "shadcn" | "radix" | "headlessui" | "none";
+
+export interface AudienceCtx {
+  persona: string;
+  scale: ScaleT;
+  geography: string;
+}
+
+export interface BackendStackCtx {
+  language: string;
+  framework: string;
+  runtime?: string;
+}
+
+export interface DbStrategyCtx {
+  mode: DbModeT;
+  engine: string;
+  notes?: string;
+}
+
+export interface FrontendApproachCtx {
+  library: FeLibraryT;
+  framework: "next" | "vite-react" | "svelte" | "none";
+}
+
+export interface DeploymentCtx {
+  target: "self-host" | "cloud" | "hybrid";
+  provider?: string;
+  ciCd?: string;
+}
+
+export interface DiscoveryContext {
+  productType: ProductTypeT;
+  targetPlatform: PlatformT[];
+  audience: AudienceCtx;
+  backendArchitecture: BackendArchT;
+  backendStack: BackendStackCtx;
+  dbStrategy: DbStrategyCtx;
+  frontendApproach?: FrontendApproachCtx;
+  baStatus?: "complete" | "partial" | "none";
+  designStatus?: "system-exists" | "mockups-only" | "none";
+  deployment?: DeploymentCtx;
+}
+
+export interface RecommendationEntry {
+  chosen: any;
+  alternatives: any[];
+  rationale: string;
+  source: "leader" | "council" | "user-only";
+  debateRef?: string;
+  tiebreakUsed?: boolean;
+  synthFailed?: boolean;
+}
+
+export interface UserOverrideEntry {
+  seq: number;
+  timestampUtc: string;
+  field: string;
+  from: any;
+  to: any;
+  reason: string;
+}
+
+export type ClassificationT = "greenfield" | "existing" | "ambiguous";
+
+export interface ManifestDetection {
+  file: string;
+  type: "package.json" | "Cargo.toml" | "go.mod" | "pyproject.toml" | "csproj" | "pom.xml" | "build.gradle";
+  weight: number;
+  inferredLang: string;
+  inferredFrameworks: string[];
+}
+
+export interface ExistingProjectSignals {
+  isGitRepo: boolean;
+  hasCommitHistory: boolean;
+  srcFileCount: number;
+  manifests: ManifestDetection[];
+  languages: string[];
+  frameworks: string[];
+  classification: ClassificationT;
+}
+
+export interface ProjectContext {
+  version: 1;
+  schemaName: "project-context";
+  generatedAt: string;
+  idea: string;
+  detection: ExistingProjectSignals;
+  context: DiscoveryContext;
+  recommendations: {
+    byField: Record<string, RecommendationEntry>;
+    constraints: {
+      fePolicy: "headless-ui-only";
+      feEnforced: boolean;
+    };
+  };
+  userOverrides: UserOverrideEntry[];
+}
+
+export type DiscoveryPhase = "interview" | "awaiting-artifact-write" | "done";
+
+export interface DiscoveryState {
+  version: 1;
+  phase: DiscoveryPhase;
+  classification: ClassificationT;
+  prefillSource: { fromDetection: string[]; fromPrompt: string[] };
+  questionsAsked: string[];
+  questionsAnswered: string[];
+  currentQuestion?: string;
+  answers: Partial<DiscoveryContext>;
+  recommendations: Record<string, RecommendationEntry>;
+  userOverrides: UserOverrideEntry[];
+  userGatePassed: boolean;
+  cumulativeRecommenderCostUsd: number;
+}
