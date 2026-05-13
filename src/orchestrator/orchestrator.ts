@@ -3,30 +3,31 @@
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { generateText, type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
+import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { extractSession } from "../ee/extract-session.js";
+import {
+  bootstrapEEClient,
+  getDefaultEEClient,
+  getDefaultEEClient as getEEClientForVeto,
+  getLastSurfacedState,
+} from "../ee/intercept.js";
+import { getMistakeDetector } from "../ee/mistake-detector.js";
+import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
+import * as phaseTracker from "../ee/phase-tracker.js";
+import { buildScope as buildScopeForVeto } from "../ee/scope.js";
+import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
+import { getTenantId, getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
-import { getMistakeDetector } from "../ee/mistake-detector.js";
-import { getDefaultEEClient as getEEClientForVeto } from "../ee/intercept.js";
-import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { buildScope as buildScopeForVeto } from "../ee/scope.js";
-import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
-import * as phaseTracker from "../ee/phase-tracker.js";
-import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
-import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
-import type { PreToolUseHookInput, PostToolUseHookInput, PostToolUseFailureHookInput } from "../hooks/types";
-import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
-import { getTenantId } from "../ee/tenant.js";
-import { routeFeedback, routeModel } from "../ee/bridge.js";
-import { reportRouteOutcome } from "../router/decide.js";
-import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
-import { routerStore } from "../router/store.js";
-import { statusBarStore } from "../ui/status-bar/store.js";
-import { taskTypeToTier, taskTypeToMaxTokens, taskTypeToReasoningEffort } from "../pil/task-tier-map.js";
 import type {
   NotificationHookInput,
   PostCompactHookInput,
+  PostToolUseFailureHookInput,
+  PostToolUseHookInput,
   PreCompactHookInput,
+  PreToolUseHookInput,
   SessionEndHookInput,
   SessionStartHookInput,
   StopFailureHookInput,
@@ -38,18 +39,31 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
-import { extractSession } from "../ee/extract-session.js";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { buildMcpToolSet } from "../mcp/runtime";
-import { createBuiltinTools } from "../tools/registry.js";
+import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
+import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
+import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
+import {
+  bridgeMcpToolResult,
+  getVisionGuidanceForTextOnly,
+  scrubImagePayloadsInMessages,
+} from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
-import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
+import {
+  createProviderFactory,
+  detectProviderForModel,
+  type ProviderFactory,
+  type ResolvedModelRuntime as RuntimeResult,
+  resolveModelRuntime as resolveRuntime,
+} from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
-import { bridgeMcpToolResult, getVisionGuidanceForTextOnly, scrubImagePayloadsInMessages } from "../providers/mcp-vision-bridge.js";
-import { isDebugEnabled, recordTurnTrace, type PipelineStep, type TurnTrace } from "../ui/slash/debug.js";
-import { applyPilSuffix, getResponseToolSet, isResponseTool, getResponseTaskType, runPipeline } from "../pil/index.js";
+import { reportRouteOutcome } from "../router/decide.js";
+import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
+import { routerStore } from "../router/store.js";
 import {
   appendCompaction,
   appendMessages,
@@ -59,11 +73,12 @@ import {
   getSessionTotalTokens,
   loadTranscript,
   loadTranscriptState,
+  logInteraction,
   recordUsageEvent,
   SessionStore,
-  logInteraction,
 } from "../storage/index";
 import { BashTool } from "../tools/bash";
+import { createBuiltinTools } from "../tools/registry.js";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -81,16 +96,19 @@ import type {
   VerifyRecipe,
   WorkspaceInfo,
 } from "../types/index";
+import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
+import { statusBarStore } from "../ui/status-bar/store.js";
 import { loadCustomInstructions } from "../utils/instructions";
 import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
-  getCurrentModel,
-  getModeSpecificModel,
+  getAutoCompactThresholdPct,
   getCouncilRounds,
+  getCurrentModel,
+  getCurrentShellSettings,
+  getModeSpecificModel,
   getRoleModel,
   getRoleModels,
-  getAutoCompactThresholdPct,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
@@ -100,110 +118,101 @@ import {
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
-  getCurrentShellSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 import { buildVerifyDetectPrompt, normalizeVerifyRecipe, prepareVerifySandbox } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
+  type AgentOptions,
+  type BatchChatCompletionRequest,
+  type BatchChatCompletionResponse,
+  type BatchChatMessage,
+  type BatchClientOptions,
+  type BatchFunctionTool,
+  type BatchToolCall,
+  COUNCIL_COLOR_BG,
+  COUNCIL_COLOR_RESET,
+  COUNCIL_ROLE_COLORS,
+  type CouncilOutcome,
+  type LegacyProvider,
+  type ModelInfoStub,
+  type ProcessMessageError,
+  type ProcessMessageFinishReason,
+  type ProcessMessageObserver,
+  type ProcessMessageStepFinish,
+  type ProcessMessageStepStart,
+  type ProcessMessageToolFinish,
+  type ProcessMessageToolStart,
+  type ProcessMessageUsage,
+  type ResolvedModelRuntime,
+} from "./agent-options";
+import {
+  accumulateUsage,
+  asNumber,
+  buildAssistantBatchMessage,
+  buildBatchChatCompletionRequest,
+  buildBatchName,
+  buildToolBatchMessage,
+  type ExecutedBatchTool,
+  extractJsonObject,
+  getBatchFinishReason,
+  getBatchUsage,
+  hasUsage,
+  parseToolArgumentsOrRaw,
+  sumDefined,
+  toBase64DataContent,
+  toBatchChatMessages,
+  toLocalToolCall,
+  toolOutputToText,
+  toSerializableValue,
+} from "./batch-utils";
+import {
   type CompactionSettings,
   createCompactionSummaryMessage,
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_RESERVE_TOKENS,
-  POST_TURN_MIN_TOKENS,
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
   getCompactionSummaryText,
   isCompactionSummaryMessage,
+  POST_TURN_MIN_TOKENS,
   prepareCompaction,
   relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
-import { setProviderHint } from "./token-counter.js";
 import { DelegationManager } from "./delegations";
+import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { stableCallId } from "./pending-calls.js";
 import {
-  type AgentOptions,
-  type ProcessMessageObserver,
-  type ProcessMessageUsage,
-  type ProcessMessageStepStart,
-  type ProcessMessageStepFinish,
-  type ProcessMessageToolStart,
-  type ProcessMessageToolFinish,
-  type ProcessMessageError,
-  type ProcessMessageFinishReason,
-  type CouncilOutcome,
-  type BatchClientOptions,
-  type BatchChatMessage,
-  type BatchFunctionTool,
-  type BatchToolCall,
-  type BatchChatCompletionRequest,
-  type BatchChatCompletionResponse,
-  type ModelInfoStub,
-  COUNCIL_ROLE_COLORS,
-  COUNCIL_COLOR_RESET,
-  COUNCIL_COLOR_BG,
-  type LegacyProvider,
-  type ResolvedModelRuntime,
-} from "./agent-options";
-import {
-  MAX_TOOL_ROUNDS,
-  VISION_MODEL,
+  applyModelConstraints,
+  buildSubagentPrompt,
+  buildSystemPrompt,
+  buildSystemPromptParts,
   COMPUTER_MODEL,
-  type SystemPromptParts,
   findCustomSubagent,
   formatCustomSubagentsPromptSection,
-  buildSystemPromptParts,
-  buildSystemPrompt,
-  buildSubagentPrompt,
-  applyModelConstraints,
+  MAX_TOOL_ROUNDS,
+  type SystemPromptParts,
+  VISION_MODEL,
 } from "./prompts";
-import { isContextLimitError, isAuthenticationError, humanizeApiError } from "./error-utils";
+import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { setProviderHint } from "./token-counter.js";
 import {
+  combineAbortSignals,
+  firstLine,
+  formatSubagentActivity,
+  getFinishReason,
+  getStepNumber,
+  getUsage,
+  notifyObserver,
+  parseToolArgs,
   toToolCall,
   toToolResult,
-  formatSubagentActivity,
-  parseToolArgs,
-  firstLine,
   truncate,
-  notifyObserver,
-  combineAbortSignals,
-  getStepNumber,
-  getFinishReason,
-  getUsage,
 } from "./tool-utils";
-import {
-  type ExecutedBatchTool,
-  extractJsonObject,
-  buildBatchName,
-  buildBatchChatCompletionRequest,
-  toBatchChatMessages,
-  toBase64DataContent,
-  toolOutputToText,
-  getBatchUsage,
-  accumulateUsage,
-  hasUsage,
-  getBatchFinishReason,
-  toLocalToolCall,
-  buildAssistantBatchMessage,
-  buildToolBatchMessage,
-  parseToolArgumentsOrRaw,
-  toSerializableValue,
-  asNumber,
-  sumDefined,
-} from "./batch-utils";
-import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
-import {
-  createProviderFactory,
-  resolveModelRuntime as resolveRuntime,
-  detectProviderForModel,
-  type ProviderFactory,
-  type ResolvedModelRuntime as RuntimeResult,
-} from "../providers/runtime.js";
-import type { ProviderId } from "../providers/types.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -281,17 +290,13 @@ function createTools(
     modelId?: string;
   },
 ): ToolSet {
-  return createBuiltinTools(
-    _bash as BashTool,
-    (_mode ?? "agent") as AgentMode,
-    {
-      runTask: _opts?.runTask,
-      runDelegation: _opts?.runDelegation,
-      readDelegation: _opts?.readDelegation,
-      listDelegations: _opts?.listDelegations,
-      modelId: _opts?.modelId,
-    },
-  );
+  return createBuiltinTools(_bash as BashTool, (_mode ?? "agent") as AgentMode, {
+    runTask: _opts?.runTask,
+    runDelegation: _opts?.runDelegation,
+    readDelegation: _opts?.readDelegation,
+    listDelegations: _opts?.listDelegations,
+    modelId: _opts?.modelId,
+  });
 }
 
 async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: AbortSignal): Promise<ModelMessage[]> {
@@ -368,7 +373,10 @@ export class Agent {
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
   private _priorWarningIdsInSession = new Set<string>();
   /** EE session guidance: structured warnings accumulated across turns — injected into model context at turn start. Keyed by principle_uuid to deduplicate. */
-  private _sessionEEGuidance = new Map<string, { toolName: string; message: string; why: string; confidence: number }>();
+  private _sessionEEGuidance = new Map<
+    string,
+    { toolName: string; message: string; why: string; confidence: number }
+  >();
   /** P0 native observation: rolling buffer of assistant reasoning text in current turn — last 200 chars sent as intent_context.assistantReasoningExcerpt. */
   private _turnAssistantReasoning = "";
   /** P0 native observation: cached user goal for current turn — first 200 chars of userMessage. */
@@ -476,9 +484,10 @@ export class Agent {
     if (newProviderId !== this.providerId && this.apiKey) {
       this.providerId = newProviderId;
       setProviderHint(this.providerId);
-      const effectiveBaseURL = this.providerId !== "anthropic" && this.baseURL === apiBaseFor("anthropic")
-        ? undefined
-        : (this.baseURL ?? undefined);
+      const effectiveBaseURL =
+        this.providerId !== "anthropic" && this.baseURL === apiBaseFor("anthropic")
+          ? undefined
+          : (this.baseURL ?? undefined);
       this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
     }
     if (this.sessionStore && this.session) {
@@ -539,9 +548,8 @@ export class Agent {
     this.baseURL = baseURL || null;
     // Only pass baseURL to provider factory if it's an explicit override,
     // not the default Anthropic URL (which would break non-Anthropic providers).
-    const effectiveBaseURL = this.providerId !== "anthropic" && baseURL === apiBaseFor("anthropic")
-      ? undefined
-      : baseURL;
+    const effectiveBaseURL =
+      this.providerId !== "anthropic" && baseURL === apiBaseFor("anthropic") ? undefined : baseURL;
     this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
   }
 
@@ -683,8 +691,7 @@ export class Agent {
 
   async clearHistory(): Promise<void> {
     // D-09: Extract messages accumulated since last clear BEFORE reset
-    await extractSession(this.messages, this.bash.getCwd(), "cli-clear", this.getSessionId())
-      .catch(() => {}); // D-05: redundant safety — extractSession already swallows
+    await extractSession(this.messages, this.bash.getCwd(), "cli-clear", this.getSessionId()).catch(() => {}); // D-05: redundant safety — extractSession already swallows
     this.startNewSession();
   }
 
@@ -820,7 +827,13 @@ export class Agent {
   }
 
   private recordUsage(
-    usage?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number },
+    usage?: {
+      totalTokens?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    },
     source: UsageSource = "message",
     model = this.modelId,
   ): void {
@@ -846,7 +859,8 @@ export class Agent {
     const priceOut = info?.outputPrice ?? 0;
     // API inputTokens includes cacheRead — subtract to get non-cached portion
     const nonCachedInput = Math.max(0, totalInput - cacheRead - cacheCreate);
-    const turnCostMicros = nonCachedInput * priceIn + cacheRead * priceCached + cacheCreate * priceIn + output * priceOut;
+    const turnCostMicros =
+      nonCachedInput * priceIn + cacheRead * priceCached + cacheCreate * priceIn + output * priceOut;
     statusBarStore.setState({
       in_tokens: prev.in_tokens + totalInput,
       out_tokens: prev.out_tokens + output,
@@ -1191,7 +1205,10 @@ export class Agent {
       statusBarStore.setState({ routed_from: this.modelId, model: childModelId });
     }
     const childRuntime = isVision
-      ? { ...resolveModelRuntime(provider, childModelId), model: provider.responses?.(childModelId) ?? provider(childModelId) }
+      ? {
+          ...resolveModelRuntime(provider, childModelId),
+          model: provider.responses?.(childModelId) ?? provider(childModelId),
+        }
       : resolveModelRuntime(provider, childModelId);
     if (isComputer && childRuntime.modelInfo?.supportsClientTools === false) {
       return {
@@ -1226,9 +1243,12 @@ export class Agent {
           onOAuthRequired: (_serverId, url) => {
             const urlStr = url.toString();
             import("child_process").then(({ exec }) => {
-              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
-                : process.platform === "darwin" ? `open "${urlStr}"`
-                : `xdg-open "${urlStr}"`;
+              const cmd =
+                process.platform === "win32"
+                  ? `start "" "${urlStr}"`
+                  : process.platform === "darwin"
+                    ? `open "${urlStr}"`
+                    : `xdg-open "${urlStr}"`;
               exec(cmd);
             });
           },
@@ -1282,10 +1302,13 @@ export class Agent {
           const tu = totalUsage as Record<string, unknown>;
           const details = tu.inputTokenDetails as Record<string, unknown> | undefined;
           const raw = tu.raw as Record<string, unknown> | undefined;
-          const cacheReadTokens = asNumber(tu.cachedInputTokens) ?? asNumber(details?.cacheReadTokens)
-            ?? asNumber(raw?.prompt_cache_hit_tokens) ?? 0;
-          const cacheCreationTokens = asNumber(details?.cacheWriteTokens)
-            ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
+          const cacheReadTokens =
+            asNumber(tu.cachedInputTokens) ??
+            asNumber(details?.cacheReadTokens) ??
+            asNumber(raw?.prompt_cache_hit_tokens) ??
+            0;
+          const cacheCreationTokens =
+            asNumber(details?.cacheWriteTokens) ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
           this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
         },
       });
@@ -1502,7 +1525,7 @@ export class Agent {
       explore: ["balanced", "fast"],
       general: ["premium", "balanced"],
     };
-    for (const tier of (tierPrefs[task] ?? ["balanced"])) {
+    for (const tier of tierPrefs[task] ?? ["balanced"]) {
       const m = getModelByTier(tier, this.providerId);
       if (m?.provider === this.providerId) return m.id;
     }
@@ -1549,7 +1572,13 @@ export class Agent {
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactModelId = this._resolveCompactModel();
-    const { summary, usage: compactUsage } = await generateCompactionSummary(provider, compactModelId, preparation, undefined, signal);
+    const { summary, usage: compactUsage } = await generateCompactionSummary(
+      provider,
+      compactModelId,
+      preparation,
+      undefined,
+      signal,
+    );
 
     appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
 
@@ -1577,11 +1606,7 @@ export class Agent {
       pinnedReinjectionSeqs.push(null);
     }
 
-    this.messages = [
-      createCompactionSummaryMessage(summary),
-      ...pinnedReinjections,
-      ...preparation.keptMessages,
-    ];
+    this.messages = [createCompactionSummaryMessage(summary), ...pinnedReinjections, ...preparation.keptMessages];
     this.messageSeqs = [null, ...pinnedReinjectionSeqs, ...keptSeqs];
 
     // Track compaction stats — net of the tokens spent ON compaction itself.
@@ -1594,7 +1619,7 @@ export class Agent {
     this._compactionStats.totalSaved += saved;
 
     // Update status bar with current context size and compaction summary
-    const fmtCompact = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+    const fmtCompact = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n));
     const modelSuffix = compactModelId !== this.modelId ? ` via ${compactModelId}` : "";
     const userMsgCount = this.messages.filter((m) => m.role === "user").length;
     const isLongSession = this._compactionStats.count >= 3 || userMsgCount >= 200;
@@ -1626,7 +1651,9 @@ export class Agent {
           },
         });
       }
-    } catch { /* fail-open */ }
+    } catch {
+      /* fail-open */
+    }
 
     this._compactedThisTurn = true;
     return true;
@@ -1644,9 +1671,14 @@ export class Agent {
     const thresholdPct = getAutoCompactThresholdPct();
     const minMeaningfulTokens = Math.max(POST_TURN_MIN_TOKENS, Math.floor(contextWindow * thresholdPct));
     if (tokens < minMeaningfulTokens) return;
-    await this.compactForContext(provider, system, contextWindow, signal, this.getCompactionSettings(contextWindow), true).catch(
-      (err) => console.warn("[compact] failed:", (err as Error)?.message),
-    );
+    await this.compactForContext(
+      provider,
+      system,
+      contextWindow,
+      signal,
+      this.getCompactionSettings(contextWindow),
+      true,
+    ).catch((err) => console.warn("[compact] failed:", (err as Error)?.message));
   }
 
   // ========================================================================
@@ -1655,12 +1687,7 @@ export class Agent {
 
   private _councilStats = { calls: 0, startMs: 0 };
 
-  private async _councilGenerate(
-    modelId: string,
-    system: string,
-    prompt: string,
-    maxTokens = 2048,
-  ): Promise<string> {
+  private async _councilGenerate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
     const providerId = detectProviderForModel(modelId);
     const key = await loadKeyForProvider(providerId);
     const provider = createProvider(providerId, key);
@@ -1759,7 +1786,9 @@ export class Agent {
         return {
           system:
             `You are a ${ctx.speakerRole} specialist. You are entering a discussion with a ${ctx.partnerRole} specialist about a technical topic.\n\n` +
-            (ctx.conversationContext ? `## Conversation Context (before this discussion)\n${ctx.conversationContext}\n\n---\n\n` : "") +
+            (ctx.conversationContext
+              ? `## Conversation Context (before this discussion)\n${ctx.conversationContext}\n\n---\n\n`
+              : "") +
             `Share your analysis naturally — explain your reasoning, the trade-offs you see, and what concerns you.\n` +
             `End by asking the ${ctx.partnerRole} for their perspective on your analysis. What do they see differently?`,
           prompt: `Topic for discussion:\n${ctx.topic}`,
@@ -1913,7 +1942,9 @@ export class Agent {
               this.session.id,
               `[Council Decision]\nTopic: ${topic}\n${outcome.summary}\nAgreed: ${outcome.agreed.join("; ")}\nRecommendation: ${outcome.recommendation}`,
             );
-          } catch { /* non-critical */ }
+          } catch {
+            /* non-critical */
+          }
         }
         yield { type: "content", content: `\n> Decision recorded.\n` };
         break;
@@ -1925,7 +1956,9 @@ export class Agent {
           if (this.session) {
             try {
               appendSystemMessage(this.session.id, `[Council Action Items]\nTopic: ${topic}\n${itemsText}`);
-            } catch { /* non-critical */ }
+            } catch {
+              /* non-critical */
+            }
           }
         }
         break;
@@ -1947,11 +1980,15 @@ export class Agent {
                 yield { type: "content", content: `\n> Plan updated with council recommendations.\n` };
               }
             }
-          } catch { /* flow dir may not exist — non-critical */ }
+          } catch {
+            /* flow dir may not exist — non-critical */
+          }
           if (this.session) {
             try {
               appendSystemMessage(this.session.id, `[Council Plan Update]\nTopic: ${topic}\n${outcome.planUpdate}`);
-            } catch { /* non-critical */ }
+            } catch {
+              /* non-critical */
+            }
           }
         }
         break;
@@ -1965,7 +2002,9 @@ export class Agent {
                 this.session.id,
                 `[Council Resolution]\nQ: ${outcome.resolvedQuestion.question}\nA: ${outcome.resolvedQuestion.answer}`,
               );
-            } catch { /* non-critical */ }
+            } catch {
+              /* non-critical */
+            }
           }
         }
         break;
@@ -1987,7 +2026,13 @@ export class Agent {
    */
   private async _resolveNonDisabledFallback(): Promise<{ modelId: string }> {
     const fallbackProviders: ProviderId[] = [
-      "anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama",
+      "anthropic",
+      "openai",
+      "google",
+      "deepseek",
+      "siliconflow",
+      "xai",
+      "ollama",
     ];
     for (const p of fallbackProviders) {
       if (!isProviderDisabled(p)) {
@@ -2010,7 +2055,9 @@ export class Agent {
     providerId: ProviderId,
     roles: ModelRole[],
   ): Promise<Array<{ role: ModelRole; model: string }>> {
-    const canReach = await loadKeyForProvider(providerId).then(() => true).catch(() => false);
+    const canReach = await loadKeyForProvider(providerId)
+      .then(() => true)
+      .catch(() => false);
     if (!canReach) return [];
 
     const providerModels = getModelsForProvider(providerId);
@@ -2225,7 +2272,9 @@ export class Agent {
         if (!modelId) continue;
         const provider = detectProviderForModel(modelId);
         if (isProviderDisabled(provider as ProviderId)) continue;
-        const canReach = await loadKeyForProvider(provider).then(() => true).catch(() => false);
+        const canReach = await loadKeyForProvider(provider)
+          .then(() => true)
+          .catch(() => false);
         if (canReach) candidates.push({ role, model: modelId });
       }
       if (candidates.length >= 2) {
@@ -2259,7 +2308,11 @@ export class Agent {
     if (candidates.length < 2) {
       const mainProviderId = detectProviderForModel(this.modelId);
       const mainDisabled = isProviderDisabled(mainProviderId as ProviderId);
-      const mainCanReach = !mainDisabled && await loadKeyForProvider(mainProviderId).then(() => true).catch(() => false);
+      const mainCanReach =
+        !mainDisabled &&
+        (await loadKeyForProvider(mainProviderId)
+          .then(() => true)
+          .catch(() => false));
       if (mainCanReach) {
         candidates.length = 0;
         for (const role of ALL_ROLES) {
@@ -2273,7 +2326,10 @@ export class Agent {
     }
 
     if (candidates.length < 2) {
-      yield { type: "content", content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n" };
+      yield {
+        type: "content",
+        content: "\nNo reachable provider. Check API keys in user-settings.json or environment.\n",
+      };
       yield { type: "done" };
       return;
     }
@@ -2289,11 +2345,7 @@ export class Agent {
     const researchCandidate = candidates.find((c) => c.role === "research") ?? candidates[0];
     yield { type: "content", content: `\n### \x1b[35m[research]\x1b[0m ${researchCandidate.model}\n` };
 
-    const researchFindings = await this._councilResearch(
-      researchCandidate.model,
-      topic,
-      conversationContext,
-    );
+    const researchFindings = await this._councilResearch(researchCandidate.model, topic, conversationContext);
     yield { type: "content", content: `${researchFindings}\n` };
     yield { type: "content", content: `\n> Phase 0: ${((Date.now() - p0Start) / 1000).toFixed(1)}s\n` };
 
@@ -2338,7 +2390,10 @@ export class Agent {
       }
     }
 
-    yield { type: "content", content: `\n> Phase 1: ${active.length} participants, ${((Date.now() - p1Start) / 1000).toFixed(1)}s (parallel)\n` };
+    yield {
+      type: "content",
+      content: `\n> Phase 1: ${active.length} participants, ${((Date.now() - p1Start) / 1000).toFixed(1)}s (parallel)\n`,
+    };
 
     if (active.length < 2) {
       yield { type: "content", content: "\nNot enough successful openings for discussion.\n" };
@@ -2380,8 +2435,11 @@ export class Agent {
 
             if (round === 1) {
               const aPrompt = this._buildDiscussPrompt("respond", {
-                speakerRole: a.role, partnerRole: b.role, topic,
-                speakerPosition: a.position, partnerPosition: b.position,
+                speakerRole: a.role,
+                partnerRole: b.role,
+                topic,
+                speakerPosition: a.position,
+                partnerPosition: b.position,
                 conversationContext: enrichedContext,
               });
               aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
@@ -2389,8 +2447,11 @@ export class Agent {
               chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
 
               const bPrompt = this._buildDiscussPrompt("respond", {
-                speakerRole: b.role, partnerRole: a.role, topic,
-                speakerPosition: b.position, partnerPosition: aResponse,
+                speakerRole: b.role,
+                partnerRole: a.role,
+                topic,
+                speakerPosition: b.position,
+                partnerPosition: aResponse,
                 conversationContext: enrichedContext,
               });
               bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
@@ -2399,8 +2460,12 @@ export class Agent {
             } else {
               const historyText = log.join("\n\n");
               const aPrompt = this._buildDiscussPrompt("followup", {
-                speakerRole: a.role, partnerRole: b.role, topic,
-                partnerPosition: b.position, exchangeHistory: historyText, round,
+                speakerRole: a.role,
+                partnerRole: b.role,
+                topic,
+                partnerPosition: b.position,
+                exchangeHistory: historyText,
+                round,
                 conversationContext: enrichedContext,
                 runningSummary,
               });
@@ -2409,8 +2474,12 @@ export class Agent {
               chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
 
               const bPrompt = this._buildDiscussPrompt("followup", {
-                speakerRole: b.role, partnerRole: a.role, topic,
-                partnerPosition: aResponse, exchangeHistory: historyText, round,
+                speakerRole: b.role,
+                partnerRole: a.role,
+                topic,
+                partnerPosition: aResponse,
+                exchangeHistory: historyText,
+                round,
                 conversationContext: enrichedContext,
                 runningSummary,
               });
@@ -2424,7 +2493,9 @@ export class Agent {
 
             // Convergence check
             const convPrompt = this._buildDiscussPrompt("convergence-check", {
-              speakerRole: a.role, partnerRole: b.role, topic,
+              speakerRole: a.role,
+              partnerRole: b.role,
+              topic,
               exchangeHistory: log.slice(-4).join("\n\n"),
               conversationContext: enrichedContext,
             });
@@ -2438,12 +2509,17 @@ export class Agent {
                 converged = parsed.converged === true;
                 convReason = parsed.reason ?? "";
               }
-            } catch { /* not converged */ }
+            } catch {
+              /* not converged */
+            }
 
             return { key, chunks, converged, convReason, error: null as string | null };
           } catch (err: unknown) {
             return {
-              key, chunks, converged: false, convReason: "",
+              key,
+              chunks,
+              converged: false,
+              convReason: "",
               error: err instanceof Error ? err.message : String(err),
             };
           }
@@ -2474,7 +2550,10 @@ export class Agent {
         }
       }
 
-      yield { type: "content", content: `\n> Round ${round}: ${((Date.now() - p2Start) / 1000).toFixed(1)}s (${pairs.length} pairs parallel)\n` };
+      yield {
+        type: "content",
+        content: `\n> Round ${round}: ${((Date.now() - p2Start) / 1000).toFixed(1)}s (${pairs.length} pairs parallel)\n`,
+      };
 
       if (allConverged) {
         yield { type: "content", content: `\n> All pairs converged at round ${round}. Moving to synthesis.\n` };
@@ -2485,7 +2564,14 @@ export class Agent {
       if (round < maxRounds) {
         try {
           runningSummary = await this._generateRoundSummary(exchangeLogs, topic, round, active[0].model);
-          yield { type: "content", content: `\n> **Discussion state:** ${runningSummary.split("\n").filter((l) => l.trim()).slice(0, 3).join(" | ")}\n` };
+          yield {
+            type: "content",
+            content: `\n> **Discussion state:** ${runningSummary
+              .split("\n")
+              .filter((l) => l.trim())
+              .slice(0, 3)
+              .join(" | ")}\n`,
+          };
         } catch {
           // Non-critical — continue without summary
         }
@@ -2503,31 +2589,29 @@ export class Agent {
       .map(([pair, log]) => `### Discussion: ${pair}\n${log.join("\n\n")}`)
       .join("\n\n---\n\n");
 
-    const finalPositions = active
-      .map((p) => `**${p.role}** (${p.model}): ${p.position.slice(0, 500)}...`)
-      .join("\n\n");
+    const finalPositions = active.map((p) => `**${p.role}** (${p.model}): ${p.position.slice(0, 500)}...`).join("\n\n");
 
     let synthesisText = "";
     try {
       synthesisText = await this._councilGenerate(
         leaderModelId,
         "You are the team lead. Multiple specialists just had a structured discussion about a topic.\n\n" +
-        "Output TWO parts separated by the exact line `---READABLE---`:\n\n" +
-        "**Part 1: JSON** — a single JSON object:\n" +
-        "```\n" +
-        '{ "type": "decision"|"action_items"|"plan_update"|"resolve_question",\n' +
-        '  "summary": "1-2 sentence executive summary",\n' +
-        '  "agreed": ["point 1", "point 2"],\n' +
-        '  "tradeoffs": ["trade-off 1"],\n' +
-        '  "recommendation": "Your decisive recommendation",\n' +
-        '  "actionItems": ["step 1", "step 2"],\n' +
-        '  "planUpdate": "paragraph for plan update (only if type=plan_update)",\n' +
-        '  "resolvedQuestion": {"question": "...", "answer": "..."} }\n' +
-        "```\n" +
-        "Choose type: decision (general), action_items (concrete steps), plan_update (modify active plan), resolve_question (answer a specific question).\n\n" +
-        "**Part 2: Human-readable** — after `---READABLE---`, write the synthesis in markdown:\n" +
-        "## AGREED\n## TRADE-OFFS\n## RECOMMENDATION\n## NEXT STEPS\n\n" +
-        "Be decisive. Output Part 1 JSON first, then ---READABLE---, then Part 2.",
+          "Output TWO parts separated by the exact line `---READABLE---`:\n\n" +
+          "**Part 1: JSON** — a single JSON object:\n" +
+          "```\n" +
+          '{ "type": "decision"|"action_items"|"plan_update"|"resolve_question",\n' +
+          '  "summary": "1-2 sentence executive summary",\n' +
+          '  "agreed": ["point 1", "point 2"],\n' +
+          '  "tradeoffs": ["trade-off 1"],\n' +
+          '  "recommendation": "Your decisive recommendation",\n' +
+          '  "actionItems": ["step 1", "step 2"],\n' +
+          '  "planUpdate": "paragraph for plan update (only if type=plan_update)",\n' +
+          '  "resolvedQuestion": {"question": "...", "answer": "..."} }\n' +
+          "```\n" +
+          "Choose type: decision (general), action_items (concrete steps), plan_update (modify active plan), resolve_question (answer a specific question).\n\n" +
+          "**Part 2: Human-readable** — after `---READABLE---`, write the synthesis in markdown:\n" +
+          "## AGREED\n## TRADE-OFFS\n## RECOMMENDATION\n## NEXT STEPS\n\n" +
+          "Be decisive. Output Part 1 JSON first, then ---READABLE---, then Part 2.",
         `Topic: ${topic}\n\nFinal positions:\n${finalPositions}\n\nFull discussion:\n${allExchanges}`,
         4096,
       );
@@ -2545,14 +2629,18 @@ export class Agent {
         if (this.session) {
           try {
             appendSystemMessage(this.session.id, `[Council Outcome]\n${JSON.stringify(structuredOutcome)}`);
-          } catch { /* non-critical */ }
+          } catch {
+            /* non-critical */
+          }
         }
       } else {
         // Fallback: store text-only outcome (backward compatible)
         if (this.session) {
           try {
             appendSystemMessage(this.session.id, `[Council Outcome]\nTopic: ${topic}\n${synthesisText.slice(0, 2000)}`);
-          } catch { /* non-critical */ }
+          } catch {
+            /* non-critical */
+          }
         }
       }
     } catch (err: unknown) {
@@ -2582,7 +2670,9 @@ export class Agent {
       };
       try {
         appendSystemMessage(this.session.id, `[Council Memory] ${JSON.stringify(councilRecord)}`);
-      } catch { /* non-critical */ }
+      } catch {
+        /* non-critical */
+      }
     }
 
     // Store council output as assistant message so the conversation history
@@ -2652,16 +2742,19 @@ export class Agent {
         let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
         if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
           const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
-          onOAuthRequired: (_serverId, url) => {
-            const urlStr = url.toString();
-            import("child_process").then(({ exec }) => {
-              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
-                : process.platform === "darwin" ? `open "${urlStr}"`
-                : `xdg-open "${urlStr}"`;
-              exec(cmd);
-            });
-          },
-        });
+            onOAuthRequired: (_serverId, url) => {
+              const urlStr = url.toString();
+              import("child_process").then(({ exec }) => {
+                const cmd =
+                  process.platform === "win32"
+                    ? `start "" "${urlStr}"`
+                    : process.platform === "darwin"
+                      ? `open "${urlStr}"`
+                      : `xdg-open "${urlStr}"`;
+                exec(cmd);
+              });
+            },
+          });
           closeMcp = mcpBundle.close;
           tools = { ...baseTools, ...mcpBundle.tools };
           if (mcpBundle.errors.length > 0) {
@@ -2922,10 +3015,14 @@ export class Agent {
           phaseTracker.markAborted(
             this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined,
           );
-        } catch { /* fail-open */ }
+        } catch {
+          /* fail-open */
+        }
         try {
           const det = getMistakeDetector();
-          const events = det.detectAbort(this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined);
+          const events = det.detectAbort(
+            this.abortController?.signal.reason ? String(this.abortController.signal.reason) : undefined,
+          );
           if (events.length === 0) return;
           const cwd = this.bash.getCwd();
           const tenantId = getTenantIdForVeto();
@@ -2941,10 +3038,14 @@ export class Agent {
                     tenantId,
                     scope,
                   })
-                  .catch(() => { /* fire-and-forget */ });
+                  .catch(() => {
+                    /* fire-and-forget */
+                  });
               }
             })
-            .catch(() => { /* fire-and-forget */ });
+            .catch(() => {
+              /* fire-and-forget */
+            });
         } catch {
           /* fail-open */
         }
@@ -3049,7 +3150,9 @@ export class Agent {
           );
         }
       }
-    } catch { /* fail-open: phase-outcome must never block a turn */ }
+    } catch {
+      /* fail-open: phase-outcome must never block a turn */
+    }
 
     if (_debugOn) {
       const appliedLayers = pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [];
@@ -3071,6 +3174,7 @@ export class Agent {
           durationMs: pilDurationMs,
           data: {
             layers: pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [],
+            fullLayers: pilCtx.layers?.map((l) => ({ name: l.name, applied: l.applied, delta: l.delta })) ?? [],
             layerCount: pilCtx.layers?.length ?? 0,
             layerTimings: pilCtx.metrics?.layerTimings ?? null,
             domain: pilCtx.domain,
@@ -3093,7 +3197,9 @@ export class Agent {
           },
         });
       }
-    } catch { /* fail-open */ }
+    } catch {
+      /* fail-open */
+    }
 
     // ROUTE-11: Per-turn model routing via decide() — picks cheapest capable model
     const turnStartMs = Date.now();
@@ -3172,7 +3278,9 @@ export class Agent {
           data: { defaultModel: this.modelId, routedModel: turnModelId, taskHash },
         });
       }
-    } catch { /* fail-open */ }
+    } catch {
+      /* fail-open */
+    }
 
     // Re-detect provider if router picked a model from a different provider
     const turnProviderId = detectProviderForModel(turnModelId);
@@ -3228,14 +3336,20 @@ export class Agent {
             const historyResult = await proxyVision(this.messages, turnModelId, signal);
             if (historyResult.proxied) {
               this.messages = historyResult.messages;
-              yield { type: "content", content: `[Vision proxy: ${historyResult.imageCount} historical image(s) → text]\n` };
+              yield {
+                type: "content",
+                content: `[Vision proxy: ${historyResult.imageCount} historical image(s) → text]\n`,
+              };
             }
           }
           if (turnHasImages) {
             const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
             if (proxyResult.proxied) {
               userModelMessage = proxyResult.messages[0];
-              yield { type: "content", content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n` };
+              yield {
+                type: "content",
+                content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n`,
+              };
             }
           }
         } catch {
@@ -3303,13 +3417,10 @@ export class Agent {
     // a cheaper model handles the mechanical "read results, call more tools" loop.
     const stepRouterCfg = getStepRouterConfig();
     const stepRouterDecision = decideStepRouting(turnModelId, this.providerId, stepRouterCfg);
-    let stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId
-      ? "phase1"
-      : "done";
-    const phase2Runtime =
-      stepRouterDecision.phase2ModelId
-        ? resolveModelRuntime(provider, stepRouterDecision.phase2ModelId)
-        : null;
+    let stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
+    const phase2Runtime = stepRouterDecision.phase2ModelId
+      ? resolveModelRuntime(provider, stepRouterDecision.phase2ModelId)
+      : null;
     if (stepRouterDecision.phase2ModelId && _debugOn) {
       _debugSteps.push({
         name: "StepRouter",
@@ -3333,8 +3444,7 @@ export class Agent {
     const councilRoles = getRoleModels();
     const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
     const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
-    const taskTypeMatch =
-      pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= 0.75;
+    const taskTypeMatch = pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= 0.75;
     const shouldAutoCouncil =
       !this._isCouncilContinuation &&
       isAutoCouncilEnabled() &&
@@ -3435,16 +3545,19 @@ export class Agent {
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
           if (this.mode === "agent" && !isChitchat && runtime.modelInfo?.supportsClientTools !== false) {
             const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
-          onOAuthRequired: (_serverId, url) => {
-            const urlStr = url.toString();
-            import("child_process").then(({ exec }) => {
-              const cmd = process.platform === "win32" ? `start "" "${urlStr}"`
-                : process.platform === "darwin" ? `open "${urlStr}"`
-                : `xdg-open "${urlStr}"`;
-              exec(cmd);
+              onOAuthRequired: (_serverId, url) => {
+                const urlStr = url.toString();
+                import("child_process").then(({ exec }) => {
+                  const cmd =
+                    process.platform === "win32"
+                      ? `start "" "${urlStr}"`
+                      : process.platform === "darwin"
+                        ? `open "${urlStr}"`
+                        : `xdg-open "${urlStr}"`;
+                  exec(cmd);
+                });
+              },
             });
-          },
-        });
             closeMcp = mcpBundle.close;
             tools = { ...baseTools, ...mcpBundle.tools };
             captureToolSchemas(tools);
@@ -3493,7 +3606,11 @@ export class Agent {
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
-                { role: "system" as const, content: systemParts.staticPrefix, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } } },
+                {
+                  role: "system" as const,
+                  content: systemParts.staticPrefix,
+                  providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
+                },
                 { role: "system" as const, content: system.slice(systemParts.staticPrefix.length) },
               ]
             : system;
@@ -3503,10 +3620,7 @@ export class Agent {
             system: systemForModel,
             messages: this.messages,
             tools,
-            toolChoice:
-              _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false
-                ? "auto"
-                : undefined,
+            toolChoice: _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false ? "auto" : undefined,
             stopWhen:
               stepRouterPhase === "phase1"
                 ? stepCountIs(1) // SAMR Phase 1: stop after reasoning step
@@ -3514,7 +3628,9 @@ export class Agent {
             maxRetries: 0,
             abortSignal: signal,
             temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+            ...(runtime.modelInfo?.supportsMaxOutputTokens === false
+              ? {}
+              : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
             experimental_onStepStart: (event: unknown) => {
               stepNumber = getStepNumber(event, stepNumber + 1);
@@ -3563,8 +3679,7 @@ export class Agent {
                   break;
                 }
                 // P0 native observation: accumulate reasoning for intent context.
-                this._turnAssistantReasoning =
-                  (this._turnAssistantReasoning + part.text).slice(-400);
+                this._turnAssistantReasoning = (this._turnAssistantReasoning + part.text).slice(-400);
                 yield { type: "reasoning", content: part.text };
                 break;
 
@@ -3632,7 +3747,9 @@ export class Agent {
                       const arr = Array.from(this._priorWarningIdsInSession);
                       this._priorWarningIdsInSession = new Set(arr.slice(-100));
                     }
-                  } catch { /* fail-open */ }
+                  } catch {
+                    /* fail-open */
+                  }
                 }
 
                 // Pitfall 9: log the pending call so reconcile() can recover any
@@ -3660,7 +3777,9 @@ export class Agent {
                       },
                     });
                   }
-                } catch { /* fail-open */ }
+                } catch {
+                  /* fail-open */
+                }
                 yield { type: "tool_calls", toolCalls: [tc] };
                 break;
               }
@@ -3675,12 +3794,26 @@ export class Agent {
 
                 // Vision Bridge: proxy image-bearing tool results for text-only models (any tool, not just MCP)
                 try {
-                  const bridgeResult = await bridgeMcpToolResult(part.toolName, tr.output, turnModelId, signal, part.toolCallId);
+                  const bridgeResult = await bridgeMcpToolResult(
+                    part.toolName,
+                    tr.output,
+                    turnModelId,
+                    signal,
+                    part.toolCallId,
+                  );
                   if (bridgeResult.proxied) {
-                    tr = { ...tr, output: typeof bridgeResult.output === "string" ? bridgeResult.output : JSON.stringify(bridgeResult.output) };
+                    tr = {
+                      ...tr,
+                      output:
+                        typeof bridgeResult.output === "string"
+                          ? bridgeResult.output
+                          : JSON.stringify(bridgeResult.output),
+                    };
                     yield { type: "content", content: `[Vision Bridge: image → text for ${turnModelId}]\n` };
                   }
-                } catch { /* fail-open */ }
+                } catch {
+                  /* fail-open */
+                }
 
                 // Pitfall 9: settle the pending call log entry.
                 if (this.pendingCalls) {
@@ -3697,7 +3830,10 @@ export class Agent {
                     hook_event_name: "PostToolUse",
                     tool_name: part.toolName,
                     tool_input: (part.input as Record<string, unknown>) ?? {},
-                    tool_output: typeof tr.output === "string" ? { text: tr.output } : ((tr.output as unknown as Record<string, unknown>) ?? {}),
+                    tool_output:
+                      typeof tr.output === "string"
+                        ? { text: tr.output }
+                        : ((tr.output as unknown as Record<string, unknown>) ?? {}),
                     session_id: this.session?.id,
                     cwd: this.bash.getCwd(),
                   };
@@ -3727,13 +3863,16 @@ export class Agent {
                 // Interaction log: tool result
                 try {
                   if (this.session) {
-                    const outputPreview = typeof tr.output === "string" ? tr.output.slice(0, 200) : JSON.stringify(tr.output).slice(0, 200);
+                    const outputPreview =
+                      typeof tr.output === "string" ? tr.output.slice(0, 200) : JSON.stringify(tr.output).slice(0, 200);
                     logInteraction(this.session.id, "tool_result", {
                       eventSubtype: tc.function.name,
                       data: { success: tr.success, outputPreview },
                     });
                   }
-                } catch { /* fail-open */ }
+                } catch {
+                  /* fail-open */
+                }
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
                 break;
               }
@@ -3755,9 +3894,12 @@ export class Agent {
                   type: "function",
                   function: { name: errPart.toolName, arguments: JSON.stringify(errPart.input ?? {}) },
                 };
-                const errMsg = errPart.error instanceof Error
-                  ? errPart.error.message
-                  : (typeof errPart.error === "string" ? errPart.error : JSON.stringify(errPart.error));
+                const errMsg =
+                  errPart.error instanceof Error
+                    ? errPart.error.message
+                    : typeof errPart.error === "string"
+                      ? errPart.error
+                      : JSON.stringify(errPart.error);
                 const tr = { success: false, output: `[tool-error] ${errMsg}` };
 
                 // Settle pending-call ledger so we don't leak stale .tmp files.
@@ -3787,7 +3929,9 @@ export class Agent {
                       data: { success: false, error: errMsg.slice(0, 500), reason: "tool-error" },
                     });
                   }
-                } catch { /* fail-open */ }
+                } catch {
+                  /* fail-open */
+                }
 
                 notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
@@ -3846,7 +3990,9 @@ export class Agent {
                       data: { message: friendly.slice(0, 200) },
                     });
                   }
-                } catch { /* fail-open */ }
+                } catch {
+                  /* fail-open */
+                }
                 yield {
                   type: "error",
                   content: friendly,
@@ -3996,7 +4142,9 @@ export class Agent {
                 },
               });
             }
-          } catch { /* fail-open */ }
+          } catch {
+            /* fail-open */
+          }
 
           const stopInput: StopHookInput = {
             hook_event_name: "Stop",
@@ -4010,12 +4158,16 @@ export class Agent {
             const sb = statusBarStore.getState();
             const defaultInfo = getModelInfo(this.modelId);
             const usedInfo = getModelInfo(turnModelId);
-            const routerSaved = (defaultInfo && usedInfo && defaultInfo.outputPrice > usedInfo.outputPrice)
-              ? (sb.out_tokens * (defaultInfo.outputPrice - usedInfo.outputPrice)) / 1_000_000
-              : 0;
-            const cacheSaved = sb.cache_read_tokens > 0 && defaultInfo
-              ? (sb.cache_read_tokens * (defaultInfo.inputPrice - (defaultInfo.cachedInputPrice ?? defaultInfo.inputPrice * 0.1))) / 1_000_000
-              : 0;
+            const routerSaved =
+              defaultInfo && usedInfo && defaultInfo.outputPrice > usedInfo.outputPrice
+                ? (sb.out_tokens * (defaultInfo.outputPrice - usedInfo.outputPrice)) / 1_000_000
+                : 0;
+            const cacheSaved =
+              sb.cache_read_tokens > 0 && defaultInfo
+                ? (sb.cache_read_tokens *
+                    (defaultInfo.inputPrice - (defaultInfo.cachedInputPrice ?? defaultInfo.inputPrice * 0.1))) /
+                  1_000_000
+                : 0;
             const trace: TurnTrace = {
               turn_id: _debugTurnId,
               timestamp: turnStartMs,
@@ -4032,7 +4184,8 @@ export class Agent {
                 pil_tokens_saved: this._pilEnrichmentDelta > 0 ? this._pilEnrichmentDelta : 0,
                 cache_tokens_saved: sb.cache_read_tokens,
                 router_cost_saved_usd: routerSaved,
-                total_tokens_saved: (this._pilEnrichmentDelta > 0 ? this._pilEnrichmentDelta : 0) + sb.cache_read_tokens,
+                total_tokens_saved:
+                  (this._pilEnrichmentDelta > 0 ? this._pilEnrichmentDelta : 0) + sb.cache_read_tokens,
                 total_cost_saved_usd: routerSaved + cacheSaved,
               },
             };
@@ -4047,9 +4200,13 @@ export class Agent {
               traceLines.push(`│   ${step.output_summary}`);
             }
             const routeLabel = trace.routed ? `${trace.model_requested}→${trace.model_used}` : trace.model_used;
-            traceLines.push(`│ Model: ${routeLabel} | ↑${sb.in_tokens} ↓${sb.out_tokens} | $${sb.session_usd.toFixed(4)}`);
+            traceLines.push(
+              `│ Model: ${routeLabel} | ↑${sb.in_tokens} ↓${sb.out_tokens} | $${sb.session_usd.toFixed(4)}`,
+            );
             if (trace.estimated_savings.total_cost_saved_usd > 0) {
-              traceLines.push(`│ Savings: ~${trace.estimated_savings.total_tokens_saved} tok, ~$${trace.estimated_savings.total_cost_saved_usd.toFixed(4)}`);
+              traceLines.push(
+                `│ Savings: ~${trace.estimated_savings.total_tokens_saved} tok, ~$${trace.estimated_savings.total_cost_saved_usd.toFixed(4)}`,
+              );
             }
             traceLines.push("└──────────────────────────────────────────\n");
             yield { type: "content", content: traceLines.join("\n") };
@@ -4069,14 +4226,7 @@ export class Agent {
               const turnDuration = Date.now() - turnStartMs;
               if (taskHash) {
                 const tier = taskTypeToTier(pilCtx.taskType);
-                void routeFeedback(
-                  taskHash,
-                  tier,
-                  runtime.modelId,
-                  "cancelled",
-                  0,
-                  turnDuration,
-                );
+                void routeFeedback(taskHash, tier, runtime.modelId, "cancelled", 0, turnDuration);
               }
               const storeHash = routerStore.getState().taskHash;
               if (storeHash) {
@@ -4114,14 +4264,7 @@ export class Agent {
             const turnDuration = Date.now() - turnStartMs;
             if (taskHash) {
               const tier = taskTypeToTier(pilCtx.taskType);
-              void routeFeedback(
-                taskHash,
-                tier,
-                runtime.modelId,
-                "fail",
-                0,
-                turnDuration,
-              );
+              void routeFeedback(taskHash, tier, runtime.modelId, "fail", 0, turnDuration);
             }
             const storeHash = routerStore.getState().taskHash;
             if (storeHash) {
@@ -4163,11 +4306,15 @@ export class Agent {
     const parts: string[] = [];
     for (const msg of recent) {
       if (msg.role !== "user" && msg.role !== "assistant") continue;
-      const text = typeof msg.content === "string"
-        ? msg.content
-        : Array.isArray(msg.content)
-          ? msg.content.filter((p: { type: string }) => p.type === "text").map((p: { type: string; text?: string }) => p.text ?? "").join("")
-          : "";
+      const text =
+        typeof msg.content === "string"
+          ? msg.content
+          : Array.isArray(msg.content)
+            ? msg.content
+                .filter((p: { type: string }) => p.type === "text")
+                .map((p: { type: string; text?: string }) => p.text ?? "")
+                .join("")
+            : "";
       if (!text) continue;
       const snippet = text.length > 80 ? `${text.slice(0, 77)}...` : text;
       parts.push(`[${msg.role}]: ${snippet}`);
@@ -4267,9 +4414,3 @@ export class Agent {
     }
   }
 }
-
-
-
-
-
-
