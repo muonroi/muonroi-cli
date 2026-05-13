@@ -11,6 +11,7 @@ import { InvalidArgumentError, program } from "commander";
 import { createInterface } from "readline";
 
 import packageJson from "../package.json";
+import { hydrateChatEnvFromKeychain } from "./chat/chat-keychain.js";
 import { buildConfigCommand } from "./cli/config/index.js";
 import { setRenderSink } from "./ee/render.js";
 import {
@@ -62,6 +63,9 @@ import {
 } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
+
+// Hydrate chat secrets from OS keychain before CLI bootstrap
+await hydrateChatEnvFromKeychain();
 
 const exitCleanlyOnSigterm = () => {
   process.exit(0);
@@ -1117,6 +1121,42 @@ keys
   .action(async () => {
     const { runKeysCleanupSettings } = await import("./cli/keys.js");
     await runKeysCleanupSettings();
+  });
+
+keys
+  .command("set-chat <id>")
+  .description(
+    "Set a chat-service secret (discord-token, discord-guild-id, slack-token, slack-team-id) in the OS keychain",
+  )
+  .action(async (id: string) => {
+    const { runChatKeySet } = await import("./cli/keys.js");
+    if (!["discord-token", "discord-guild-id", "slack-token", "slack-team-id"].includes(id)) {
+      console.error(`Unknown chat secret '${id}'. Valid: discord-token, discord-guild-id, slack-token, slack-team-id`);
+      process.exit(1);
+    }
+    const value = (
+      await new Promise<string>((resolve) => {
+        const rl = createInterface({ input: process.stdin, output: process.stderr });
+        rl.question(`Paste ${id} value (hidden): `, (answer) => {
+          rl.close();
+          resolve(answer);
+        });
+      })
+    ).trim();
+    if (!value) {
+      console.error("Aborted (empty value).");
+      process.exit(1);
+    }
+    await runChatKeySet(id as any, value);
+  });
+
+keys
+  .command("import-bw-chat [ids...]")
+  .option("--prefix <prefix>", "BW item name prefix", "muonroi-cli/chat-")
+  .description("Import chat-service secrets from Bitwarden vault into OS keychain")
+  .action(async (ids: string[], opts: { prefix?: string }) => {
+    const { runChatImportBw } = await import("./cli/keys.js");
+    await runChatImportBw({ ids: ids.length > 0 ? (ids as any) : undefined, itemPrefix: opts.prefix });
   });
 
 const usage = program.command("usage").description("Inspect cost ledger and find spend bloat");
