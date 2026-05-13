@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { OutputStyleSchema, PipelineContextSchema, PipelineMetricsSchema, TaskTypeSchema } from "../schema.js";
+import {
+  OutputStyleSchema,
+  PilContextResponseSchema,
+  PipelineContextSchema,
+  PipelineMetricsSchema,
+  TaskTypeSchema,
+} from "../schema.js";
 
 describe("PipelineContextSchema", () => {
   const validCtx = {
@@ -124,5 +130,64 @@ describe("OutputStyleSchema", () => {
 
   it("rejects unknown style", () => {
     expect(OutputStyleSchema.safeParse("verbose").success).toBe(false);
+  });
+});
+
+describe("PilContextResponseSchema", () => {
+  const validResponse = {
+    taskType: "debug",
+    intentKind: "task",
+    outputStyle: "balanced",
+    confidence: 0.85,
+    domain: "typescript",
+    gsd_phase: "execute",
+    gsd_route_source: "ee",
+    t0_principles: [{ text: "principle one", score: 0.9 }],
+    t1_rules: ["always run tests after edit"],
+    t2_patterns: [{ text: "pattern one", score: 0.7 }],
+    retrieval_skipped_reason: null,
+    cache_hit: false,
+    inference_ms: 1234,
+    schema_version: "1.0",
+  };
+
+  it("accepts a complete valid response", () => {
+    const result = PilContextResponseSchema.safeParse(validResponse);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts nullable taskType / intentKind / domain / gsd_phase", () => {
+    const r = PilContextResponseSchema.safeParse({
+      ...validResponse,
+      taskType: null,
+      intentKind: null,
+      domain: null,
+      gsd_phase: null,
+    });
+    expect(r.success).toBe(true);
+  });
+
+  it("rejects when outputStyle is missing (must always be provided)", () => {
+    const { outputStyle, ...rest } = validResponse;
+    void outputStyle;
+    const r = PilContextResponseSchema.safeParse(rest);
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects when confidence is out of [0,1]", () => {
+    const r = PilContextResponseSchema.safeParse({ ...validResponse, confidence: 1.5 });
+    expect(r.success).toBe(false);
+  });
+
+  it("rejects when schema_version is missing", () => {
+    const { schema_version, ...rest } = validResponse;
+    void schema_version;
+    const r = PilContextResponseSchema.safeParse(rest);
+    expect(r.success).toBe(false);
+  });
+
+  it("ignores unknown fields (forward-compat for v1.1)", () => {
+    const r = PilContextResponseSchema.safeParse({ ...validResponse, whoami_directives: ["x"] });
+    expect(r.success).toBe(true);
   });
 });
