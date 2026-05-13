@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import type { ProductRunManifest, IterationState } from "./types.js";
+import type { IterationState, ProductRunManifest } from "./types.js";
 
 /**
  * Write the product manifest to manifest.md.
@@ -206,6 +206,9 @@ export async function readCriteria(flowDir: string, runId: string): Promise<Crit
 
 /**
  * Update criteria in gray-areas.md.
+ * P8: also mirror to criteria.json (machine-readable snapshot for downstream
+ * consumers like /review and /execute). Markdown remains source of truth;
+ * the JSON snapshot is regenerated on every write so the two cannot drift.
  */
 export async function updateCriteria(flowDir: string, runId: string, criteria: Criterion[]): Promise<void> {
   const runDir = path.join(flowDir, "runs", runId);
@@ -220,4 +223,12 @@ export async function updateCriteria(flowDir: string, runId: string, criteria: C
   }
 
   await writeArtifact(runDir, "gray-areas.md", grayMap);
+
+  // P8 mirror — non-fatal on failure since markdown above is canonical.
+  try {
+    const { syncCriteriaSnapshot } = await import("./typed-artifacts.js");
+    await syncCriteriaSnapshot(flowDir, runId, criteria);
+  } catch {
+    /* non-critical */
+  }
 }
