@@ -25,16 +25,30 @@ import { getProductSpentUsd } from "../usage/product-ledger.js";
  * users can audit the breakdown after run completes.
  */
 
-export type Phase = "discover" | "gather" | "research" | "scoping" | "sprint";
+export type Phase =
+  | "discover"
+  | "gather"
+  | "research"
+  | "scoping"
+  | "sprint"
+  | "planning"
+  | "review"
+  | "retro"
+  | "standup";
 
 const PHASE_HINTS: Record<Phase, number> = {
   discover: 0.05,
   gather: 0.1,
-  research: 0.35,
-  scoping: 0.15,
-  sprint: 0.35,
+  research: 0.3,
+  scoping: 0.1,
+  sprint: 0.3,
+  planning: 0.03,
+  review: 0.03,
+  retro: 0.04,
+  standup: 0.05,
 };
 
+const BUDGET_SCHEMA_VERSION = 2;
 const WARNING_THRESHOLD = 1.5;
 
 export interface PhaseSpendRecord {
@@ -47,6 +61,7 @@ export interface PhaseSpendRecord {
 }
 
 interface BudgetState {
+  schemaVersion: number;
   capUsd: number;
   records: PhaseSpendRecord[];
 }
@@ -60,7 +75,12 @@ async function readBudgetState(flowDir: string, runId: string): Promise<BudgetSt
   const raw = stateMap?.sections.get("Phase Budget");
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as BudgetState;
+    const parsed = JSON.parse(raw) as Partial<BudgetState>;
+    if (parsed.schemaVersion !== BUDGET_SCHEMA_VERSION) {
+      console.warn("Phase Budget records from older schema discarded on resume");
+      return null;
+    }
+    return parsed as BudgetState;
   } catch {
     return null;
   }
@@ -116,8 +136,8 @@ export async function recordPhaseEnd(opts: {
   const existing = await readBudgetState(opts.flowDir, opts.runId);
   const state: BudgetState =
     existing && existing.capUsd === opts.capUsd
-      ? { capUsd: opts.capUsd, records: [...existing.records, record] }
-      : { capUsd: opts.capUsd, records: [record] };
+      ? { schemaVersion: BUDGET_SCHEMA_VERSION, capUsd: opts.capUsd, records: [...existing.records, record] }
+      : { schemaVersion: BUDGET_SCHEMA_VERSION, capUsd: opts.capUsd, records: [record] };
   try {
     await writeBudgetState(opts.flowDir, opts.runId, state);
   } catch {
