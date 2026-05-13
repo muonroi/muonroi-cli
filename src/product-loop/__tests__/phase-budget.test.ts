@@ -22,10 +22,10 @@ describe("phase-budget (P7)", () => {
     mockGetSpent.mockReset();
   });
 
-  it("hints sum to 100% of capUsd", () => {
-    const total =
+  it("old hints (discover/gather/research/scoping/sprint) sum correctly", () => {
+    const oldTotal =
       PHASE_HINTS.discover + PHASE_HINTS.gather + PHASE_HINTS.research + PHASE_HINTS.scoping + PHASE_HINTS.sprint;
-    expect(total).toBeCloseTo(1.0, 2);
+    expect(oldTotal).toBeCloseTo(0.85, 2);
   });
 
   it("returns null warning when phase stays within hint", async () => {
@@ -100,5 +100,43 @@ describe("phase-budget (P7)", () => {
     expect(warning).toBeNull();
     const summary = await renderBudgetSummary(flowDir, runId);
     expect(summary).toContain("$0.000");
+  });
+});
+
+describe("phase-budget v2 (subsystem E)", () => {
+  it("PHASE_HINTS includes new keys planning/review/retro/standup summing to 1.0", () => {
+    const total =
+      PHASE_HINTS.discover +
+      PHASE_HINTS.gather +
+      PHASE_HINTS.research +
+      PHASE_HINTS.scoping +
+      PHASE_HINTS.sprint +
+      (PHASE_HINTS as any).planning +
+      (PHASE_HINTS as any).review +
+      (PHASE_HINTS as any).retro +
+      (PHASE_HINTS as any).standup;
+    expect(total).toBeCloseTo(1.0, 2);
+  });
+
+  it("recordPhaseStart accepts new phase 'planning'", async () => {
+    const flowDir = path.join(os.tmpdir(), `budget-v2-${Math.random().toString(36).slice(2)}`);
+    await fs.mkdir(flowDir, { recursive: true });
+    mockGetSpent.mockResolvedValueOnce(0);
+    const marker = await recordPhaseStart({ flowDir, runId: "r1", phase: "planning" as any });
+    expect(marker.phase).toBe("planning");
+  });
+
+  it("on resume, persisted records without schemaVersion are skipped", async () => {
+    const flowDir = path.join(os.tmpdir(), `budget-v1legacy-${Math.random().toString(36).slice(2)}`);
+    const runId = "r-legacy";
+    await fs.mkdir(path.join(flowDir, "runs", runId), { recursive: true });
+    const legacy = {
+      capUsd: 50,
+      records: [{ phase: "research", startUsd: 0, endUsd: 5, spentUsd: 5, hintUsd: 10, warnedOverBudget: false }],
+    };
+    const statePath = path.join(flowDir, "runs", runId, "state.md");
+    await fs.writeFile(statePath, `## Phase Budget\n\n${JSON.stringify(legacy)}\n`);
+    const summary = await renderBudgetSummary(flowDir, runId);
+    expect(summary).toContain("no phase budget data");
   });
 });
