@@ -35,6 +35,11 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)
 - Role-based routing: PIL detects task type -> maps to role (leader/implement/verify/research) -> routes to configured model
+- PIL unified-brain path:
+  - `src/pil/config.ts` — `MUONROI_PIL_UNIFIED` feature flag
+  - `src/ee/bridge.ts:pilContext()` — unified `/api/pil-context` call with circuit breaker
+  - Layer 1 calls `pilContext` when flag=1 and local classify confidence < 0.7;
+    legacy multi-call path remains as permanent brain-unreachable fallback.
 - Council: `/council` triggers multi-model debate with dynamic prompts and convergence detection
 - Auto-compact: after every turn, context is silently compressed to keep token costs flat
 - Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)
