@@ -4,6 +4,7 @@ import type { PipelineContext } from "../types";
 vi.mock("../../ee/bridge.js", () => ({
   getEmbeddingRaw: vi.fn().mockResolvedValue(null),
   searchCollection: vi.fn().mockResolvedValue([]),
+  searchByText: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -117,6 +118,30 @@ describe("layer5Context", () => {
   it("no stale warning when digestAgeMs is undefined", async () => {
     const result = await layer5Context(makeCtx({ resumeDigest: "Some work" }));
     expect(result.enriched).not.toContain("stale");
+  });
+
+  it("skips fetchPrinciples when ctx._brainData already supplied them", async () => {
+    const { searchByText } = await import("../../ee/bridge.js");
+    vi.mocked(searchByText).mockClear();
+    const { layer5Context } = await import("../layer5-context.js");
+    await layer5Context({
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "p", score: 0.9 }],
+        t1_rules: [],
+        t2_patterns: [],
+        retrieval_skipped_reason: null,
+      },
+    });
+    expect(searchByText).not.toHaveBeenCalled();
   });
 
   it("preserves existing enriched content", async () => {

@@ -83,10 +83,7 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
   if (ctx.intentKind === "chitchat") {
     return {
       ...ctx,
-      layers: [
-        ...ctx.layers,
-        { name: "context-enrichment", applied: false, delta: "skip:chitchat" },
-      ],
+      layers: [...ctx.layers, { name: "context-enrichment", applied: false, delta: "skip:chitchat" }],
     };
   }
 
@@ -94,12 +91,17 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
   const parts: string[] = [];
   const deltaSegments: string[] = [];
 
-  // 1. T0/T1 principles (12% budget)
-  const principlesBudget = Math.floor(ctx.tokenBudget * 0.12);
-  const principles = await fetchPrinciples(ctx.raw, principlesBudget);
-  if (principles) {
-    parts.push(principles);
-    deltaSegments.push(`principles=${principles.length}ch`);
+  // 1. T0/T1 principles — skip when L1's unified call already supplied them
+  //    (L3 already rendered the principles block from ctx._brainData).
+  if (!ctx._brainData) {
+    const principlesBudget = Math.floor(ctx.tokenBudget * 0.12);
+    const principles = await fetchPrinciples(ctx.raw, principlesBudget);
+    if (principles) {
+      parts.push(principles);
+      deltaSegments.push(`principles=${principles.length}ch`);
+    }
+  } else {
+    deltaSegments.push("principles=skipped-l1-unified");
   }
 
   // 2. Resume digest (5% budget)
