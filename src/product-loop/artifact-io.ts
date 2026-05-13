@@ -232,3 +232,6 @@ export async function updateCriteria(flowDir: string, runId: string, criteria: C
     /* non-critical */
   }
 }
+
+// P-B+C: project-context.md helpers re-exported for outer modules
+export { readProjectContext, writeProjectContext } from "./discovery-persistence.js";
