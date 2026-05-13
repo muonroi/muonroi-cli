@@ -6,10 +6,18 @@ import { redactor } from "./utils/redactor.js";
 
 redactor.installGlobalPatches();
 
+import { readFileSync } from "node:fs";
 import { createInterface } from "readline";
 import { InvalidArgumentError, program } from "commander";
 
 import packageJson from "../package.json";
+import {
+  type CouncilAnswersFile,
+  type CouncilAutoAnswerer,
+  createCouncilAutoAnswerer,
+  handleCouncilChunk,
+  parseCouncilAnswersFile,
+} from "./headless/council-answers";
 import {
   createHeadlessJsonlEmitter,
   type HeadlessOutputFormat,
@@ -475,6 +483,7 @@ async function runHeadless(
   format: HeadlessOutputFormat,
   session?: string,
   permissionMode: PermissionMode = "safe",
+  councilAutoAnswer?: CouncilAutoAnswerer | null,
 ) {
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
@@ -496,12 +505,25 @@ async function runHeadless(
     }
   }
 
+  // Council askcards have no TUI to render them in headless mode. When
+  // auto-answer is enabled, resolve the responder promises with either the
+  // scripted answer or `defaultIndex` — otherwise the process hangs forever.
+  const councilSink = {
+    respondToQuestion: (id: string, a: string) => agent.respondToCouncilQuestion(id, a),
+    respondToPreflight: (id: string, ok: boolean) => agent.respondToCouncilPreflight(id, ok),
+  };
+  function maybeAutoAnswer(chunk: { type: string; councilQuestion?: import("./types/index.js").CouncilQuestionData; councilPreflight?: { preflightId: string } }): void {
+    const auditLine = handleCouncilChunk(chunk, councilAutoAnswer ?? null, councilSink);
+    if (auditLine) writeSafe(process.stderr, auditLine + "\n");
+  }
+
   try {
     const { enhancedMessage } = processAtMentions(prompt, process.cwd());
 
     if (format === "json") {
       const { observer, consumeChunk, flush } = createHeadlessJsonlEmitter(agent.getSessionId() || undefined);
       for await (const chunk of agent.processMessage(enhancedMessage, observer)) {
+        maybeAutoAnswer(chunk);
         const writes = consumeChunk(chunk);
         if (writes.stdout) writeSafe(process.stdout, writes.stdout);
         if (writes.stderr) writeSafe(process.stderr, writes.stderr ?? "");
@@ -513,12 +535,24 @@ async function runHeadless(
     }
 
     for await (const chunk of agent.processMessage(enhancedMessage)) {
+      maybeAutoAnswer(chunk);
       const writes = renderHeadlessChunk(chunk);
       if (writes.stdout) writeSafe(process.stdout, writes.stdout);
       if (writes.stderr) writeSafe(process.stderr, writes.stderr);
     }
   } finally {
     await agent.cleanup();
+  }
+}
+
+function loadCouncilAnswersOrExit(filePath: string): CouncilAnswersFile {
+  try {
+    const raw = readFileSync(filePath, "utf8");
+    return parseCouncilAnswersFile(raw);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Cannot load --council-answers file "${filePath}": ${msg}`);
+    process.exit(1);
   }
 }
 
@@ -700,6 +734,8 @@ program
     "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)",
     "safe",
   )
+  .option("-y, --yes", "Headless: auto-answer council askcards with their default option and approve preflights")
+  .option("--council-answers <file>", "Headless: JSON file with scripted council answers per phase (FIFO)")
   .option("--update", "Update muonroi-cli to the latest version and exit")
   .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access")
   .action(async (message: string[], options) => {
@@ -833,6 +869,14 @@ program
       }
     }
 
+    const councilAnswersFile = typeof options.councilAnswers === "string"
+      ? loadCouncilAnswersOrExit(options.councilAnswers)
+      : undefined;
+    const councilAutoAnswer = createCouncilAutoAnswerer({
+      enabled: options.yes === true,
+      file: councilAnswersFile,
+    });
+
     if (options.verify) {
       const verifyError = getVerifyCliError({ hasPrompt: Boolean(options.prompt), hasMessageArgs: message.length > 0 });
       if (verifyError) {
@@ -852,6 +896,7 @@ program
         options.format,
         options.session,
         options.permission as PermissionMode,
+        councilAutoAnswer,
       );
       return;
     }
@@ -869,6 +914,7 @@ program
         options.format,
         options.session,
         options.permission as PermissionMode,
+        councilAutoAnswer,
       );
       return;
     }
