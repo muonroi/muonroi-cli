@@ -1,6 +1,6 @@
 // src/product-loop/__tests__/discovery-recommender.test.ts
 import { describe, expect, it, vi } from "vitest";
-import { leaderRecommend } from "../discovery-recommender.js";
+import { leaderRecommend, councilRecommend } from "../discovery-recommender.js";
 
 function makeLeader(seq: Array<string | Error>) {
   const q = [...seq];
@@ -74,5 +74,89 @@ describe("discovery-recommender — leader", () => {
       leader as any,
     );
     expect(rec.source).toBe("user-only");
+  });
+});
+
+describe("discovery-recommender — council", () => {
+  it("synthesizes recommendation from chunks where 2-of-3 stances agree", async () => {
+    const fakeDebate = {
+      async *runDebate() {
+        yield { type: "stance", name: "pragmatist", value: "monolith", rationale: "simple" };
+        yield { type: "stance", name: "scaler", value: "monolith", rationale: "ok for scale" };
+        yield { type: "stance", name: "cost-optimizer", value: "microservices", rationale: "isolate" };
+        yield { type: "cost", costUsd: 0.30 };
+      },
+    };
+    const leader = makeLeader([]);
+    const rec = await councilRecommend(
+      { question: { id: "backendArchitecture", required: true, recommendMode: "council", prompt: "?" } as any, context: {}, detection: { classification: "greenfield" } as any },
+      leader as any,
+      fakeDebate as any,
+    );
+    expect(rec.primary.value).toBe("monolith");
+    expect(rec.alternatives.length).toBe(1);
+    expect(rec.source).toBe("council");
+    expect(rec.tiebreakUsed).toBe(false);
+    expect(rec.costUsd).toBeCloseTo(0.30, 2);
+  });
+
+  it("invokes synth tiebreak when all three stances differ", async () => {
+    const fakeDebate = {
+      async *runDebate() {
+        yield { type: "stance", name: "pragmatist", value: "monolith", rationale: "simple" };
+        yield { type: "stance", name: "scaler", value: "microservices", rationale: "scale" };
+        yield { type: "stance", name: "cost-optimizer", value: "serverless", rationale: "cheap" };
+        yield { type: "cost", costUsd: 0.30 };
+      },
+    };
+    const leader = makeLeader([
+      JSON.stringify({ primary: { value: "monolith", rationale: "synth: best fit" }, alternatives: [{ value: "microservices", rationale: "alt" }, { value: "serverless", rationale: "alt" }] }),
+    ]);
+    const rec = await councilRecommend(
+      { question: { id: "backendArchitecture", required: true, recommendMode: "council", prompt: "?" } as any, context: {}, detection: { classification: "greenfield" } as any },
+      leader as any,
+      fakeDebate as any,
+    );
+    expect(rec.tiebreakUsed).toBe(true);
+    expect(rec.primary.value).toBe("monolith");
+    expect(rec.synthFailed).toBeFalsy();
+  });
+
+  it("falls back to highest-confidence when synth fails", async () => {
+    const fakeDebate = {
+      async *runDebate() {
+        yield { type: "stance", name: "pragmatist", value: "monolith", rationale: "simple", confidence: 0.7 };
+        yield { type: "stance", name: "scaler", value: "microservices", rationale: "scale", confidence: 0.4 };
+        yield { type: "stance", name: "cost-optimizer", value: "serverless", rationale: "cheap", confidence: 0.5 };
+        yield { type: "cost", costUsd: 0.30 };
+      },
+    };
+    const leader = makeLeader(["bad json", "still bad"]);
+    const rec = await councilRecommend(
+      { question: { id: "backendArchitecture", required: true, recommendMode: "council", prompt: "?" } as any, context: {}, detection: { classification: "greenfield" } as any },
+      leader as any,
+      fakeDebate as any,
+    );
+    expect(rec.tiebreakUsed).toBe(true);
+    expect(rec.synthFailed).toBe(true);
+    expect(rec.primary.value).toBe("monolith"); // highest confidence
+  });
+
+  it("falls back to leader when council throws", async () => {
+    const fakeDebate = {
+      async *runDebate() {
+        throw new Error("council unavailable");
+      },
+    };
+    const leader = makeLeader([
+      JSON.stringify({ primary: { value: "monolith", rationale: "leader fallback" }, alternatives: [] }),
+    ]);
+    const rec = await councilRecommend(
+      { question: { id: "backendArchitecture", required: true, recommendMode: "council", prompt: "?" } as any, context: {}, detection: { classification: "greenfield" } as any },
+      leader as any,
+      fakeDebate as any,
+    );
+    expect(rec.source).toBe("leader");
+    expect(rec.primary.value).toBe("monolith");
   });
 });
