@@ -100,38 +100,75 @@ describe("runPhases orchestrator (subsystem E)", () => {
     await fs.mkdir(path.join(flowDir, "runs", runId), { recursive: true });
   });
 
-  function baseArgs(over: Partial<any> = {}) {
+  type OrchestratorResult = { pass: boolean; reason?: string };
+
+  // biome-ignore lint/suspicious/noExplicitAny: test helper accepts partial overrides for ease
+  function baseArgs(over: Partial<Record<string, unknown>> = {}) {
     return {
-      flowDir, runId,
+      flowDir,
+      runId,
       manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
-      clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A","B"], scope: "s", rawQA: [] },
+      clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
       projectContext: { context: {}, prefillSource: {}, version: 1 },
-      leader: { generate: vi.fn().mockResolvedValue({ content: JSON.stringify({
-        version: 1, generatedAt: "2026-05-13T00:00:00Z",
-        phases: [
-          { id: "phase-1", name: "n", goal: "g", successCriteria: ["A"], scope: "s",
-            exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: [], maxSprints: 1 },
-          { id: "phase-2", name: "n", goal: "g", successCriteria: ["B"], scope: "s",
-            exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: ["phase-1"], maxSprints: 1 },
-        ],
-      }), costUsd: 0.1 }) },
+      leader: {
+        generate: vi.fn().mockResolvedValue({
+          content: JSON.stringify({
+            version: 1,
+            generatedAt: "2026-05-13T00:00:00Z",
+            phases: [
+              {
+                id: "phase-1",
+                name: "n",
+                goal: "g",
+                successCriteria: ["A"],
+                scope: "s",
+                exitCondition: { type: "criteria-threshold", min: 0.8 },
+                dependsOn: [],
+                maxSprints: 1,
+              },
+              {
+                id: "phase-2",
+                name: "n",
+                goal: "g",
+                successCriteria: ["B"],
+                scope: "s",
+                exitCondition: { type: "criteria-threshold", min: 0.8 },
+                dependsOn: ["phase-1"],
+                maxSprints: 1,
+              },
+            ],
+          }),
+          costUsd: 0.1,
+        }),
+      },
       leaderModelId: "m1",
       capUsd: 10,
       remainingUsd: async () => 5,
       awaitCustomerVerdict: async () => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
-      sprintRunner: vi.fn(async function* () { yield { type: "info", content: "" }; return { scoreBefore: 0.0, scoreAfter: 0.9, criteriaMet: 1, totalCriteria: 1 }; }),
+      sprintRunner: vi.fn(async function* () {
+        yield { type: "info", content: "" };
+        return { scoreBefore: 0.0, scoreAfter: 0.9, criteriaMet: 1, totalCriteria: 1 };
+      }),
       ...over,
     };
   }
 
   it("iterates phases in DAG order, returns product verdict", async () => {
     const args = baseArgs();
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
-    let res; while (true) { const n = await gen.next(); if (n.done) { res = n.value; break; } }
+    let res: OrchestratorResult | undefined;
+    while (true) {
+      const n = await gen.next();
+      if (n.done) {
+        res = n.value;
+        break;
+      }
+    }
     expect(args.sprintRunner).toHaveBeenCalledTimes(2);
-    expect(res.pass).toBe(true);
+    expect(res?.pass).toBe(true);
   });
 
   it("skips done phases on resume", async () => {
@@ -139,50 +176,117 @@ describe("runPhases orchestrator (subsystem E)", () => {
     await markPhaseStatus(flowDir, runId, "phase-1", "done");
     const { writePhasePlan } = await import("../phase-plan.js");
     await writePhasePlan(flowDir, runId, {
-      version: 1, generatedAt: "t", phases: [
-        { id: "phase-1", name: "n", goal: "g", successCriteria: ["A"], scope: "s", exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: [], maxSprints: 1 },
-        { id: "phase-2", name: "n", goal: "g", successCriteria: ["B"], scope: "s", exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: ["phase-1"], maxSprints: 1 },
+      version: 1,
+      generatedAt: "t",
+      phases: [
+        {
+          id: "phase-1",
+          name: "n",
+          goal: "g",
+          successCriteria: ["A"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 1,
+        },
+        {
+          id: "phase-2",
+          name: "n",
+          goal: "g",
+          successCriteria: ["B"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: ["phase-1"],
+          maxSprints: 1,
+        },
       ],
     });
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
-    while (true) { const n = await gen.next(); if (n.done) break; }
+    while (true) {
+      const n = await gen.next();
+      if (n.done) break;
+    }
     expect(args.sprintRunner).toHaveBeenCalledTimes(1);
   });
 
   it("customer abort → returns immediately with user-aborted reason", async () => {
     const args = baseArgs({ awaitCustomerVerdict: async () => ({ verdict: "abort" }) });
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
-    let res; while (true) { const n = await gen.next(); if (n.done) { res = n.value; break; } }
-    expect(res.pass).toBe(false);
-    expect(res.reason).toBe("user-aborted");
+    let res: OrchestratorResult | undefined;
+    while (true) {
+      const n = await gen.next();
+      if (n.done) {
+        res = n.value;
+        break;
+      }
+    }
+    expect(res?.pass).toBe(false);
+    expect(res?.reason).toBe("user-aborted");
   });
 
   it("customer reject feedback persisted verbatim", async () => {
     const args = baseArgs({ awaitCustomerVerdict: async () => ({ verdict: "reject", feedback: "needs more polish" }) });
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
     let count = 0;
-    while (true) { const n = await gen.next(); if (n.done || count++ > 5) break; }
+    while (true) {
+      const n = await gen.next();
+      if (n.done || count++ > 5) break;
+    }
     const { readArtifact } = await import("../../flow/artifact-io.js");
     const map = await readArtifact(path.join(flowDir, "runs", runId), "state.md");
     const cd = JSON.parse(map!.sections.get("Customer Decisions")!);
-    expect(cd.items.some((d: any) => d.feedback?.includes("needs more polish"))).toBe(true);
+    expect(cd.items.some((d: { feedback?: string }) => d.feedback?.includes("needs more polish"))).toBe(true);
   });
 
   it("phase deadlock when phase-2 blocked because phase-1 never completed", async () => {
     const args = baseArgs({
-      sprintRunner: vi.fn(async function* () { yield { type: "info", content: "" }; return { scoreBefore: 0.0, scoreAfter: 0.1, criteriaMet: 0, totalCriteria: 1 }; }),
+      sprintRunner: vi.fn(async function* () {
+        yield { type: "info", content: "" };
+        return { scoreBefore: 0.0, scoreAfter: 0.1, criteriaMet: 0, totalCriteria: 1 };
+      }),
     });
     await markPhaseStatus(flowDir, runId, "phase-1", "blocked");
     const { writePhasePlan } = await import("../phase-plan.js");
     await writePhasePlan(flowDir, runId, {
-      version: 1, generatedAt: "t", phases: [
-        { id: "phase-1", name: "n", goal: "g", successCriteria: ["A"], scope: "s", exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: [], maxSprints: 1 },
-        { id: "phase-2", name: "n", goal: "g", successCriteria: ["B"], scope: "s", exitCondition: { type: "criteria-threshold", min: 0.8 }, dependsOn: ["phase-1"], maxSprints: 1 },
+      version: 1,
+      generatedAt: "t",
+      phases: [
+        {
+          id: "phase-1",
+          name: "n",
+          goal: "g",
+          successCriteria: ["A"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: [],
+          maxSprints: 1,
+        },
+        {
+          id: "phase-2",
+          name: "n",
+          goal: "g",
+          successCriteria: ["B"],
+          scope: "s",
+          exitCondition: { type: "criteria-threshold", min: 0.8 },
+          dependsOn: ["phase-1"],
+          maxSprints: 1,
+        },
       ],
     });
+    // biome-ignore lint/suspicious/noExplicitAny: intentional cast for test stub typing
     const gen = runPhases(args as any);
-    let res; while (true) { const n = await gen.next(); if (n.done) { res = n.value; break; } }
-    expect(res.pass).toBe(false);
-    expect(res.reason).toMatch(/phases-deadlocked/);
+    let res: OrchestratorResult | undefined;
+    while (true) {
+      const n = await gen.next();
+      if (n.done) {
+        res = n.value;
+        break;
+      }
+    }
+    expect(res?.pass).toBe(false);
+    expect(res?.reason).toMatch(/phases-deadlocked/);
   });
 });
