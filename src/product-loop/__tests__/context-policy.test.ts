@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildSprintContext, CONTEXT_CAPS } from "../context-policy.js";
+import { describe, expect, it, vi } from "vitest";
+import { buildSprintContext, CONTEXT_CAPS, digestSprintIntoPhase, handoffPhaseToNext } from "../context-policy.js";
 
 const fakeProject = "## Project (permanent)\n" + "x".repeat(200);
 
@@ -129,5 +129,96 @@ describe("buildSprintContext (subsystem E)", () => {
     });
     expect(out).toContain("[oversize:");
     for (let i = 1; i <= 50; i++) expect(out).toContain(`seq ${i}`);
+  });
+});
+
+describe("digestSprintIntoPhase (subsystem E)", () => {
+  it("appends entry when under cap", () => {
+    const out = digestSprintIntoPhase([], { sprintN: 1, timestampUtc: "t", lessonText: "L" });
+    expect(out).toHaveLength(1);
+  });
+
+  it("drops oldest when over cap, adds pruned marker", () => {
+    const big: any[] = [];
+    for (let i = 0; i < 200; i++) {
+      big.push({ sprintN: i, timestampUtc: "2026-05-13T00:00:00Z", lessonText: "X".repeat(40) });
+    }
+    const out = digestSprintIntoPhase(big, { sprintN: 999, timestampUtc: "t", lessonText: "new" });
+    expect(out.length).toBeLessThan(big.length + 1);
+    expect(out[0].lessonText).toMatch(/digest pruned/);
+    expect(out[out.length - 1].sprintN).toBe(999);
+  });
+
+  it("preserves order: newest stays last after pruning", () => {
+    const existing = [
+      { sprintN: 1, timestampUtc: "t", lessonText: "A".repeat(2000) },
+      { sprintN: 2, timestampUtc: "t", lessonText: "B".repeat(2000) },
+    ];
+    const out = digestSprintIntoPhase(existing, { sprintN: 3, timestampUtc: "t", lessonText: "C" });
+    expect(out[out.length - 1].sprintN).toBe(3);
+  });
+
+  it("single oversize entry dropped, adds marker + new entry", () => {
+    const huge = [{ sprintN: 1, timestampUtc: "t", lessonText: "X".repeat(5000) }];
+    const out = digestSprintIntoPhase(huge, { sprintN: 2, timestampUtc: "t", lessonText: "tiny" });
+    expect(out.length).toBe(2);
+    expect(out[0].sprintN).toBe(-1);
+    expect(out[0].lessonText).toMatch(/digest pruned/);
+    expect(out[1].sprintN).toBe(2);
+  });
+});
+
+describe("handoffPhaseToNext (subsystem E)", () => {
+  it("happy path uses leader summary truncated to 300 chars", async () => {
+    const leader = {
+      generate: vi.fn().mockResolvedValue({ content: "All good carry over X.".repeat(50), costUsd: 0.05 }),
+    };
+    const out = await handoffPhaseToNext({
+      phaseId: "phase-1",
+      sprintsExecuted: 2,
+      criteriaMet: 3,
+      totalCriteria: 3,
+      leader,
+      capUsd: 10,
+      remainingUsd: 1,
+      backoffDelays: [1, 1, 1],
+    });
+    expect(out.exitSummary.length).toBeLessThanOrEqual(300);
+    expect(out.usedFallback).toBe(false);
+  });
+
+  it("falls back to deterministic when remainingUsd below floor", async () => {
+    const leader = { generate: vi.fn() };
+    const out = await handoffPhaseToNext({
+      phaseId: "phase-1",
+      sprintsExecuted: 2,
+      criteriaMet: 1,
+      totalCriteria: 3,
+      leader,
+      capUsd: 10,
+      remainingUsd: 0.01,
+      backoffDelays: [1, 1, 1],
+    });
+    expect(leader.generate).not.toHaveBeenCalled();
+    expect(out.usedFallback).toBe(true);
+    expect(out.exitSummary).toContain("phase-1");
+    expect(out.exitSummary).toContain("1/3");
+  });
+
+  it("falls back on 3 429s", async () => {
+    const err: any = new Error("429");
+    err.status = 429;
+    const leader = { generate: vi.fn().mockRejectedValue(err) };
+    const out = await handoffPhaseToNext({
+      phaseId: "phase-2",
+      sprintsExecuted: 5,
+      criteriaMet: 2,
+      totalCriteria: 2,
+      leader,
+      capUsd: 10,
+      remainingUsd: 1,
+      backoffDelays: [1, 1, 1],
+    });
+    expect(out.usedFallback).toBe(true);
   });
 });
