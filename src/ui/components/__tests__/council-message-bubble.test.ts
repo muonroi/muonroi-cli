@@ -65,3 +65,25 @@ describe("buildQuoteLine", () => {
     expect(out).toContain("line one line two");
   });
 });
+
+describe("buildHeader (research variant)", () => {
+  it("uses 🔍 prefix for research kind", () => {
+    const msg: CouncilMessage = {
+      kind: "research",
+      speaker: { role: "Research Agent", model: "gpt-4o-mini" },
+      text: "Found 3 usages of RSC in the codebase.",
+    };
+    const out = buildHeader(msg, { color: "#22d3ee", sigil: "●" });
+    expect(out).toBe("🔍 Research Agent · gpt-4o-mini");
+  });
+
+  it("uses sigil for non-research kinds", () => {
+    const msg: CouncilMessage = {
+      kind: "debate",
+      speaker: { role: "Frontend Engineer", model: "gpt-4o" },
+      text: "",
+    };
+    const out = buildHeader(msg, { color: "#22d3ee", sigil: "●" });
+    expect(out).toBe("● Frontend Engineer · gpt-4o");
+  });
+});

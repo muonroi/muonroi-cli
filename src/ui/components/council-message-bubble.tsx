@@ -35,7 +35,8 @@ export function buildFooter(msg: CouncilMessage): string {
 }
 
 export function buildHeader(msg: CouncilMessage, style: RoleStyle): string {
-  return `${style.sigil} ${msg.speaker.role} · ${msg.speaker.model}`;
+  const prefix = msg.kind === "research" ? "🔍 " : `${style.sigil} `;
+  return `${prefix}${msg.speaker.role} · ${msg.speaker.model}`;
 }
 
 export function buildQuoteLine(partnerLastText: string, partnerRole: string): string {
