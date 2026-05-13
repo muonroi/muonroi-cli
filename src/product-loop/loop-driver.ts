@@ -11,6 +11,7 @@ import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
 import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
 import { type DiscoveryResult, discoverProject, formatDiscoverySummary } from "./discover.js";
+import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import {
   additionalPrefills,
   auditAsContextBlock,
@@ -51,6 +52,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           phaseId: "loop:discover",
           kind: "research",
           label: "Project discovery",
+        });
+        const phaseMarker_discover = await recordPhaseStart({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          phase: "discover",
         });
 
         // Run shallow manifest probe and deep repo audit in parallel.
@@ -114,6 +120,16 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         }
         await writeArtifact(runDir, "state.md", stateMap);
 
+        const discoverWarn = await recordPhaseEnd({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          capUsd: ctx.flags.maxCost,
+          marker: phaseMarker_discover,
+        });
+        if (discoverWarn) {
+          yield { type: "content", content: "\n> [budget] " + discoverWarn + "\n" } as StreamChunk;
+        }
+
         state = "gather";
         break;
       }
@@ -123,6 +139,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           phaseId: "loop:gather",
           kind: "clarification",
           label: "Gathering Product Context",
+        });
+        const phaseMarker_gather = await recordPhaseStart({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          phase: "gather",
         });
 
         // Write Resume Digest to state.md
@@ -164,6 +185,16 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           }
           await writeArtifact(runDir, "gray-areas.md", grayMap);
 
+          const gatherWarn = await recordPhaseEnd({
+            flowDir: ctx.flowDir,
+            runId: ctx.runId,
+            capUsd: ctx.flags.maxCost,
+            marker: phaseMarker_gather,
+          });
+          if (gatherWarn) {
+            yield { type: "content", content: "\n> [budget] " + gatherWarn + "\n" } as StreamChunk;
+          }
+
           state = "research";
         } else {
           yield {
@@ -191,6 +222,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           phaseId: "loop:research",
           kind: "research",
           label: "Research & Debate",
+        });
+        const phaseMarker_research = await recordPhaseStart({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          phase: "research",
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -290,6 +326,16 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           /* non-critical */
         }
 
+        const researchWarn = await recordPhaseEnd({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          capUsd: ctx.flags.maxCost,
+          marker: phaseMarker_research,
+        });
+        if (researchWarn) {
+          yield { type: "content", content: "\n> [budget] " + researchWarn + "\n" } as StreamChunk;
+        }
+
         state = "scoping";
         break;
       }
@@ -303,6 +349,11 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           phaseId: "loop:scoping",
           kind: "synthesis",
           label: "Scoping & Synthesis",
+        });
+        const phaseMarker_scoping = await recordPhaseStart({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          phase: "scoping",
         });
 
         const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -381,6 +432,16 @@ interface ProductSpec {
             break;
           }
           yield value as StreamChunk;
+        }
+
+        const scopingWarn = await recordPhaseEnd({
+          flowDir: ctx.flowDir,
+          runId: ctx.runId,
+          capUsd: ctx.flags.maxCost,
+          marker: phaseMarker_scoping,
+        });
+        if (scopingWarn) {
+          yield { type: "content", content: "\n> [budget] " + scopingWarn + "\n" } as StreamChunk;
         }
 
         if (approved) {
