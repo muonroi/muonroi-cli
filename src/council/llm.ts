@@ -208,6 +208,23 @@ function logCouncilCost(args: {
   return usage;
 }
 
+// ── Mock-LLM bypass (agent harness / E2E tests) ──────────────────────────────
+//
+// When `globalThis.__muonroiMockLlm` is set (injected by --mock-llm startup),
+// council LLM calls are short-circuited through the mock fixture rather than
+// hitting a real provider.  This mirrors the hook already present in
+// src/providers/adapter.ts for the streaming path.
+
+declare global {
+  // biome-ignore lint/suspicious/noExplicitAny: intentionally untyped global
+  var __muonroiMockLlm: any;
+}
+
+function getMockLlm(): { complete(req: { prompt: string }): Promise<{ text: string }> } | null {
+  // biome-ignore lint/suspicious/noExplicitAny: intentionally untyped global access
+  return (globalThis as any).__muonroiMockLlm ?? null;
+}
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -222,6 +239,12 @@ export function createCouncilLLM(
       maxTokens = 4096,
       onUsage?: UsageCallback,
     ): Promise<string> {
+      const mock = getMockLlm();
+      if (mock) {
+        stats.calls++;
+        const result = await mock.complete({ prompt });
+        return result.text;
+      }
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -305,6 +328,12 @@ export function createCouncilLLM(
       options?: { enableVerificationTools?: boolean },
       onUsage?: UsageCallback,
     ): Promise<{ text: string; toolCalls: Array<{ toolName: string; result?: unknown }> }> {
+      const mock = getMockLlm();
+      if (mock) {
+        stats.calls++;
+        const result = await mock.complete({ prompt });
+        return { text: result.text, toolCalls: [] };
+      }
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
@@ -455,6 +484,12 @@ export function createCouncilLLM(
       options?: { internetFirst?: boolean },
       onUsage?: UsageCallback,
     ): Promise<string> {
+      const mock = getMockLlm();
+      if (mock) {
+        stats.calls++;
+        const result = await mock.complete({ prompt: topic });
+        return result.text;
+      }
       const providerId = detectProviderForModel(modelId);
       const key = await loadKeyForProvider(providerId);
       const { factory } = createProviderFactory(providerId, { apiKey: key });
