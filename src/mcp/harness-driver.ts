@@ -1,18 +1,22 @@
 /**
- * Security primitives for tui.start (to be wired in Task 4.3):
+ * Security primitives for tui.start:
  *   - validateStartArgs: argv allowlist
  *   - sanitizeEnv: strip dangerous env vars
  *   - validateCwd: ensure cwd is under home or repo root
  *   - validateMockLlmPath: ensure mock-llm path stays within repo root
  */
+
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import type { Driver } from "../agent-harness/driver.js";
+import { createDriver, type Driver } from "../agent-harness/driver.js";
+import type { LiveEvent, LiveFrame } from "../agent-harness/protocol.js";
 import { PROTOCOL_VERSION } from "../agent-harness/protocol.js";
+import { createLineSplitter } from "../agent-harness/sidechannel.js";
 
 const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
@@ -328,8 +332,13 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
 
 export async function runHarnessDriver(): Promise<void> {
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
-  const currentDriver: Driver | null = null;
-  const onStop: () => void = () => {};
+  let currentDriver: Driver | null = null;
+  let childProc: ChildProcess | null = null;
+  const onStop = () => {
+    childProc?.kill();
+    childProc = null;
+    currentDriver = null;
+  };
 
   server.registerTool(
     "tui.capabilities",
@@ -347,9 +356,115 @@ export async function runHarnessDriver(): Promise<void> {
     }),
   );
 
+  server.registerTool(
+    "tui.start",
+    {
+      description: "Spawn the muonroi-cli TUI in agent-mode with sanitized argv/env.",
+      inputSchema: {
+        args: z.array(z.string().max(200)).max(20),
+        cwd: z.string().max(2000).optional(),
+        env: z.record(z.string(), z.string()).optional(),
+        mockLlmDir: z.string().max(500).optional(),
+      },
+    },
+    async (input) => {
+      if (currentDriver) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "already_started" }) }],
+          isError: true,
+        };
+      }
+      const argCheck = validateStartArgs(input.args);
+      if (!argCheck.ok) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "argv_rejected", bad: argCheck.bad }) }],
+          isError: true,
+        };
+      }
+      if (input.cwd) {
+        const cwdCheck = validateCwd(input.cwd);
+        if (!cwdCheck.ok) {
+          return {
+            content: [
+              { type: "text" as const, text: JSON.stringify({ error: "cwd_rejected", reason: cwdCheck.reason }) },
+            ],
+            isError: true,
+          };
+        }
+      }
+      if (input.mockLlmDir && !validateMockLlmPath(input.mockLlmDir)) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "mock_llm_rejected" }) }],
+          isError: true,
+        };
+      }
+      const sanitizedEnv = sanitizeEnv(input.env ?? {});
+
+      // Skip actual spawn on Windows (fd3/fd4 not supported).
+      if (process.platform === "win32") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: "windows_unsupported",
+                message: "fd3/fd4 sidechannel not supported on Windows",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // POSIX: spawn child with fd3/fd4 piped.
+      const finalArgs = [...input.args];
+      if (input.mockLlmDir && !finalArgs.some((a) => a.startsWith("--mock-llm"))) {
+        finalArgs.push("--mock-llm", input.mockLlmDir);
+      }
+      if (!finalArgs.includes("--agent-mode")) finalArgs.push("--agent-mode");
+
+      const entry = process.cwd() + "/src/index.ts";
+      const proc = spawn("bun", ["run", entry, ...finalArgs], {
+        stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+        cwd: input.cwd,
+        env: { ...sanitizedEnv },
+        shell: false,
+      });
+
+      const driver = createDriver({
+        sendKey: (k: string) => {
+          const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
+          fd4?.write(JSON.stringify({ op: "press", key: k }) + "\n");
+        },
+        sendType: (t: string) => {
+          const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
+          fd4?.write(JSON.stringify({ op: "type", text: t }) + "\n");
+        },
+      });
+      const splitter = createLineSplitter((line: string) => {
+        try {
+          const msg = JSON.parse(line) as Record<string, unknown>;
+          if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
+          else if (msg.t === "idle") driver._ingest({ kind: "idle" });
+          else if (msg.t === "event") driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
+        } catch {
+          // ignore malformed lines
+        }
+      });
+      const fd3 = proc.stdio[3] as NodeJS.ReadableStream | null;
+      fd3?.on("data", (chunk: Buffer | string) => {
+        splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      });
+
+      currentDriver = driver;
+      childProc = proc;
+      return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, pid: proc.pid }) }] };
+    },
+  );
+
   registerReadTools(server, () => currentDriver);
   registerActionTools(server, () => currentDriver);
-  registerAsyncTools(server, () => currentDriver, { onStop: () => onStop() });
+  registerAsyncTools(server, () => currentDriver, { onStop });
 
   await server.connect(new StdioServerTransport());
 }
