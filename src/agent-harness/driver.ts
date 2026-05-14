@@ -105,8 +105,11 @@ export function createDriver(deps: DriverDeps): Driver {
     },
 
     focus(selector: string): void {
-      const node = driver.query(selector);
-      if (!node) throw new Error(`focus: no node matching "${selector}"`);
+      const hits = selectorMatches(selector);
+      if (hits.length !== 1) {
+        throw new Error(`focus: expected 1 match for "${selector}", got ${hits.length}`);
+      }
+      deps.sendKey(`__focus__:${hits[0].id}`);
     },
 
     wait_for(args: WaitArgs): Promise<void> {
@@ -181,7 +184,7 @@ export function createDriver(deps: DriverDeps): Driver {
     },
 
     expect(selector: string, predicate: Predicate | unknown): boolean {
-      const node = driver.query(selector);
+      const node = selectorMatches(selector)[0];
       if (!node) return false;
       const parsed = predicateSchema.safeParse(predicate);
       if (!parsed.success) return false;
