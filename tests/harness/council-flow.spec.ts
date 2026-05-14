@@ -100,7 +100,11 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
   // NOTE: /council with no topic returns the help string (not __COUNCIL__). The topic must be
   // included in the command so app.tsx dispatches runCouncilV2.
   it("full council flow reaches Phase/Status renders", async () => {
-    driver.type("/council analyze trade-offs for the project");
+    // Tab autocompletes "/council" → "/council " and closes the slash menu so
+    // the subsequent Enter reaches handleCommand (not handleSlashMenuSelect).
+    driver.type("/council");
+    driver.press("Tab");
+    driver.type("analyze trade-offs for the project");
     driver.press("Enter");
     // council_phase for "Clarification" fires before runPreflight blocks — should appear quickly.
     await driver.wait_for({
