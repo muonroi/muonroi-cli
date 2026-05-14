@@ -93,7 +93,10 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
     // but once the filter has no matching item, Enter closes the menu and lets
     // the textarea submit the full "/ideal <topic>" text (app.tsx fix: when
     // filteredSlashItems is empty, Enter falls through without preventDefault).
+    // Wait for idle after type() so React commits the slashSearchQuery state
+    // updates before Enter arrives (avoids stale filteredSlashItems issue).
     driver.type("/ideal build a counter --max-sprints 1");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 30_000 });
     expect(driver.query("id=ideal-status")).toBeTruthy();
