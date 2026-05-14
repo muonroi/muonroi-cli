@@ -98,10 +98,14 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
             const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
             fd4?.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
             fd4?.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
-          } else {
-            // Second idle = response received. Collect frames and finish.
-            clearTimeout(safetyTimer);
-            settle();
+            // Collect frames for a fixed window — using "second idle" as the
+            // settle trigger creates a race where the response frame
+            // sometimes arrives before, sometimes after the idle event.
+            // A fixed window after input dispatch removes timing noise.
+            setTimeout(() => {
+              clearTimeout(safetyTimer);
+              settle();
+            }, 1500);
           }
         }
       } catch {
