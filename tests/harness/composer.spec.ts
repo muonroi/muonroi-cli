@@ -12,9 +12,24 @@ describe.skipIf(process.platform === "win32")("composer E2E", () => {
   beforeAll(async () => {
     const entry = resolve("src/index.ts");
     const fixturesDir = resolve("tests/harness/fixtures/llm");
-    proc = spawn("bun", ["run", entry, "--agent-mode", "--mock-llm", fixturesDir], {
-      stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
-    });
+    // -k FAKE + explicit -m bypass the first-run API-key modal on fresh clones
+    // (e.g., CI runners without a keychain). Mock-LLM intercepts before the key
+    // is ever validated against a real provider.
+    proc = spawn(
+      "bun",
+      [
+        "run",
+        entry,
+        "--agent-mode",
+        "--mock-llm",
+        fixturesDir,
+        "-k",
+        "FAKE_KEY_FOR_TESTS",
+        "-m",
+        "deepseek-ai/DeepSeek-V4-Flash",
+      ],
+      { stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"] },
+    );
 
     driver = createDriver({
       sendKey: (k) => {
