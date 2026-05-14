@@ -5,6 +5,11 @@ import { createDriver } from "../../src/agent-harness/driver";
 import type { LiveEvent, LiveFrame } from "../../src/agent-harness/protocol";
 import { createLineSplitter } from "../../src/agent-harness/sidechannel";
 
+// Placeholder value used by loadKeyForProvider — must be >= 20 chars so the
+// provider is considered "reachable". The mock-llm short-circuit means this
+// value is never sent to a real API.
+const MOCK_PROVIDER_KEY = ["test", "mock", "provider", "noop"].join("-");
+
 describe.skipIf(process.platform === "win32")("ideal E2E", () => {
   let proc: ChildProcess;
   let driver: ReturnType<typeof createDriver>;
@@ -12,6 +17,8 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
   beforeAll(async () => {
     const entry = resolve("src/index.ts");
     const fixturesDir = resolve("tests/harness/fixtures/llm");
+    const spawnEnv = { ...process.env };
+    spawnEnv.SILICONFLOW_API_KEY = MOCK_PROVIDER_KEY;
     proc = spawn(
       "bun",
       [
@@ -21,11 +28,14 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
         "--mock-llm",
         fixturesDir,
         "-k",
-        "FAKE_KEY_FOR_TESTS",
+        MOCK_PROVIDER_KEY,
         "-m",
         "deepseek-ai/DeepSeek-V4-Flash",
       ],
-      { stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"] },
+      {
+        stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+        env: spawnEnv,
+      },
     );
 
     driver = createDriver({
@@ -72,17 +82,37 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
   });
 
   it.skip("ideal status card renders after starting a run", async () => {
-    // Blocked: the product-loop orchestrator calls createCouncilLLM (src/council/llm.ts)
-    // which calls generateText (AI SDK) directly — NOT through the createAdapter mock hook.
-    // The sequence fixture (tests/harness/fixtures/llm/ideal.json) covers the main chat
-    // adapter path only. To unblock: add globalThis.__muonroiMockLlm short-circuit to
-    // createCouncilLLM.generate/debate/research in src/council/llm.ts, then flip to it().
+    // Blocked: id="ideal-status" is rendered by ProductStatusCard
+    // (src/ui/cards/product-status-card.tsx:66) which only mounts when productStatus
+    // state is non-null. productStatus is set in app.tsx only when a chunk of type
+    // "product_status_card" arrives. However, no code in src/product-loop/* emits that
+    // chunk type — it is defined in src/types/index.ts:369 and consumed in app.tsx:3020
+    // but never yielded by the sprint runner, loop driver, or phase runner.
+    //
+    // To unblock:
+    //   1. Add a "product_status_card" yield in src/product-loop/sprint-runner.ts after
+    //      each sprint completes, emitting criteriaMet/criteriaPartial/criteriaUnmet counts.
+    //   2. Also add a trigger in src/product-loop/loop-driver.ts (gather stage) for a
+    //      pre-sprint status card so the card appears before the first sprint runs.
+    //   3. Then add a driver.type("/ideal build a counter --max-sprints 1") step here,
+    //      handle the gather questions via driver answers, and wait for id=ideal-status.
+    //   Estimated effort: ~2-3h (emit chunk + fixture entries for gather questions + spec).
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
     expect(driver.query("id=ideal-status")?.role).toBe("region");
   });
 
   it.skip("can advance through ideal phases", async () => {
-    // Same blocker as above — needs createCouncilLLM mock hook (see comment above).
+    // Blocked: same as above — id="ideal-status" never appears (product_status_card
+    // chunk is dead code; src/product-loop/* never emits it). Additionally, the test
+    // relies on "role=listitem" nodes which do appear when council_info_card chunks are
+    // emitted (app.tsx wraps each card as role="listitem"), but without first triggering
+    // /ideal and handling the gather question card, the product loop never starts.
+    //
+    // To unblock: fix the product_status_card emit path (see test above), then:
+    //   driver.type('/ideal build a counter --max-sprints 1');
+    //   driver.press('Enter');
+    //   // handle gather question card if it appears (press 'y' for preflight)
+    //   await driver.wait_for({ selector: 'role=listitem', timeoutMs: 15_000 });
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
     const phases = driver.queryAll("role=listitem");
     expect(phases.length).toBeGreaterThan(0);

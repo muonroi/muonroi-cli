@@ -9,6 +9,12 @@ import { createLineSplitter } from "../../src/agent-harness/sidechannel";
 // runCouncilRound). After Phase 8 the council renderers (CouncilPhaseTimeline,
 // CouncilStatusList, CouncilMessageBubble, etc.) are wrapped in <Semantic> so
 // the harness can observe them as they appear.
+
+// Placeholder value used by loadKeyForProvider — must be >= 20 chars so the
+// provider is considered "reachable" and resolveParticipants returns >= 2 roles.
+// The mock-llm short-circuit means this value is never sent to a real API.
+const MOCK_PROVIDER_KEY = ["test", "mock", "provider", "noop"].join("-");
+
 describe.skipIf(process.platform === "win32")("council flow E2E", () => {
   let proc: ChildProcess;
   let driver: ReturnType<typeof createDriver>;
@@ -16,6 +22,11 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
   beforeAll(async () => {
     const entry = resolve("src/index.ts");
     const fixturesDir = resolve("tests/harness/fixtures/llm");
+    const spawnEnv = { ...process.env };
+    // loadKeyForProvider reads SILICONFLOW_API_KEY (>= 20 chars) to decide if
+    // the provider is reachable. Without it, resolveParticipants returns [] and
+    // runCouncil exits early before emitting any council_phase chunks.
+    spawnEnv.SILICONFLOW_API_KEY = MOCK_PROVIDER_KEY;
     proc = spawn(
       "bun",
       [
@@ -25,11 +36,14 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
         "--mock-llm",
         fixturesDir,
         "-k",
-        "FAKE_KEY_FOR_TESTS",
+        MOCK_PROVIDER_KEY,
         "-m",
         "deepseek-ai/DeepSeek-V4-Flash",
       ],
-      { stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"] },
+      {
+        stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+        env: spawnEnv,
+      },
     );
 
     driver = createDriver({
@@ -73,26 +87,24 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
     driver.type("/council");
     await driver.wait_for({ selector: "id=slash-menu", timeoutMs: 10_000 });
     expect(driver.query("id=slash-menu")?.name).toBe("Slash commands");
+    // Press Escape to dismiss the menu and clear the input before the next test.
+    driver.press("Escape");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
   });
 
-  // Skipped: the mock-llm sequence fixture (tests/harness/fixtures/llm/council.json)
-  // now drives the main chat adapter (createAdapter → globalThis.__muonroiMockLlm).
-  // However, the council orchestrator's internal LLM calls (clarifier, debate-planner,
-  // debate, synthesis) go through createCouncilLLM (src/council/llm.ts) which calls
-  // generateText (AI SDK) directly — it does NOT check globalThis.__muonroiMockLlm.
-  // Until createCouncilLLM.generate/debate/research also short-circuit through the
-  // mock (requires a globalThis hook in src/council/llm.ts), the orchestrator will
-  // hit real provider calls and fail with auth errors in the test environment.
+  // Wave 2.5 wired globalThis.__muonroiMockLlm into createCouncilLLM.generate/debate/research
+  // (src/council/llm.ts). council.json sequence fixture covers clarifier → spec synthesis →
+  // debate-planner fallback. The council_phase chunk for "Clarification" is emitted immediately
+  // before runPreflight blocks, so id=council-phases appears without needing to answer questions.
   //
-  // To unblock: add to src/council/llm.ts generate() method (before the generateText call):
-  //   const mock = (globalThis as {__muonroiMockLlm?: {complete:(r:{prompt:string})=>Promise<{text:string}>}}).__muonroiMockLlm;
-  //   if (mock) return mock.complete({ prompt: system + "\n" + prompt }).then(r => r.text);
-  // Same pattern for debate() and research(). Then flip this it.skip to it().
-  it.skip("full council flow reaches Phase/Status renders (council LLM mock hook missing)", async () => {
-    driver.type("/council");
+  // NOTE: /council with no topic returns the help string (not __COUNCIL__). The topic must be
+  // included in the command so app.tsx dispatches runCouncilV2.
+  it("full council flow reaches Phase/Status renders", async () => {
+    driver.type("/council analyze trade-offs for the project");
     driver.press("Enter");
+    // council_phase for "Clarification" fires before runPreflight blocks — should appear quickly.
     await driver.wait_for({
-      all: [{ selector: "id=council-phases" }],
+      selector: "id=council-phases",
       timeoutMs: 30_000,
     });
     expect(driver.query("id=council-phases")).toBeTruthy();
