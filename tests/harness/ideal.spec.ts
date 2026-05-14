@@ -85,13 +85,15 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
   });
 
   it("ideal status card renders after starting a run", async () => {
-    // loop-driver.ts now emits product_status_card after the discover phase
+    // loop-driver.ts emits product_status_card after the discover phase
     // (before gather blocks on user input), so id=ideal-status appears without
     // needing to drive the full gather/research/sprint flow.
-    driver.type("/ideal");
-    driver.press("Tab");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
-    driver.type("build a counter --max-sprints 1");
+    //
+    // Type the full command including the topic. The slash menu opens on "/"
+    // but once the filter has no matching item, Enter closes the menu and lets
+    // the textarea submit the full "/ideal <topic>" text (app.tsx fix: when
+    // filteredSlashItems is empty, Enter falls through without preventDefault).
+    driver.type("/ideal build a counter --max-sprints 1");
     driver.press("Enter");
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 30_000 });
     expect(driver.query("id=ideal-status")).toBeTruthy();

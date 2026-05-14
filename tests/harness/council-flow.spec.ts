@@ -100,13 +100,12 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
   // NOTE: /council with no topic returns the help string (not __COUNCIL__). The topic must be
   // included in the command so app.tsx dispatches runCouncilV2.
   it("full council flow reaches Phase/Status renders", async () => {
-    // Tab autocompletes "/council" → "/council " and closes the slash menu.
-    // Wait for idle after Tab so React re-renders (showSlashMenu=false) before
-    // subsequent type() chars arrive — otherwise they land in the slash filter.
-    driver.type("/council");
-    driver.press("Tab");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
-    driver.type("analyze trade-offs for the project");
+    // Type the full command including the topic. The slash menu opens on "/" and
+    // the filter narrows as we type — once the query is "council analyze..." no
+    // item matches. app.tsx now falls through on Enter when filteredSlashItems
+    // is empty: it closes the menu without key.preventDefault() so the textarea
+    // submit handler fires with the full "/council <topic>" text.
+    driver.type("/council analyze trade-offs for the project");
     driver.press("Enter");
     // council_phase for "Clarification" fires before runPreflight blocks.
     await driver.wait_for({

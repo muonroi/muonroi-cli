@@ -4079,9 +4079,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         if (key.name === "return") {
           const item = filteredSlashItems[slashMenuIndex];
-          if (item) handleSlashMenuSelect(item);
-          setSlashSearchQuery("");
-          key.preventDefault?.();
+          if (item) {
+            handleSlashMenuSelect(item);
+            setSlashSearchQuery("");
+            key.preventDefault?.();
+          } else {
+            // No items match the current filter — close the menu and let
+            // Enter fall through to the textarea's submit handler so the
+            // typed command (e.g. "/council <topic>") is submitted as-is.
+            setShowSlashMenu(false);
+            setSlashSearchQuery("");
+            // Do NOT call key.preventDefault() — textarea must receive Enter.
+          }
           return;
         }
         if (key.name === "tab") {
