@@ -23,7 +23,8 @@ export type Role =
   | "menu"
   | "menuitem"
   | "toast"
-  | "tooltip";
+  | "tooltip"
+  | "region";
 
 export type UINode = {
   id: string;
