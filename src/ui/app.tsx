@@ -4,6 +4,8 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AgentModeRuntime } from "../agent-harness/agent-mode.js";
+import { SemanticProvider } from "../agent-harness/semantic.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
@@ -812,6 +814,21 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   }, [agent.getModel, agent.getProviderId]);
   // Wire status bar subscriptions once at boot (Plan 06)
   useEffect(() => wireStatusBar(), []);
+
+  // Agent-mode: wire addPostProcessFn so each renderer pass triggers a registry
+  // snapshot → LiveFrame diff → JSONL write on fd 3.
+  const agentRuntime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as AgentModeRuntime | undefined;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: agentRuntime is a process-lifetime stable ref from globalThis; it never changes after App mounts
+  useEffect(() => {
+    if (!agentRuntime) return;
+    const captureFrame = () => {
+      agentRuntime.capture();
+    };
+    renderer.addPostProcessFn(captureFrame);
+    return () => {
+      renderer.removePostProcessFn(captureFrame);
+    };
+  }, [renderer, agentRuntime]);
   useEffect(() => {
     let cancelled = false;
     getConfiguredProviders()
@@ -2407,6 +2424,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setQueuedMessages([]);
   }, [agent, clearLiveTurnUi, replacePasteBlocks]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array — adding them would cause unnecessary re-creation of processMessage on every render
   const processMessage = useCallback(
     async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
       if (!text.trim() || isProcessingRef.current) return;
@@ -2695,6 +2713,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     };
   }, [agent, scrollToBottom]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks; adding them to deps would unnecessarily recreate handleCommand on each render
   const handleCommand = useCallback(
     (cmd: string): boolean => {
       const c = cmd.trim().toLowerCase();
@@ -4785,413 +4804,427 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const hasMessages = messages.length > 0 || streamContent || isProcessing;
 
+  // SemanticProvider wraps the app root so descendant <Semantic> components can
+  // register nodes into the runtime's registry. When agent-mode is inactive,
+  // agentRuntime is undefined and the registry is a stable no-op stub (never
+  // triggers captures since addPostProcessFn was not wired without a runtime).
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: OpenCode-style copy-on-mouse-up on root surface
-    <box
-      width={width}
-      height={height}
-      backgroundColor={t.background}
-      flexDirection="column"
-      onMouseUp={handleRootMouseUp}
-      onMouseDown={handleRootMouseDown}
+    <SemanticProvider
+      registry={
+        agentRuntime
+          ? agentRuntime.registry
+          : { register: () => () => {}, update: () => {}, snapshot: () => ({ nodes: [] }), clear: () => {} }
+      }
     >
-      {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
-      {hasMessages ? (
-        <box flexGrow={1} flexDirection="column">
-          <SessionHeader
-            t={t}
-            modeInfo={modeInfo}
-            sessionTitle={sessionTitle}
-            sessionId={sessionId}
-            onCopySessionId={showCopyBanner}
-          />
-          <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
-            {/* Scrollable messages */}
-            {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
-            <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
-              {(() => {
-                const mcpRuns = computeMcpRunInfo(messages);
-                return messages.map((msg, i) => (
-                  <MessageView
-                    key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
-                    entry={msg}
-                    index={i}
-                    t={t}
-                    modeColor={modeInfo.color}
-                    expandedMessages={expandedMessages}
-                    mcpRun={mcpRuns[i]}
-                  />
-                ));
-              })()}
-              {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
-                <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                  <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
-                </box>
-              )}
-              {/* Active tool calls — pending inline */}
-              {activeToolCalls.map((tc) =>
-                tc.function.name === "task" ? (
-                  <SubagentTaskLine
-                    key={tc.id}
-                    t={t}
-                    agent={tryParseArg(tc, "agent") || "sub-agent"}
-                    label={toolArgs(tc) || "Working"}
-                    pending
-                  />
-                ) : tc.function.name === "delegate" ? (
-                  <DelegationTaskLine
-                    key={tc.id}
-                    t={t}
-                    label={toolArgs(tc) || "Background research"}
-                    pending
-                    id={undefined}
-                  />
-                ) : (
-                  <InlineTool key={tc.id} t={t} pending>
-                    {toolLabel(tc)}
-                  </InlineTool>
-                ),
-              )}
-              {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-              {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
-              {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-              {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
-              {councilInfoCards.map((card, idx) => (
-                <CouncilInfoCardView
-                  key={`info-card-${idx}-${card.title}`}
-                  card={card}
-                  terminalCols={width}
-                  theme={t}
-                />
-              ))}
-              {councilMessages.map((cm, idx) => {
-                const side: "left" | "right" =
-                  cm.kind === "debate" && cm.partner
-                    ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
-                    : "left";
-
-                if (cm.kind === "leader") {
-                  return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
-                }
-                if (cm.kind === "synthesis") {
-                  return <CouncilSynthesisBanner key={idx} msg={cm} />;
-                }
-                const pairKey = cm.partner ? makePairKey(cm.speaker.role, cm.partner.role) : `solo::${cm.speaker.role}`;
-                const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
-                return (
-                  <CouncilMessageBubble
-                    key={idx}
-                    msg={cm}
+      {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenCode-style copy-on-mouse-up on root surface */}
+      <box
+        width={width}
+        height={height}
+        backgroundColor={t.background}
+        flexDirection="column"
+        onMouseUp={handleRootMouseUp}
+        onMouseDown={handleRootMouseDown}
+      >
+        {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
+        {hasMessages ? (
+          <box flexGrow={1} flexDirection="column">
+            <SessionHeader
+              t={t}
+              modeInfo={modeInfo}
+              sessionTitle={sessionTitle}
+              sessionId={sessionId}
+              onCopySessionId={showCopyBanner}
+            />
+            <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
+              {/* Scrollable messages */}
+              {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
+              <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
+                {(() => {
+                  const mcpRuns = computeMcpRunInfo(messages);
+                  return messages.map((msg, i) => (
+                    <MessageView
+                      key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
+                      entry={msg}
+                      index={i}
+                      t={t}
+                      modeColor={modeInfo.color}
+                      expandedMessages={expandedMessages}
+                      mcpRun={mcpRuns[i]}
+                    />
+                  ));
+                })()}
+                {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
+                  </box>
+                )}
+                {/* Active tool calls — pending inline */}
+                {activeToolCalls.map((tc) =>
+                  tc.function.name === "task" ? (
+                    <SubagentTaskLine
+                      key={tc.id}
+                      t={t}
+                      agent={tryParseArg(tc, "agent") || "sub-agent"}
+                      label={toolArgs(tc) || "Working"}
+                      pending
+                    />
+                  ) : tc.function.name === "delegate" ? (
+                    <DelegationTaskLine
+                      key={tc.id}
+                      t={t}
+                      label={toolArgs(tc) || "Background research"}
+                      pending
+                      id={undefined}
+                    />
+                  ) : (
+                    <InlineTool key={tc.id} t={t} pending>
+                      {toolLabel(tc)}
+                    </InlineTool>
+                  ),
+                )}
+                {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+                {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
+                {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+                {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
+                {councilInfoCards.map((card, idx) => (
+                  <CouncilInfoCardView
+                    key={`info-card-${idx}-${card.title}`}
+                    card={card}
                     terminalCols={width}
-                    side={side}
-                    resolveStyle={resolveStyle}
-                    partnerLastText={partnerLastText}
-                    partnerRole={cm.partner?.role}
                     theme={t}
                   />
-                );
-              })}
-              {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
-                <CouncilPlaceholderBubble
-                  key={id}
-                  role={p.role}
-                  side={p.side}
-                  terminalCols={width}
-                  color={p.color}
-                  theme={t}
-                  variant={p.variant}
+                ))}
+                {councilMessages.map((cm, idx) => {
+                  const side: "left" | "right" =
+                    cm.kind === "debate" && cm.partner
+                      ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
+                      : "left";
+
+                  if (cm.kind === "leader") {
+                    return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
+                  }
+                  if (cm.kind === "synthesis") {
+                    return <CouncilSynthesisBanner key={idx} msg={cm} />;
+                  }
+                  const pairKey = cm.partner
+                    ? makePairKey(cm.speaker.role, cm.partner.role)
+                    : `solo::${cm.speaker.role}`;
+                  const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
+                  return (
+                    <CouncilMessageBubble
+                      key={idx}
+                      msg={cm}
+                      terminalCols={width}
+                      side={side}
+                      resolveStyle={resolveStyle}
+                      partnerLastText={partnerLastText}
+                      partnerRole={cm.partner?.role}
+                      theme={t}
+                    />
+                  );
+                })}
+                {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
+                  <CouncilPlaceholderBubble
+                    key={id}
+                    role={p.role}
+                    side={p.side}
+                    terminalCols={width}
+                    color={p.color}
+                    theme={t}
+                    variant={p.variant}
+                  />
+                ))}
+                {pendingCouncilQuestion && councilCardState && (
+                  <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                )}
+                {pendingCouncilPreflight && preflightCardState && (
+                  <CouncilQuestionCard
+                    question={buildPreflightQuestion(pendingCouncilPreflight)}
+                    theme={t}
+                    state={preflightCardState}
+                  />
+                )}
+                {/* Streaming assistant content */}
+                {streamContent && (
+                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <Markdown content={streamContent} t={t} />
+                  </box>
+                )}
+                {/* Waiting indicator */}
+                {isProcessing && !streamContent && activeToolCalls.length === 0 && (
+                  <ShimmerText t={t} text="Planning next moves" />
+                )}
+                {/* Plan questions panel — inline, OpenCode-style */}
+                {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
+                {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+              </scrollbox>
+              {btwState && <BtwOverlay state={btwState} theme={t} />}
+              {/* Prompt */}
+              <box flexShrink={0}>
+                <PromptBox
+                  t={t}
+                  inputRef={inputRef}
+                  isProcessing={isProcessing}
+                  showModelPicker={showModelPicker}
+                  showSandboxPicker={showSandboxPicker}
+                  showWalletPicker={showWalletPicker}
+                  showSlashMenu={showSlashMenu}
+                  showPlanQuestions={showPlanPanel}
+                  showApiKeyModal={showApiKeyModal}
+                  blockPrompt={blockPrompt}
+                  onSubmit={handleSubmit}
+                  onPaste={handlePaste}
+                  pasteBlocks={pasteBlocks}
+                  modeInfo={modeInfo}
+                  model={model}
+                  modelInfo={modelInfo}
+                  contextStats={contextStats}
+                  queuedCount={queuedMessages.length}
+                  queuedMessages={queuedMessages}
+                  typeahead={typeahead}
+                  slashItems={filteredSlashItems}
+                  slashSelectedIndex={slashMenuIndex}
+                  slashInputIsMatched={slashInputIsMatched}
                 />
-              ))}
-              {pendingCouncilQuestion && councilCardState && (
-                <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
-              )}
-              {pendingCouncilPreflight && preflightCardState && (
-                <CouncilQuestionCard
-                  question={buildPreflightQuestion(pendingCouncilPreflight)}
-                  theme={t}
-                  state={preflightCardState}
+              </box>
+            </box>
+            <box paddingLeft={2} paddingRight={2} flexShrink={0}>
+              <StatusBar />
+            </box>
+            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
+              <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
+              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
+              <box flexGrow={1} />
+            </box>
+          </box>
+        ) : (
+          /* ── Home ───────────────────────────────────────── */
+          <>
+            <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
+              <box flexGrow={1} minHeight={0} />
+              <box flexShrink={0} alignItems="center">
+                <HeroLogo t={t} />
+              </box>
+              <box height={1} minHeight={0} flexShrink={1} />
+              <box width="100%" maxWidth={75} flexShrink={0}>
+                <PromptBox
+                  t={t}
+                  inputRef={inputRef}
+                  isProcessing={isProcessing}
+                  showModelPicker={showModelPicker}
+                  showSandboxPicker={showSandboxPicker}
+                  showWalletPicker={showWalletPicker}
+                  showSlashMenu={showSlashMenu}
+                  showPlanQuestions={showPlanPanel}
+                  showApiKeyModal={showApiKeyModal}
+                  blockPrompt={blockPrompt}
+                  onSubmit={handleSubmit}
+                  onPaste={handlePaste}
+                  pasteBlocks={pasteBlocks}
+                  modeInfo={modeInfo}
+                  model={model}
+                  modelInfo={modelInfo}
+                  contextStats={contextStats}
+                  placeholder={"What are we building?"}
+                  typeahead={typeahead}
+                  slashItems={filteredSlashItems}
+                  slashSelectedIndex={slashMenuIndex}
+                  slashInputIsMatched={slashInputIsMatched}
                 />
-              )}
-              {/* Streaming assistant content */}
-              {streamContent && (
-                <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                  <Markdown content={streamContent} t={t} />
-                </box>
-              )}
-              {/* Waiting indicator */}
-              {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                <ShimmerText t={t} text="Planning next moves" />
-              )}
-              {/* Plan questions panel — inline, OpenCode-style */}
-              {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-              {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
-            </scrollbox>
-            {btwState && <BtwOverlay state={btwState} theme={t} />}
-            {/* Prompt */}
-            <box flexShrink={0}>
-              <PromptBox
-                t={t}
-                inputRef={inputRef}
-                isProcessing={isProcessing}
-                showModelPicker={showModelPicker}
-                showSandboxPicker={showSandboxPicker}
-                showWalletPicker={showWalletPicker}
-                showSlashMenu={showSlashMenu}
-                showPlanQuestions={showPlanPanel}
-                showApiKeyModal={showApiKeyModal}
-                blockPrompt={blockPrompt}
-                onSubmit={handleSubmit}
-                onPaste={handlePaste}
-                pasteBlocks={pasteBlocks}
-                modeInfo={modeInfo}
-                model={model}
-                modelInfo={modelInfo}
-                contextStats={contextStats}
-                queuedCount={queuedMessages.length}
-                queuedMessages={queuedMessages}
-                typeahead={typeahead}
-                slashItems={filteredSlashItems}
-                slashSelectedIndex={slashMenuIndex}
-                slashInputIsMatched={slashInputIsMatched}
-              />
+              </box>
+              <box height={2} minHeight={0} flexShrink={1} />
+              <box flexGrow={1} minHeight={0} />
             </box>
-          </box>
-          <box paddingLeft={2} paddingRight={2} flexShrink={0}>
-            <StatusBar />
-          </box>
-          <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
-            <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-            {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
-            <box flexGrow={1} />
-          </box>
-        </box>
-      ) : (
-        /* ── Home ───────────────────────────────────────── */
-        <>
-          <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
-            <box flexGrow={1} minHeight={0} />
-            <box flexShrink={0} alignItems="center">
-              <HeroLogo t={t} />
+            {updateInfo?.hasUpdate && (
+              <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
+                <text fg="#f59e0b">
+                  {"┃ Update available: v"}
+                  {startupConfig.version}
+                  {" → v"}
+                  {updateInfo.latestVersion}
+                  {" — run /update to install"}
+                </text>
+              </box>
+            )}
+            {isUpdating && (
+              <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
+                <text fg="#f59e0b">{"┃ Updating..."}</text>
+              </box>
+            )}
+            {updateOutput && !isUpdating && (
+              <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
+                <text fg={updateOutput.startsWith("Update complete") ? "#22c55e" : "#ef4444"}>
+                  {"┃ "}
+                  {updateOutput}
+                </text>
+              </box>
+            )}
+            <box paddingLeft={2} paddingRight={2} flexShrink={0}>
+              <StatusBar />
             </box>
-            <box height={1} minHeight={0} flexShrink={1} />
-            <box width="100%" maxWidth={75} flexShrink={0}>
-              <PromptBox
-                t={t}
-                inputRef={inputRef}
-                isProcessing={isProcessing}
-                showModelPicker={showModelPicker}
-                showSandboxPicker={showSandboxPicker}
-                showWalletPicker={showWalletPicker}
-                showSlashMenu={showSlashMenu}
-                showPlanQuestions={showPlanPanel}
-                showApiKeyModal={showApiKeyModal}
-                blockPrompt={blockPrompt}
-                onSubmit={handleSubmit}
-                onPaste={handlePaste}
-                pasteBlocks={pasteBlocks}
-                modeInfo={modeInfo}
-                model={model}
-                modelInfo={modelInfo}
-                contextStats={contextStats}
-                placeholder={"What are we building?"}
-                typeahead={typeahead}
-                slashItems={filteredSlashItems}
-                slashSelectedIndex={slashMenuIndex}
-                slashInputIsMatched={slashInputIsMatched}
-              />
+            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
+              <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
+              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
+              <box flexGrow={1} />
+              <text fg={t.textDim}>{`v${startupConfig.version}`}</text>
             </box>
-            <box height={2} minHeight={0} flexShrink={1} />
-            <box flexGrow={1} minHeight={0} />
-          </box>
-          {updateInfo?.hasUpdate && (
-            <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg="#f59e0b">
-                {"┃ Update available: v"}
-                {startupConfig.version}
-                {" → v"}
-                {updateInfo.latestVersion}
-                {" — run /update to install"}
-              </text>
-            </box>
-          )}
-          {isUpdating && (
-            <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg="#f59e0b">{"┃ Updating..."}</text>
-            </box>
-          )}
-          {updateOutput && !isUpdating && (
-            <box paddingLeft={2} paddingRight={2} flexDirection="row" flexShrink={0}>
-              <text fg={updateOutput.startsWith("Update complete") ? "#22c55e" : "#ef4444"}>
-                {"┃ "}
-                {updateOutput}
-              </text>
-            </box>
-          )}
-          <box paddingLeft={2} paddingRight={2} flexShrink={0}>
-            <StatusBar />
-          </box>
-          <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
-            <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-            {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
-            <box flexGrow={1} />
-            <text fg={t.textDim}>{`v${startupConfig.version}`}</text>
-          </box>
-        </>
-      )}
-      {showApiKeyModal && (
-        <ApiKeyModal
-          t={t}
-          width={width}
-          height={height}
-          inputRef={apiKeyInputRef}
-          error={apiKeyError}
-          onSubmit={submitApiKey}
-        />
-      )}
-      {showUpdateModal && updateInfo && (
-        <UpdateModal
-          t={t}
-          width={width}
-          height={height}
-          currentVersion={startupConfig.version}
-          latestVersion={updateInfo.latestVersion}
-        />
-      )}
-      {showMcpModal && !showMcpEditor && (
-        <McpBrowserModal
-          t={t}
-          width={width}
-          height={height}
-          selectedIndex={mcpModalIndex}
-          searchQuery={mcpSearchQuery}
-          rows={mcpRows}
-        />
-      )}
-      {showMcpEditor && (
-        <McpEditorModal
-          t={t}
-          width={width}
-          height={height}
-          draft={mcpEditorDraft}
-          focusedField={mcpEditorField}
-          syncKey={mcpEditorSyncKey}
-          error={mcpEditorError}
-          title={editingMcpId ? "Edit MCP Server" : "Add MCP Server"}
-          labelRef={mcpLabelRef}
-          urlRef={mcpUrlRef}
-          headersRef={mcpHeadersRef}
-          commandRef={mcpCommandRef}
-          argsRef={mcpArgsRef}
-          cwdRef={mcpCwdRef}
-          envRef={mcpEnvRef}
-          onSubmit={submitMcpEditor}
-        />
-      )}
-      {showScheduleModal && (
-        <ScheduleBrowserModal
-          t={t}
-          width={width}
-          height={height}
-          selectedIndex={scheduleModalIndex}
-          searchQuery={scheduleSearchQuery}
-          rows={scheduleRows}
-        />
-      )}
-      {showAgentsModal && !showAgentsEditor && (
-        <SubagentsBrowserModal
-          t={t}
-          width={width}
-          height={height}
-          selectedIndex={agentsModalIndex}
-          searchQuery={agentsSearchQuery}
-          rows={agentRows}
-        />
-      )}
-      {showAgentsEditor && (
-        <SubagentEditorModal
-          key={`subagent-editor-${agentsEditorSyncKey}`}
-          t={t}
-          width={width}
-          height={height}
-          draft={agentsEditorDraft}
-          focusedField={agentsEditorField}
-          modelIndex={agentsEditorModelIndex}
-          error={agentsEditorError}
-          title={editingSubagent ? `Edit sub-agent: ${formatSubagentName(editingSubagent.name)}` : "Add sub-agent"}
-          nameRef={subagentNameRef}
-          instructionRef={subagentInstructionRef}
-          onSubmit={submitSubagentEditor}
-          showRemoveHint={!!editingSubagent}
-        />
-      )}
-      {showModelPicker && (
-        <ModelPickerModal
-          t={t}
-          currentModel={model}
-          selectedIndex={modelPickerIndex}
-          width={width}
-          height={height}
-          searchQuery={modelSearchQuery}
-          filteredModels={filteredModels}
-          reasoningEffortByModel={reasoningEffortByModel}
-          configuredProviders={configuredProviders}
-          disabledProviders={disabledProviders}
-          focus={modelPickerFocus}
-          providerChipIndex={providerChipIndex}
-        />
-      )}
-      {showWalletPicker && (
-        <WalletPickerModal
-          t={t}
-          settings={walletSettings}
-          walletInfo={walletDisplayInfo}
-          focusIndex={walletFocusIndex}
-          width={width}
-          height={height}
-        />
-      )}
-      {showSandboxPicker && (
-        <SandboxPickerModal
-          t={t}
-          currentMode={sandboxMode}
-          settings={sandboxSettings}
-          focusIndex={sandboxSettingsFocusIndex}
-          editing={sandboxSettingsEditing}
-          editBuffer={sandboxSettingsEditBuffer}
-          width={width}
-          height={height}
-        />
-      )}
-      {showConnectModal && (
-        <ConnectModal
-          t={t}
-          width={width}
-          height={height}
-          selectedIndex={connectModalIndex}
-          channels={CONNECT_CHANNELS}
-        />
-      )}
-      {showTelegramTokenModal && (
-        <TelegramTokenModal
-          t={t}
-          width={width}
-          height={height}
-          inputRef={telegramTokenInputRef}
-          error={telegramTokenError}
-          onSubmit={submitTelegramToken}
-        />
-      )}
-      {showTelegramPairModal && (
-        <TelegramPairModal
-          t={t}
-          width={width}
-          height={height}
-          inputRef={telegramPairInputRef}
-          error={telegramPairError}
-          onSubmit={() => void submitTelegramPair()}
-        />
-      )}
-    </box>
+          </>
+        )}
+        {showApiKeyModal && (
+          <ApiKeyModal
+            t={t}
+            width={width}
+            height={height}
+            inputRef={apiKeyInputRef}
+            error={apiKeyError}
+            onSubmit={submitApiKey}
+          />
+        )}
+        {showUpdateModal && updateInfo && (
+          <UpdateModal
+            t={t}
+            width={width}
+            height={height}
+            currentVersion={startupConfig.version}
+            latestVersion={updateInfo.latestVersion}
+          />
+        )}
+        {showMcpModal && !showMcpEditor && (
+          <McpBrowserModal
+            t={t}
+            width={width}
+            height={height}
+            selectedIndex={mcpModalIndex}
+            searchQuery={mcpSearchQuery}
+            rows={mcpRows}
+          />
+        )}
+        {showMcpEditor && (
+          <McpEditorModal
+            t={t}
+            width={width}
+            height={height}
+            draft={mcpEditorDraft}
+            focusedField={mcpEditorField}
+            syncKey={mcpEditorSyncKey}
+            error={mcpEditorError}
+            title={editingMcpId ? "Edit MCP Server" : "Add MCP Server"}
+            labelRef={mcpLabelRef}
+            urlRef={mcpUrlRef}
+            headersRef={mcpHeadersRef}
+            commandRef={mcpCommandRef}
+            argsRef={mcpArgsRef}
+            cwdRef={mcpCwdRef}
+            envRef={mcpEnvRef}
+            onSubmit={submitMcpEditor}
+          />
+        )}
+        {showScheduleModal && (
+          <ScheduleBrowserModal
+            t={t}
+            width={width}
+            height={height}
+            selectedIndex={scheduleModalIndex}
+            searchQuery={scheduleSearchQuery}
+            rows={scheduleRows}
+          />
+        )}
+        {showAgentsModal && !showAgentsEditor && (
+          <SubagentsBrowserModal
+            t={t}
+            width={width}
+            height={height}
+            selectedIndex={agentsModalIndex}
+            searchQuery={agentsSearchQuery}
+            rows={agentRows}
+          />
+        )}
+        {showAgentsEditor && (
+          <SubagentEditorModal
+            key={`subagent-editor-${agentsEditorSyncKey}`}
+            t={t}
+            width={width}
+            height={height}
+            draft={agentsEditorDraft}
+            focusedField={agentsEditorField}
+            modelIndex={agentsEditorModelIndex}
+            error={agentsEditorError}
+            title={editingSubagent ? `Edit sub-agent: ${formatSubagentName(editingSubagent.name)}` : "Add sub-agent"}
+            nameRef={subagentNameRef}
+            instructionRef={subagentInstructionRef}
+            onSubmit={submitSubagentEditor}
+            showRemoveHint={!!editingSubagent}
+          />
+        )}
+        {showModelPicker && (
+          <ModelPickerModal
+            t={t}
+            currentModel={model}
+            selectedIndex={modelPickerIndex}
+            width={width}
+            height={height}
+            searchQuery={modelSearchQuery}
+            filteredModels={filteredModels}
+            reasoningEffortByModel={reasoningEffortByModel}
+            configuredProviders={configuredProviders}
+            disabledProviders={disabledProviders}
+            focus={modelPickerFocus}
+            providerChipIndex={providerChipIndex}
+          />
+        )}
+        {showWalletPicker && (
+          <WalletPickerModal
+            t={t}
+            settings={walletSettings}
+            walletInfo={walletDisplayInfo}
+            focusIndex={walletFocusIndex}
+            width={width}
+            height={height}
+          />
+        )}
+        {showSandboxPicker && (
+          <SandboxPickerModal
+            t={t}
+            currentMode={sandboxMode}
+            settings={sandboxSettings}
+            focusIndex={sandboxSettingsFocusIndex}
+            editing={sandboxSettingsEditing}
+            editBuffer={sandboxSettingsEditBuffer}
+            width={width}
+            height={height}
+          />
+        )}
+        {showConnectModal && (
+          <ConnectModal
+            t={t}
+            width={width}
+            height={height}
+            selectedIndex={connectModalIndex}
+            channels={CONNECT_CHANNELS}
+          />
+        )}
+        {showTelegramTokenModal && (
+          <TelegramTokenModal
+            t={t}
+            width={width}
+            height={height}
+            inputRef={telegramTokenInputRef}
+            error={telegramTokenError}
+            onSubmit={submitTelegramToken}
+          />
+        )}
+        {showTelegramPairModal && (
+          <TelegramPairModal
+            t={t}
+            width={width}
+            height={height}
+            inputRef={telegramPairInputRef}
+            error={telegramPairError}
+            onSubmit={() => void submitTelegramPair()}
+          />
+        )}
+      </box>
+    </SemanticProvider>
   );
 }
 
@@ -5236,7 +5269,6 @@ function SessionHeader({
         <box flexGrow={1} />
         {sessionId ? (
           // biome-ignore lint/a11y/noStaticElementInteractions: OpenTUI <text> is a custom terminal renderer element, not an HTML span
-          // biome-ignore lint/a11y/useSemanticElements: OpenTUI has no <button> element; <text> is the only inline option
           <text fg={t.textDim} onMouseUp={handleSessionIdClick}>
             {sessionId}
           </text>

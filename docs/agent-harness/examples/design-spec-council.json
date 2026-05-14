@@ -1,0 +1,43 @@
+{
+  "mode": "design",
+  "version": "0.1.0",
+  "target": "tui",
+  "scenes": [
+    {
+      "id": "picker",
+      "name": "Council Picker",
+      "layout": {
+        "id": "picker-root",
+        "role": "dialog",
+        "children": [
+          {
+            "id": "picker-list",
+            "role": "listbox",
+            "value": "ba",
+            "children": [
+              { "id": "ba", "role": "listitem", "name": "BA" },
+              { "id": "designer", "role": "listitem", "name": "Designer" },
+              { "id": "qa", "role": "listitem", "name": "QA" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "debate",
+      "name": "Debate Plan",
+      "layout": {
+        "id": "debate-root",
+        "role": "dialog",
+        "children": [{ "id": "debate-log", "role": "log", "value": "" }]
+      }
+    }
+  ],
+  "transitions": [
+    {
+      "from": "picker",
+      "on": "select",
+      "to": "debate"
+    }
+  ]
+}

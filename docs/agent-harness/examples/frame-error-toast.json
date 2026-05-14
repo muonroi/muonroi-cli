@@ -1,0 +1,16 @@
+{
+  "mode": "live",
+  "version": "0.1.0",
+  "seq": 12,
+  "ts": 1715000001000,
+  "nodes": [
+    {
+      "id": "root",
+      "role": "dialog",
+      "children": [
+        { "id": "log-pane", "role": "log", "value": "Response log" },
+        { "id": "error-toast", "role": "toast", "name": "Error", "state": "error", "props": { "level": "error" } }
+      ]
+    }
+  ]
+}

@@ -773,7 +773,34 @@ program
   .option("--council-answers <file>", "Headless: JSON file with scripted council answers per phase (FIFO)")
   .option("--update", "Update muonroi-cli to the latest version and exit")
   .option("--smoke-boot-only", "CI smoke: validate loadConfig + loadUsage and exit 0 — no keychain access")
+  .option("--agent-mode", "Enable agent harness mode (JSONL sidechannel)")
+  .option("--agent-cols <n>", "Terminal columns in agent-mode", (v) => parseInt(v, 10), 120)
+  .option("--agent-rows <n>", "Terminal rows in agent-mode", (v) => parseInt(v, 10), 40)
+  .option("--agent-idle-ms <n>", "Idle quiescence window (ms)", (v) => parseInt(v, 10), 50)
+  .option("--agent-fake-clock", "Use deterministic frame-counter clock")
+  .option("--mock-llm <dir>", "Use fixture-based mock LLM from <dir> instead of real provider (E2E testing)")
   .action(async (message: string[], options) => {
+    // Agent-mode: start the sidechannel runtime BEFORE any TUI or model work.
+    // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
+    // can pick it up without a direct import dependency.
+    if (options.agentMode) {
+      const { startAgentMode } = await import("./agent-harness/agent-mode.js");
+      const runtime = await startAgentMode({
+        cols: options.agentCols as number,
+        rows: options.agentRows as number,
+        idleMs: options.agentIdleMs as number,
+        fakeClock: !!options.agentFakeClock,
+      });
+      (globalThis as Record<string, unknown>).__muonroiAgentRuntime = runtime;
+    }
+
+    // Mock-LLM: load fixture directory and inject into globalThis BEFORE any
+    // provider call. Dynamic import keeps startup lean when flag is absent.
+    if (typeof options.mockLlm === "string") {
+      const { createMockLlm } = await import("./agent-harness/mock-llm.js");
+      (globalThis as Record<string, unknown>).__muonroiMockLlm = createMockLlm({ dir: options.mockLlm });
+    }
+
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
     // Deliberately exits BEFORE provider key loading — CI runners have no keychain configured.
     if (options.smokeBootOnly) {
@@ -1239,6 +1266,14 @@ mcp
   .action(async (keys: string[], opts: { prefix: string }) => {
     const { runMcpImportBw } = await import("./cli/keys.js");
     await runMcpImportBw({ keys, itemPrefix: opts.prefix });
+  });
+
+program
+  .command("mcp-driver")
+  .description("Run the agent-harness MCP driver over stdio")
+  .action(async () => {
+    const { runHarnessDriver } = await import("./mcp/harness-driver.js");
+    await runHarnessDriver();
   });
 
 program.addCommand(buildConfigCommand());
