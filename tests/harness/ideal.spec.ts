@@ -72,13 +72,17 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
   });
 
   it.skip("ideal status card renders after starting a run", async () => {
-    // requires mock-llm sequence mode for /ideal multi-LLM-call flow
+    // Blocked: the product-loop orchestrator calls createCouncilLLM (src/council/llm.ts)
+    // which calls generateText (AI SDK) directly — NOT through the createAdapter mock hook.
+    // The sequence fixture (tests/harness/fixtures/llm/ideal.json) covers the main chat
+    // adapter path only. To unblock: add globalThis.__muonroiMockLlm short-circuit to
+    // createCouncilLLM.generate/debate/research in src/council/llm.ts, then flip to it().
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
     expect(driver.query("id=ideal-status")?.role).toBe("region");
   });
 
   it.skip("can advance through ideal phases", async () => {
-    // requires mock-llm sequence mode for /ideal multi-LLM-call flow
+    // Same blocker as above — needs createCouncilLLM mock hook (see comment above).
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
     const phases = driver.queryAll("role=listitem");
     expect(phases.length).toBeGreaterThan(0);

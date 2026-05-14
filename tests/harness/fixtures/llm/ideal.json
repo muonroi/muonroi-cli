@@ -1,0 +1,30 @@
+{
+  "sequence": [
+    {
+      "text": "[]",
+      "match": "AMBIGUITIES",
+      "___comment": "PIL/clarifier: no clarification questions needed"
+    },
+    {
+      "text": "{\"problemStatement\":\"Build a simple counter feature.\",\"constraints\":[\"keep it minimal\"],\"successCriteria\":[\"counter increments and resets\"],\"scope\":\"in-scope: counter UI. out-of-scope: persistence.\"}",
+      "___comment": "Spec synthesis: clarified brief for the product loop"
+    },
+    {
+      "text": "Sprint plan: Step 1 — create Counter component. Step 2 — wire increment/decrement buttons. Step 3 — add reset. Acceptance: counter renders and responds to button clicks.",
+      "___comment": "Sprint planner: sprint 1 plan"
+    },
+    {
+      "text": "Implementation complete. Counter component created with increment, decrement, and reset. All acceptance criteria met.",
+      "___comment": "Sprint executor: implementation result"
+    },
+    {
+      "text": "{\"score\":0.95,\"passed\":true,\"reason\":\"All acceptance criteria satisfied.\"}",
+      "___comment": "Done-gate evaluator: score > done_threshold (0.9) — loop exits"
+    },
+    {
+      "text": "Ideal loop acknowledged — generic fallback for any remaining calls.",
+      "___comment": "Fallback: exhausted sequence sticks here"
+    }
+  ],
+  "___note": "To unlock full /ideal multi-phase E2E: the product-loop runner calls llm.generate/debate via createCouncilLLM (council/llm.ts), which calls generateText (AI SDK) directly — NOT through the createAdapter mock hook. The sequence fixture covers the main chat adapter path only. To drive the product-loop orchestrator's state machine, createCouncilLLM must also check globalThis.__muonroiMockLlm — see src/council/llm.ts generate/debate/research methods."
+}
