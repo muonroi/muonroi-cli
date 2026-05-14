@@ -4852,7 +4852,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             />
             <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
               {/* Scrollable messages */}
-              <Semantic id="log" role="log">
+              <Semantic id="log" role="log" props={{ scrollTop: scrollRef.current?.scrollTop ?? 0 }}>
                 {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
                 <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
                   {(() => {
@@ -5744,65 +5744,69 @@ function ApiKeyModal({
   const top = bottomAlignedModalTop(height, panelHeight);
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={top}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="api-key-modal" role="dialog" name="API Key" isModal>
       <box
-        width={panelWidth}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={top}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"Add API key"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <box paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.text}>{"Paste your xAI API key to unlock chat. You can hide this prompt with esc."}</text>
-        </box>
-        <box paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1} width="100%">
-            <textarea
-              ref={inputRef}
-              focused={true}
-              placeholder="xai-..."
-              textColor={t.text}
-              backgroundColor={t.backgroundElement}
-              placeholderColor={t.textMuted}
-              minHeight={1}
-              maxHeight={3}
-              wrapMode="word"
-              keyBindings={TEXTAREA_KEYBINDINGS}
-              onSubmit={onSubmit as unknown as () => void}
-            />
+        <box
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"Add API key"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={t.text}>{"Paste your xAI API key to unlock chat. You can hide this prompt with esc."}</text>
+          </box>
+          <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1} width="100%">
+              <Semantic id="api-key-input" role="textbox">
+                <textarea
+                  ref={inputRef}
+                  focused={true}
+                  placeholder="xai-..."
+                  textColor={t.text}
+                  backgroundColor={t.backgroundElement}
+                  placeholderColor={t.textMuted}
+                  minHeight={1}
+                  maxHeight={3}
+                  wrapMode="word"
+                  keyBindings={TEXTAREA_KEYBINDINGS}
+                  onSubmit={onSubmit as unknown as () => void}
+                />
+              </Semantic>
+            </box>
+          </box>
+          <box flexGrow={1} minHeight={0} />
+          <box paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
+            {error ? (
+              <text fg={t.diffRemovedFg}>{error}</text>
+            ) : (
+              <text>
+                <span style={{ fg: t.primary }}>{"enter "}</span>
+                <span style={{ fg: t.textMuted }}>{"save key  ·  "}</span>
+                <span style={{ fg: t.primary }}>{"esc "}</span>
+                <span style={{ fg: t.textMuted }}>{"hide"}</span>
+              </text>
+            )}
           </box>
         </box>
-        <box flexGrow={1} minHeight={0} />
-        <box paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
-          {error ? (
-            <text fg={t.diffRemovedFg}>{error}</text>
-          ) : (
-            <text>
-              <span style={{ fg: t.primary }}>{"enter "}</span>
-              <span style={{ fg: t.textMuted }}>{"save key  ·  "}</span>
-              <span style={{ fg: t.primary }}>{"esc "}</span>
-              <span style={{ fg: t.textMuted }}>{"hide"}</span>
-            </text>
-          )}
-        </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
 

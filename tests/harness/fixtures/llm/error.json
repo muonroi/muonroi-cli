@@ -1,0 +1,3 @@
+{
+  "responses": [{ "match": "__trigger_error__", "error": "mock LLM error: simulated provider failure" }]
+}

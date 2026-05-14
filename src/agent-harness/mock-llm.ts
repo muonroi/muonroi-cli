@@ -8,9 +8,11 @@
  *
  * ResponsesFixture — stateless, first-match-wins (original behavior):
  *   { "responses": [{ "match": "string or *", "text": "..." }] }
+ *   Error injection: { "match": "...", "error": "message" } — throws instead of returning text.
  *
  * SequenceFixture — stateful, calls consumed in order:
  *   { "sequence": [{ "text": "...", "match": "optional substring" }] }
+ *   Error injection in sequence: { "error": "message", "match": "optional substring" }
  *   - Entries are consumed in order per MockLlm instance.
  *   - If an entry has "match", it is only consumed when the prompt includes it;
  *     otherwise consumed unconditionally.
@@ -22,9 +24,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Adapter, AdapterRequest, ProviderId, ProviderStream } from "../providers/types.js";
 
-type SequenceEntry = { text: string; match?: string };
+type SequenceEntry = { text?: string; error?: string; match?: string };
 type SequenceFixture = { sequence: SequenceEntry[] };
-type ResponsesFixture = { responses: Array<{ match: string; text: string }> };
+type ResponseEntry = { match: string; text?: string; error?: string };
+type ResponsesFixture = { responses: ResponseEntry[] };
 type Fixture = SequenceFixture | ResponsesFixture;
 
 function isSequenceFixture(fx: Fixture): fx is SequenceFixture {
@@ -71,14 +74,18 @@ export function createMockLlm(opts: { dir: string }): MockLlm {
         }
         if (chosen === undefined) continue; // No entry in this fixture matches — try next fixture.
         seqCounters.set(fx, nextIdx);
-        return { text: chosen.text };
+        if (chosen.error !== undefined) throw new Error(chosen.error);
+        return { text: chosen.text ?? "" };
       }
 
       // 2. Try responses fixtures: non-wildcard matches first.
       for (const fx of fixtures) {
         if (isSequenceFixture(fx)) continue;
         for (const r of fx.responses) {
-          if (r.match !== "*" && req.prompt.includes(r.match)) return { text: r.text };
+          if (r.match !== "*" && req.prompt.includes(r.match)) {
+            if (r.error !== undefined) throw new Error(r.error);
+            return { text: r.text ?? "" };
+          }
         }
       }
 
@@ -86,7 +93,10 @@ export function createMockLlm(opts: { dir: string }): MockLlm {
       for (const fx of fixtures) {
         if (isSequenceFixture(fx)) continue;
         for (const r of fx.responses) {
-          if (r.match === "*") return { text: r.text };
+          if (r.match === "*") {
+            if (r.error !== undefined) throw new Error(r.error);
+            return { text: r.text ?? "" };
+          }
         }
       }
 

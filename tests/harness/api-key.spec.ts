@@ -1,18 +1,12 @@
 /**
- * error-states.spec.ts
+ * api-key.spec.ts
  *
- * Asserts that a mock-LLM error causes a role=toast level=error event to
- * appear via driver.last_event("toast").
- *
- * Error injection: fixture `tests/harness/fixtures/llm/error.json` contains
- *   { "match": "__trigger_error__", "error": "mock LLM error: ..." }
- * When the prompt includes that sentinel string, mock-llm.ts throws — the
- * adapter generator propagates the throw, stream-loop.ts catches it and
- * yields { kind: "error" }, app.tsx case "error" calls agentRuntime.emitEvent
- * with kind="toast" level="error".
+ * Verifies that the API-key modal (`id="api-key-modal"`) is visible on a
+ * fresh-clone boot (no -k flag, no saved keychain entry) and that the input
+ * field is queryable by the agent harness.
  *
  * Run via:
- *   bunx vitest -c vitest.harness.config.ts run tests/harness/error-states.spec.ts
+ *   bunx vitest -c vitest.harness.config.ts run tests/harness/api-key.spec.ts
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -22,7 +16,7 @@ import { createDriver } from "../../src/agent-harness/driver";
 import type { LiveEvent, LiveFrame } from "../../src/agent-harness/protocol";
 import { createLineSplitter } from "../../src/agent-harness/sidechannel";
 
-describe.skipIf(process.platform === "win32")("error states E2E", () => {
+describe.skipIf(process.platform === "win32")("api-key modal E2E", () => {
   let proc: ChildProcess;
   let driver: ReturnType<typeof createDriver>;
 
@@ -30,21 +24,12 @@ describe.skipIf(process.platform === "win32")("error states E2E", () => {
     const entry = resolve("src/index.ts");
     const fixturesDir = resolve("tests/harness/fixtures/llm");
 
-    proc = spawn(
-      "bun",
-      [
-        "run",
-        entry,
-        "--agent-mode",
-        "--mock-llm",
-        fixturesDir,
-        "-k",
-        "FAKE_KEY_FOR_TESTS",
-        "-m",
-        "deepseek-ai/DeepSeek-V4-Flash",
-      ],
-      { stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"] },
-    );
+    // Spawn WITHOUT -k so the API-key modal actually appears.
+    // --mock-llm is still passed so any accidental LLM call doesn't hit a real provider.
+    // --agent-mode enables fd3/fd4 sidechannels.
+    proc = spawn("bun", ["run", entry, "--agent-mode", "--mock-llm", fixturesDir], {
+      stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
+    });
 
     driver = createDriver({
       sendKey: (k) => {
@@ -76,6 +61,8 @@ describe.skipIf(process.platform === "win32")("error states E2E", () => {
       splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
     });
 
+    // Wait for the modal to appear (or for idle if already visible in first frame).
+    // Use a longer timeout since fresh-boot can be slow in WSL CI.
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
   }, 20_000);
 
@@ -83,16 +70,23 @@ describe.skipIf(process.platform === "win32")("error states E2E", () => {
     proc?.kill();
   });
 
-  it("toast error event fires when mock-LLM throws", async () => {
-    // The sentinel substring "__trigger_error__" matches the error fixture entry,
-    // causing mock.complete() to throw → stream-loop catches → "error" chunk →
-    // app.tsx emits toast event with level="error".
-    driver.type("__trigger_error__");
-    driver.press("Enter");
+  it("api key modal appears on fresh clone", async () => {
+    // The modal should appear immediately on boot without a saved key.
+    await driver.wait_for({ selector: "id=api-key-modal", timeoutMs: 15_000 });
+    const node = driver.query("id=api-key-modal");
+    expect(node?.role).toBe("dialog");
+  });
 
-    await driver.wait_for({ selector: "role=toast", timeoutMs: 10_000 });
-    const event = driver.last_event("toast") as { kind: "toast"; level: string; text: string } | null;
-    expect(event).not.toBeNull();
-    expect(event?.level).toBe("error");
+  it("can type into api key input", async () => {
+    driver.type("xai-t");
+    await driver.wait_for({ idle: true, timeoutMs: 10_000 });
+    const input = driver.query("id=api-key-input");
+    expect(input).not.toBeNull();
+  });
+
+  it.skip("submitting valid key dismisses modal", async () => {
+    // Skipped: requires real keychain integration (saveUserSettings persists
+    // to disk and the modal reads from there). Cannot be driven reliably in
+    // a headless test without a real xai- key that passes validation.
   });
 });

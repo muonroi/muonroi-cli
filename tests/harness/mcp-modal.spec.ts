@@ -1,18 +1,11 @@
 /**
- * error-states.spec.ts
+ * mcp-modal.spec.ts
  *
- * Asserts that a mock-LLM error causes a role=toast level=error event to
- * appear via driver.last_event("toast").
- *
- * Error injection: fixture `tests/harness/fixtures/llm/error.json` contains
- *   { "match": "__trigger_error__", "error": "mock LLM error: ..." }
- * When the prompt includes that sentinel string, mock-llm.ts throws — the
- * adapter generator propagates the throw, stream-loop.ts catches it and
- * yields { kind: "error" }, app.tsx case "error" calls agentRuntime.emitEvent
- * with kind="toast" level="error".
+ * Verifies that the MCP browser modal (`id="mcp-modal"`) is reachable via
+ * the `/mcp` slash command and is observable by the harness.
  *
  * Run via:
- *   bunx vitest -c vitest.harness.config.ts run tests/harness/error-states.spec.ts
+ *   bunx vitest -c vitest.harness.config.ts run tests/harness/mcp-modal.spec.ts
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -22,7 +15,7 @@ import { createDriver } from "../../src/agent-harness/driver";
 import type { LiveEvent, LiveFrame } from "../../src/agent-harness/protocol";
 import { createLineSplitter } from "../../src/agent-harness/sidechannel";
 
-describe.skipIf(process.platform === "win32")("error states E2E", () => {
+describe.skipIf(process.platform === "win32")("MCP modal E2E", () => {
   let proc: ChildProcess;
   let driver: ReturnType<typeof createDriver>;
 
@@ -83,16 +76,11 @@ describe.skipIf(process.platform === "win32")("error states E2E", () => {
     proc?.kill();
   });
 
-  it("toast error event fires when mock-LLM throws", async () => {
-    // The sentinel substring "__trigger_error__" matches the error fixture entry,
-    // causing mock.complete() to throw → stream-loop catches → "error" chunk →
-    // app.tsx emits toast event with level="error".
-    driver.type("__trigger_error__");
+  it("MCP modal opens via /mcp slash command", async () => {
+    driver.type("/mcp");
     driver.press("Enter");
-
-    await driver.wait_for({ selector: "role=toast", timeoutMs: 10_000 });
-    const event = driver.last_event("toast") as { kind: "toast"; level: string; text: string } | null;
-    expect(event).not.toBeNull();
-    expect(event?.level).toBe("error");
+    await driver.wait_for({ selector: "id=mcp-modal", timeoutMs: 10_000 });
+    const node = driver.query("id=mcp-modal");
+    expect(node?.role).toBe("dialog");
   });
 });
