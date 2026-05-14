@@ -1,5 +1,6 @@
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
+import { Semantic } from "../agent-harness/semantic.js";
 import { MODELS } from "../models/registry.js";
 import type { CustomSubagentConfig } from "../utils/settings";
 import { formatSubagentName } from "../utils/subagent-display";
@@ -67,73 +68,84 @@ export function SubagentsBrowserModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={bottomAlignedModalTop(height, panelHeight)}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="subagents-modal" role="dialog" name="Subagents" isModal>
       <box
-        width={panelWidth}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={bottomAlignedModalTop(height, panelHeight)}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"Custom sub-agents"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <text fg={t.text}>
-            {searchQuery || <span style={{ fg: t.textMuted }}>{"Search by name, model..."}</span>}
-          </text>
-        </box>
-        <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
-          {rows.map((row, idx) => {
-            const selected = idx === selectedIndex;
+        <box
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"Custom sub-agents"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+            <text fg={t.text}>
+              {searchQuery || <span style={{ fg: t.textMuted }}>{"Search by name, model..."}</span>}
+            </text>
+          </box>
+          <Semantic id="subagents-list" role="listbox">
+            <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
+              {rows.map((row, idx) => {
+                const selected = idx === selectedIndex;
 
-            return (
-              <box
-                key={`agent-${row.agent.name}`}
-                id={`subagent-${row.agent.name}`}
-                width="100%"
-                backgroundColor={selected ? t.selectedBg : undefined}
-                paddingLeft={2}
-                paddingRight={2}
-              >
-                <box width="100%" flexDirection="row" justifyContent="space-between">
-                  <text fg={selected ? t.primary : t.text}>
-                    <b>{formatSubagentName(row.agent.name)}</b>
-                  </text>
-                  <text fg={t.textMuted}>{row.agent.model}</text>
+                return (
+                  <Semantic
+                    key={`agent-${row.agent.name}`}
+                    id={`subagent-${row.agent.name}`}
+                    role="listitem"
+                    name={row.agent.name}
+                    selected={selected || undefined}
+                  >
+                    <box
+                      id={`subagent-${row.agent.name}`}
+                      width="100%"
+                      backgroundColor={selected ? t.selectedBg : undefined}
+                      paddingLeft={2}
+                      paddingRight={2}
+                    >
+                      <box width="100%" flexDirection="row" justifyContent="space-between">
+                        <text fg={selected ? t.primary : t.text}>
+                          <b>{formatSubagentName(row.agent.name)}</b>
+                        </text>
+                        <text fg={t.textMuted}>{row.agent.model}</text>
+                      </box>
+                    </box>
+                  </Semantic>
+                );
+              })}
+              {rows.length === 0 ? (
+                <box paddingLeft={2} paddingRight={2}>
+                  <text fg={t.textMuted}>{"No custom sub-agents yet"}</text>
                 </box>
-              </box>
-            );
-          })}
-          {rows.length === 0 ? (
-            <box paddingLeft={2} paddingRight={2}>
-              <text fg={t.textMuted}>{"No custom sub-agents yet"}</text>
-            </box>
-          ) : null}
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
-          <text>
-            <span style={{ fg: t.primary }}>{"enter "}</span>
-            <span style={{ fg: t.textMuted }}>{"open selected · "}</span>
-            <span style={{ fg: t.primary }}>{"ctrl+a "}</span>
-            <span style={{ fg: t.textMuted }}>{"add"}</span>
-          </text>
+              ) : null}
+            </scrollbox>
+          </Semantic>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
+            <text>
+              <span style={{ fg: t.primary }}>{"enter "}</span>
+              <span style={{ fg: t.textMuted }}>{"open selected · "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+a "}</span>
+              <span style={{ fg: t.textMuted }}>{"add"}</span>
+            </text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
 
@@ -175,98 +187,106 @@ export function SubagentEditorModal({
   }, [draft, nameRef, instructionRef]);
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={bottomAlignedModalTop(height, panelHeight)}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="subagent-editor" role="dialog" name={title} isModal>
       <box
-        width={panelWidth}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={bottomAlignedModalTop(height, panelHeight)}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{title}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc back"}</text>
-        </box>
-        <scrollbox flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <box paddingBottom={1}>
-            <text fg={focusedField === "name" ? t.primary : t.textMuted}>{"Name (task tool agent value)"}</text>
-            <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-              <textarea
-                ref={nameRef}
-                focused={focusedField === "name"}
-                placeholder="e.g. security-review"
-                textColor={t.text}
-                backgroundColor={t.backgroundElement}
-                placeholderColor={t.textMuted}
-                minHeight={1}
-                maxHeight={2}
-                wrapMode="word"
-                keyBindings={EDITOR_KEYBINDINGS}
-                onSubmit={onSubmit as unknown as () => void}
-              />
-            </box>
-          </box>
-          <box paddingBottom={1}>
-            <text fg={focusedField === "model" ? t.primary : t.textMuted}>
-              {"Model - "}
-              <span style={{ fg: t.text }}>{`${model.name} (${model.id})`}</span>
-            </text>
-            {focusedField === "model" ? <text fg={t.textMuted}>{"up/down or left/right to change model"}</text> : null}
-          </box>
-          <box paddingBottom={1}>
-            <text fg={focusedField === "instruction" ? t.primary : t.textMuted}>{"Instruction (system prompt)"}</text>
-            <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-              <textarea
-                ref={instructionRef}
-                focused={focusedField === "instruction"}
-                placeholder="How this sub-agent should behave..."
-                textColor={t.text}
-                backgroundColor={t.backgroundElement}
-                placeholderColor={t.textMuted}
-                minHeight={4}
-                maxHeight={12}
-                wrapMode="word"
-                keyBindings={EDITOR_KEYBINDINGS}
-                onSubmit={onSubmit as unknown as () => void}
-              />
-            </box>
-          </box>
-          {error ? (
-            <box paddingBottom={1}>
-              <text fg={t.diffRemovedFg}>{error}</text>
-            </box>
-          ) : null}
-        </scrollbox>
         <box
-          flexShrink={0}
-          paddingLeft={2}
-          paddingRight={2}
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
           paddingTop={1}
           paddingBottom={1}
           flexDirection="column"
-          gap={0}
         >
-          {showRemoveHint ? (
-            <text>
-              <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
-              <span style={{ fg: t.textMuted }}>{"remove sub-agent"}</span>
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{title}</b>
             </text>
-          ) : null}
-          <text fg={t.textMuted}>{"tab fields · enter save"}</text>
+            <text fg={t.textMuted}>{"esc back"}</text>
+          </box>
+          <scrollbox flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <box paddingBottom={1}>
+              <text fg={focusedField === "name" ? t.primary : t.textMuted}>{"Name (task tool agent value)"}</text>
+              <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                <Semantic id="subagent-editor-name" role="textbox" value={draft.name}>
+                  <textarea
+                    ref={nameRef}
+                    focused={focusedField === "name"}
+                    placeholder="e.g. security-review"
+                    textColor={t.text}
+                    backgroundColor={t.backgroundElement}
+                    placeholderColor={t.textMuted}
+                    minHeight={1}
+                    maxHeight={2}
+                    wrapMode="word"
+                    keyBindings={EDITOR_KEYBINDINGS}
+                    onSubmit={onSubmit as unknown as () => void}
+                  />
+                </Semantic>
+              </box>
+            </box>
+            <box paddingBottom={1}>
+              <text fg={focusedField === "model" ? t.primary : t.textMuted}>
+                {"Model - "}
+                <span style={{ fg: t.text }}>{`${model.name} (${model.id})`}</span>
+              </text>
+              {focusedField === "model" ? (
+                <text fg={t.textMuted}>{"up/down or left/right to change model"}</text>
+              ) : null}
+            </box>
+            <box paddingBottom={1}>
+              <text fg={focusedField === "instruction" ? t.primary : t.textMuted}>{"Instruction (system prompt)"}</text>
+              <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                <Semantic id="subagent-editor-instruction" role="textbox" value={draft.instruction}>
+                  <textarea
+                    ref={instructionRef}
+                    focused={focusedField === "instruction"}
+                    placeholder="How this sub-agent should behave..."
+                    textColor={t.text}
+                    backgroundColor={t.backgroundElement}
+                    placeholderColor={t.textMuted}
+                    minHeight={4}
+                    maxHeight={12}
+                    wrapMode="word"
+                    keyBindings={EDITOR_KEYBINDINGS}
+                    onSubmit={onSubmit as unknown as () => void}
+                  />
+                </Semantic>
+              </box>
+            </box>
+            {error ? (
+              <box paddingBottom={1}>
+                <text fg={t.diffRemovedFg}>{error}</text>
+              </box>
+            ) : null}
+          </scrollbox>
+          <box
+            flexShrink={0}
+            paddingLeft={2}
+            paddingRight={2}
+            paddingTop={1}
+            paddingBottom={1}
+            flexDirection="column"
+            gap={0}
+          >
+            {showRemoveHint ? (
+              <text>
+                <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
+                <span style={{ fg: t.textMuted }}>{"remove sub-agent"}</span>
+              </text>
+            ) : null}
+            <text fg={t.textMuted}>{"tab fields · enter save"}</text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }

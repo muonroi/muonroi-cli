@@ -1,5 +1,6 @@
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
+import { Semantic } from "../agent-harness/semantic.js";
 import type { McpCatalogEntry } from "../mcp/catalog";
 import { toMcpServerId } from "../mcp/validate";
 import type { McpServerConfig } from "../utils/settings";
@@ -90,109 +91,134 @@ export function McpBrowserModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={bottomAlignedModalTop(height, panelHeight)}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="mcp-modal" role="dialog" name="MCP Servers" isModal>
       <box
-        width={Math.min(96, width - 4)}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={bottomAlignedModalTop(height, panelHeight)}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"MCP Servers"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <text fg={t.text}>{searchQuery || <span style={{ fg: t.textMuted }}>{"Search servers..."}</span>}</text>
-        </box>
-        <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
-          {rows.map((row, idx) => {
-            const selected = idx === selectedIndex;
+        <box
+          width={Math.min(96, width - 4)}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"MCP Servers"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+            <text fg={t.text}>{searchQuery || <span style={{ fg: t.textMuted }}>{"Search servers..."}</span>}</text>
+          </box>
+          <Semantic id="mcp-list" role="listbox">
+            <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
+              {rows.map((row, idx) => {
+                const selected = idx === selectedIndex;
 
-            if (row.kind === "server") {
-              const enabledColor = row.server.enabled ? t.diffAddedFg : selected ? t.selected : t.text;
-              return (
-                <box
-                  key={`server-${row.server.id}`}
-                  id={`mcp-server-${row.server.id}`}
-                  backgroundColor={selected ? t.selectedBg : undefined}
-                  paddingLeft={2}
-                  paddingRight={2}
-                >
-                  <box flexDirection="row" justifyContent="space-between">
-                    <text fg={enabledColor}>
-                      {row.server.enabled ? "■ " : "□ "}
-                      {row.server.label}
-                    </text>
-                    <text fg={row.server.enabled ? t.diffAddedFg : t.textMuted}>{row.server.transport}</text>
-                  </box>
-                  <text fg={t.textMuted}>{row.description}</text>
-                </box>
-              );
-            }
+                if (row.kind === "server") {
+                  const enabledColor = row.server.enabled ? t.diffAddedFg : selected ? t.selected : t.text;
+                  return (
+                    <Semantic
+                      key={`server-${row.server.id}`}
+                      id={`mcp-${row.server.id}`}
+                      role="listitem"
+                      name={row.server.label}
+                      selected={selected || undefined}
+                    >
+                      <box
+                        id={`mcp-server-${row.server.id}`}
+                        backgroundColor={selected ? t.selectedBg : undefined}
+                        paddingLeft={2}
+                        paddingRight={2}
+                      >
+                        <box flexDirection="row" justifyContent="space-between">
+                          <text fg={enabledColor}>
+                            {row.server.enabled ? "■ " : "□ "}
+                            {row.server.label}
+                          </text>
+                          <text fg={row.server.enabled ? t.diffAddedFg : t.textMuted}>{row.server.transport}</text>
+                        </box>
+                        <text fg={t.textMuted}>{row.description}</text>
+                      </box>
+                    </Semantic>
+                  );
+                }
 
-            if (row.kind === "catalog") {
-              return (
-                <box
-                  key={`catalog-${row.entry.id}`}
-                  id={`mcp-catalog-${row.entry.id}`}
-                  backgroundColor={selected ? t.selectedBg : undefined}
-                  paddingLeft={2}
-                  paddingRight={2}
-                >
-                  <box flexDirection="row" justifyContent="space-between">
-                    <text fg={selected ? t.selected : t.text}>
-                      {"□ "}
-                      {row.entry.name}
-                    </text>
-                    <text fg={t.textMuted}>{"Popular"}</text>
-                  </box>
-                  <text fg={t.textMuted}>{row.entry.description}</text>
-                </box>
-              );
-            }
+                if (row.kind === "catalog") {
+                  return (
+                    <Semantic
+                      key={`catalog-${row.entry.id}`}
+                      id={`mcp-catalog-${row.entry.id}`}
+                      role="listitem"
+                      name={row.entry.name}
+                      selected={selected || undefined}
+                    >
+                      <box
+                        id={`mcp-catalog-${row.entry.id}`}
+                        backgroundColor={selected ? t.selectedBg : undefined}
+                        paddingLeft={2}
+                        paddingRight={2}
+                      >
+                        <box flexDirection="row" justifyContent="space-between">
+                          <text fg={selected ? t.selected : t.text}>
+                            {"□ "}
+                            {row.entry.name}
+                          </text>
+                          <text fg={t.textMuted}>{"Popular"}</text>
+                        </box>
+                        <text fg={t.textMuted}>{row.entry.description}</text>
+                      </box>
+                    </Semantic>
+                  );
+                }
 
-            return (
-              <box
-                key="mcp-add"
-                id="mcp-add"
-                backgroundColor={selected ? t.selectedBg : undefined}
-                paddingLeft={2}
-                paddingRight={2}
-              >
-                <text fg={selected ? t.selected : t.primary}>
-                  <b>{"□ Add Custom MCP"}</b>
-                </text>
-              </box>
-            );
-          })}
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
-          <text>
-            <span style={{ fg: t.primary }}>{"enter "}</span>
-            <span style={{ fg: t.textMuted }}>{"toggle  ·  "}</span>
-            <span style={{ fg: t.primary }}>{"ctrl+e "}</span>
-            <span style={{ fg: t.textMuted }}>{"edit  ·  "}</span>
-            <span style={{ fg: t.primary }}>{"ctrl+a "}</span>
-            <span style={{ fg: t.textMuted }}>{"add  ·  "}</span>
-            <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
-            <span style={{ fg: t.textMuted }}>{"delete"}</span>
-          </text>
+                return (
+                  <Semantic
+                    key="mcp-add"
+                    id="mcp-add"
+                    role="listitem"
+                    name="Add Custom MCP"
+                    selected={selected || undefined}
+                  >
+                    <box
+                      id="mcp-add"
+                      backgroundColor={selected ? t.selectedBg : undefined}
+                      paddingLeft={2}
+                      paddingRight={2}
+                    >
+                      <text fg={selected ? t.selected : t.primary}>
+                        <b>{"□ Add Custom MCP"}</b>
+                      </text>
+                    </box>
+                  </Semantic>
+                );
+              })}
+            </scrollbox>
+          </Semantic>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
+            <text>
+              <span style={{ fg: t.primary }}>{"enter "}</span>
+              <span style={{ fg: t.textMuted }}>{"toggle  ·  "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+e "}</span>
+              <span style={{ fg: t.textMuted }}>{"edit  ·  "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+a "}</span>
+              <span style={{ fg: t.textMuted }}>{"add  ·  "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
+              <span style={{ fg: t.textMuted }}>{"delete"}</span>
+            </text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
 
@@ -254,203 +280,205 @@ export function McpEditorModal({
   }, [draft, syncKey, labelRef, urlRef, headersRef, commandRef, argsRef, cwdRef, envRef]);
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={bottomAlignedModalTop(height, panelHeight)}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="mcp-editor" role="dialog" name={title} isModal>
       <box
-        width={Math.min(86, width - 6)}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={bottomAlignedModalTop(height, panelHeight)}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{title}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <box flexDirection="row" gap={1} alignItems="center">
-            <text fg={focusedField === "transport" ? t.primary : t.textMuted}>{"Transport"}</text>
-            {(["stdio", "http", "sse"] as const).map((option) => {
-              const active = draft.transport === option;
-              const focused = focusedField === "transport";
-              return (
-                <box
-                  key={option}
-                  backgroundColor={active ? (focused ? t.selectedBg : t.backgroundElement) : undefined}
-                  paddingLeft={1}
-                  paddingRight={1}
-                >
-                  <text fg={active ? (focused ? t.primary : t.text) : t.textMuted}>{option}</text>
-                </box>
-              );
-            })}
-          </box>
-        </box>
-        <scrollbox flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <box paddingBottom={1}>
-            <text fg={focusedField === "label" ? t.primary : t.textMuted}>{"Label"}</text>
-            <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-              <textarea
-                ref={labelRef}
-                focused={focusedField === "label"}
-                placeholder="GitHub MCP"
-                textColor={t.text}
-                backgroundColor={t.backgroundElement}
-                placeholderColor={t.textMuted}
-                minHeight={1}
-                maxHeight={2}
-                wrapMode="word"
-                keyBindings={EDITOR_KEYBINDINGS}
-                onSubmit={onSubmit as unknown as () => void}
-              />
-            </box>
-          </box>
-
-          {isRemote ? (
-            <>
-              <box paddingBottom={1}>
-                <text fg={focusedField === "url" ? t.primary : t.textMuted}>{"URL"}</text>
-                <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-                  <textarea
-                    ref={urlRef}
-                    focused={focusedField === "url"}
-                    placeholder="https://example.com/mcp"
-                    textColor={t.text}
-                    backgroundColor={t.backgroundElement}
-                    placeholderColor={t.textMuted}
-                    minHeight={1}
-                    maxHeight={3}
-                    wrapMode="word"
-                    keyBindings={EDITOR_KEYBINDINGS}
-                    onSubmit={onSubmit as unknown as () => void}
-                  />
-                </box>
-              </box>
-              <box paddingBottom={1}>
-                <text fg={focusedField === "headers" ? t.primary : t.textMuted}>
-                  {"Headers (one Header: value per line)"}
-                </text>
-                <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-                  <textarea
-                    ref={headersRef}
-                    focused={focusedField === "headers"}
-                    placeholder="Authorization: Bearer ..."
-                    textColor={t.text}
-                    backgroundColor={t.backgroundElement}
-                    placeholderColor={t.textMuted}
-                    minHeight={2}
-                    maxHeight={6}
-                    wrapMode="word"
-                    keyBindings={EDITOR_KEYBINDINGS}
-                    onSubmit={onSubmit as unknown as () => void}
-                  />
-                </box>
-              </box>
-            </>
-          ) : (
-            <>
-              <box paddingBottom={1}>
-                <text fg={focusedField === "command" ? t.primary : t.textMuted}>{"Command"}</text>
-                <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-                  <textarea
-                    ref={commandRef}
-                    focused={focusedField === "command"}
-                    placeholder="npx"
-                    textColor={t.text}
-                    backgroundColor={t.backgroundElement}
-                    placeholderColor={t.textMuted}
-                    minHeight={1}
-                    maxHeight={2}
-                    wrapMode="word"
-                    keyBindings={EDITOR_KEYBINDINGS}
-                    onSubmit={onSubmit as unknown as () => void}
-                  />
-                </box>
-              </box>
-              <box paddingBottom={1}>
-                <text fg={focusedField === "args" ? t.primary : t.textMuted}>{"Arguments (one per line)"}</text>
-                <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-                  <textarea
-                    ref={argsRef}
-                    focused={focusedField === "args"}
-                    placeholder={"-y\n@scope/server"}
-                    textColor={t.text}
-                    backgroundColor={t.backgroundElement}
-                    placeholderColor={t.textMuted}
-                    minHeight={2}
-                    maxHeight={6}
-                    wrapMode="word"
-                    keyBindings={EDITOR_KEYBINDINGS}
-                    onSubmit={onSubmit as unknown as () => void}
-                  />
-                </box>
-              </box>
-              <box paddingBottom={1}>
-                <text fg={focusedField === "cwd" ? t.primary : t.textMuted}>{"Working Directory (optional)"}</text>
-                <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-                  <textarea
-                    ref={cwdRef}
-                    focused={focusedField === "cwd"}
-                    placeholder="/path/to/project"
-                    textColor={t.text}
-                    backgroundColor={t.backgroundElement}
-                    placeholderColor={t.textMuted}
-                    minHeight={1}
-                    maxHeight={2}
-                    wrapMode="word"
-                    keyBindings={EDITOR_KEYBINDINGS}
-                    onSubmit={onSubmit as unknown as () => void}
-                  />
-                </box>
-              </box>
-            </>
-          )}
-
-          <box paddingBottom={1}>
-            <text fg={focusedField === "env" ? t.primary : t.textMuted}>{"Extra Env (one KEY=value per line)"}</text>
-            <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
-              <textarea
-                ref={envRef}
-                focused={focusedField === "env"}
-                placeholder="API_KEY=..."
-                textColor={t.text}
-                backgroundColor={t.backgroundElement}
-                placeholderColor={t.textMuted}
-                minHeight={2}
-                maxHeight={6}
-                wrapMode="word"
-                keyBindings={EDITOR_KEYBINDINGS}
-                onSubmit={onSubmit as unknown as () => void}
-              />
-            </box>
-          </box>
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
-          {error ? (
-            <text fg={t.diffRemovedFg}>{error}</text>
-          ) : (
-            <text>
-              <span style={{ fg: t.primary }}>{"enter "}</span>
-              <span style={{ fg: t.textMuted }}>{"save  ·  "}</span>
-              <span style={{ fg: t.primary }}>{"tab "}</span>
-              <span style={{ fg: t.textMuted }}>{"next field  ·  "}</span>
-              <span style={{ fg: t.primary }}>{"←→ "}</span>
-              <span style={{ fg: t.textMuted }}>{"transport"}</span>
+        <box
+          width={Math.min(86, width - 6)}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{title}</b>
             </text>
-          )}
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <box flexDirection="row" gap={1} alignItems="center">
+              <text fg={focusedField === "transport" ? t.primary : t.textMuted}>{"Transport"}</text>
+              {(["stdio", "http", "sse"] as const).map((option) => {
+                const active = draft.transport === option;
+                const focused = focusedField === "transport";
+                return (
+                  <box
+                    key={option}
+                    backgroundColor={active ? (focused ? t.selectedBg : t.backgroundElement) : undefined}
+                    paddingLeft={1}
+                    paddingRight={1}
+                  >
+                    <text fg={active ? (focused ? t.primary : t.text) : t.textMuted}>{option}</text>
+                  </box>
+                );
+              })}
+            </box>
+          </box>
+          <scrollbox flexGrow={1} minHeight={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <box paddingBottom={1}>
+              <text fg={focusedField === "label" ? t.primary : t.textMuted}>{"Label"}</text>
+              <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                <textarea
+                  ref={labelRef}
+                  focused={focusedField === "label"}
+                  placeholder="GitHub MCP"
+                  textColor={t.text}
+                  backgroundColor={t.backgroundElement}
+                  placeholderColor={t.textMuted}
+                  minHeight={1}
+                  maxHeight={2}
+                  wrapMode="word"
+                  keyBindings={EDITOR_KEYBINDINGS}
+                  onSubmit={onSubmit as unknown as () => void}
+                />
+              </box>
+            </box>
+
+            {isRemote ? (
+              <>
+                <box paddingBottom={1}>
+                  <text fg={focusedField === "url" ? t.primary : t.textMuted}>{"URL"}</text>
+                  <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                    <textarea
+                      ref={urlRef}
+                      focused={focusedField === "url"}
+                      placeholder="https://example.com/mcp"
+                      textColor={t.text}
+                      backgroundColor={t.backgroundElement}
+                      placeholderColor={t.textMuted}
+                      minHeight={1}
+                      maxHeight={3}
+                      wrapMode="word"
+                      keyBindings={EDITOR_KEYBINDINGS}
+                      onSubmit={onSubmit as unknown as () => void}
+                    />
+                  </box>
+                </box>
+                <box paddingBottom={1}>
+                  <text fg={focusedField === "headers" ? t.primary : t.textMuted}>
+                    {"Headers (one Header: value per line)"}
+                  </text>
+                  <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                    <textarea
+                      ref={headersRef}
+                      focused={focusedField === "headers"}
+                      placeholder="Authorization: Bearer ..."
+                      textColor={t.text}
+                      backgroundColor={t.backgroundElement}
+                      placeholderColor={t.textMuted}
+                      minHeight={2}
+                      maxHeight={6}
+                      wrapMode="word"
+                      keyBindings={EDITOR_KEYBINDINGS}
+                      onSubmit={onSubmit as unknown as () => void}
+                    />
+                  </box>
+                </box>
+              </>
+            ) : (
+              <>
+                <box paddingBottom={1}>
+                  <text fg={focusedField === "command" ? t.primary : t.textMuted}>{"Command"}</text>
+                  <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                    <textarea
+                      ref={commandRef}
+                      focused={focusedField === "command"}
+                      placeholder="npx"
+                      textColor={t.text}
+                      backgroundColor={t.backgroundElement}
+                      placeholderColor={t.textMuted}
+                      minHeight={1}
+                      maxHeight={2}
+                      wrapMode="word"
+                      keyBindings={EDITOR_KEYBINDINGS}
+                      onSubmit={onSubmit as unknown as () => void}
+                    />
+                  </box>
+                </box>
+                <box paddingBottom={1}>
+                  <text fg={focusedField === "args" ? t.primary : t.textMuted}>{"Arguments (one per line)"}</text>
+                  <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                    <textarea
+                      ref={argsRef}
+                      focused={focusedField === "args"}
+                      placeholder={"-y\n@scope/server"}
+                      textColor={t.text}
+                      backgroundColor={t.backgroundElement}
+                      placeholderColor={t.textMuted}
+                      minHeight={2}
+                      maxHeight={6}
+                      wrapMode="word"
+                      keyBindings={EDITOR_KEYBINDINGS}
+                      onSubmit={onSubmit as unknown as () => void}
+                    />
+                  </box>
+                </box>
+                <box paddingBottom={1}>
+                  <text fg={focusedField === "cwd" ? t.primary : t.textMuted}>{"Working Directory (optional)"}</text>
+                  <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                    <textarea
+                      ref={cwdRef}
+                      focused={focusedField === "cwd"}
+                      placeholder="/path/to/project"
+                      textColor={t.text}
+                      backgroundColor={t.backgroundElement}
+                      placeholderColor={t.textMuted}
+                      minHeight={1}
+                      maxHeight={2}
+                      wrapMode="word"
+                      keyBindings={EDITOR_KEYBINDINGS}
+                      onSubmit={onSubmit as unknown as () => void}
+                    />
+                  </box>
+                </box>
+              </>
+            )}
+
+            <box paddingBottom={1}>
+              <text fg={focusedField === "env" ? t.primary : t.textMuted}>{"Extra Env (one KEY=value per line)"}</text>
+              <box backgroundColor={t.backgroundElement} paddingLeft={1} paddingRight={1}>
+                <textarea
+                  ref={envRef}
+                  focused={focusedField === "env"}
+                  placeholder="API_KEY=..."
+                  textColor={t.text}
+                  backgroundColor={t.backgroundElement}
+                  placeholderColor={t.textMuted}
+                  minHeight={2}
+                  maxHeight={6}
+                  wrapMode="word"
+                  keyBindings={EDITOR_KEYBINDINGS}
+                  onSubmit={onSubmit as unknown as () => void}
+                />
+              </box>
+            </box>
+          </scrollbox>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
+            {error ? (
+              <text fg={t.diffRemovedFg}>{error}</text>
+            ) : (
+              <text>
+                <span style={{ fg: t.primary }}>{"enter "}</span>
+                <span style={{ fg: t.textMuted }}>{"save  ·  "}</span>
+                <span style={{ fg: t.primary }}>{"tab "}</span>
+                <span style={{ fg: t.textMuted }}>{"next field  ·  "}</span>
+                <span style={{ fg: t.primary }}>{"←→ "}</span>
+                <span style={{ fg: t.textMuted }}>{"transport"}</span>
+              </text>
+            )}
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }

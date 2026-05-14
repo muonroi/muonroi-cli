@@ -1,5 +1,6 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useEffect, useRef } from "react";
+import { Semantic } from "../agent-harness/semantic.js";
 import type { StoredSchedule } from "../tools/schedule";
 import type { Theme } from "./theme";
 
@@ -54,73 +55,84 @@ export function ScheduleBrowserModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={bottomAlignedModalTop(height, panelHeight)}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="schedule-modal" role="dialog" name="Schedules" isModal>
       <box
-        width={panelWidth}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={bottomAlignedModalTop(height, panelHeight)}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"Schedules"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <text fg={t.text}>
-            {searchQuery || <span style={{ fg: t.textMuted }}>{"Search by name, cron, instruction..."}</span>}
-          </text>
-        </box>
-        <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
-          {rows.map((row, idx) => {
-            const selected = idx === selectedIndex;
-            const schedule = row.schedule;
-            const scheduleText = schedule.cron ?? "runs once immediately";
-            return (
-              <box
-                key={`schedule-${schedule.id}`}
-                id={`schedule-${schedule.id}`}
-                width="100%"
-                backgroundColor={selected ? t.selectedBg : undefined}
-                paddingLeft={2}
-                paddingRight={2}
-              >
-                <box width="100%" flexDirection="row">
-                  <text fg={selected ? t.primary : t.text}>
-                    <b>{schedule.name}</b>
-                  </text>
-                  <text fg={t.textMuted}>{` - ${scheduleText}`}</text>
+        <box
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"Schedules"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+            <text fg={t.text}>
+              {searchQuery || <span style={{ fg: t.textMuted }}>{"Search by name, cron, instruction..."}</span>}
+            </text>
+          </box>
+          <Semantic id="schedule-list" role="listbox">
+            <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
+              {rows.map((row, idx) => {
+                const selected = idx === selectedIndex;
+                const schedule = row.schedule;
+                const scheduleText = schedule.cron ?? "runs once immediately";
+                return (
+                  <Semantic
+                    key={`schedule-${schedule.id}`}
+                    id={`schedule-${schedule.id}`}
+                    role="listitem"
+                    name={schedule.name}
+                    selected={selected || undefined}
+                  >
+                    <box
+                      id={`schedule-${schedule.id}`}
+                      width="100%"
+                      backgroundColor={selected ? t.selectedBg : undefined}
+                      paddingLeft={2}
+                      paddingRight={2}
+                    >
+                      <box width="100%" flexDirection="row">
+                        <text fg={selected ? t.primary : t.text}>
+                          <b>{schedule.name}</b>
+                        </text>
+                        <text fg={t.textMuted}>{` - ${scheduleText}`}</text>
+                      </box>
+                    </box>
+                  </Semantic>
+                );
+              })}
+              {rows.length === 0 ? (
+                <box paddingLeft={2} paddingRight={2}>
+                  <text fg={t.textMuted}>{"No schedules yet"}</text>
                 </box>
-              </box>
-            );
-          })}
-          {rows.length === 0 ? (
-            <box paddingLeft={2} paddingRight={2}>
-              <text fg={t.textMuted}>{"No schedules yet"}</text>
-            </box>
-          ) : null}
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
-          <text>
-            <span style={{ fg: t.primary }}>{"enter "}</span>
-            <span style={{ fg: t.textMuted }}>{"details · "}</span>
-            <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
-            <span style={{ fg: t.textMuted }}>{"remove"}</span>
-          </text>
+              ) : null}
+            </scrollbox>
+          </Semantic>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={2} paddingBottom={1}>
+            <text>
+              <span style={{ fg: t.primary }}>{"enter "}</span>
+              <span style={{ fg: t.textMuted }}>{"details · "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
+              <span style={{ fg: t.textMuted }}>{"remove"}</span>
+            </text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
