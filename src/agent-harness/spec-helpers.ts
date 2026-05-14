@@ -35,3 +35,30 @@ function applyPatch(node: UINode, p: StatePatch): boolean {
   }
   return false;
 }
+
+export type SpecDiff = {
+  scenes: {
+    added: Array<{ id: string }>;
+    removed: Array<{ id: string }>;
+    modified: Array<{ id: string; changes: string[] }>;
+  };
+};
+
+export function diffSpecs(a: DesignSpec, b: DesignSpec): SpecDiff {
+  const aIds = new Set(a.scenes.map((s) => s.id));
+  const bIds = new Set(b.scenes.map((s) => s.id));
+  const added = [...bIds].filter((i) => !aIds.has(i)).map((id) => ({ id }));
+  const removed = [...aIds].filter((i) => !bIds.has(i)).map((id) => ({ id }));
+  const modified: SpecDiff["scenes"]["modified"] = [];
+  for (const id of aIds) {
+    if (!bIds.has(id)) continue;
+    const sa = a.scenes.find((s) => s.id === id)!;
+    const sb = b.scenes.find((s) => s.id === id)!;
+    const changes: string[] = [];
+    if (sa.name !== sb.name) changes.push("name");
+    if (JSON.stringify(sa.layout) !== JSON.stringify(sb.layout)) changes.push("layout");
+    if (JSON.stringify(sa.states ?? []) !== JSON.stringify(sb.states ?? [])) changes.push("states");
+    if (changes.length) modified.push({ id, changes });
+  }
+  return { scenes: { added, removed, modified } };
+}

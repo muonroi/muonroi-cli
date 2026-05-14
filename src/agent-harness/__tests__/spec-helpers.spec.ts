@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DesignSpec } from "../protocol.js";
-import { querySpec, validateSpec } from "../spec-helpers.js";
+import { diffSpecs, querySpec, validateSpec } from "../spec-helpers.js";
 
 describe("validateSpec", () => {
   it("accepts a valid spec", () => {
@@ -48,5 +48,29 @@ describe("querySpec", () => {
 
   it("throws on unknown scene", () => {
     expect(() => querySpec(spec, { scene: "missing" })).toThrow();
+  });
+});
+
+describe("diffSpecs", () => {
+  const a: DesignSpec = {
+    mode: "design",
+    version: "0.1.0",
+    scenes: [{ id: "s", name: "S", layout: { id: "root", role: "dialog" } }],
+  };
+  const b: DesignSpec = {
+    mode: "design",
+    version: "0.1.0",
+    scenes: [
+      {
+        id: "s",
+        name: "S2",
+        layout: { id: "root", role: "dialog", children: [{ id: "n", role: "button" }] },
+      },
+    ],
+  };
+
+  it("reports renamed scene name", () => {
+    const d = diffSpecs(a, b);
+    expect(d.scenes.modified.find((m) => m.id === "s")).toBeTruthy();
   });
 });
