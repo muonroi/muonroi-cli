@@ -65,6 +65,39 @@ export function isRequiredForPlatform(questionId: string, platforms: PlatformT[]
 const PRODUCT_TYPES = new Set(["saas", "internal-tool", "consumer-app", "b2b-platform", "marketplace", "other"]);
 const SCALES = new Set(["1-100", "100-1k", "1k-100k", "100k-1M", "1M+"]);
 
+/**
+ * Schema hint for the leader prompt — surfaces the enum/shape that
+ * `validateAnswer` will check for this question. Without it the LLM
+ * hallucinates free-form strings (e.g. "web application" for productType)
+ * which fail validation and trap the interview in an infinite re-ask loop.
+ *
+ * Only the questions whose values are enforced by `validateAnswer` get a
+ * constraint. Questions in its `default: { ok: true }` branch
+ * (backendArchitecture, dbStrategy, baStatus, designStatus, deployment) are
+ * left unconstrained — they accept any value and inventing a fake enum here
+ * would risk conflicting with downstream prompt expectations.
+ */
+export function getSchemaHintForLeader(questionId: string): string {
+  switch (questionId) {
+    case "productType":
+      return `value MUST be one of: ${Array.from(PRODUCT_TYPES)
+        .map((v) => JSON.stringify(v))
+        .join(", ")} (string)`;
+    case "targetPlatform":
+      return `value MUST be a non-empty array of strings drawn from: "web", "ios", "android", "desktop", "cli"`;
+    case "audience":
+      return `value MUST be an object {"persona": string, "scale": one of ${Array.from(SCALES)
+        .map((s) => JSON.stringify(s))
+        .join("|")}, "geography": string}`;
+    case "frontendApproach":
+      return `value MUST be an object {"library": one of ${Array.from(ACCEPTED_FE_LIBRARIES)
+        .map((l) => JSON.stringify(l))
+        .join("|")}, "framework": string}`;
+    default:
+      return "";
+  }
+}
+
 export interface ValidationResult {
   ok: boolean;
   reason?: string;

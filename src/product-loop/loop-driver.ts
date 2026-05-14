@@ -241,14 +241,51 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         stateMap.sections.set("Resume Digest", "Stage: Gather - Defining product dimensions");
         await writeArtifact(runDir, "state.md", stateMap);
 
-        const projectContext = await runGatherPhase(
-          ctx.flowDir,
-          ctx.runId,
-          ctx.idea,
-          ctx.flags.maxCost,
-          ctx.llm,
-          ctx.sessionModelId,
-        );
+        // runGatherPhase is async (not a generator), but the discovery
+        // interview emits askcard chunks via the io.emit callback. We collect
+        // them into a queue and drain after each yield so the UI sees each
+        // question and the user (or harness) can answer via
+        // respondToCouncilQuestion → ctx.respondToQuestion.
+        const gatherEmitted: StreamChunk[] = [];
+        const gatherDone = { value: false };
+        let gatherError: unknown;
+        let gatherResult: Awaited<ReturnType<typeof runGatherPhase>> | undefined;
+        const gatherTask = (async () => {
+          try {
+            gatherResult = await runGatherPhase(
+              ctx.flowDir,
+              ctx.runId,
+              ctx.idea,
+              ctx.flags.maxCost,
+              ctx.llm,
+              ctx.sessionModelId,
+              {
+                emit: (chunk) => gatherEmitted.push(chunk),
+                respondToQuestion: ctx.respondToQuestion,
+              },
+            );
+          } catch (err) {
+            gatherError = err;
+          } finally {
+            gatherDone.value = true;
+          }
+        })();
+
+        // Drain emitted chunks while waiting for gatherTask to finish.
+        while (!gatherDone.value) {
+          while (gatherEmitted.length > 0) {
+            yield gatherEmitted.shift() as StreamChunk;
+          }
+          // Yield to the event loop briefly so emit + async respond can advance.
+          await new Promise<void>((r) => setTimeout(r, 50));
+        }
+        // Flush any chunks emitted after the final await but before resolution.
+        while (gatherEmitted.length > 0) {
+          yield gatherEmitted.shift() as StreamChunk;
+        }
+        await gatherTask;
+        if (gatherError) throw gatherError;
+        const projectContext = gatherResult as Awaited<ReturnType<typeof runGatherPhase>>;
         clarifiedSpec = clarifiedSpecFromContext(projectContext);
 
         // Confidence metric: unresolvedDimensions.length
