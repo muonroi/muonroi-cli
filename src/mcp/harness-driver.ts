@@ -243,9 +243,93 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
   );
 }
 
+export type AsyncToolDeps = {
+  onStop: () => void;
+};
+
+export function registerAsyncTools(server: McpServer, getDriver: () => Driver | null, deps: AsyncToolDeps): void {
+  const noDriver = () => ({
+    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
+    isError: true,
+  });
+
+  const waitConditionShape = {
+    selector: z.string().max(500).optional(),
+    idle: z.boolean().optional(),
+  };
+
+  server.registerTool(
+    "tui.wait_for",
+    {
+      description: "Wait until a selector matches or the TUI is idle (or both for all=).",
+      inputSchema: {
+        selector: z.string().max(500).optional(),
+        idle: z.boolean().optional(),
+        all: z.array(z.object(waitConditionShape)).max(10).optional(),
+        timeoutMs: z.number().int().min(0).max(60_000).optional(),
+      },
+    },
+    async (input) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      try {
+        await d.wait_for(input as Parameters<typeof d.wait_for>[0]);
+        return { content: [{ type: "text" as const, text: "ok" }] };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify({ error: "timeout", message: (e as Error).message }) },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "tui.expect",
+    {
+      description: "Evaluate a predicate against the first node matched by selector.",
+      inputSchema: { selector: z.string().max(500), predicate: z.unknown() },
+    },
+    async ({ selector, predicate }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      const ok = d.expect(selector, predicate);
+      return { content: [{ type: "text" as const, text: String(ok) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.last_event",
+    {
+      description: "Return the most recent event of the given kind (null if none).",
+      inputSchema: { kind: z.enum(["toast", "stream.delta"]) },
+    },
+    async ({ kind }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.last_event(kind)) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.stop",
+    {
+      description: "Stop the child TUI process.",
+      inputSchema: {},
+    },
+    async () => {
+      deps.onStop();
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+}
+
 export async function runHarnessDriver(): Promise<void> {
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
   const currentDriver: Driver | null = null;
+  const onStop: () => void = () => {};
 
   server.registerTool(
     "tui.capabilities",
@@ -265,6 +349,7 @@ export async function runHarnessDriver(): Promise<void> {
 
   registerReadTools(server, () => currentDriver);
   registerActionTools(server, () => currentDriver);
+  registerAsyncTools(server, () => currentDriver, { onStop: () => onStop() });
 
   await server.connect(new StdioServerTransport());
 }
