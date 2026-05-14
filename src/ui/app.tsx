@@ -4907,16 +4907,31 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     ),
                   )}
                   {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-                  {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
+                  {councilPhases.length > 0 && (
+                    <Semantic id="council-phases" role="listbox" name="Council Phases">
+                      <CouncilPhaseTimeline phases={councilPhases} theme={t} />
+                    </Semantic>
+                  )}
                   {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-                  {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
+                  {councilStatuses.length > 0 && (
+                    <Semantic id="council-status" role="listbox" name="Council Status">
+                      <CouncilStatusList statuses={councilStatuses} theme={t} />
+                    </Semantic>
+                  )}
                   {councilInfoCards.map((card, idx) => (
-                    <CouncilInfoCardView
-                      key={`info-card-${idx}-${card.title}`}
-                      card={card}
-                      terminalCols={width}
-                      theme={t}
-                    />
+                    <Semantic
+                      key={`sem-info-${idx}-${card.title}`}
+                      id={`council-card-${idx}`}
+                      role="listitem"
+                      name={card.title || `Council card ${idx}`}
+                    >
+                      <CouncilInfoCardView
+                        key={`info-card-${idx}-${card.title}`}
+                        card={card}
+                        terminalCols={width}
+                        theme={t}
+                      />
+                    </Semantic>
                   ))}
                   {councilMessages.map((cm, idx) => {
                     const side: "left" | "right" =
@@ -4924,27 +4939,38 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                         ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
                         : "left";
 
+                    const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
                     if (cm.kind === "leader") {
-                      return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
+                      return (
+                        <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                          <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                        </Semantic>
+                      );
                     }
                     if (cm.kind === "synthesis") {
-                      return <CouncilSynthesisBanner key={idx} msg={cm} />;
+                      return (
+                        <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                          <CouncilSynthesisBanner key={idx} msg={cm} />
+                        </Semantic>
+                      );
                     }
                     const pairKey = cm.partner
                       ? makePairKey(cm.speaker.role, cm.partner.role)
                       : `solo::${cm.speaker.role}`;
                     const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
                     return (
-                      <CouncilMessageBubble
-                        key={idx}
-                        msg={cm}
-                        terminalCols={width}
-                        side={side}
-                        resolveStyle={resolveStyle}
-                        partnerLastText={partnerLastText}
-                        partnerRole={cm.partner?.role}
-                        theme={t}
-                      />
+                      <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                        <CouncilMessageBubble
+                          key={idx}
+                          msg={cm}
+                          terminalCols={width}
+                          side={side}
+                          resolveStyle={resolveStyle}
+                          partnerLastText={partnerLastText}
+                          partnerRole={cm.partner?.role}
+                          theme={t}
+                        />
+                      </Semantic>
                     );
                   })}
                   {Array.from(councilPlaceholders.entries()).map(([id, p]) => (

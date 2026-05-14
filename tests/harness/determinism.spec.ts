@@ -49,7 +49,17 @@ type FrameTrace = string[]; // JSON-stringified frames (ts stripped if no fake c
 
 async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
   return new Promise<FrameTrace>((resolve, reject) => {
-    const args = ["run", ENTRY, "--agent-mode", "--mock-llm", FIXTURES_DIR];
+    const args = [
+      "run",
+      ENTRY,
+      "--agent-mode",
+      "--mock-llm",
+      FIXTURES_DIR,
+      "-k",
+      "FAKE_KEY_FOR_TESTS",
+      "-m",
+      "deepseek-ai/DeepSeek-V4-Flash",
+    ];
     if (useFakeClock) args.push("--agent-fake-clock");
 
     const proc: ChildProcess = spawn("bun", args, {
@@ -88,10 +98,14 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
             const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
             fd4?.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
             fd4?.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
-          } else {
-            // Second idle = response received. Collect frames and finish.
-            clearTimeout(safetyTimer);
-            settle();
+            // Collect frames for a fixed window — using "second idle" as the
+            // settle trigger creates a race where the response frame
+            // sometimes arrives before, sometimes after the idle event.
+            // A fixed window after input dispatch removes timing noise.
+            setTimeout(() => {
+              clearTimeout(safetyTimer);
+              settle();
+            }, 1500);
           }
         }
       } catch {
@@ -124,11 +138,10 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
 // Spec
 // ---------------------------------------------------------------------------
 
-// Skipped: 10 sequential bun spawns ×~4s each + a /council flow that never
-// reaches idle (no Council picker wired) trips the per-run 15s safety timeout
-// on POSIX CI. Re-enable after composer-only determinism path is added that
-// doesn't depend on /council.
-describe.skip(`determinism: ${N}× identical LiveFrame traces`, () => {
+// Unskipped after Phase 8 (fd4 input bridge + idle.markActivity on input).
+// The interaction sequence is composer-only ("hello" + Enter), so we don't
+// depend on the council pipeline. Windows still skipped (fd3/4 unavailable).
+describe.skipIf(process.platform === "win32")(`determinism: ${N}× identical LiveFrame traces`, () => {
   /**
    * Core determinism test.
    * Runs N times sequentially (not parallel — avoids port/resource contention).
