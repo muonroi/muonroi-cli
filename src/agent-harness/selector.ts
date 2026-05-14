@@ -13,32 +13,35 @@ const FLAGS = new Set(["focus", "selected", "disabled"]);
 export function parseSelector(input: string): Selector {
   // First, split by child combinator >>
   const childCombinatorRegex = /\s*>>\s*/;
-  const segments = input.split(childCombinatorRegex);
+  const rawSegments = input.split(childCombinatorRegex);
 
   // If there's only one segment and no >> was found, combinators = [" "]
   // If there are N segments, there are N-1 >> combinators
   const combinators: string[] = [];
-  if (segments.length === 1) {
+  if (rawSegments.length === 1) {
     combinators.push(" ");
   } else {
-    for (let i = 0; i < segments.length - 1; i++) {
+    for (let i = 0; i < rawSegments.length - 1; i++) {
       combinators.push(">>");
     }
   }
 
   // Parse the first segment (for single-segment selectors, this is the only one)
-  const terms = parseSegment(segments[0]);
+  const terms = parseSegment(rawSegments[0]);
 
   const result: Selector = {
     terms,
     combinators,
   };
 
-  // If multiple segments, recursively parse the rest
-  if (segments.length > 1) {
-    const rest = segments.slice(1).join(" >> ");
-    const restSelector = parseSelector(rest);
-    result.segments = [result, restSelector];
+  // If multiple segments, build an array of leaf selectors
+  if (rawSegments.length > 1) {
+    const leafSegments: Selector[] = [{ terms, combinators: [] }];
+    for (let i = 1; i < rawSegments.length; i++) {
+      const segTerms = parseSegment(rawSegments[i]);
+      leafSegments.push({ terms: segTerms, combinators: [] });
+    }
+    result.segments = leafSegments;
   }
 
   return result;
@@ -125,4 +128,79 @@ function parseSegment(input: string): Term[] {
   }
 
   return terms;
+}
+
+function termMatches(node: UINode, t: Term): boolean {
+  if (t.key === "__flag") {
+    if (t.value === "focus") return node.focus === true;
+    if (t.value === "selected") return node.selected === true;
+    if (t.value === "disabled") return node.disabled === true;
+    return false;
+  }
+  if (t.key === "__index") return true;
+  const v = readField(node, t.key);
+  if (v === undefined) return false;
+  const s = String(v);
+  if (t.op === "=") return s === t.value;
+  if (t.op === "~=") return s.toLowerCase().includes(t.value.toLowerCase());
+  if (t.op === "*=") return new RegExp(t.value).test(s);
+  return false;
+}
+
+function readField(node: UINode, key: string): unknown {
+  if (key === "role") return node.role;
+  if (key === "id") return node.id;
+  if (key === "name") return node.name;
+  if (key === "value") return node.value;
+  if (key === "state") return node.state;
+  if (key.startsWith("props.")) {
+    const dot = key.slice("props.".length);
+    return (node.props ?? {})[dot];
+  }
+  return undefined;
+}
+
+function termsMatch(node: UINode, terms: Term[]): boolean {
+  return terms.filter((t) => t.key !== "__index").every((t) => termMatches(node, t));
+}
+
+function indexOf(terms: Term[]): number | undefined {
+  const t = terms.find((t) => t.key === "__index");
+  return t ? parseInt(t.value, 10) : undefined;
+}
+
+function walk(node: UINode, fn: (n: UINode) => void): void {
+  fn(node);
+  for (const c of node.children ?? []) walk(c, fn);
+}
+
+export function matchSelector(root: UINode, sel: string): UINode[] {
+  const parsed = parseSelector(sel);
+  const segments = parsed.segments ?? [{ terms: parsed.terms, combinators: [] }];
+
+  let candidates: UINode[] = [root];
+  for (let s = 0; s < segments.length; s++) {
+    const segTerms = segments[s].terms;
+    const idx = indexOf(segTerms);
+    const nextCandidates: UINode[] = [];
+    for (const parent of candidates) {
+      const segMatches: UINode[] = [];
+      if (s === 0) {
+        walk(parent, (n) => {
+          if (termsMatch(n, segTerms)) segMatches.push(n);
+        });
+      } else {
+        for (const c of parent.children ?? []) {
+          if (termsMatch(c, segTerms)) segMatches.push(c);
+        }
+      }
+      if (idx !== undefined) {
+        if (segMatches[idx]) nextCandidates.push(segMatches[idx]);
+      } else {
+        nextCandidates.push(...segMatches);
+      }
+    }
+    candidates = nextCandidates;
+  }
+  return candidates;
 }
