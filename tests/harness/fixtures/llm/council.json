@@ -1,11 +1,45 @@
 {
-  "responses": [
+  "sequence": [
     {
-      "match": "leader prompt",
-      "text": "Leader analysis: Council convened successfully, reviewing participant perspectives."
+      "text": "[]",
+      "match": "AMBIGUITIES",
+      "___comment": "Clarifier: return empty array = no clarification needed, skip straight to preflight"
     },
-    { "match": "participant 1", "text": "Participant 1 view: First perspective on the matter analyzed." },
-    { "match": "participant 2", "text": "Participant 2 view: Second perspective on the matter analyzed." },
-    { "match": "*", "text": "Council acknowledged, processing input." }
+    {
+      "text": "{\"problemStatement\":\"Evaluate trade-offs for the given topic.\",\"constraints\":[\"keep it concise\"],\"successCriteria\":[\"clear recommendation produced\"],\"scope\":\"in-scope: analysis. out-of-scope: implementation.\"}",
+      "___comment": "Spec synthesis: structured brief"
+    },
+    {
+      "text": "no",
+      "___comment": "Research-need evaluation: leader says no research needed"
+    },
+    {
+      "text": "{\"intentSummary\":\"Balanced trade-off analysis\",\"stances\":[{\"name\":\"Primary Analyst\",\"lens\":\"Address the success criteria with concrete reasoning.\"},{\"name\":\"Critical Reviewer\",\"lens\":\"Stress-test claims, surface missing evidence, identify risks.\"}],\"outputShape\":{\"kind\":\"decision\",\"sections\":[{\"key\":\"agreed\",\"heading\":\"Agreed\",\"prompt\":\"points converged on\",\"shape\":\"list\"},{\"key\":\"recommendation\",\"heading\":\"Recommendation\",\"prompt\":\"decisive verdict\",\"shape\":\"text\"}],\"guardrails\":[]}}",
+      "___comment": "Debate planner: DebatePlan JSON — two stances, decision shape"
+    },
+    {
+      "text": "Primary Analyst position: The approach is sound. Evidence: standard engineering practice. [CONFIRMED] main point.",
+      "___comment": "Debate round 1 — participant 1 (Primary Analyst)"
+    },
+    {
+      "text": "Critical Reviewer position: Risk identified — ensure rollback plan exists. [CONFIRMED] main point, [REFUTED] secondary risk.",
+      "___comment": "Debate round 1 — participant 2 (Critical Reviewer)"
+    },
+    {
+      "text": "Primary Analyst rebuttal: Rollback plan included in scope. [CONFIRMED] risk mitigation.",
+      "___comment": "Debate round 2 — participant 1"
+    },
+    {
+      "text": "Critical Reviewer final: Satisfied with rollback commitment. Positions converged.",
+      "___comment": "Debate round 2 — participant 2"
+    },
+    {
+      "text": "{\"summary\":\"Council reached consensus: approach is sound with rollback plan.\",\"agreed\":[\"Approach is sound\",\"Rollback plan is required\"],\"recommendation\":\"Proceed with implementation, include rollback plan.\",\"sections\":{\"agreed\":[\"Approach is sound\",\"Rollback plan is required\"],\"recommendation\":\"Proceed with implementation, include rollback plan.\"}}",
+      "___comment": "Synthesis: EnhancedCouncilOutcome JSON for the planner"
+    },
+    {
+      "text": "Council acknowledged — generic fallback for any remaining calls.",
+      "___comment": "Fallback: exhausted sequence sticks here for post-debate questions etc."
+    }
   ]
 }

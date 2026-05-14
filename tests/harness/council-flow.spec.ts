@@ -75,17 +75,20 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
     expect(driver.query("id=slash-menu")?.name).toBe("Slash commands");
   });
 
-  // Skipped: a full /council round requires multiple LLM round-trips
-  // (leader → participants → debate → synthesis). The mock-llm fixture's
-  // single-call "Council acknowledged" reply is insufficient to drive the
-  // orchestrator's state machine to the point where CouncilPhaseTimeline /
-  // CouncilStatusList / CouncilMessageBubble actually render.
+  // Skipped: the mock-llm sequence fixture (tests/harness/fixtures/llm/council.json)
+  // now drives the main chat adapter (createAdapter → globalThis.__muonroiMockLlm).
+  // However, the council orchestrator's internal LLM calls (clarifier, debate-planner,
+  // debate, synthesis) go through createCouncilLLM (src/council/llm.ts) which calls
+  // generateText (AI SDK) directly — it does NOT check globalThis.__muonroiMockLlm.
+  // Until createCouncilLLM.generate/debate/research also short-circuit through the
+  // mock (requires a globalThis hook in src/council/llm.ts), the orchestrator will
+  // hit real provider calls and fail with auth errors in the test environment.
   //
-  // The Semantic wrappers for those renders ARE in place (id=council-phases,
-  // id=council-status, id=council-msg-N) — verified by code inspection. To
-  // assert against them in this E2E, the mock-llm fixture would need
-  // multi-prompt match logic mimicking the council prompt protocol.
-  it.skip("full council flow reaches Phase/Status renders (mock-llm fixture incomplete)", async () => {
+  // To unblock: add to src/council/llm.ts generate() method (before the generateText call):
+  //   const mock = (globalThis as {__muonroiMockLlm?: {complete:(r:{prompt:string})=>Promise<{text:string}>}}).__muonroiMockLlm;
+  //   if (mock) return mock.complete({ prompt: system + "\n" + prompt }).then(r => r.text);
+  // Same pattern for debate() and research(). Then flip this it.skip to it().
+  it.skip("full council flow reaches Phase/Status renders (council LLM mock hook missing)", async () => {
     driver.type("/council");
     driver.press("Enter");
     await driver.wait_for({

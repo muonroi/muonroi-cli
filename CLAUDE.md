@@ -12,7 +12,9 @@
 
 # Every test cycle from Windows:
 git push                                                    # push your changes
-wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest run tests/harness/'
+wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest -c vitest.harness.config.ts run tests/harness/'
+# vitest.harness.config.ts sets fileParallelism:false — prevents idle-timeout contention
+# when multiple TUI processes spawn under WSL simultaneously.
 ```
 
 ## Why this exists
