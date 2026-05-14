@@ -33,8 +33,20 @@ const send = (obj: unknown) => {
 const lines: string[] = [];
 const splitter = createLineSplitter((line) => {
   lines.push(line);
-  if (line.includes("council_phase") || line.includes("idle")) {
-    console.log("FD3:", line.slice(0, 200));
+  if (line.includes("council_phase") || line.includes('"t":"idle"') || line.includes('"t":"event"')) {
+    console.log("FD3:", line.slice(0, 300));
+  }
+  // Log all frames (truncated) for inspection
+  if (line.includes('"mode":"live"')) {
+    // Extract just the nodes portion to see composer value
+    try {
+      const msg = JSON.parse(line) as Record<string, unknown>;
+      const nodes = (msg.nodes as unknown[]) ?? [];
+      const composer = nodes.find((n: unknown) => (n as Record<string, unknown>).id === "composer");
+      if (composer) {
+        console.log("COMPOSER:", JSON.stringify(composer).slice(0, 200));
+      }
+    } catch { /* */ }
   }
 });
 
