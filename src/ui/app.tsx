@@ -5,6 +5,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentModeRuntime } from "../agent-harness/agent-mode.js";
+import { useAgentInputBridge } from "../agent-harness/input-bridge.js";
 import { Semantic, SemanticProvider } from "../agent-harness/semantic.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { setActiveEeYield } from "../index.js";
@@ -829,6 +830,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       renderer.removePostProcessFn(captureFrame);
     };
   }, [renderer, agentRuntime]);
+  // Wire fd4 input bridge: translate agent JSONL ops → synthetic key events.
+  useAgentInputBridge(agentRuntime);
   useEffect(() => {
     let cancelled = false;
     getConfiguredProviders()

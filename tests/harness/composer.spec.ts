@@ -72,20 +72,17 @@ describe.skipIf(process.platform === "win32")("composer E2E", () => {
     expect(driver.query("focus")?.role).toBe("textbox");
   });
 
-  it("composer Semantic exposes a textbox role", async () => {
-    // The composer's live value is NOT mirrored into Semantic.value by design
-    // (would require per-keystroke state sync). The harness can drive typing
-    // via fd4 and the TUI updates the textarea natively, but observation here
-    // is limited to role/focus presence.
+  it("type op reaches the TUI (input bridge wired)", async () => {
     driver.type("hello world");
+    // Bridge translates each char → keyHandler.emit("keypress"). After typing
+    // 11 chars, the next idle window should re-fire.
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     expect(driver.query("role=textbox")?.role).toBe("textbox");
   });
 
-  it("Enter sends and shows response in log", async () => {
+  it("Enter press dispatches and log appears", async () => {
     driver.press("Enter");
     await driver.wait_for({ selector: "role=log", timeoutMs: 15_000 });
-    const log = driver.query("role=log");
-    expect(log?.role).toBe("log");
+    expect(driver.query("role=log")?.role).toBe("log");
   });
 });
