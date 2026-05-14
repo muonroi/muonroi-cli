@@ -1,0 +1,26 @@
+# Files under src/ui/**/*.tsx that are intentionally NOT required to wrap with <Semantic>.
+# One glob per line (matched against the path relative to repo root, e.g. src/ui/foo/bar.tsx).
+# Lines starting with # are comments.
+
+# Test files
+src/ui/**/*.test.tsx
+
+# Pure utility / sub-component helpers used as children of an already-wrapped parent.
+# These are small presentational primitives — their observable identity comes from the
+# parent wrapper (e.g. StatusBar wraps tier-badge and usd-meter in its own Semantic).
+src/ui/status-bar/tier-badge.tsx
+src/ui/status-bar/usd-meter.tsx
+
+# Inline child components / primitives (no standalone observable identity needed).
+src/ui/components/council-leader-bubble.tsx
+src/ui/components/council-message-bubble.tsx
+src/ui/components/council-synthesis-banner.tsx
+src/ui/components/council-phase-timeline.tsx
+src/ui/components/council-status-list.tsx
+src/ui/components/council-placeholder-bubble.tsx
+src/ui/components/btw-overlay.tsx
+src/ui/components/SuggestionOverlay.tsx
+
+# Pure-utility / non-component files (no JSX root exported at top level).
+src/ui/markdown.tsx
+src/ui/plan.tsx
