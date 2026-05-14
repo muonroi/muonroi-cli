@@ -165,7 +165,9 @@ export function createDriver(deps: DriverDeps): Driver {
     query(selector: string): UINode | null {
       const results = selectorMatches(selector);
       if (results.length > 1) {
-        throw new Error(`query: selector "${selector}" matched ${results.length} nodes (use queryAll for multiple)`);
+        throw new Error(
+          `query: ambiguous — selector "${selector}" matched ${results.length} nodes (use queryAll for multiple)`,
+        );
       }
       return results[0] ?? null;
     },

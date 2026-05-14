@@ -70,4 +70,28 @@ describe("driver", () => {
     const d = createDriver({ sendKey: () => {}, sendType: () => {} });
     await expect(d.wait_for({ selector: "role=nonexistent", timeoutMs: 30 })).rejects.toThrow(/timeout/i);
   });
+
+  it("query throws when selector matches multiple nodes", () => {
+    const d = createDriver({ sendKey: () => {}, sendType: () => {} });
+    d._ingest({
+      kind: "frame",
+      frame: {
+        mode: "live",
+        version: "0.1.0",
+        seq: 1,
+        ts: 0,
+        nodes: [
+          {
+            id: "r",
+            role: "dialog",
+            children: [
+              { id: "a", role: "listitem" },
+              { id: "b", role: "listitem" },
+            ],
+          },
+        ],
+      },
+    });
+    expect(() => d.query("role=listitem")).toThrow(/ambiguous/);
+  });
 });
