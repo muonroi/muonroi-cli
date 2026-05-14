@@ -14,6 +14,7 @@
  * path returns a pristine context (Pitfall 4 from RESEARCH.md).
  */
 
+import { getCachedServerBaseUrl } from "../ee/auth.js";
 import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";
@@ -45,6 +46,16 @@ function pipelineTimeoutMs(): number {
   }
   const mode = getCachedEEClientMode();
   if (mode && (mode.mode === "thin" || mode.mode === "thin-degraded" || mode.mode === "fat")) {
+    return PIPELINE_TIMEOUT_BRAIN_MS;
+  }
+  // Boot race fallback: detectEEClientMode() is fire-and-forget at startup
+  // (src/index.ts) and its /health probe can take up to 1500ms. Any prompt
+  // submitted before the probe resolves saw mode=null and fell through to the
+  // 200ms FAST budget, killing the brain call. loadEEAuthToken() IS awaited
+  // at boot, so a configured serverBaseUrl is a reliable signal that the user
+  // intends thin mode — use BRAIN budget optimistically. If the probe later
+  // fails, mode becomes "thin-degraded" which the branch above also covers.
+  if (getCachedServerBaseUrl()) {
     return PIPELINE_TIMEOUT_BRAIN_MS;
   }
   return PIPELINE_TIMEOUT_FAST_MS;

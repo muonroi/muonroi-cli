@@ -1,0 +1,28 @@
+{
+  "mode": "design",
+  "version": "0.1.0",
+  "target": "tui",
+  "scenes": [
+    {
+      "id": "composer",
+      "name": "Composer",
+      "layout": {
+        "id": "root",
+        "role": "dialog",
+        "children": [
+          { "id": "textbox-id", "role": "textbox", "value": "", "props": { "maxLength": 500 } },
+          { "id": "send-btn", "role": "button", "name": "Send" }
+        ]
+      },
+      "states": [
+        {
+          "name": "loading",
+          "patches": [
+            { "id": "textbox-id", "state": "loading", "disabled": true },
+            { "id": "send-btn", "disabled": true }
+          ]
+        }
+      ]
+    }
+  ]
+}

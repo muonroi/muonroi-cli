@@ -1,0 +1,17 @@
+{
+  "mode": "live",
+  "version": "0.1.0",
+  "seq": 1,
+  "ts": 1715000000000,
+  "focus": "composer",
+  "nodes": [
+    {
+      "id": "root",
+      "role": "dialog",
+      "children": [
+        { "id": "composer", "role": "textbox", "value": "" },
+        { "id": "status", "role": "statusbar", "value": "Ready" }
+      ]
+    }
+  ]
+}
