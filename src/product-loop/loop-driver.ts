@@ -17,7 +17,7 @@ import { recordPhaseEnd, recordPhaseStart } from "./phase-budget.js";
 import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } from "./repo-audit.js";
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
-import type { DriverContext, DriverResult, ProductSpec, Stage } from "./types.js";
+import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
 
 function buildWorkspaceDiscoveryCard(d: DiscoveryResult, a: RepoAudit, priorRunCount: number): CouncilInfoCard | null {
   const sections: CouncilInfoCard["sections"] = [];
@@ -204,6 +204,21 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         if (discoverWarn) {
           yield { type: "content", content: "\n> [budget] " + discoverWarn + "\n" } as StreamChunk;
         }
+
+        // Emit an initial product_status_card so the UI shows the status panel
+        // immediately after discovery completes — before gather/research blocks
+        // on user interaction. The card is updated again after each sprint.
+        const initStatusCard: ProductStatusCardData = {
+          sprintN: 0,
+          totalSprints: ctx.flags.maxSprints,
+          costSpent: 0,
+          costCap: ctx.flags.maxCost,
+          criteriaMet: 0,
+          criteriaPartial: 0,
+          criteriaUnmet: 0,
+          currentStage: "gather",
+        };
+        yield { type: "product_status_card", productStatusCard: initStatusCard } as StreamChunk;
 
         state = "gather";
         break;
