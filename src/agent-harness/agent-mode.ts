@@ -107,6 +107,12 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   const splitter = createLineSplitter((line) => {
     try {
       const cmd = JSON.parse(line);
+      // Any incoming command is "activity" — reset the idle quiescence timer
+      // so the next idle event fires after the system settles post-dispatch.
+      // Without this, wait_for({idle: true}) after press/type can never
+      // resolve because no frame write happens to mark activity (e.g., when
+      // the input changes textarea state but no Semantic field is mirrored).
+      idle.markActivity();
       for (const h of commandHandlers) h(cmd);
     } catch {
       // Malformed JSONL from host — ignore silently.
