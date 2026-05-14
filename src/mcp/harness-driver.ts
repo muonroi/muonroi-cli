@@ -10,6 +10,8 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import type { Driver } from "../agent-harness/driver.js";
 import { PROTOCOL_VERSION } from "../agent-harness/protocol.js";
 
 const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
@@ -85,8 +87,93 @@ export function buildCapabilitiesPayload(): { protocol: string; features: readon
   };
 }
 
+export function registerReadTools(server: McpServer, getDriver: () => Driver | null): void {
+  const noDriver = () => ({
+    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
+    isError: true,
+  });
+
+  server.registerTool("tui.snapshot", { description: "Return the latest LiveFrame.", inputSchema: {} }, async () => {
+    const d = getDriver();
+    if (!d) return noDriver();
+    return { content: [{ type: "text" as const, text: JSON.stringify(d.snapshot()) }] };
+  });
+
+  server.registerTool(
+    "tui.changes_since",
+    {
+      description: "Return current frame if seq > given seq, else null.",
+      inputSchema: { seq: z.number().int().min(0) },
+    },
+    async ({ seq }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.changes_since(seq)) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.query",
+    {
+      description: "Return the single node matching selector (null if 0; throws on multi).",
+      inputSchema: { selector: z.string().max(500) },
+    },
+    async ({ selector }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      try {
+        return { content: [{ type: "text" as const, text: JSON.stringify(d.query(selector)) }] };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify({ error: "ambiguous", message: (e as Error).message }) },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "tui.query_all",
+    {
+      description: "Return all nodes matching selector.",
+      inputSchema: { selector: z.string().max(500) },
+    },
+    async ({ selector }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: JSON.stringify(d.queryAll(selector)) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.count",
+    {
+      description: "Return number of nodes matching selector.",
+      inputSchema: { selector: z.string().max(500) },
+    },
+    async ({ selector }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: String(d.count(selector)) }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.render_text",
+    { description: "ASCII debug render of the current frame.", inputSchema: {} },
+    async () => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      return { content: [{ type: "text" as const, text: d.render_text() }] };
+    },
+  );
+}
+
 export async function runHarnessDriver(): Promise<void> {
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
+  const currentDriver: Driver | null = null;
 
   server.registerTool(
     "tui.capabilities",
@@ -103,6 +190,8 @@ export async function runHarnessDriver(): Promise<void> {
       ],
     }),
   );
+
+  registerReadTools(server, () => currentDriver);
 
   await server.connect(new StdioServerTransport());
 }
