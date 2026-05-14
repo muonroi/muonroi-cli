@@ -1,0 +1,11 @@
+{
+  "responses": [
+    {
+      "match": "leader prompt",
+      "text": "Leader analysis: Council convened successfully, reviewing participant perspectives."
+    },
+    { "match": "participant 1", "text": "Participant 1 view: First perspective on the matter analyzed." },
+    { "match": "participant 2", "text": "Participant 2 view: Second perspective on the matter analyzed." },
+    { "match": "*", "text": "Council acknowledged, processing input." }
+  ]
+}
