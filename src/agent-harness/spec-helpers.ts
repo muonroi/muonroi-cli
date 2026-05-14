@@ -12,3 +12,26 @@ export function validateSpec(spec: unknown): { ok: boolean; errors?: unknown[] }
   const ok = validator(spec);
   return ok ? { ok: true } : { ok: false, errors: validator.errors ?? [] };
 }
+
+export function querySpec(spec: DesignSpec, q: { scene: string; state?: string }): UINode {
+  const scene = spec.scenes.find((s) => s.id === q.scene);
+  if (!scene) throw new Error(`scene not found: ${q.scene}`);
+  const layout = JSON.parse(JSON.stringify(scene.layout)) as UINode;
+  if (!q.state) return layout;
+  const state = scene.states?.find((s) => s.name === q.state);
+  if (!state) throw new Error(`state not found: ${q.state}`);
+  for (const patch of state.patches) applyPatch(layout, patch);
+  return layout;
+}
+
+function applyPatch(node: UINode, p: StatePatch): boolean {
+  if (node.id === p.id) {
+    const { id: _ignored, ...rest } = p;
+    Object.assign(node, rest);
+    return true;
+  }
+  for (const c of node.children ?? []) {
+    if (applyPatch(c, p)) return true;
+  }
+  return false;
+}
