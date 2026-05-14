@@ -1,4 +1,5 @@
 import React from "react";
+import { Semantic } from "../../agent-harness/semantic.js";
 import type { CouncilInfoCard } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 
@@ -16,27 +17,29 @@ export function CouncilInfoCardView({ card, terminalCols, theme }: CouncilInfoCa
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
 
   return (
-    <box flexDirection="column" marginBottom={1}>
-      <box
-        width={width}
-        borderStyle="single"
-        borderColor={theme.councilInfoCardBorder}
-        flexDirection="column"
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        <text fg={theme.councilInfoCardTitle} attributes={1}>
-          {card.title}
-        </text>
-        {card.sections.map((section, i) => (
-          <box key={`${section.heading}-${i}`} flexDirection="column" marginTop={1}>
-            <text fg={theme.councilInfoCardHeading} attributes={1}>
-              {section.heading}
-            </text>
-            <text fg={theme.text}>{section.body}</text>
-          </box>
-        ))}
+    <Semantic id="info-card" role="listitem" name={card.title}>
+      <box flexDirection="column" marginBottom={1}>
+        <box
+          width={width}
+          borderStyle="single"
+          borderColor={theme.councilInfoCardBorder}
+          flexDirection="column"
+          paddingLeft={1}
+          paddingRight={1}
+        >
+          <text fg={theme.councilInfoCardTitle} attributes={1}>
+            {card.title}
+          </text>
+          {card.sections.map((section, i) => (
+            <box key={`${section.heading}-${i}`} flexDirection="column" marginTop={1}>
+              <text fg={theme.councilInfoCardHeading} attributes={1}>
+                {section.heading}
+              </text>
+              <text fg={theme.text}>{section.body}</text>
+            </box>
+          ))}
+        </box>
       </box>
-    </box>
+    </Semantic>
   );
 }

@@ -11,6 +11,7 @@
  */
 
 import type * as React from "react";
+import { Semantic } from "../../agent-harness/semantic.js";
 import type { ProductStatusCardData } from "../../product-loop/types.js";
 import type { Theme } from "../theme.js";
 
@@ -62,46 +63,54 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
     : "";
 
   return (
-    <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
-      <box>
-        <text fg={t.accent}>{`▶ Product Loop · ${data.currentStage}`}</text>
-      </box>
-      <box>
-        <text fg={t.textMuted}>{"Sprint:   "}</text>
-        <text fg={t.text}>{`${data.sprintN}/${data.totalSprints} `}</text>
-        <text fg={t.accent}>{bar(sprintPct)}</text>
-        <text fg={t.textDim}>{` ${sprintPct.toFixed(0)}%`}</text>
-      </box>
-      <box>
-        <text fg={t.textMuted}>{"Cost:     "}</text>
-        <text fg={t.text}>{`$${data.costSpent.toFixed(2)}/$${data.costCap.toFixed(2)} `}</text>
-        <text fg={costColor}>{bar(costPct)}</text>
-        <text fg={t.textDim}>{` ${costPct.toFixed(0)}%`}</text>
-      </box>
-      {costSpark && (
+    <Semantic id="ideal-status" role="region" name="Ideal status">
+      <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
         <box>
-          <text fg={t.textMuted}>{"Burn:     "}</text>
-          <text fg={costColor}>{costSpark}</text>
-          <text fg={t.textDim}>{` (per-sprint)`}</text>
+          <text fg={t.accent}>{`▶ Product Loop · ${data.currentStage}`}</text>
         </box>
-      )}
-      <box>
-        <text fg={t.textMuted}>{"Criteria: "}</text>
-        <text fg={t.planOptionCheck}>{`✓ ${data.criteriaMet}`}</text>
-        <text fg={t.text}>{"  "}</text>
-        <text fg={t.accent}>{`◐ ${data.criteriaPartial}`}</text>
-        <text fg={t.text}>{"  "}</text>
-        <text fg={t.diffRemovedFg}>{`✗ ${data.criteriaUnmet}`}</text>
-        <text fg={t.textDim}>{`  (of ${totalCriteria})`}</text>
+        <Semantic id={`ideal-phase-sprint`} role="listitem" name="Sprint">
+          <box>
+            <text fg={t.textMuted}>{"Sprint:   "}</text>
+            <text fg={t.text}>{`${data.sprintN}/${data.totalSprints} `}</text>
+            <text fg={t.accent}>{bar(sprintPct)}</text>
+            <text fg={t.textDim}>{` ${sprintPct.toFixed(0)}%`}</text>
+          </box>
+        </Semantic>
+        <Semantic id={`ideal-phase-cost`} role="listitem" name="Cost">
+          <box>
+            <text fg={t.textMuted}>{"Cost:     "}</text>
+            <text fg={t.text}>{`$${data.costSpent.toFixed(2)}/$${data.costCap.toFixed(2)} `}</text>
+            <text fg={costColor}>{bar(costPct)}</text>
+            <text fg={t.textDim}>{` ${costPct.toFixed(0)}%`}</text>
+          </box>
+        </Semantic>
+        {costSpark && (
+          <box>
+            <text fg={t.textMuted}>{"Burn:     "}</text>
+            <text fg={costColor}>{costSpark}</text>
+            <text fg={t.textDim}>{` (per-sprint)`}</text>
+          </box>
+        )}
+        <Semantic id={`ideal-phase-criteria`} role="listitem" name="Criteria">
+          <box>
+            <text fg={t.textMuted}>{"Criteria: "}</text>
+            <text fg={t.planOptionCheck}>{`✓ ${data.criteriaMet}`}</text>
+            <text fg={t.text}>{"  "}</text>
+            <text fg={t.accent}>{`◐ ${data.criteriaPartial}`}</text>
+            <text fg={t.text}>{"  "}</text>
+            <text fg={t.diffRemovedFg}>{`✗ ${data.criteriaUnmet}`}</text>
+            <text fg={t.textDim}>{`  (of ${totalCriteria})`}</text>
+          </box>
+        </Semantic>
+        {criteriaSpark && (
+          <box>
+            <text fg={t.textMuted}>{"Trend:    "}</text>
+            <text fg={t.planOptionCheck}>{criteriaSpark}</text>
+            <text fg={t.textDim}>{` met-ratio per sprint`}</text>
+          </box>
+        )}
       </box>
-      {criteriaSpark && (
-        <box>
-          <text fg={t.textMuted}>{"Trend:    "}</text>
-          <text fg={t.planOptionCheck}>{criteriaSpark}</text>
-          <text fg={t.textDim}>{` met-ratio per sprint`}</text>
-        </box>
-      )}
-    </box>
+    </Semantic>
   );
 }
 

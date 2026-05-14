@@ -251,6 +251,16 @@ Before opening a PR:
 4. If you added a TUI element: confirm `<Semantic>` is wrapping it (otherwise harness can't see it)
 5. If you added a slash command or modal: write an E2E spec under `tests/harness/`
 
+### Adding a new TUI component
+
+1. Wrap the user-visible root with `<Semantic id="..." role="..." name="...">`. Pick `role` from the union in `src/agent-harness/protocol.ts`.
+2. If it's a list/picker, wrap items with `role="listitem"` and mirror `selected` from your active-index state.
+3. If it accepts input, mirror `value` (and `focus` when relevant).
+4. If it's a modal, set `isModal`.
+5. Add `tests/harness/<feature>.spec.ts` following the composer pattern.
+6. Run on WSL: `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest run tests/harness/<feature>.spec.ts'`.
+7. If the flow requires multiple LLM round-trips, extend the corresponding fixture in `tests/harness/fixtures/llm/` (sequence mode — see `mock-llm.ts`).
+
 ## References
 
 - Design doc: `docs/superpowers/specs/2026-05-14-agent-harness-design.md`

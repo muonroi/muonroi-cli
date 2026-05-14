@@ -1,3 +1,4 @@
+import { Semantic } from "../../agent-harness/semantic.js";
 import type { CouncilQuestionData, CouncilQuestionOption, CouncilQuestionPhase } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 
@@ -45,67 +46,79 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
   const labelText = PHASE_LABEL[question.phase ?? "clarify"];
 
   return (
-    <box
-      flexDirection="column"
-      flexShrink={0}
-      paddingLeft={2}
-      paddingRight={2}
-      paddingTop={1}
-      paddingBottom={1}
-      borderStyle="single"
-      borderColor={t.borderActive}
-    >
-      <box paddingBottom={1}>
-        <text bg={t.accent} fg={t.background}>{` □ ${labelText} `}</text>
-      </box>
-      <box paddingBottom={1}>
-        <text fg={t.text} attributes={1}>
-          {question.question}
-        </text>
-      </box>
-      {question.context && (
+    <Semantic id="askcard" role="dialog" name={question.question} isModal>
+      <box
+        flexDirection="column"
+        flexShrink={0}
+        paddingLeft={2}
+        paddingRight={2}
+        paddingTop={1}
+        paddingBottom={1}
+        borderStyle="single"
+        borderColor={t.borderActive}
+      >
         <box paddingBottom={1}>
-          <text fg={t.textMuted}>{`> ${question.context}`}</text>
+          <text bg={t.accent} fg={t.background}>{` □ ${labelText} `}</text>
         </box>
-      )}
+        <box paddingBottom={1}>
+          <text fg={t.text} attributes={1}>
+            {question.question}
+          </text>
+        </box>
+        {question.context && (
+          <box paddingBottom={1}>
+            <text fg={t.textMuted}>{`> ${question.context}`}</text>
+          </box>
+        )}
 
-      {options.map((opt, i) => {
-        const selected = i === idx;
-        const isRecommended = i === recommendedIdx && opt.kind === "choice";
-        const cursor = selected ? "›" : " ";
-        const numberColor = selected ? t.accent : t.textMuted;
-        const labelColor = selected ? t.accent : t.text;
-        return (
-          <box key={i} flexDirection="column">
-            <box flexDirection="row">
-              <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
-              <text fg={labelColor}>{opt.label}</text>
-              {isRecommended && <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>}
-            </box>
-            {opt.description && (
-              <box paddingLeft={5}>
-                <text fg={t.textMuted}>{opt.description}</text>
+        {options.map((opt, i) => {
+          const selected = i === idx;
+          const isRecommended = i === recommendedIdx && opt.kind === "choice";
+          const cursor = selected ? "›" : " ";
+          const numberColor = selected ? t.accent : t.textMuted;
+          const labelColor = selected ? t.accent : t.text;
+          return (
+            <Semantic
+              key={i}
+              id={`askcard-option-${opt.value ?? i}`}
+              role="button"
+              name={opt.label}
+              selected={selected || undefined}
+            >
+              <box flexDirection="column">
+                <box flexDirection="row">
+                  <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
+                  <text fg={labelColor}>{opt.label}</text>
+                  {isRecommended && <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>}
+                </box>
+                {opt.description && (
+                  <box paddingLeft={5}>
+                    <text fg={t.textMuted}>{opt.description}</text>
+                  </box>
+                )}
               </box>
-            )}
-          </box>
-        );
-      })}
+            </Semantic>
+          );
+        })}
 
-      {freetext !== null && (
-        <box flexDirection="column" paddingTop={1}>
-          <text fg={t.textMuted}>{"Type your answer · Enter to submit · Esc to go back"}</text>
-          <box paddingLeft={1} paddingRight={1} width={freetextInputWidth}>
-            <text fg={t.planInputText} bg={t.planInputBg}>
-              {freetext.length > 0 ? freetext : " "}
-            </text>
+        {freetext !== null && (
+          <box flexDirection="column" paddingTop={1}>
+            <text fg={t.textMuted}>{"Type your answer · Enter to submit · Esc to go back"}</text>
+            <Semantic id="askcard-input" role="textbox" value={freetext}>
+              <box paddingLeft={1} paddingRight={1} width={freetextInputWidth}>
+                <text fg={t.planInputText} bg={t.planInputBg}>
+                  {freetext.length > 0 ? freetext : " "}
+                </text>
+              </box>
+            </Semantic>
           </box>
+        )}
+
+        <box paddingTop={1}>
+          <text fg={t.textDim}>{"Enter to select · ↑/↓ to navigate · Esc to cancel"}</text>
         </box>
-      )}
-
-      <box paddingTop={1}>
-        <text fg={t.textDim}>{"Enter to select · ↑/↓ to navigate · Esc to cancel"}</text>
       </box>
-    </box>
+    </Semantic>
   );
 }
 
