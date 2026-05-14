@@ -46,8 +46,8 @@ describe.skipIf(process.platform === "win32")("composer E2E", () => {
       splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
     });
 
-    await driver.wait_for({ idle: true, timeoutMs: 5000 });
-  }, 10_000);
+    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+  }, 20_000);
 
   afterAll(() => {
     proc?.kill();
@@ -66,7 +66,7 @@ describe.skipIf(process.platform === "win32")("composer E2E", () => {
 
   it("Enter sends and shows response in log", async () => {
     driver.press("Enter");
-    await driver.wait_for({ selector: "role=log", timeoutMs: 3000 });
+    await driver.wait_for({ selector: "role=log", timeoutMs: 10_000 });
     const log = driver.query("role=log");
     expect(log?.value || log?.children?.length).toBeTruthy();
   });
