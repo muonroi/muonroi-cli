@@ -5062,6 +5062,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   slashItems={filteredSlashItems}
                   slashSelectedIndex={slashMenuIndex}
                   slashInputIsMatched={slashInputIsMatched}
+                  composerValue={showSlashMenu ? `/${slashSearchQuery}` : undefined}
                 />
               </box>
             </box>
@@ -5107,6 +5108,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   slashItems={filteredSlashItems}
                   slashSelectedIndex={slashMenuIndex}
                   slashInputIsMatched={slashInputIsMatched}
+                  composerValue={showSlashMenu ? `/${slashSearchQuery}` : undefined}
                 />
               </box>
               <box height={2} minHeight={0} flexShrink={1} />
@@ -5397,21 +5399,29 @@ function SlashInlineMenu({ t, items, selectedIndex }: { t: Theme; items: SlashMe
       {visible.map((item, i) => {
         const isSelected = i === selectedIndex;
         return (
-          <box
+          <Semantic
             key={item.id}
-            height={1}
-            backgroundColor={isSelected ? t.selectedBg : undefined}
-            flexDirection="row"
-            justifyContent="space-between"
-            paddingLeft={1}
-            paddingRight={1}
+            id={`slash-item-${item.id}`}
+            role="listitem"
+            name={`/${item.label}`}
+            value={item.description}
+            selected={isSelected ? true : undefined}
           >
-            <text fg={isSelected ? t.selected : t.text}>
-              {"/"}
-              {item.label}
-            </text>
-            <text fg={t.textMuted}>{item.description}</text>
-          </box>
+            <box
+              height={1}
+              backgroundColor={isSelected ? t.selectedBg : undefined}
+              flexDirection="row"
+              justifyContent="space-between"
+              paddingLeft={1}
+              paddingRight={1}
+            >
+              <text fg={isSelected ? t.selected : t.text}>
+                {"/"}
+                {item.label}
+              </text>
+              <text fg={t.textMuted}>{item.description}</text>
+            </box>
+          </Semantic>
         );
       })}
       {items.length > SLASH_MENU_MAX_VISIBLE && (
@@ -5446,6 +5456,7 @@ function PromptBox({
   slashItems,
   slashSelectedIndex,
   slashInputIsMatched,
+  composerValue,
 }: {
   t: Theme;
   inputRef: React.RefObject<TextareaRenderable | null>;
@@ -5471,6 +5482,7 @@ function PromptBox({
   slashItems?: SlashMenuItem[];
   slashSelectedIndex?: number;
   slashInputIsMatched?: boolean;
+  composerValue?: string;
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
@@ -5531,6 +5543,10 @@ function PromptBox({
             <Semantic
               id="composer"
               role="textbox"
+              // Mirror current composer text so external harness drivers
+              // can read back what the user typed. Sourced from the parent's
+              // slashSearchQuery (only tracked while slash menu is open).
+              value={composerValue ?? ""}
               focus={
                 !showModelPicker &&
                 !showSandboxPicker &&
