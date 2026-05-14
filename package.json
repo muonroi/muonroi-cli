@@ -25,6 +25,7 @@
     "format": "biome format src/",
     "format:fix": "biome format --write src/",
     "lint:fix": "biome check --fix src/",
+    "lint:semantic": "bun scripts/check-semantic-wrap.ts",
     "pre-commit": "lint-staged",
     "prepare": "husky"
   },
