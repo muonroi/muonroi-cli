@@ -14,6 +14,7 @@
  * path returns a pristine context (Pitfall 4 from RESEARCH.md).
  */
 
+import { getCachedServerBaseUrl } from "../ee/auth.js";
 import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";

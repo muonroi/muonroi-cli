@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { DesignSpec, LiveFrame, UINode } from "../protocol";
+import type { DesignSpec, LiveEvent, LiveFrame, UINode } from "../protocol";
 
 describe("protocol types", () => {
   it("compiles a minimal LiveFrame", () => {
@@ -43,5 +43,20 @@ describe("protocol types", () => {
       ],
     };
     expect(spec.scenes.length).toBe(1);
+  });
+
+  it("compiles a stream.delta LiveEvent", () => {
+    const e: LiveEvent = { t: "event", kind: "stream.delta", target: "x", text: "y" };
+    expect(e.kind).toBe("stream.delta");
+  });
+
+  it("compiles a toast LiveEvent", () => {
+    const e: LiveEvent = { t: "event", kind: "toast", level: "error", text: "boom" };
+    expect(e.level).toBe("error");
+  });
+
+  it("compiles an idle LiveEvent", () => {
+    const e: LiveEvent = { t: "idle" };
+    expect(e.t).toBe("idle");
   });
 });
