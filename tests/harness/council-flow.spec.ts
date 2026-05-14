@@ -105,7 +105,12 @@ describe.skipIf(process.platform === "win32")("council flow E2E", () => {
     // item matches. app.tsx now falls through on Enter when filteredSlashItems
     // is empty: it closes the menu without key.preventDefault() so the textarea
     // submit handler fires with the full "/council <topic>" text.
+    //
+    // Wait for idle after type() so React commits the slashSearchQuery state
+    // updates before Enter arrives — otherwise filteredSlashItems is still the
+    // full list (stale state) and the Enter handler selects the first item.
     driver.type("/council analyze trade-offs for the project");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");
     // council_phase for "Clarification" fires before runPreflight blocks.
     await driver.wait_for({

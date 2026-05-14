@@ -75,7 +75,9 @@ console.log("--- sending: /council analyze... Enter (full command, no Tab) ---")
 // no matching items, app.tsx lets Enter fall through to the textarea submit
 // handler (fix: filteredSlashItems empty → no key.preventDefault on Enter).
 send({ op: "type", text: "/council analyze trade-offs for the project" });
-await sleep(500);
+// Wait for React to commit slashSearchQuery state updates before sending Enter
+// — otherwise filteredSlashItems is stale (full list) and Enter selects "exit".
+await sleep(3000);
 send({ op: "press", key: "Enter" });
 await sleep(20000);
 
