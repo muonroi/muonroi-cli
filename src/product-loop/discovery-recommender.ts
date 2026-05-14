@@ -73,9 +73,15 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
 }
 
 function buildLeaderPrompt(input: RecommendInput): string {
+  // Pull schema hint inline (lazy import to avoid circular dep risks).
+  const { getSchemaHintForLeader } = require("./discovery-schema.js") as {
+    getSchemaHintForLeader: (id: string) => string;
+  };
+  const constraint = getSchemaHintForLeader(input.question.id);
   return [
     `Question: ${input.question.prompt}`,
     `Field id: ${input.question.id}`,
+    constraint ? `Constraint: ${constraint}` : "",
     `Detected project: ${input.detection.classification} (${input.detection.languages?.join(", ") || "no languages"})`,
     `Context so far: ${JSON.stringify(input.context)}`,
     input.priorRunsDigest ? `Prior similar runs: ${input.priorRunsDigest}` : "",

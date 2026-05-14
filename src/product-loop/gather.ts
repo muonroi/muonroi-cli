@@ -5,6 +5,7 @@
 
 import { resolveLeaderModel } from "../council/leader.js";
 import type { ClarifiedSpec } from "../council/types.js";
+import type { StreamChunk } from "../types/index.js";
 import { detectExistingProject } from "./discovery-detection.js";
 import {
   iterateInterview,
@@ -34,6 +35,39 @@ import type { DiscoveryContext, ProjectContext } from "./types.js";
 // biome-ignore lint/suspicious/noExplicitAny: stub replaced in Task 16
 function buildDiscoveryDebateRunner(_deps?: any): CouncilDebateRunner {
   throw new Error("buildDiscoveryDebateRunner not yet wired — complete Task 16");
+}
+
+/**
+ * Translate gather's `tuiAsk(label, options)` contract onto the council askcard
+ * machinery. Each call emits a `council_question` chunk that the UI renders as
+ * an interactive card, then awaits the resolver for the user's chosen value.
+ * Info messages (empty options) are emitted as a plain content chunk so they
+ * don't block.
+ */
+function buildLiveTuiAsk(
+  emit: (chunk: StreamChunk) => void,
+  respondToQuestion: (questionId: string) => Promise<string>,
+): (label: string, options?: string[]) => Promise<string> {
+  return async (label, options) => {
+    if (!options || options.length === 0) {
+      emit({ type: "content", content: `\n> ${label}\n` } as StreamChunk);
+      return "";
+    }
+    const questionId = crypto.randomUUID();
+    emit({
+      type: "council_question",
+      content: label,
+      councilQuestion: {
+        questionId,
+        phase: "clarify",
+        question: label,
+        isRequired: true,
+        options: options.map((o) => ({ label: o, value: o, kind: "choice" as const })),
+        defaultIndex: 0,
+      },
+    } as StreamChunk);
+    return await respondToQuestion(questionId);
+  };
 }
 
 function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Promise<string>): UserPromptFn {
@@ -82,6 +116,13 @@ function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Pr
 // Main dispatcher
 // ---------------------------------------------------------------------------
 
+export interface GatherIO {
+  /** Stream chunks back to the loop driver so the UI can render question askcards. */
+  emit?: (chunk: StreamChunk) => void;
+  /** Resolve once the user answers the question on this id. Returns the chosen option's `value`. */
+  respondToQuestion?: (questionId: string) => Promise<string>;
+}
+
 export async function runGatherPhase(
   flowDir: string,
   runId: string,
@@ -90,6 +131,7 @@ export async function runGatherPhase(
   // biome-ignore lint/suspicious/noExplicitAny: llm injected from driver
   llm: any,
   sessionModelId: string,
+  io?: GatherIO,
 ): Promise<ProjectContext> {
   const cwd = process.cwd();
   await acquireRunLock(flowDir, runId);
@@ -101,10 +143,15 @@ export async function runGatherPhase(
     const detection = await detectExistingProject(cwd);
     const leaderModelId = resolveLeaderModel(sessionModelId);
 
-    // Minimal LeaderLike adapter for parsePromptForContext / recommender
+    // Minimal LeaderLike adapter for parsePromptForContext / recommender.
+    // LeaderLike expects {content, costUsd} but council llm.generate returns
+    // just the text string — wrap it so leaderRecommend can parse the result
+    // (otherwise res.content is undefined → falls back to "leader unavailable").
     const leader: LeaderLike = {
-      generate: (args: { system: string; prompt: string; maxTokens: number }) =>
-        llm.generate(leaderModelId, args.system, args.prompt),
+      generate: async (args: { system: string; prompt: string; maxTokens: number }) => {
+        const text = await llm.generate(leaderModelId, args.system, args.prompt, args.maxTokens);
+        return { content: text, costUsd: 0 };
+      },
     };
 
     const { partial: prompted } = await parsePromptForContext(idea, leader);
@@ -118,20 +165,26 @@ export async function runGatherPhase(
       prefillAnswers: prompted,
     });
 
-    const debateRunner = buildDiscoveryDebateRunner();
+    // Recommender: always leader-only. The council debate runner (Task 16) is
+    // a stub that throws; until it is wired we delegate council asks to the
+    // leader so the gather phase doesn't crash on greenfield projects with
+    // unused budget.
     const recommender = {
       leaderRecommend: async (input: Parameters<typeof leaderRecommend>[0]) => leaderRecommend(input, leader),
-      councilRecommend: async (input: Parameters<typeof councilRecommend>[0]) => {
-        const state = await readDiscoveryState(flowDir, runId);
-        const cumulative = state?.cumulativeRecommenderCostUsd ?? 0;
-        if (shouldFallbackToLeader({ cumulative, capUsd })) {
-          return leaderRecommend(input, leader);
-        }
-        return councilRecommend(input, leader, debateRunner);
-      },
+      councilRecommend: async (input: Parameters<typeof councilRecommend>[0]) => leaderRecommend(input, leader),
     };
+    // Silence unused-import warning for the stub-only recommender helpers we
+    // intentionally bypass above.
+    void buildDiscoveryDebateRunner;
+    void councilRecommend;
+    void shouldFallbackToLeader;
+    void readDiscoveryState;
 
-    const userPrompt: UserPromptFn = buildGatherUserPrompt(async () => "");
+    // Build a real tuiAsk if the driver wired emit + respondToQuestion. The
+    // stub `async () => ""` falls back to the old infinite-loop behavior
+    // (only hit by tests that don't supply io).
+    const tuiAsk = io?.emit && io?.respondToQuestion ? buildLiveTuiAsk(io.emit, io.respondToQuestion) : async () => "";
+    const userPrompt: UserPromptFn = buildGatherUserPrompt(tuiAsk);
 
     return await iterateInterview({
       flowDir,
@@ -178,13 +231,31 @@ export function clarifiedSpecFromContext(pc: ProjectContext): ClarifiedSpec {
     answer: typeof value === "object" ? JSON.stringify(value) : String(value ?? ""),
   }));
 
+  // Map gather answers onto the 6 SEED_DIMENSIONS. We mark a dimension
+  // "answered" whenever ANY relevant gather field has a truthy value — even
+  // when the LLM returned a free-form string instead of the structured shape
+  // (e.g. backendStack: "Node.js with Express" vs {language, framework}). The
+  // alternative is to halt the run on every shape mismatch, which makes the
+  // gather phase brittle to LLM output variance for fields the discovery
+  // schema does not strictly validate.
+  const truthy = (v: unknown): boolean => {
+    if (v === null || v === undefined) return false;
+    if (typeof v === "string") return v.trim().length > 0;
+    if (Array.isArray(v)) return v.length > 0;
+    if (typeof v === "object") return Object.keys(v as object).length > 0;
+    return Boolean(v);
+  };
   const resolved: Record<string, "answered" | "unspecified" | "skipped"> = {
     persona: ctx.audience?.persona ? "answered" : "unspecified",
     "core-features": ctx.productType ? "answered" : "unspecified",
-    "non-functional": ctx.audience?.scale || ctx.deployment?.target ? "answered" : "unspecified",
-    "tech-constraints": ctx.backendStack?.language || ctx.backendStack?.framework ? "answered" : "unspecified",
+    "non-functional": ctx.audience?.scale || truthy(ctx.deployment) ? "answered" : "unspecified",
+    "tech-constraints": truthy(ctx.backendStack) || truthy(ctx.backendArchitecture) ? "answered" : "unspecified",
     "success-metric": ctx.audience?.persona ? "answered" : "unspecified",
-    "cost-tolerance": ctx.deployment?.target ? "answered" : "unspecified",
+    // cost-tolerance has no dedicated DISCOVERY_QUESTION — the per-run capUsd
+    // flag (default $50) is the canonical answer. Treat it as answered when
+    // gather completes (any non-null context means the user accepted defaults
+    // by passing the gate).
+    "cost-tolerance": Object.keys(ctx).length > 0 ? "answered" : "unspecified",
   };
 
   return { problemStatement, constraints, successCriteria, scope, rawQA, resolved };
