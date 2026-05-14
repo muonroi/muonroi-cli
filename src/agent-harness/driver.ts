@@ -4,9 +4,12 @@ import { matchSelector } from "./selector.js";
 
 type WaitConditionIdle = { idle: true };
 type WaitConditionSelector = { selector: string };
-type WaitConditionAll = { all: (WaitConditionIdle | WaitConditionSelector)[] };
+type WaitConditionEvent = { event: string };
+type WaitConditionAll = { all: (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent)[] };
 
-type WaitArgs = (WaitConditionIdle | WaitConditionSelector | WaitConditionAll) & { timeoutMs?: number };
+type WaitArgs = (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent | WaitConditionAll) & {
+  timeoutMs?: number;
+};
 
 type DriverDeps = {
   sendKey: (key: string) => void;
@@ -116,13 +119,21 @@ export function createDriver(deps: DriverDeps): Driver {
       const timeoutMs = (args as { timeoutMs?: number }).timeoutMs ?? 5000;
       const start = Date.now();
 
-      function buildCheck(cond: WaitConditionIdle | WaitConditionSelector): () => boolean {
+      function buildCheck(cond: WaitConditionIdle | WaitConditionSelector | WaitConditionEvent): () => boolean {
         if ("idle" in cond && cond.idle) {
           return () => lastIdleAt >= start;
         }
         if ("selector" in cond) {
           const sel = (cond as WaitConditionSelector).selector;
           return () => selectorMatches(sel).length > 0;
+        }
+        if ("event" in cond) {
+          const kind = (cond as WaitConditionEvent).event;
+          // True when at least one event of the given kind has been ingested
+          // at or after `start` (we check the full buffer since events don't
+          // carry timestamps — any matching event received while we are waiting
+          // counts).
+          return () => eventBuffer.some((e) => e.t === "event" && e.kind === kind);
         }
         return () => false;
       }
@@ -135,6 +146,8 @@ export function createDriver(deps: DriverDeps): Driver {
         check = buildCheck(args as WaitConditionIdle);
       } else if ("selector" in args) {
         check = buildCheck(args as WaitConditionSelector);
+      } else if ("event" in args) {
+        check = buildCheck(args as WaitConditionEvent);
       } else {
         check = () => false;
       }
