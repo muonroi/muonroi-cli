@@ -4091,6 +4091,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               } catch {
                 /* opentui versions vary */
               }
+              // Re-focus the textarea so subsequent keystrokes land in the
+              // input (clear/insertText can drop OpenTUI's internal focus).
+              try {
+                (ta as unknown as { focus?: () => void }).focus?.();
+              } catch {
+                /* opentui versions vary */
+              }
             }
           }
           key.preventDefault?.();
