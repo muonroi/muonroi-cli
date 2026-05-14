@@ -51,11 +51,12 @@
     "LiveFrame": {
       "type": "object",
       "required": ["mode", "version", "seq", "ts", "nodes"],
+      "additionalProperties": false,
       "properties": {
         "mode": { "const": "live" },
         "version": { "const": "0.1.0" },
         "seq": { "type": "integer", "minimum": 0 },
-        "ts": { "type": "integer" },
+        "ts": { "type": "integer", "minimum": 0 },
         "focus": { "type": "string" },
         "modals": { "type": "array", "items": { "type": "string" } },
         "nodes": { "type": "array", "items": { "$ref": "#/definitions/UINode" } }
@@ -106,6 +107,7 @@
     "DesignSpec": {
       "type": "object",
       "required": ["mode", "version", "scenes"],
+      "additionalProperties": false,
       "properties": {
         "mode": { "const": "design" },
         "version": { "const": "0.1.0" },
@@ -115,6 +117,7 @@
           "items": {
             "type": "object",
             "required": ["id", "name", "layout"],
+            "additionalProperties": false,
             "properties": {
               "id": { "type": "string" },
               "name": { "type": "string" },
@@ -130,19 +133,19 @@
                   }
                 }
               },
-              "transitions": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["from", "on", "to"],
-                  "properties": {
-                    "from": { "type": "string" },
-                    "on": { "type": "string" },
-                    "to": { "type": "string" }
-                  }
-                }
-              },
               "notes": { "type": "string" }
+            }
+          }
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["from", "on", "to"],
+            "properties": {
+              "from": { "type": "string" },
+              "on": { "type": "string" },
+              "to": { "type": "string" }
             }
           }
         }

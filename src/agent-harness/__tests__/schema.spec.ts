@@ -27,3 +27,55 @@ describe("schema fixtures", () => {
     });
   }
 });
+
+describe("schema rejects invalid data", () => {
+  it("rejects a LiveFrame missing mode", () => {
+    const validate = ajv.compile({
+      $ref: `${schema.$id}#/definitions/LiveFrame`,
+    });
+    const badData = {
+      version: "0.1.0",
+      seq: 0,
+      ts: 0,
+      nodes: [],
+    };
+    expect(validate(badData)).toBe(false);
+  });
+
+  it("rejects a LiveFrame with extra unknown field", () => {
+    const validate = ajv.compile({
+      $ref: `${schema.$id}#/definitions/LiveFrame`,
+    });
+    const badData = {
+      mode: "live",
+      version: "0.1.0",
+      seq: 0,
+      ts: 0,
+      nodes: [],
+      extra: "x",
+    };
+    expect(validate(badData)).toBe(false);
+  });
+
+  it("rejects a DesignSpec where a StatePatch includes children", () => {
+    const validate = ajv.compile({
+      $ref: `${schema.$id}#/definitions/StatePatch`,
+    });
+    const badData = {
+      id: "root",
+      children: [],
+    };
+    expect(validate(badData)).toBe(false);
+  });
+
+  it("rejects a UINode with invalid role value", () => {
+    const validate = ajv.compile({
+      $ref: `${schema.$id}#/definitions/UINode`,
+    });
+    const badData = {
+      id: "test",
+      role: "notarole",
+    };
+    expect(validate(badData)).toBe(false);
+  });
+});
