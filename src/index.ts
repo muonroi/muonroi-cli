@@ -1268,6 +1268,14 @@ mcp
     await runMcpImportBw({ keys, itemPrefix: opts.prefix });
   });
 
+program
+  .command("mcp-driver")
+  .description("Run the agent-harness MCP driver over stdio")
+  .action(async () => {
+    const { runHarnessDriver } = await import("./mcp/harness-driver.js");
+    await runHarnessDriver();
+  });
+
 program.addCommand(buildConfigCommand());
 
 program
