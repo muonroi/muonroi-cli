@@ -171,6 +171,78 @@ export function registerReadTools(server: McpServer, getDriver: () => Driver | n
   );
 }
 
+export function registerActionTools(server: McpServer, getDriver: () => Driver | null): void {
+  const noDriver = () => ({
+    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
+    isError: true,
+  });
+
+  server.registerTool(
+    "tui.press",
+    {
+      description: "Send a single key to the TUI.",
+      inputSchema: { key: z.string().max(64) },
+    },
+    async ({ key }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      d.press(key);
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.press_sequence",
+    {
+      description: "Send a sequence of keys to the TUI.",
+      inputSchema: { keys: z.array(z.string().max(64)).max(100) },
+    },
+    async ({ keys }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      d.press_sequence(keys);
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.type",
+    {
+      description: "Type literal text into the focused element.",
+      inputSchema: { text: z.string().max(10_000) },
+    },
+    async ({ text }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      d.type(text);
+      return { content: [{ type: "text" as const, text: "ok" }] };
+    },
+  );
+
+  server.registerTool(
+    "tui.focus",
+    {
+      description: "Move focus to the node matched by selector (must match exactly one).",
+      inputSchema: { selector: z.string().max(500) },
+    },
+    async ({ selector }) => {
+      const d = getDriver();
+      if (!d) return noDriver();
+      try {
+        d.focus(selector);
+        return { content: [{ type: "text" as const, text: "ok" }] };
+      } catch (e) {
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify({ error: "focus_failed", message: (e as Error).message }) },
+          ],
+          isError: true,
+        };
+      }
+    },
+  );
+}
+
 export async function runHarnessDriver(): Promise<void> {
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
   const currentDriver: Driver | null = null;
@@ -192,6 +264,7 @@ export async function runHarnessDriver(): Promise<void> {
   );
 
   registerReadTools(server, () => currentDriver);
+  registerActionTools(server, () => currentDriver);
 
   await server.connect(new StdioServerTransport());
 }
