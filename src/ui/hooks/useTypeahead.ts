@@ -105,9 +105,23 @@ export function useTypeahead(
     const poll = () => {
       const ta = inputRef.current;
       if (!ta) return;
+      // Skip if the underlying OpenTUI renderable has been destroyed. The
+      // setInterval keeps firing across React commits, and the inputRef ref
+      // can briefly point at a destroyed TextareaRenderable when the parent
+      // view swaps (e.g., HomeView → ChatView on first message). Accessing
+      // plainText/cursorOffset on a destroyed EditBuffer throws and tears
+      // down the whole process via the uncaughtException handler.
+      if ((ta as unknown as { isDestroyed?: boolean }).isDestroyed) return;
 
-      const text = ta.plainText;
-      const cursor = ta.cursorOffset;
+      let text: string;
+      let cursor: number;
+      try {
+        text = ta.plainText;
+        cursor = ta.cursorOffset;
+      } catch {
+        // Last-resort guard against any other transient destroyed-state race.
+        return;
+      }
 
       if (text === lastTextRef.current && cursor === lastCursorRef.current && tokenRef.current) return;
       lastTextRef.current = text;
