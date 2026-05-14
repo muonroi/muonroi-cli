@@ -62,19 +62,22 @@ fd3?.on("data", (chunk: Buffer | string) =>
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Log ALL fd3 lines (to see everything, including non-frame events)
+fd3?.on("data", (chunk: Buffer | string) => {
+  // Already handled by splitter
+});
+
 // Wait for initial idle
 await sleep(8000);
-console.log("--- sending: /council Tab <wait> analyze... Enter ---");
+console.log("--- sending: /council analyze... Enter (full command, no Tab) ---");
 
-send({ op: "type", text: "/council" });
-await sleep(500);
-send({ op: "press", key: "Tab" });
-// Wait for idle to ensure React re-renders (showSlashMenu=false)
-await sleep(3000);
-send({ op: "type", text: "analyze trade-offs for the project" });
+// Type the full command. The slash menu opens on "/" but once the filter has
+// no matching items, app.tsx lets Enter fall through to the textarea submit
+// handler (fix: filteredSlashItems empty → no key.preventDefault on Enter).
+send({ op: "type", text: "/council analyze trade-offs for the project" });
 await sleep(500);
 send({ op: "press", key: "Enter" });
-await sleep(15000);
+await sleep(20000);
 
 console.log("--- checking for council_phase ---");
 const councilLines = lines.filter((l) => l.includes("council"));
