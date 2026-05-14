@@ -36,14 +36,21 @@ const splitter = createLineSplitter((line) => {
   if (line.includes("council_phase") || line.includes('"t":"idle"') || line.includes('"t":"event"')) {
     console.log("FD3:", line.slice(0, 300));
   }
-  // Log frame diffs to see composer value
+  // Log ALL frame diffs to see what nodes change
   if (line.includes('"mode":"live"')) {
     try {
       const msg = JSON.parse(line) as Record<string, unknown>;
       const nodes = (msg.nodes as unknown[]) ?? [];
-      const composer = nodes.find((n: unknown) => (n as Record<string, unknown>).id === "composer");
-      if (composer) {
-        console.log("COMPOSER:", JSON.stringify(composer).slice(0, 200));
+      const patches = (msg.patches as unknown[]) ?? [];
+      const removes = (msg.removes as unknown[]) ?? [];
+      if (nodes.length + patches.length + removes.length > 0) {
+        console.log("FRAME diff: nodes=" + nodes.length + " patches=" + patches.length + " removes=" + removes.length);
+        for (const n of nodes as Record<string, unknown>[]) {
+          console.log("  NODE:", JSON.stringify(n).slice(0, 200));
+        }
+        for (const p of patches as Record<string, unknown>[]) {
+          console.log("  PATCH:", JSON.stringify(p).slice(0, 200));
+        }
       }
     } catch { /* */ }
   }
