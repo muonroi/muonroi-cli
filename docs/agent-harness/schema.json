@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://muonroi.dev/agent-harness/0.1.0/schema.json",
+  "title": "Agent Harness Protocol",
+  "definitions": {
+    "Role": {
+      "enum": [
+        "dialog",
+        "textbox",
+        "listbox",
+        "listitem",
+        "button",
+        "checkbox",
+        "radio",
+        "radiogroup",
+        "tab",
+        "tablist",
+        "tree",
+        "treeitem",
+        "table",
+        "row",
+        "cell",
+        "progressbar",
+        "spinner",
+        "log",
+        "statusbar",
+        "menu",
+        "menuitem",
+        "toast",
+        "tooltip"
+      ]
+    },
+    "UINode": {
+      "type": "object",
+      "required": ["id", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "role": { "$ref": "#/definitions/Role" },
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "focus": { "const": true },
+        "selected": { "const": true },
+        "disabled": { "const": true },
+        "hidden": { "const": true },
+        "state": { "type": "string" },
+        "props": { "type": "object" },
+        "children": { "type": "array", "items": { "$ref": "#/definitions/UINode" } }
+      }
+    },
+    "LiveFrame": {
+      "type": "object",
+      "required": ["mode", "version", "seq", "ts", "nodes"],
+      "properties": {
+        "mode": { "const": "live" },
+        "version": { "const": "0.1.0" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "ts": { "type": "integer" },
+        "focus": { "type": "string" },
+        "modals": { "type": "array", "items": { "type": "string" } },
+        "nodes": { "type": "array", "items": { "$ref": "#/definitions/UINode" } }
+      }
+    },
+    "LiveEvent": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["t", "kind", "target", "text"],
+          "properties": {
+            "t": { "const": "event" },
+            "kind": { "const": "stream.delta" },
+            "target": { "type": "string" },
+            "text": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["t", "kind", "level", "text"],
+          "properties": {
+            "t": { "const": "event" },
+            "kind": { "const": "toast" },
+            "level": { "enum": ["info", "warn", "error"] },
+            "text": { "type": "string" },
+            "ttlMs": { "type": "integer" }
+          }
+        },
+        { "type": "object", "required": ["t"], "properties": { "t": { "const": "idle" } } }
+      ]
+    },
+    "StatePatch": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "focus": { "const": true },
+        "selected": { "const": true },
+        "disabled": { "const": true },
+        "hidden": { "const": true },
+        "state": { "type": "string" },
+        "props": { "type": "object" }
+      },
+      "not": { "required": ["children"] }
+    },
+    "DesignSpec": {
+      "type": "object",
+      "required": ["mode", "version", "scenes"],
+      "properties": {
+        "mode": { "const": "design" },
+        "version": { "const": "0.1.0" },
+        "target": { "enum": ["tui", "react", "angular", "any"] },
+        "scenes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "layout"],
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "layout": { "$ref": "#/definitions/UINode" },
+              "states": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "patches"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "patches": { "type": "array", "items": { "$ref": "#/definitions/StatePatch" } }
+                  }
+                }
+              },
+              "transitions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["from", "on", "to"],
+                  "properties": {
+                    "from": { "type": "string" },
+                    "on": { "type": "string" },
+                    "to": { "type": "string" }
+                  }
+                }
+              },
+              "notes": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
