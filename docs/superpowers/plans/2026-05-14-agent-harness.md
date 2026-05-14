@@ -1,6 +1,176 @@
-# Agent Harness Implementation Plan
+# Agent Harness Implementation Plan (v1.1, post cross-review)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+## Revisions v1.1 — Critical fixes from cross-review
+
+Apply these adjustments while executing the plan (sequenced into the relevant tasks below):
+
+**Phase 0 additions**
+- **Phase 0c — Bun extra-fd Windows spike** (½ day). Verify `Bun.spawn({ stdio: [...,'pipe','pipe'] })` actually forwards fds 3/4 on Windows; if not, document fallback to Node `child_process` for the MCP-driver spawn path. Output: `docs/agent-harness/spike-0c-findings.md`.
+- **Phase 0d — MCP SDK API spike** (~30 min). Read `node_modules/@modelcontextprotocol/sdk/dist/server/mcp.d.ts` and confirm whether to use `server.registerTool(name, { description, inputSchema }, cb)` (preferred, non-deprecated) or `server.tool(name, rawShape, cb)` where `rawShape` is **`Record<string, ZodSchema>`** (NOT `z.object({...})`). Update Tasks 4.1 and 4.3 accordingly. Output: short note in `spike-0c-findings.md`.
+
+**Schema / dependencies**
+- Task 0b.4: import Ajv 2020 explicitly: `import Ajv from "ajv/dist/2020.js"` (not `"ajv"`) — required for draft 2020-12 support. Same for `spec-helpers.ts` (Task 6.1).
+- Task 6.1: replace `readFileSync(resolve("docs/agent-harness/schema.json"))` with `readFileSync(new URL("../../../docs/agent-harness/schema.json", import.meta.url))` so the path is robust to test-runner CWD.
+
+**Task 1.3 (Windows pipe)**: bump `generatePipeName()` random suffix from 4 bytes to 8 bytes.
+
+**Task 1.5 — add idle-heuristic mode**: add a second factory `createHeuristicIdleDetector` taking both a "no-frame-for-Nms" timer and a "no-stream-delta-for-Nms" timer; emit `idle` only when BOTH are quiescent. Used when Phase 0a finding is NO-HOOK. Add tests for both branches.
+
+**Task 1.6 — split into three sub-tasks** (current scope mixes runtime init, CLI flag, and renderer wiring with no failing test):
+- **1.6a — `agent-mode.ts` runtime init** with unit test that mocks the transport (using PassThrough streams) and asserts: handshake fires before listen on Windows, command messages parse, idle emitted after quiescence.
+- **1.6b — `--agent-mode` flag in `src/index.ts`** with a smoke test in `src/__tests__/cli-flags.spec.ts` that asserts the flag parses without spawning a TUI.
+- **1.6c — Renderer hook wiring in `src/ui/app.tsx`** with one integration test that mounts a trivial OpenTUI tree and asserts a `LiveFrame` is emitted via a captured-writer stub. **Order fix:** call `server.listen()` before writing the Windows handshake line (TOCTOU).
+
+**Task 2.2 (selector) and Task 2.3 (predicate) — ReDoS guard**: add `z.string().max(200)` to the predicate `rhs` field (Task 2.3 schema) and reject selector `*=` values longer than 200 chars or containing nested quantifiers `(a+)+`-style patterns. Add one negative test per fix.
+
+**Task 2.4 — add the missing multi-match negative test**:
+
+```ts
+it("query throws when selector matches multiple nodes", () => {
+  const d = createDriver({ sendKey: () => {}, sendType: () => {} });
+  d._ingest({ kind: "frame", frame: {
+    mode: "live", version: "0.1.0", seq: 1, ts: 0,
+    nodes: [{ id: "r", role: "dialog", children: [
+      { id: "a", role: "listitem" }, { id: "b", role: "listitem" }
+    ]}]
+  }});
+  expect(() => d.query("role=listitem")).toThrow(/ambiguous/);
+});
+```
+
+**Task 2.5 vs 3.1 — ordering fix**: Task 2.5 E2E asserts an LLM response, which requires `--mock-llm` provider wiring (Task 3.1 Step 4). Either (a) move Task 3.1 Step 4 (provider hook) into a new task **2.4b** before Task 2.5, or (b) split Task 2.5: 2.5a covers steps 1–4 of the test (focus, typing) which do not need the LLM, and 2.5b covers the send-and-response assertion which is gated on Phase 3. Recommended: do (a).
+
+**Task 3.2 — replace prose comment with actual test code**:
+
+```ts
+// tests/harness/council-flow.spec.ts
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { resolve } from "node:path";
+import { createDriver } from "../../src/agent-harness/driver";
+import { createLineSplitter } from "../../src/agent-harness/sidechannel";
+
+describe.skipIf(process.platform === "win32")("council flow E2E", () => {
+  let proc: ChildProcessWithoutNullStreams;
+  let driver: ReturnType<typeof createDriver>;
+
+  beforeAll(async () => {
+    proc = spawn("bun", ["run", resolve("src/index.ts"), "--agent-mode",
+                          "--mock-llm", "tests/harness/fixtures/llm"],
+      { stdio: ["pipe","pipe","pipe","pipe","pipe"] });
+    driver = createDriver({
+      sendKey: (k) => proc.stdio[4]!.write(JSON.stringify({ op: "press", key: k }) + "\n"),
+      sendType: (t) => proc.stdio[4]!.write(JSON.stringify({ op: "type", text: t }) + "\n"),
+    });
+    proc.stdio[3]!.on("data", createLineSplitter((line) => {
+      const m = JSON.parse(line);
+      if (m.mode === "live") driver._ingest({ kind: "frame", frame: m });
+      else if (m.t === "idle") driver._ingest({ kind: "idle" });
+      else if (m.t === "event") driver._ingest({ kind: "event", event: m });
+    }));
+    await driver.wait_for({ idle: true, timeoutMs: 5000 });
+  });
+
+  afterAll(() => new Promise<void>((r) => { proc.once("exit", () => r()); proc.kill(); }));
+
+  it("opens council picker on /council", async () => {
+    driver.type("/council"); driver.press("Enter");
+    await driver.wait_for({ selector: 'role=dialog name~="Council"', timeoutMs: 3000 });
+    expect(driver.query('role=dialog name~="Council"')).toBeTruthy();
+  });
+
+  it("selecting a participant renders the Debate Plan", async () => {
+    driver.press("Down"); driver.press("Enter");
+    await driver.wait_for({ selector: 'name~="Debate Plan"', timeoutMs: 5000 });
+    expect(driver.queryAll("role=log").length).toBeGreaterThan(0);
+  });
+});
+```
+
+**Task 4.1 / 4.3 — MCP SDK API correction**: replace `server.tool(name, z.object({...}), cb)` with **either**:
+- (Preferred) `server.registerTool(name, { description, inputSchema: z.object({...}) }, cb)`, OR
+- `server.tool(name, { args: z.array(z.string()), cwd: z.string().optional(), ... }, cb)` passing a **raw shape** (plain Record), not a wrapped `z.object`.
+
+The plan as written silently degrades to the `ToolAnnotations` overload. Phase 0d spike must confirm which form to use.
+
+**Task 4.2 — security hardening, additional fixes**:
+- Expand `ENV_STRIP` to also include `LD_AUDIT`, `DYLD_FRAMEWORK_PATH`, `NODE_PATH`.
+- Add `validateCwd(cwd: string): { ok: true } | { ok: false; reason: string }` using `fs.realpathSync` and asserting the resolved path is under `os.homedir()` OR the muonroi-cli repo root.
+- Add `validateMockLlmPath(value: string): boolean` for the `--mock-llm=<dir>` value; reject if it escapes the repo root.
+- In the spawn call, explicitly pass `shell: false` (Bun: do not use `Bun.$`; use `Bun.spawn` with explicit argv array).
+- Test cases: CWD outside home rejected; symlink-escape rejected; `--mock-llm=../../etc` rejected; `LD_AUDIT` stripped; `DYLD_FRAMEWORK_PATH` stripped; `NODE_PATH` stripped.
+
+**Task 4.3 — split into three sub-tasks** (13 tools in one commit is too large + zero unit tests):
+- **4.3a — Read tools** (`tui.snapshot`, `tui.changes_since`, `tui.query`, `tui.query_all`, `tui.count`, `tui.render_text`). Unit test: each tool, with the driver fed a stubbed frame.
+- **4.3b — Action tools** (`tui.press`, `tui.press_sequence`, `tui.type`, `tui.focus`). Unit test: each tool dispatches the right command to a stubbed deps object.
+- **4.3c — Async/condition tools** (`tui.wait_for`, `tui.expect`, `tui.last_event`, `tui.stop`). Unit test: wait_for timeout case, expect with predicate, last_event ordering.
+
+**Task 4.4 — add timeout to `call()` helper and `try/finally` cleanup**:
+
+```ts
+function call(proc: ReturnType<typeof spawn>, id: number, method: string, params?: unknown, timeoutMs = 10_000): Promise<unknown> {
+  return new Promise((res, rej) => {
+    const onData = (data: Buffer) => { /* ... unchanged ... */ };
+    const timer = setTimeout(() => { proc.stdout!.off("data", onData); rej(new Error(`call timeout: ${method}`)); }, timeoutMs);
+    proc.stdout!.on("data", onData);
+    proc.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+  });
+}
+```
+
+Wrap each `it` body in `try { ... } finally { p.kill(); }`.
+
+**Task F.1 — replace with five concrete tasks** (each producing a real test file with actual code, not just paths):
+
+- **F.1.a — `tests/harness/error-states.spec.ts`** — assert `last_event("toast")` returns `{level: "error"}` after an LLM-failure fixture.
+- **F.1.b — `tests/harness/modal-focus.spec.ts`** — open dialog → press Escape → assert `driver.query("focus")?.id` equals the previously-focused id.
+- **F.1.c — `tests/harness/scroll.spec.ts`** — load 200-item listbox; press `Down` × 50; assert `driver.query("role=listbox").props?.scrollTop > 0`. Requires reconciler-hook to emit `data-props={scrollTop}` — add to Task 1.4.
+- **F.1.d — `tests/harness/concurrent-input.spec.ts`** — start a streaming response, type 5 chars during stream, assert all `LiveFrame.seq` values are strictly monotonic.
+- **F.1.e — `tests/harness/disconnect.spec.ts`** — kill the child mid-session, assert the next driver call rejects with a typed error and that no fd/pipe handle leaks (verify via `process.listenerCount`).
+
+For each: write one failing test → run → implement / fix any harness gap → run → commit. Time budget: ½ day per sub-task; total ~2.5 days extra. Defer non-blocking ones (F.1.c, F.1.d) if needed.
+
+**Task F.2 — replace prose with actual determinism code**:
+
+```ts
+// tests/harness/determinism.spec.ts
+import { describe, it, expect } from "vitest";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+
+function runCouncilOnce(): string[] {
+  // Use Bun's runner with a deterministic script that drives the council flow
+  // via the in-process driver and returns the captured LiveFrame trace as
+  // JSONL (one frame per line). Strip `ts` field before returning.
+  const r = spawnSync("bun", ["run", resolve("tests/harness/determinism-runner.ts")], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`runner failed: ${r.stderr}`);
+  return r.stdout.split("\n").filter(Boolean);
+}
+
+describe.skipIf(process.env.CI_QUICK === "1")("determinism", () => {
+  it("council flow produces byte-identical traces over 50 runs", () => {
+    const first = runCouncilOnce();
+    for (let i = 0; i < 49; i++) {
+      const next = runCouncilOnce();
+      expect(next).toEqual(first);
+    }
+  });
+});
+```
+
+A companion script `tests/harness/determinism-runner.ts` is required: it spawns muonroi-cli with `--agent-mode --agent-fake-clock --mock-llm tests/harness/fixtures/llm`, drives the council flow via the driver, captures every `LiveFrame`, strips `ts`, and prints JSONL to stdout. Add as part of the same task.
+
+---
+
+Beyond the above critical revisions, the body of the plan stands. Implementers should still consult cross-review findings stored at:
+- Architect & sequencing review (this conversation)
+- Test engineer review (this conversation)
+- Security & integration review (this conversation)
+
+---
+
 
 **Goal:** Build an in-repo agent harness that lets external agent CLIs (Claude/Codex/Gemini) drive `muonroi-cli`'s OpenTUI/React TUI like a real user, by reading structured JSON state via a stable protocol — and reuse the same schema as the design-time output of the `ideal` feature.
 
