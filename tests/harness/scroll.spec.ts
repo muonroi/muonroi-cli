@@ -24,7 +24,7 @@
 
 import { describe, it } from "vitest";
 
-describe.skipIf(process.platform === "win32")("scroll E2E", () => {
+describe("scroll E2E", () => {
   it.todo(
     "no scrollable listbox exposes props.scrollTop: the TUI has no <Semantic role='listbox' props={{ scrollTop }}> wired; LiveFrame.nodes is always empty so scroll position cannot be observed via the driver",
   );

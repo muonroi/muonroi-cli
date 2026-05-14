@@ -5,13 +5,13 @@
 
 ## TL;DR
 
-```bash
-# WSL one-time setup (already done — see "WSL setup" below if missing):
-#   - bun installed at ~/.npm-global/bin/bun, symlinked to ~/.local/bin/bun
-#   - repo cloned at ~/muonroi-cli with Linux-native node_modules
+```powershell
+# Primary path — run natively on Windows (no WSL required):
+bunx vitest -c vitest.harness.config.ts run tests/harness/
+```
 
-# Every test cycle from Windows:
-git push                                                    # push your changes
+```bash
+# Fallback / CI verification — run from WSL (POSIX fd 3/4 path):
 wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest -c vitest.harness.config.ts run tests/harness/'
 # vitest.harness.config.ts sets fileParallelism:false — prevents idle-timeout contention
 # when multiple TUI processes spawn under WSL simultaneously.
@@ -19,18 +19,24 @@ wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest -c vitest
 
 ## Why this exists
 
-The agent harness lets external CLIs (`claude`, `codex`, `gemini`) drive the TUI as a real user via structured JSON — no screenshots, no OCR. It is **POSIX-only by design** (uses `fd3`/`fd4` sidechannels not available on Windows). On Windows the only verifiable path is the MCP protocol contract (argv allowlist, env strip, capabilities). For actual TUI driving you need POSIX → use WSL.
+The agent harness lets external CLIs (`claude`, `codex`, `gemini`) drive the TUI as a real user via structured JSON — no screenshots, no OCR.
+
+**Transport**: POSIX uses `fd 3`/`fd 4` sidechannels; Windows uses named pipes (`\\.\pipe\muonroi-harness-{pid}-{uuid}-{in|out}`). Both paths are verified by `tests/harness/**`. The helper in `src/agent-harness/test-spawn.ts` selects the right transport automatically; spec files have no platform guards.
+
+The WSL workflow remains documented below as a fallback for CI environments that don't support named pipes or for comparing POSIX vs Windows behaviour.
 
 Core components:
 - `src/agent-harness/protocol.ts` — `LiveFrame` / `LiveEvent` / `UINode` / `DesignSpec`
 - `src/agent-harness/selector.ts` — `parseSelector`, `matchSelector` (CSS-like grammar)
 - `src/agent-harness/predicate.ts` — Zod-typed predicate evaluator
 - `src/agent-harness/driver.ts` — in-process `Driver` API
+- `src/agent-harness/test-spawn.ts` — cross-platform spawn helper (fd 3/4 on POSIX, named pipes on Windows)
 - `src/agent-harness/semantic.tsx` — `<Semantic id="..." role="...">` React wrapper
 - `src/agent-harness/reconciler-hook.ts` — `SemanticRegistry`, snapshot to `LiveFrame`
 - `src/agent-harness/mock-llm.ts` — fixture-based provider for deterministic tests
 - `src/mcp/harness-driver.ts` — `mcp-driver` subcommand, 16 tools over stdio MCP
-- `tests/harness/` — E2E specs (POSIX-only suites use `describe.skipIf(process.platform === "win32")`)
+- `tests/harness/` — E2E specs (no platform guards — run on Windows and POSIX via `test-spawn.ts`)
+- `tests/harness/helpers.ts` — shared `spawnHarness()` helper used by all spawn-based specs
 
 ## Workflow: verify a new TUI feature
 

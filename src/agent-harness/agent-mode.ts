@@ -1,15 +1,16 @@
 /**
  * agent-mode.ts — Runtime that the --agent-mode CLI flag activates.
  *
- * Transport: fd 3 (out, JSONL writes) and fd 4 (in, JSONL reads), opened via
- * createWriteStream/createReadStream per spike-0c findings. Node child_process
- * correctly forwards extra fds on Windows (Bun does not); the harness driver
- * spawns via node:child_process.spawn everywhere for consistency.
+ * Transport (POSIX):
+ *   fd 3 (out, JSONL writes) and fd 4 (in, JSONL reads), opened via
+ *   createWriteStream/createReadStream. Parent must spawn with a 5-element
+ *   stdio array using node:child_process.spawn.
  *
- * No Windows named-pipe handshake is needed here. Spike-0c confirmed that
- * inheritable fds work on Windows when the parent uses node:child_process.spawn
- * with a 5-element stdio array. The TOCTOU concern noted in Revisions v1.1 only
- * applied to the abandoned named-pipe approach.
+ * Transport (Windows):
+ *   If env vars MUONROI_HARNESS_OUT_PIPE and MUONROI_HARNESS_IN_PIPE are set,
+ *   the child connects to those named pipes instead of using fd 3/4. The child
+ *   sends a { t: "handshake", ok: true } JSONL line on the out pipe once
+ *   connected, so the parent can synchronize before sending commands.
  *
  * For tests, pass opts.injectStreams to inject in-memory PassThrough streams
  * instead of opening real fds — this avoids touching process state in tests.
@@ -66,12 +67,54 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     // Tests inject PassThrough streams; skip fd opening and terminal resizing.
     outStream = opts.injectStreams!.out;
     inStream = opts.injectStreams!.in;
+  } else if (
+    process.platform === "win32" &&
+    process.env["MUONROI_HARNESS_OUT_PIPE"] &&
+    process.env["MUONROI_HARNESS_IN_PIPE"]
+  ) {
+    // Windows: connect to named pipes provided by the parent (test-spawn.ts).
+    // The parent creates both pipe servers before spawning this child, so both
+    // pipes are ready when we arrive here. On connect, emit a handshake line on
+    // the out pipe so the parent knows the transport is ready.
+    const { createConnection } = await import("node:net");
+
+    const outPipeName = process.env["MUONROI_HARNESS_OUT_PIPE"];
+    const inPipeName = process.env["MUONROI_HARNESS_IN_PIPE"];
+
+    const outSock = createConnection(outPipeName);
+    const inSock = createConnection(inPipeName);
+
+    // Wait for both sockets to establish their connection before proceeding.
+    // If either fails, log to stderr and exit — the parent will time out and
+    // surface a clear error.
+    await new Promise<void>((resolve, reject) => {
+      let connected = 0;
+      const onConnect = () => {
+        if (++connected === 2) resolve();
+      };
+      outSock.once("connect", onConnect);
+      inSock.once("connect", onConnect);
+      outSock.once("error", reject);
+      inSock.once("error", reject);
+    }).catch((err: unknown) => {
+      process.stderr.write(`[agent-mode] named-pipe connect error: ${String(err)}\n`);
+      process.exit(1);
+    });
+
+    // Emit handshake so parent's waitForHandshake() can unblock.
+    outSock.write(JSON.stringify({ t: "handshake", ok: true }) + "\n");
+
+    outStream = outSock;
+    inStream = inSock;
+
+    // Apply determinism: force terminal dimensions so layout is reproducible.
+    process.stdout.columns = opts.cols;
+    (process.stdout as unknown as { rows: number }).rows = opts.rows;
   } else {
-    // Production: open fds 3 (write) and 4 (read). The parent process is
-    // responsible for spawning this CLI with:
-    //   stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"]
-    // using node:child_process.spawn (Bun's spawn does not forward extra fds
-    // on Windows — confirmed by spike-0c).
+    // POSIX (Linux/macOS): open fds 3 (write) and 4 (read). The parent is
+    // responsible for spawning with a 5-element stdio array via
+    // node:child_process.spawn (Bun's spawn does not forward extra fds on
+    // Windows — confirmed by spike-0c).
     outStream = createWriteStream("", { fd: 3 });
     inStream = createReadStream("", { fd: 4 });
 

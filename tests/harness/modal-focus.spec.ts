@@ -28,7 +28,7 @@
 
 import { describe, it } from "vitest";
 
-describe.skipIf(process.platform === "win32")("modal focus E2E", () => {
+describe("modal focus E2E", () => {
   it.todo(
     "TUI has no <Semantic> nodes wired: app.tsx uses SemanticProvider but no component registers role=dialog or role=textbox nodes, so LiveFrame.nodes is always empty and driver.query() cannot observe focus state",
   );
