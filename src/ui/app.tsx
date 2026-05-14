@@ -5,7 +5,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentModeRuntime } from "../agent-harness/agent-mode.js";
-import { SemanticProvider } from "../agent-harness/semantic.js";
+import { Semantic, SemanticProvider } from "../agent-harness/semantic.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
@@ -2604,6 +2604,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 }
                 contentAccRef.current += `\n${chunk.content || "Unknown error"}`;
                 setStreamContent(contentAccRef.current);
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "toast",
+                  level: "error",
+                  text: chunk.content || "Unknown error",
+                });
                 break;
               case "experience_warning":
                 applyLocalAssistantDelta(
@@ -2624,6 +2630,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (!isStale()) {
             contentAccRef.current += "\nAn unexpected error occurred.";
             setStreamContent(contentAccRef.current);
+            agentRuntime?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "error",
+              text: "An unexpected error occurred.",
+            });
           }
         } finally {
           setActiveEeYield(null);
@@ -4837,127 +4849,137 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             />
             <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
               {/* Scrollable messages */}
-              {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
-              <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
-                {(() => {
-                  const mcpRuns = computeMcpRunInfo(messages);
-                  return messages.map((msg, i) => (
-                    <MessageView
-                      key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
-                      entry={msg}
-                      index={i}
-                      t={t}
-                      modeColor={modeInfo.color}
-                      expandedMessages={expandedMessages}
-                      mcpRun={mcpRuns[i]}
-                    />
-                  ));
-                })()}
-                {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
-                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                    <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
-                  </box>
-                )}
-                {/* Active tool calls — pending inline */}
-                {activeToolCalls.map((tc) =>
-                  tc.function.name === "task" ? (
-                    <SubagentTaskLine
-                      key={tc.id}
-                      t={t}
-                      agent={tryParseArg(tc, "agent") || "sub-agent"}
-                      label={toolArgs(tc) || "Working"}
-                      pending
-                    />
-                  ) : tc.function.name === "delegate" ? (
-                    <DelegationTaskLine
-                      key={tc.id}
-                      t={t}
-                      label={toolArgs(tc) || "Background research"}
-                      pending
-                      id={undefined}
-                    />
-                  ) : (
-                    <InlineTool key={tc.id} t={t} pending>
-                      {toolLabel(tc)}
-                    </InlineTool>
-                  ),
-                )}
-                {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-                {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
-                {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-                {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
-                {councilInfoCards.map((card, idx) => (
-                  <CouncilInfoCardView
-                    key={`info-card-${idx}-${card.title}`}
-                    card={card}
-                    terminalCols={width}
-                    theme={t}
-                  />
-                ))}
-                {councilMessages.map((cm, idx) => {
-                  const side: "left" | "right" =
-                    cm.kind === "debate" && cm.partner
-                      ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
-                      : "left";
-
-                  if (cm.kind === "leader") {
-                    return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
-                  }
-                  if (cm.kind === "synthesis") {
-                    return <CouncilSynthesisBanner key={idx} msg={cm} />;
-                  }
-                  const pairKey = cm.partner
-                    ? makePairKey(cm.speaker.role, cm.partner.role)
-                    : `solo::${cm.speaker.role}`;
-                  const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
-                  return (
-                    <CouncilMessageBubble
-                      key={idx}
-                      msg={cm}
+              <Semantic id="log" role="log">
+                {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
+                <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
+                  {(() => {
+                    const mcpRuns = computeMcpRunInfo(messages);
+                    return messages.map((msg, i) => (
+                      // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
+                      <Semantic
+                        key={`sem-${msg.timestamp?.getTime?.() ?? i}-${i}`}
+                        id={`msg-${i}`}
+                        role="listitem"
+                        name={`${msg.type ?? "msg"}:${String(msg.content ?? "").slice(0, 40)}`}
+                      >
+                        <MessageView
+                          key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
+                          entry={msg}
+                          index={i}
+                          t={t}
+                          modeColor={modeInfo.color}
+                          expandedMessages={expandedMessages}
+                          mcpRun={mcpRuns[i]}
+                        />
+                      </Semantic>
+                    ));
+                  })()}
+                  {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
+                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                      <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
+                    </box>
+                  )}
+                  {/* Active tool calls — pending inline */}
+                  {activeToolCalls.map((tc) =>
+                    tc.function.name === "task" ? (
+                      <SubagentTaskLine
+                        key={tc.id}
+                        t={t}
+                        agent={tryParseArg(tc, "agent") || "sub-agent"}
+                        label={toolArgs(tc) || "Working"}
+                        pending
+                      />
+                    ) : tc.function.name === "delegate" ? (
+                      <DelegationTaskLine
+                        key={tc.id}
+                        t={t}
+                        label={toolArgs(tc) || "Background research"}
+                        pending
+                        id={undefined}
+                      />
+                    ) : (
+                      <InlineTool key={tc.id} t={t} pending>
+                        {toolLabel(tc)}
+                      </InlineTool>
+                    ),
+                  )}
+                  {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
+                  {councilPhases.length > 0 && <CouncilPhaseTimeline phases={councilPhases} theme={t} />}
+                  {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+                  {councilStatuses.length > 0 && <CouncilStatusList statuses={councilStatuses} theme={t} />}
+                  {councilInfoCards.map((card, idx) => (
+                    <CouncilInfoCardView
+                      key={`info-card-${idx}-${card.title}`}
+                      card={card}
                       terminalCols={width}
-                      side={side}
-                      resolveStyle={resolveStyle}
-                      partnerLastText={partnerLastText}
-                      partnerRole={cm.partner?.role}
                       theme={t}
                     />
-                  );
-                })}
-                {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
-                  <CouncilPlaceholderBubble
-                    key={id}
-                    role={p.role}
-                    side={p.side}
-                    terminalCols={width}
-                    color={p.color}
-                    theme={t}
-                    variant={p.variant}
-                  />
-                ))}
-                {pendingCouncilQuestion && councilCardState && (
-                  <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
-                )}
-                {pendingCouncilPreflight && preflightCardState && (
-                  <CouncilQuestionCard
-                    question={buildPreflightQuestion(pendingCouncilPreflight)}
-                    theme={t}
-                    state={preflightCardState}
-                  />
-                )}
-                {/* Streaming assistant content */}
-                {streamContent && (
-                  <box paddingLeft={3} marginTop={1} flexShrink={0}>
-                    <Markdown content={streamContent} t={t} />
-                  </box>
-                )}
-                {/* Waiting indicator */}
-                {isProcessing && !streamContent && activeToolCalls.length === 0 && (
-                  <ShimmerText t={t} text="Planning next moves" />
-                )}
-                {/* Plan questions panel — inline, OpenCode-style */}
-                {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-                {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
-              </scrollbox>
+                  ))}
+                  {councilMessages.map((cm, idx) => {
+                    const side: "left" | "right" =
+                      cm.kind === "debate" && cm.partner
+                        ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
+                        : "left";
+
+                    if (cm.kind === "leader") {
+                      return <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />;
+                    }
+                    if (cm.kind === "synthesis") {
+                      return <CouncilSynthesisBanner key={idx} msg={cm} />;
+                    }
+                    const pairKey = cm.partner
+                      ? makePairKey(cm.speaker.role, cm.partner.role)
+                      : `solo::${cm.speaker.role}`;
+                    const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
+                    return (
+                      <CouncilMessageBubble
+                        key={idx}
+                        msg={cm}
+                        terminalCols={width}
+                        side={side}
+                        resolveStyle={resolveStyle}
+                        partnerLastText={partnerLastText}
+                        partnerRole={cm.partner?.role}
+                        theme={t}
+                      />
+                    );
+                  })}
+                  {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
+                    <CouncilPlaceholderBubble
+                      key={id}
+                      role={p.role}
+                      side={p.side}
+                      terminalCols={width}
+                      color={p.color}
+                      theme={t}
+                      variant={p.variant}
+                    />
+                  ))}
+                  {pendingCouncilQuestion && councilCardState && (
+                    <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                  )}
+                  {pendingCouncilPreflight && preflightCardState && (
+                    <CouncilQuestionCard
+                      question={buildPreflightQuestion(pendingCouncilPreflight)}
+                      theme={t}
+                      state={preflightCardState}
+                    />
+                  )}
+                  {/* Streaming assistant content */}
+                  {streamContent && (
+                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                      <Markdown content={streamContent} t={t} />
+                    </box>
+                  )}
+                  {/* Waiting indicator */}
+                  {isProcessing && !streamContent && activeToolCalls.length === 0 && (
+                    <ShimmerText t={t} text="Planning next moves" />
+                  )}
+                  {/* Plan questions panel — inline, OpenCode-style */}
+                  {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
+                  {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+                </scrollbox>
+              </Semantic>
               {btwState && <BtwOverlay state={btwState} theme={t} />}
               {/* Prompt */}
               <box flexShrink={0}>
@@ -5431,7 +5453,9 @@ function PromptBox({
           </box>
         )}
         {showSlashMenu && slashItems && (
-          <SlashInlineMenu t={t} items={slashItems} selectedIndex={slashSelectedIndex ?? 0} />
+          <Semantic id="slash-menu" role="menu" isModal name="Slash commands">
+            <SlashInlineMenu t={t} items={slashItems} selectedIndex={slashSelectedIndex ?? 0} />
+          </Semantic>
         )}
         {showSuggestions && typeahead && (
           <SuggestionOverlay t={t} suggestions={typeahead.suggestions} selectedIndex={typeahead.selectedIndex} />
@@ -5449,29 +5473,44 @@ function PromptBox({
         >
           <PromptModeLabel t={t} modeInfo={modeInfo} isProcessing={isProcessing} />
           <box flexGrow={1}>
-            <textarea
-              ref={inputRef}
-              focused={
+            <Semantic
+              id="composer"
+              role="textbox"
+              focus={
                 !showModelPicker &&
                 !showSandboxPicker &&
                 !showWalletPicker &&
                 !showPlanQuestions &&
                 !showApiKeyModal &&
                 !blockPrompt
+                  ? true
+                  : undefined
               }
-              placeholder={
-                isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
-              }
-              textColor={slashInputIsMatched ? "#3b82f6" : t.text}
-              backgroundColor={t.backgroundElement}
-              placeholderColor={t.textMuted}
-              minHeight={1}
-              maxHeight={10}
-              wrapMode="word"
-              keyBindings={TEXTAREA_KEYBINDINGS}
-              onSubmit={onSubmit as unknown as () => void}
-              onPaste={onPaste as unknown as (event: PasteEvent) => void}
-            />
+            >
+              <textarea
+                ref={inputRef}
+                focused={
+                  !showModelPicker &&
+                  !showSandboxPicker &&
+                  !showWalletPicker &&
+                  !showPlanQuestions &&
+                  !showApiKeyModal &&
+                  !blockPrompt
+                }
+                placeholder={
+                  isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
+                }
+                textColor={slashInputIsMatched ? "#3b82f6" : t.text}
+                backgroundColor={t.backgroundElement}
+                placeholderColor={t.textMuted}
+                minHeight={1}
+                maxHeight={10}
+                wrapMode="word"
+                keyBindings={TEXTAREA_KEYBINDINGS}
+                onSubmit={onSubmit as unknown as () => void}
+                onPaste={onPaste as unknown as (event: PasteEvent) => void}
+              />
+            </Semantic>
           </box>
         </box>
       </box>

@@ -8,6 +8,7 @@
  */
 
 import * as React from "react";
+import { Semantic } from "../../agent-harness/semantic.js";
 import { type StatusBarState, statusBarStore } from "./store.js";
 import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";
@@ -85,7 +86,13 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
 }
 
 /** React component with hook-based subscription -- used in app.tsx layout. */
-export function StatusBar(): React.ReactElement {
+export function StatusBar(): React.ReactNode {
   const s = useStatusBarState();
-  return renderStatusBar(s);
+  const valueSummary = `${s.provider || "-"}/${s.model || "-"} ${s.degraded ? "DEGRADED" : "OK"}`;
+  return (
+    // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid ARIA role in the harness protocol, not a DOM element
+    <Semantic id="status" role="statusbar" value={valueSummary} state={s.degraded ? "degraded" : undefined}>
+      {renderStatusBar(s)}
+    </Semantic>
+  );
 }
