@@ -6,7 +6,7 @@
  *   - validateMockLlmPath: ensure mock-llm path stays within repo root
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
@@ -17,6 +17,7 @@ import { createDriver, type Driver } from "../agent-harness/driver.js";
 import type { LiveEvent, LiveFrame } from "../agent-harness/protocol.js";
 import { PROTOCOL_VERSION } from "../agent-harness/protocol.js";
 import { createLineSplitter } from "../agent-harness/sidechannel.js";
+import { spawnAgentTui } from "../agent-harness/test-spawn.js";
 
 const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
@@ -400,23 +401,7 @@ export async function runHarnessDriver(): Promise<void> {
       }
       const sanitizedEnv = sanitizeEnv(input.env ?? {});
 
-      // Skip actual spawn on Windows (fd3/fd4 not supported).
-      if (process.platform === "win32") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: "windows_unsupported",
-                message: "fd3/fd4 sidechannel not supported on Windows",
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      // POSIX: spawn child with fd3/fd4 piped.
+      // Build final arg list.
       const finalArgs = [...input.args];
       if (input.mockLlmDir && !finalArgs.some((a) => a.startsWith("--mock-llm"))) {
         finalArgs.push("--mock-llm", input.mockLlmDir);
@@ -424,21 +409,38 @@ export async function runHarnessDriver(): Promise<void> {
       if (!finalArgs.includes("--agent-mode")) finalArgs.push("--agent-mode");
 
       const entry = process.cwd() + "/src/index.ts";
-      const proc = spawn("bun", ["run", entry, ...finalArgs], {
-        stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
-        cwd: input.cwd,
-        env: { ...sanitizedEnv },
-        shell: false,
-      });
+
+      // Use the cross-platform spawn helper. On POSIX this uses fd 3/4;
+      // on Windows it uses named pipes (MUONROI_HARNESS_OUT_PIPE / IN_PIPE).
+      let spawnResult: Awaited<ReturnType<typeof spawnAgentTui>>;
+      try {
+        spawnResult = await spawnAgentTui([entry, ...finalArgs], {
+          spawnOpts: {
+            cwd: input.cwd,
+            env: { ...sanitizedEnv },
+            shell: false,
+          },
+        });
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ error: "spawn_failed", message: String(err) }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const { proc, inWrite, outRead } = spawnResult;
 
       const driver = createDriver({
         sendKey: (k: string) => {
-          const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
-          fd4?.write(JSON.stringify({ op: "press", key: k }) + "\n");
+          inWrite.write(JSON.stringify({ op: "press", key: k }) + "\n");
         },
         sendType: (t: string) => {
-          const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
-          fd4?.write(JSON.stringify({ op: "type", text: t }) + "\n");
+          inWrite.write(JSON.stringify({ op: "type", text: t }) + "\n");
         },
       });
       const splitter = createLineSplitter((line: string) => {
@@ -451,8 +453,7 @@ export async function runHarnessDriver(): Promise<void> {
           // ignore malformed lines
         }
       });
-      const fd3 = proc.stdio[3] as NodeJS.ReadableStream | null;
-      fd3?.on("data", (chunk: Buffer | string) => {
+      outRead.on("data", (chunk: Buffer | string) => {
         splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
       });
 

@@ -16,7 +16,7 @@
  * ts also deterministic. The test passes --agent-fake-clock and asserts full
  * byte-identity including `ts`.
  *
- * Frame collection: read every JSONL line from fd3 that has mode="live";
+ * Frame collection: read every JSONL line from the out channel that has mode="live";
  * strip nothing when --agent-fake-clock is active (ts is deterministic).
  *
  * Known limitation: if the TUI emits zero frames (because no <Semantic> nodes
@@ -25,11 +25,11 @@
  * A todo documents this gap.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { LiveFrame } from "../../src/agent-harness/protocol";
 import { createLineSplitter } from "../../src/agent-harness/sidechannel";
+import { spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -45,27 +45,24 @@ const FIXTURES_DIR = resolve("tests/harness/fixtures/llm");
 // Helper: run one interaction and collect all LiveFrame JSONL messages
 // ---------------------------------------------------------------------------
 
-type FrameTrace = string[]; // JSON-stringified frames (ts stripped if no fake clock)
+type FrameTrace = string[]; // JSON-stringified frames
 
 async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
+  const args = [
+    ENTRY,
+    "--agent-mode",
+    "--mock-llm",
+    FIXTURES_DIR,
+    "-k",
+    "FAKE_KEY_FOR_TESTS",
+    "-m",
+    "deepseek-ai/DeepSeek-V4-Flash",
+  ];
+  if (useFakeClock) args.push("--agent-fake-clock");
+
+  const { proc, inWrite, outRead, cleanup } = await spawnAgentTui(args);
+
   return new Promise<FrameTrace>((resolve, reject) => {
-    const args = [
-      "run",
-      ENTRY,
-      "--agent-mode",
-      "--mock-llm",
-      FIXTURES_DIR,
-      "-k",
-      "FAKE_KEY_FOR_TESTS",
-      "-m",
-      "deepseek-ai/DeepSeek-V4-Flash",
-    ];
-    if (useFakeClock) args.push("--agent-fake-clock");
-
-    const proc: ChildProcess = spawn("bun", args, {
-      stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"],
-    });
-
     const frames: LiveFrame[] = [];
     let idleReceived = false;
     let settled = false;
@@ -73,6 +70,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     function settle() {
       if (settled) return;
       settled = true;
+      cleanup();
       proc.kill();
       resolve(frames.map((f) => JSON.stringify(f)));
     }
@@ -81,6 +79,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     const safetyTimer = setTimeout(() => {
       if (!settled) {
         settled = true;
+        cleanup();
         proc.kill();
         reject(new Error("runOnce: safety timeout exceeded"));
       }
@@ -95,9 +94,8 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
           if (!idleReceived) {
             idleReceived = true;
             // First idle = startup complete. Send the interaction sequence.
-            const fd4 = proc.stdio[4] as NodeJS.WritableStream | null;
-            fd4?.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
-            fd4?.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
+            inWrite.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
+            inWrite.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
             // Collect frames for a fixed window — using "second idle" as the
             // settle trigger creates a race where the response frame
             // sometimes arrives before, sometimes after the idle event.
@@ -113,8 +111,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
       }
     });
 
-    const fd3 = proc.stdio[3] as NodeJS.ReadableStream | null;
-    fd3?.on("data", (chunk: Buffer | string) => {
+    outRead.on("data", (chunk: Buffer | string) => {
       splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
     });
 
@@ -122,6 +119,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
       clearTimeout(safetyTimer);
       if (!settled) {
         settled = true;
+        cleanup();
         reject(err);
       }
     });
@@ -140,8 +138,9 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
 
 // Unskipped after Phase 8 (fd4 input bridge + idle.markActivity on input).
 // The interaction sequence is composer-only ("hello" + Enter), so we don't
-// depend on the council pipeline. Windows still skipped (fd3/4 unavailable).
-describe.skipIf(process.platform === "win32")(`determinism: ${N}× identical LiveFrame traces`, () => {
+// depend on the council pipeline. Runs on all platforms via named-pipe transport
+// on Windows and fd 3/4 on POSIX.
+describe(`determinism: ${N}× identical LiveFrame traces`, () => {
   /**
    * Core determinism test.
    * Runs N times sequentially (not parallel — avoids port/resource contention).
