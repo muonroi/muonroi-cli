@@ -79,40 +79,28 @@ describe.skipIf(process.platform === "win32")("ideal E2E", () => {
     driver.type("/ideal");
     await driver.wait_for({ selector: "id=slash-menu", timeoutMs: 5_000 });
     expect(driver.query("id=slash-menu")?.name).toBe("Slash commands");
+    // Press Escape to dismiss the menu before the next test.
+    driver.press("Escape");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
   });
 
-  it.skip("ideal status card renders after starting a run", async () => {
-    // Blocked: id="ideal-status" is rendered by ProductStatusCard
-    // (src/ui/cards/product-status-card.tsx:66) which only mounts when productStatus
-    // state is non-null. productStatus is set in app.tsx only when a chunk of type
-    // "product_status_card" arrives. However, no code in src/product-loop/* emits that
-    // chunk type — it is defined in src/types/index.ts:369 and consumed in app.tsx:3020
-    // but never yielded by the sprint runner, loop driver, or phase runner.
-    //
-    // To unblock:
-    //   1. Add a "product_status_card" yield in src/product-loop/sprint-runner.ts after
-    //      each sprint completes, emitting criteriaMet/criteriaPartial/criteriaUnmet counts.
-    //   2. Also add a trigger in src/product-loop/loop-driver.ts (gather stage) for a
-    //      pre-sprint status card so the card appears before the first sprint runs.
-    //   3. Then add a driver.type("/ideal build a counter --max-sprints 1") step here,
-    //      handle the gather questions via driver answers, and wait for id=ideal-status.
-    //   Estimated effort: ~2-3h (emit chunk + fixture entries for gather questions + spec).
-    await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
-    expect(driver.query("id=ideal-status")?.role).toBe("region");
+  it("ideal status card renders after starting a run", async () => {
+    // loop-driver.ts now emits product_status_card after the discover phase
+    // (before gather blocks on user input), so id=ideal-status appears without
+    // needing to drive the full gather/research/sprint flow.
+    driver.type("/ideal");
+    driver.press("Tab");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
+    driver.type("build a counter --max-sprints 1");
+    driver.press("Enter");
+    await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 30_000 });
+    expect(driver.query("id=ideal-status")).toBeTruthy();
   });
 
-  it.skip("can advance through ideal phases", async () => {
-    // Blocked: same as above — id="ideal-status" never appears (product_status_card
-    // chunk is dead code; src/product-loop/* never emits it). Additionally, the test
-    // relies on "role=listitem" nodes which do appear when council_info_card chunks are
-    // emitted (app.tsx wraps each card as role="listitem"), but without first triggering
-    // /ideal and handling the gather question card, the product loop never starts.
-    //
-    // To unblock: fix the product_status_card emit path (see test above), then:
-    //   driver.type('/ideal build a counter --max-sprints 1');
-    //   driver.press('Enter');
-    //   // handle gather question card if it appears (press 'y' for preflight)
-    //   await driver.wait_for({ selector: 'role=listitem', timeoutMs: 15_000 });
+  it("can advance through ideal phases", async () => {
+    // ProductStatusCard renders <Semantic id="ideal-phase-sprint" role="listitem">
+    // and <Semantic id="ideal-phase-cost" role="listitem"> as children of id=ideal-status.
+    // The card is visible once product_status_card chunk fires (discover stage).
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
     const phases = driver.queryAll("role=listitem");
     expect(phases.length).toBeGreaterThan(0);
