@@ -43,7 +43,17 @@ const NAMED: Record<string, { name: string; sequence: string; raw: string }> = {
 };
 
 function makeKey(partial: { name: string; sequence: string; raw: string }): KeyEvent {
-  return {
+  // Some app key-handlers conditionally call key.preventDefault()/stopPropagation()
+  // (typed `?.()` so they tolerate undefined). When the host's keypress arrives
+  // through a terminal, OpenTUI attaches these methods; in agent-mode we
+  // synthesize the event directly, so we must attach them ourselves — otherwise
+  // the optional-chained call is a no-op and the textarea inserts the key
+  // natively in addition to whatever the handler did (e.g. typing `/` results
+  // in `//` because app.tsx manually insertText("/") and relies on
+  // preventDefault to suppress the textarea's own insert).
+  let _defaultPrevented = false;
+  let _propagationStopped = false;
+  const ev = {
     name: partial.name,
     ctrl: false,
     meta: false,
@@ -54,7 +64,20 @@ function makeKey(partial: { name: string; sequence: string; raw: string }): KeyE
     raw: partial.raw,
     eventType: "press",
     source: "raw",
-  } as unknown as KeyEvent;
+    preventDefault() {
+      _defaultPrevented = true;
+    },
+    stopPropagation() {
+      _propagationStopped = true;
+    },
+    get defaultPrevented() {
+      return _defaultPrevented;
+    },
+    get propagationStopped() {
+      return _propagationStopped;
+    },
+  };
+  return ev as unknown as KeyEvent;
 }
 
 function keyForChar(ch: string): KeyEvent {
