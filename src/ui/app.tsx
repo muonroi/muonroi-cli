@@ -3316,10 +3316,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         case "btw":
           inputRef.current?.clear();
           inputRef.current?.insertText("/btw ");
+          try {
+            (inputRef.current as unknown as { focus?: () => void })?.focus?.();
+          } catch {
+            /* opentui versions vary */
+          }
           break;
         case "council":
           inputRef.current?.clear();
           inputRef.current?.insertText("/council ");
+          try {
+            (inputRef.current as unknown as { focus?: () => void })?.focus?.();
+          } catch {
+            /* opentui versions vary */
+          }
           break;
         case "debug-on":
         case "debug-off":
@@ -3532,7 +3542,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             }
             setMessages((prev) => [...prev, buildAssistantEntry(result)]);
           });
-          break;
+          return true;
         }
       }
     },
