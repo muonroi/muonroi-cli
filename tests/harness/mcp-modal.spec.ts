@@ -77,7 +77,17 @@ describe.skipIf(process.platform === "win32")("MCP modal E2E", () => {
   });
 
   it("MCP modal opens via /mcp slash command", async () => {
-    driver.type("/mcp");
+    // Type "/" first and wait for the slash menu to open.  The slash menu
+    // filters items as characters arrive; if we send "/mcp\n" as a single
+    // burst the Enter fires before React re-renders with the filtered list,
+    // so the default-selected item (index 0 = "exit") wins instead of "mcp".
+    driver.type("/");
+    await driver.wait_for({ selector: "id=slash-menu", timeoutMs: 5_000 });
+    driver.type("m");
+    driver.type("c");
+    driver.type("p");
+    // Wait for the filter to settle so filteredSlashItems[0] === "mcp".
+    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
     driver.press("Enter");
     await driver.wait_for({ selector: "id=mcp-modal", timeoutMs: 10_000 });
     const node = driver.query("id=mcp-modal");

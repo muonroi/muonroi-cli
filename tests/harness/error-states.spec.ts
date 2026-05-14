@@ -87,10 +87,12 @@ describe.skipIf(process.platform === "win32")("error states E2E", () => {
     // The sentinel substring "__trigger_error__" matches the error fixture entry,
     // causing mock.complete() to throw → stream-loop catches → "error" chunk →
     // app.tsx emits toast event with level="error".
+    // Note: toast is an *event* (agentRuntime.emitEvent), NOT a Semantic node, so
+    // we wait with { event: "toast" } rather than { selector: "role=toast" }.
     driver.type("__trigger_error__");
     driver.press("Enter");
 
-    await driver.wait_for({ selector: "role=toast", timeoutMs: 10_000 });
+    await driver.wait_for({ event: "toast", timeoutMs: 10_000 });
     const event = driver.last_event("toast") as { kind: "toast"; level: string; text: string } | null;
     expect(event).not.toBeNull();
     expect(event?.level).toBe("error");

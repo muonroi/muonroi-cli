@@ -77,7 +77,20 @@ describe.skipIf(process.platform === "win32")("subagents modal E2E", () => {
   });
 
   it("subagents modal opens via /agents slash command", async () => {
-    driver.type("/agents");
+    // Type "/" first and wait for the slash menu to open.  The slash menu
+    // filters items as characters arrive; if we send "/agents\n" as a single
+    // burst the Enter fires before React re-renders with the filtered list,
+    // so the default-selected item (index 0 = "exit") wins instead of "agents".
+    driver.type("/");
+    await driver.wait_for({ selector: "id=slash-menu", timeoutMs: 5_000 });
+    driver.type("a");
+    driver.type("g");
+    driver.type("e");
+    driver.type("n");
+    driver.type("t");
+    driver.type("s");
+    // Wait for the filter to settle so filteredSlashItems[0] === "agents".
+    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
     driver.press("Enter");
     await driver.wait_for({ selector: "id=subagents-modal", timeoutMs: 10_000 });
     const node = driver.query("id=subagents-modal");
