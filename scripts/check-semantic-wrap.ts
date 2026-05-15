@@ -19,18 +19,33 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
 const ALLOW_FILE = join(__dirname, ".semantic-wrap-allow.txt");
 
+// Scan src/ui/ (TUI components) AND all adapter package fixture/test directories
+// so that scaffolded React/Angular components are also checked.
+const SCAN_PATTERNS = [
+  "src/ui/**/*.tsx",
+  // React adapter: component sources and __tests__ fixture apps
+  "packages/agent-harness-react/src/**/*.tsx",
+  "packages/agent-harness-react/__tests__/**/*.tsx",
+  // Angular adapter: component sources (Angular uses .ts but exports JSX via TSX where applicable)
+  "packages/agent-harness-angular/src/**/*.tsx",
+  "packages/agent-harness-angular/__tests__/**/*.tsx",
+];
+
 const warnings = await findUnwrappedComponents({
   rootDir: REPO_ROOT,
-  patterns: ["src/ui/**/*.tsx"],
+  patterns: SCAN_PATTERNS,
   allowlistPath: ALLOW_FILE,
   wrapperNames: ["Semantic"],
 });
 
+const SCOPE_LABEL =
+  "src/ui/, packages/agent-harness-react/, packages/agent-harness-angular/";
+
 if (warnings.length === 0) {
-  console.log("✔  check-semantic-wrap: all src/ui/ components appear to have <Semantic> root wrapping.");
+  console.log(`✔  check-semantic-wrap: all components in ${SCOPE_LABEL} appear to have <Semantic> root wrapping.`);
 } else {
   console.warn(
-    `\n⚠  check-semantic-wrap: ${warnings.length} component(s) in src/ui/ are missing a <Semantic> root wrap.\n`,
+    `\n⚠  check-semantic-wrap: ${warnings.length} component(s) are missing a <Semantic> root wrap.\n`,
   );
   for (const w of warnings) {
     console.warn(`  ${w.path}:${w.line}`);
