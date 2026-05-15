@@ -247,6 +247,13 @@ Vision Proxy (input) ─── text-only models auto-receive image descriptions
 Tool Loop ────────────── bash, file ops, grep, LSP, schedule
   │                      optional Shuru sandbox isolation
   ▼
+Sub-agent cap ────────── inside `task` sub-agent loop only: cumulative
+  │                      tool-output budget (default 120KB ≈ 30K tokens).
+  │                      Past 30% → trim each result to 8KB; past 70% →
+  │                      2KB + "finalize"; past 100% → stub. Identical
+  │                      outputs are deduped to a "see call #N" pointer.
+  │                      Override: MUONROI_SUB_AGENT_BUDGET_CHARS.
+  ▼
 Vision Bridge (output) ── intercepts tool results returning images
   │                       (Playwright screenshots, Figma exports, etc.)
   │                       extract → Qwen3-VL → cache → strip bytes → inject text
@@ -256,8 +263,10 @@ Output guardrails ─────── scrub base64 before persist; cap each to
   │                      MUONROI_MAX_TOOL_OUTPUT_CHARS
   │
   ▼
-Auto-compact ─────────── silent context compression after every turn
-  │                      context stays flat at ~6–7K tokens regardless of session length
+Auto-compact ─────────── silent context compression at end of top-level turn
+  │                      when context exceeds autoCompactThresholdPct (default
+  │                      25% of model window). Note: runs at top-level only —
+  │                      sub-agent internal context is bounded by the cap above.
   ▼
 Session storage ──────── SQLite persistence, crash recovery via pending-calls log
 ```
@@ -338,11 +347,26 @@ Full settings reference: `~/.muonroi-cli/user-settings.json`
   "autoCouncilConfidence": 0.85,
   "autoCompactAfterTurn": true,
   "autoCompactThresholdPct": 0.25,
+  "subAgentBudgetChars": 120000,
   "providers": { "anthropic": {}, "openai": {}, "deepseek": {}, "xai": {}, "siliconflow": {}, "ollama": {} },
   "sandboxMode": "off",
   "lsp": { "enabled": true }
 }
 ```
+
+### Cost forensics
+
+Inspect the per-event token + cache breakdown of any past session
+(useful when a single prompt seems unexpectedly expensive):
+
+```bash
+muonroi-cli usage forensics <session-id-prefix>     # plain table
+muonroi-cli usage forensics <prefix> --json         # machine-readable
+```
+
+The report flags acceptance-target anomalies inline: peak single-call
+input over 80K, `usage_events.message_seq` left NULL, or a DeepSeek
+route producing zero `cache_creation_tokens` across a large session.
 
 Per-project overrides: `.muonroi-cli/settings.json` in the repo root.
 Absolute model override: `MUONROI_MODEL=<model-id>` env var (suppresses all routing).

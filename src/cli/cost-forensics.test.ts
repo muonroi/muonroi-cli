@@ -40,8 +40,8 @@ function summary(events: CostForensicsRow[]): CostForensicsSummary {
 function captureStdout(fn: () => void): string {
   const chunks: string[] = [];
   const original = process.stdout.write.bind(process.stdout);
-  // @ts-expect-error — narrow override for the duration of the call
-  process.stdout.write = (chunk: string) => {
+  // Narrow override for the duration of the call.
+  (process.stdout as unknown as { write: (c: unknown) => boolean }).write = (chunk: unknown) => {
     chunks.push(typeof chunk === "string" ? chunk : String(chunk));
     return true;
   };
