@@ -52,6 +52,11 @@
       "node": "./dist/node/transports/sidechannel.js",
       "default": "./src/transports/sidechannel.ts"
     },
+    "./lint": {
+      "types": "./src/lint.ts",
+      "node": "./dist/node/lint.js",
+      "default": "./src/lint.ts"
+    },
     "./mcp-server": {
       "types": "./src/mcp-server.ts",
       "node": "./dist/node/mcp-server.js",

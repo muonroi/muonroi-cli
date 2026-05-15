@@ -5,6 +5,7 @@ export default defineConfig([
   {
     entry: {
       index: "src/index.ts",
+      lint: "src/lint.ts",
       "mcp-server": "src/mcp-server.ts",
       registry: "src/registry.ts",
       "transports/sidechannel": "src/transports/sidechannel.ts",
