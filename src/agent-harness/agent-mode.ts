@@ -17,11 +17,11 @@
  */
 
 import { createReadStream, createWriteStream } from "node:fs";
-import { createIdleDetector } from "./idle.js";
-import type { LiveEvent } from "./protocol.js";
+import { createIdleDetector } from "@muonroi/agent-harness-core/idle";
+import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
+import { createLineSplitter, createSidechannelWriter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import type { SemanticRegistry } from "./reconciler-hook.js";
 import { createReconcilerHook, createSemanticRegistry } from "./reconciler-hook.js";
-import { createLineSplitter, createSidechannelWriter } from "./sidechannel.js";
 
 // ---------------------------------------------------------------------------
 // Public API types

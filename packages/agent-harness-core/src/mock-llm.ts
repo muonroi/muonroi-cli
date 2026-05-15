@@ -22,7 +22,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Adapter, AdapterRequest, ProviderId, ProviderStream } from "../providers/types.js";
+import type { Adapter, AdapterRequest, ProviderId, ProviderStream } from "../../../src/providers/types.js";
 
 type SequenceEntry = { text?: string; error?: string; match?: string };
 type SequenceFixture = { sequence: SequenceEntry[] };

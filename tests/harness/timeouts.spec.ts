@@ -9,9 +9,9 @@
  * consistency even though these are pure unit tests of the driver.
  */
 
+import { createDriver } from "@muonroi/agent-harness-core/driver";
+import type { LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import { createDriver } from "../../src/agent-harness/driver";
-import type { LiveFrame } from "../../src/agent-harness/protocol";
 
 const minimalFrame: LiveFrame = {
   mode: "live",

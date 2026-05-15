@@ -1,8 +1,13 @@
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  sanitizeEnv,
+  validateCwd,
+  validateMockLlmPath,
+  validateStartArgs,
+} from "@muonroi/agent-harness-core/mcp-server";
 import { describe, expect, it } from "vitest";
-import { sanitizeEnv, validateCwd, validateMockLlmPath, validateStartArgs } from "../harness-driver";
 
 describe("validateStartArgs (argv allowlist)", () => {
   it("accepts --agent-* flags", () => {

@@ -1,6 +1,6 @@
+import { buildCapabilitiesPayload } from "@muonroi/agent-harness-core/mcp-server";
+import { PROTOCOL_VERSION } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION } from "../../agent-harness/protocol";
-import { buildCapabilitiesPayload } from "../harness-driver";
 
 describe("harness-driver capabilities", () => {
   it("reports current protocol version", () => {

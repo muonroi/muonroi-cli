@@ -1,6 +1,6 @@
+import { createDriver } from "@muonroi/agent-harness-core/driver";
+import type { LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import { createDriver } from "../driver";
-import type { LiveFrame } from "../protocol";
 
 const frame: LiveFrame = {
   mode: "live",

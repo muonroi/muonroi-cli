@@ -26,9 +26,9 @@
  */
 
 import { resolve } from "node:path";
+import type { LiveFrame } from "@muonroi/agent-harness-core/protocol";
+import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { describe, expect, it } from "vitest";
-import type { LiveFrame } from "../../src/agent-harness/protocol";
-import { createLineSplitter } from "../../src/agent-harness/sidechannel";
 import { spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import Ajv from "ajv/dist/2020.js";
 import type { DesignSpec, StatePatch, UINode } from "./protocol.js";
 
-const schemaPath = new URL("../../docs/agent-harness/schema.json", import.meta.url);
+const schemaPath = new URL("../../../docs/agent-harness/schema.json", import.meta.url);
 const schema = JSON.parse(readFileSync(schemaPath, "utf8"));
 const ajv = new Ajv({ strict: false });
 ajv.addSchema(schema);

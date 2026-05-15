@@ -1,5 +1,5 @@
+import { parseSelector } from "@muonroi/agent-harness-core/selector";
 import { describe, expect, it } from "vitest";
-import { parseSelector } from "../selector";
 
 describe("selector parser", () => {
   it("parses key=value", () => {
@@ -38,8 +38,8 @@ describe("selector parser", () => {
   });
 });
 
-import type { UINode } from "../protocol";
-import { matchSelector } from "../selector";
+import type { UINode } from "@muonroi/agent-harness-core/protocol";
+import { matchSelector } from "@muonroi/agent-harness-core/selector";
 
 const tree: UINode = {
   id: "root",

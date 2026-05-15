@@ -1,4 +1,4 @@
-import type { HarnessMessage } from "./protocol.js";
+import type { HarnessMessage } from "../protocol.js";
 
 const MAX_BYTES = 1024 * 1024; // 1 MiB
 

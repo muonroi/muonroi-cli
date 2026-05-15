@@ -1,5 +1,8 @@
 {
   "name": "muonroi-cli",
+  "workspaces": [
+    "packages/*"
+  ],
   "version": "1.2.3",
   "description": "BYOK AI coding agent with multi-model council debate, role-based routing, and auto-compact.",
   "type": "module",
@@ -27,7 +30,8 @@
     "lint:fix": "biome check --fix src/",
     "lint:semantic": "bun scripts/check-semantic-wrap.ts",
     "pre-commit": "lint-staged",
-    "prepare": "husky"
+    "prepare": "husky",
+    "postinstall": "bun run scripts/postinstall.ts"
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"
