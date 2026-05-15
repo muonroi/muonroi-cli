@@ -171,10 +171,32 @@ describe("P3: convergence ratio over a round's pair-turns", () => {
     /\bready\s+to\s+(proceed|move|start)\s+to\s+implementation\b/i,
     /\blet['']?s\s+proceed\s+to\s+implementation\b/i,
     /\bfinal\s+(position|confirmation)\b/i,
+    /\b(i\s+)?(fully\s+|completely\s+)?(agree|agreed|concur)\s+(with|on)\b/i,
+    /\bsigned?\s+off\b/i,
+    /\bship\s+it\b/i,
+    /\bno\s+(further\s+|more\s+)?(objections?|concerns?|issues?)\b/i,
+    /\bgreen[\s-]?light\b/i,
+    /\blooks?\s+good\s+to\s+(me|go)\b/i,
+    /\bgood\s+to\s+(go|ship|proceed)\b/i,
+    /(^|\s)nh[ấâ]t\s+tr[íi](?=\s|[.,!?;:]|$)/i,
+    /(^|\s)[đd][ồô]ng\s+[ýy]\s+(ho[àa]n\s+to[àa]n|v[ớơ]i)(?=\s|[.,!?;:]|$)/i,
+    /(^|\s)kh[ôo]ng\s+c[òo]n\s+(g[òo]p\s+[ýy]|[ýy]\s+ki[ếê]n|tranh\s+lu[ậâ]n)(?=\s|[.,!?;:]|$)/i,
+    /(^|\s)s[ẵã]n\s+s[àa]ng\s+(tri[ểê]n\s+khai|implement)(?=\s|[.,!?;:]|$)/i,
+    /(^|\s)ch[ốô]t\s+(s[ổô]|l[ạa]i|design)(?=\s|[.,!?;:]|$)/i,
   ];
+  const NEGATION_HEAD =
+    /\b(don'?t|do\s+not|does\s+not|doesn'?t|cannot|can'?t|not|no(t)?\s+yet|haven'?t|hasn'?t|kh[ôo]ng|ch[ưu]a)\b/i;
   function looksLocked(text: string): boolean {
     if (!text || text.length < 20) return false;
-    return LOCK_PHRASES.some((re) => re.test(text));
+    for (const re of LOCK_PHRASES) {
+      const match = re.exec(text);
+      if (!match) continue;
+      const windowStart = Math.max(0, match.index - 24);
+      const upstream = text.slice(windowStart, match.index);
+      if (NEGATION_HEAD.test(upstream)) continue;
+      return true;
+    }
+    return false;
   }
   function convergenceRatio(turns: string[]): number {
     const usable = turns.filter((t) => t && t.trim().length >= 20);
@@ -217,6 +239,42 @@ describe("P3: convergence ratio over a round's pair-turns", () => {
       "The auth flow needs another pass — we haven't settled on token rotation.",
     ];
     expect(convergenceRatio(turns)).toBeLessThan(0.8);
+  });
+
+  it("upgrade A: broader EN convergence vocabulary (signed off / ship it / no objections)", () => {
+    const turns = [
+      "Signed off on the proposed architecture, no further concerns from my side.",
+      "I fully agree with the migration plan as outlined.",
+      "Ship it — green-light from the security review perspective.",
+    ];
+    expect(convergenceRatio(turns)).toBe(1.0);
+  });
+
+  it("upgrade A: Vietnamese convergence vocabulary", () => {
+    const turns = [
+      "Tôi hoàn toàn nhất trí với thiết kế hiện tại, không còn ý kiến gì thêm.",
+      "Đồng ý hoàn toàn với phương án migration, có thể chốt sổ.",
+      "Sẵn sàng triển khai theo spec này, không còn tranh luận gì.",
+    ];
+    expect(convergenceRatio(turns)).toBe(1.0);
+  });
+
+  it("upgrade A: negation guard prevents false positive on 'don't agree'", () => {
+    const turns = [
+      "I don't agree with the proposed caching layer, performance impact is unclear.",
+      "We do not concur with skipping the integration test phase here.",
+      "Tôi không nhất trí với cách tiếp cận này, có rủi ro về consistency.",
+    ];
+    expect(convergenceRatio(turns)).toBe(0);
+  });
+
+  it("upgrade A: negation only blocks the matched phrase, downstream agreement still counts", () => {
+    // First clause negates; second clause is a separate positive lock signal far
+    // beyond the 24-char negation window — should still register as locked.
+    const turns = [
+      "I'm not entirely sold on the rollout plan today, but after looking at the metrics overnight everything is locked from my perspective.",
+    ];
+    expect(convergenceRatio(turns)).toBe(1.0);
   });
 });
 
@@ -350,6 +408,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
     }));
     // tracedGenerate also fails — both paths exhausted
     vi.doMock("../llm.js", () => ({
+      // biome-ignore lint/correctness/useYield: mock generator intentionally throws without yielding
       tracedGenerate: vi.fn().mockImplementation(async function* () {
         throw new Error("Retry also failed");
       }),
@@ -395,6 +454,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
       buildDebatePlanPrompt: vi.fn().mockReturnValue({ system: "sys", prompt: "prompt" }),
     }));
     vi.doMock("../llm.js", () => ({
+      // biome-ignore lint/correctness/useYield: mock generator intentionally throws without yielding
       tracedGenerate: vi.fn().mockImplementation(async function* () {
         throw new Error("retry fail");
       }),
@@ -430,6 +490,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
       buildDebatePlanPrompt: vi.fn().mockReturnValue({ system: "sys", prompt: "prompt" }),
     }));
     vi.doMock("../llm.js", () => ({
+      // biome-ignore lint/correctness/useYield: mock generator intentionally throws without yielding
       tracedGenerate: vi.fn().mockImplementation(async function* () {
         throw new Error("also fails");
       }),

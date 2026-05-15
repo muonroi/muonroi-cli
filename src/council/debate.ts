@@ -86,6 +86,7 @@ function makeExcerpt(text: string): { excerpt: string; length: number } {
  * English but synthesis might leak some Vietnamese in cross-language sessions.
  */
 const LOCK_PHRASES = [
+  // English — original phrases (kept for backward compatibility)
   /\bever[yi]thing\s+(is\s+)?locked\b/i,
   /\bfully\s+aligned\b/i,
   /\bcomplete\s+agreement\b/i,
@@ -96,11 +97,44 @@ const LOCK_PHRASES = [
   /\bready\s+to\s+(proceed|move|start)\s+to\s+implementation\b/i,
   /\blet['']?s\s+proceed\s+to\s+implementation\b/i,
   /\bfinal\s+(position|confirmation)\b/i,
+  // English — broader convergence vocabulary (council-mode upgrade A)
+  /\b(i\s+)?(fully\s+|completely\s+)?(agree|agreed|concur)\s+(with|on)\b/i,
+  /\bsigned?\s+off\b/i,
+  /\bship\s+it\b/i,
+  /\bno\s+(further\s+|more\s+)?(objections?|concerns?|issues?)\b/i,
+  /\bgreen[\s-]?light\b/i,
+  /\blooks?\s+good\s+to\s+(me|go)\b/i,
+  /\bgood\s+to\s+(go|ship|proceed)\b/i,
+  // Vietnamese — cross-language session safety.
+  // NOTE: JS regex `\b` is ASCII-only; accented chars like "í", "ý", "ậ" are
+  // treated as non-word, so a trailing `\b` after them never matches. Use
+  // `(?=\s|[.,!?;:]|$)` as an explicit word-end guard instead.
+  /(^|\s)nh[ấâ]t\s+tr[íi](?=\s|[.,!?;:]|$)/i,
+  /(^|\s)[đd][ồô]ng\s+[ýy]\s+(ho[àa]n\s+to[àa]n|v[ớơ]i)(?=\s|[.,!?;:]|$)/i,
+  /(^|\s)kh[ôo]ng\s+c[òo]n\s+(g[òo]p\s+[ýy]|[ýy]\s+ki[ếê]n|tranh\s+lu[ậâ]n)(?=\s|[.,!?;:]|$)/i,
+  /(^|\s)s[ẵã]n\s+s[àa]ng\s+(tri[ểê]n\s+khai|implement)(?=\s|[.,!?;:]|$)/i,
+  /(^|\s)ch[ốô]t\s+(s[ổô]|l[ạa]i|design)(?=\s|[.,!?;:]|$)/i,
 ];
+
+// Negation guard — if a lock-phrase candidate appears inside a negation
+// envelope, treat as NOT locked. Common patterns: "we don't agree",
+// "not fully aligned", "tôi không nhất trí". Negation must be within 24 chars
+// upstream of the match (heuristic: typical clause length).
+const NEGATION_HEAD =
+  /\b(don'?t|do\s+not|does\s+not|doesn'?t|cannot|can'?t|not|no(t)?\s+yet|haven'?t|hasn'?t|kh[ôo]ng|ch[ưu]a)\b/i;
 
 function looksLocked(text: string): boolean {
   if (!text || text.length < 20) return false;
-  return LOCK_PHRASES.some((re) => re.test(text));
+  for (const re of LOCK_PHRASES) {
+    const match = re.exec(text);
+    if (!match) continue;
+    // Negation guard: scan a small window upstream for a negation head.
+    const windowStart = Math.max(0, match.index - 24);
+    const upstream = text.slice(windowStart, match.index);
+    if (NEGATION_HEAD.test(upstream)) continue;
+    return true;
+  }
+  return false;
 }
 
 function convergenceRatio(turns: string[]): number {
@@ -889,14 +923,23 @@ export async function* runDebate(
       // aligned", "ready to proceed"), we end the debate regardless of
       // leader judgment. The leader's per-round slice (-8 turns) sometimes
       // misses cross-pair convergence frequency; this catches it explicitly.
+      //
+      // Round 1 exit is gated on the leader confirming no unresolved points
+      // remain — convergence vocabulary alone at round 1 isn't enough since
+      // the skeptic stance may still surface fresh risks late in the round.
+      // From round 2 onward, lock ratio alone is sufficient.
       const lastRoundTurns = pairResults.flatMap((pr) => pr.chunks).map((c) => c.text);
       const lockRatio = convergenceRatio(lastRoundTurns);
-      if (round >= 2 && lockRatio >= 0.8) {
+      const skepticClean = Array.isArray(evaluation.unresolvedPoints) && evaluation.unresolvedPoints.length === 0;
+      const canExitEarly = (round >= 2 && lockRatio >= 0.8) || (round === 1 && lockRatio >= 0.8 && skepticClean);
+      if (canExitEarly) {
+        const reason =
+          round === 1
+            ? `round 1 converged early (lock=${Math.round(lockRatio * 100)}%, no unresolved points)`
+            : `${Math.round(lockRatio * 100)}% of round ${round} turns contained lock phrases`;
         yield {
           type: "content",
-          content:
-            `\n> Convergence detected: ${Math.round(lockRatio * 100)}% of round ${round} turns contained lock phrases. ` +
-            `Ending debate to avoid a redundant confirmation round.\n`,
+          content: `\n> Convergence detected: ${reason}. Ending debate to avoid a redundant confirmation round.\n`,
         };
         break;
       }
