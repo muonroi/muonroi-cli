@@ -179,8 +179,10 @@ export async function recordVerifyFailureAndMaybePush(input: {
   errorMessage: string;
   verifyCommand: string;
   fileTouched: string;
+  /** Chat session id (sessions.id). Used as the FK-safe first arg to logInteraction. */
+  sessionId?: string;
 }): Promise<VerifyFailureSignatures> {
-  const { flowDir, runId, cwd, errorMessage, verifyCommand, fileTouched } = input;
+  const { flowDir, runId, cwd, errorMessage, verifyCommand, fileTouched, sessionId } = input;
 
   const sigs = await loadVerifyFailureSignatures(flowDir, runId);
   const sig = computeFailureSignature({ errorMessage, verifyCommand, fileTouched });
@@ -210,7 +212,7 @@ export async function recordVerifyFailureAndMaybePush(input: {
 
     // P3.6: telemetry row so /ideal stats can surface pattern detection rate.
     try {
-      logInteraction(runId, "ee_judge", {
+      logInteraction(sessionId ?? runId, "ee_judge", {
         eventSubtype: "ideal_verify_pattern",
         data: { signature: sig, count: sigs[sig].count, file: fileTouched },
       });

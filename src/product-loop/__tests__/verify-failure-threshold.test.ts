@@ -26,6 +26,7 @@ import { logInteraction } from "../../storage/index.js";
 
 let flowDir: string;
 const runId = "run-threshold-test";
+const sessionId = "test-session-id";
 const cwd = "/fake/cwd";
 
 const BASE_INPUT = {
@@ -101,23 +102,23 @@ describe("recordVerifyFailureAndMaybePush — threshold", () => {
     setDefaultEEClient(client);
 
     // First two calls — no log
-    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
-    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, sessionId, cwd, ...BASE_INPUT });
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, sessionId, cwd, ...BASE_INPUT });
     expect(vi.mocked(logInteraction)).not.toHaveBeenCalled();
 
-    // Third call — should log
-    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    // Third call — should log with chat session id (FK-safe)
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, sessionId, cwd, ...BASE_INPUT });
     expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
 
     const [calledRunId, calledEventType, calledMeta] = vi.mocked(logInteraction).mock.calls[0];
-    expect(calledRunId).toBe(runId);
+    expect(calledRunId).toBe(sessionId);
     expect(calledEventType).toBe("ee_judge");
     expect(calledMeta?.eventSubtype).toBe("ideal_verify_pattern");
     expect((calledMeta?.data as Record<string, unknown>)?.count).toBe(3);
     expect(typeof (calledMeta?.data as Record<string, unknown>)?.signature).toBe("string");
 
     // Fourth call — no additional log (one-shot)
-    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, sessionId, cwd, ...BASE_INPUT });
     expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
   });
 

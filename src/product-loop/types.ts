@@ -123,6 +123,12 @@ export interface DriverContext {
    */
   cwd?: string;
   /**
+   * Chat session id from the orchestrator (sessions.id in the DB). Used as the
+   * first argument to logInteraction so FK constraints are satisfied.
+   * Falls back to runId when not provided (e.g. unit tests / legacy callers).
+   */
+  sessionId?: string;
+  /**
    * Bridge into the orchestrator's tool-execution loop. Sprint-runner pipes
    * the council plan through this fn during the implement stage so the same
    * tools / EE intercept / posttool hooks fire as for ordinary chat turns.

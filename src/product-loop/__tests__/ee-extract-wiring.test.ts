@@ -55,6 +55,7 @@ async function tmpFlowDir(): Promise<string> {
 function makeOpts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     sessionModelId: "claude-sonnet-4-6",
+    sessionId: "test-session-id",
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9 },
     respondToQuestion: vi.fn(async () => "answer"),
@@ -137,10 +138,10 @@ describe("P1.3 — EE extract wiring", () => {
     expect(callArg.meta?.scope).toBe(`ideal:${result.runId}`);
     expect(callArg.projectPath).toBe(flowDir);
 
-    // P1.6: logInteraction called with ee_injection / extract telemetry
+    // P1.6: logInteraction called with the chat session id (FK-safe)
     expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
     const logCall = vi.mocked(logInteraction).mock.calls[0];
-    expect(logCall[0]).toBe(result.runId);
+    expect(logCall[0]).toBe("test-session-id");
     expect(logCall[1]).toBe("ee_injection");
     expect(logCall[2]?.eventSubtype).toBe("extract");
     expect(logCall[2]?.data?.ok).toBe(true);
@@ -203,10 +204,10 @@ describe("P1.3 — EE extract wiring", () => {
     const callArg = vi.mocked(stub.extract).mock.calls[0][0];
     expect(callArg.meta?.scope).toBe(`ideal:${runId}`);
 
-    // P1.6: logInteraction called with ee_injection / extract on abort path
+    // P1.6: logInteraction called with the chat session id (FK-safe) on abort path
     expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
     const logCall = vi.mocked(logInteraction).mock.calls[0];
-    expect(logCall[0]).toBe(runId);
+    expect(logCall[0]).toBe("test-session-id");
     expect(logCall[1]).toBe("ee_injection");
     expect(logCall[2]?.eventSubtype).toBe("extract");
     expect(logCall[2]?.data?.ok).toBe(true);

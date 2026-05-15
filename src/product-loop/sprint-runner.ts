@@ -221,6 +221,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       errorMessage,
       verifyCommand,
       fileTouched: "unknown",
+      sessionId: ctx.sessionId,
     }).catch(() => {
       /* failure tracking must not derail the sprint */
     });

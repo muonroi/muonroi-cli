@@ -41,6 +41,7 @@ function makeOpts(overrides: Record<string, unknown> = {}): any {
     idea: overrides.idea ?? "build a counter",
     subcommand: "start",
     sessionModelId: "claude-sonnet-4-6",
+    sessionId: "test-session-id",
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 8, doneThreshold: 0.9 },
     respondToQuestion: vi.fn(async () => "answer"),
