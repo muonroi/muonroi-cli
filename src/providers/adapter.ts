@@ -6,6 +6,7 @@
  */
 
 import { createAnthropicAdapter } from "./anthropic.js";
+import { loadTokensWithRefresh } from "./auth/openai-oauth.js";
 import { apiBaseFor } from "./endpoints.js";
 import { createGeminiAdapter } from "./gemini.js";
 import { createOllamaAdapter } from "./ollama.js";
@@ -39,6 +40,9 @@ function createMockAdapter(id: ProviderId, mock: MockLlmInstance): Adapter {
 
 /**
  * Create an Adapter for the given provider.
+ * For OpenAI, this is an async factory — call `createAdapterAsync` if you
+ * need OAuth token auto-loading. `createAdapter` is kept synchronous for
+ * backward compat but does NOT load OAuth tokens.
  */
 export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
   // Mock-LLM short-circuit: if the harness injected a mock, return it immediately.
@@ -51,6 +55,8 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
     case "anthropic":
       return createAnthropicAdapter(config);
     case "openai":
+      // Synchronous path: API-key only (no OAuth auto-load).
+      // For OAuth support use createAdapterAsync().
       return createOpenAIAdapter(config);
     case "google":
       return createGeminiAdapter(config);
@@ -63,6 +69,37 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
     case "ollama":
       return createOllamaAdapter(config);
   }
+}
+
+/**
+ * Create an Adapter for the given provider, with OAuth auto-loading for OpenAI.
+ * Use this instead of `createAdapter` whenever you need subscription-backed auth.
+ *
+ * For OpenAI:
+ *   - Loads stored OAuth tokens (auto-refreshes if expiring within 60s).
+ *   - If OAuth tokens exist, builds adapter with Bearer headers.
+ *   - If no OAuth tokens, falls through to API-key path (backward compat).
+ * For all other providers: identical to `createAdapter`.
+ */
+export async function createAdapterAsync(id: ProviderId, config: ProviderConfig): Promise<Adapter> {
+  // Mock-LLM short-circuit
+  const mock = (globalThis as { __muonroiMockLlm?: MockLlmInstance }).__muonroiMockLlm;
+  if (mock) {
+    return createMockAdapter(id, mock);
+  }
+
+  if (id === "openai") {
+    const tokens = await loadTokensWithRefresh("openai").catch(() => null);
+    if (tokens) {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { openAIOAuth } = await import("./auth/openai-oauth.js");
+      const oauthHeaders = openAIOAuth.authHeaders(tokens);
+      return createOpenAIAdapter({ ...config, oauthHeaders });
+    }
+    // No OAuth tokens — fall through to API-key adapter
+  }
+
+  return createAdapter(id, config);
 }
 
 /**
