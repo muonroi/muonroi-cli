@@ -1,0 +1,43 @@
+{
+  "name": "@muonroi/agent-harness-angular",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/public-api.ts",
+  "module": "./src/public-api.ts",
+  "types": "./src/public-api.ts",
+  "exports": {
+    ".": {
+      "types": "./src/public-api.ts",
+      "default": "./src/public-api.ts"
+    }
+  },
+  "scripts": {
+    "test": "bunx vitest run"
+  },
+  "peerDependencies": {
+    "@angular/common": ">=16",
+    "@angular/core": ">=16",
+    "rxjs": "*",
+    "zone.js": "*"
+  },
+  "dependencies": {
+    "@muonroi/agent-harness-core": "*"
+  },
+  "devDependencies": {
+    "@angular/common": "^17.3.0",
+    "@angular/compiler": "^17.3.0",
+    "@angular/compiler-cli": "^17.3.0",
+    "@angular/core": "^17.3.0",
+    "@angular/platform-browser": "^17.3.0",
+    "@angular/platform-browser-dynamic": "^17.3.0",
+    "rxjs": "^7.8.1",
+    "zone.js": "^0.14.10",
+    "esbuild": "^0.25.4",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.4.0",
+    "vitest": "^4.1.5",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.14"
+  }
+}

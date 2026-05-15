@@ -16,6 +16,7 @@ const workspaceLinks: Array<{ name: string; pkg: string }> = [
   { name: "@muonroi/agent-harness-core", pkg: "packages/agent-harness-core" },
   { name: "@muonroi/agent-harness-opentui", pkg: "packages/agent-harness-opentui" },
   { name: "@muonroi/agent-harness-react", pkg: "packages/agent-harness-react" },
+  { name: "@muonroi/agent-harness-angular", pkg: "packages/agent-harness-angular" },
 ];
 
 for (const { name, pkg } of workspaceLinks) {
