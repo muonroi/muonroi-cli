@@ -66,7 +66,8 @@ describe("compile-time tree-shake guard (Task 3.4)", () => {
     });
 
     expect(result.outputFiles).toHaveLength(1);
-    const code = result.outputFiles[0].text;
+    if (!result.outputFiles) throw new Error("esbuild produced no outputFiles");
+    const code = result.outputFiles[0]!.text;
 
     // These identifiers come from the registry-touching branch — must be gone.
     // "register(" and "snapshot(" are function call signatures specific to
@@ -87,7 +88,8 @@ describe("compile-time tree-shake guard (Task 3.4)", () => {
     });
 
     expect(result.outputFiles).toHaveLength(1);
-    const code = result.outputFiles[0].text;
+    if (!result.outputFiles) throw new Error("esbuild produced no outputFiles");
+    const code = result.outputFiles[0]!.text;
 
     // When harness is ON, registry calls must be present
     expect(code).toContain("register(");
@@ -112,7 +114,8 @@ describe("bundle size ≤ 2KB gzipped (Task 3.5)", () => {
     });
 
     expect(result.outputFiles).toHaveLength(1);
-    const raw = Buffer.from(result.outputFiles[0].contents);
+    if (!result.outputFiles) throw new Error("esbuild produced no outputFiles");
+    const raw = Buffer.from(result.outputFiles[0]!.contents);
     const gzipped = gzipSync(raw, { level: 9 });
 
     console.log(`Bundle raw: ${raw.byteLength} bytes`);
@@ -133,7 +136,8 @@ describe("bundle size ≤ 2KB gzipped (Task 3.5)", () => {
     });
 
     expect(result.outputFiles).toHaveLength(1);
-    const raw = Buffer.from(result.outputFiles[0].contents);
+    if (!result.outputFiles) throw new Error("esbuild produced no outputFiles");
+    const raw = Buffer.from(result.outputFiles[0]!.contents);
     const gzipped = gzipSync(raw, { level: 9 });
 
     console.log(`Bundle (harness=true) raw: ${raw.byteLength} bytes`);
