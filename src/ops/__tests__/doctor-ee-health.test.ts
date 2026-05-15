@@ -25,6 +25,21 @@ vi.mock("../../ee/intercept.js", () => ({
   })),
 }));
 
+// Mock keychain — on macOS the real keychain probe can prompt and hang in CI.
+vi.mock("../../providers/keychain.js", () => ({
+  listStoredProviders: vi.fn().mockResolvedValue([]),
+  getStoredApiKey: vi.fn().mockResolvedValue(null),
+  setStoredApiKey: vi.fn().mockResolvedValue(undefined),
+  deleteStoredApiKey: vi.fn().mockResolvedValue(undefined),
+}));
+
+// Mock settings — avoid filesystem reads that may block in CI sandboxes.
+vi.mock("../../utils/settings.js", () => ({
+  loadUserSettings: vi.fn().mockResolvedValue({}),
+  saveUserSettings: vi.fn().mockResolvedValue(undefined),
+  loadMcpServers: vi.fn().mockResolvedValue([]),
+}));
+
 import { healthDetailed } from "../../ee/health.js";
 import { runDoctor } from "../doctor.js";
 
