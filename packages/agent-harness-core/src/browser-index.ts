@@ -16,3 +16,4 @@ export * from "./predicate.js";
 export * from "./protocol.js";
 export * from "./registry.js";
 export * from "./selector.js";
+export * from "./transports/ws.js";
