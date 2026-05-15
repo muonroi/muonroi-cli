@@ -43,7 +43,7 @@ import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { appendRoleMemory } from "./role-memory.js";
-import type { DriverContext, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult } from "./verify-result.js";
 
@@ -115,7 +115,31 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const verifyRecipe = await verifyAgent.detectVerifyRecipe(verifyAgent.getSandboxSettings());
   const cb3 = CB3_verifyBlank(sprintN, verifyRecipe);
   if (cb3.halt) {
-    throw new Error(`Halted by circuit breaker: ${cb3.reason}`);
+    // Yield a structured halt chunk so the TUI can render an actionable recovery
+    // card (Task 5.2). Do NOT throw — callers must discriminate on chunk.type.
+    const haltChunk: HaltChunk = {
+      type: "halt",
+      reason: cb3.reason ?? "no_recipe",
+      recovery_options: [
+        {
+          id: "init_new",
+          label: "Init new project",
+          description: "Bootstrap a new project from muonroi-building-block (BE) + a FE adapter.",
+        },
+        {
+          id: "point_to_existing",
+          label: "Point to existing project",
+          description: "Provide a path; re-run verify-detect against that directory.",
+        },
+        {
+          id: "continue_as_council",
+          label: "Continue as council brainstorm",
+          description: "Skip CB-3 and verify gates; produce a spec.md from a council debate.",
+        },
+      ],
+    };
+    yield haltChunk as unknown as StreamChunk;
+    return undefined as unknown as IterationState;
   }
 
   // ── Step 3: Plan stage (council, skipClarification=true) ──────────────────

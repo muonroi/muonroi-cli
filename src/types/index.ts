@@ -369,7 +369,8 @@ export interface StreamChunk {
     | "product_status_card"
     | "experience_warning"
     | "experience_injected"
-    | "push_notification";
+    | "push_notification"
+    | "halt";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -385,6 +386,8 @@ export interface StreamChunk {
   councilMessage?: CouncilMessage;
   councilInfoCard?: CouncilInfoCard;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
+  /** Populated when type === "halt". Contains structured recovery options. */
+  haltChunk?: import("../product-loop/types.js").HaltChunk;
   experienceWarning?: ExperienceWarningData;
   experienceInjected?: ExperienceInjectedData;
 }
