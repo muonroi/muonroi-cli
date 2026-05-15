@@ -22,7 +22,37 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Adapter, AdapterRequest, ProviderId, ProviderStream } from "../../../src/providers/types.js";
+
+// ---------------------------------------------------------------------------
+// Minimal provider types inlined here to avoid cross-package rootDir violation.
+// These are structural duplicates of src/providers/types.ts — keep in sync.
+// ---------------------------------------------------------------------------
+type StreamChunk =
+  | { kind: "text-delta"; text: string }
+  | { kind: "tool-call"; toolCallId: string; toolName: string; input: unknown }
+  | { kind: "tool-result"; toolCallId: string; output: unknown }
+  | {
+      kind: "finish";
+      reason: "stop" | "length" | "tool-calls" | "error";
+      usage?: { inputTokens: number; outputTokens: number };
+    }
+  | { kind: "error"; error: Error };
+
+type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "xai" | "ollama";
+
+interface AdapterRequest {
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  tools?: unknown[];
+  toolChoice?: unknown;
+  abortSignal?: AbortSignal;
+}
+
+type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
+
+interface Adapter {
+  readonly id: ProviderId;
+  stream(req: AdapterRequest): ProviderStream;
+}
 
 type SequenceEntry = { text?: string; error?: string; match?: string };
 type SequenceFixture = { sequence: SequenceEntry[] };
