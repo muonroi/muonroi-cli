@@ -25,14 +25,25 @@
  *   ≥ 100%  → return error stub that signals the agent to stop expanding scope
  */
 
+import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
 
 export interface SubAgentCapOptions {
   /** Total chars of tool output the sub-agent may receive before the cap kicks in fully. */
   maxCumulativeChars?: number;
+  /**
+   * If true (default), identical tool outputs (by content hash) within the
+   * same sub-agent invocation are returned as a short reference stub on
+   * subsequent occurrences. Cheap way to neutralize a sub-agent that
+   * re-reads the same file or re-runs the same grep.
+   */
+  dedupRepeatOutputs?: boolean;
+  /** Outputs below this length are not worth deduplicating. */
+  dedupMinChars?: number;
 }
 
 const DEFAULT_MAX_CUMULATIVE_CHARS = 120_000;
+const DEFAULT_DEDUP_MIN_CHARS = 500;
 
 export interface SubAgentCapState {
   /** Running sum of characters returned to the sub-agent so far. */
@@ -41,6 +52,15 @@ export interface SubAgentCapState {
   max: number;
   /** True once `cumulative >= max` (sub-agent should wrap up). */
   exhausted: boolean;
+  /** Number of duplicate-output detections (telemetry / tests). */
+  dedupHits: number;
+  /** Internal: short-hash → first call index, for "see call #N" pointers. */
+  seenHashes: Map<string, number>;
+  /** Internal: call counter for stable pointers. */
+  callIndex: number;
+  /** Internal: feature flags from options. */
+  dedupEnabled: boolean;
+  dedupMinChars: number;
 }
 
 function trimHeadTail(text: string, target: number): string {
@@ -54,10 +74,31 @@ function trimHead(text: string, target: number): string {
   return `${text.slice(0, target)}\n\n... [${text.length - target} chars trimmed — sub-agent budget low; finalize work] ...`;
 }
 
+function shortHash(text: string): string {
+  return createHash("sha1").update(text).digest("hex").slice(0, 12);
+}
+
 export function compressForCap(state: SubAgentCapState, raw: string): string {
   if (state.exhausted) {
     return `[sub-agent tool budget exhausted (${state.cumulative}/${state.max} chars). Further tool calls will return this stub. Summarize findings now and return.]`;
   }
+  state.callIndex += 1;
+
+  // Dedup pass — if we've already returned this exact output, replace with a
+  // pointer. Cheap protection against an agent that re-reads the same file or
+  // re-runs the same grep mid-loop.
+  if (state.dedupEnabled && raw.length >= state.dedupMinChars) {
+    const hash = shortHash(raw);
+    const firstSeen = state.seenHashes.get(hash);
+    if (firstSeen !== undefined) {
+      state.dedupHits += 1;
+      const stub = `[duplicate tool output detected — identical to result of call #${firstSeen} in this sub-agent (sha1:${hash}, ${raw.length} chars). Reuse the earlier result instead of re-running.]`;
+      state.cumulative += stub.length;
+      return stub;
+    }
+    state.seenHashes.set(hash, state.callIndex);
+  }
+
   const ratio = state.cumulative / state.max;
   let out: string;
   if (ratio >= 0.7) {
@@ -126,6 +167,11 @@ export function wrapToolSetWithCap(
     cumulative: 0,
     max: Math.max(20_000, opts.maxCumulativeChars ?? DEFAULT_MAX_CUMULATIVE_CHARS),
     exhausted: false,
+    dedupHits: 0,
+    seenHashes: new Map(),
+    callIndex: 0,
+    dedupEnabled: opts.dedupRepeatOutputs ?? true,
+    dedupMinChars: opts.dedupMinChars ?? DEFAULT_DEDUP_MIN_CHARS,
   };
   return {
     tools: wrapInternal(tools, state),

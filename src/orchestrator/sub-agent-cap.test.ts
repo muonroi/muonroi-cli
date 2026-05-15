@@ -3,8 +3,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import { compressForCap, type SubAgentCapState, wrapToolSetWithCap } from "./sub-agent-cap.js";
 
-function freshState(max: number): SubAgentCapState {
-  return { cumulative: 0, max, exhausted: false };
+function freshState(max: number, dedupEnabled = true): SubAgentCapState {
+  return {
+    cumulative: 0,
+    max,
+    exhausted: false,
+    dedupHits: 0,
+    seenHashes: new Map(),
+    callIndex: 0,
+    dedupEnabled,
+    dedupMinChars: 500,
+  };
 }
 
 describe("compressForCap", () => {
@@ -17,24 +26,62 @@ describe("compressForCap", () => {
   });
 
   it("trims to ~8k head/tail once over 30% budget", () => {
-    const state: SubAgentCapState = { cumulative: 35_000, max: 100_000, exhausted: false };
+    const state = freshState(100_000);
+    state.cumulative = 35_000;
     const out = compressForCap(state, "y".repeat(40_000));
     expect(out.length).toBeLessThan(40_000);
     expect(out).toContain("trimmed by sub-agent cap");
   });
 
   it("trims to ~2k head plus 'budget low' warning over 70% budget", () => {
-    const state: SubAgentCapState = { cumulative: 75_000, max: 100_000, exhausted: false };
+    const state = freshState(100_000);
+    state.cumulative = 75_000;
     const out = compressForCap(state, "z".repeat(20_000));
     expect(out).toContain("finalize work");
     expect(out.length).toBeLessThan(20_000);
   });
 
   it("emits exhausted stub once budget is fully spent", () => {
-    const state: SubAgentCapState = { cumulative: 100_000, max: 100_000, exhausted: true };
+    const state = freshState(100_000);
+    state.cumulative = 100_000;
+    state.exhausted = true;
     const out = compressForCap(state, "w".repeat(10_000));
     expect(out).toContain("budget exhausted");
     expect(out).toContain("Summarize findings now");
+  });
+
+  it("dedups identical outputs across calls and returns a pointer", () => {
+    const state = freshState(100_000);
+    const payload = "DUP".repeat(500); // 1_500 chars, above the 500-char min
+    const first = compressForCap(state, payload);
+    expect(first).toBe(payload);
+    expect(state.dedupHits).toBe(0);
+
+    const second = compressForCap(state, payload);
+    expect(second).toContain("duplicate tool output detected");
+    expect(second).toContain("call #1");
+    expect(state.dedupHits).toBe(1);
+    // Cumulative should grow by stub length, NOT full payload length again.
+    expect(state.cumulative).toBeLessThan(payload.length * 2);
+  });
+
+  it("skips dedup for outputs shorter than dedupMinChars", () => {
+    const state = freshState(100_000);
+    state.dedupMinChars = 500;
+    const small = "x".repeat(200);
+    compressForCap(state, small);
+    const out = compressForCap(state, small);
+    expect(out).toBe(small);
+    expect(state.dedupHits).toBe(0);
+  });
+
+  it("dedup can be disabled via opts", () => {
+    const state = freshState(100_000, false);
+    const payload = "Y".repeat(1_000);
+    compressForCap(state, payload);
+    const out = compressForCap(state, payload);
+    expect(out).toBe(payload);
+    expect(state.dedupHits).toBe(0);
   });
 
   it("marks exhausted once cumulative reaches max", () => {
