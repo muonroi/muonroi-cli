@@ -233,8 +233,21 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
       for (const f of r.files ?? []) parts.push(`\n── ${f.path} (${f.language}) ──\n${f.content}`);
       return parts.join("\n");
     }
-    default:
-      return JSON.stringify(d, null, 2);
+    case "general": {
+      const r = d as { response?: string; reasoning?: string };
+      return r.response ?? JSON.stringify(d, null, 2);
+    }
+    default: {
+      // Graceful fallback for unknown taskTypes; probe common text fields.
+      const obj = (d ?? {}) as Record<string, unknown>;
+      const primary =
+        (typeof obj["response"] === "string" && obj["response"]) ||
+        (typeof obj["summary"] === "string" && obj["summary"]) ||
+        (typeof obj["content"] === "string" && obj["content"]) ||
+        (typeof obj["text"] === "string" && obj["text"]) ||
+        null;
+      return primary || JSON.stringify(d, null, 2);
+    }
   }
 }
 
@@ -6634,8 +6647,42 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
         </box>
       );
     }
-    default:
+    case "general": {
+      const g = d as { response?: string; reasoning?: string };
+      if (!g.response) return <text fg={t.textMuted}>{JSON.stringify(d, null, 2)}</text>;
+      return (
+        <box flexDirection="column" paddingLeft={2} marginTop={1}>
+          <text fg={t.text}>{g.response}</text>
+          {g.reasoning ? (
+            <text fg={t.textMuted}>
+              {"  ── reasoning: "}
+              {g.reasoning}
+            </text>
+          ) : null}
+        </box>
+      );
+    }
+    default: {
+      // Graceful fallback for taskTypes without a dedicated renderer (e.g. a new
+      // PIL schema added without UI updates). Probe for common text-bearing fields
+      // before falling back to raw JSON.
+      const obj = (d ?? {}) as Record<string, unknown>;
+      const primary =
+        (typeof obj["response"] === "string" && obj["response"]) ||
+        (typeof obj["summary"] === "string" && obj["summary"]) ||
+        (typeof obj["content"] === "string" && obj["content"]) ||
+        (typeof obj["text"] === "string" && obj["text"]) ||
+        null;
+      if (primary) {
+        return (
+          <box flexDirection="column" paddingLeft={2} marginTop={1}>
+            <text fg={t.text}>{primary}</text>
+            <text fg={t.textMuted}>{`  ── (renderer missing for taskType: ${sr.taskType})`}</text>
+          </box>
+        );
+      }
       return <text fg={t.text}>{JSON.stringify(d, null, 2)}</text>;
+    }
   }
 }
 

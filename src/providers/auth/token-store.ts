@@ -72,24 +72,32 @@ async function loadKeytar(): Promise<KeytarLike | null> {
  * Persist OAuth tokens for a provider.
  * Tries keychain first; falls back to filesystem (0600).
  */
+// Windows Credential Manager's stub rejects credentials larger than ~2.5 KiB
+// with "The stub received bad data" — OAuth blobs routinely exceed that, so
+// for anything over this threshold we skip keytar and go straight to the
+// file fallback (mode 0600).
+const KEYCHAIN_BLOB_LIMIT_BYTES = 2000;
+
 export async function saveTokens(provider: string, tokens: OAuthTokens): Promise<void> {
   enrollTokensInRedactor(tokens);
   const json = JSON.stringify(tokens);
 
-  const kt = await loadKeytar();
-  if (kt) {
-    try {
-      await kt.setPassword(KEYCHAIN_SERVICE, oauthAccount(provider), json);
-      return;
-    } catch {
-      // fall through to file
+  // Try keytar only for payloads small enough that Credential Manager will
+  // accept them. For larger blobs, write to the 0600 file fallback directly.
+  if (json.length <= KEYCHAIN_BLOB_LIMIT_BYTES) {
+    const kt = await loadKeytar();
+    if (kt) {
+      try {
+        await kt.setPassword(KEYCHAIN_SERVICE, oauthAccount(provider), json);
+        return;
+      } catch {
+        // fall through to file
+      }
     }
   }
 
-  // File fallback
   await mkdir(fallbackDir(), { recursive: true });
-  const filePath = fallbackPath(provider);
-  await writeFile(filePath, json, { mode: 0o600, encoding: "utf8" });
+  await writeFile(fallbackPath(provider), json, { mode: 0o600, encoding: "utf8" });
 }
 
 /**
