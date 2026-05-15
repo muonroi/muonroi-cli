@@ -12,7 +12,7 @@ import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
-import type { ProductStatusCardData } from "../product-loop/types.js";
+import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
@@ -90,6 +90,7 @@ import {
 } from "./components/council-question-card.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
+import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
@@ -782,6 +783,13 @@ export interface AppStartupConfig {
   sandboxSettings: SandboxSettings;
   maxToolRounds: number;
   version: string;
+  /**
+   * TEST SEAM (Task 5.2): when true, dispatch a synthetic halt chunk after the
+   * TUI reaches its first idle state. Lets harness E2E specs verify the recovery
+   * card without triggering a real CB-3 sprint run.
+   * Never set this in production — only passed via --inject-halt CLI flag.
+   */
+  injectHalt?: boolean;
 }
 
 interface AppProps {
@@ -920,6 +928,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const getSide = usePairSideMap();
   const { store: storeQuote, getPartnerLast } = usePairQuoteBuffer();
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
+  const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
+  const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
+  // This lets harness E2E specs verify the recovery card without a real CB-3 run.
+  useEffect(() => {
+    if (!startupConfig.injectHalt) return;
+    setActiveHaltCard({
+      type: "halt",
+      reason: "no_recipe",
+      detail: "Injected by --inject-halt for E2E testing.",
+      recovery_options: [
+        {
+          id: "init_new",
+          label: "Init new project",
+          description: "Run /ideal init to scaffold a fresh verify recipe.",
+        },
+        {
+          id: "point_to_existing",
+          label: "Point to existing recipe",
+          description: "Provide the path to an existing verify-manifest.yml.",
+        },
+        {
+          id: "continue_as_council",
+          label: "Continue as council brainstorm",
+          description: "Skip verification and proceed with the council debate flow.",
+        },
+      ],
+    });
+    setHaltSelectedIndex(0);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -2623,6 +2661,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   `\n💡 [Experience Injected] ${chunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${chunk.experienceInjected?.scoreFloor ?? 0})\n`,
                 );
                 break;
+              case "halt":
+                if (chunk.haltChunk) {
+                  setActiveHaltCard(chunk.haltChunk);
+                  setHaltSelectedIndex(0);
+                }
+                break;
               case "done":
                 break;
             }
@@ -3644,6 +3688,33 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // Halt recovery card intercepts all input until dismissed.
+      if (activeHaltCard) {
+        if (isEscapeKey(key)) {
+          setActiveHaltCard(null);
+          setHaltSelectedIndex(0);
+          return;
+        }
+        if (key.name === "up") {
+          setHaltSelectedIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          setHaltSelectedIndex((i) => Math.min(activeHaltCard.recovery_options.length - 1, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
+          if (chosen) {
+            // TODO Task 5.3/5.4/5.5 — wire real action handlers per option.id
+            console.log("halt recovery: not implemented yet:", chosen.id);
+          }
+          setActiveHaltCard(null);
+          setHaltSelectedIndex(0);
+          return;
+        }
+        return;
+      }
       if (btwState) {
         if (isEscapeKey(key) || key.name === "return") {
           dismissBtw();
@@ -4938,6 +5009,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     </Semantic>
                   )}
                   {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+                  {activeHaltCard && (
+                    <HaltRecoveryCard
+                      halt={activeHaltCard}
+                      selectedIndex={haltSelectedIndex}
+                      terminalCols={width}
+                      theme={t}
+                    />
+                  )}
                   {councilStatuses.length > 0 && (
                     <Semantic id="council-status" role="listbox" name="Council Status">
                       <CouncilStatusList statuses={councilStatuses} theme={t} />
