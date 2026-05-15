@@ -20,8 +20,9 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { createIdleDetector } from "@muonroi/agent-harness-core/idle";
 import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter, createSidechannelWriter } from "@muonroi/agent-harness-core/transports/sidechannel";
+import { installOpenTUIHarness, type OpenTUIHarnessTransport } from "./install.js";
 import type { SemanticRegistry } from "./reconciler-hook.js";
-import { createReconcilerHook, createSemanticRegistry } from "./reconciler-hook.js";
+import { createSemanticRegistry } from "./reconciler-hook.js";
 
 // ---------------------------------------------------------------------------
 // Public API types
@@ -123,17 +124,14 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     (process.stdout as unknown as { rows: number }).rows = opts.rows;
   }
 
-  // --- Sequence / clock ----------------------------------------------------
-  let seq = 0;
-  const now = (): number => (opts.fakeClock ? seq * 16 : Date.now());
+  // --- Clock ---------------------------------------------------------------
+  // now() is exposed on AgentModeRuntime so callers can get a consistent
+  // timestamp.  fakeClock returns 0 (a stable sentinel for tests) because the
+  // seq counter is now owned by installOpenTUIHarness internally.
+  const now = (): number => (opts.fakeClock ? 0 : Date.now());
 
-  // --- Semantic registry + reconciler hook ---------------------------------
+  // --- Semantic registry ---------------------------------------------------
   const registry = createSemanticRegistry();
-  const hook = createReconcilerHook({
-    registry,
-    getSeq: () => seq++,
-    getTs: now,
-  });
 
   // --- Idle detector -------------------------------------------------------
   const idle = createIdleDetector({
@@ -142,6 +140,23 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
       const line = createSidechannelWriter.serialize({ t: "idle" });
       outStream.write(line);
     },
+  });
+
+  // --- Harness install ------------------------------------------------------
+  // Wire registry → outStream via installOpenTUIHarness.  The transport wraps
+  // the raw outStream; close() is handled by uninstall() in dispose().
+  // onFrame threads idle.markActivity() so the idle detector resets after each
+  // emitted frame (prevents spurious idle events mid-render-burst).
+  const transport: OpenTUIHarnessTransport = {
+    send: (line: string) => outStream.write(line),
+    close: () => outStream.end(),
+  };
+
+  const harnessHandle = installOpenTUIHarness({
+    registry,
+    transport,
+    fps: 60,
+    onFrame: () => idle.markActivity(),
   });
 
   // --- Command channel (in stream → handlers) ------------------------------
@@ -168,12 +183,11 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
 
   // --- Public API ----------------------------------------------------------
 
+  // capture() is called from app.tsx's addPostProcessFn after each renderer
+  // pass — it forces an immediate snapshot via captureNow() rather than waiting
+  // for the next poll interval tick.
   const capture = (): void => {
-    const frame = hook.capture();
-    if (frame !== null) {
-      outStream.write(createSidechannelWriter.serialize(frame));
-      idle.markActivity();
-    }
+    harnessHandle.captureNow();
   };
 
   const emitEvent = (e: LiveEvent): void => {
@@ -189,9 +203,9 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   };
 
   const dispose = (): void => {
+    harnessHandle.uninstall(); // stops poll interval; transport.close() ends outStream
     idle.dispose();
-    // End the out stream; in stream is read-only — unpipe/destroy.
-    outStream.end();
+    // in stream is read-only — destroy if possible.
     if (typeof (inStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy === "function") {
       (inStream as NodeJS.ReadableStream & { destroy: () => void }).destroy();
     }
