@@ -255,6 +255,14 @@ export interface UserSettings {
     /** Switch back to premium for final synthesis. Default: false. */
     premiumSynthesis?: boolean;
   };
+  /**
+   * Maximum cumulative chars of tool output a `task` sub-agent may receive
+   * before its tool results get progressively trimmed (then stubbed out).
+   * Prevents one sub-agent from accumulating 500k+ billed input tokens via
+   * unbounded read_file/grep loops. Default 120_000 (~30k tokens). Range
+   * 20_000–600_000.
+   */
+  subAgentBudgetChars?: number;
 }
 
 export interface ProjectSettings {
@@ -841,6 +849,22 @@ export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
   if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
   return 0.25; // default 25% — compact later to reduce summarize-call frequency
+}
+
+/**
+ * Per-invocation cap on cumulative tool-output chars inside a `task`
+ * sub-agent. See orchestrator/sub-agent-cap.ts for the tiered compression
+ * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
+ */
+export function getSubAgentBudgetChars(): number {
+  const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 600_000) return Math.floor(n);
+  }
+  const val = loadUserSettings().subAgentBudgetChars;
+  if (typeof val === "number" && val >= 20_000 && val <= 600_000) return Math.floor(val);
+  return 120_000;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
