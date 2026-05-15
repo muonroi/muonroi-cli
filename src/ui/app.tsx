@@ -1,21 +1,23 @@
 import * as path from "node:path";
+import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
+import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";
 import type { KeyBinding, KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentModeRuntime } from "../agent-harness/agent-mode.js";
-import { useAgentInputBridge } from "../agent-harness/input-bridge.js";
-import { Semantic, SemanticProvider } from "../agent-harness/semantic.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
-import type { ProductStatusCardData } from "../product-loop/types.js";
+import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { continueAsCouncil } from "../scaffold/continue-as-council.js";
+import { initNewProject } from "../scaffold/init-new.js";
+import { pointToExisting } from "../scaffold/point-to-existing.js";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -43,8 +45,10 @@ import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/hos
 import {
   type CustomSubagentConfig,
   getApiKey,
+  getDisabledModels,
   getDisabledProviders,
   getTelegramBotToken,
+  isModelDisabled,
   isReservedSubagentName,
   loadMcpServers,
   loadPaymentSettings,
@@ -61,6 +65,7 @@ import {
   savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
+  setModelDisabled,
   setProviderDisabled,
 } from "../utils/settings";
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
@@ -91,6 +96,18 @@ import {
 } from "./components/council-question-card.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
+import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
+import {
+  FE_STACK_OPTIONS,
+  InitNewFormCard,
+  type InitNewFormState,
+  initialInitNewFormState,
+} from "./components/init-new-form-card.js";
+import {
+  initialPointToExistingFormState,
+  PointToExistingFormCard,
+  type PointToExistingFormState,
+} from "./components/point-to-existing-form-card.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
@@ -783,6 +800,13 @@ export interface AppStartupConfig {
   sandboxSettings: SandboxSettings;
   maxToolRounds: number;
   version: string;
+  /**
+   * TEST SEAM (Task 5.2): when true, dispatch a synthetic halt chunk after the
+   * TUI reaches its first idle state. Lets harness E2E specs verify the recovery
+   * card without triggering a real CB-3 sprint run.
+   * Never set this in production — only passed via --inject-halt CLI flag.
+   */
+  injectHalt?: boolean;
 }
 
 interface AppProps {
@@ -869,6 +893,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [configuredProviders, setConfiguredProviders] = useState<ProviderId[]>([]);
   const [disabledProviders, setDisabledProvidersState] = useState<ProviderId[]>(() => getDisabledProviders());
+  const [disabledModels, setDisabledModelsState] = useState<string[]>(() => getDisabledModels());
   const [modelPickerFocus, setModelPickerFocus] = useState<"models" | "providers">("models");
   const [providerChipIndex, setProviderChipIndex] = useState(0);
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
@@ -921,6 +946,44 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const getSide = usePairSideMap();
   const { store: storeQuote, getPartnerLast } = usePairQuoteBuffer();
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
+  const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
+  const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
+  const [pointToExistingForm, setPointToExistingForm] = useState<PointToExistingFormState | null>(null);
+  const [councilProgress, setCouncilProgress] = useState<{
+    status: "running" | "done" | "error";
+    specPath: string;
+    hasContent: boolean;
+    error?: string;
+  } | null>(null);
+  // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
+  // This lets harness E2E specs verify the recovery card without a real CB-3 run.
+  useEffect(() => {
+    if (!startupConfig.injectHalt) return;
+    setActiveHaltCard({
+      type: "halt",
+      reason: "no_recipe",
+      detail: "Injected by --inject-halt for E2E testing.",
+      recovery_options: [
+        {
+          id: "init_new",
+          label: "Init new project",
+          description: "Run /ideal init to scaffold a fresh verify recipe.",
+        },
+        {
+          id: "point_to_existing",
+          label: "Point to existing recipe",
+          description: "Provide the path to an existing verify-manifest.yml.",
+        },
+        {
+          id: "continue_as_council",
+          label: "Continue as council brainstorm",
+          description: "Skip verification and proceed with the council debate flow.",
+        },
+      ],
+    });
+    setHaltSelectedIndex(0);
+  }, [startupConfig.injectHalt]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -1217,6 +1280,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       return next;
     });
     setModelPickerIndex(0);
+  }, []);
+
+  const toggleModelDisabled = useCallback((modelId: string) => {
+    const disabled = isModelDisabled(modelId);
+    const next = setModelDisabled(modelId, !disabled);
+    setDisabledModelsState(next);
   }, []);
 
   const setReasoningEfforts = useCallback((next: Record<string, ReasoningEffort>) => {
@@ -2624,6 +2693,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   `\n💡 [Experience Injected] ${chunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${chunk.experienceInjected?.scoreFloor ?? 0})\n`,
                 );
                 break;
+              case "halt":
+                if (chunk.haltChunk) {
+                  setActiveHaltCard(chunk.haltChunk);
+                  setHaltSelectedIndex(0);
+                }
+                break;
               case "done":
                 break;
             }
@@ -3645,6 +3720,210 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // Point-to-existing form intercepts all input while open.
+      if (pointToExistingForm) {
+        if (pointToExistingForm.step === "input") {
+          if (isEscapeKey(key)) {
+            setPointToExistingForm(null);
+            return;
+          }
+          if (key.name === "return") {
+            const rawPath = pointToExistingForm.pathInput.trim();
+            if (!rawPath) {
+              setPointToExistingForm((s) => (s ? { ...s, errorMessage: "Path cannot be empty." } : s));
+              return;
+            }
+            setPointToExistingForm((s) => (s ? { ...s, step: "loading", errorMessage: null } : s));
+            pointToExisting({
+              path: rawPath,
+              detectVerifyRecipe: async (cwd) => {
+                // Sprint re-entry via detectVerifyRecipe is DEFERRED — the orchestrator
+                // instance is not accessible from app.tsx without a shared context seam.
+                // See Task 5.4 report. Returns null so the user sees the error state until
+                // the seam is built in a follow-up task.
+                // TODO: inject via AppStartupConfig or React context.
+                void cwd;
+                return null;
+              },
+            })
+              .then((result) => {
+                if (result.ok) {
+                  setPointToExistingForm((s) =>
+                    s ? { ...s, step: "done", resultPath: result.absolutePath, errorMessage: null } : s,
+                  );
+                } else if (result.reason === "not_a_dir") {
+                  setPointToExistingForm((s) =>
+                    s ? { ...s, step: "input", errorMessage: "Path does not exist or is not a directory." } : s,
+                  );
+                } else {
+                  // no_recipe
+                  setPointToExistingForm((s) =>
+                    s
+                      ? {
+                          ...s,
+                          step: "error",
+                          errorMessage:
+                            "No verify recipe found at " +
+                            result.absolutePath +
+                            ". Try a different directory or pick 'Init new' instead.",
+                        }
+                      : s,
+                  );
+                }
+              })
+              .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setPointToExistingForm((s) => (s ? { ...s, step: "error", errorMessage: msg } : s));
+              });
+            return;
+          }
+          if (key.name === "backspace" || key.name === "delete") {
+            setPointToExistingForm((s) => (s ? { ...s, pathInput: s.pathInput.slice(0, -1), errorMessage: null } : s));
+            return;
+          }
+          if (key.sequence && !key.ctrl && !key.meta && key.sequence.length === 1) {
+            setPointToExistingForm((s) =>
+              s ? { ...s, pathInput: s.pathInput + key.sequence, errorMessage: null } : s,
+            );
+            return;
+          }
+          return;
+        }
+        // done / error — any key dismisses. loading ignores keys.
+        if (pointToExistingForm.step === "done" || pointToExistingForm.step === "error") {
+          setPointToExistingForm(null);
+          return;
+        }
+        return;
+      }
+      // Init-new form intercepts all input while open.
+      if (initNewForm) {
+        if (initNewForm.step === "name") {
+          if (isEscapeKey(key)) {
+            setInitNewForm(null);
+            return;
+          }
+          if (key.name === "return") {
+            const name = initNewForm.nameInput.trim();
+            if (!name) {
+              setInitNewForm((s) => (s ? { ...s, nameError: "Project name cannot be empty." } : s));
+              return;
+            }
+            if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+              setInitNewForm((s) => (s ? { ...s, nameError: "Name cannot contain path separators." } : s));
+              return;
+            }
+            setInitNewForm((s) => (s ? { ...s, step: "fe-stack", nameError: null } : s));
+            return;
+          }
+          if (key.name === "backspace" || key.name === "delete") {
+            setInitNewForm((s) => (s ? { ...s, nameInput: s.nameInput.slice(0, -1), nameError: null } : s));
+            return;
+          }
+          if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+            setInitNewForm((s) => (s ? { ...s, nameInput: s.nameInput + key.sequence, nameError: null } : s));
+            return;
+          }
+          return;
+        }
+        if (initNewForm.step === "fe-stack") {
+          if (isEscapeKey(key)) {
+            setInitNewForm((s) => (s ? { ...s, step: "name" } : s));
+            return;
+          }
+          if (key.name === "up") {
+            setInitNewForm((s) => (s ? { ...s, feStackIndex: Math.max(0, s.feStackIndex - 1) } : s));
+            return;
+          }
+          if (key.name === "down") {
+            setInitNewForm((s) =>
+              s ? { ...s, feStackIndex: Math.min(FE_STACK_OPTIONS.length - 1, s.feStackIndex + 1) } : s,
+            );
+            return;
+          }
+          if (key.name === "return") {
+            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
+            const projectName = initNewForm.nameInput.trim();
+            const beSource =
+              process.env.MUONROI_BUILDING_BLOCK_URL ??
+              (process.env.HOME ? `${process.env.HOME}/muonroi-building-block` : "muonroi-building-block");
+            setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            initNewProject({ projectName, beSource, feStack })
+              .then((result) => {
+                setInitNewForm((s) => (s ? { ...s, step: "done", resultMessage: `Created: ${result.projectDir}` } : s));
+              })
+              .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
+              });
+            return;
+          }
+          return;
+        }
+        // done / error — any key dismisses. running ignores keys.
+        if (initNewForm.step === "done" || initNewForm.step === "error") {
+          setInitNewForm(null);
+          return;
+        }
+        return;
+      }
+      // Halt recovery card intercepts all input until dismissed.
+      if (activeHaltCard) {
+        if (isEscapeKey(key)) {
+          setActiveHaltCard(null);
+          setHaltSelectedIndex(0);
+          return;
+        }
+        if (key.name === "up") {
+          setHaltSelectedIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          setHaltSelectedIndex((i) => Math.min(activeHaltCard.recovery_options.length - 1, i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
+          if (chosen) {
+            if (chosen.id === "init_new") {
+              // Task 5.3 — open init-new form; close halt card.
+              setInitNewForm(initialInitNewFormState());
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              return;
+            }
+            if (chosen.id === "point_to_existing") {
+              // Task 5.4 — open point-to-existing form; close halt card.
+              setPointToExistingForm(initialPointToExistingFormState());
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              return;
+            }
+            if (chosen.id === "continue_as_council") {
+              // Task 5.5 — kick off council brainstorm; production council wiring
+              // (real orchestrator inject) is deferred, scaffolder writes a
+              // header-only spec.md when no runCouncil is provided.
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              void continueAsCouncil({ prompt: activeHaltCard.detail ?? "(no prompt)" })
+                .then((r) => {
+                  setCouncilProgress({ status: "done", specPath: r.specPath, hasContent: r.hasContent });
+                })
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  setCouncilProgress({ status: "error", specPath: "", hasContent: false, error: msg });
+                });
+              setCouncilProgress({ status: "running", specPath: "", hasContent: false });
+              return;
+            }
+            console.log("halt recovery: unknown option id:", chosen.id);
+          }
+          setActiveHaltCard(null);
+          setHaltSelectedIndex(0);
+          return;
+        }
+        return;
+      }
       if (btwState) {
         if (isEscapeKey(key) || key.name === "return") {
           dismissBtw();
@@ -4186,6 +4465,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           setModelPickerIndex((i) => Math.min(filteredModelIds.length - 1, i + 1));
           return;
         }
+        if ((key.name === "space" || key.sequence === " ") && modelPickerFocus === "models") {
+          const sel = filteredModelIds[modelPickerIndex];
+          if (sel) toggleModelDisabled(sel);
+          return;
+        }
         if (key.name === "left" || key.name === "right") {
           const sel = filteredModelIds[modelPickerIndex];
           if (sel) {
@@ -4682,6 +4966,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       preflightCardState,
       slashSearchQuery.length,
       slashSearchQuery.slice,
+      activeHaltCard,
+      haltSelectedIndex,
+      initNewForm,
+      toggleModelDisabled,
+      pointToExistingForm,
     ],
   );
   useKeyboard(handleKey);
@@ -4939,6 +5228,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     </Semantic>
                   )}
                   {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+                  {activeHaltCard && (
+                    <HaltRecoveryCard
+                      halt={activeHaltCard}
+                      selectedIndex={haltSelectedIndex}
+                      terminalCols={width}
+                      theme={t}
+                    />
+                  )}
+                  {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                  {pointToExistingForm && (
+                    <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                  )}
+                  {councilProgress && (
+                    <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
+                      <box
+                        flexDirection="column"
+                        borderStyle="single"
+                        borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
+                        padding={1}
+                        marginTop={1}
+                      >
+                        <text fg={t.text}>
+                          {councilProgress.status === "running" && "Council brainstorming — writing spec.md..."}
+                          {councilProgress.status === "done" &&
+                            `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content — production council wiring deferred)"}`}
+                          {councilProgress.status === "error" && `Council brainstorm failed: ${councilProgress.error}`}
+                        </text>
+                      </box>
+                    </Semantic>
+                  )}
                   {councilStatuses.length > 0 && (
                     <Semantic id="council-status" role="listbox" name="Council Status">
                       <CouncilStatusList statuses={councilStatuses} theme={t} />
@@ -5247,6 +5566,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             reasoningEffortByModel={reasoningEffortByModel}
             configuredProviders={configuredProviders}
             disabledProviders={disabledProviders}
+            disabledModels={disabledModels}
             focus={modelPickerFocus}
             providerChipIndex={providerChipIndex}
           />
@@ -7269,6 +7589,33 @@ function TelegramPairModal({
 
 /* ── Model Picker ────────────────────────────────────────────── */
 
+// ── Tier grouping helpers ─────────────────────────────────────────────────────
+
+const TIER_ORDER_MAP: Record<string, number> = { premium: 0, balanced: 1, fast: 2 };
+const TIER_BADGE: Record<string, string> = { premium: "[prem]", balanced: "[bal]", fast: "[fast]" };
+
+function sortModelsByTier(models: ModelInfo[]): ModelInfo[] {
+  return [...models].sort((a, b) => {
+    const ta = TIER_ORDER_MAP[a.tier ?? ""] ?? 3;
+    const tb = TIER_ORDER_MAP[b.tier ?? ""] ?? 3;
+    return ta - tb;
+  });
+}
+
+type TierGroup = { tier: string; items: ModelInfo[] };
+
+function groupModelsByTier(models: ModelInfo[]): TierGroup[] {
+  const map = new Map<string, ModelInfo[]>();
+  for (const m of models) {
+    const tier = m.tier ?? "other";
+    const list = map.get(tier) ?? [];
+    list.push(m);
+    map.set(tier, list);
+  }
+  const order = ["premium", "balanced", "fast", "other"];
+  return order.filter((t) => map.has(t)).map((t) => ({ tier: t, items: map.get(t)! }));
+}
+
 function ModelPickerModal({
   t,
   currentModel,
@@ -7280,6 +7627,7 @@ function ModelPickerModal({
   reasoningEffortByModel,
   configuredProviders,
   disabledProviders,
+  disabledModels,
   focus,
   providerChipIndex,
 }: {
@@ -7293,118 +7641,204 @@ function ModelPickerModal({
   reasoningEffortByModel: Record<string, ReasoningEffort>;
   configuredProviders: ProviderId[];
   disabledProviders: ProviderId[];
+  disabledModels: string[];
   focus: "models" | "providers";
   providerChipIndex: number;
 }) {
   const disabledSet = new Set(disabledProviders);
+  const disabledModelSet = new Set(disabledModels);
   const listRef = useRef<ScrollBoxRenderable>(null);
   useEffect(() => {
     const m = filteredModels[selectedIndex];
     if (m) listRef.current?.scrollChildIntoView(`model-${m.id}`);
   }, [selectedIndex, filteredModels]);
 
-  const itemCount = Math.max(filteredModels.length, 1);
+  // Sort: enabled first, disabled to bottom within tier ordering
+  const sortedModels = useMemo(() => {
+    const enabledModels = filteredModels.filter(
+      (m) => !disabledModelSet.has(m.id) && !(m.provider && disabledSet.has(m.provider as ProviderId)),
+    );
+    const disabledModelsList = filteredModels.filter(
+      (m) => disabledModelSet.has(m.id) || (m.provider && disabledSet.has(m.provider as ProviderId)),
+    );
+    return [...sortModelsByTier(enabledModels), ...sortModelsByTier(disabledModelsList)];
+  }, [filteredModels, disabledModelSet, disabledSet]);
+
+  const showGroups = sortedModels.length > 6;
+  const tierGroups = showGroups ? groupModelsByTier(sortedModels) : null;
+
   const selectedModel = filteredModels[selectedIndex];
   const selectedSupportsReasoning = !!selectedModel && getSupportedReasoningEfforts(selectedModel.id).length > 0;
-  const contentHeight = itemCount + 6;
-  const maxH = Math.floor(height * 0.6);
+
+  const panelWidth = Math.min(64, width - 6);
+  const maxNameWidth = panelWidth - 22;
+
+  const itemCount = Math.max(sortedModels.length, 1);
+  const headerCount = tierGroups ? tierGroups.length : 0;
+  const contentHeight = itemCount + headerCount + 9;
+  const maxH = Math.floor(height * 0.65);
   const panelHeight = Math.min(contentHeight, maxH);
   const top = bottomAlignedModalTop(height, panelHeight);
   const overlayBg = "#000000cc" as string;
-  return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={top}
-      backgroundColor={overlayBg}
-    >
-      <box
-        width={Math.min(60, width - 6)}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+
+  const renderModelRow = (m: ModelInfo, idx: number) => {
+    const selected = idx === selectedIndex;
+    const current = m.id === currentModel;
+    const modelDisabled = disabledModelSet.has(m.id) || (m.provider && disabledSet.has(m.provider as ProviderId));
+    const supportedReasoningEfforts = getSupportedReasoningEfforts(m.id);
+    const reasoningEffort = getEffectiveReasoningEffort(m.id, reasoningEffortByModel[normalizeModelId(m.id)]) ?? "auto";
+
+    const nameRaw = m.name ?? m.id;
+    const truncatedName = nameRaw.length > maxNameWidth ? `${nameRaw.slice(0, maxNameWidth - 1)}…` : nameRaw;
+
+    const enableMark = modelDisabled ? "✗" : "✓";
+    const tierBadge = m.tier ? (TIER_BADGE[m.tier] ?? "") : "";
+    const visionBadge = m.supportsVision ? " [V]" : "";
+    const reasoningBadge = m.reasoning ? " [R]" : "";
+
+    const nameFg = modelDisabled ? t.textMuted : current ? t.accent : selected ? t.selected : t.text;
+
+    return (
+      <Semantic
+        key={m.id}
+        id={`model-row-${m.id}`}
+        role="listitem"
+        selected={selected ? true : undefined}
+        disabled={modelDisabled ? true : undefined}
+        name={m.name ?? m.id}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"Select model"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        {configuredProviders.length > 0 && (
-          <box
-            flexShrink={0}
-            flexDirection="row"
-            paddingLeft={2}
-            paddingRight={2}
-            paddingTop={1}
-            backgroundColor={focus === "providers" ? t.selectedBg : undefined}
-          >
-            <text fg={t.textMuted}>{"providers: "}</text>
-            {configuredProviders.map((p, i) => {
-              const enabled = !disabledSet.has(p);
-              const focused = focus === "providers" && i === providerChipIndex;
-              const mark = enabled ? "✓" : "✗";
-              const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
-              return (
-                <text
-                  key={p}
-                  fg={fg}
-                >{`${i === 0 ? "" : "  "}${focused ? "[" : " "}${mark} ${p}${focused ? "]" : " "}`}</text>
-              );
-            })}
+        <box
+          id={`model-${m.id}`}
+          backgroundColor={selected ? t.selectedBg : undefined}
+          paddingLeft={1}
+          paddingRight={1}
+          width="100%"
+        >
+          <box width="100%" flexDirection="row">
+            <text fg={modelDisabled ? t.textMuted : selected ? t.accent : t.textMuted}>{`${enableMark} `}</text>
+            <text fg={nameFg}>{truncatedName.padEnd(Math.max(0, maxNameWidth))}</text>
+            {tierBadge ? <text fg={selected ? t.primary : t.textDim}>{` ${tierBadge}`}</text> : null}
+            {visionBadge ? <text fg={selected ? t.primary : t.textDim}>{visionBadge}</text> : null}
+            {reasoningBadge ? <text fg={selected ? t.primary : t.textDim}>{reasoningBadge}</text> : null}
+            {supportedReasoningEfforts.length > 0 ? (
+              <text fg={selected ? t.primary : t.textMuted}>{` [${reasoningEffort}]`}</text>
+            ) : null}
           </box>
-        )}
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
-          <text fg={t.text}>{searchQuery || <span style={{ fg: t.textMuted }}>{"Search..."}</span>}</text>
         </box>
-        <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
-          {filteredModels.map((m, idx) => {
-            const selected = idx === selectedIndex;
-            const current = m.id === currentModel;
-            const supportedReasoningEfforts = getSupportedReasoningEfforts(m.id);
-            const reasoningEffort =
-              getEffectiveReasoningEffort(m.id, reasoningEffortByModel[normalizeModelId(m.id)]) ?? "auto";
-            return (
-              <box
-                key={m.id}
-                id={`model-${m.id}`}
-                backgroundColor={selected ? t.selectedBg : undefined}
-                paddingLeft={2}
-                paddingRight={2}
-                width="100%"
-              >
-                <box width="100%" flexDirection="row" justifyContent="space-between">
-                  <text fg={current ? t.accent : selected ? t.selected : t.text}>{m.name}</text>
-                  {supportedReasoningEfforts.length > 0 ? (
-                    <text fg={selected ? t.primary : t.textMuted}>{`[${reasoningEffort}]`}</text>
-                  ) : null}
-                </box>
-              </box>
-            );
-          })}
-          {filteredModels.length === 0 && (
-            <box paddingLeft={2}>
-              <text fg={t.textMuted}>{"No models match your search"}</text>
+      </Semantic>
+    );
+  };
+
+  return (
+    <Semantic id="model-picker" role="dialog" isModal name="Select model">
+      <box
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={top}
+        backgroundColor={overlayBg}
+      >
+        <box
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"Select model"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          {configuredProviders.length > 0 && (
+            <box
+              flexShrink={0}
+              flexDirection="row"
+              paddingLeft={2}
+              paddingRight={2}
+              paddingTop={1}
+              backgroundColor={focus === "providers" ? t.selectedBg : undefined}
+            >
+              <text fg={t.textMuted}>{"providers: "}</text>
+              {configuredProviders.map((p, i) => {
+                const enabled = !disabledSet.has(p);
+                const focused = focus === "providers" && i === providerChipIndex;
+                const mark = enabled ? "✓" : "✗";
+                const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
+                return (
+                  <Semantic
+                    key={p}
+                    id={`provider-chip-${p}`}
+                    role="button"
+                    selected={enabled ? true : undefined}
+                    name={p}
+                  >
+                    <text fg={fg}>
+                      {`${i === 0 ? "" : "  "}${focused ? "[" : " "}${mark} ${p}${focused ? "]" : " "}`}
+                    </text>
+                  </Semantic>
+                );
+              })}
             </box>
           )}
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.textMuted}>
-            {focus === "providers"
-              ? "left/right pick provider  space toggle  tab back  esc close"
-              : selectedSupportsReasoning
-                ? "left/right reasoning  enter select  tab providers  esc close"
-                : "enter select  tab providers  esc close"}
-          </text>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={1}>
+            <text fg={t.text}>{searchQuery || <span style={{ fg: t.textMuted }}>{"Search..."}</span>}</text>
+          </box>
+          <scrollbox ref={listRef} flexGrow={1} minHeight={0}>
+            {showGroups && tierGroups
+              ? tierGroups.map((group) => (
+                  <box key={group.tier} flexDirection="column">
+                    <box paddingLeft={2} paddingRight={2}>
+                      <text fg={t.textDim}>
+                        {"── " +
+                          (group.tier === "premium"
+                            ? "Premium"
+                            : group.tier === "balanced"
+                              ? "Balanced"
+                              : group.tier === "fast"
+                                ? "Fast"
+                                : group.tier) +
+                          " " +
+                          "─".repeat(Math.max(0, panelWidth - 16))}
+                      </text>
+                    </box>
+                    {group.items.map((m) => {
+                      const globalIdx = sortedModels.indexOf(m);
+                      return renderModelRow(m, globalIdx);
+                    })}
+                  </box>
+                ))
+              : sortedModels.map((m, idx) => renderModelRow(m, idx))}
+            {filteredModels.length === 0 && (
+              <box paddingLeft={2}>
+                <text fg={t.textMuted}>{"No models match your search"}</text>
+              </box>
+            )}
+          </scrollbox>
+          {selectedModel && (
+            <box flexShrink={0} paddingLeft={2} paddingRight={2}>
+              <text fg={t.textMuted}>
+                {`${selectedModel.name}${selectedModel.provider ? ` (${selectedModel.provider})` : ""}`}
+              </text>
+            </box>
+          )}
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={t.textMuted}>
+              {focus === "providers"
+                ? "←→ pick  Space toggle  Tab back  Esc close"
+                : selectedSupportsReasoning
+                  ? "↑↓ nav  Space toggle  ←→ reasoning  Enter select  Tab providers  Esc close"
+                  : "↑↓ nav  Space toggle  Enter select  Tab providers  Esc close"}
+            </text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
 

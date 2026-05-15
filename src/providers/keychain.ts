@@ -208,6 +208,22 @@ export async function getConfiguredProviders(): Promise<ProviderId[]> {
 }
 
 /**
+ * Load OAuth tokens for a provider with auto-refresh.
+ * Returns null if no OAuth tokens are stored for that provider.
+ * This is a thin helper over token-store + openai-oauth; exported here so
+ * higher-level code (CLI, adapter) has a single import point.
+ */
+export async function getOAuthTokens(provider: ProviderId): Promise<import("./auth/types.js").OAuthTokens | null> {
+  if (provider !== "openai") return null; // only openai supported in Phase 18
+  try {
+    const { loadTokensWithRefresh } = await import("./auth/openai-oauth.js");
+    return await loadTokensWithRefresh("openai");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Find the first provider with an available API key.
  * Checks in priority order: anthropic, openai, google, deepseek, siliconflow, ollama.
  * Returns null if no provider has a key (unlikely — ollama is keyless fallback).

@@ -1,6 +1,6 @@
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
-import { Semantic } from "../agent-harness/semantic.js";
 import { MODELS } from "../models/registry.js";
 import type { CustomSubagentConfig } from "../utils/settings";
 import { formatSubagentName } from "../utils/subagent-display";

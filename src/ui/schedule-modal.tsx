@@ -1,6 +1,6 @@
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useEffect, useRef } from "react";
-import { Semantic } from "../agent-harness/semantic.js";
 import type { StoredSchedule } from "../tools/schedule";
 import type { Theme } from "./theme";
 

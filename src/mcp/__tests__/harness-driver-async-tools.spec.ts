@@ -1,7 +1,7 @@
+import type { Driver } from "@muonroi/agent-harness-core/driver";
+import { registerAsyncTools } from "@muonroi/agent-harness-core/mcp-server";
+import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import type { Driver } from "../../agent-harness/driver";
-import type { LiveEvent } from "../../agent-harness/protocol";
-import { registerAsyncTools } from "../harness-driver";
 
 type ToolCb = (input: Record<string, unknown>) => Promise<unknown>;
 

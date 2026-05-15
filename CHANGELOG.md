@@ -7,6 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+- **harness**: `src/agent-harness/*` moved to `packages/agent-harness-{core,opentui}`.
+  - Pure pieces (protocol, selector, predicate, driver, registry, mock-llm, idle,
+    spec-helpers, sidechannel transport, mcp-server, lint) now live in
+    `@muonroi/agent-harness-core`.
+  - OpenTUI-specific pieces (`<Semantic>`, `<SemanticProvider>`,
+    `reconciler-hook`, `input-bridge`, `agent-mode`) live in
+    `@muonroi/agent-harness-opentui`.
+  - A backwards-compat shim at `src/agent-harness/index.ts` still re-exports both.
+  - **Migration**: rewrite `from "./agent-harness/<x>"` →
+    `from "@muonroi/agent-harness-core/<x>"` (pure) or
+    `from "@muonroi/agent-harness-opentui"` (OpenTUI). The shim works for
+    deep imports but direct subpath imports are clearer.
+- **product-loop**: CB-3 (verify-recipe halt) now `yields` a structured
+  `{ type: "halt", reason, recovery_options }` chunk instead of `throw`.
+  All 3 `runSprint()` call sites in `src/product-loop/index.ts` have been
+  updated to handle the halt chunk. **Migration**: callers consuming
+  `runSprint()` must add `if (chunk.type === "halt") { … }` inside their
+  `for await` loops.
+
+### Added
+- **harness packages** (new):
+  - `@muonroi/agent-harness-react` — React DOM adapter. Bundle gzip:
+    346 B (harness OFF, tree-shaken via compile-time `__MUONROI_HARNESS__`
+    define) / 914 B (ON). Peer-deps `react@>=18`, `react-dom@>=18`.
+  - `@muonroi/agent-harness-angular` — Angular 16+ adapter.
+    `[muonroiSemantic]` directive with `@Optional() @SkipSelf() @Host()`
+    element-injector DI. SSR-safe via `isPlatformBrowser` guard. Bundle
+    gzip ≤ 8 KB.
+- **harness-core**:
+  - `createWebSocketTransport({ url, token })` — browser-safe WebSocket
+    transport with Zod-validated envelope (`dir: "frame" | "event" | "cmd"`).
+  - `"browser"` export condition strips Node-only modules.
+  - `HarnessSpawn` injection contract — `createMcpHarnessServer({ spawn })`
+    accepts a caller-provided spawn closure so core no longer back-imports
+    `src/`.
+- **/ideal recovery flow**:
+  - HaltRecoveryCard rendered when CB-3 yields a halt chunk
+    (`<Semantic id="ideal-halt-card" role="dialog" isModal>`).
+  - Init-new flow scaffolds a project: `<name>/server/` (clone of
+    `muonroi-building-block`) + `<name>/client/` (React/Angular/none) with
+    `<SemanticProvider>` wired.
+  - Point-to-existing flow validates a path + re-detects the verify recipe.
+  - Continue-as-council flow writes `spec.md` via injected council stream
+    (no CB-3 re-entry).
+- **docs**: `docs/agent-harness/TRANSPORTS.md` (fd 3/4, named-pipe, and
+  WebSocket envelope spec), `docs/agent-harness/MONOREPO.md`
+  (Bun-workspaces decision), per-package READMEs for all four packages.
+
 ### Security
 - Pre-commit secret scanner (`scripts/check-secrets.mjs`) blocks `.claude/`,
   `.env*`, `user-settings.json`, and inline credential patterns (Anthropic,

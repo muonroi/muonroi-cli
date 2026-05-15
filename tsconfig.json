@@ -4,7 +4,6 @@
     "module": "ESNext",
     "lib": ["ES2022"],
     "outDir": "./dist",
-    "rootDir": "./src",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -15,8 +14,16 @@
     "jsx": "react-jsx",
     "jsxImportSource": "@opentui/react",
     "moduleResolution": "Bundler",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "paths": {
+      "@muonroi/agent-harness-core": ["./packages/agent-harness-core/src/index.ts"],
+      "@muonroi/agent-harness-core/*": [
+        "./packages/agent-harness-core/src/*.ts",
+        "./packages/agent-harness-core/src/*/index.ts"
+      ],
+      "@muonroi/agent-harness-opentui": ["./packages/agent-harness-opentui/src/index.ts"]
+    }
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules", "dist", "packages/**", "tests/harness-react/**", "tests/harness-angular/**"]
 }

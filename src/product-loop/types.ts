@@ -376,6 +376,36 @@ export interface PhaseDigestEntry {
   lessonText: string;
 }
 
+// ── Halt chunk (Task 5.1) ────────────────────────────────────────────────────
+
+/**
+ * An actionable recovery choice surfaced alongside a halt chunk.
+ * The UI (Task 5.2) wires each id to a concrete handler.
+ */
+export interface RecoveryOption {
+  /** Stable key. Used by the UI to wire actions. */
+  id: "init_new" | "point_to_existing" | "continue_as_council";
+  /** Label shown in the recovery card. */
+  label: string;
+  /** One-line user-facing description of what choosing this does. */
+  description: string;
+}
+
+/**
+ * Yielded by sprint-runner when a circuit breaker (currently CB-3) prevents
+ * the sprint from starting. Replaces the previous throw so the TUI can render
+ * an actionable recovery card rather than crashing with an opaque message.
+ */
+export interface HaltChunk {
+  type: "halt";
+  /** CB-3 currently only emits "no_recipe"; kept as a union for future CBs. */
+  reason: "no_recipe" | "zero_coverage";
+  /** Optional human-readable detail rendered alongside the recovery card. */
+  detail?: string;
+  /** Actionable choices. UI renders these as buttons / list items. */
+  recovery_options: RecoveryOption[];
+}
+
 export interface RunPhasesOptions {
   flowDir: string;
   runId: string;

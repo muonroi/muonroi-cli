@@ -10,8 +10,8 @@
  * app.tsx accumulates the latest snapshot and renders this component.
  */
 
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type * as React from "react";
-import { Semantic } from "../../agent-harness/semantic.js";
 import type { ProductStatusCardData } from "../../product-loop/types.js";
 import type { Theme } from "../theme.js";
 

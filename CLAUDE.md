@@ -270,9 +270,39 @@ Before opening a PR:
 7. If the flow requires multiple LLM round-trips, extend the corresponding fixture in `tests/harness/fixtures/llm/` (sequence mode — see `mock-llm.ts`).
 8. Run `bun run lint:semantic` — it warns on `.tsx` files under `src/ui/` whose root is not `<Semantic>`. Address warnings before merging. To suppress a file that is intentionally unwrapped (child component, utility, test), add its repo-relative path to `scripts/.semantic-wrap-allow.txt`.
 
+## Multi-framework package layout
+
+As of Phase 6, the harness is split into four independently-publishable packages under `packages/`:
+
+| Package | npm name | Purpose |
+|---|---|---|
+| `packages/agent-harness-core` | `@muonroi/agent-harness-core` | Protocol types, selector/predicate engine, `Driver`, WebSocket transport, `findUnwrappedComponents` lint helper. Framework-agnostic. |
+| `packages/agent-harness-opentui` | `@muonroi/agent-harness-opentui` | OpenTUI adapter — `SemanticRegistry`, `reconciler-hook`, `input-bridge`, agent-mode bootstrap. Used by `src/index.ts` in this repo. |
+| `packages/agent-harness-react` | `@muonroi/agent-harness-react` | React DOM adapter — `<Semantic>`, `<SemanticProvider>`, `installReactHarness()`. Peer-requires React ≥ 18. |
+| `packages/agent-harness-angular` | `@muonroi/agent-harness-angular` | Angular 16+ adapter — `[muonroiSemantic]` directive, `SemanticRegistryService`, `SemanticSnapshotService`. |
+
+The backwards-compatibility shim at `src/agent-harness/` re-exports everything from `@muonroi/agent-harness-core` and `@muonroi/agent-harness-opentui` so existing imports inside this repo continue to work unchanged.
+
+### Adding a new framework adapter
+
+1. Copy `packages/agent-harness-react` (or `-angular`) as a starting point.
+2. Implement a `SemanticRegistry`-compatible tree builder that calls `registry.register(node)` on mount and `registry.unregister(id)` on unmount.
+3. Snapshot the tree and emit it as a `LiveFrame` via `snapshotToLiveFrame(registry, seq, ts)` from `@muonroi/agent-harness-core`.
+4. Wire commands (`press`, `type`, `focus`) from the transport back into your framework's DOM/event system.
+5. Export a single `install<Framework>Harness(opts)` entry-point that sets up the registry, transport, and teardown handle.
+6. Add a per-package `README.md` (see `packages/agent-harness-react/README.md` as template).
+7. Add the package to `bun.workspaces` in the root `package.json`.
+
+Per-package README files:
+- `packages/agent-harness-core/README.md`
+- `packages/agent-harness-opentui/README.md`
+- `packages/agent-harness-react/README.md`
+- `packages/agent-harness-angular/README.md`
+
 ## References
 
 - Design doc: `docs/superpowers/specs/2026-05-14-agent-harness-design.md`
 - Implementation plan (executed): `docs/superpowers/plans/2026-05-14-agent-harness.md`
 - Protocol schema: `docs/agent-harness/PROTOCOL.md`, `docs/agent-harness/schema.json`
+- Transport spec: `docs/agent-harness/TRANSPORTS.md`
 - Spike findings: `docs/agent-harness/spike-0a-findings.md` (OpenTUI hook), `spike-0c-findings.md` (POSIX stdio), `spike-0d-mcp-sdk.md` (MCP SDK API)

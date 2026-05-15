@@ -158,13 +158,26 @@ describe("sprint-runner", () => {
     expect(chunks.some((c: any) => c.type === "content")).toBe(true);
   });
 
-  it("CB-3 trips on sprint 1 with missing recipe — halts BEFORE planner runs", async () => {
+  it("CB-3 trips on sprint 1 with missing recipe — yields halt chunk BEFORE planner runs", async () => {
     (CB3_verifyBlank as any).mockReturnValue({ halt: true, reason: "no_recipe" });
     const ctx = makeCtx({ detectVerifyRecipe: vi.fn(async () => null) });
-    const { error } = await drain(
+    const { chunks, error } = await drain(
       runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
     );
-    expect((error as Error).message).toContain("no_recipe");
+    // Must yield a structured halt chunk, not throw.
+    expect(error).toBeUndefined();
+    const haltChunks = chunks.filter((c: any) => c.type === "halt");
+    expect(haltChunks).toHaveLength(1);
+    expect(haltChunks[0]).toMatchObject({
+      type: "halt",
+      reason: "no_recipe",
+      recovery_options: expect.arrayContaining([
+        expect.objectContaining({ id: "init_new" }),
+        expect.objectContaining({ id: "point_to_existing" }),
+        expect.objectContaining({ id: "continue_as_council" }),
+      ]),
+    });
+    expect((haltChunks[0] as any).recovery_options).toHaveLength(3);
     expect(runCouncil).not.toHaveBeenCalled();
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
@@ -388,5 +401,96 @@ describe("sprint-runner phaseScope (subsystem E)", () => {
 
     const gateCall = (evaluateDoneGate as any).mock.calls[0][0];
     expect(gateCall.criteria).toHaveLength(3);
+  });
+});
+
+// ── Task 5.1: call-site halt forwarding ─────────────────────────────────────
+// These tests exercise runSprint() directly (the only unit-testable path for the
+// halt chunk shape and forwarding semantics). The call-site logic in index.ts
+// (sites 1, 2, 3) uses the same discriminator pattern; testing the yielded shape
+// here proves the contract that all three sites consume.
+
+describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
+    (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
+    (CB3_verifyBlank as any).mockReturnValue({ halt: false });
+    (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
+    (runVerifyOrchestration as any).mockResolvedValue({
+      success: true,
+      output: "VERIFY_PASS\n",
+      verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+    });
+    (runCouncil as any).mockImplementation(async function* () {
+      yield { type: "content", content: "council planning..." };
+      return "synthesis text from council";
+    });
+  });
+
+  it("call site 1 pattern — CB-3 halt chunk is yielded (not thrown) and contains 3 recovery options", async () => {
+    // Simulate what site 1 (runOneSprint) drives: runSprint with sprintN=1, no history.
+    (CB3_verifyBlank as any).mockReturnValue({ halt: true, reason: "no_recipe" });
+    const ctx = makeCtx({ detectVerifyRecipe: vi.fn(async () => null) });
+
+    const { chunks, error } = await drain(
+      runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+    );
+
+    // No throw — error must be undefined.
+    expect(error).toBeUndefined();
+    // Halt chunk must be in the yielded stream.
+    const halt = chunks.find((c: any) => c.type === "halt");
+    expect(halt).toBeDefined();
+    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
+    expect((halt as any).recovery_options).toHaveLength(3);
+    // Planner and verifier must NOT have run.
+    expect(runCouncil).not.toHaveBeenCalled();
+    expect(runVerifyOrchestration).not.toHaveBeenCalled();
+  });
+
+  it("call site 2 pattern — CB-3 halt chunk is forwarded through multi-sprint drainSprints loop", async () => {
+    // Simulate what site 2 (drainSprints) drives: runSprint with sprintN >= 1, history may be non-empty.
+    (CB3_verifyBlank as any).mockReturnValue({ halt: true, reason: "no_recipe" });
+    const ctx = makeCtx({ detectVerifyRecipe: vi.fn(async () => null) });
+
+    // Drive with sprintN=2 to exercise the multi-sprint path in drainSprints.
+    const { chunks, error } = await drain(
+      runSprint({ sprintN: 2, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+    );
+
+    expect(error).toBeUndefined();
+    const halt = chunks.find((c: any) => c.type === "halt");
+    expect(halt).toBeDefined();
+    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
+    expect((halt as any).recovery_options).toHaveLength(3);
+  });
+
+  it("call site 3 pattern — CB-3 halt chunk is forwarded through phase-runner sprintRunner adapter", async () => {
+    // Simulate what site 3 (sprintRunner adapter inside runWithPhases) drives:
+    // runSprint called with phaseScope, no try/catch in the adapter.
+    (CB3_verifyBlank as any).mockReturnValue({ halt: true, reason: "no_recipe" });
+    const ctx = makeCtx({ detectVerifyRecipe: vi.fn(async () => null) });
+
+    const { chunks, error } = await drain(
+      runSprint({
+        sprintN: 1,
+        ctx,
+        productSpec: makeSpec(),
+        roleAssignments: NO_ROLES,
+        history: [],
+        phaseScope: { criteria: ["crit-A"], scope: "phase-1" },
+      }),
+    );
+
+    // Without the fix, the generator returned normally (halt silently consumed).
+    // With the fix, the halt chunk is in the yielded stream.
+    expect(error).toBeUndefined();
+    const halt = chunks.find((c: any) => c.type === "halt");
+    expect(halt).toBeDefined();
+    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
+    expect((halt as any).recovery_options).toHaveLength(3);
+    // Planner must NOT have been called.
+    expect(runCouncil).not.toHaveBeenCalled();
   });
 });

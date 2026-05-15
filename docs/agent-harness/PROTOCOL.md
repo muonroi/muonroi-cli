@@ -232,8 +232,57 @@ Messages are exchanged via JSON Lines (JSONL) over a transport layer:
 
 - **POSIX (Linux/macOS):** File descriptors 3 (child → driver) and 4 (driver → child)
 - **Windows:** Named pipes (negotiated via stdout handshake)
+- **WebSocket:** Single bi-directional socket for React/Angular web-app adapters (see §6.1 below)
 
 Each message is one UTF-8 line terminated by `\n`, with a 1 MiB cap per message. The JSON Schema at `schema.json` (in the same directory as this document) is the normative binding-level specification.
+
+### 6.1 WebSocket Transport Envelope
+
+The fd 3/4 and named-pipe transports use two separate unidirectional channels so the direction of any message is implicit. The WebSocket transport uses a **single bi-directional socket**, which requires an explicit `dir` discriminator on every message.
+
+Every message on a WebSocket harness connection is wrapped in an envelope that adds a top-level `dir` field:
+
+```typescript
+type WsEnvelope =
+  | { dir: "frame";  /* + all LiveFrame fields verbatim */ }
+  | { dir: "event";  /* + all LiveEvent fields verbatim */ }
+  | { dir: "cmd";    op: "press" | "type" | "focus"; key?: string; text?: string; id?: string }
+```
+
+#### `dir: "frame"` — Server → Client
+
+Carries a complete `LiveFrame` snapshot. All `LiveFrame` fields are placed at the top level alongside `dir`:
+
+```json
+{"dir":"frame","mode":"live","version":"0.1.0","seq":1,"ts":1747267200000,"nodes":[...]}
+```
+
+#### `dir: "event"` — Server → Client
+
+Carries a `LiveEvent`. The inner `t` discriminant from `LiveEvent` (`"event"` or `"idle"`) is preserved:
+
+```json
+{"dir":"event","t":"event","kind":"toast","level":"info","text":"Ready","ttlMs":3000}
+{"dir":"event","t":"idle"}
+```
+
+#### `dir: "cmd"` — Client → Server
+
+Carries a command from the controlling agent to the TUI process:
+
+```json
+{"dir":"cmd","op":"press","key":"Enter"}
+{"dir":"cmd","op":"type","text":"hello world"}
+{"dir":"cmd","op":"focus","id":"composer"}
+```
+
+#### Forward Compatibility
+
+Consumers **MUST** silently ignore any `dir` value they do not recognise (skip the line, do not close). This allows future `dir` values (e.g. `"design"` for `DesignSpec` frames) to be introduced without breaking older consumers.
+
+The fd 3/4 and named-pipe transports are **unchanged** — they continue to emit raw `LiveFrame` and `LiveEvent` objects without a `dir` wrapper.
+
+Full transport spec (security requirements, Zod schema, wire examples): [`docs/agent-harness/TRANSPORTS.md`](./TRANSPORTS.md).
 
 ## 7. Version Evolution Policy
 

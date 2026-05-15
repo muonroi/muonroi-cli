@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist/browser",
+    "noEmit": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  },
+  "exclude": [
+    "src/mcp-server.ts",
+    "src/transports/sidechannel.ts",
+    "src/mock-llm.ts",
+    "src/spec-helpers.ts",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts",
+    "__tests__/**"
+  ]
+}

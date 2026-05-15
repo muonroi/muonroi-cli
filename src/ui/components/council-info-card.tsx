@@ -1,5 +1,5 @@
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import React from "react";
-import { Semantic } from "../../agent-harness/semantic.js";
 import type { CouncilInfoCard } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 

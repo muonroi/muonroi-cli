@@ -1,6 +1,6 @@
+import type { DesignSpec } from "@muonroi/agent-harness-core/protocol";
+import { diffSpecs, querySpec, validateSpec } from "@muonroi/agent-harness-core/spec-helpers";
 import { describe, expect, it } from "vitest";
-import type { DesignSpec } from "../protocol.js";
-import { diffSpecs, querySpec, validateSpec } from "../spec-helpers.js";
 
 describe("validateSpec", () => {
   it("accepts a valid spec", () => {

@@ -197,6 +197,19 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
         result = step.value as import("./types.js").IterationState;
         break;
       }
+      // Site 1 — forward halt chunk to UI, mark stage halted, stop iteration.
+      if (step.value && (step.value as StreamChunk).type === "halt") {
+        yield step.value as StreamChunk;
+        const manifest = await readManifest(flowDir, runId);
+        const haltReason = (step.value as any).reason ?? "no_recipe";
+        if (manifest) {
+          await writeManifest(flowDir, runId, {
+            ...manifest,
+            verdict: { pass: false, score: 0, reason: haltReason, failedCondition: undefined as any },
+          });
+        }
+        return { runId, stage: "halted", success: false, reason: haltReason, sprintsRun: 0 };
+      }
       yield step.value as StreamChunk;
     }
     iter = result!;
@@ -399,6 +412,25 @@ async function* drainSprints(args: {
         if (step.done) {
           result = step.value as IterationState;
           break;
+        }
+        // Site 2 — forward halt chunk to UI, mark stage halted, stop iteration.
+        if (step.value && (step.value as StreamChunk).type === "halt") {
+          yield step.value as StreamChunk;
+          const haltReason = (step.value as any).reason ?? "no_recipe";
+          const manifest = await readManifest(ctx.flowDir, ctx.runId);
+          if (manifest) {
+            await writeManifest(ctx.flowDir, ctx.runId, {
+              ...manifest,
+              verdict: { pass: false, score: 0, reason: haltReason, failedCondition: undefined as any },
+            });
+          }
+          return {
+            runId: ctx.runId,
+            stage: "halted",
+            success: false,
+            reason: haltReason,
+            sprintsRun,
+          };
         }
         yield step.value as StreamChunk;
       }
@@ -605,6 +637,24 @@ async function* runPhasesPath(args: {
       if (n.done) {
         result = n.value;
         break;
+      }
+      // Site 3 — no try/catch here; without explicit halt handling the generator
+      // returns normally and the phase orchestrator treats it as a completed sprint.
+      // Forward the halt chunk upstream so runPhases can surface it to the user.
+      if (n.value && (n.value as StreamChunk).type === "halt") {
+        yield n.value;
+        // Return a sentinel IterationState so the phase runner records a halted stage.
+        return {
+          sprintN: sc.sprintN,
+          stage: "halted",
+          scoreBefore: 0,
+          scoreAfter: 0,
+          criteriaMet: 0,
+          criteriaPartial: 0,
+          criteriaUnmet: 0,
+          costUsd: 0,
+          lastVerifyResult: (n.value as any).reason ?? "no_recipe",
+        } as IterationState;
       }
       yield n.value;
     }

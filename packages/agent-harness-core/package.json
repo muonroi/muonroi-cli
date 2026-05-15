@@ -1,0 +1,84 @@
+{
+  "name": "@muonroi/agent-harness-core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "browser": "./dist/browser/index.js",
+      "node": "./dist/node/index.js",
+      "default": "./dist/node/index.js"
+    },
+    "./protocol": {
+      "types": "./src/protocol.ts",
+      "default": "./src/protocol.ts"
+    },
+    "./selector": {
+      "types": "./src/selector.ts",
+      "default": "./src/selector.ts"
+    },
+    "./predicate": {
+      "types": "./src/predicate.ts",
+      "default": "./src/predicate.ts"
+    },
+    "./driver": {
+      "types": "./src/driver.ts",
+      "default": "./src/driver.ts"
+    },
+    "./idle": {
+      "types": "./src/idle.ts",
+      "default": "./src/idle.ts"
+    },
+    "./registry": {
+      "types": "./src/registry.ts",
+      "default": "./src/registry.ts"
+    },
+    "./mock-llm": {
+      "types": "./src/mock-llm.ts",
+      "node": "./src/mock-llm.ts",
+      "default": "./src/mock-llm.ts"
+    },
+    "./spec-helpers": {
+      "types": "./src/spec-helpers.ts",
+      "node": "./src/spec-helpers.ts",
+      "default": "./src/spec-helpers.ts"
+    },
+    "./transports/sidechannel": {
+      "types": "./src/transports/sidechannel.ts",
+      "node": "./dist/node/transports/sidechannel.js",
+      "default": "./src/transports/sidechannel.ts"
+    },
+    "./transports/ws": {
+      "types": "./src/transports/ws.ts",
+      "browser": "./dist/browser/transports/ws.js",
+      "node": "./dist/node/transports/ws.js",
+      "default": "./dist/node/transports/ws.js"
+    },
+    "./lint": {
+      "types": "./src/lint.ts",
+      "node": "./dist/node/lint.js",
+      "default": "./src/lint.ts"
+    },
+    "./mcp-server": {
+      "types": "./src/mcp-server.ts",
+      "node": "./dist/node/mcp-server.js",
+      "default": "./src/mcp-server.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "tsup": "^8.5.1",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.14"
+  }
+}

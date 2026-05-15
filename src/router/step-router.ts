@@ -29,7 +29,7 @@ import { getModelByTier } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo } from "../types/index.js";
-import { isProviderDisabled, loadUserSettings } from "../utils/settings.js";
+import { isModelDisabled, isProviderDisabled, loadUserSettings } from "../utils/settings.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -167,13 +167,16 @@ function resolveExecutionModel(
   // Try same provider first
   const sameProvider = getModelByTier(tier, provider);
   if (sameProvider && sameProvider.id !== excludeModelId) {
-    return sameProvider;
+    // Guard: check provider-disabled and model-disabled (mirrors cross-provider branch)
+    if (!isProviderDisabled(sameProvider.provider as ProviderId) && !isModelDisabled(sameProvider.id)) {
+      return sameProvider;
+    }
   }
   // If no same-provider model in this tier, try any provider
   const anyProvider = getModelByTier(tier);
   if (anyProvider && anyProvider.id !== excludeModelId) {
-    // Only use cross-provider if the provider isn't disabled
-    if (!isProviderDisabled(anyProvider.provider as ProviderId)) {
+    // Only use cross-provider if the provider and model aren't disabled
+    if (!isProviderDisabled(anyProvider.provider as ProviderId) && !isModelDisabled(anyProvider.id)) {
       return anyProvider;
     }
   }
