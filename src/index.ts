@@ -1143,6 +1143,22 @@ keys
   });
 
 keys
+  .command("login <provider>")
+  .description("Log in to a provider via OAuth subscription (currently supports: openai)")
+  .action(async (provider: string) => {
+    const { runKeysLogin } = await import("./cli/keys.js");
+    await runKeysLogin(provider);
+  });
+
+keys
+  .command("logout <provider>")
+  .description("Log out of an OAuth provider and revoke stored tokens")
+  .action(async (provider: string) => {
+    const { runKeysLogout } = await import("./cli/keys.js");
+    await runKeysLogout(provider);
+  });
+
+keys
   .command("cleanup-settings")
   .description("Strip plaintext API keys out of ~/.muonroi-cli/user-settings.json after migrating to keychain")
   .action(async () => {
