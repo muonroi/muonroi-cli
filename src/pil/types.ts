@@ -125,7 +125,7 @@ export interface IntentDetectionTrace {
   /** Legacy style-detection call returned a non-null response. */
   pass3LegacyStyleSucceeded: boolean;
   /** How the final outputStyle was resolved. */
-  styleSource: "explicit-regex" | "brain-unified" | "brain-legacy" | "chitchat-default" | "none";
+  styleSource: "explicit-regex" | "brain-unified" | "brain-legacy" | "chitchat-default" | "classifier-default" | "none";
   /** Final taskType emitted by Layer 1. */
   finalTaskType: string | null;
   /** Final confidence emitted by Layer 1. */

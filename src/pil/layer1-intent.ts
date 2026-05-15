@@ -300,9 +300,8 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
         }
       }
 
-      // Pass 3b legacy: brain-only style detection when classifier gave a
-      // taskType AND regex found no explicit style signal. Regex Pass 3.5 (below)
-      // runs FIRST so explicit cues skip this 800ms call.
+      // Pass 3.5: regex style detection — free, always runs before any brain call.
+      // Catches explicit user cues ("ngắn gọn", "chi tiết", "step by step").
       if (outputStyle === null) {
         const regexStyle = detectStyleFromText(ctx.raw);
         if (regexStyle) {
@@ -311,23 +310,34 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
         }
       }
 
+      // Pass 3b: style brain call — only when task detection ITSELF needed the
+      // brain (pass3LegacyTaskAttempted). When pass1 or pass2 already decided
+      // the task cheaply, the 800ms style call adds no signal (confirmed by
+      // 112/112 wasted calls in production — 100% returned styleSource=none).
+      // Default to "balanced" instead: clear, cheap, and accurate for most
+      // coding turns.
       if (outputStyle === null && taskType !== null) {
-        legacyBrainAttempted = true;
-        pass3LegacyStyleAttempted = true;
-        const brainRawStyle = await classifyViaBrain(
-          `Detect the user's preferred output style. The prompt may be EN or VN.
+        if (pass3LegacyTaskAttempted) {
+          legacyBrainAttempted = true;
+          pass3LegacyStyleAttempted = true;
+          const brainRawStyle = await classifyViaBrain(
+            `Detect the user's preferred output style. The prompt may be EN or VN.
 Reply with ONE word: concise (ngắn gọn) | balanced (bình thường) | detailed (chi tiết).
 
 Prompt: "${ctx.raw.slice(0, 300)}"`,
-          800,
-        );
-        if (brainRawStyle) {
-          pass3LegacyStyleSucceeded = true;
-          const styleMatched = VALID_STYLES.find((s) => brainRawStyle.toLowerCase().includes(s));
-          if (styleMatched) {
-            outputStyle = styleMatched;
-            styleSource = "brain-legacy";
+            800,
+          );
+          if (brainRawStyle) {
+            pass3LegacyStyleSucceeded = true;
+            const styleMatched = VALID_STYLES.find((s) => brainRawStyle.toLowerCase().includes(s));
+            if (styleMatched) {
+              outputStyle = styleMatched;
+              styleSource = "brain-legacy";
+            }
           }
+        } else {
+          outputStyle = "balanced";
+          styleSource = "classifier-default";
         }
       }
     } else if (unifiedFailed && outputStyle === null) {
