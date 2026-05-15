@@ -8,7 +8,7 @@ export default defineConfig({
     environment: "happy-dom",
     globals: false,
     root: pkgRoot,
-    include: ["**/__tests__/**/*.spec.{ts,tsx}"],
+    include: ["**/__tests__/**/*.spec.{ts,tsx}", "../../tests/harness-react/**/*.spec.tsx"],
   },
   resolve: {
     alias: [
