@@ -244,6 +244,8 @@ export interface UserSettings {
   };
   /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
   disabledProviders?: ProviderId[];
+  /** Models the user has explicitly disabled in the model picker. Migration: missing field -> empty array. */
+  disabledModels?: string[];
   /** Step-aware model routing: downgrade to cheaper model for tool-execution steps. */
   stepRouter?: {
     /** Enable step-aware routing. Default: true. */
@@ -910,5 +912,26 @@ export function setProviderDisabled(provider: ProviderId, disabled: boolean): Pr
   else current.delete(provider);
   const next = [...current];
   saveUserSettings({ disabledProviders: next });
+  return next;
+}
+
+export function getDisabledModels(): string[] {
+  const raw = loadUserSettings().disabledModels;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((m): m is string => typeof m === "string");
+}
+
+export function isModelDisabled(modelId: string): boolean {
+  const info = getModelInfo(modelId);
+  if (info?.provider && isProviderDisabled(info.provider as ProviderId)) return true;
+  return getDisabledModels().includes(modelId);
+}
+
+export function setModelDisabled(modelId: string, disabled: boolean): string[] {
+  const current = new Set(getDisabledModels());
+  if (disabled) current.add(modelId);
+  else current.delete(modelId);
+  const next = [...current];
+  saveUserSettings({ disabledModels: next });
   return next;
 }
