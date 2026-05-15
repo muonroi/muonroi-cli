@@ -5,6 +5,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOllama } from "ollama-ai-provider-v2";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
+import { getReasoningEffortForModel } from "../utils/settings.js";
 import { OPENAI_COMPATIBLE_BASE_URLS } from "./endpoints.js";
 import type { ProviderId } from "./types.js";
 
@@ -12,6 +13,10 @@ import type { ProviderId } from "./types.js";
 export type ProviderFactory = ((modelId: string) => any) & {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   responses?: (modelId: string) => any;
+  /** Provider-level options to merge into providerOptions[<provider>] on every call. */
+  defaultProviderOptions?: Record<string, unknown>;
+  /** AI SDK top-level call params to strip (backend doesn't accept them). */
+  unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
 };
 
 export interface ProviderFactoryResult {
@@ -26,6 +31,8 @@ export interface ResolvedModelRuntime {
   modelInfo?: ModelInfo;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: any;
+  /** Top-level streamText params to omit (backend doesn't accept them). */
+  unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
 }
 
 export function createProviderFactory(
@@ -40,14 +47,24 @@ export function createProviderFactory(
       return { id, factory };
     }
     case "openai": {
-      const p = opts.headers
+      // OAuth subscription tokens cannot call api.openai.com — they must hit
+      // ChatGPT's backend (https://chatgpt.com/backend-api/codex) using the
+      // Responses API, not Chat Completions.
+      const isOAuth = !!opts.headers;
+      const p = isOAuth
         ? createOpenAI({
-            apiKey: opts.apiKey ?? "oauth", // placeholder when using OAuth headers
-            baseURL: opts.baseURL,
+            apiKey: opts.apiKey ?? "oauth",
+            baseURL: opts.baseURL ?? "https://chatgpt.com/backend-api/codex",
             headers: opts.headers,
           })
         : createOpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-      return { id, factory: (modelId: string) => p(modelId) };
+      const factory: ProviderFactory = isOAuth
+        ? // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
+          (modelId: string) => (p as any).responses(modelId)
+        : (modelId: string) => p(modelId);
+      // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
+      factory.responses = (modelId: string) => (p as any).responses(modelId);
+      return { id, factory };
     }
     case "google": {
       const p = opts.headers
@@ -90,30 +107,29 @@ export async function createProviderFactoryAsync(
   id: ProviderId,
   opts: { apiKey?: string; baseURL?: string },
 ): Promise<ProviderFactoryResult> {
-  if (id === "openai") {
-    try {
-      const { loadTokensWithRefresh, openAIOAuth } = await import("./auth/openai-oauth.js");
-      const tokens = await loadTokensWithRefresh("openai").catch(() => null);
+  try {
+    const { getOAuthProviderConfig } = await import("./auth/registry.js");
+    const cfg = await getOAuthProviderConfig(id);
+    if (cfg) {
+      const tokens = await cfg.loadTokensWithRefresh().catch(() => null);
       if (tokens) {
-        const headers = openAIOAuth.authHeaders(tokens);
-        return createProviderFactory(id, { ...opts, headers });
+        const headers = cfg.provider.authHeaders(tokens);
+        // OAuth subscription tokens may need a different base URL than the
+        // provider's API-key endpoint (e.g. OpenAI's ChatGPT backend).
+        const baseURL = opts.baseURL ?? cfg.baseURL;
+        const result = createProviderFactory(id, { ...opts, baseURL, headers });
+        // Attach provider-level OAuth-only defaults so downstream code can merge them.
+        if (cfg.defaultProviderOptions) {
+          result.factory.defaultProviderOptions = cfg.defaultProviderOptions;
+        }
+        if (cfg.unsupportedParams) {
+          result.factory.unsupportedParams = cfg.unsupportedParams;
+        }
+        return result;
       }
-    } catch {
-      // OAuth module unavailable or token load failed — fall through to API key
     }
-  }
-
-  if (id === "google") {
-    try {
-      const { loadGeminiTokensWithRefresh, geminiOAuth } = await import("./auth/gemini-oauth.js");
-      const tokens = await loadGeminiTokensWithRefresh().catch(() => null);
-      if (tokens) {
-        const headers = geminiOAuth.authHeaders(tokens);
-        return createProviderFactory(id, { ...opts, headers });
-      }
-    } catch {
-      // OAuth module unavailable or token load failed — fall through to API key
-    }
+  } catch {
+    /* registry unavailable or token load failed — fall through to API key */
   }
 
   return createProviderFactory(id, opts);
@@ -136,14 +152,43 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
     providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
   }
 
+  const userEffort = getReasoningEffortForModel(modelId);
+
   if (modelInfo?.provider === "xai" && modelInfo.supportsReasoningEffort) {
     providerOptions = {
       ...providerOptions,
-      xai: { reasoningEffort: modelInfo.defaultReasoningEffort ?? "medium" },
+      xai: { reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium" },
     };
   }
 
-  return { model, modelId, modelInfo, providerOptions };
+  // Forward reasoning effort generically for any provider whose catalog entry
+  // declares `supportsReasoningEffort`. AI SDK accepts "low"|"medium"|"high"|"xhigh"
+  // for openai (matching Codex CLI's UI labels) and similar for other providers.
+  if (modelInfo?.provider === "openai" && modelInfo.supportsReasoningEffort) {
+    providerOptions = {
+      ...providerOptions,
+      openai: {
+        ...(providerOptions?.openai as Record<string, unknown> | undefined),
+        reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium",
+      },
+    };
+  }
+
+  // Merge provider-level defaults from the factory (e.g. OAuth backends inject
+  // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
+  // backend-specific quirks centralized in src/providers/auth/registry.ts.
+  if (factory.defaultProviderOptions && modelInfo?.provider) {
+    const key = modelInfo.provider;
+    providerOptions = {
+      ...providerOptions,
+      [key]: {
+        ...factory.defaultProviderOptions,
+        ...((providerOptions?.[key] as Record<string, unknown> | undefined) ?? {}),
+      },
+    };
+  }
+
+  return { model, modelId, modelInfo, providerOptions, unsupportedParams: factory.unsupportedParams };
 }
 
 export function detectProviderForModel(modelId: string): ProviderId {

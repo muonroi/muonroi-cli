@@ -3767,11 +3767,19 @@ export class Agent {
             providerOpts.anthropic.thinking = { type: "adaptive" as any };
           }
 
-          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache
+          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache.
+          // Respect an already-set `store` (Codex/ChatGPT backend sets store:false via
+          // OAuth registry defaults); only default to true for api.openai.com path.
           const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
           if (turnProvider === "openai") {
-            providerOpts.openai = { ...(providerOpts.openai ?? {}), store: true };
+            const existing = (providerOpts.openai ?? {}) as { store?: boolean };
+            providerOpts.openai = {
+              ...existing,
+              store: existing.store ?? true,
+            };
           }
+          const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean =>
+            runtime.unsupportedParams?.includes(p) ?? false;
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
@@ -3841,7 +3849,7 @@ export class Agent {
             maxRetries: 0,
             abortSignal: signal,
             temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false
+            ...(runtime.modelInfo?.supportsMaxOutputTokens === false || dropParam("maxOutputTokens")
               ? {}
               : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
@@ -4053,15 +4061,22 @@ export class Agent {
                   await this.fireHook(postInput, signal).catch(() => {});
                 }
 
-                // Response tool: yield as structured_response instead of tool_result
+                // Response tool: yield as structured_response instead of tool_result.
+                // AI SDK v5 wraps tool outputs as `{type:"json", value:{...}}`; unwrap
+                // to expose the schema-shaped payload to the UI renderer.
                 if (isResponseTool(part.toolName)) {
                   responseToolCalled = true;
                   const taskType = getResponseTaskType(part.toolName);
+                  const rawOutput = part.output as unknown;
+                  const unwrapped =
+                    rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+                      ? ((rawOutput as { value?: unknown }).value ?? {})
+                      : (rawOutput ?? {});
                   yield {
                     type: "structured_response" as StreamChunk["type"],
                     structuredResponse: {
                       taskType: taskType ?? part.toolName,
-                      data: (part.output ?? {}) as Record<string, unknown>,
+                      data: unwrapped as Record<string, unknown>,
                     },
                   };
                   notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
@@ -4595,18 +4610,26 @@ export class Agent {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
 
-    if (this.providerId !== "openai") return;
     // Only upgrade when there is no explicit API key — OAuth is an alternative
     // auth path, not an override when the user deliberately passed a key.
-    if (this.apiKey) return;
+    // The boot wizard in src/index.ts uses the literal "oauth" as a sentinel
+    // to signal "no API key but OAuth tokens exist", so treat that as "no
+    // key" here.
+    if (this.apiKey && this.apiKey !== "oauth") return;
 
     try {
+      const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
+      const ids = await listOAuthProviderIds();
+      if (!ids.includes(this.providerId)) return;
+
       const effectiveBaseURL =
         this.baseURL &&
         this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
           ? this.baseURL
           : undefined;
-      const result = await createProviderFactoryAsync("openai", { baseURL: effectiveBaseURL ?? undefined });
+      const result = await createProviderFactoryAsync(this.providerId, {
+        baseURL: effectiveBaseURL ?? undefined,
+      });
       this.provider = result.factory;
     } catch {
       // Fail-open — provider remains null; requireProvider() will surface the error

@@ -1,21 +1,35 @@
 /**
  * src/providers/auth/openai-oauth.ts
  *
- * OpenAI Device-Code + PKCE OAuth implementation.
+ * OpenAI subscription OAuth — Authorization Code + PKCE with loopback redirect.
  *
- * Uses Codex CLI's published client_id (OSS MIT license, public):
+ * Mirrors the official Codex CLI flow (https://github.com/openai/codex,
+ * codex-rs/login/src/server.rs):
+ *   1. Spawn a local HTTP server on port 1455 (fallback 1457). The port is
+ *      fixed because OpenAI's OAuth app has `http://localhost:1455/auth/callback`
+ *      registered as the allowed redirect_uri — random ports are rejected.
+ *   2. Open the user's browser at https://auth.openai.com/oauth/authorize with
+ *      response_type=code, PKCE S256, and Codex-specific extras.
+ *   3. The user logs in via the real ChatGPT login page; OpenAI redirects
+ *      back to the loopback URL with ?code=...&state=...
+ *   4. POST /oauth/token with grant_type=authorization_code + code_verifier
+ *      to obtain access/refresh tokens.
+ *
+ * Uses Codex CLI's published client_id (MIT-licensed OSS, RFC 8252 — public
+ * client, no confidential secret):
  *   client_id = "app_EMznDTI27GiqE5Cz4yviqixP"
- *   Source: https://github.com/openai/codex (oauth config)
- * Rationale: zero registration friction; already proven to work with
- * OpenAI subscription accounts (ChatGPT Plus/Pro/Team).
  *
- * NOTE: this is NOT CliOAuthProvider (src/mcp/oauth-provider.ts) which uses
- * a browser-redirect flow for MCP. This is a different device-code grant.
+ * NOTE: this is NOT CliOAuthProvider (src/mcp/oauth-provider.ts) which serves
+ * the MCP server-discovery OAuth dance.
  */
 
+import { exec } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import type { OAuthCallbackServer } from "../../mcp/oauth-callback.js";
+import { startOAuthCallbackServer } from "../../mcp/oauth-callback.js";
+import { exchangeBrowserCode, generatePKCE, refreshBrowserTokens } from "./browser-flow.js";
 import type { FetchFn } from "./device-flow.js";
-import { exchangeCodeForTokens, generatePKCE, pollDeviceAuthorization, requestDeviceCode } from "./device-flow.js";
-import type { OAuthTokens, ProviderOAuth, TokenExchangeResponse, UserInfo } from "./types.js";
+import type { OAuthTokens, ProviderOAuth, UserInfo } from "./types.js";
 import { OAuthLoginError, OAuthRefreshError } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -25,16 +39,60 @@ import { OAuthLoginError, OAuthRefreshError } from "./types.js";
 const OPENAI_ISSUER = "https://auth.openai.com";
 
 /**
- * Codex CLI's published OAuth client_id.
- * Legal to use: MIT-licensed open-source, publicly documented.
+ * Codex CLI's published OAuth client_id (MIT OSS, RFC 8252 public client).
+ * Source: openai/codex codex-rs/login/src/auth/manager.rs `pub const CLIENT_ID`.
+ * Rotate this when Codex rotates theirs (the prior id was app_EMznDTI27GiqE5Cz4yviqixP).
  */
-const OPENAI_CLIENT_ID = "app_EMznDTI27GiqE5Cz4yviqixP";
+const OPENAI_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-// Pre-emptive refresh window: refresh when token expires within 60 seconds.
+/**
+ * Codex CLI's registered redirect ports. OpenAI's OAuth app rejects
+ * redirect_uri values that don't match these literally.
+ */
+const CODEX_PORTS = [1455, 1457] as const;
+const CALLBACK_PATH = "/auth/callback";
+
+// Scopes must match Codex CLI exactly — OpenAI's OAuth app config rejects
+// requests that ask for a different scope set than what's registered.
+const OPENAI_SCOPES = ["openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"];
+
+/** Identifies the calling CLI to OpenAI's auth backend. Required. */
+const OPENAI_ORIGINATOR = "codex_cli_rs";
+
 const REFRESH_WINDOW_MS = 60_000;
+const CALLBACK_TIMEOUT_MS = 5 * 60_000;
 
 // ---------------------------------------------------------------------------
-// Mutex — prevents double-refresh under concurrent requests
+// Injected dependencies (for testability)
+// ---------------------------------------------------------------------------
+
+export type CallbackServerFn = (opts: {
+  onCode: (code: string, state: string) => void;
+  timeoutMs?: number;
+  port?: number;
+  path?: string;
+  host?: string;
+}) => Promise<OAuthCallbackServer>;
+
+export type OpenBrowserFn = (url: string) => void;
+
+function defaultOpenBrowser(url: string): void {
+  const platform = process.platform;
+  let cmd: string;
+  if (platform === "win32") {
+    cmd = `start "" "${url}"`;
+  } else if (platform === "darwin") {
+    cmd = `open "${url}"`;
+  } else {
+    cmd = `xdg-open "${url}"`;
+  }
+  exec(cmd, () => {
+    // fire-and-forget — errors non-fatal (user can open manually)
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Mutex
 // ---------------------------------------------------------------------------
 
 class Mutex {
@@ -74,12 +132,24 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
   private readonly issuer: string;
   private readonly clientId: string;
   private readonly fetchFn: FetchFn;
+  private readonly callbackServerFn: CallbackServerFn;
+  private readonly openBrowserFn: OpenBrowserFn;
   private readonly mutex = new Mutex();
 
-  constructor(opts: { issuer?: string; clientId?: string; fetchFn?: FetchFn } = {}) {
+  constructor(
+    opts: {
+      issuer?: string;
+      clientId?: string;
+      fetchFn?: FetchFn;
+      callbackServerFn?: CallbackServerFn;
+      openBrowserFn?: OpenBrowserFn;
+    } = {},
+  ) {
     this.issuer = opts.issuer ?? OPENAI_ISSUER;
     this.clientId = opts.clientId ?? OPENAI_CLIENT_ID;
     this.fetchFn = opts.fetchFn ?? globalThis.fetch.bind(globalThis);
+    this.callbackServerFn = opts.callbackServerFn ?? startOAuthCallbackServer;
+    this.openBrowserFn = opts.openBrowserFn ?? defaultOpenBrowser;
   }
 
   // -------------------------------------------------------------------------
@@ -88,66 +158,115 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
 
   async login(opts: { onUserCode?: (code: string, url: string) => void } = {}): Promise<OAuthTokens> {
     const { codeVerifier, codeChallenge } = generatePKCE();
+    const state = randomBytes(16).toString("base64url");
 
-    // Step 1: request device code
-    let deviceResponse: Awaited<ReturnType<typeof requestDeviceCode>>;
+    let authCode: string;
+    let receivedState = "";
+    let bound: OAuthCallbackServer | undefined;
+
     try {
-      deviceResponse = await requestDeviceCode({
-        issuer: this.issuer,
-        clientId: this.clientId,
-        codeChallenge,
-        fetchFn: this.fetchFn,
+      authCode = await new Promise<string>((resolve, reject) => {
+        const loginTimeout = setTimeout(() => {
+          reject(new Error("OAuth browser callback timed out"));
+        }, CALLBACK_TIMEOUT_MS);
+
+        const tryPorts = async () => {
+          let bindError: unknown;
+          for (const port of CODEX_PORTS) {
+            try {
+              const server = await this.callbackServerFn({
+                onCode: (code, s) => {
+                  receivedState = s;
+                  clearTimeout(loginTimeout);
+                  resolve(code);
+                },
+                port,
+                path: CALLBACK_PATH,
+                host: "localhost",
+                timeoutMs: CALLBACK_TIMEOUT_MS,
+              });
+              bound = server;
+
+              const authorizeUrl = buildOpenAIAuthorizeUrl({
+                authEndpoint: `${this.issuer}/oauth/authorize`,
+                clientId: this.clientId,
+                redirectUri: server.url,
+                scopes: OPENAI_SCOPES,
+                codeChallenge,
+                state,
+              });
+
+              opts.onUserCode?.(authorizeUrl, authorizeUrl);
+              this.openBrowserFn(authorizeUrl);
+              return;
+            } catch (err) {
+              bindError = err;
+            }
+          }
+          clearTimeout(loginTimeout);
+          reject(
+            new Error(
+              `Could not bind loopback callback on ports ${CODEX_PORTS.join(", ")}: ${String(bindError)}. ` +
+                `Stop any other process holding that port and retry.`,
+            ),
+          );
+        };
+
+        tryPorts().catch((err) => {
+          clearTimeout(loginTimeout);
+          reject(err);
+        });
       });
     } catch (err) {
+      bound?.close();
       throw new OAuthLoginError("openai", String(err));
+    } finally {
+      bound?.close();
     }
 
-    // Step 2: surface user code to caller
-    opts.onUserCode?.(deviceResponse.user_code, deviceResponse.verification_uri);
-
-    // Step 3: poll until approved
-    let pollResult: Awaited<ReturnType<typeof pollDeviceAuthorization>>;
-    try {
-      pollResult = await pollDeviceAuthorization({
-        issuer: this.issuer,
-        deviceCode: deviceResponse.device_code,
-        pollIntervalMs: (deviceResponse.interval ?? 3) * 1000,
-        timeoutMs: (deviceResponse.expires_in ?? 300) * 1000,
-        fetchFn: this.fetchFn,
-      });
-    } catch (err) {
-      throw new OAuthLoginError("openai", String(err));
+    if (receivedState && receivedState !== state) {
+      throw new OAuthLoginError("openai", "OAuth state mismatch — possible CSRF, aborting.");
     }
 
-    // Step 4: exchange code for tokens
-    let exchangeResponse: TokenExchangeResponse;
+    // Step 2: exchange code for tokens (no client_secret — public client).
+    let tokenResponse: Awaited<ReturnType<typeof exchangeBrowserCode>> & { account_id?: string };
     try {
-      exchangeResponse = await exchangeCodeForTokens({
-        issuer: this.issuer,
+      tokenResponse = (await exchangeBrowserCode({
+        tokenEndpoint: `${this.issuer}/oauth/token`,
         clientId: this.clientId,
-        authorizationCode: pollResult.authorization_code,
+        redirectUri: bound?.url ?? `http://localhost:${CODEX_PORTS[0]}${CALLBACK_PATH}`,
+        code: authCode,
         codeVerifier,
         fetchFn: this.fetchFn,
-      });
+      })) as Awaited<ReturnType<typeof exchangeBrowserCode>> & { account_id?: string };
     } catch (err) {
       throw new OAuthLoginError("openai", String(err));
     }
 
-    const expiresAt = Date.now() + (exchangeResponse.expires_in ?? 3600) * 1000;
+    const expiresAt = Date.now() + (tokenResponse.expires_in ?? 3600) * 1000;
 
-    // Step 5: fetch userinfo (best-effort)
-    let email: string | undefined;
-    try {
-      email = await this._fetchUserEmail(exchangeResponse.access_token);
-    } catch {
-      // non-fatal
+    // Step 3: extract email from id_token (cheaper than the /userinfo HTTP
+    // round-trip) and fall back to userinfo only if the claim is missing.
+    let email = extractIdTokenClaim<string>(tokenResponse.id_token, "email");
+    if (!email) {
+      try {
+        email = await this._fetchUserEmail(tokenResponse.access_token);
+      } catch {
+        // non-fatal
+      }
     }
 
+    // ChatGPT-Account-ID is required by chatgpt.com/backend-api/codex but
+    // OpenAI's /oauth/token response does not include `account_id` as a
+    // top-level field. Codex extracts it from the id_token JWT claim
+    // `https://api.openai.com/auth.chatgpt_account_id`.
+    const accountId = tokenResponse.account_id ?? extractChatGPTAccountId(tokenResponse.id_token);
+
     return {
-      accessToken: exchangeResponse.access_token,
-      refreshToken: exchangeResponse.refresh_token,
-      idToken: exchangeResponse.id_token,
-      accountId: exchangeResponse.account_id,
+      accessToken: tokenResponse.access_token,
+      refreshToken: tokenResponse.refresh_token ?? "",
+      idToken: tokenResponse.id_token,
+      accountId,
       expiresAt,
       email,
     };
@@ -160,39 +279,31 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
   async refresh(tokens: OAuthTokens): Promise<OAuthTokens> {
     const release = await this.mutex.acquire();
     try {
-      // Double-check after acquiring lock — another concurrent call may have
-      // already refreshed.
       if (tokens.expiresAt - Date.now() > REFRESH_WINDOW_MS) {
         return tokens;
       }
 
-      const res = await this.fetchFn(`${this.issuer}/oauth/token`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          grant_type: "refresh_token",
-          client_id: this.clientId,
-          refresh_token: tokens.refreshToken,
-        }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "(unreadable)");
-        // invalid_grant = permanent failure
-        if (res.status === 400 || res.status === 401) {
-          throw new OAuthRefreshError("openai", `${res.status}: ${text}`);
-        }
-        throw new OAuthRefreshError("openai", `HTTP ${res.status}: ${text}`);
+      let data: Awaited<ReturnType<typeof refreshBrowserTokens>> & { account_id?: string };
+      try {
+        data = (await refreshBrowserTokens({
+          tokenEndpoint: `${this.issuer}/oauth/token`,
+          clientId: this.clientId,
+          refreshToken: tokens.refreshToken,
+          fetchFn: this.fetchFn,
+        })) as Awaited<ReturnType<typeof refreshBrowserTokens>> & { account_id?: string };
+      } catch (err) {
+        throw new OAuthRefreshError("openai", String(err));
       }
 
-      const data = (await res.json()) as TokenExchangeResponse;
       const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
+
+      const accountId = data.account_id ?? extractChatGPTAccountId(data.id_token) ?? tokens.accountId;
 
       return {
         accessToken: data.access_token,
         refreshToken: data.refresh_token ?? tokens.refreshToken,
         idToken: data.id_token ?? tokens.idToken,
-        accountId: data.account_id ?? tokens.accountId,
+        accountId,
         expiresAt,
         email: tokens.email,
       };
@@ -207,16 +318,18 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
 
   async revoke(tokens: OAuthTokens): Promise<void> {
     try {
+      const token = tokens.refreshToken || tokens.accessToken;
+      const body = new URLSearchParams({
+        client_id: this.clientId,
+        token,
+      });
       await this.fetchFn(`${this.issuer}/oauth/revoke`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          client_id: this.clientId,
-          token: tokens.refreshToken,
-        }),
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
       });
     } catch {
-      // best-effort — caller should delete local tokens regardless
+      // best-effort
     }
   }
 
@@ -249,22 +362,76 @@ export class OpenAIOAuthProvider implements ProviderOAuth {
 }
 
 // ---------------------------------------------------------------------------
+// Authorize URL builder — adds Codex-specific extras on top of the generic
+// PKCE authorize URL builder.
+// ---------------------------------------------------------------------------
+
+interface OpenAIAuthorizeUrlOpts {
+  authEndpoint: string;
+  clientId: string;
+  redirectUri: string;
+  scopes: string[];
+  codeChallenge: string;
+  state: string;
+}
+
+/**
+ * Decode the JWT payload (middle segment) and return the OpenAI ChatGPT
+ * account id claim if present. Returns undefined for malformed or missing
+ * tokens — `account_id` is best-effort and the login flow doesn't fail
+ * without it.
+ */
+function decodeIdTokenClaims(idToken: string | undefined): Record<string, unknown> | undefined {
+  if (!idToken) return undefined;
+  const parts = idToken.split(".");
+  if (parts.length < 2) return undefined;
+  try {
+    const payload = Buffer.from(parts[1] ?? "", "base64url").toString("utf8");
+    return JSON.parse(payload) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractChatGPTAccountId(idToken: string | undefined): string | undefined {
+  const claims = decodeIdTokenClaims(idToken);
+  const authClaim = claims?.["https://api.openai.com/auth"] as { chatgpt_account_id?: string } | undefined;
+  return authClaim?.chatgpt_account_id;
+}
+
+function extractIdTokenClaim<T>(idToken: string | undefined, key: string): T | undefined {
+  return decodeIdTokenClaims(idToken)?.[key] as T | undefined;
+}
+
+function buildOpenAIAuthorizeUrl(opts: OpenAIAuthorizeUrlOpts): string {
+  // Build the query string by hand — generic helpers like buildAuthorizeUrl()
+  // inject Google-specific params (access_type=offline, prompt=consent) that
+  // OpenAI's auth backend rejects with "Authentication Error".
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: opts.clientId,
+    redirect_uri: opts.redirectUri,
+    scope: opts.scopes.join(" "),
+    code_challenge: opts.codeChallenge,
+    code_challenge_method: "S256",
+    id_token_add_organizations: "true",
+    codex_cli_simplified_flow: "true",
+    state: opts.state,
+    originator: OPENAI_ORIGINATOR,
+  });
+  return `${opts.authEndpoint}?${params.toString()}`;
+}
+
+// ---------------------------------------------------------------------------
 // Singleton
 // ---------------------------------------------------------------------------
 
-/** Default OpenAI OAuth provider singleton (uses live auth.openai.com). */
 export const openAIOAuth = new OpenAIOAuthProvider();
 
 // ---------------------------------------------------------------------------
 // Convenience: load + auto-refresh tokens
 // ---------------------------------------------------------------------------
 
-/**
- * Load stored OAuth tokens for OpenAI and auto-refresh if within the expiry
- * window. Returns null if no tokens are stored.
- *
- * Uses a module-level mutex to prevent concurrent refresh races.
- */
 export async function loadTokensWithRefresh(
   provider: "openai",
   oauthProvider?: OpenAIOAuthProvider,
@@ -275,14 +442,12 @@ export async function loadTokensWithRefresh(
 
   const impl = oauthProvider ?? openAIOAuth;
 
-  // Pre-emptive refresh
   if (Date.now() >= tokens.expiresAt - REFRESH_WINDOW_MS) {
     try {
       tokens = await impl.refresh(tokens);
       await saveTokens(provider, tokens);
     } catch {
-      // If refresh fails, return stale tokens — adapter will get 401 and
-      // the user will need to re-login.
+      // stale tokens — adapter will get 401
     }
   }
 
