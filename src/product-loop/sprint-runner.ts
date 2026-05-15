@@ -46,6 +46,14 @@ import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
 
+export {
+  computeFailureSignature,
+  loadVerifyFailureSignatures,
+  saveVerifyFailureSignatures,
+  type VerifyFailureRecord,
+  type VerifyFailureSignatures,
+} from "./verify-failure-tracking.js";
+
 export interface RunSprintArgs {
   sprintN: number;
   ctx: DriverContext;
