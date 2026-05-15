@@ -73,12 +73,16 @@ jobs:
         working-directory: muonroi-cli
         env:
           EE_AUTH_TOKEN: ${{ secrets.EE_AUTH_TOKEN }}
+          COLLECTION_FILTER: ${{ inputs.collection_filter }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          BB_ROOT: ${{ github.workspace }}/muonroi-building-block
+          TEMPLATES_ROOT: ${{ github.workspace }}
         run: |
-          ARGS="--bb-root ${{ github.workspace }}/muonroi-building-block --templates-root ${{ github.workspace }}"
-          if [ -n "${{ inputs.collection_filter }}" ]; then
-            ARGS="$ARGS --collection-filter ${{ inputs.collection_filter }}"
+          ARGS=(--bb-root "$BB_ROOT" --templates-root "$TEMPLATES_ROOT")
+          if [ -n "$COLLECTION_FILTER" ]; then
+            ARGS+=(--collection-filter "$COLLECTION_FILTER")
           fi
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS+=(--dry-run)
           fi
-          bun run scripts/ingest-bb-to-ee.mts $ARGS
+          bun run scripts/ingest-bb-to-ee.mts "${ARGS[@]}"

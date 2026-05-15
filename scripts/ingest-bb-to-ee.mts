@@ -65,7 +65,7 @@ const DRY_RUN = args["dry-run"] ?? false;
 const COLLECTION_FILTER = args["collection-filter"] ?? null;
 const EE_URL = args["ee-url"] ?? "https://experience.muonroi.com";
 
-const STATE_FILE = resolve("D:/sources/Core/muonroi-cli/.ee-ingest-state.json");
+const STATE_FILE = resolve(process.cwd(), ".ee-ingest-state.json");
 
 // ---------------------------------------------------------------------------
 // Auth resolution (3.9)
