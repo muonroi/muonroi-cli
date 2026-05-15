@@ -1,77 +1,93 @@
 /**
  * semantic.tsx — React <Semantic> + <SemanticProvider> components.
  *
- * API mirrors the OpenTUI semantic.tsx exactly so consumers can swap adapters
- * without changing component code.
+ * Tree-shake design:
+ * - When __MUONROI_HARNESS__ is false, esbuild replaces the constant with
+ *   `false` and eliminates all dead `if (false) { ... }` branches.
+ * - The live component implementations are assigned via conditional at module
+ *   init time. The "dead" implementations are empty passthroughs that reference
+ *   no React hooks, no contexts, and no registry calls.
+ * - With minify:true + treeShaking:true, esbuild can DCE the full hook branch.
  *
- * Design notes:
- * - <SemanticProvider registry={r}> provides the registry via React context.
- * - <Semantic id role ...> wraps user-visible elements. It renders ONLY a
- *   React.Fragment — zero DOM nodes are added.
- * - Registry calls (register/update/unregister) live inside
- *   `if (__MUONROI_HARNESS__) { ... }` branches so that when the build tool
- *   sets __MUONROI_HARNESS__ = false, the entire block is eliminated at build time.
- * - StrictMode double-mount safety: the cleanup returned from useEffect
- *   unregisters the node. On re-mount, the register effect re-runs. The
- *   registry's Map handles this correctly because keys are string IDs.
+ * StrictMode safety: useEffect cleanup unregisters; re-mount re-registers.
+ * Map keys are string IDs, so this is idempotent.
  */
 
-import type { Role, SemanticNodeInput, SemanticRegistry } from "@muonroi/agent-harness-core/registry";
-import { createContext, Fragment, type ReactNode, useContext, useEffect } from "react";
-
-// ---------------------------------------------------------------------------
-// Contexts
-// ---------------------------------------------------------------------------
-
-/** Provides the registry to all <Semantic> descendants. */
-const RegistryContext = createContext<SemanticRegistry | null>(null);
-
-/** Tracks the nearest ancestor <Semantic> id for parent-child linking. */
-const ParentIdContext = createContext<string | undefined>(undefined);
-
-// ---------------------------------------------------------------------------
-// <SemanticProvider>
-// ---------------------------------------------------------------------------
+import type { SemanticNodeInput, SemanticRegistry } from "@muonroi/agent-harness-core/registry";
+import { Fragment, type ReactNode } from "react";
 
 export interface SemanticProviderProps {
   registry: SemanticRegistry;
   children: ReactNode;
 }
 
-export function SemanticProvider({ registry, children }: SemanticProviderProps) {
-  return <RegistryContext.Provider value={registry}>{children}</RegistryContext.Provider>;
-}
-
-// ---------------------------------------------------------------------------
-// <Semantic>
-// ---------------------------------------------------------------------------
-
 export type SemanticProps = Omit<SemanticNodeInput, "parentId"> & {
   children?: ReactNode;
 };
 
-export function Semantic({ children, ...node }: SemanticProps) {
-  const registry = useContext(RegistryContext);
-  const parentId = useContext(ParentIdContext);
+// ---------------------------------------------------------------------------
+// Harness-ON branch — all hooks, context, registry wiring live here.
+// Only evaluated when __MUONROI_HARNESS__ is true.
+// ---------------------------------------------------------------------------
 
-  // Build a stable cache key from node props (excluding children).
-  // We stringify ALL fields so that ANY prop change triggers a re-register.
-  const nodeKey = JSON.stringify(node);
+function buildHarnessComponents() {
+  // Dynamic requires ensure these imports are only resolved when this function
+  // is actually called (i.e. when __MUONROI_HARNESS__ is true).
+  const { createContext, useContext, useEffect } = require("react") as typeof import("react");
 
-  // Register on mount, re-register on prop change, unregister on unmount.
-  // This is safe under StrictMode: cleanup → unregister, re-run → re-register.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: nodeKey captures all node fields
-  useEffect(() => {
-    if (!__MUONROI_HARNESS__) return;
-    if (!registry) return;
-    return registry.register({ ...node, parentId });
-  }, [registry, parentId, nodeKey]);
+  const RegistryCtx = createContext<SemanticRegistry | null>(null);
+  const ParentCtx = createContext<string | undefined>(undefined);
 
-  // Render children inside a ParentIdContext so nested <Semantic> nodes know
-  // their parent. We wrap in Fragment — zero extra DOM nodes.
-  return (
-    <ParentIdContext.Provider value={node.id}>
-      <Fragment>{children}</Fragment>
-    </ParentIdContext.Provider>
-  );
+  function Provider({ registry, children }: SemanticProviderProps) {
+    return <RegistryCtx.Provider value={registry}>{children}</RegistryCtx.Provider>;
+  }
+
+  function SemanticNode({ children, ...node }: SemanticProps) {
+    const registry = useContext(RegistryCtx);
+    const parentId = useContext(ParentCtx);
+    const nodeKey = JSON.stringify(node);
+
+    // biome-ignore lint/correctness/useExhaustiveDependencies: nodeKey captures all node fields
+    useEffect(() => {
+      if (!registry) return;
+      return registry.register({ ...node, parentId });
+    }, [registry, parentId, nodeKey]);
+
+    return (
+      <ParentCtx.Provider value={node.id}>
+        <Fragment>{children}</Fragment>
+      </ParentCtx.Provider>
+    );
+  }
+
+  return { Provider, SemanticNode };
 }
+
+// ---------------------------------------------------------------------------
+// Module init — assign implementations based on compile-time flag
+// ---------------------------------------------------------------------------
+
+let _Provider: (props: SemanticProviderProps) => JSX.Element;
+let _Semantic: (props: SemanticProps) => JSX.Element;
+
+if (__MUONROI_HARNESS__) {
+  const { Provider, SemanticNode } = buildHarnessComponents();
+  _Provider = Provider;
+  _Semantic = SemanticNode;
+} else {
+  _Provider = ({ children }: SemanticProviderProps) => <Fragment>{children}</Fragment>;
+  _Semantic = ({ children }: SemanticProps) => <Fragment>{children}</Fragment>;
+}
+
+// ---------------------------------------------------------------------------
+// Public exports
+// ---------------------------------------------------------------------------
+
+/** Provide a SemanticRegistry to all descendant <Semantic> nodes. */
+export const SemanticProvider: (props: SemanticProviderProps) => JSX.Element = _Provider;
+
+/**
+ * Wrap user-visible elements with <Semantic> to expose them to the agent harness.
+ * Renders only a React.Fragment — zero extra DOM nodes.
+ */
+export const Semantic: (props: SemanticProps) => JSX.Element = _Semantic;
