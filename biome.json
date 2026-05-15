@@ -25,7 +25,8 @@
         "noAssignInExpressions": "off"
       },
       "correctness": {
-        "noUnusedFunctionParameters": "warn"
+        "noUnusedFunctionParameters": "warn",
+        "useExhaustiveDependencies": "warn"
       },
       "complexity": {
         "noForEach": "off"
