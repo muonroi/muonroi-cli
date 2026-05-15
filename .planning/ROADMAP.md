@@ -9,6 +9,7 @@
 - v1.4 Architecture Quality (Phase 12.1) - active
 - v1.5 Self-Driving Product Loop (Phase 13) - shipped 2026-05-07
 - v1.6 Council Quality & Trust (Phases 14-17) - active
+- v1.7 Auth Flexibility (Phase 18) - planned
 
 ## Phases
 
@@ -64,6 +65,12 @@ See milestone archive for details.
 - [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
 - [x] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation (completed 2026-05-08)
 
+### v1.7 Auth Flexibility
+
+**Milestone Goal:** Allow users to authenticate to LLM providers via their existing subscription (ChatGPT Plus/Pro/Codex) using OAuth Device-Code + PKCE against `auth.openai.com`, alongside the existing API-key path. Interface-first so Anthropic/Google can be added later. Driven by adoption friction: users with paid ChatGPT subscriptions shouldn't need separate API credits.
+
+- [ ] **Phase 18: OAuth Provider Auth** — `ProviderOAuth` interface; `OpenAIOAuthProvider` impl (Device-Code + PKCE); `GeminiOAuthProvider` impl (browser-redirect + PKCE, Google Gemini support); keychain/file token store with auto-refresh + mutex; `keys login/logout` subcommands for both openai and google; adapter wiring; API-key path unchanged. See `.planning/notes/oauth-provider-auth.md`.
+
 ## Phase Details
 
 ### Phase 08: Session End Extraction
@@ -90,166 +97,3 @@ Plans:
   3. The offline queue directory exists at ~/.muonroi-cli/ee-offline-queue/ and survives CLI restarts
   4. Queue never grows past 100 entries -- oldest entries are dropped when cap is reached
   5. Heavy events (extract payloads) drain in background without blocking the CLI hot path
-**Plans:** 2/2 plans complete
-Plans:
-- [x] 09-01-PLAN.md — TDD: Offline queue module (enqueue, drainQueue, cap enforcement, tests)
-- [x] 09-02-PLAN.md — Wire into client.ts (enqueue on failure, drain on circuit recovery)
-
-### Phase 10: Prompt-stale Reconciliation
-**Goal**: Stale EE suggestions that agents ignore are reported back so EE can learn what is not useful
-**Depends on**: Phase 07 (PIL Layer 3 injection must be working)
-**Requirements**: STALE-01, STALE-02, STALE-03
-**Success Criteria** (what must be TRUE):
-  1. PIL Layer 3 tracks which suggestions were injected into the prompt for each turn
-  2. After each tool-use turn, suggestions the agent did not follow are reported to EE via /api/prompt-stale
-  3. Prompt-stale reconciliation does not add latency to the user's next turn (async fire-and-forget)
-**Plans:** 2/2 plans complete
-Plans:
-- [x] 10-01-PLAN.md — Core prompt-stale primitives (setter/resetter, reconcilePromptStale module, tests)
-- [x] 10-02-PLAN.md — Wire into PIL Layer 3 and PostToolUse/PostToolUseFailure hooks
-
-### Phase 13: Product Ideal Loop
-**Goal**: Ship a self-driving product loop (`/ideal "<idea>"`) that gathers context, debates feasibility, produces a ProductSpec, and runs sprint iterations until a strict 5-condition Definition-of-Done passes — or a deterministic circuit breaker halts the run.
-**Depends on**: Phase 07 (EE pipeline live), Phase 10 (prompt-stale reconciliation), Phase 12.1 (clean orchestrator). Reuses council, verify, ee/phase-tracker, ee/judge, pil/pipeline, flow/run-manager, usage/ledger.
-**Canonical Spec**: `docs/superpowers/specs/2026-05-07-product-ideal-loop-design.md`
-**Success Criteria** (what must be TRUE):
-  1. `/ideal "<idea>"` creates a GSD run at `.muonroi-flow/runs/<runId>/` with all 6 artifact files (roadmap.md, state.md, delegations.md, gray-areas.md, iterations.md, manifest.md)
-  2. Gather stage refuses to advance until ≥5/6 seed dimensions are resolved (≥85%) within 6 rounds
-  3. Done-gate evaluates 5 AND conditions in cost-ascending order (verify floor → evidence regex → weighted score ≥ threshold → PO↔Customer cross-model debate → user approval); short-circuits on first fail
-  4. PO and Customer slots resolve to distinct models (cross-provider preferred); same-model assignment is a hard refuse at run start
-  5. All 3 circuit breakers fire deterministically (CB-1 cost EWMA, CB-2 oscillation 2-sprint streak, CB-3 verify-blank on sprint 1)
-  6. Per-product cost ledger at `~/.muonroi/usage/products/<runId>.jsonl` writes alongside monthly ledger; halt on first cap hit
-  7. `muonroi ideal resume <runId>` reconstructs state from the 6 artifact files and re-enters the correct stage
-  8. EE integration: phase-tracker auto-posts `phase-outcome` on each sprint boundary; PIL Layer 5 reads Resume Digest from `state.md`
-  9. Council, verify, ee/* invoked as callers — zero edits to those modules; orchestrator wires `runProductLoopV1` mirroring `runCouncilV2`
-  10. `MUONROI_DEV=1` env var enables `--no-customer-debate` for internal testing; not exposed in `--help`
-**Plans:** 6/6 plans complete
-Plans:
-- [x] 13-01-PLAN.md — Types + run-manager + manifest/iterations IO + StreamChunk extension + VerifyRecipe.coverage field
-- [x] 13-02-PLAN.md — Role registry (cross-tier resolution) + per-role memory (2KB cap)
-- [x] 13-03-PLAN.md — Loop driver FSM (gather/research/scoping) + clarifier maxRounds parameterization + 6 seed dimensions
-- [x] 13-04-PLAN.md — Done-gate (5 conditions) + reality-anchor + circuit breakers + verify-result + coverage parsers (bun/vitest/jest/pytest)
-- [x] 13-05-PLAN.md — Cost-scoper + per-product JSONL ledger + commitToProduct + EE phase-tracker bridge + PhaseOutcomeKind extension
-- [x] 13-06-PLAN.md — /ideal slash + orchestrator runProductLoopV1 + sprint-runner + feedback-routing + product_status_card TUI + integration tests
-
-### Phase 14: Council Accounting & Research MCP Wiring
-**Milestone**: v1.6 Council Quality & Trust
-**Goal**: Make council outputs auditable AND make the research role actually capable of internet, URL, and source-code research as users request.
-**Depends on**: none — pure surgery on existing `src/council/*` and `src/orchestrator/*`
-**Requirements**: CQ-01, CQ-02, CQ-03, CQ-04, CQ-05
-**Success Criteria** (what must be TRUE):
-  1. `[Council Memory]` records show `stats.calls > 0` matching the actual count of LLM API calls (single shared accounting object, no second `stats` shadow)
-  2. `[Council Memory] finalPositions` contains each agent's actual end-of-debate text, not empty strings
-  3. When MCP `tavily`, `playwright`, `chrome-devtools`, and `filesystem` are enabled, they appear as tools available to the research role alongside builtin (bash/grep/read_file)
-  4. When the topic contains an `https?://` URL, the research role's tool trace contains at least one Playwright or Chrome-DevTools call before the research output is returned
-  5. Research output always contains the three labelled sections `## Source Code Findings`, `## Internet Findings`, `## Frontend Findings (live)`, each with citations (`[file:line]`, `[url]`, or `[snapshot:uid]`); empty sections are explicitly marked `(no findings — gap noted)`
-  6. Re-running the audit topic against the eBerth session reproduces all of the above in the persisted council memory record
-**Plans:** 4/4 plans complete
-Plans:
-- [x] 14-01-PLAN.md — Type contracts: DebateState.active + RunCouncilOptions.councilStats
-- [x] 14-02-PLAN.md — Test scaffolds: accounting.test.ts + research-tools.test.ts
-- [x] 14-03-PLAN.md — Bug fixes: debate.ts return + index.ts stats/positions + orchestrator pass-through
-- [x] 14-04-PLAN.md — MCP wiring + URL detection + 3-section research prompt
-
-### Phase 15: Tool-grounded Debate Rounds
-**Milestone**: v1.6 Council Quality & Trust
-**Goal**: Agents actually debate by verifying each other's claims with tools — not by trading prose generated from general knowledge.
-**Depends on**: Phase 14 (research wiring + merged tool set is reused for round tools)
-**Requirements**: CQ-06, CQ-07, CQ-08, CQ-09, CQ-10
-**Success Criteria** (what must be TRUE):
-  1. Opening, response, and follow-up debate calls accept and use a merged `tools` parameter (MCP + builtin) so agents can grep/fetch/browse during rounds
-  2. Stance prompts mandate verify-then-refute; debate logs of contentious topics contain at least one `[REFUTED via <tool>:<evidence>]` citation or an explicit concession
-  3. `evaluateDebate` reports `evidenceDensity` and `disagreementResolved`; when `evidenceDensity < 0.3` after ≥2 rounds, the leader injects a forced research query
-  4. Each round's exchanges are persisted as a `[Council Round N]` system message in the session DB, including each speaker's response and citations
-  5. Debate-planner uses structured JSON output (provider schema mode where supported) and retries once with explicit schema feedback before falling back to generic stances; fallback rate drops below 10% on representative topics
-**Plans:** 5 plans
-Plans:
-**Wave 1**
-- [x] 15-01-PLAN.md — Type contracts: LeaderEvaluation + CouncilLLM.debate() interface
-**Wave 2** *(blocked on Wave 1 completion)*
-- [x] 15-02-PLAN.md — llm.debate() implementation + prompts refute-then-cite injection
-- [x] 15-03-PLAN.md — debate.ts: switch to llm.debate() + per-round persistence + evidence density metrics
-- [x] 15-04-PLAN.md — debate-planner: generateObject structured output + retry path
-**Wave 3** *(blocked on Wave 2 completion)*
-- [x] 15-05-PLAN.md — TDD: round-tools.test.ts + evaluator-metrics.test.ts (CQ-06 through CQ-10)
-
-Cross-cutting constraints: `llm.debate()` return shape `{ text, toolCalls }` must remain consistent across 15-01 (types), 15-02 (implementation), 15-03 (consumers)
-
-### Phase 16: PIL + EE Integration into Council
-**Milestone**: v1.6 Council Quality & Trust
-**Goal**: Bring the project's existing intelligence (PIL pipeline, EE brain) into the council so debates are calibrated by past experience and outcomes feed learning back to the brain.
-**Depends on**: Phase 15 (round tool tracing is the integration point for `wrapToolWithEeCheck`)
-**Requirements**: CQ-11, CQ-12, CQ-13, CQ-14, CQ-15, CQ-16, CQ-17, CQ-18, CQ-19, CQ-16a, CQ-16b, CQ-16c, CQ-16d
-**EE mode assumption**: thin-client only. EE runs on VPS at `72.61.127.154:8082` (per `~/.experience/config.json` `version: "thin-client"`). Fat-mode is OUT OF SCOPE for v1.6 — `~/.experience/experience-core.js` is absent on the dev box and embedding it is a separate project. All EE access goes through HTTP via `ee/bridge.ts:searchByText`, `ee/client.ts` (intercept/judge/extract/phase-outcome). The thin-client circuit breaker + offline queue absorb VPS unreachability.
-**Success Criteria** (what must be TRUE):
-  1. `runCouncil` invokes `runPipeline(topic)` at run start; `taskType`, `complexityTier`, `domain`, and `outputStyle` propagate to debate-planner and synthesis prompts
-  2. New `ee/council-bridge.ts:queryExperience(topic, domain)` issues a single thin-client `searchByText` call (`experience-behavioral` + `experience-principles` collections), returns matched points, and degrades gracefully when the VPS is unreachable (no crash, no hang, ≤500ms cumulative latency budget on the critical path; fall back to no-experience path on timeout)
-  3. When `queryExperience` returns ≥1 high-confidence warning, an "Experience Auditor" stance is auto-added with a lens dynamically built from the top warning
-  4. Tool calls inside debate rounds emit PreToolUse warnings into the debate output stream via `wrapToolWithEeCheck` before executing
-  5. After synthesis, `ee/judge.ts:judgeOutcome` returns confidence ∈ [0,1]; confidence `< 0.5` triggers either another debate round (if rounds remaining) or a `[NEEDS HUMAN REVIEW]` flag on the synthesis
-  6. `ee/phase-outcome.ts:recordCouncilOutcome` posts the synthesis + verdict + confidence to the EE brain on every run
-  7. Synthesis text honours `ctx.outputStyle` (concise/balanced/detailed) instead of always defaulting to one style
-  8. Feature flag `council.experienceMode = off | advisory | enforcing` is settable via `/gsd-settings`, defaults to `advisory`, and `off` exits the EE integration cleanly with no latency cost
-  9. **(CQ-16a)** App boot wires `setRenderSink` (from `src/ee/render.ts`) into the StreamChunk pipeline so PreToolUse `emitMatches` warnings appear in the chat UI as `⚠ [Experience]` blocks; `console.warn` no longer leaks to stderr in TUI raw mode
- 10. **(CQ-16b)** Successful PIL Layer 3 injection emits a dedicated `experience_injected` StreamChunk (collapsed by default, expandable) showing experience id, score, source collection, and the snippet that was added to the prompt — so the user can see WHICH experience was applied, not only that "something" was
- 11. **(CQ-16c)** `muonroi doctor` includes an EE thin-client health probe: reads `~/.experience/config.json` (`serverBaseUrl` + `serverReadAuthToken`), calls `/health` with `Authorization: Bearer <token>`, and reports per-subsystem status (`qdrant`, `fileStore`, `embed`); shows actionable hints when VPS unreachable, token missing, or only one subsystem degraded
- 12. **(CQ-16d)** Brain-emptiness diagnostic: when `interaction_logs` shows ≥50 consecutive `ee_injection` rows whose `event_subtype != 'injected'`, doctor (and a session-start one-liner) suggest either running `experience extract` / `experience evolve` on the VPS to bootstrap principles, or lowering `MUONROI_PIL_SCORE_FLOOR` if matches are present but filtered as noise. Today's audit on this machine: 0/55 successful injections — suggests brain bootstrap needed.
-
-**Open questions for plan-phase:**
-- `queryExperience` latency budget on a 5-second `serverTimeoutMs` — when VPS is slow, do we wait or short-circuit? Recommend: 1.5s hard cap on the council critical path, parallel with clarifier/preflight to hide cost.
-- `ee/judge.ts` schema fit — current judge is for phase outcomes; council outcomes need different dimensions (evidence-grounded? convergence? actionability?). May need new `judgeCouncilOutcome` variant.
-- "Experience Auditor" participant accounting — additive when `experienceMode=advisory` (3rd voice), replaces a generic role when `experienceMode=enforcing`?
-- `setRenderSink` wiring point — most natural is in `src/index.ts` boot, sink pushes a synthetic `StreamChunk` into the active orchestrator's stream. Need to confirm there's exactly one orchestrator at a time before this is safe (multi-session concurrency = NO per current architecture, so safe).
-
-**Plans:** 8 plans
-Plans:
-**Wave 1** (parallel — foundational types + EE pre-fetch + render sink)
-- [ ] 16-01-PLAN.md — StreamChunk types extension + council-bridge.ts + settings experienceMode flag
-- [ ] 16-02-PLAN.md — setRenderSink boot wiring + render.ts StreamChunk extension
-- [ ] 16-03-PLAN.md — PIL Layer 3 experience_injected chunk emission
-**Wave 2** (depends on Wave 1)
-- [ ] 16-04-PLAN.md — runCouncil: runPipeline invocation + queryExperience parallel pre-fetch + outputStyle propagation
-- [ ] 16-05-PLAN.md — debate-planner experience seeding + Experience Auditor auto-add + synthesis outputStyle
-- [ ] 16-06-PLAN.md — judgeCouncilOutcome + recordCouncilOutcome + wrapToolsWithEeCheck
-**Wave 3** (depends on Wave 2)
-- [ ] 16-07-PLAN.md — Doctor EE thin-client health probe + brain-emptiness diagnostic
-- [ ] 16-08-PLAN.md — Tests: render-sink-wiring, doctor-ee-health, layer3-injected-chunk
-
-### Phase 17: Council Robustness & Observability
-**Milestone**: v1.6 Council Quality & Trust
-**Goal**: Make the council self-auditable, give the user a way to inspect any past debate, and let `doctor` catch missing MCP configuration before it bites.
-**Depends on**: Phase 16
-**Requirements**: CQ-20, CQ-21, CQ-22, CQ-23, CQ-24
-**Success Criteria** (what must be TRUE):
-  1. `parseOutcome` logs raw synthesis text on parse failure and tries a shape-based fallback parser using `debatePlan.outputShape.sections` before returning null
-  2. `/council inspect <session-id>` slash command renders a past `[Council Memory]` record with citations, per-agent tool calls, evidence density, and the leader's per-round evaluation; works on any session in `~/.muonroi-cli/muonroi.db`
-  3. Every tool call inside research and rounds is persisted as a `[Council Tool Trace]` system message (truncated to 2KB per arg/result) so a debate can be forensically replayed
-  4. `muonroi doctor` warns when MCP `tavily` or `playwright` is not enabled but the user has run ≥3 debates whose topic contained URLs or research keywords
-  5. New `docs/Council.md` documents the integrated flow (PIL → EE warnings → planner → debate with tools → EE judge → synthesis) with a worked example
-  6. E2E test re-runs the original audit topic and asserts the persisted council memory contains evidence from `docs/*` AND a Tavily citation AND a Playwright snapshot of `localhost:3010`
-**Plans:** 4 plans
-Plans:
-**Wave 1** (parallel)
-- [x] 17-01-PLAN.md — parseOutcome raw log + shape fallback (CQ-20) + [Council Tool Trace] persistence in llm.ts + debate.ts (CQ-22)
-- [x] 17-02-PLAN.md — /council inspect slash command + menu-items registration (CQ-21)
-- [x] 17-03-PLAN.md — doctor council.mcp nudge check (CQ-23)
-**Wave 2** (depends on Wave 1)
-- [x] 17-04-PLAN.md — docs/Council.md + README link + audit-replay.test.ts (CQ-24)
-
-## Progress
-
-**Execution Order:** Phase 08 -> Phase 09 -> Phase 10 -> Phase 11 -> Phase 12 -> Phase 12.1 -> Phase 13 -> Phase 14 -> Phase 15 -> Phase 16 -> Phase 17
-
-| Phase | Milestone | Plans Complete | Status | Completed |
-|-------|-----------|----------------|--------|-----------|
-| 08. Session End Extraction | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 09. Offline Queue | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 10. Prompt-stale Reconciliation | v1.2 | 2/2 | Complete    | 2026-05-01 |
-| 11. Auto-Compact Visibility & Efficiency | v1.3 | 1/1 | Planned     | — |
-| 12. Quality & Efficiency Improvements from DB Stats | v1.3 | 1/1 | Planned     | — |
-| 12.1. Orchestrator.ts Refactor | v1.4 | 1/1 | Active      | — |
-| 13. Product Ideal Loop | v1.5 | 6/6 | Complete    | 2026-05-07 |
-| 14. Council Accounting & Research MCP Wiring | v1.6 | 4/4 | Complete    | 2026-05-08 |
-| 15. Tool-grounded Debate Rounds | v1.6 | 0/5 | Planned     | — |
-| 16. PIL + EE Integration into Council | v1.6 | 0/0 | Planned     | — |
-| 17. Council Robustness & Observability | v1.6 | 4/4 | Complete    | 2026-05-08 |

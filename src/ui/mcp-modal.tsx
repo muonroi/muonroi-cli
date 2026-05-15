@@ -1,6 +1,6 @@
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { type RefObject, useEffect, useRef } from "react";
-import { Semantic } from "../agent-harness/semantic.js";
 import type { McpCatalogEntry } from "../mcp/catalog";
 import { toMcpServerId } from "../mcp/validate";
 import type { McpServerConfig } from "../utils/settings";

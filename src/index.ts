@@ -259,6 +259,7 @@ async function startInteractive(
   session?: string,
   initialMessage?: string,
   permissionMode: PermissionMode = "safe",
+  injectHalt = false,
 ) {
   // ── Plan 00-07 boot order ──────────────────────────────────────────────────
   // 1. redactor.installGlobalPatches() — already at top of file (line 6).
@@ -495,6 +496,7 @@ async function startInteractive(
         sandboxMode,
         sandboxSettings,
         version: packageJson.version,
+        injectHalt,
       },
       initialMessage,
       onExit,
@@ -779,12 +781,13 @@ program
   .option("--agent-idle-ms <n>", "Idle quiescence window (ms)", (v) => parseInt(v, 10), 50)
   .option("--agent-fake-clock", "Use deterministic frame-counter clock")
   .option("--mock-llm <dir>", "Use fixture-based mock LLM from <dir> instead of real provider (E2E testing)")
+  .option("--inject-halt", "TEST SEAM: render a synthetic halt recovery card after boot (harness E2E only)")
   .action(async (message: string[], options) => {
     // Agent-mode: start the sidechannel runtime BEFORE any TUI or model work.
     // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
     // can pick it up without a direct import dependency.
     if (options.agentMode) {
-      const { startAgentMode } = await import("./agent-harness/agent-mode.js");
+      const { startAgentMode } = await import("@muonroi/agent-harness-opentui");
       const runtime = await startAgentMode({
         cols: options.agentCols as number,
         rows: options.agentRows as number,
@@ -797,7 +800,7 @@ program
     // Mock-LLM: load fixture directory and inject into globalThis BEFORE any
     // provider call. Dynamic import keeps startup lean when flag is absent.
     if (typeof options.mockLlm === "string") {
-      const { createMockLlm } = await import("./agent-harness/mock-llm.js");
+      const { createMockLlm } = await import("@muonroi/agent-harness-core/mock-llm");
       (globalThis as Record<string, unknown>).__muonroiMockLlm = createMockLlm({ dir: options.mockLlm });
     }
 
@@ -1003,6 +1006,7 @@ program
       options.session,
       initialMessage,
       options.permission as PermissionMode,
+      options.injectHalt === true,
     );
   });
 
@@ -1143,6 +1147,22 @@ keys
   });
 
 keys
+  .command("login <provider>")
+  .description("Log in to a provider via OAuth subscription (currently supports: openai)")
+  .action(async (provider: string) => {
+    const { runKeysLogin } = await import("./cli/keys.js");
+    await runKeysLogin(provider);
+  });
+
+keys
+  .command("logout <provider>")
+  .description("Log out of an OAuth provider and revoke stored tokens")
+  .action(async (provider: string) => {
+    const { runKeysLogout } = await import("./cli/keys.js");
+    await runKeysLogout(provider);
+  });
+
+keys
   .command("cleanup-settings")
   .description("Strip plaintext API keys out of ~/.muonroi-cli/user-settings.json after migrating to keychain")
   .action(async () => {
@@ -1272,8 +1292,9 @@ program
   .command("mcp-driver")
   .description("Run the agent-harness MCP driver over stdio")
   .action(async () => {
-    const { runHarnessDriver } = await import("./mcp/harness-driver.js");
-    await runHarnessDriver();
+    const { runHarnessDriver } = await import("@muonroi/agent-harness-core/mcp-server");
+    const { opentuiSpawn } = await import("./mcp/opentui-spawn.js");
+    await runHarnessDriver(opentuiSpawn);
   });
 
 program.addCommand(buildConfigCommand());

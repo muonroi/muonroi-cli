@@ -1,0 +1,9 @@
+{
+  "extends": "../../packages/agent-harness-angular/tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "../../dist-test/harness-angular",
+    "types": ["node"]
+  },
+  "include": ["./**/*"]
+}

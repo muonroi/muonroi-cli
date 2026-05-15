@@ -1,5 +1,5 @@
+import type { DesignSpec, LiveEvent, LiveFrame, UINode } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import type { DesignSpec, LiveEvent, LiveFrame, UINode } from "../protocol";
 
 describe("protocol types", () => {
   it("compiles a minimal LiveFrame", () => {

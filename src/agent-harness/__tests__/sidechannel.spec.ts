@@ -1,6 +1,11 @@
 // src/agent-harness/__tests__/sidechannel.spec.ts
+
+import {
+  createLineSplitter,
+  createSidechannelWriter,
+  parseSidechannelLine,
+} from "@muonroi/agent-harness-core/transports/sidechannel";
 import { describe, expect, it } from "vitest";
-import { createLineSplitter, createSidechannelWriter, parseSidechannelLine } from "../sidechannel";
 
 describe("sidechannel framing", () => {
   it("serializes a message as a single JSONL line", () => {

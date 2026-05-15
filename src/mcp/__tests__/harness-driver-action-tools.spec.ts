@@ -1,6 +1,6 @@
+import type { Driver } from "@muonroi/agent-harness-core/driver";
+import { registerActionTools } from "@muonroi/agent-harness-core/mcp-server";
 import { describe, expect, it } from "vitest";
-import type { Driver } from "../../agent-harness/driver";
-import { registerActionTools } from "../harness-driver";
 
 type ToolCb = (input: Record<string, unknown>) => Promise<unknown>;
 

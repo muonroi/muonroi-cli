@@ -7,9 +7,9 @@
 
 import type { ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
-import { createDriver, type Driver } from "../../src/agent-harness/driver.js";
-import type { LiveEvent, LiveFrame } from "../../src/agent-harness/protocol.js";
-import { createLineSplitter } from "../../src/agent-harness/sidechannel.js";
+import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
+import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
+import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 export type HarnessContext = {

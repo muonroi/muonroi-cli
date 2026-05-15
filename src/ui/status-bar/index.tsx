@@ -7,8 +7,8 @@
  * Subscribes to statusBarStore for live updates (no polling).
  */
 
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import * as React from "react";
-import { Semantic } from "../../agent-harness/semantic.js";
 import { type StatusBarState, statusBarStore } from "./store.js";
 import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";

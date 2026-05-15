@@ -30,7 +30,7 @@ export interface ResolvedModelRuntime {
 
 export function createProviderFactory(
   id: ProviderId,
-  opts: { apiKey?: string; baseURL?: string },
+  opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
 ): ProviderFactoryResult {
   switch (id) {
     case "anthropic": {
@@ -40,11 +40,23 @@ export function createProviderFactory(
       return { id, factory };
     }
     case "openai": {
-      const p = createOpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
+      const p = opts.headers
+        ? createOpenAI({
+            apiKey: opts.apiKey ?? "oauth", // placeholder when using OAuth headers
+            baseURL: opts.baseURL,
+            headers: opts.headers,
+          })
+        : createOpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
       return { id, factory: (modelId: string) => p(modelId) };
     }
     case "google": {
-      const p = createGoogleGenerativeAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
+      const p = opts.headers
+        ? createGoogleGenerativeAI({
+            apiKey: opts.apiKey ?? "oauth", // placeholder when using OAuth headers
+            baseURL: opts.baseURL,
+            headers: opts.headers,
+          })
+        : createGoogleGenerativeAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
       return { id, factory: (modelId: string) => p(modelId) };
     }
     case "deepseek":
@@ -62,6 +74,49 @@ export function createProviderFactory(
       return { id, factory: (modelId: string) => p(modelId) };
     }
   }
+}
+
+/**
+ * Async variant of createProviderFactory.
+ * For OpenAI: loads stored OAuth tokens (auto-refreshing if expiring) and injects
+ * them as Authorization / ChatGPT-Account-ID headers so subscription-backed
+ * ChatGPT Plus/Pro accounts work without an API key.
+ * For Google: loads stored Gemini OAuth tokens and injects Authorization header
+ * so users can authenticate via their Google account without a GOOGLE_API_KEY.
+ * Falls back to API-key path when no tokens are stored.
+ * All other providers: identical to createProviderFactory.
+ */
+export async function createProviderFactoryAsync(
+  id: ProviderId,
+  opts: { apiKey?: string; baseURL?: string },
+): Promise<ProviderFactoryResult> {
+  if (id === "openai") {
+    try {
+      const { loadTokensWithRefresh, openAIOAuth } = await import("./auth/openai-oauth.js");
+      const tokens = await loadTokensWithRefresh("openai").catch(() => null);
+      if (tokens) {
+        const headers = openAIOAuth.authHeaders(tokens);
+        return createProviderFactory(id, { ...opts, headers });
+      }
+    } catch {
+      // OAuth module unavailable or token load failed — fall through to API key
+    }
+  }
+
+  if (id === "google") {
+    try {
+      const { loadGeminiTokensWithRefresh, geminiOAuth } = await import("./auth/gemini-oauth.js");
+      const tokens = await loadGeminiTokensWithRefresh().catch(() => null);
+      if (tokens) {
+        const headers = geminiOAuth.authHeaders(tokens);
+        return createProviderFactory(id, { ...opts, headers });
+      }
+    } catch {
+      // OAuth module unavailable or token load failed — fall through to API key
+    }
+  }
+
+  return createProviderFactory(id, opts);
 }
 
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {

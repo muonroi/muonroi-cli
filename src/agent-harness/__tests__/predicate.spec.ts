@@ -1,6 +1,6 @@
+import { evaluatePredicate, predicateSchema } from "@muonroi/agent-harness-core/predicate";
+import type { UINode } from "@muonroi/agent-harness-core/protocol";
 import { describe, expect, it } from "vitest";
-import { evaluatePredicate, predicateSchema } from "../predicate";
-import type { UINode } from "../protocol";
 
 const node: UINode = { id: "x", role: "button", name: "Send", focus: true };
 
