@@ -1,6 +1,8 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { performance } from "node:perf_hooks";
 import type { CouncilLLM } from "../council/types.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { readManifest } from "./artifact-io.js";
 
@@ -291,6 +293,85 @@ export async function buildPriorContext(opts: {
 
   return { digest, runs };
 }
+
+// ─── P1: EE transcript extraction ────────────────────────────────────────────
+
+const TRANSCRIPT_FILES = ["manifest.md", "roadmap.md", "delegations.md", "gray-areas.md"] as const;
+const MAX_TRANSCRIPT_BYTES = 32768;
+
+/**
+ * Compose a single transcript string from the run artifact files
+ * (manifest.md, roadmap.md, delegations.md, gray-areas.md), in that exact
+ * order, each prefixed with a section header. Missing files are skipped
+ * silently. If total length exceeds 32KB, the result is truncated and a
+ * "[...truncated]" marker appended.
+ */
+export async function composeRunTranscript(flowDir: string, runId: string): Promise<string> {
+  const runDir = path.join(flowDir, "runs", runId);
+  const parts: string[] = [];
+
+  for (const file of TRANSCRIPT_FILES) {
+    const filePath = path.join(runDir, file);
+    let content: string;
+    try {
+      content = await fs.readFile(filePath, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    parts.push(`\n\n# ${file}\n\n${content}`);
+  }
+
+  const result = parts.join("");
+  if (Buffer.byteLength(result) > MAX_TRANSCRIPT_BYTES) {
+    // Truncate to exactly MAX_TRANSCRIPT_BYTES characters and append marker.
+    return result.slice(0, MAX_TRANSCRIPT_BYTES) + "\n\n[...truncated]";
+  }
+  return result;
+}
+
+/**
+ * Extract a run's artifact transcript to the Experience Engine.
+ *
+ * Non-fatal: any network/client error returns { ok: false } without throwing.
+ * Callers are responsible for telemetry/logging.
+ */
+export async function extractRunToEE(
+  flowDir: string,
+  runId: string,
+  projectPath: string,
+): Promise<{ ok: boolean; mistakes?: number; stored?: number; durationMs: number }> {
+  const transcript = await composeRunTranscript(flowDir, runId);
+
+  if (transcript.length === 0) {
+    return { ok: false, durationMs: 0 };
+  }
+
+  const t0 = performance.now();
+  try {
+    const response = await getDefaultEEClient().extract({
+      transcript,
+      projectPath,
+      meta: { source: "cli-exit", scope: `ideal:${runId}` },
+    });
+    const durationMs = performance.now() - t0;
+
+    if (response === null) {
+      return { ok: false, durationMs };
+    }
+    return {
+      ok: response.ok,
+      mistakes: response.mistakes,
+      stored: response.stored,
+      durationMs,
+    };
+  } catch {
+    const durationMs = performance.now() - t0;
+    return { ok: false, durationMs };
+  }
+}
+
+// ─── P5: Prior-run prompt context ─────────────────────────────────────────────
 
 /**
  * Format the digest for injection into clarifier/debate conversationContext.
