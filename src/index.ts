@@ -1275,6 +1275,17 @@ usage
     });
   });
 
+usage
+  .command("forensics <sessionPrefix>")
+  .description(
+    "Per-event token + cache breakdown for a session (joins usage_events ∪ interaction_logs). Use to verify Phase A/B/C cost-optimization caps.",
+  )
+  .option("--json", "Emit summary as JSON")
+  .action(async (sessionPrefix: string, opts: { json?: boolean }) => {
+    const { runCostForensics } = await import("./cli/cost-forensics.js");
+    await runCostForensics({ prefix: sessionPrefix, json: opts.json });
+  });
+
 const mcp = program.command("mcp").description("Manage MCP server configuration");
 
 mcp
