@@ -185,6 +185,44 @@ The EE client communicates with [experience-engine](https://github.com/muonroi/e
 
 ---
 
+## §4 — Agent Harness (multi-framework)
+
+**The insight:** agents driving a UI need to *understand* what they're looking at, not stare at screenshots. The agent harness emits a structured semantic tree (`<Semantic id role …>`) that external agents can query via a CSS-like grammar — same protocol whether the UI is OpenTUI, React DOM, or Angular.
+
+```
+External agent (claude/codex/gemini)
+  │  driver.query("role=dialog name~='Recovery'")
+  │  driver.press("Enter")
+  ▼
+WS / fd 3-4 / named pipe transport
+  ▼
+Semantic registry  ── snapshot at 30-60Hz, hash-dedup
+  ▼
+TUI / Web app / Angular app
+```
+
+**Token cost: ~1/10 of Playwright** — no screenshots, no OCR, deterministic selectors.
+
+### Packages
+
+| Package | Runtime | Bundle (gzip) |
+|---|---|---|
+| `@muonroi/agent-harness-core` | Node + browser | core engine, protocol, transports |
+| `@muonroi/agent-harness-opentui` | OpenTUI (terminal React) | ~ |
+| `@muonroi/agent-harness-react` | React DOM 18+ | **346 B** (harness off) / 914 B (on) |
+| `@muonroi/agent-harness-angular` | Angular 16+ | ≤ 8 KB |
+
+### Recovery card on halt
+
+When `/ideal` halts (no verify recipe detected), the TUI now renders a structured recovery card with three options:
+- **Init new** — scaffold a project from `muonroi-building-block` (BE) + a FE adapter (React/Angular/none)
+- **Point to existing** — point to an existing project and re-detect the verify recipe
+- **Continue as council** — skip CB-3 / verify gates and produce `spec.md` from a council brainstorm
+
+See [`packages/agent-harness-core/README.md`](packages/agent-harness-core/README.md), [`docs/agent-harness/PROTOCOL.md`](docs/agent-harness/PROTOCOL.md), and [`docs/agent-harness/TRANSPORTS.md`](docs/agent-harness/TRANSPORTS.md).
+
+---
+
 ## Architecture
 
 ```
