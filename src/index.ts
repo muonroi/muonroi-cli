@@ -259,6 +259,7 @@ async function startInteractive(
   session?: string,
   initialMessage?: string,
   permissionMode: PermissionMode = "safe",
+  injectHalt = false,
 ) {
   // ── Plan 00-07 boot order ──────────────────────────────────────────────────
   // 1. redactor.installGlobalPatches() — already at top of file (line 6).
@@ -495,6 +496,7 @@ async function startInteractive(
         sandboxMode,
         sandboxSettings,
         version: packageJson.version,
+        injectHalt,
       },
       initialMessage,
       onExit,
@@ -779,6 +781,7 @@ program
   .option("--agent-idle-ms <n>", "Idle quiescence window (ms)", (v) => parseInt(v, 10), 50)
   .option("--agent-fake-clock", "Use deterministic frame-counter clock")
   .option("--mock-llm <dir>", "Use fixture-based mock LLM from <dir> instead of real provider (E2E testing)")
+  .option("--inject-halt", "TEST SEAM: render a synthetic halt recovery card after boot (harness E2E only)")
   .action(async (message: string[], options) => {
     // Agent-mode: start the sidechannel runtime BEFORE any TUI or model work.
     // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
@@ -1003,6 +1006,7 @@ program
       options.session,
       initialMessage,
       options.permission as PermissionMode,
+      options.injectHalt === true,
     );
   });
 

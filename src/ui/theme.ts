@@ -71,6 +71,14 @@ export const dark = {
   councilInfoCardBorder: "#4a4a4a",
   councilInfoCardTitle: "#e5c07b",
   councilInfoCardHeading: "#9cdcfe",
+  // ── Halt recovery card tokens ─────────────────────────────────────────────
+  haltCardBorder: "#c0392b",
+  haltCardTitle: "#e74c3c",
+  haltCardDetail: "#999999",
+  haltCardOptionSelected: "#e5c07b",
+  haltCardOptionDefault: "#e0e0e0",
+  haltCardOptionDesc: "#999999",
+  haltCardHint: "#555555",
 } as const;
 
 export type Theme = typeof dark;
