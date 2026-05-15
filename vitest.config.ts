@@ -26,7 +26,25 @@ export default defineConfig({
   },
   test: {
     include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}", "tests/perf/**/*.bench.ts"],
-    exclude: ["dist/**", "node_modules/**", "tmp/**", ".claude/**", ".cursor/**"],
+    exclude: [
+      "dist/**",
+      "node_modules/**",
+      "tmp/**",
+      ".claude/**",
+      ".cursor/**",
+      // Angular tests require jsdom + zone.js + TestBed.initTestEnvironment().
+      // Run via: bunx vitest -c packages/agent-harness-angular/vitest.config.ts run
+      // or:      bun run test:harness-angular
+      "packages/agent-harness-angular/**",
+      // Angular E2E tests — require zone.js setup
+      "tests/harness-angular/**",
+      // React adapter tests require happy-dom environment.
+      // Run via: bunx vitest -c packages/agent-harness-react/vitest.config.ts run
+      // or:      bun run test:harness-react (from root)
+      "packages/agent-harness-react/**",
+      // React E2E tests — require happy-dom / WS transport setup
+      "tests/harness-react/**",
+    ],
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 30_000,
   },
