@@ -1,5 +1,6 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
+import { createHash } from "node:crypto";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { generateText, type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
@@ -116,6 +117,7 @@ import {
   getRoleModel,
   getRoleModels,
   getSubAgentBudgetChars,
+  getTopLevelToolBudgetChars,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
@@ -1338,6 +1340,36 @@ export class Agent {
         });
       }
 
+      // G1 debug: enable detailed sub-agent telemetry via env flag so we can
+      // diagnose "No output generated" / silent task failures (e.g. with
+      // gpt-5.4 reasoning models). Disabled by default — zero cost.
+      const debugSubagent = process.env.MUONROI_DEBUG_SUBAGENT === "1";
+      const debugLog = (line: string): void => {
+        if (debugSubagent) process.stderr.write(`[subagent] ${line}\n`);
+      };
+      if (debugSubagent) {
+        const mi = childRuntime.modelInfo;
+        debugLog(
+          `start: model=${childRuntime.modelId} provider=${mi?.provider} reasoning=${mi?.reasoning} thinkingType=${mi?.thinkingType} supportsClientTools=${mi?.supportsClientTools} supportsMaxOutputTokens=${mi?.supportsMaxOutputTokens} agent=${request.agent}`,
+        );
+        try {
+          debugLog(`providerOptions=${JSON.stringify(childRuntime.providerOptions ?? {})}`);
+        } catch {
+          /* providerOptions may contain non-serializable refs */
+        }
+        debugLog(
+          `toolCount=${Object.keys(childTools).length} stopWhen=stepCountIs(${Math.min(this.maxToolRounds, isExplore ? 60 : 120)})`,
+        );
+      }
+
+      // Honor `unsupportedParams` from OAuth registry (ChatGPT Codex backend
+      // rejects `max_output_tokens` with HTTP 400; top-level orchestrator
+      // already strips it via `dropParam`, the sub-agent path was missing
+      // the same guard, causing G1: "Task failed: No output generated.").
+      const childDropMaxOutput =
+        childRuntime.modelInfo?.supportsMaxOutputTokens === false ||
+        (childRuntime.unsupportedParams?.includes("maxOutputTokens") ?? false);
+      const childDropTemperature = childRuntime.unsupportedParams?.includes("temperature") ?? false;
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1346,10 +1378,8 @@ export class Agent {
         stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
         maxRetries: 0,
         abortSignal: signal,
-        temperature: isExplore ? 0.2 : 0.5,
-        ...(childRuntime.modelInfo?.supportsMaxOutputTokens === false
-          ? {}
-          : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
+        ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
+        ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
         onFinish: ({ totalUsage }) => {
           const tu = totalUsage as Record<string, unknown>;
@@ -1366,24 +1396,59 @@ export class Agent {
         },
       });
 
+      const partCounts: Record<string, number> = {};
+      let toolCallCount = 0;
+      let textDeltaCount = 0;
       for await (const part of result.fullStream) {
         if (signal?.aborted) {
           break;
         }
 
+        if (debugSubagent) {
+          partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+        }
+
         if (part.type === "text-delta") {
+          textDeltaCount++;
           assistantText += part.text;
           continue;
         }
 
         if (part.type === "tool-call") {
+          toolCallCount++;
           lastActivity = formatSubagentActivity(part.toolName, part.input);
           onActivity?.(lastActivity);
+          continue;
+        }
+
+        if (debugSubagent) {
+          // Capture finish reasons + error parts that we'd otherwise swallow.
+          if ((part as { type: string }).type === "error") {
+            const errPart = (part as { error?: unknown }).error ?? part;
+            const errStr = (() => {
+              try {
+                return JSON.stringify(errPart, Object.getOwnPropertyNames(errPart as object));
+              } catch {
+                return String(errPart);
+              }
+            })();
+            debugLog(`stream-error-part: ${errStr.slice(0, 500)}`);
+          }
+          if ((part as { type: string }).type === "finish") {
+            const reason = (part as { finishReason?: string }).finishReason ?? null;
+            debugLog(`stream-finish: reason=${reason}`);
+          }
         }
       }
 
       if (signal?.aborted) {
         return { success: false, output: "[Cancelled]" };
+      }
+
+      if (debugSubagent) {
+        debugLog(
+          `stream-end: textDeltas=${textDeltaCount} toolCalls=${toolCallCount} assistantTextLen=${assistantText.length} parts=${JSON.stringify(partCounts)}`,
+        );
       }
 
       await result.response;
@@ -1402,6 +1467,44 @@ export class Agent {
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
       const msg = err instanceof Error ? err.message : String(err);
+      // G1 diagnostic: surface the full error shape under
+      // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
+      // generated" (AI SDK validation failure on empty assistant response)
+      // or a deeper provider error.
+      if (process.env.MUONROI_DEBUG_SUBAGENT === "1") {
+        const e = err as {
+          name?: string;
+          message?: string;
+          cause?: unknown;
+          stack?: string;
+          statusCode?: number;
+          data?: unknown;
+          responseBody?: unknown;
+        };
+        process.stderr.write(
+          `[subagent] catch: name=${e.name ?? "?"} statusCode=${e.statusCode ?? "?"} message=${(e.message ?? "").slice(0, 400)}\n`,
+        );
+        if (e.cause !== undefined) {
+          try {
+            process.stderr.write(
+              `[subagent] catch.cause=${JSON.stringify(e.cause, Object.getOwnPropertyNames(e.cause as object)).slice(0, 600)}\n`,
+            );
+          } catch {
+            process.stderr.write(`[subagent] catch.cause(string)=${String(e.cause).slice(0, 400)}\n`);
+          }
+        }
+        if (e.responseBody !== undefined) {
+          process.stderr.write(`[subagent] catch.responseBody=${String(e.responseBody).slice(0, 600)}\n`);
+        }
+        if (e.data !== undefined) {
+          try {
+            process.stderr.write(`[subagent] catch.data=${JSON.stringify(e.data).slice(0, 400)}\n`);
+          } catch {
+            /* non-serializable */
+          }
+        }
+        if (e.stack) process.stderr.write(`[subagent] stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}\n`);
+      }
       const output = `Task failed: ${msg}`;
       return {
         success: false,
@@ -3693,7 +3796,7 @@ export class Agent {
             );
           }
 
-          const baseTools = createTools(this.bash, provider, this.mode, {
+          const baseToolsRaw = createTools(this.bash, provider, this.mode, {
             runTask: (request, abortSignal) => this.runTask(request, combineAbortSignals(signal, abortSignal)),
             runDelegation: (request, abortSignal) =>
               this.runDelegation(request, combineAbortSignals(signal, abortSignal)),
@@ -3705,11 +3808,17 @@ export class Agent {
             sessionId: this.session?.id ?? undefined,
             modelId: turnModelId,
           });
+          // Top-level cumulative cap state. We accumulate the raw tool set
+          // (base + MCP + PIL response tools) across the assembly below,
+          // then apply the cap once. Tier ratios are looser than the
+          // sub-agent cap (50%/80%) so casual single-tool turns are not
+          // trimmed. See sub-agent-cap.ts.
           // Chitchat: drop builtin tools too (not just MCP). A 1-word greeting
           // never needs bash/read_file/edit_file/grep — those schemas alone
           // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
           // every non-chitchat turn (PIL gates conservatively).
-          let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseTools;
+          let rawToolSet: ToolSet =
+            runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseToolsRaw;
           // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
           // worth of tool schemas (~20K input tokens). PIL Layer 1 already
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
@@ -3744,8 +3853,7 @@ export class Agent {
               },
             });
             closeMcp = mcpBundle.close;
-            tools = { ...baseTools, ...mcpBundle.tools };
-            captureToolSchemas(tools);
+            rawToolSet = { ...rawToolSet, ...mcpBundle.tools };
             if (mcpBundle.errors.length > 0) {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
@@ -3753,9 +3861,20 @@ export class Agent {
 
           // PIL response tools: inject structured output tool when taskType detected
           if (_hasResponseTools && runtime.modelInfo?.supportsClientTools !== false) {
-            tools = { ...tools, ..._pilResponseTools };
+            rawToolSet = { ...rawToolSet, ..._pilResponseTools };
             captureToolSchemas(_pilResponseTools);
           }
+
+          // Apply the top-level cumulative cap once over the fully-assembled
+          // raw tool set. State is per-turn; each turn gets a fresh budget.
+          const topLevelCap = wrapToolSetWithCap(rawToolSet, {
+            maxCumulativeChars: getTopLevelToolBudgetChars(),
+            midTierRatio: 0.5,
+            highTierRatio: 0.8,
+            label: "top-level",
+          });
+          const tools: ToolSet = topLevelCap.tools;
+          captureToolSchemas(tools);
           let responseToolCalled = false;
 
           // Build provider options, optionally adding reasoning budget for capable models
@@ -3788,10 +3907,24 @@ export class Agent {
           // OAuth registry defaults); only default to true for api.openai.com path.
           const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
           if (turnProvider === "openai") {
-            const existing = (providerOpts.openai ?? {}) as { store?: boolean };
+            const existing = (providerOpts.openai ?? {}) as { store?: boolean; promptCacheKey?: string };
+            // Stable prompt-cache key per session — the AI SDK's agentic
+            // streamText loop sends multiple OpenAI calls per turn (one per
+            // tool round). Without a stable key, OpenAI auto-hashes the
+            // prompt content, which busts the cache the moment messages
+            // change between rounds. Hashing the session ID gives every
+            // round in the same session the same cache key so subsequent
+            // rounds hit the cache for the unchanging prefix (system +
+            // earlier messages). Cache TTL is short (a few minutes) but
+            // covers a multi-round turn comfortably.
+            const sessionId = this.session?.id;
+            const promptCacheKey =
+              existing.promptCacheKey ??
+              (sessionId ? createHash("sha256").update(sessionId).digest("hex").slice(0, 32) : undefined);
             providerOpts.openai = {
               ...existing,
               store: existing.store ?? true,
+              ...(promptCacheKey ? { promptCacheKey } : {}),
             };
           }
           const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean =>

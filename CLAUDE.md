@@ -279,7 +279,9 @@ Optional env overrides for the caps:
 | Env | Range | Default | Effect |
 |---|---|---|---|
 | `MUONROI_MAX_TOOL_OUTPUT_CHARS` | 10_000–200_000 | 32_000 | Per-call tool-output cap (applies to every tool returning text). |
-| `MUONROI_SUB_AGENT_BUDGET_CHARS` | 20_000–600_000 | 120_000 | Cumulative budget the `task` sub-agent may receive across one invocation. |
+| `MUONROI_SUB_AGENT_BUDGET_CHARS` | 20_000–600_000 | 120_000 | Cumulative budget the `task` sub-agent may receive across one invocation. Tiers at 30%/70% (aggressive). |
+| `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` | 50_000–1_500_000 | 400_000 | Cumulative budget for the TOP-LEVEL agentic tool loop, fresh per turn. Tiers at 50%/80% (loose — single-tool turns unaffected). Kicks in when sub-agent path fails and the top-level loop has to fall back to direct tool calls. |
+| `MUONROI_DEBUG_SUBAGENT` | `0` / `1` | `0` | Emit detailed stderr telemetry from `task` sub-agents: streamText start config, per-part stream counts, finish reason, error parts, full catch-block error shape (name/statusCode/cause/responseBody/stack). Use when diagnosing silent task failures (e.g. "No output generated" with reasoning models). |
 
 ## When you finish a feature
 
