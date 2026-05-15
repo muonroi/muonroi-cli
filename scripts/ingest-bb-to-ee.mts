@@ -725,7 +725,7 @@ async function main() {
         collection: "experience-principles",
         payload: {
           rule_type: rule.type,
-          severity: rule.type === "general" || rule.type === "oss-pkg" ? "high" : "medium",
+          severity: "high",
           package: rule.packageName ?? null,
           category: rule.category ?? null,
           project_slug: "muonroi-building-block",
