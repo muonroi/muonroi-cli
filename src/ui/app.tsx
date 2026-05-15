@@ -983,7 +983,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       ],
     });
     setHaltSelectedIndex(0);
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startupConfig.injectHalt]);
   // Reap completed status rows after their hold window so the row clears.
   useEffect(() => {
     if (councilStatuses.length === 0) return;
@@ -4966,6 +4966,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       preflightCardState,
       slashSearchQuery.length,
       slashSearchQuery.slice,
+      activeHaltCard,
+      haltSelectedIndex,
+      initNewForm,
+      toggleModelDisabled,
+      pointToExistingForm,
     ],
   );
   useKeyboard(handleKey);
