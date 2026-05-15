@@ -10,6 +10,7 @@ import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { logInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
@@ -272,10 +273,23 @@ async function* drainSprints(args: {
         }
       }
       // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
-      // EE client absorbs failures into the offline queue. Telemetry lands
-      // in P1.6.
+      // EE client absorbs failures into the offline queue.
+      // P1.6: log telemetry for the extract outcome.
       if (ctx.cwd) {
-        await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
+        const eeResult = await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
+        try {
+          logInteraction(ctx.runId, "ee_injection", {
+            eventSubtype: "extract",
+            durationMs: Math.round(eeResult.durationMs),
+            data: {
+              ok: eeResult.ok,
+              mistakes: eeResult.mistakes ?? null,
+              stored: eeResult.stored ?? null,
+            },
+          });
+        } catch {
+          // DB errors must not break /ideal
+        }
       }
       return {
         runId: ctx.runId,
@@ -538,10 +552,23 @@ async function* runPhasesPath(args: {
     });
   }
   // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
-  // EE client absorbs failures into the offline queue. Telemetry lands
-  // in P1.6.
+  // EE client absorbs failures into the offline queue.
+  // P1.6: log telemetry for the extract outcome.
   if (ctx.cwd) {
-    await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
+    const eeResult = await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
+    try {
+      logInteraction(ctx.runId, "ee_injection", {
+        eventSubtype: "extract",
+        durationMs: Math.round(eeResult.durationMs),
+        data: {
+          ok: eeResult.ok,
+          mistakes: eeResult.mistakes ?? null,
+          stored: eeResult.stored ?? null,
+        },
+      });
+    } catch {
+      // DB errors must not break /ideal
+    }
   }
   return {
     runId: ctx.runId,
@@ -657,7 +684,23 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   // from partial runs. runAbort does not have a full DriverContext so cwd is
   // not available here; fall back to process.cwd() as the project path.
   // EE client is non-fatal (offline queue absorbs transport failures).
-  await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
+  // P1.6: log telemetry for the extract outcome.
+  {
+    const eeResult = await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
+    try {
+      logInteraction(opts.runId, "ee_injection", {
+        eventSubtype: "extract",
+        durationMs: Math.round(eeResult.durationMs),
+        data: {
+          ok: eeResult.ok,
+          mistakes: eeResult.mistakes ?? null,
+          stored: eeResult.stored ?? null,
+        },
+      });
+    } catch {
+      // DB errors must not break /ideal
+    }
+  }
   yield { type: "content", content: `Aborted run ${opts.runId}.\n` } as StreamChunk;
   return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
 }

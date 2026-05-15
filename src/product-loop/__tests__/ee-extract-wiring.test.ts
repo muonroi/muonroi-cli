@@ -1,7 +1,9 @@
 /**
- * P1.3 wiring tests: assert that extractRunToEE is called at the shipped
+ * P1.3/P1.6 wiring tests: assert that extractRunToEE is called at the shipped
  * terminus (drainSprints) and the abort path (runAbort), and that a failing
  * EE client does not prevent the shipped result from being returned.
+ * P1.6 additionally asserts logInteraction is called with event_type="ee_injection"
+ * and event_subtype="extract" at each extract call site.
  */
 
 import { promises as fs } from "node:fs";
@@ -16,6 +18,12 @@ vi.mock("../loop-driver.js", () => ({
     yield { type: "content", content: "[gather→scoping]" };
     return { runId: "ignored", stage: "approved", success: true };
   }),
+}));
+
+// Mock storage to prevent DB writes in tests and capture logInteraction calls
+vi.mock("../../storage/index.js", () => ({
+  logInteraction: vi.fn(),
+  appendSystemMessage: vi.fn(),
 }));
 
 vi.mock("../sprint-runner.js", () => ({
@@ -34,6 +42,7 @@ vi.mock("../ship-polish.js", () => ({
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 import { setDefaultEEClient } from "../../ee/intercept.js";
+import { logInteraction } from "../../storage/index.js";
 import { writeManifest } from "../artifact-io.js";
 import { runProductLoop } from "../index.js";
 import { runSprint } from "../sprint-runner.js";
@@ -127,6 +136,14 @@ describe("P1.3 — EE extract wiring", () => {
     expect(callArg.meta?.source).toBe("cli-exit");
     expect(callArg.meta?.scope).toBe(`ideal:${result.runId}`);
     expect(callArg.projectPath).toBe(flowDir);
+
+    // P1.6: logInteraction called with ee_injection / extract telemetry
+    expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
+    const logCall = vi.mocked(logInteraction).mock.calls[0];
+    expect(logCall[0]).toBe(result.runId);
+    expect(logCall[1]).toBe("ee_injection");
+    expect(logCall[2]?.eventSubtype).toBe("extract");
+    expect(logCall[2]?.data?.ok).toBe(true);
   });
 
   it("shipped path: EE failure is non-fatal — result.success still true", async () => {
@@ -146,6 +163,12 @@ describe("P1.3 — EE extract wiring", () => {
     expect(result.success).toBe(true);
     expect(result.shipped).toBe(true);
     expect(nullStub.extract).toHaveBeenCalledOnce();
+
+    // P1.6: logInteraction still called even when EE returns null (ok=false path)
+    expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
+    const logCall = vi.mocked(logInteraction).mock.calls[0];
+    expect(logCall[1]).toBe("ee_injection");
+    expect(logCall[2]?.eventSubtype).toBe("extract");
   });
 
   it("abort path: extract is called with scope=ideal:<runId>", async () => {
@@ -179,5 +202,13 @@ describe("P1.3 — EE extract wiring", () => {
     expect(stub.extract).toHaveBeenCalledOnce();
     const callArg = vi.mocked(stub.extract).mock.calls[0][0];
     expect(callArg.meta?.scope).toBe(`ideal:${runId}`);
+
+    // P1.6: logInteraction called with ee_injection / extract on abort path
+    expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
+    const logCall = vi.mocked(logInteraction).mock.calls[0];
+    expect(logCall[0]).toBe(runId);
+    expect(logCall[1]).toBe("ee_injection");
+    expect(logCall[2]?.eventSubtype).toBe("extract");
+    expect(logCall[2]?.data?.ok).toBe(true);
   });
 });
