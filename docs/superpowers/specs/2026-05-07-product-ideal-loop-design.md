@@ -537,6 +537,38 @@ Reuse 3 card types:
 4. Mistake detector learns from failed sprint outcomes
 5. EE judge worker promotes successful patterns to T0/T1 via retrospective
 
+### 7.6 Update 2026-05-15 — EE-native T0 path (commits f22f7f0 .. a4d3e30)
+
+**Cross-run memory redesign.** The filesystem manifest store (`runs/{runId}/manifest.md`, 
+`roadmap.md`, `iterations.md`, `state.md`) is now **audit log only**, not a prompt source.
+
+#### Extract on termination
+On run termination (shipped success or user abort), `extractRunToEE()` posts the full 
+run transcript to EE `/api/extract` (src/product-loop/index.ts, P1.3). EE's `evolve()` 
+pipeline promotes the extracted artifact: T3 raw → T1 behavioral → T0 principle (per 
+`experience-engine` promotion rules). Transport is non-fatal (offline-queue if client 
+goes down).
+
+#### Semantic injection at query time
+On subsequent `/ideal` runs (or any LLM call), PIL Layer 3 (`src/pil/layer3-ee-injection.ts`) 
+pulls relevant T0/T1 principles semantically via `/api/search` against Qdrant. Score floor 
+is 0.55 (mirrored from `minConfidence`). Injected into the system prompt per LLM call — 
+no static digest, no leader synthesis.
+
+#### Audit surface
+The `state.md` section `EE Injections (Layer 3)` is now the truth table: it reads live 
+from `interaction_logs` (via `selectEEInjectionsForRun()` in interaction-log.ts) and shows 
+when principles were surfaced and from which extract outcomes. Users see the injection events 
+without needing to query the EE API directly.
+
+#### buildPriorContext refactor
+`buildPriorContext()` still returns `runs.length` for the discovery card, but the static 
+digest that was appended to `conversationContext` is dropped. Semantic injection already 
+handles per-LLM-call enrichment via PIL Layer 3, so the static digest was duplicating work 
+and growing the system prompt unbounded (P1.4). The function signature is preserved for 
+loop-driver.ts compatibility; deprecated flags (`leaderModelId`, `llm`) will be pruned in 
+P2 cleanup.
+
 ---
 
 ## 8. Anti-Hallucination Layers (summary)
