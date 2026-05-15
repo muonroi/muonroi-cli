@@ -191,6 +191,7 @@ import {
 import { DelegationManager } from "./delegations";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { lastPersistedSeq } from "./message-seq.js";
 import { stableCallId } from "./pending-calls.js";
 import {
   applyModelConstraints,
@@ -856,7 +857,10 @@ export class Agent {
     if (this.session) {
       const pilActive = source === "message" ? this._pilActive : false;
       const enrichmentDelta = source === "message" ? this._pilEnrichmentDelta : 0;
-      recordUsageEvent(this.session.id, source, model, usage, null, pilActive, enrichmentDelta);
+      // Attribute usage to the most recent persisted message — this lets
+      // per-prompt cost analysis work (was null hardcoded → impossible).
+      const lastSeq = lastPersistedSeq(this.messageSeqs);
+      recordUsageEvent(this.session.id, source, model, usage, lastSeq, pilActive, enrichmentDelta);
       if (source === "message") {
         this._pilActive = false;
         this._pilEnrichmentDelta = 0;
