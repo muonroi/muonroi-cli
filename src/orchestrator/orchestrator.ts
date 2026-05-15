@@ -115,6 +115,7 @@ import {
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
+  getSubAgentBudgetChars,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
@@ -206,6 +207,7 @@ import {
   VISION_MODEL,
 } from "./prompts";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { setProviderHint } from "./token-counter.js";
 import {
   combineAbortSignals,
@@ -1217,7 +1219,14 @@ export class Agent {
         : this.bash.getSandboxSettings(),
       shellSettings: getCurrentShellSettings(),
     });
-    const childBaseTools = createTools(childBash, provider, childMode);
+    const childBaseToolsRaw = createTools(childBash, provider, childMode);
+    // Wrap with the cumulative cap so the sub-agent's tool loop cannot
+    // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
+    // tiered compression schedule. The cap is per-invocation; each sub-agent
+    // gets a fresh budget.
+    const subAgentCapBudget = getSubAgentBudgetChars();
+    const subAgentCap = wrapToolSetWithCap(childBaseToolsRaw, { maxCumulativeChars: subAgentCapBudget });
+    const childBaseTools = subAgentCap.tools;
     const initialDetail = isExplore
       ? "Scanning the codebase"
       : isVerifyDetect
@@ -1295,7 +1304,10 @@ export class Agent {
           },
         });
         closeMcp = mcpBundle.close;
-        childTools = { ...childBaseTools, ...mcpBundle.tools };
+        // Re-wrap merged tools through the same cumulative-cap state so MCP
+        // tools (which aren't part of childBaseTools) also count against and
+        // honor the sub-agent budget.
+        childTools = subAgentCap.rewrap({ ...childBaseTools, ...mcpBundle.tools });
         captureToolSchemas(childTools);
         if (mcpBundle.errors.length > 0) {
           lastActivity = `MCP unavailable: ${mcpBundle.errors.join(" | ")}`;
