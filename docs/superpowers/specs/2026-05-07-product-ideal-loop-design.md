@@ -569,6 +569,45 @@ and growing the system prompt unbounded (P1.4). The function signature is preser
 loop-driver.ts compatibility; deprecated flags (`leaderModelId`, `llm`) will be pruned in 
 P2 cleanup.
 
+### Update 2026-05-15 — Complexity routing (P2)
+
+**Purpose:** Skip Council debate and sprint ceremony for low-complexity ideation tasks. Route 
+simple edits (typo fixes, doc updates, rename refactors) to single-sprint hot-path without 
+multi-model debate overhead.
+
+#### Scoring heuristic (Layer 1)
+`src/pil/layer1-intent.ts:scoreComplexity()` is a pure function that assigns low / medium / high 
+based on idea text alone — no LLM call, no disk I/O.
+
+**Input signals** (sourced from parsed plan):
+- `planLength` ≤ 300 chars: -1 per each signal
+- `fileReferenceCount` (regex `src/.*\.(ts|tsx|...)`) < 2: -1
+- Regex `(fix|typo|rename)`: -1
+- `taskType === "debug"`: +1
+- `hasMaxSprintsOne` (user set `--max-sprints 1`): -2
+- `t0HitCount` (EE injections matched): -1
+
+**Score brackets:** ≤2 `low`, 3–5 `medium`, ≥6 `high`.
+
+#### Dispatcher (product-loop/index.ts)
+- `complexity === "low" && !flags.forceCouncil` → call `runHotPath()` (skips gather, research, 
+  scoping; runs 1 sprint with no Council, no preflight debate, direct ship)
+- Else → existing `runStart()` flow (gather → research → scoping → sprint-loop)
+
+#### Opt-out flag
+`--force-council` boolean (slash parser + CLI) opts out of hot-path routing. Useful when 
+heuristic is wrong and user wants full ceremony.
+
+#### Telemetry
+`interaction_logs` row with `event_type="routing"`, `event_subtype="ideal_hot_path"` logged 
+per hot-path invocation. Payload includes final complexity score and skipped stages.
+
+#### Cross-run memory unaffected
+`extractRunToEE()` still fires on hot-path ship/abort; EE extraction and T0 principle 
+promotion work identically to full-ceremony runs. No special handling per hot-path.
+
+**Reference:** commit `2faf34d`.
+
 ---
 
 ## 8. Anti-Hallucination Layers (summary)
