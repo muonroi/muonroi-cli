@@ -52,6 +52,12 @@
       "node": "./dist/node/transports/sidechannel.js",
       "default": "./src/transports/sidechannel.ts"
     },
+    "./transports/ws": {
+      "types": "./src/transports/ws.ts",
+      "browser": "./dist/browser/transports/ws.js",
+      "node": "./dist/node/transports/ws.js",
+      "default": "./dist/node/transports/ws.js"
+    },
     "./lint": {
       "types": "./src/lint.ts",
       "node": "./dist/node/lint.js",
@@ -71,6 +77,8 @@
   },
   "devDependencies": {
     "esbuild": "^0.28.0",
-    "tsup": "^8.5.1"
+    "tsup": "^8.5.1",
+    "ws": "^8.18.0",
+    "@types/ws": "^8.5.14"
   }
 }

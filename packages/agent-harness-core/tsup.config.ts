@@ -9,6 +9,7 @@ export default defineConfig([
       "mcp-server": "src/mcp-server.ts",
       registry: "src/registry.ts",
       "transports/sidechannel": "src/transports/sidechannel.ts",
+      "transports/ws": "src/transports/ws.ts",
     },
     outDir: "dist/node",
     format: ["esm"],
@@ -25,6 +26,7 @@ export default defineConfig([
     entry: {
       index: "src/browser-index.ts",
       registry: "src/registry.ts",
+      "transports/ws": "src/transports/ws.ts",
     },
     outDir: "dist/browser",
     format: ["esm"],
