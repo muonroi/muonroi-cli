@@ -1,0 +1,33 @@
+{
+  "name": "angular-harness-spike",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "verify": "ts-node --project tsconfig.json node-verify.ts",
+    "server": "ts-node --project tsconfig.json server.ts",
+    "server:assert": "ts-node --project tsconfig.json server.ts --assert"
+  },
+  "peerDependencies": {
+    "@angular/common": "^17.0.0",
+    "@angular/compiler": "^17.0.0",
+    "@angular/core": "^17.0.0",
+    "@angular/platform-browser-dynamic": "^17.0.0"
+  },
+  "devDependencies": {
+    "@angular/common": "^17.3.12",
+    "@angular/compiler": "^17.3.12",
+    "@angular/compiler-cli": "^17.3.12",
+    "@angular/core": "^17.3.12",
+    "@angular/platform-browser": "^17.3.12",
+    "@angular/platform-browser-dynamic": "^17.3.12",
+    "@types/jsdom": "^28.0.3",
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.14",
+    "jsdom": "^29.1.1",
+    "rxjs": "^7.8.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5",
+    "ws": "^8.18.2",
+    "zone.js": "^0.14.10"
+  }
+}
