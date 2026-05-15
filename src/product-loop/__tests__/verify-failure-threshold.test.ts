@@ -1,9 +1,10 @@
 /**
- * Tests for P3.3 + P3.4:
+ * Tests for P3.3 + P3.4 + P3.6:
  *   - recordVerifyFailureAndMaybePush threshold logic
  *   - pushFailureToEE payload shape
  *   - one-shot push per signature crossing threshold
  *   - independent signatures each trigger their own push
+ *   - P3.6: logInteraction called once when count crosses 3
  */
 
 import { promises as fs } from "node:fs";
@@ -13,6 +14,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setDefaultEEClient } from "../../ee/intercept.js";
 import type { PostToolPayload } from "../../ee/types.js";
 import { pushFailureToEE, recordVerifyFailureAndMaybePush } from "../verify-failure-tracking.js";
+
+// P3.6: mock storage to capture logInteraction calls
+vi.mock("../../storage/index.js", () => ({
+  logInteraction: vi.fn(),
+}));
+
+import { logInteraction } from "../../storage/index.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -46,6 +54,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await fs.rm(flowDir, { recursive: true, force: true });
   vi.restoreAllMocks();
+  vi.mocked(logInteraction).mockClear();
 });
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -85,6 +94,31 @@ describe("recordVerifyFailureAndMaybePush — threshold", () => {
     }
 
     expect(calls).toHaveLength(1);
+  });
+
+  it("P3.6: logInteraction called once when count crosses 3", async () => {
+    const { client } = makeMockClient();
+    setDefaultEEClient(client);
+
+    // First two calls — no log
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    expect(vi.mocked(logInteraction)).not.toHaveBeenCalled();
+
+    // Third call — should log
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
+
+    const [calledRunId, calledEventType, calledMeta] = vi.mocked(logInteraction).mock.calls[0];
+    expect(calledRunId).toBe(runId);
+    expect(calledEventType).toBe("ee_judge");
+    expect(calledMeta?.eventSubtype).toBe("ideal_verify_pattern");
+    expect((calledMeta?.data as Record<string, unknown>)?.count).toBe(3);
+    expect(typeof (calledMeta?.data as Record<string, unknown>)?.signature).toBe("string");
+
+    // Fourth call — no additional log (one-shot)
+    await recordVerifyFailureAndMaybePush({ flowDir, runId, cwd, ...BASE_INPUT });
+    expect(vi.mocked(logInteraction)).toHaveBeenCalledOnce();
   });
 
   it("4. two different signatures both reach 3 → 2 pushes", async () => {
