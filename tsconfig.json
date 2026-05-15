@@ -24,6 +24,6 @@
       "@muonroi/agent-harness-opentui": ["./packages/agent-harness-opentui/src/index.ts"]
     }
   },
-  "include": ["src/**/*", "packages/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "packages/**", "tests/harness-react/**", "tests/harness-angular/**"]
 }

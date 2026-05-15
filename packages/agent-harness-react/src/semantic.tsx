@@ -67,8 +67,8 @@ function buildHarnessComponents() {
 // Module init — assign implementations based on compile-time flag
 // ---------------------------------------------------------------------------
 
-let _Provider: (props: SemanticProviderProps) => JSX.Element;
-let _Semantic: (props: SemanticProps) => JSX.Element;
+let _Provider: (props: SemanticProviderProps) => ReactNode;
+let _Semantic: (props: SemanticProps) => ReactNode;
 
 if (__MUONROI_HARNESS__) {
   const { Provider, SemanticNode } = buildHarnessComponents();
@@ -84,10 +84,10 @@ if (__MUONROI_HARNESS__) {
 // ---------------------------------------------------------------------------
 
 /** Provide a SemanticRegistry to all descendant <Semantic> nodes. */
-export const SemanticProvider: (props: SemanticProviderProps) => JSX.Element = _Provider;
+export const SemanticProvider: (props: SemanticProviderProps) => ReactNode = _Provider;
 
 /**
  * Wrap user-visible elements with <Semantic> to expose them to the agent harness.
  * Renders only a React.Fragment — zero extra DOM nodes.
  */
-export const Semantic: (props: SemanticProps) => JSX.Element = _Semantic;
+export const Semantic: (props: SemanticProps) => ReactNode = _Semantic;
