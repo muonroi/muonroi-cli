@@ -16,8 +16,8 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { Driver } from "../../src/agent-harness/driver";
 import { spawnHarness } from "./helpers.js";
 
 // TODO: This spec has never passed in CI on any platform since it was added

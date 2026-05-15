@@ -13,11 +13,11 @@ import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createDriver, type Driver } from "../agent-harness/driver.js";
-import type { LiveEvent, LiveFrame } from "../agent-harness/protocol.js";
-import { PROTOCOL_VERSION } from "../agent-harness/protocol.js";
-import { createLineSplitter } from "../agent-harness/sidechannel.js";
-import { spawnAgentTui } from "../agent-harness/test-spawn.js";
+import { spawnAgentTui } from "../../../src/agent-harness/test-spawn.js";
+import { createDriver, type Driver } from "./driver.js";
+import type { LiveEvent, LiveFrame } from "./protocol.js";
+import { PROTOCOL_VERSION } from "./protocol.js";
+import { createLineSplitter } from "./transports/sidechannel.js";
 
 const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;

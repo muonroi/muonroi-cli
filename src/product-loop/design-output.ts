@@ -1,5 +1,5 @@
-import type { DesignSpec, UINode } from "../agent-harness/protocol.js";
-import { PROTOCOL_VERSION } from "../agent-harness/protocol.js";
+import type { DesignSpec, UINode } from "@muonroi/agent-harness-core/protocol";
+import { PROTOCOL_VERSION } from "@muonroi/agent-harness-core/protocol";
 
 type Input = Omit<DesignSpec, "mode" | "version">;
 

@@ -11,9 +11,24 @@
  * (The default vitest.config.ts is unchanged — unit tests keep their
  * normal parallelism.)
  */
+import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
+const PKG_ROOT = resolve("packages/agent-harness-core/src");
+
 export default defineConfig({
+  resolve: {
+    alias: [
+      {
+        find: /^@muonroi\/agent-harness-core\/(.+)$/,
+        replacement: `${PKG_ROOT}/$1.ts`,
+      },
+      {
+        find: "@muonroi/agent-harness-core",
+        replacement: resolve("packages/agent-harness-core/src/index.ts"),
+      },
+    ],
+  },
   test: {
     include: ["tests/harness/**/*.spec.ts"],
     exclude: ["dist/**", "node_modules/**", "tmp/**", ".claude/**", ".cursor/**"],

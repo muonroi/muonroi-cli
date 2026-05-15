@@ -1,5 +1,5 @@
+import type { LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { beforeEach, describe, expect, it } from "vitest";
-import type { LiveFrame } from "../protocol.js";
 import { createReconcilerHook, createSemanticRegistry, type SemanticNodeInput } from "../reconciler-hook.js";
 
 // ---------------------------------------------------------------------------

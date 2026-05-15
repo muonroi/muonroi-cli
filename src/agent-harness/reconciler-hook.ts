@@ -1,4 +1,4 @@
-import type { LiveFrame, Role, UINode } from "./protocol.js";
+import type { LiveFrame, Role, UINode } from "@muonroi/agent-harness-core/protocol";
 
 export type { LiveFrame, Role, UINode };
 

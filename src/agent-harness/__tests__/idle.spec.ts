@@ -1,5 +1,5 @@
+import { createHeuristicIdleDetector, createIdleDetector } from "@muonroi/agent-harness-core/idle";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHeuristicIdleDetector, createIdleDetector } from "../idle";
 
 describe("idle detector", () => {
   beforeEach(() => {

@@ -1,8 +1,8 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createMockLlm } from "@muonroi/agent-harness-core/mock-llm";
 import { describe, expect, it } from "vitest";
-import { createMockLlm } from "../mock-llm";
 
 describe("mock-llm", () => {
   it("returns fixture matching prompt", async () => {

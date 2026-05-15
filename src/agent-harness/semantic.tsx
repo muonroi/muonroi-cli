@@ -1,5 +1,5 @@
+import type { Role } from "@muonroi/agent-harness-core/protocol";
 import * as React from "react";
-import type { Role } from "./protocol.js";
 import type { SemanticNodeInput, SemanticRegistry } from "./reconciler-hook.js";
 
 // Re-export Role for consumers of this module.

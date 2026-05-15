@@ -797,7 +797,7 @@ program
     // Mock-LLM: load fixture directory and inject into globalThis BEFORE any
     // provider call. Dynamic import keeps startup lean when flag is absent.
     if (typeof options.mockLlm === "string") {
-      const { createMockLlm } = await import("./agent-harness/mock-llm.js");
+      const { createMockLlm } = await import("@muonroi/agent-harness-core/mock-llm");
       (globalThis as Record<string, unknown>).__muonroiMockLlm = createMockLlm({ dir: options.mockLlm });
     }
 
@@ -1272,7 +1272,7 @@ program
   .command("mcp-driver")
   .description("Run the agent-harness MCP driver over stdio")
   .action(async () => {
-    const { runHarnessDriver } = await import("./mcp/harness-driver.js");
+    const { runHarnessDriver } = await import("@muonroi/agent-harness-core/mcp-server");
     await runHarnessDriver();
   });
 
