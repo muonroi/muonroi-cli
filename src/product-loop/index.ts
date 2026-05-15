@@ -60,6 +60,12 @@ export interface ProductLoopOptions {
    * not set, the dispatcher routes to runHotPath (single sprint, no council debate).
    */
   complexity?: "low" | "medium" | "high";
+  /**
+   * Chat session id (sessions.id) — required for interaction_logs telemetry
+   * inserts to satisfy the FK constraint. The /ideal runId is NOT a valid
+   * sessions.id; passing runId there silently fails FK on STRICT bun:sqlite.
+   */
+  sessionId?: string;
 }
 
 export interface ProductLoopResult extends DriverResult {
@@ -133,7 +139,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
 
   // Telemetry: log routing decision.
   try {
-    logInteraction(runId, "routing", {
+    logInteraction(opts.sessionId ?? runId, "routing", {
       eventSubtype: "ideal_hot_path",
       data: { complexity: "low", forceCouncil: false },
     });
@@ -166,6 +172,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     respondToQuestion: opts.respondToQuestion,
     respondToPreflight: opts.respondToPreflight,
     cwd: opts.cwd,
+    sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
@@ -256,7 +263,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
   if (opts.cwd) {
     const eeResult = await extractRunToEE(flowDir, runId, opts.cwd);
     try {
-      logInteraction(runId, "ee_injection", {
+      logInteraction(opts.sessionId ?? runId, "ee_injection", {
         eventSubtype: "extract",
         durationMs: Math.round(eeResult.durationMs),
         data: {
@@ -314,6 +321,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     respondToQuestion,
     respondToPreflight,
     cwd: opts.cwd,
+    sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
@@ -460,7 +468,7 @@ async function* drainSprints(args: {
       if (ctx.cwd) {
         const eeResult = await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
         try {
-          logInteraction(ctx.runId, "ee_injection", {
+          logInteraction(ctx.sessionId ?? ctx.runId, "ee_injection", {
             eventSubtype: "extract",
             durationMs: Math.round(eeResult.durationMs),
             data: {
@@ -739,7 +747,7 @@ async function* runPhasesPath(args: {
   if (ctx.cwd) {
     const eeResult = await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
     try {
-      logInteraction(ctx.runId, "ee_injection", {
+      logInteraction(ctx.sessionId ?? ctx.runId, "ee_injection", {
         eventSubtype: "extract",
         durationMs: Math.round(eeResult.durationMs),
         data: {
@@ -870,7 +878,7 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   {
     const eeResult = await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
     try {
-      logInteraction(opts.runId, "ee_injection", {
+      logInteraction(opts.sessionId ?? opts.runId ?? "abort", "ee_injection", {
         eventSubtype: "extract",
         durationMs: Math.round(eeResult.durationMs),
         data: {
@@ -949,6 +957,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     respondToQuestion: opts.respondToQuestion,
     respondToPreflight: opts.respondToPreflight,
     cwd: opts.cwd,
+    sessionId: opts.sessionId,
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
   };

@@ -2333,6 +2333,9 @@ export class Agent {
       processMessageFn,
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
+      // Chat session id — used as the FK key for interaction_logs telemetry.
+      // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
+      sessionId: this.session?.id,
     } as Parameters<typeof runProductLoop>[0]);
 
     for await (const chunk of gen) {
