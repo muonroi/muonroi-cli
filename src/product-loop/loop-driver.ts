@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { fetchBBContext, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
@@ -381,6 +382,21 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             stance: s,
           };
         });
+
+        // CB-1 — BB-aware context injection. Runs before council debate fires so
+        // the research stances have access to relevant BB recipes and rules.
+        // Only active when IntentDetectionTrace signals "muonroi-building-block" target.
+        if (ctx._intentTrace?.targetFramework === "muonroi-building-block") {
+          try {
+            const bbCtx = await fetchBBContext(ctx.idea);
+            const bbBlock = renderBBContextBlock(bbCtx);
+            if (bbBlock) {
+              conversationContext = `${bbBlock}\n\n${conversationContext}`;
+            }
+          } catch {
+            /* graceful degrade — never block the research phase */
+          }
+        }
 
         const debateGen = runDebate(
           clarifiedSpec,
