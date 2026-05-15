@@ -44,8 +44,18 @@ import { buildContinueFeedback } from "./feedback-routing.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, IterationState, ProductSpec, RoleSlot } from "./types.js";
-import { recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
+import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult } from "./verify-result.js";
+
+// P3.7: track one-shot CB-2 retry bonus per run (keyed by runId).
+// The Map is module-scoped so multiple sprints within the same run share state
+// without touching DriverContext / IterationState shapes.
+const _cb2RetryUsed = new Map<string, boolean>();
+
+/** @internal Test-only: reset CB-2 retry state for a given runId. */
+export function _resetCb2RetryUsed(runId: string): void {
+  _cb2RetryUsed.delete(runId);
+}
 
 export {
   computeFailureSignature,
@@ -255,9 +265,37 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const cb2History = history.map((h) => ({ score: h.score ?? h.scoreAfter ?? 0 })).concat([{ score: verdict.score }]);
   const cb2 = CB2_oscillation(cb2History, sprintN);
   if (cb2.halt) {
-    throw new Error(
-      `Halted by circuit breaker: oscillation detected (delta_t=${cb2.delta_t.toFixed(3)}, delta_t-1=${cb2.delta_t_minus_1.toFixed(3)})`,
-    );
+    // P3.7: one-shot CB-2 bypass when any signature has been pushed to EE
+    // (count >= 3). Rationale: the EE judge-worker may promote the pattern
+    // to T1; giving the runner one extra sprint lets the next PIL Layer 3
+    // query pick up the warning and possibly escape the oscillation.
+    const retryKey = ctx.runId;
+    const retryAlreadyUsed = _cb2RetryUsed.get(retryKey) ?? false;
+    if (!retryAlreadyUsed) {
+      // Check if any signature has been pushed to EE (count >= 3)
+      let anyPushed = false;
+      try {
+        const sigs = await loadVerifyFailureSignatures(ctx.flowDir, ctx.runId);
+        anyPushed = Object.values(sigs).some((r) => r.count >= 3);
+      } catch {
+        /* fail-open: if we can't read, don't grant bonus */
+      }
+      if (anyPushed) {
+        _cb2RetryUsed.set(retryKey, true);
+        yield {
+          type: "content",
+          content: `\n> CB-2 oscillation detected but skipping halt (EE-push retry bonus consumed). delta_t=${cb2.delta_t.toFixed(3)}, delta_t-1=${cb2.delta_t_minus_1.toFixed(3)}\n`,
+        };
+      } else {
+        throw new Error(
+          `Halted by circuit breaker: oscillation detected (delta_t=${cb2.delta_t.toFixed(3)}, delta_t-1=${cb2.delta_t_minus_1.toFixed(3)})`,
+        );
+      }
+    } else {
+      throw new Error(
+        `Halted by circuit breaker: oscillation detected (delta_t=${cb2.delta_t.toFixed(3)}, delta_t-1=${cb2.delta_t_minus_1.toFixed(3)})`,
+      );
+    }
   }
 
   // ── Step 8: Persist iteration state, role memory, EE boundary ────────────
