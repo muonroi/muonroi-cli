@@ -20,7 +20,8 @@
       "@muonroi/agent-harness-core/*": [
         "./packages/agent-harness-core/src/*.ts",
         "./packages/agent-harness-core/src/*/index.ts"
-      ]
+      ],
+      "@muonroi/agent-harness-opentui": ["./packages/agent-harness-opentui/src/index.ts"]
     }
   },
   "include": ["src/**/*", "packages/**/*"],

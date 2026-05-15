@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 const PKG_ROOT = resolve("packages/agent-harness-core/src");
+const OPENTUI_PKG_ROOT = resolve("packages/agent-harness-opentui/src");
 
 export default defineConfig({
   resolve: {
@@ -15,6 +16,11 @@ export default defineConfig({
         // @muonroi/agent-harness-core (bare) → packages/agent-harness-core/src/index.ts
         find: "@muonroi/agent-harness-core",
         replacement: resolve("packages/agent-harness-core/src/index.ts"),
+      },
+      {
+        // @muonroi/agent-harness-opentui (bare) → packages/agent-harness-opentui/src/index.ts
+        find: "@muonroi/agent-harness-opentui",
+        replacement: `${OPENTUI_PKG_ROOT}/index.ts`,
       },
     ],
   },

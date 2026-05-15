@@ -14,6 +14,7 @@ const ROOT = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd();
 
 const workspaceLinks: Array<{ name: string; pkg: string }> = [
   { name: "@muonroi/agent-harness-core", pkg: "packages/agent-harness-core" },
+  { name: "@muonroi/agent-harness-opentui", pkg: "packages/agent-harness-opentui" },
 ];
 
 for (const { name, pkg } of workspaceLinks) {
