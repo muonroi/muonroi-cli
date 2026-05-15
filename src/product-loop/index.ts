@@ -27,6 +27,8 @@ export interface ProductLoopFlags {
   maxSprints: number;
   doneThreshold: number;
   stack?: string;
+  /** P2.7: when true, always run full council debate even for low-complexity ideas. */
+  forceCouncil?: boolean;
 }
 
 export interface ProductLoopOptions {
@@ -53,6 +55,11 @@ export interface ProductLoopOptions {
   roleAssignments?: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
   /** P5: when true, skip cross-run workspace memory injection. */
   skipPriorContext?: boolean;
+  /**
+   * P2.6: Complexity decision from PIL Layer 1. When "low" and forceCouncil is
+   * not set, the dispatcher routes to runHotPath (single sprint, no council debate).
+   */
+  complexity?: "low" | "medium" | "high";
 }
 
 export interface ProductLoopResult extends DriverResult {
@@ -87,8 +94,183 @@ export async function* runProductLoop(
     case "ship":
       return yield* runShip(opts);
     default:
+      if (opts.complexity === "low" && !opts.flags.forceCouncil) {
+        return yield* runHotPath(opts);
+      }
       return yield* runStart(opts);
   }
+}
+
+/**
+ * P2.5 — Hot-path for complexity=low ideas.
+ *
+ * Skips Council debate + scoping. Goes straight from idea → single sprint → ship.
+ * extractRunToEE still fires so cross-run memory continues to build.
+ */
+async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+  const { idea, flowDir, flags } = opts;
+  if (!idea?.trim()) {
+    yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
+    return { runId: "", stage: "error", success: false, reason: "missing_idea" };
+  }
+
+  const runState = await createRun(flowDir);
+  const runId = runState.id;
+
+  await writeManifest(flowDir, runId, {
+    idea,
+    capUsd: flags.maxCost,
+    maxSprints: 1, // hot-path always caps at 1 sprint
+    doneThreshold: flags.doneThreshold,
+    stack: flags.stack,
+    createdAt: new Date(),
+  });
+
+  yield {
+    type: "content",
+    content: "\n> hot-path: complexity=low → single sprint, no council debate\n",
+  } as StreamChunk;
+
+  // Telemetry: log routing decision.
+  try {
+    logInteraction(runId, "routing", {
+      eventSubtype: "ideal_hot_path",
+      data: { complexity: "low", forceCouncil: false },
+    });
+  } catch {
+    // DB errors must not break /ideal
+  }
+
+  // Build a minimal ProductSpec inline (no LLM calls needed for the hot-path).
+  const productSpec: ProductSpec = {
+    idea,
+    persona: "users",
+    mvp: [],
+    phase2: [],
+    architecture: "",
+    ioContract: "",
+    folderStructure: "",
+    sprintEstimate: 1,
+    costEstimate: 1,
+    stack: flags.stack,
+    createdAt: new Date(),
+  };
+
+  const ctx: DriverContext = {
+    runId,
+    flowDir,
+    idea,
+    sessionModelId: opts.sessionModelId,
+    llm: opts.llm,
+    flags,
+    respondToQuestion: opts.respondToQuestion,
+    respondToPreflight: opts.respondToPreflight,
+    cwd: opts.cwd,
+    processMessageFn: opts.processMessageFn,
+    detectVerifyRecipe: opts.detectVerifyRecipe,
+    skipPriorContext: opts.skipPriorContext,
+  };
+
+  const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+
+  // Run a single sprint (maxSprints=1 enforced regardless of opts.flags.maxSprints).
+  let iter: import("./types.js").IterationState;
+  try {
+    const sprintGen = runSprint({
+      sprintN: 1,
+      ctx,
+      productSpec,
+      roleAssignments,
+      history: [],
+    });
+    let result: import("./types.js").IterationState | undefined;
+    while (true) {
+      const step = await sprintGen.next();
+      if (step.done) {
+        result = step.value as import("./types.js").IterationState;
+        break;
+      }
+      yield step.value as StreamChunk;
+    }
+    iter = result!;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    yield { type: "content", content: `\n> Sprint 1 halted: ${msg}\n` } as StreamChunk;
+    const manifest = await readManifest(flowDir, runId);
+    if (manifest) {
+      await writeManifest(flowDir, runId, {
+        ...manifest,
+        verdict: { pass: false, score: 0, reason: msg, failedCondition: undefined as any },
+      });
+    }
+    return { runId, stage: "halted", success: false, reason: msg, sprintsRun: 0 };
+  }
+
+  if (iter.stage !== "shipped") {
+    return {
+      runId,
+      stage: "halted",
+      success: false,
+      reason: iter.lastVerifyResult ?? "sprint_not_shipped",
+      sprintsRun: 1,
+    };
+  }
+
+  // Sprint shipped — write final manifest.
+  const manifest = await readManifest(flowDir, runId);
+  if (manifest) {
+    await writeManifest(flowDir, runId, {
+      ...manifest,
+      doneAt: new Date(),
+      verdict: {
+        pass: true,
+        score: iter.scoreAfter,
+        failedCondition: undefined as any,
+        reason: "all_conditions_met",
+      },
+    });
+  }
+
+  // Delivery polish.
+  if (opts.cwd) {
+    try {
+      const polish = await polishDelivery({
+        cwd: opts.cwd,
+        runDir: path.join(flowDir, "runs", runId),
+        productSpec,
+        runId,
+      });
+      if (polish.notes.length > 0) {
+        yield {
+          type: "content",
+          content: `\n**Delivery polish:**\n${polish.notes.map((n) => `- ${n}`).join("\n")}\n`,
+        } as StreamChunk;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      yield { type: "content", content: `\n_Delivery polish skipped: ${msg}_\n` } as StreamChunk;
+    }
+  }
+
+  // P1.3: extract run artifacts to EE for cross-run memory.
+  if (opts.cwd) {
+    const eeResult = await extractRunToEE(flowDir, runId, opts.cwd);
+    try {
+      logInteraction(runId, "ee_injection", {
+        eventSubtype: "extract",
+        durationMs: Math.round(eeResult.durationMs),
+        data: {
+          ok: eeResult.ok,
+          mistakes: eeResult.mistakes ?? null,
+          stored: eeResult.stored ?? null,
+        },
+      });
+    } catch {
+      // DB errors must not break /ideal
+    }
+  }
+
+  return { runId, stage: "approved", success: true, reason: "shipped", sprintsRun: 1, shipped: true };
 }
 
 /** start: createRun → loop-driver (gather/research/scoping) → sprint loop → done|halted. */

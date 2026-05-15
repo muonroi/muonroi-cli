@@ -39,6 +39,8 @@ export interface IdealFlags {
   noCustomerDebate?: boolean;
   /** P5: --no-prior-context skips cross-run workspace memory injection. */
   noPriorContext?: boolean;
+  /** P2.7: --force-council always runs full council debate even for low-complexity ideas. */
+  forceCouncil?: boolean;
 }
 
 export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "help";
@@ -73,6 +75,7 @@ const HELP_TEXT = [
   "  --done-threshold <0..1>  default 0.9, range 0.7..1.0 (clamped)",
   "  --stack          <hint>  free-form stack description",
   "  --no-prior-context       skip cross-run workspace memory (greenfield)",
+  "  --force-council          always run full council debate even for low-complexity ideas",
 ].join("\n");
 
 function parseIntInRange(min: number, max: number) {
@@ -160,6 +163,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     )
     .option("--stack <text>", "tech stack hint")
     .option("--no-prior-context", "skip cross-run workspace memory (greenfield start)")
+    .option("--force-council", "always run full council debate even for low-complexity ideas")
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
@@ -183,6 +187,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     stack?: string;
     /** Commander emits priorContext=false when user passes --no-prior-context. */
     priorContext?: boolean;
+    forceCouncil?: boolean;
   };
   const ideaParts = (parsed.args as string[]) ?? [];
   const idea = ideaParts
@@ -208,6 +213,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
       stack: opts.stack,
       noCustomerDebate,
       noPriorContext: opts.priorContext === false ? true : undefined,
+      forceCouncil: opts.forceCouncil === true ? true : undefined,
     },
     warnings,
   };

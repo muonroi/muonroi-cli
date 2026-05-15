@@ -79,6 +79,22 @@ describe("/ideal slash parser", () => {
     expect(getIdealHelpText().includes("--no-customer-debate")).toBe(false);
     expect(getIdealHelpText().includes("customer-debate")).toBe(false);
   });
+
+  it("--force-council sets forceCouncil=true", () => {
+    const r = parseIdealArgs(["--force-council", "build a counter"]);
+    expect(r.subcommand).toBe("start");
+    expect(r.flags.forceCouncil).toBe(true);
+  });
+
+  it("without --force-council, forceCouncil is undefined", () => {
+    const r = parseIdealArgs(["build a counter"]);
+    expect(r.subcommand).toBe("start");
+    expect(r.flags.forceCouncil).toBeUndefined();
+  });
+
+  it("--force-council appears in --help text", () => {
+    expect(getIdealHelpText().includes("--force-council")).toBe(true);
+  });
 });
 
 describe("/ideal slash handler dispatch", () => {
