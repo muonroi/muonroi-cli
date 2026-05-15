@@ -49,7 +49,10 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
   let cost = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await leader.generate({ system: LEADER_SYSTEM, prompt, maxTokens: 1024 });
+      // 4096 (was 1024) — reasoner models (deepseek-v4-pro, o3) consume the
+      // output budget for reasoning_tokens, so 1024 routinely truncates the
+      // JSON tail and makes parseLeaderResponse fail twice → "leader unavailable".
+      const res = await leader.generate({ system: LEADER_SYSTEM, prompt, maxTokens: 4096 });
       cost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {
@@ -193,7 +196,7 @@ export async function councilRecommend(
   let synthCost = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const res = await leader.generate({ system: SYNTH_SYSTEM, prompt: synthPrompt, maxTokens: 800 });
+      const res = await leader.generate({ system: SYNTH_SYSTEM, prompt: synthPrompt, maxTokens: 4096 });
       synthCost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {

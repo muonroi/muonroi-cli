@@ -96,7 +96,14 @@ function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Pr
         lines.push(`  alt ${i + 1}: ${JSON.stringify(alt.value)} — ${alt.rationale}`);
       });
     }
-    const choice = await tuiAsk(lines.join("\n"), ["accept", "override", "more-options", "skip", "abort"]);
+    // When the leader returns null (source="user-only"), "accept" would feed null
+    // into validateAnswer and silently loop on the same askcard. Hide it so the
+    // user must override / skip / abort.
+    const hasRecommendation = args.recommendation?.primary?.value != null;
+    const options = hasRecommendation
+      ? ["accept", "override", "more-options", "skip", "abort"]
+      : ["override", "skip", "abort"];
+    const choice = await tuiAsk(lines.join("\n"), options);
     if (choice === "accept") return { action: "accept" };
     if (choice === "skip") return { action: "skip" };
     if (choice === "more-options") return { action: "more-options" };
