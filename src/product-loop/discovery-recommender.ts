@@ -1,7 +1,7 @@
 // src/product-loop/discovery-recommender.ts
 
 import type { LeaderLike } from "./discovery-prompt-parser.js";
-import type { DiscoveryQuestion } from "./discovery-schema.js";
+import { type DiscoveryQuestion, getSchemaHintForLeader } from "./discovery-schema.js";
 import type { DiscoveryContext, ExistingProjectSignals, RecommendationEntry } from "./types.js";
 
 export interface RecommendInput {
@@ -76,10 +76,6 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
 }
 
 function buildLeaderPrompt(input: RecommendInput): string {
-  // Pull schema hint inline (lazy import to avoid circular dep risks).
-  const { getSchemaHintForLeader } = require("./discovery-schema.js") as {
-    getSchemaHintForLeader: (id: string) => string;
-  };
   const constraint = getSchemaHintForLeader(input.question.id);
   return [
     `Question: ${input.question.prompt}`,

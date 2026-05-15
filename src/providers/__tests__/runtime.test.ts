@@ -79,9 +79,9 @@ describe("resolveModelRuntime", () => {
 describe("detectProviderForModel", () => {
   test("detects anthropic", () => expect(detectProviderForModel("claude-sonnet-4-6")).toBe("anthropic"));
   test("detects openai", () => expect(detectProviderForModel("gpt-4o")).toBe("openai"));
-  // DeepSeek V4 catalog entries point at SiliconFlow (the actual host).
-  test("detects siliconflow for deepseek-v4 alias", () =>
-    expect(detectProviderForModel("deepseek-v4-flash")).toBe("siliconflow"));
+  // DeepSeek V4 native ids point at api.deepseek.com per catalog.json.
+  test("detects deepseek for deepseek-v4 native id", () =>
+    expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
   test("prefix fallback for unknown deepseek id", () =>
     expect(detectProviderForModel("deepseek-future-x")).toBe("deepseek"));
   test("detects xai", () => expect(detectProviderForModel("grok-3")).toBe("xai"));

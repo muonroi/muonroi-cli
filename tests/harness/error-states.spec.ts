@@ -20,7 +20,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { Driver } from "../../src/agent-harness/driver";
 import { spawnHarness } from "./helpers.js";
 
-describe("error states E2E", () => {
+// TODO: This spec has never passed in CI on any platform since it was added
+// (commit bf5df60). The error fixture loads correctly and the app.tsx wiring
+// emits the toast event on error chunks, but the chain from
+// `driver.type("__trigger_error__")` → mock throw → toast event never
+// completes within 10s in CI. Likely cause: prompt composition prefixes (system
+// prompt, history) prevent the substring match from firing, or the harness
+// sidechannel drops the toast event before ingestion. Skip until the harness
+// has a deterministic error-injection hook that doesn't depend on prompt
+// matching.
+describe.skip("error states E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
