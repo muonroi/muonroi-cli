@@ -11,6 +11,8 @@
  *   keys delete <provider>        — remove a stored key
  *   keys import-bw [providers]    — pull from Bitwarden vault, store in keychain
  *   keys cleanup-settings         — strip plaintext keys from user-settings.json
+ *   keys login <provider>         — OAuth login (openai, google)
+ *   keys logout <provider>        — OAuth logout (openai, google)
  */
 
 import { spawnSync } from "node:child_process";
@@ -34,7 +36,7 @@ import {
 import type { ProviderId } from "../providers/types.js";
 
 /** Providers that support OAuth login in this release. */
-const OAUTH_PROVIDER_IDS: readonly string[] = ["openai"];
+const OAUTH_PROVIDER_IDS: readonly string[] = ["openai", "google"];
 
 const MCP_KEY_IDS: readonly McpKeyId[] = ["tavily"];
 
@@ -213,6 +215,7 @@ export async function runKeysList(): Promise<void> {
     console.log("No keys stored in OS keychain.");
     console.log("Run 'muonroi-cli keys set <provider>' or 'muonroi-cli keys import-bw' to add some.");
     console.log("Run 'muonroi-cli keys login openai' to log in with your OpenAI subscription.");
+    console.log("Run 'muonroi-cli keys login google' to log in with your Google account.");
     return;
   }
 
@@ -547,8 +550,10 @@ export async function runChatImportBw(opts: ChatBwImportOptions = {}): Promise<v
 /**
  * `muonroi-cli keys login <provider>`
  *
- * Runs the Device-Code + PKCE OAuth flow for the given provider,
- * displays the user_code, waits for browser approval, then persists tokens.
+ * Runs the OAuth flow for the given provider:
+ * - openai: Device-Code + PKCE (device-code grant)
+ * - google: Authorization Code + PKCE (browser-redirect, loopback callback)
+ * Persists tokens after successful login.
  */
 export async function runKeysLogin(provider: string): Promise<void> {
   if (!OAUTH_PROVIDER_IDS.includes(provider)) {
@@ -556,33 +561,62 @@ export async function runKeysLogin(provider: string): Promise<void> {
     process.exit(1);
   }
 
-  const { OpenAIOAuthProvider } = await import("../providers/auth/openai-oauth.js");
   const { saveTokens } = await import("../providers/auth/token-store.js");
 
-  const oauth = new OpenAIOAuthProvider();
+  if (provider === "openai") {
+    const { OpenAIOAuthProvider } = await import("../providers/auth/openai-oauth.js");
+    const oauth = new OpenAIOAuthProvider();
 
-  console.log(`Logging in to ${provider} via subscription OAuth...`);
+    console.log("Logging in to openai via subscription OAuth...");
 
-  const tokens = await oauth.login({
-    onUserCode(code, url) {
-      console.log(`\n  Visit: ${url}`);
-      console.log(`  Code:  ${code}`);
-      console.log("\nWaiting for browser approval...");
-    },
-  });
+    const tokens = await oauth.login({
+      onUserCode(code, url) {
+        console.log(`\n  Visit: ${url}`);
+        console.log(`  Code:  ${code}`);
+        console.log("\nWaiting for browser approval...");
+      },
+    });
 
-  await saveTokens(provider, tokens);
+    await saveTokens(provider, tokens);
 
-  const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
-  const expiry = new Date(tokens.expiresAt).toLocaleString();
-  console.log(`\nLogged in to ${provider}${emailDisplay}. Token expires: ${expiry}`);
-  console.log("Run 'muonroi-cli keys list' to verify.");
+    const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
+    const expiry = new Date(tokens.expiresAt).toLocaleString();
+    console.log(`\nLogged in to openai${emailDisplay}. Token expires: ${expiry}`);
+    console.log("Run 'muonroi-cli keys list' to verify.");
+    return;
+  }
+
+  if (provider === "google") {
+    const { GeminiOAuthProvider } = await import("../providers/auth/gemini-oauth.js");
+    const oauth = new GeminiOAuthProvider();
+
+    console.log("Logging in to Google via OAuth...");
+    console.log("A browser window will open. Sign in with your Google account.");
+
+    const tokens = await oauth.login({
+      onUserCode(_authorizeUrl, _url) {
+        // For browser-redirect flow, onUserCode receives the authorize URL.
+        // The browser is opened automatically; just show a status message.
+        console.log("\nOpening browser for Google sign-in...");
+        console.log("(If the browser does not open, copy the URL from the terminal above.)");
+        console.log("\nWaiting for authorization...");
+      },
+    });
+
+    await saveTokens(provider, tokens);
+
+    const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
+    const expiry = new Date(tokens.expiresAt).toLocaleString();
+    console.log(`\nLogged in to Google${emailDisplay}. Token expires: ${expiry}`);
+    console.log("Run 'muonroi-cli keys list' to verify.");
+    return;
+  }
 }
 
 /**
  * `muonroi-cli keys logout <provider>`
  *
- * Revokes the refresh token at the issuer and deletes stored tokens.
+ * Revokes the token at the issuer and deletes stored tokens.
  */
 export async function runKeysLogout(provider: string): Promise<void> {
   if (!OAUTH_PROVIDER_IDS.includes(provider)) {
@@ -590,7 +624,6 @@ export async function runKeysLogout(provider: string): Promise<void> {
     process.exit(1);
   }
 
-  const { OpenAIOAuthProvider } = await import("../providers/auth/openai-oauth.js");
   const { loadTokens, deleteTokens } = await import("../providers/auth/token-store.js");
 
   const tokens = await loadTokens(provider);
@@ -599,8 +632,16 @@ export async function runKeysLogout(provider: string): Promise<void> {
     return;
   }
 
-  const oauth = new OpenAIOAuthProvider();
-  await oauth.revoke(tokens); // best-effort
+  if (provider === "openai") {
+    const { OpenAIOAuthProvider } = await import("../providers/auth/openai-oauth.js");
+    const oauth = new OpenAIOAuthProvider();
+    await oauth.revoke(tokens); // best-effort
+  } else if (provider === "google") {
+    const { GeminiOAuthProvider } = await import("../providers/auth/gemini-oauth.js");
+    const oauth = new GeminiOAuthProvider();
+    await oauth.revoke(tokens); // best-effort
+  }
+
   await deleteTokens(provider);
   console.log(`Logged out of ${provider}. OAuth tokens revoked and deleted.`);
 }
