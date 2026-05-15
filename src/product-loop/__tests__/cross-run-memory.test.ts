@@ -116,12 +116,12 @@ describe("cross-run-memory (P5)", () => {
     expect(llm.generate).not.toHaveBeenCalled();
   });
 
-  it("buildPriorContext condenses via leader and persists audit trail", async () => {
+  it("buildPriorContext always returns empty digest (P1.5: leader LLM synthesis removed)", async () => {
     await seedRun(flowDir, "prior", "pdf translator extension", {
       pass: true,
       memories: { architect: "Chose Manifest V3." },
     });
-    const llm = makeStubLLM("- Use Manifest V3\n- Avoid synchronous spatial index");
+    const llm = makeStubLLM("should not be called");
     const result = await buildPriorContext({
       flowDir,
       runId: "current",
@@ -129,32 +129,19 @@ describe("cross-run-memory (P5)", () => {
       leaderModelId: "leader-model",
       llm,
     });
-    expect(result.digest).toContain("Manifest V3");
+    // P1.5: digest synthesis was removed — digest is always "" regardless of runs
+    expect(result.digest).toBe("");
     expect(result.runs.length).toBe(1);
+    // leader LLM must NOT be called — PIL Layer 3 handles injection per-call
+    expect(llm.generate).not.toHaveBeenCalled();
 
     const stateFile = path.join(flowDir, "runs", "current", "state.md");
     const state = await fs.readFile(stateFile, "utf8");
-    expect(state).toContain("Prior Decisions Context");
-    expect(state).toContain("prior");
-    expect(state).toContain("Manifest V3");
+    // P1.5: section is now "EE Injections (Layer 3)" instead of "Prior Decisions Context"
+    expect(state).toContain("EE Injections (Layer 3)");
   });
 
-  it("buildPriorContext caps digest at 2KB", async () => {
-    await seedRun(flowDir, "prior", "pdf translator extension", { pass: true });
-    const huge = "X".repeat(5000);
-    const llm = makeStubLLM(huge);
-    const result = await buildPriorContext({
-      flowDir,
-      runId: "current",
-      idea: "pdf translator extension v2",
-      leaderModelId: "leader-model",
-      llm,
-    });
-    expect(Buffer.byteLength(result.digest)).toBeLessThanOrEqual(2048 + 4); // +ellipsis
-    expect(result.digest.endsWith("...")).toBe(true);
-  });
-
-  it("buildPriorContext persists 'no qualifying runs' marker when nothing matches", async () => {
+  it("buildPriorContext persists no-injections fallback when nothing matches", async () => {
     await seedRun(flowDir, "prior", "completely unrelated topic", { pass: true });
     const llm = makeStubLLM("should not be called");
     const result = await buildPriorContext({
@@ -169,7 +156,8 @@ describe("cross-run-memory (P5)", () => {
     expect(llm.generate).not.toHaveBeenCalled();
     const stateFile = path.join(flowDir, "runs", "current", "state.md");
     const state = await fs.readFile(stateFile, "utf8");
-    expect(state).toContain("no qualifying prior runs");
+    // P1.5: fallback text when no DB rows found
+    expect(state).toContain("no EE injections recorded yet");
   });
 
   it("formatPriorContextForPrompt returns empty for empty digest", () => {
@@ -184,7 +172,7 @@ describe("cross-run-memory (P5)", () => {
     expect(out).toContain("decision 2");
   });
 
-  it("survives LLM failure by returning empty digest without throwing", async () => {
+  it("LLM is never called — digest synthesis removed in P1.5", async () => {
     await seedRun(flowDir, "prior", "pdf translator extension", { pass: true });
     const llm = {
       generate: vi.fn().mockRejectedValue(new Error("upstream 500")),
@@ -199,7 +187,9 @@ describe("cross-run-memory (P5)", () => {
       leaderModelId: "leader-model",
       llm,
     });
+    // P1.5: no LLM call — always empty digest, runs still discovered
     expect(result.digest).toBe("");
     expect(result.runs.length).toBe(1);
+    expect(llm.generate).not.toHaveBeenCalled();
   });
 });

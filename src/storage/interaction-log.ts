@@ -48,6 +48,37 @@ function maybePruneOld(): void {
   }
 }
 
+export interface EEInjectionRow {
+  session_id: string;
+  event_subtype: string | null;
+  duration_ms: number | null;
+  metadata_json: string | null;
+  created_at: string;
+}
+
+/**
+ * Query ee_injection rows for a specific run (session_id = runId).
+ * Returns both PIL Layer 3 injection rows (event_subtype IS NULL or "injected"/"no_match"/"filtered_noise"/"error")
+ * and extract rows (event_subtype = "extract"). Capped at `limit` rows, ordered by created_at DESC.
+ * Fail-open: returns [] on any DB error.
+ */
+export function selectEEInjectionsForRun(runId: string, limit = 20): EEInjectionRow[] {
+  try {
+    const db = getDatabase();
+    return db
+      .prepare(
+        `SELECT session_id, event_subtype, duration_ms, metadata_json, created_at
+         FROM interaction_logs
+         WHERE session_id = ? AND event_type = 'ee_injection'
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(runId, limit) as EEInjectionRow[];
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Log a single interaction event to the database.
  * Synchronous SQLite insert — no await needed. Wrapped in try-catch to be fail-open.

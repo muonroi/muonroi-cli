@@ -4,6 +4,7 @@ import { performance } from "node:perf_hooks";
 import type { CouncilLLM } from "../council/types.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { selectEEInjectionsForRun } from "../storage/interaction-log.js";
 import { readManifest } from "./artifact-io.js";
 
 /**
@@ -252,43 +253,106 @@ export async function condensePriorRuns(
 }
 
 /**
- * Top-level helper. Discover, condense, persist audit. Returns the digest
- * string (empty when nothing to inject).
+ * Top-level helper. Discover prior runs, persist EE injection audit to state.md.
+ * Returns digest="" (digest synthesis removed in P1.5 — PIL Layer 3 + EE T0
+ * handle semantic injection per-call, so the leader LLM condensation step is
+ * no longer needed) and the discovered runs list.
  */
 export async function buildPriorContext(opts: {
   flowDir: string;
   runId: string;
   idea: string;
+  /**
+   * @deprecated P1.5 — digest synthesis via the leader LLM was removed.
+   * The parameter is kept so callers in loop-driver.ts don't need a signature
+   * change yet. Will be pruned in P2 cleanup.
+   */
   leaderModelId: string;
+  /**
+   * @deprecated P1.5 — same as leaderModelId above. Kept for call-site
+   * compatibility; no longer used inside buildPriorContext.
+   */
   llm: CouncilLLM;
   optOut?: boolean;
 }): Promise<{ digest: string; runs: PriorRunSummary[] }> {
   if (opts.optOut) return { digest: "", runs: [] };
 
   const runs = await discoverPriorRuns(opts.flowDir, opts.runId, opts.idea);
-  const digest = await condensePriorRuns(runs, opts.leaderModelId, opts.llm);
+
+  // Digest synthesis is no longer needed: PIL Layer 3 + EE T0 handle semantic
+  // injection per-call. The caller still uses runs.length for the discovery card.
+  const digest = "";
 
   const runDir = path.join(opts.flowDir, "runs", opts.runId);
   try {
     const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
-    if (runs.length === 0) {
-      stateMap.sections.set("Prior Decisions Context", "_(no qualifying prior runs in this workspace)_");
+
+    // Query both PIL Layer 3 injection events (event_subtype IS NULL or "injected"/noise/error)
+    // and extract events (event_subtype = "extract") for this run.
+    const allRows = selectEEInjectionsForRun(opts.runId, 40);
+    const pilRows = allRows.filter((r) => r.event_subtype !== "extract");
+    const extractRows = allRows.filter((r) => r.event_subtype === "extract");
+
+    if (allRows.length === 0) {
+      stateMap.sections.set(
+        "EE Injections (Layer 3)",
+        "_(no EE injections recorded yet — PIL Layer 3 fires on the next LLM call)_",
+      );
     } else {
-      const auditLines: string[] = [];
-      for (const r of runs) {
-        const status = r.verdictPass ? "SHIPPED" : (r.failedCondition ?? "INCOMPLETE");
-        const sim = r.similarity.toFixed(2);
-        const rec = r.recency.toFixed(2);
-        auditLines.push("- " + r.runId + " | sim=" + sim + " rec=" + rec + " | " + status);
+      const lines: string[] = [];
+      lines.push(`**Prior runs scanned:** ${runs.length} (similarity-filtered)`);
+      lines.push("");
+
+      // PIL injection hits
+      lines.push(`**PIL Layer 3 hits this run:** ${pilRows.length}`);
+      for (const row of pilRows) {
+        let detail = "";
+        if (row.metadata_json) {
+          try {
+            const meta = JSON.parse(row.metadata_json) as Record<string, unknown>;
+            const pc = meta.principleCount ?? "";
+            const bc = meta.behavioralCount ?? "";
+            if (pc !== "" || bc !== "") {
+              detail = ` | principles=${pc} behavioral=${bc}`;
+            }
+          } catch {
+            /* ignore malformed json */
+          }
+        }
+        const subtype = row.event_subtype ? ` (${row.event_subtype})` : "";
+        lines.push(`- ${row.created_at}: injected at score floor 0.55${subtype}${detail}`);
       }
-      const digestBody = digest || "_(empty - leader returned no useful content)_";
-      const sourcesBlock = "**Sources:**\n" + auditLines.join("\n");
-      const digestBlock = "**Condensed digest:**\n" + digestBody;
-      stateMap.sections.set("Prior Decisions Context", sourcesBlock + "\n\n" + digestBlock);
+      lines.push("");
+
+      // Extract outcomes
+      lines.push(`**Extracts this run:** ${extractRows.length}`);
+      for (const row of extractRows) {
+        let detail = "";
+        if (row.metadata_json) {
+          try {
+            const meta = JSON.parse(row.metadata_json) as Record<string, unknown>;
+            const ok = meta.ok ?? "?";
+            const stored = meta.stored ?? "?";
+            const mistakes = meta.mistakes ?? "?";
+            const ms = row.duration_ms ?? "?";
+            detail = `ok=${ok} stored=${stored} mistakes=${mistakes} durationMs=${ms}`;
+          } catch {
+            detail = "metadata_parse_error";
+          }
+        }
+        lines.push(`- ${row.created_at}: ${detail}`);
+      }
+      lines.push("");
+
+      lines.push(
+        `*Audit raw events: \`sqlite3 ~/.muonroi-cli/muonroi.db "SELECT * FROM interaction_logs WHERE session_id='${opts.runId}' AND event_type='ee_injection' ORDER BY created_at DESC"\`*`,
+      );
+
+      stateMap.sections.set("EE Injections (Layer 3)", lines.join("\n"));
     }
     await writeArtifact(runDir, "state.md", stateMap);
   } catch {
-    /* non-critical */
+    /* non-critical — state.md write must never throw */
   }
 
   return { digest, runs };
