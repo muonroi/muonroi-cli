@@ -1273,7 +1273,8 @@ program
   .description("Run the agent-harness MCP driver over stdio")
   .action(async () => {
     const { runHarnessDriver } = await import("@muonroi/agent-harness-core/mcp-server");
-    await runHarnessDriver();
+    const { opentuiSpawn } = await import("./mcp/opentui-spawn.js");
+    await runHarnessDriver(opentuiSpawn);
   });
 
 program.addCommand(buildConfigCommand());
