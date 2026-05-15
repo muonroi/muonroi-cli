@@ -73,6 +73,7 @@
     "ai": "6.0.169",
     "commander": "^12.1.0",
     "diff": "^8.0.3",
+    "fast-xml-parser": "^4.4.1",
     "gpt-tokenizer": "^3.4.0",
     "keytar": "^7.9.0",
     "ollama-ai-provider-v2": "1.5.5",

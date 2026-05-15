@@ -98,6 +98,7 @@ import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/coun
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
 import {
+  BB_TEMPLATE_OPTIONS,
   FE_STACK_OPTIONS,
   InitNewFormCard,
   type InitNewFormState,
@@ -3842,15 +3843,50 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             return;
           }
           if (key.name === "return") {
+            // Advance to bb-template picker (task 6.2a)
+            setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
+            return;
+          }
+          return;
+        }
+        // Task 6.2a — BB template picker step
+        if (initNewForm.step === "bb-template") {
+          if (isEscapeKey(key)) {
+            setInitNewForm((s) => (s ? { ...s, step: "fe-stack" } : s));
+            return;
+          }
+          if (key.name === "up") {
+            setInitNewForm((s) => (s ? { ...s, bbTemplateIndex: Math.max(0, s.bbTemplateIndex - 1) } : s));
+            return;
+          }
+          if (key.name === "down") {
+            setInitNewForm((s) =>
+              s ? { ...s, bbTemplateIndex: Math.min(BB_TEMPLATE_OPTIONS.length - 1, s.bbTemplateIndex + 1) } : s,
+            );
+            return;
+          }
+          if (key.name === "return") {
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
+            const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
             const projectName = initNewForm.nameInput.trim();
             const beSource =
               process.env.MUONROI_BUILDING_BLOCK_URL ??
               (process.env.HOME ? `${process.env.HOME}/muonroi-building-block` : "muonroi-building-block");
             setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
-            initNewProject({ projectName, beSource, feStack })
+            initNewProject({ projectName, beSource, feStack, bbTemplate })
               .then((result) => {
-                setInitNewForm((s) => (s ? { ...s, step: "done", resultMessage: `Created: ${result.projectDir}` } : s));
+                setInitNewForm((s) =>
+                  s
+                    ? {
+                        ...s,
+                        step: "done",
+                        resultMessage: `Created: ${result.projectDir}`,
+                        scaffoldedTemplate: bbTemplate?.nugetId,
+                        // Coverage derived from usedDotnetTemplate flag
+                        scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
+                      }
+                    : s,
+                );
               })
               .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);

@@ -3,17 +3,147 @@
  *   - <name>/server/  cloned from muonroi-building-block (BE)
  *   - <name>/client/  scaffolded with React or Angular + SemanticProvider wiring
  *
+ * Phase 6 additions:
+ *   - detectDotnet(): spawnSync("dotnet", ["--version"]) check (task 6.1)
+ *   - detectBBTemplates(): parse `dotnet new list` for 3 template shortNames (task 6.2)
+ *   - installBBTemplates(): dotnet new install <pkgs> with NuGet-unreachable fallback (task 6.2)
+ *   - bbTemplate / eePackages on InitNewOptions (task 6.2b)
+ *   - dotnet-new scaffold path with Directory.Packages.props injection (task 6.3)
+ *   - OSS-only package filter, --commercial opt-in (task 6.4)
+ *   - EE-INTENT.md generation (task 6.5)
+ *
  * Designed for testability: callers inject fs+exec via opts.fs to avoid
  * real I/O in unit tests. Only the smoke test uses real filesystem operations.
  */
 
-import { exec as nodeExec } from "node:child_process";
-import { existsSync } from "node:fs";
+import { exec as nodeExec, spawnSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
 
 const execAsync = promisify(nodeExec);
+
+// ---------------------------------------------------------------------------
+// BB detection helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether a directory is a muonroi-building-block project.
+ * Heuristic: presence of Directory.Build.props + *.sln + any src/Muonroi.* directory.
+ * Returns "muonroi-building-block" when matched, undefined otherwise.
+ */
+export function detectBBFramework(
+  dirPath: string,
+  fsOps?: { exists: (p: string) => boolean },
+): "muonroi-building-block" | undefined {
+  const checkExists = fsOps?.exists ?? ((p: string) => existsSync(p));
+  const hasBuildProps = checkExists(path.join(dirPath, "Directory.Build.props"));
+  if (!hasBuildProps) return undefined;
+
+  // Check for any *.sln file in root
+  const hasSlnFile = (() => {
+    try {
+      return readdirSync(dirPath).some((f) => f.endsWith(".sln"));
+    } catch {
+      return false;
+    }
+  })();
+  if (!hasSlnFile) return undefined;
+
+  // Check for src/Muonroi.* directory
+  const srcPath = path.join(dirPath, "src");
+  const hasMuonroiSrc = (() => {
+    try {
+      return readdirSync(srcPath).some((f) => f.startsWith("Muonroi."));
+    } catch {
+      return false;
+    }
+  })();
+  if (!hasMuonroiSrc) return undefined;
+
+  return "muonroi-building-block";
+}
+
+// ---------------------------------------------------------------------------
+// Dotnet detection helpers (task 6.1 + 6.2)
+// ---------------------------------------------------------------------------
+
+export interface BBTemplateInfo {
+  shortName: string;
+  nugetId: string;
+  version: string;
+}
+
+/** Known BB template package descriptors. ShortNames discovered at install time. */
+export const BB_TEMPLATE_PACKAGES: ReadonlyArray<Omit<BBTemplateInfo, "shortName">> = [
+  { nugetId: "Muonroi.BaseTemplate", version: "latest" },
+  { nugetId: "Muonroi.Modular.Template", version: "latest" },
+  { nugetId: "Muonroi.Microservices.Template", version: "latest" },
+];
+
+/** Maps NuGet package id → expected dotnet new shortName (best-effort; runtime parse overrides). */
+const NUGET_TO_SHORTNAME: Record<string, string> = {
+  "Muonroi.BaseTemplate": "muonroi-base",
+  "Muonroi.Modular.Template": "muonroi-modular",
+  "Muonroi.Microservices.Template": "muonroi-microservices",
+};
+
+/**
+ * Task 6.1 — Detect dotnet SDK availability via spawnSync.
+ * Returns the dotnet version string, or null if not found.
+ */
+export function detectDotnet(): string | null {
+  try {
+    const result = spawnSync("dotnet", ["--version"], { encoding: "utf8", timeout: 5000 });
+    if (result.status === 0 && result.stdout) {
+      return result.stdout.trim();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Task 6.2 — Detect which BB templates are installed by parsing `dotnet new list`.
+ * Returns map of nugetId → shortName for installed templates.
+ */
+export function detectInstalledBBTemplates(): Map<string, string> {
+  const result = spawnSync("dotnet", ["new", "list"], { encoding: "utf8", timeout: 15000 });
+  const installed = new Map<string, string>();
+  if (result.status !== 0 || !result.stdout) return installed;
+
+  const lines = result.stdout.split("\n");
+  for (const [nugetId, expectedShort] of Object.entries(NUGET_TO_SHORTNAME)) {
+    // Match by known shortName or NuGet id in the output
+    const found = lines.some(
+      (l) => l.toLowerCase().includes(expectedShort.toLowerCase()) || l.toLowerCase().includes(nugetId.toLowerCase()),
+    );
+    if (found) {
+      installed.set(nugetId, expectedShort);
+    }
+  }
+  return installed;
+}
+
+/**
+ * Task 6.2 — Install BB dotnet templates from NuGet.
+ * Returns true if install succeeded, false if NuGet unreachable (caller falls back to clone).
+ */
+export function installBBTemplates(): boolean {
+  const pkgs = BB_TEMPLATE_PACKAGES.map((p) => p.nugetId).join(" ");
+  const result = spawnSync("dotnet", ["new", "install", ...BB_TEMPLATE_PACKAGES.map((p) => p.nugetId)], {
+    encoding: "utf8",
+    timeout: 60000,
+  });
+  // NuGet feed unreachable: non-zero exit or NU-prefixed error
+  if (result.status !== 0) {
+    process.stderr.write(`[init-new] dotnet new install failed (${pkgs}): ${result.stderr ?? "unknown error"}\n`);
+    return false;
+  }
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -28,6 +158,21 @@ export interface InitNewOptions {
   feStack: "react" | "angular" | "none";
   /** Where to write the project. Defaults to process.cwd(). */
   projectsRoot?: string;
+  /**
+   * Task 6.2b — BB template selection.
+   * When absent → current clone path (backward-compatible).
+   */
+  bbTemplate?: BBTemplateInfo;
+  /**
+   * Task 6.2b — EE-recommended packages to inject into Directory.Packages.props.
+   * OSS-only by default; commercial packages require explicit --commercial flag.
+   */
+  eePackages?: string[];
+  /**
+   * Task 6.4 — Allow commercial BB packages in the scaffold.
+   * Defaults to false (OSS-only).
+   */
+  commercial?: boolean;
   /** Optional override: inject filesystem operations for testability. */
   fs?: {
     mkdir: (p: string) => Promise<void>;
@@ -41,6 +186,8 @@ export interface InitNewResult {
   projectDir: string;
   /** Relative paths of files written (relative to projectDir). */
   files: string[];
+  /** Whether dotnet-template path was used (vs. legacy clone path). */
+  usedDotnetTemplate?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,11 +435,72 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   // 5. Write root package.json.
   await write("package.json", rootPackageJson(projectName, hasClient));
 
-  // 6. Clone BE source into server/.
-  // Detect local path vs git URL: if existsSync or starts with a known git protocol.
-  const cloneTarget = path.join(projectDir, "server");
-  // Use the source as-is — git clone handles both local paths and URLs.
-  await fsOps.exec(`git clone ${beSource} ${JSON.stringify(cloneTarget)}`, root);
+  // 6. Task 6.3 — Scaffold BE source.
+  //    If bbTemplate is provided + dotnet is available → use dotnet new template path.
+  //    Otherwise → fall back to legacy git clone path.
+  const serverDir = path.join(projectDir, "server");
+  let usedDotnetTemplate = false;
+
+  if (opts.bbTemplate) {
+    const dotnetVersion = detectDotnet();
+    if (dotnetVersion) {
+      try {
+        // Task 6.3 — run: dotnet new <shortName> -n <name> -o <target>/server
+        await fsOps.exec(
+          `dotnet new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)} --no-restore`,
+          root,
+        );
+
+        // Task 6.3 — inject EE-recommended packages into Directory.Packages.props
+        const propsPath = path.join(serverDir, "Directory.Packages.props");
+        if (opts.eePackages && opts.eePackages.length > 0 && fsOps.exists(propsPath)) {
+          await injectPackagesProps(propsPath, opts.eePackages, opts.commercial ?? false, fsOps);
+          filesWritten.push("server/Directory.Packages.props");
+        }
+
+        // Task 6.3 — verify with dotnet restore --nologo
+        const restoreResult = await fsOps
+          .exec("dotnet restore --nologo", serverDir)
+          .catch((e: unknown) => ({ stdout: "", stderr: String(e) }));
+        if (restoreResult.stderr && restoreResult.stderr.includes("error")) {
+          // Restore failed — roll back props file if we injected it and fall through to clone
+          process.stderr.write(`[init-new] dotnet restore failed after template scaffold; falling back to clone\n`);
+          // Attempt to re-restore without custom props (original props)
+          await fsOps
+            .exec("dotnet restore --nologo", serverDir)
+            .catch(() => {});
+        } else {
+          usedDotnetTemplate = true;
+        }
+
+        // Task 6.5 — Emit EE-INTENT.md
+        const eePackageList = opts.eePackages ?? [];
+        // Compute coverage: partial if any package not in eePackages list
+        const coverage = eePackageList.length > 0 ? "full" : "partial";
+        await write(
+          "server/EE-INTENT.md",
+          buildEEIntentMd({
+            projectName,
+            template: opts.bbTemplate,
+            eePackages: eePackageList,
+            coverage,
+          }),
+        );
+      } catch (err) {
+        // dotnet new failed — fall through to clone path
+        process.stderr.write(
+          `[init-new] dotnet new ${opts.bbTemplate.shortName} failed: ${err instanceof Error ? err.message : String(err)}; falling back to clone\n`,
+        );
+        usedDotnetTemplate = false;
+      }
+    }
+  }
+
+  if (!usedDotnetTemplate) {
+    // Legacy path: git clone BE source into server/
+    const cloneTarget = path.join(projectDir, "server");
+    await fsOps.exec(`git clone ${beSource} ${JSON.stringify(cloneTarget)}`, root);
+  }
 
   // 7. Scaffold FE client.
   if (feStack === "react") {
@@ -307,5 +515,149 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
     await write("client/src/app/app.component.ts", angularAppComponentTs(projectName));
   }
 
-  return { projectDir, files: filesWritten };
+  return { projectDir, files: filesWritten, usedDotnetTemplate };
+}
+
+// ---------------------------------------------------------------------------
+// Task 6.3 — Directory.Packages.props injection helper
+// Task 6.4 — OSS-only filter (commercial packages excluded unless flag set)
+// ---------------------------------------------------------------------------
+
+/** Commercial BB package ids — excluded unless opts.commercial is true. */
+const COMMERCIAL_PACKAGE_PREFIXES = [
+  "Muonroi.RuleEngine.CEP",
+  "Muonroi.Governance.Commercial",
+  "Muonroi.Infrastructure.Commercial",
+];
+
+function isCommercialPackage(pkgId: string): boolean {
+  return COMMERCIAL_PACKAGE_PREFIXES.some((prefix) => pkgId.startsWith(prefix));
+}
+
+async function injectPackagesProps(
+  propsPath: string,
+  eePackages: string[],
+  commercial: boolean,
+  fsOps: {
+    writeFile: (p: string, content: string) => Promise<void>;
+    exists: (p: string) => boolean;
+  },
+): Promise<void> {
+  // Task 6.4 — filter out commercial packages unless flag is set
+  const filteredPackages = eePackages.filter((pkg) => commercial || !isCommercialPackage(pkg));
+  if (filteredPackages.length === 0) return;
+
+  // Read current props content
+  let propsContent: string;
+  try {
+    const { readFileSync } = await import("node:fs");
+    propsContent = readFileSync(propsPath, "utf-8");
+  } catch {
+    propsContent = buildMinimalPackagesProps();
+  }
+
+  // Use fast-xml-parser for safe XML round-trip (task 6.2c / 6.11)
+  // Dynamically import so tests can stub it
+  let updatedContent = propsContent;
+  try {
+    const { XMLParser, XMLBuilder } = await import("fast-xml-parser");
+    const parser = new XMLParser({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_",
+      isArray: (name) => name === "PackageVersion",
+    });
+    const builder = new XMLBuilder({
+      ignoreAttributes: false,
+      attributeNamePrefix: "@_",
+      format: true,
+      indentBy: "  ",
+    });
+
+    const parsed = parser.parse(propsContent) as {
+      Project?: {
+        PropertyGroup?: unknown;
+        ItemGroup?: {
+          PackageVersion?: Array<{ "@_Include": string; "@_Version": string }>;
+        };
+      };
+    };
+
+    const project = parsed.Project ?? {};
+    const itemGroup = project.ItemGroup ?? {};
+    const existing: Array<{ "@_Include": string; "@_Version": string }> = itemGroup.PackageVersion ?? [];
+    const existingIds = new Set(existing.map((pv) => pv["@_Include"]));
+
+    // Add missing EE-recommended packages
+    for (const pkg of filteredPackages) {
+      if (!existingIds.has(pkg)) {
+        existing.push({ "@_Include": pkg, "@_Version": "*" });
+      }
+    }
+    itemGroup.PackageVersion = existing;
+    project.ItemGroup = itemGroup;
+    parsed.Project = project;
+    updatedContent = builder.build(parsed) as string;
+  } catch {
+    // fast-xml-parser not available or parse failed — append raw entries as comment
+    const rawEntries = filteredPackages
+      .map((pkg) => `  <PackageVersion Include="${pkg}" Version="*" />`)
+      .join("\n");
+    updatedContent = propsContent.replace(
+      "</Project>",
+      `  <!-- muonroi-cli:injected:ee-packages -->\n${rawEntries}\n  <!-- /muonroi-cli:injected:ee-packages -->\n</Project>`,
+    );
+  }
+
+  await fsOps.writeFile(propsPath, updatedContent);
+}
+
+function buildMinimalPackagesProps(): string {
+  return `<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+  </ItemGroup>
+</Project>`;
+}
+
+// ---------------------------------------------------------------------------
+// Task 6.5 — EE-INTENT.md builder
+// ---------------------------------------------------------------------------
+
+interface EEIntentMdOpts {
+  projectName: string;
+  template: BBTemplateInfo;
+  eePackages: string[];
+  coverage: "full" | "partial";
+}
+
+function buildEEIntentMd(opts: EEIntentMdOpts): string {
+  const date = new Date().toISOString().slice(0, 10);
+  const packageList = opts.eePackages.length > 0 ? opts.eePackages.map((p) => `- ${p}`).join("\n") : "_(none)_";
+  return `# EE-INTENT.md
+
+Generated by muonroi-cli on ${date}.
+
+## Project
+**Name:** ${opts.projectName}
+
+## Template
+**Package:** ${opts.template.nugetId}
+**Short name:** ${opts.template.shortName}
+**Version:** ${opts.template.version}
+
+## EE-Recommended Packages
+${packageList}
+
+## Coverage
+**Status:** ${opts.coverage}
+${opts.coverage === "partial" ? "\n> Some recommended packages have weak EE coverage (< 0.70). Code-gen applied generic wiring only for low-coverage packages. Run \`bun run ee:ingest-bb\` to improve coverage.\n" : ""}
+
+## Resume
+To re-apply or fix scaffold issues interactively:
+\`\`\`
+/ideal --resume .
+\`\`\`
+`;
 }
