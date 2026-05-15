@@ -37,7 +37,8 @@
     "lint:semantic": "bun scripts/check-semantic-wrap.ts",
     "pre-commit": "lint-staged",
     "prepare": "husky",
-    "postinstall": "bun run scripts/postinstall.ts"
+    "postinstall": "bun run scripts/postinstall.ts",
+    "ee:ingest-bb": "bun run scripts/ingest-bb-to-ee.mts"
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"

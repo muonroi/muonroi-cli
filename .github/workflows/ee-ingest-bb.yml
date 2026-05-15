@@ -1,0 +1,84 @@
+name: EE Ingest BB Assets
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      collection_filter:
+        description: "Only ingest this collection (leave blank for all)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (no HTTP POST)"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  ingest:
+    name: Ingest BB structured assets into EE
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout muonroi-cli
+        uses: actions/checkout@v4
+        with:
+          path: muonroi-cli
+
+      - name: Checkout muonroi-building-block
+        uses: actions/checkout@v4
+        with:
+          repository: muonroi/muonroi-building-block
+          path: muonroi-building-block
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Templates are public NuGet template repos; skip if not available in CI
+      - name: Checkout BaseTemplate (optional)
+        uses: actions/checkout@v4
+        with:
+          repository: muonroi/Muonroi.BaseTemplate
+          path: Muonroi.BaseTemplate
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Checkout Modular.Template (optional)
+        uses: actions/checkout@v4
+        with:
+          repository: muonroi/Muonroi.Modular.Template
+          path: Muonroi.Modular.Template
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Checkout Microservices.Template (optional)
+        uses: actions/checkout@v4
+        with:
+          repository: muonroi/Muonroi.Microservices.Template
+          path: Muonroi.Microservices.Template
+          token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: muonroi-cli
+        run: bun install --frozen-lockfile
+
+      - name: Run EE ingest
+        working-directory: muonroi-cli
+        env:
+          EE_AUTH_TOKEN: ${{ secrets.EE_AUTH_TOKEN }}
+        run: |
+          ARGS="--bb-root ${{ github.workspace }}/muonroi-building-block --templates-root ${{ github.workspace }}"
+          if [ -n "${{ inputs.collection_filter }}" ]; then
+            ARGS="$ARGS --collection-filter ${{ inputs.collection_filter }}"
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          bun run scripts/ingest-bb-to-ee.mts $ARGS
