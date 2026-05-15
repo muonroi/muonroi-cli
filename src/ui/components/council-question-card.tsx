@@ -1,4 +1,4 @@
-import { Semantic } from "../../agent-harness/semantic.js";
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { CouncilQuestionData, CouncilQuestionOption, CouncilQuestionPhase } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 

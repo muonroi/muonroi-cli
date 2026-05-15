@@ -1,12 +1,11 @@
 import * as path from "node:path";
+import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
+import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";
 import type { KeyBinding, KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AgentModeRuntime } from "../agent-harness/agent-mode.js";
-import { useAgentInputBridge } from "../agent-harness/input-bridge.js";
-import { Semantic, SemanticProvider } from "../agent-harness/semantic.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";

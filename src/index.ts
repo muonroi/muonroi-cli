@@ -784,7 +784,7 @@ program
     // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
     // can pick it up without a direct import dependency.
     if (options.agentMode) {
-      const { startAgentMode } = await import("./agent-harness/agent-mode.js");
+      const { startAgentMode } = await import("@muonroi/agent-harness-opentui");
       const runtime = await startAgentMode({
         cols: options.agentCols as number,
         rows: options.agentRows as number,
