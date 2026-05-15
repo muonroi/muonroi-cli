@@ -91,6 +91,13 @@ import {
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
+import {
+  FE_STACK_OPTIONS,
+  InitNewFormCard,
+  type InitNewFormState,
+  initialInitNewFormState,
+} from "./components/init-new-form-card.js";
+import { initNewProject } from "../scaffold/init-new.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
@@ -930,6 +937,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
@@ -3688,6 +3696,83 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // Init-new form intercepts all input while open.
+      if (initNewForm) {
+        if (initNewForm.step === "name") {
+          if (isEscapeKey(key)) {
+            setInitNewForm(null);
+            return;
+          }
+          if (key.name === "return") {
+            const name = initNewForm.nameInput.trim();
+            if (!name) {
+              setInitNewForm((s) => s ? { ...s, nameError: "Project name cannot be empty." } : s);
+              return;
+            }
+            if (name.includes("/") || name.includes("\\") || name.includes("..")) {
+              setInitNewForm((s) => s ? { ...s, nameError: "Name cannot contain path separators." } : s);
+              return;
+            }
+            setInitNewForm((s) => s ? { ...s, step: "fe-stack", nameError: null } : s);
+            return;
+          }
+          if (key.name === "backspace" || key.name === "delete") {
+            setInitNewForm((s) => s ? { ...s, nameInput: s.nameInput.slice(0, -1), nameError: null } : s);
+            return;
+          }
+          if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
+            setInitNewForm((s) => s ? { ...s, nameInput: s.nameInput + key.sequence, nameError: null } : s);
+            return;
+          }
+          return;
+        }
+        if (initNewForm.step === "fe-stack") {
+          if (isEscapeKey(key)) {
+            setInitNewForm((s) => s ? { ...s, step: "name" } : s);
+            return;
+          }
+          if (key.name === "up") {
+            setInitNewForm((s) =>
+              s ? { ...s, feStackIndex: Math.max(0, s.feStackIndex - 1) } : s,
+            );
+            return;
+          }
+          if (key.name === "down") {
+            setInitNewForm((s) =>
+              s ? { ...s, feStackIndex: Math.min(FE_STACK_OPTIONS.length - 1, s.feStackIndex + 1) } : s,
+            );
+            return;
+          }
+          if (key.name === "return") {
+            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
+            const projectName = initNewForm.nameInput.trim();
+            const beSource =
+              process.env.MUONROI_BUILDING_BLOCK_URL ??
+              (process.env.HOME
+                ? process.env.HOME + "/muonroi-building-block"
+                : "muonroi-building-block");
+            setInitNewForm((s) => s ? { ...s, step: "running" } : s);
+            initNewProject({ projectName, beSource, feStack })
+              .then((result) => {
+                setInitNewForm((s) =>
+                  s ? { ...s, step: "done", resultMessage: "Created: " + result.projectDir } : s,
+                );
+              })
+              .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setInitNewForm((s) => s ? { ...s, step: "error", resultMessage: msg } : s);
+              });
+            return;
+          }
+          return;
+        }
+        // done / error — any key dismisses. running ignores keys.
+        if (initNewForm.step === "done" || initNewForm.step === "error") {
+          setInitNewForm(null);
+          return;
+        }
+        return;
+      }
       // Halt recovery card intercepts all input until dismissed.
       if (activeHaltCard) {
         if (isEscapeKey(key)) {
@@ -3706,7 +3791,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (key.name === "return") {
           const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
           if (chosen) {
-            // TODO Task 5.3/5.4/5.5 — wire real action handlers per option.id
+            if (chosen.id === "init_new") {
+              // Task 5.3 — open init-new form; close halt card.
+              setInitNewForm(initialInitNewFormState());
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              return;
+            }
+            // TODO Task 5.4/5.5 — wire point_to_existing and other option handlers.
             console.log("halt recovery: not implemented yet:", chosen.id);
           }
           setActiveHaltCard(null);
@@ -5013,6 +5105,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     <HaltRecoveryCard
                       halt={activeHaltCard}
                       selectedIndex={haltSelectedIndex}
+                      terminalCols={width}
+                      theme={t}
+                    />
+                  )}
+                  {initNewForm && (
+                    <InitNewFormCard
+                      state={initNewForm}
                       terminalCols={width}
                       theme={t}
                     />

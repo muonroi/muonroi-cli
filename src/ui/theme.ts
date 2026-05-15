@@ -79,6 +79,17 @@ export const dark = {
   haltCardOptionDefault: "#e0e0e0",
   haltCardOptionDesc: "#999999",
   haltCardHint: "#555555",
+  // ── Init-new form tokens ──────────────────────────────────────────────────
+  initFormBorder: "#22c55e",
+  initFormTitle: "#4ade80",
+  initFormLabel: "#9cdcfe",
+  initFormInput: "#e0e0e0",
+  initFormInputBg: "#1a1a1a",
+  initFormOptionSelected: "#e5c07b",
+  initFormOptionDefault: "#888888",
+  initFormHint: "#555555",
+  initFormSuccess: "#22c55e",
+  initFormError: "#e74c3c",
 } as const;
 
 export type Theme = typeof dark;
