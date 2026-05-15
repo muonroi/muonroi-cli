@@ -149,6 +149,11 @@ export interface DriverContext {
    * where prior context would be misleading rather than helpful.
    */
   skipPriorContext?: boolean;
+  /**
+   * Intent detection trace from Layer 1. When present and targetFramework is
+   * "muonroi-building-block", loop-driver injects BB context before council debate.
+   */
+  _intentTrace?: import("../pil/types.js").IntentDetectionTrace | null;
 }
 
 export interface DriverResult {
