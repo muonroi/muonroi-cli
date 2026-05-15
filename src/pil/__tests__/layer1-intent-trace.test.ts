@@ -117,14 +117,24 @@ describe("IntentDetectionTrace", () => {
     expect(mockClassifyViaBrain).not.toHaveBeenCalled();
   });
 
-  it("Explicit style cue takes the cheap regex path (styleSource=explicit-regex)", async () => {
+  it("Pass1 coding reason → styleSource=classifier-default without brain call", async () => {
+    mockClassify.mockReturnValue({ tier: "hot", reason: "regex:edit", confidence: 0.85 });
+    const result = await layer1Intent(makeCtx("edit this handler"));
+    const trace = result._intentTrace!;
+    expect(trace.pass1Hit).toBe(true);
+    expect(trace.pass3LegacyStyleAttempted).toBe(false);
+    expect(trace.styleSource).toBe("classifier-default");
+    expect(result.outputStyle).toBe("balanced");
+    expect(mockClassifyViaBrain).not.toHaveBeenCalled();
+  });
+
+  it("Explicit style cue takes the regex path (styleSource=explicit-regex) and skips brain", async () => {
     mockClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
     const result = await layer1Intent(makeCtx("plan the architecture, chi tiết nhé"));
     const trace = result._intentTrace!;
     expect(trace.pass2Hit).toBe(true);
     expect(trace.styleSource).toBe("explicit-regex");
     expect(result.outputStyle).toBe("detailed");
-    // legacy brain may still be called for taskType if Pass 2 doesn't match,
-    // but the style brain call must be skipped.
+    expect(trace.pass3LegacyStyleAttempted).toBe(false);
   });
 });

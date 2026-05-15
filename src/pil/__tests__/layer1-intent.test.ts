@@ -143,18 +143,19 @@ describe("layer1Intent — keyword fallback (classifier returns null)", () => {
 });
 
 describe("layer1Intent — outputStyle detection", () => {
-  it("coding task + brain returns style → outputStyle set", async () => {
+  it("coding task via pass1 → outputStyle defaults to balanced without brain call", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
-    mockClassifyViaBrain.mockResolvedValue("concise");
     const result = await layer1Intent(makeCtx("refactor this function"));
-    expect(result.outputStyle).toBe("concise");
+    // Style brain is skipped when pass1 decided cheaply — default "balanced"
+    expect(result.outputStyle).toBe("balanced");
+    expect(mockClassifyViaBrain).not.toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
   });
 
-  it("coding task + brain returns null → outputStyle stays null", async () => {
-    mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
-    mockClassifyViaBrain.mockResolvedValue(null);
-    const result = await layer1Intent(makeCtx("refactor this function"));
-    expect(result.outputStyle).toBeNull();
+  it("coding task via pass2 (keyword) → outputStyle defaults to balanced without brain call", async () => {
+    mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.2, reason: "low-confidence" });
+    const result = await layer1Intent(makeCtx("there is a bug here"));
+    expect(result.outputStyle).toBe("balanced");
+    expect(mockClassifyViaBrain).not.toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
   });
 
   it("conversational turn (taskType=null) → outputStyle=null, no style brain call", async () => {
@@ -217,15 +218,27 @@ describe("layer1Intent — EE brain bridge fallback (Pass 3)", () => {
     expect(result.taskType).toBeNull();
   });
 
-  it("classifyViaBrain called for style detection even when classifier returns high confidence", async () => {
+  it("style brain NOT called when pass1 already decided coding task (saves 800ms)", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.85, reason: "regex:refactor" });
     await layer1Intent(makeCtx("refactor this"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
+    const styleCall = mockClassifyViaBrain.mock.calls.find((c) => String(c[0]).includes("preferred output style"));
+    expect(styleCall).toBeUndefined();
   });
 
-  it("classifyViaBrain called for style detection even when keyword match found", async () => {
+  it("style brain NOT called when pass2 keyword fallback decided task", async () => {
     await layer1Intent(makeCtx("there is a bug here"));
-    expect(mockClassifyViaBrain).toHaveBeenCalledWith(expect.stringContaining("preferred output style"), 800);
+    const styleCall = mockClassifyViaBrain.mock.calls.find((c) => String(c[0]).includes("preferred output style"));
+    expect(styleCall).toBeUndefined();
+  });
+
+  it("style brain IS called when task itself was ambiguous and needed brain classification", async () => {
+    // Task brain returns task only (no style token) → style brain fires next.
+    mockClassifyViaBrain
+      .mockResolvedValueOnce("debug") // task brain: no style token
+      .mockResolvedValueOnce("balanced"); // style brain
+    await layer1Intent(makeCtx("some completely ambiguous input without keywords"));
+    const styleCall = mockClassifyViaBrain.mock.calls.find((c) => String(c[0]).includes("preferred output style"));
+    expect(styleCall).toBeDefined();
   });
 });
 
