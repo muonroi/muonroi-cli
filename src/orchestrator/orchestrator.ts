@@ -2278,6 +2278,7 @@ export class Agent {
         stack?: string;
         noCustomerDebate?: boolean;
         noPriorContext?: boolean;
+        forceCouncil?: boolean;
       };
     },
     options?: {
@@ -2298,6 +2299,20 @@ export class Agent {
     const processMessageFn = (m: string) => this.processMessage(m, options?.observer);
     const flowDir = nodePath.join(this.bash.getCwd(), ".muonroi-flow");
 
+    // P2.7: compute complexity from the idea using PIL Layer 1 heuristics (cheap,
+    // no LLM calls). Only meaningful for "start"; other subcommands ignore it.
+    let complexity: "low" | "medium" | "high" | undefined;
+    if (payload.subcommand === "start" && payload.idea) {
+      const { scoreComplexity } = await import("../pil/layer1-intent.js");
+      const result = scoreComplexity({
+        rawText: payload.idea,
+        taskType: null,
+        t0HitCount: 0,
+        hasMaxSprintsOne: payload.flags.maxSprints === 1,
+      });
+      complexity = result.complexity;
+    }
+
     const gen = runProductLoop({
       subcommand: payload.subcommand,
       idea: payload.idea ?? "",
@@ -2310,12 +2325,14 @@ export class Agent {
         maxSprints: payload.flags.maxSprints,
         doneThreshold: payload.flags.doneThreshold,
         stack: payload.flags.stack,
+        forceCouncil: payload.flags.forceCouncil,
       },
       respondToQuestion: this._createQuestionResponder(),
       respondToPreflight: this._createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
       skipPriorContext: payload.flags.noPriorContext === true,
+      complexity,
     } as Parameters<typeof runProductLoop>[0]);
 
     for await (const chunk of gen) {
