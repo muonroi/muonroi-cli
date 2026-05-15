@@ -251,7 +251,9 @@ Vision Bridge (output) ── intercepts tool results returning images
   │                       (Playwright screenshots, Figma exports, etc.)
   │                       extract → Qwen3-VL → cache → strip bytes → inject text
   ▼
-Output guardrails ─────── scrub base64 before persist, cap tool output at 200KB
+Output guardrails ─────── scrub base64 before persist; cap each tool output at
+  │                      ~32KB (≈8K tokens) head/tail-preserving — override via
+  │                      MUONROI_MAX_TOOL_OUTPUT_CHARS
   │
   ▼
 Auto-compact ─────────── silent context compression after every turn
