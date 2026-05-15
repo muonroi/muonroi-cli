@@ -98,6 +98,12 @@ import {
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
 import { initNewProject } from "../scaffold/init-new.js";
+import {
+  PointToExistingFormCard,
+  type PointToExistingFormState,
+  initialPointToExistingFormState,
+} from "./components/point-to-existing-form-card.js";
+import { pointToExisting } from "../scaffold/point-to-existing.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
@@ -938,6 +944,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
+  const [pointToExistingForm, setPointToExistingForm] = useState<PointToExistingFormState | null>(null);
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
@@ -3696,6 +3703,84 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // Point-to-existing form intercepts all input while open.
+      if (pointToExistingForm) {
+        if (pointToExistingForm.step === "input") {
+          if (isEscapeKey(key)) {
+            setPointToExistingForm(null);
+            return;
+          }
+          if (key.name === "return") {
+            const rawPath = pointToExistingForm.pathInput.trim();
+            if (!rawPath) {
+              setPointToExistingForm((s) => s ? { ...s, errorMessage: "Path cannot be empty." } : s);
+              return;
+            }
+            setPointToExistingForm((s) => s ? { ...s, step: "loading", errorMessage: null } : s);
+            pointToExisting({
+              path: rawPath,
+              detectVerifyRecipe: async (cwd) => {
+                // Sprint re-entry via detectVerifyRecipe is DEFERRED — the orchestrator
+                // instance is not accessible from app.tsx without a shared context seam.
+                // See Task 5.4 report. Returns null so the user sees the error state until
+                // the seam is built in a follow-up task.
+                // TODO: inject via AppStartupConfig or React context.
+                void cwd;
+                return null;
+              },
+            })
+              .then((result) => {
+                if (result.ok) {
+                  setPointToExistingForm((s) =>
+                    s ? { ...s, step: "done", resultPath: result.absolutePath, errorMessage: null } : s,
+                  );
+                } else if (result.reason === "not_a_dir") {
+                  setPointToExistingForm((s) =>
+                    s ? { ...s, step: "input", errorMessage: "Path does not exist or is not a directory." } : s,
+                  );
+                } else {
+                  // no_recipe
+                  setPointToExistingForm((s) =>
+                    s
+                      ? {
+                          ...s,
+                          step: "error",
+                          errorMessage:
+                            "No verify recipe found at " +
+                            result.absolutePath +
+                            ". Try a different directory or pick 'Init new' instead.",
+                        }
+                      : s,
+                  );
+                }
+              })
+              .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setPointToExistingForm((s) => s ? { ...s, step: "error", errorMessage: msg } : s);
+              });
+            return;
+          }
+          if (key.name === "backspace" || key.name === "delete") {
+            setPointToExistingForm((s) =>
+              s ? { ...s, pathInput: s.pathInput.slice(0, -1), errorMessage: null } : s,
+            );
+            return;
+          }
+          if (key.sequence && !key.ctrl && !key.meta && key.sequence.length === 1) {
+            setPointToExistingForm((s) =>
+              s ? { ...s, pathInput: s.pathInput + key.sequence, errorMessage: null } : s,
+            );
+            return;
+          }
+          return;
+        }
+        // done / error — any key dismisses. loading ignores keys.
+        if (pointToExistingForm.step === "done" || pointToExistingForm.step === "error") {
+          setPointToExistingForm(null);
+          return;
+        }
+        return;
+      }
       // Init-new form intercepts all input while open.
       if (initNewForm) {
         if (initNewForm.step === "name") {
@@ -3798,7 +3883,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               setHaltSelectedIndex(0);
               return;
             }
-            // TODO Task 5.4/5.5 — wire point_to_existing and other option handlers.
+            if (chosen.id === "point_to_existing") {
+              // Task 5.4 — open point-to-existing form; close halt card.
+              setPointToExistingForm(initialPointToExistingFormState());
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              return;
+            }
+            // TODO Task 5.5 — wire continue_as_council and other option handlers.
             console.log("halt recovery: not implemented yet:", chosen.id);
           }
           setActiveHaltCard(null);
@@ -5112,6 +5204,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   {initNewForm && (
                     <InitNewFormCard
                       state={initNewForm}
+                      terminalCols={width}
+                      theme={t}
+                    />
+                  )}
+                  {pointToExistingForm && (
+                    <PointToExistingFormCard
+                      state={pointToExistingForm}
                       terminalCols={width}
                       theme={t}
                     />
