@@ -54,6 +54,7 @@ import {
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   createProviderFactory,
+  createProviderFactoryAsync,
   detectProviderForModel,
   type ProviderFactory,
   type ResolvedModelRuntime as RuntimeResult,
@@ -382,6 +383,8 @@ export class Agent {
   private _councilBufferedPreflightApprovals = new Map<string, boolean>();
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
+  /** Guard: OAuth provider init runs at most once per Agent instance. */
+  private _oauthInitDone = false;
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
   private _priorWarningIdsInSession = new Set<string>();
   /** EE session guidance: structured warnings accumulated across turns — injected into model context at turn start. Keyed by principle_uuid to deduplicate. */
@@ -3157,6 +3160,9 @@ export class Agent {
     // Ensure flow run is ready before processing (fail-open).
     await this._flowReady?.catch(() => {});
 
+    // Upgrade to OAuth-backed provider on first turn if tokens are available.
+    await this._initOAuthProvider().catch(() => {});
+
     if (!this.sessionStartHookFired) {
       this.sessionStartHookFired = true;
       const isResume = this.messages.length > 0;
@@ -4574,6 +4580,37 @@ export class Agent {
     }
 
     return this.provider;
+  }
+
+  /**
+   * One-shot async init: upgrades the OpenAI provider to use OAuth tokens when
+   * stored tokens are available and no explicit API key was supplied by the user.
+   * Called at the start of processMessage so the first real LLM call benefits
+   * from OAuth without requiring a sync constructor change.
+   *
+   * Idempotent: skips on second call and for non-OpenAI providers.
+   * Fail-open: any error leaves the existing provider untouched.
+   */
+  private async _initOAuthProvider(): Promise<void> {
+    if (this._oauthInitDone) return;
+    this._oauthInitDone = true;
+
+    if (this.providerId !== "openai") return;
+    // Only upgrade when there is no explicit API key — OAuth is an alternative
+    // auth path, not an override when the user deliberately passed a key.
+    if (this.apiKey) return;
+
+    try {
+      const effectiveBaseURL =
+        this.baseURL &&
+        this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
+          ? this.baseURL
+          : undefined;
+      const result = await createProviderFactoryAsync("openai", { baseURL: effectiveBaseURL ?? undefined });
+      this.provider = result.factory;
+    } catch {
+      // Fail-open — provider remains null; requireProvider() will surface the error
+    }
   }
 
   async detectVerifyRecipe(settings?: SandboxSettings, abortSignal?: AbortSignal): Promise<VerifyRecipe | null> {
