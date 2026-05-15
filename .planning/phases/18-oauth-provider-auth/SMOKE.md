@@ -1,19 +1,20 @@
 # Phase 18 — Manual Smoke Test Procedure
 
-Covers acceptance items 1 and 6 (live browser flows that cannot be run in CI).
+Covers acceptance items that require live browser flows (cannot run in CI).
 
 ## Prerequisites
 
-- A valid ChatGPT Plus, Pro, or Team subscription tied to your OpenAI account.
+- A valid ChatGPT Plus, Pro, or Team subscription tied to your OpenAI account (for §1-4).
+- A Google account with access to Gemini API (for §5-8).
 - `muonroi-cli` built locally: `bun run src/index.ts` should print usage.
-- No `OPENAI_API_KEY` environment variable set (to prove OAuth-only path).
 
 ---
 
-## Smoke 1 — Login (acceptance item 1)
+## OpenAI OAuth (Phase 18-01)
+
+### Smoke 1 — Login (OpenAI)
 
 ```bash
-# From the repo root:
 bun run src/index.ts keys login openai
 ```
 
@@ -39,12 +40,10 @@ Verify: `bun run src/index.ts keys list` shows an OAuth section with your email.
 
 ---
 
-## Smoke 2 — Chat without API key (acceptance item 2)
+### Smoke 2 — Chat without API key (OpenAI)
 
 ```bash
-# Ensure no API key env var is set:
 unset OPENAI_API_KEY
-
 bun run src/index.ts -p "Say: PONG" -m gpt-4o-mini
 ```
 
@@ -52,12 +51,10 @@ Expected: model responds with "PONG" (or similar). No `ProviderKeyMissingError`.
 
 ---
 
-## Smoke 3 — OAuth takes priority over API key (acceptance item 3)
+### Smoke 3 — OAuth takes priority over API key (OpenAI)
 
 ```bash
-# Set a fake API key to ensure it doesn't override OAuth:
 export OPENAI_API_KEY=sk-fake-0000000000000000000000000000
-
 bun run src/index.ts -p "Say: PONG" -m gpt-4o-mini
 ```
 
@@ -66,7 +63,7 @@ If the fake key were used, the request would fail with 401.
 
 ---
 
-## Smoke 4 — Logout (acceptance item 6)
+### Smoke 4 — Logout (OpenAI)
 
 ```bash
 bun run src/index.ts keys logout openai
@@ -80,4 +77,89 @@ Logged out of openai. OAuth tokens revoked and deleted.
 After logout:
 - `keys list` should NOT show an OAuth row for openai.
 - Running `bun run src/index.ts -p "ping" -m gpt-4o-mini` without an API key set
-  should now throw `ProviderKeyMissingError` (or use API key if one is in keychain).
+  should now throw `ProviderKeyMissingError`.
+
+---
+
+## Google Gemini OAuth (Phase 18-02)
+
+### Smoke 5 — Login (Google)
+
+```bash
+bun run src/index.ts keys login google
+```
+
+Expected output:
+```
+Logging in to Google via OAuth...
+A browser window will open. Sign in with your Google account.
+
+Opening browser for Google sign-in...
+(If the browser does not open, copy the URL from the terminal above.)
+
+Waiting for authorization...
+```
+
+1. A browser window opens to `https://accounts.google.com/o/oauth2/v2/auth...`.
+2. Sign in with your Google account and approve the permissions.
+3. After approval, the browser shows "Authorization successful" and the CLI prints:
+   ```
+   Logged in to Google (you@gmail.com). Token expires: <date>
+   Run 'muonroi-cli keys list' to verify.
+   ```
+
+Verify: `bun run src/index.ts keys list` shows an OAuth section with a `google` row.
+
+---
+
+### Smoke 6 — Chat without API key (Google Gemini)
+
+```bash
+unset GOOGLE_API_KEY
+bun run src/index.ts -p "Say: PONG" -m gemini-1.5-flash
+```
+
+Expected: model responds with "PONG" (or similar). No `ProviderKeyMissingError`.
+The request uses OAuth Bearer token injected by `createProviderFactoryAsync`.
+
+---
+
+### Smoke 7 — OAuth takes priority over API key (Google)
+
+```bash
+export GOOGLE_API_KEY=fake-key-0000000000000000000000000000
+bun run src/index.ts -p "Say: PONG" -m gemini-1.5-flash
+```
+
+Expected: still succeeds with OAuth headers. If the fake key were used, the
+request would fail.
+
+---
+
+### Smoke 8 — Logout (Google)
+
+```bash
+bun run src/index.ts keys logout google
+```
+
+Expected output:
+```
+Logged out of google. OAuth tokens revoked and deleted.
+```
+
+After logout:
+- `keys list` should NOT show a `google` OAuth row.
+- Running `bun run src/index.ts -p "ping" -m gemini-1.5-flash` without a
+  GOOGLE_API_KEY should now throw `ProviderKeyMissingError`.
+
+---
+
+### Smoke 9 — OpenAI OAuth unaffected after Google changes
+
+```bash
+bun run src/index.ts keys login openai  # (if not already logged in)
+bun run src/index.ts keys list          # shows both openai + google rows
+bun run src/index.ts -p "Say: PONG" -m gpt-4o-mini
+```
+
+Expected: OpenAI OAuth still works after Phase 18-02 changes.
