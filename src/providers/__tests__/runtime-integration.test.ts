@@ -14,10 +14,12 @@ describe("model → provider detection", () => {
     ["gpt-4o", "openai"],
     ["gpt-4o-mini", "openai"],
     ["o3", "openai"],
-    // DeepSeek V4 models are served via SiliconFlow (see catalog.json).
-    // The catalog provider field — not the alias prefix — is the source of truth.
-    ["deepseek-v4-flash", "siliconflow"],
-    ["deepseek-v4-pro", "siliconflow"],
+    // DeepSeek V4 native ids are served by api.deepseek.com (catalog provider:
+    // "deepseek"). The SiliconFlow-hosted variants keep the upstream-style id
+    // (deepseek-ai/DeepSeek-V4-*). The catalog provider field — not the alias
+    // prefix — is the source of truth.
+    ["deepseek-v4-flash", "deepseek"],
+    ["deepseek-v4-pro", "deepseek"],
     ["deepseek-ai/DeepSeek-V4-Flash", "siliconflow"],
     ["deepseek-ai/DeepSeek-V4-Pro", "siliconflow"],
     ["grok-3", "xai"],

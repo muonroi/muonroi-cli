@@ -33,8 +33,8 @@ describe("callColdRoute", () => {
     expect(result).not.toBeNull();
     expect(result!.tier).toBe("cold");
     expect(result!.model).toBe("deepseek-v4-flash");
-    // provider is resolved by detectProviderForModel; catalog maps deepseek-v4-flash → provider: siliconflow (actual host).
-    expect(result!.provider).toBe("siliconflow");
+    // provider is resolved by detectProviderForModel; catalog maps deepseek-v4-flash → provider: deepseek (native api.deepseek.com).
+    expect(result!.provider).toBe("deepseek");
     expect(result!.reason).toContain("cold:");
   });
 
