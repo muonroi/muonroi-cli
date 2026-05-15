@@ -13,6 +13,11 @@ function freshState(max: number, dedupEnabled = true): SubAgentCapState {
     callIndex: 0,
     dedupEnabled,
     dedupMinChars: 500,
+    midTierRatio: 0.3,
+    highTierRatio: 0.7,
+    midTierChars: 8_000,
+    highTierChars: 2_000,
+    label: "sub-agent",
   };
 }
 
@@ -118,6 +123,45 @@ describe("wrapToolSetWithCap", () => {
     };
     const { tools: wrapped } = wrapToolSetWithCap(tools);
     expect(wrapped.bare).toBe(tools.bare);
+  });
+
+  it("honors custom tier ratios (top-level cap uses 50%/80%)", async () => {
+    let counter = 0;
+    const innerExec = async (): Promise<string> => {
+      counter++;
+      return `${counter}-` + "Z".repeat(20_000);
+    };
+    const tools: ToolSet = {
+      sample: {
+        description: "sample",
+        inputSchema: {} as never,
+        execute: innerExec,
+      } as ToolSet[string],
+    };
+    const { tools: wrapped, state } = wrapToolSetWithCap(tools, {
+      maxCumulativeChars: 100_000,
+      midTierRatio: 0.5,
+      highTierRatio: 0.8,
+      label: "top-level",
+    });
+    state.cumulative = 40_000; // 40% — still under 50% → pass-through
+    const execute = (wrapped.sample as unknown as { execute: (i: unknown) => Promise<string> }).execute;
+    const first = await execute({});
+    expect(first.length).toBeGreaterThanOrEqual(20_000); // untrimmed
+    // Now jump to 60% — should trim head/tail. Distinct payload so dedup is bypassed.
+    state.cumulative = 60_000;
+    const second = await execute({});
+    expect(second.length).toBeLessThan(20_000);
+    expect(second).toContain("trimmed by top-level cap");
+  });
+
+  it("budget-exhausted stub uses the configured label", () => {
+    const state = freshState(10_000);
+    state.label = "top-level";
+    state.cumulative = 10_000;
+    state.exhausted = true;
+    const out = compressForCap(state, "x".repeat(1_000));
+    expect(out).toContain("top-level tool budget exhausted");
   });
 
   it("compresses object outputs with string `output` field", async () => {

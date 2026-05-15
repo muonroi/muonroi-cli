@@ -40,10 +40,35 @@ export interface SubAgentCapOptions {
   dedupRepeatOutputs?: boolean;
   /** Outputs below this length are not worth deduplicating. */
   dedupMinChars?: number;
+  /**
+   * Ratio at which mid-tier compression (head/tail trim) kicks in. Default
+   * 0.3 for sub-agents (aggressive); top-level orchestrator uses 0.5 so
+   * single-tool turns are not trimmed.
+   */
+  midTierRatio?: number;
+  /**
+   * Ratio at which high-tier compression (head only + "finalize" note)
+   * kicks in. Default 0.7 for sub-agents; top-level uses 0.8.
+   */
+  highTierRatio?: number;
+  /**
+   * Char target for mid-tier compression (head/tail trim). Default 8_000.
+   */
+  midTierChars?: number;
+  /**
+   * Char target for high-tier compression. Default 2_000.
+   */
+  highTierChars?: number;
+  /** Identifier surfaced in budget-exhaustion stubs (for debugging). Default "sub-agent". */
+  label?: string;
 }
 
 const DEFAULT_MAX_CUMULATIVE_CHARS = 120_000;
 const DEFAULT_DEDUP_MIN_CHARS = 500;
+const DEFAULT_MID_TIER_RATIO = 0.3;
+const DEFAULT_HIGH_TIER_RATIO = 0.7;
+const DEFAULT_MID_TIER_CHARS = 8_000;
+const DEFAULT_HIGH_TIER_CHARS = 2_000;
 
 export interface SubAgentCapState {
   /** Running sum of characters returned to the sub-agent so far. */
@@ -61,17 +86,22 @@ export interface SubAgentCapState {
   /** Internal: feature flags from options. */
   dedupEnabled: boolean;
   dedupMinChars: number;
+  midTierRatio: number;
+  highTierRatio: number;
+  midTierChars: number;
+  highTierChars: number;
+  label: string;
 }
 
-function trimHeadTail(text: string, target: number): string {
+function trimHeadTail(text: string, target: number, label: string): string {
   if (text.length <= target) return text;
   const half = Math.floor(target / 2);
-  return `${text.slice(0, half)}\n\n... [${text.length - target} chars trimmed by sub-agent cap] ...\n\n${text.slice(-half)}`;
+  return `${text.slice(0, half)}\n\n... [${text.length - target} chars trimmed by ${label} cap] ...\n\n${text.slice(-half)}`;
 }
 
-function trimHead(text: string, target: number): string {
+function trimHead(text: string, target: number, label: string): string {
   if (text.length <= target) return text;
-  return `${text.slice(0, target)}\n\n... [${text.length - target} chars trimmed — sub-agent budget low; finalize work] ...`;
+  return `${text.slice(0, target)}\n\n... [${text.length - target} chars trimmed — ${label} budget low; finalize work] ...`;
 }
 
 function shortHash(text: string): string {
@@ -80,7 +110,7 @@ function shortHash(text: string): string {
 
 export function compressForCap(state: SubAgentCapState, raw: string): string {
   if (state.exhausted) {
-    return `[sub-agent tool budget exhausted (${state.cumulative}/${state.max} chars). Further tool calls will return this stub. Summarize findings now and return.]`;
+    return `[${state.label} tool budget exhausted (${state.cumulative}/${state.max} chars). Further tool calls will return this stub. Summarize findings now and return.]`;
   }
   state.callIndex += 1;
 
@@ -92,7 +122,7 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
     const firstSeen = state.seenHashes.get(hash);
     if (firstSeen !== undefined) {
       state.dedupHits += 1;
-      const stub = `[duplicate tool output detected — identical to result of call #${firstSeen} in this sub-agent (sha1:${hash}, ${raw.length} chars). Reuse the earlier result instead of re-running.]`;
+      const stub = `[duplicate tool output detected — identical to result of call #${firstSeen} in this ${state.label} (sha1:${hash}, ${raw.length} chars). Reuse the earlier result instead of re-running.]`;
       state.cumulative += stub.length;
       return stub;
     }
@@ -101,10 +131,10 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
 
   const ratio = state.cumulative / state.max;
   let out: string;
-  if (ratio >= 0.7) {
-    out = trimHead(raw, 2_000);
-  } else if (ratio >= 0.3) {
-    out = trimHeadTail(raw, 8_000);
+  if (ratio >= state.highTierRatio) {
+    out = trimHead(raw, state.highTierChars, state.label);
+  } else if (ratio >= state.midTierRatio) {
+    out = trimHeadTail(raw, state.midTierChars, state.label);
   } else {
     out = raw;
   }
@@ -172,6 +202,11 @@ export function wrapToolSetWithCap(
     callIndex: 0,
     dedupEnabled: opts.dedupRepeatOutputs ?? true,
     dedupMinChars: opts.dedupMinChars ?? DEFAULT_DEDUP_MIN_CHARS,
+    midTierRatio: opts.midTierRatio ?? DEFAULT_MID_TIER_RATIO,
+    highTierRatio: opts.highTierRatio ?? DEFAULT_HIGH_TIER_RATIO,
+    midTierChars: opts.midTierChars ?? DEFAULT_MID_TIER_CHARS,
+    highTierChars: opts.highTierChars ?? DEFAULT_HIGH_TIER_CHARS,
+    label: opts.label ?? "sub-agent",
   };
   return {
     tools: wrapInternal(tools, state),

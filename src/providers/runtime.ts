@@ -142,14 +142,28 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // the alias is not a valid model id on their API.
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
-  const model = factory(canonicalId);
+  // G1 fix: OpenAI reasoning models (gpt-5.x, o1, o3, o4) require the
+  // Responses API even on the API-key path. The chat-completions endpoint
+  // accepts the request but returns an empty assistant message, which AI
+  // SDK then surfaces as "AI_NoOutputGeneratedError" → "Task failed: No
+  // output generated". The OAuth path already routes through .responses()
+  // when the factory is constructed (see createProviderFactory), but the
+  // API-key path used plain chat completions.
+  const needsResponsesApi =
+    modelInfo?.responsesOnly === true || (modelInfo?.provider === "openai" && modelInfo?.reasoning === true);
+  const model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
 
   let providerOptions: Record<string, unknown> | undefined;
 
-  if (modelInfo?.thinkingType === "adaptive") {
-    providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
-  } else if (modelInfo?.thinkingType === "enabled") {
-    providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
+  // `thinking` is an Anthropic-specific provider option. Setting it on
+  // non-Anthropic models was dead-code (AI SDK silently strips wrong-provider
+  // keys) but masked the actual issue when debugging.
+  if (modelInfo?.provider === "anthropic") {
+    if (modelInfo.thinkingType === "adaptive") {
+      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
+    } else if (modelInfo.thinkingType === "enabled") {
+      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
+    }
   }
 
   const userEffort = getReasoningEffortForModel(modelId);

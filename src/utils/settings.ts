@@ -263,6 +263,15 @@ export interface UserSettings {
    * 20_000–600_000.
    */
   subAgentBudgetChars?: number;
+  /**
+   * Cumulative tool-output budget for the TOP-LEVEL orchestrator tool loop
+   * (the agentic streamText loop in runTurn, separate from sub-agents).
+   * Same tiered compression as the sub-agent cap, but with a larger
+   * default so casual single-tool turns are unaffected. Range
+   * 50_000–1_500_000. Env override: MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
+   * Default 400_000 (~100k tokens).
+   */
+  topLevelToolBudgetChars?: number;
 }
 
 export interface ProjectSettings {
@@ -865,6 +874,23 @@ export function getSubAgentBudgetChars(): number {
   const val = loadUserSettings().subAgentBudgetChars;
   if (typeof val === "number" && val >= 20_000 && val <= 600_000) return Math.floor(val);
   return 120_000;
+}
+
+/**
+ * Per-turn cap on cumulative tool-output chars inside the top-level
+ * orchestrator agentic loop. Same tiered compression as the sub-agent cap,
+ * higher default so single-tool turns are unaffected. Env override:
+ * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
+ */
+export function getTopLevelToolBudgetChars(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+  }
+  const val = loadUserSettings().topLevelToolBudgetChars;
+  if (typeof val === "number" && val >= 50_000 && val <= 1_500_000) return Math.floor(val);
+  return 400_000;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
