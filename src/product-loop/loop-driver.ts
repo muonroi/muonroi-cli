@@ -8,7 +8,7 @@ import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
-import { buildPriorContext, formatPriorContextForPrompt } from "./cross-run-memory.js";
+import { buildPriorContext } from "./cross-run-memory.js";
 import { type DiscoveryResult, discoverProject } from "./discover.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import { readProjectContext } from "./discovery-persistence.js";
@@ -160,11 +160,12 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // grounded in real repo state, not generic boilerplate.
         conversationContext = auditAsContextBlock(audit);
 
-        // P5 — cross-run workspace memory. Inject condensed digest of prior
-        // /ideal runs on this workspace so the team doesn't re-discover the
-        // same architecture decisions / abandoned approaches. Silent no-op
-        // when there are no qualifying prior runs (greenfield) or when the
-        // user passed --no-prior-context.
+        // P5 — cross-run workspace memory. prior.runs.length is still used
+        // for the discovery card below to show how many prior runs were found.
+        // The digest is no longer appended to conversationContext: PIL Layer 3
+        // already does semantic T0/T1 injection on every LLM call via
+        // /api/search, so the static digest was duplicating work and growing
+        // the system prompt unbounded.
         const prior = await buildPriorContext({
           flowDir: ctx.flowDir,
           runId: ctx.runId,
@@ -173,9 +174,6 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           llm: ctx.llm,
           optOut: ctx.skipPriorContext === true,
         });
-        if (prior.digest) {
-          conversationContext += formatPriorContextForPrompt(prior.digest);
-        }
 
         const discoveryCard = buildWorkspaceDiscoveryCard(discovery, audit, prior.runs.length);
         if (discoveryCard) {

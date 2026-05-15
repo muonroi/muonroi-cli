@@ -13,6 +13,7 @@ import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
+import { extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
@@ -269,6 +270,12 @@ async function* drainSprints(args: {
           const msg = err instanceof Error ? err.message : String(err);
           yield { type: "content", content: `\n_Delivery polish skipped: ${msg}_\n` } as StreamChunk;
         }
+      }
+      // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
+      // EE client absorbs failures into the offline queue. Telemetry lands
+      // in P1.6.
+      if (ctx.cwd) {
+        await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
       }
       return {
         runId: ctx.runId,
@@ -530,6 +537,12 @@ async function* runPhasesPath(args: {
       verdict: { pass: true, score: 1, failedCondition: undefined as any, reason: "phases_complete" },
     });
   }
+  // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
+  // EE client absorbs failures into the offline queue. Telemetry lands
+  // in P1.6.
+  if (ctx.cwd) {
+    await extractRunToEE(ctx.flowDir, ctx.runId, ctx.cwd);
+  }
   return {
     runId: ctx.runId,
     stage: "approved",
@@ -640,6 +653,11 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   } catch {
     /* non-fatal */
   }
+  // P1.3: extract run artifacts to EE even on abort — we still want to learn
+  // from partial runs. runAbort does not have a full DriverContext so cwd is
+  // not available here; fall back to process.cwd() as the project path.
+  // EE client is non-fatal (offline queue absorbs transport failures).
+  await extractRunToEE(opts.flowDir, opts.runId, opts.cwd ?? process.cwd());
   yield { type: "content", content: `Aborted run ${opts.runId}.\n` } as StreamChunk;
   return { runId: opts.runId, stage: "halted", success: false, reason: "aborted" };
 }
