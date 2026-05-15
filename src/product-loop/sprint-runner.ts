@@ -44,11 +44,14 @@ import { buildContinueFeedback } from "./feedback-routing.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
 import { parseVerifyResult } from "./verify-result.js";
 
 export {
   computeFailureSignature,
   loadVerifyFailureSignatures,
+  pushFailureToEE,
+  recordVerifyFailureAndMaybePush,
   saveVerifyFailureSignatures,
   type VerifyFailureRecord,
   type VerifyFailureSignatures,
@@ -193,6 +196,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
     (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
+
+  // P3.3: Track repeating failures; push to EE judge-worker when count hits 3.
+  if (verifyVerdict === "FAIL" || verifyVerdict === "ERROR") {
+    const errorMessage = verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "");
+    const verifyCommand = (recipeFromVerify as { command?: string } | null)?.command ?? "unknown";
+    // fileTouched: sprint-runner has no fine-grained file context at this depth;
+    // use "unknown" as a stable fallback so the signature still incorporates the
+    // verify command and error message for deduplication.
+    await recordVerifyFailureAndMaybePush({
+      flowDir: ctx.flowDir,
+      runId: ctx.runId,
+      cwd,
+      errorMessage,
+      verifyCommand,
+      fileTouched: "unknown",
+    }).catch(() => {
+      /* failure tracking must not derail the sprint */
+    });
+  }
 
   // ── Step 6: Read current criteria + judge stage ──────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Judgment\n` };
