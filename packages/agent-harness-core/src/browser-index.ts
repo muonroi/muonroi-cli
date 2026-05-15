@@ -14,4 +14,5 @@ export * from "./driver.js";
 export * from "./idle.js";
 export * from "./predicate.js";
 export * from "./protocol.js";
+export * from "./registry.js";
 export * from "./selector.js";
