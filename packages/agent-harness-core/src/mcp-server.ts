@@ -4,20 +4,55 @@
  *   - sanitizeEnv: strip dangerous env vars
  *   - validateCwd: ensure cwd is under home or repo root
  *   - validateMockLlmPath: ensure mock-llm path stays within repo root
+ *
+ * Spawn injection contract (HarnessSpawn / HarnessSpawnResult):
+ *   The MCP server accepts a HarnessSpawn callback at construction time so the
+ *   core package has zero knowledge of the concrete TUI transport (OpenTUI
+ *   fd 3/4, named pipes, WebSocket, …). The consumer (muonroi-cli) provides the
+ *   spawn implementation via createMcpHarnessServer({ spawn }).
  */
 
-import type { ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { spawnAgentTui } from "../../../src/agent-harness/test-spawn.js";
 import { createDriver, type Driver } from "./driver.js";
 import type { LiveEvent, LiveFrame } from "./protocol.js";
 import { PROTOCOL_VERSION } from "./protocol.js";
-import { createLineSplitter } from "./transports/sidechannel.js";
+
+// ---------------------------------------------------------------------------
+// Spawn injection contract
+// ---------------------------------------------------------------------------
+
+/**
+ * The result returned by a HarnessSpawn implementation.
+ * Both the POSIX fd-3/4 and Windows named-pipe transports satisfy this shape.
+ */
+export interface HarnessSpawnResult {
+  /** The child process — only pid and kill() are required. */
+  // biome-ignore lint: intentionally broad to avoid importing NodeJS.Signals here
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  proc: { pid?: number; kill: (signal?: any) => boolean };
+  /** Send a single newline-terminated JSON line on the input channel. */
+  sendLine: (line: string) => void;
+  /** Subscribe to newline-terminated JSON lines from the output channel. Returns an unsubscribe fn. */
+  onLine: (cb: (line: string) => void) => () => void;
+  /** Resolves with the exit code when the child process exits. */
+  exited: Promise<number>;
+}
+
+/** Describes the sanitised spawn request the server hands to the injected spawn fn. */
+export interface HarnessSpawnRequest {
+  command: string;
+  argv: string[];
+  env: Record<string, string>;
+  cwd?: string;
+}
+
+/** A function that spawns a TUI process and returns transport streams. */
+export type HarnessSpawn = (req: HarnessSpawnRequest) => Promise<HarnessSpawnResult>;
 
 const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+)$/;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
@@ -331,14 +366,30 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
   );
 }
 
-export async function runHarnessDriver(): Promise<void> {
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Create the MCP harness server with an injected spawn implementation.
+ *
+ * The caller provides `spawn`, a function that satisfies HarnessSpawn.
+ * The security boundary checks (argv allowlist, env strip, cwd containment,
+ * mock-llm path containment, Windows guard) all remain here in core — they
+ * are transport-agnostic policy and must not be bypassed.
+ *
+ * @example
+ *   // In muonroi-cli/src/index.ts:
+ *   const server = createMcpHarnessServer({ spawn: opentuiSpawn });
+ *   await server.connect(new StdioServerTransport());
+ */
+export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpServer {
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
   let currentDriver: Driver | null = null;
-  let childProc: ChildProcess | null = null;
+  let currentPid: number | undefined;
   const onStop = () => {
-    childProc?.kill();
-    childProc = null;
     currentDriver = null;
+    currentPid = undefined;
   };
 
   server.registerTool(
@@ -375,6 +426,8 @@ export async function runHarnessDriver(): Promise<void> {
           isError: true,
         };
       }
+
+      // --- Security boundary checks (must not be removed or bypassed) ---
       const argCheck = validateStartArgs(input.args);
       if (!argCheck.ok) {
         return {
@@ -410,16 +463,15 @@ export async function runHarnessDriver(): Promise<void> {
 
       const entry = process.cwd() + "/src/index.ts";
 
-      // Use the cross-platform spawn helper. On POSIX this uses fd 3/4;
-      // on Windows it uses named pipes (MUONROI_HARNESS_OUT_PIPE / IN_PIPE).
-      let spawnResult: Awaited<ReturnType<typeof spawnAgentTui>>;
+      // Delegate to the injected spawn implementation — the core package has no
+      // knowledge of the concrete transport (fd 3/4, named pipes, WebSocket …).
+      let spawnResult: HarnessSpawnResult;
       try {
-        spawnResult = await spawnAgentTui([entry, ...finalArgs], {
-          spawnOpts: {
-            cwd: input.cwd,
-            env: { ...sanitizedEnv },
-            shell: false,
-          },
+        spawnResult = await spawn({
+          command: "bun",
+          argv: ["run", entry, ...finalArgs],
+          env: sanitizedEnv,
+          cwd: input.cwd,
         });
       } catch (err) {
         return {
@@ -433,17 +485,16 @@ export async function runHarnessDriver(): Promise<void> {
         };
       }
 
-      const { proc, inWrite, outRead } = spawnResult;
+      const { proc, sendLine, onLine } = spawnResult;
 
       const driver = createDriver({
-        sendKey: (k: string) => {
-          inWrite.write(JSON.stringify({ op: "press", key: k }) + "\n");
-        },
-        sendType: (t: string) => {
-          inWrite.write(JSON.stringify({ op: "type", text: t }) + "\n");
-        },
+        sendKey: (k: string) => sendLine(JSON.stringify({ op: "press", key: k })),
+        sendType: (t: string) => sendLine(JSON.stringify({ op: "type", text: t })),
       });
-      const splitter = createLineSplitter((line: string) => {
+
+      // onLine already delivers complete newline-stripped lines — no extra
+      // splitting required.
+      const unsub = onLine((line: string) => {
         try {
           const msg = JSON.parse(line) as Record<string, unknown>;
           if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
@@ -453,12 +504,16 @@ export async function runHarnessDriver(): Promise<void> {
           // ignore malformed lines
         }
       });
-      outRead.on("data", (chunk: Buffer | string) => {
-        splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      spawnResult.exited.then(() => {
+        unsub();
+        if (currentPid === proc.pid) {
+          currentDriver = null;
+          currentPid = undefined;
+        }
       });
 
       currentDriver = driver;
-      childProc = proc;
+      currentPid = proc.pid;
       return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, pid: proc.pid }) }] };
     },
   );
@@ -467,5 +522,17 @@ export async function runHarnessDriver(): Promise<void> {
   registerActionTools(server, () => currentDriver);
   registerAsyncTools(server, () => currentDriver, { onStop });
 
+  return server;
+}
+
+/**
+ * Run the MCP harness driver over stdio with the OpenTUI spawn implementation
+ * injected by the consumer.
+ *
+ * @param spawn  A HarnessSpawn implementation that matches the HarnessSpawn contract.
+ *               muonroi-cli passes opentuiSpawn; other consumers can provide their own.
+ */
+export async function runHarnessDriver(spawn: HarnessSpawn): Promise<void> {
+  const server = createMcpHarnessServer({ spawn });
   await server.connect(new StdioServerTransport());
 }
