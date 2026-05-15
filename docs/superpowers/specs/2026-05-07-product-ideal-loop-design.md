@@ -608,6 +608,37 @@ promotion work identically to full-ceremony runs. No special handling per hot-pa
 
 **Reference:** commit `2faf34d`.
 
+### Update 2026-05-15 — Verify-failure pattern lifecycle (P3)
+
+**Purpose:** Automatically surface recurring verify failures as Experience Engine behavioral patterns 
+for promotion to T1 warnings without manual investigation.
+
+#### Signature computation and persistence
+`src/product-loop/verify-failure-tracking.ts:computeFailureSignature()` computes a 16-char sha256 hash 
+of `(first 2 stack frames, verifyCommand, fileTouched)` to uniquely identify a failure pattern within a run. 
+State persists in `state.md` section `Verify Failure Signatures` (JSON-roundtripped) via 
+`loadVerifyFailureSignatures()` / `saveVerifyFailureSignatures()`, tracking per-signature counts across sprints.
+
+#### Threshold and EE push
+`recordVerifyFailureAndMaybePush()` is invoked in `sprint-runner.ts` immediately after `parseVerifyResult` 
+when verdict is `FAIL` or `ERROR`. It increments the signature count; on FIRST transition to count ≥ 3, 
+it calls `pushFailureToEE()` (tool `ideal_verify_fail` on `/api/posttool`). Subsequent failures keep 
+counting but never re-push — one pattern per run to EE.
+
+#### Judge-worker promotion
+EE's `judge-worker.js` evaluates the pattern via `evolve()` and may promote it to T1 Behavioral status. 
+On the next `/ideal` run, PIL Layer 3 surfaces the warning automatically — no extra CLI wiring required.
+
+#### Telemetry and CB-2 bonus
+Each push records `interaction_logs` row with `event_type="ee_judge"`, `event_subtype="ideal_verify_pattern"`. 
+CB-2 oscillation breaker (`sprint-runner.ts` module-scoped Map keyed by `runId`) grants a one-shot bypass 
+when any signature in the current run has been pushed (count ≥ 3): the next sprint's CB-2 check skips, 
+allowing the newly promoted T1 warning to surface and guide recovery. After that single bypass is consumed, 
+CB-2 halts as before.
+
+**Reference:** commits `dd13fe7` (signature + persistence), `3cc4ba9` (threshold + EE push), 
+`c97aa24` (telemetry + CB-2 bonus).
+
 ---
 
 ## 8. Anti-Hallucination Layers (summary)
