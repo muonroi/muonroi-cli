@@ -3,6 +3,7 @@ export * from "./idle.js";
 export * from "./mock-llm.js";
 export * from "./predicate.js";
 export * from "./protocol.js";
+export * from "./registry.js";
 export * from "./selector.js";
 export * from "./spec-helpers.js";
 export * from "./transports/sidechannel.js";

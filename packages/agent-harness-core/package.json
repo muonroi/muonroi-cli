@@ -33,6 +33,10 @@
       "types": "./src/idle.ts",
       "default": "./src/idle.ts"
     },
+    "./registry": {
+      "types": "./src/registry.ts",
+      "default": "./src/registry.ts"
+    },
     "./mock-llm": {
       "types": "./src/mock-llm.ts",
       "node": "./src/mock-llm.ts",
