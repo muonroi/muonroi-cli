@@ -104,6 +104,7 @@ import {
   initialPointToExistingFormState,
 } from "./components/point-to-existing-form-card.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
@@ -945,6 +946,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   const [pointToExistingForm, setPointToExistingForm] = useState<PointToExistingFormState | null>(null);
+  const [councilProgress, setCouncilProgress] = useState<{
+    status: "running" | "done" | "error";
+    specPath: string;
+    hasContent: boolean;
+    error?: string;
+  } | null>(null);
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
@@ -3890,8 +3897,24 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               setHaltSelectedIndex(0);
               return;
             }
-            // TODO Task 5.5 — wire continue_as_council and other option handlers.
-            console.log("halt recovery: not implemented yet:", chosen.id);
+            if (chosen.id === "continue_as_council") {
+              // Task 5.5 — kick off council brainstorm; production council wiring
+              // (real orchestrator inject) is deferred, scaffolder writes a
+              // header-only spec.md when no runCouncil is provided.
+              setActiveHaltCard(null);
+              setHaltSelectedIndex(0);
+              void continueAsCouncil({ prompt: activeHaltCard.detail ?? "(no prompt)" })
+                .then((r) => {
+                  setCouncilProgress({ status: "done", specPath: r.specPath, hasContent: r.hasContent });
+                })
+                .catch((err: unknown) => {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  setCouncilProgress({ status: "error", specPath: "", hasContent: false, error: msg });
+                });
+              setCouncilProgress({ status: "running", specPath: "", hasContent: false });
+              return;
+            }
+            console.log("halt recovery: unknown option id:", chosen.id);
           }
           setActiveHaltCard(null);
           setHaltSelectedIndex(0);
@@ -5214,6 +5237,23 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       terminalCols={width}
                       theme={t}
                     />
+                  )}
+                  {councilProgress && (
+                    <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
+                      <box
+                        flexDirection="column"
+                        borderStyle="single"
+                        borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
+                        padding={1}
+                        marginTop={1}
+                      >
+                        <text fg={t.text}>
+                          {councilProgress.status === "running" && "Council brainstorming — writing spec.md..."}
+                          {councilProgress.status === "done" && `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content — production council wiring deferred)"}`}
+                          {councilProgress.status === "error" && `Council brainstorm failed: ${councilProgress.error}`}
+                        </text>
+                      </box>
+                    </Semantic>
                   )}
                   {councilStatuses.length > 0 && (
                     <Semantic id="council-status" role="listbox" name="Council Status">
