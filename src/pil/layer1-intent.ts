@@ -15,6 +15,70 @@ import { classify } from "../router/classifier/index.js";
 import { isUnifiedPilEnabled } from "./config.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// P2: Complexity heuristic — pure, sync, no I/O
+// ---------------------------------------------------------------------------
+
+export interface ComplexityInput {
+  rawText: string;
+  taskType: string | null;
+  t0HitCount: number;
+  hasMaxSprintsOne: boolean;
+}
+
+export interface ComplexityOutput {
+  complexity: "low" | "medium" | "high";
+  score: number;
+}
+
+/** File/path reference regex — matches common source-file extensions. */
+const FILE_REF_RE = /[\w./-]+\.(ts|tsx|js|jsx|json|md|py|rs|go|cs)\b/gi;
+
+/** Keywords that force a "low" complexity signal (additive score -3). */
+const FORCE_LOW_RE = /\b(fix typo|rename|delete|format|lint|whitespace|comment only)\b/i;
+
+/** Keywords that push toward "high" complexity (additive score +3). */
+const FORCE_HIGH_RE =
+  /\b(architect|architecture|migrate|migration|refactor|design|platform|multi-tenant|microservic|distributed|scale)\b/i;
+
+/**
+ * Score a prompt's complexity using cheap, purely local heuristics.
+ * Returns a bucketed label and the raw score so callers can log both.
+ */
+export function scoreComplexity(input: ComplexityInput): ComplexityOutput {
+  const { rawText, taskType, t0HitCount, hasMaxSprintsOne } = input;
+  let score = 0;
+
+  // Length signal
+  const len = rawText.length;
+  if (len > 500) score += 3;
+  else if (len > 200) score += 2;
+  else if (len > 50) score += 1;
+  // 0-50: +0
+
+  // File reference count signal
+  const fileRefs = (rawText.match(FILE_REF_RE) ?? []).length;
+  if (fileRefs >= 3) score += 2;
+  else if (fileRefs >= 1) score += 1;
+
+  // Keyword signals
+  if (FORCE_LOW_RE.test(rawText)) score -= 3;
+  if (FORCE_HIGH_RE.test(rawText)) score += 3;
+
+  // Context signals
+  if (hasMaxSprintsOne) score -= 2;
+  if (t0HitCount > 0) score -= 1;
+  if (taskType === "debug") score += 1;
+
+  // Bucket
+  let complexity: "low" | "medium" | "high";
+  if (score <= 2) complexity = "low";
+  else if (score <= 5) complexity = "medium";
+  else complexity = "high";
+
+  return { complexity, score };
+}
+
 // Maps every classifier reason string to a TaskType (or null for non-coding signals).
 const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
   "regex:refactor": "refactor",
@@ -382,6 +446,13 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
       !pass3UnifiedSucceeded &&
       !pass3LegacyTaskSucceeded;
 
+    const { complexity, score: complexityScore } = scoreComplexity({
+      rawText: ctx.raw,
+      taskType,
+      t0HitCount: 0, // TODO P2: feed from prior-run state.md if available
+      hasMaxSprintsOne: false, // TODO P2: thread CLI flag down through ctx
+    });
+
     const intentTrace: IntentDetectionTrace = {
       pass1Reason: result.reason,
       pass1Confidence: result.confidence,
@@ -399,6 +470,8 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
       styleSource,
       finalTaskType: taskType,
       finalConfidence: confidence,
+      complexity,
+      complexityScore,
     };
 
     return {

@@ -130,6 +130,10 @@ export interface IntentDetectionTrace {
   finalTaskType: string | null;
   /** Final confidence emitted by Layer 1. */
   finalConfidence: number;
+  /** Heuristic complexity routing decision: low / medium / high. */
+  complexity: "low" | "medium" | "high";
+  /** Raw score that produced complexity (-3..+10 range). */
+  complexityScore: number;
 }
 
 export interface BrainData {
