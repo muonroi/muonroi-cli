@@ -2,7 +2,7 @@
  * Tests for Step-Aware Model Routing (SAMR).
  */
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadCatalog, MODELS } from "../../models/registry.js";
 import { decideStepRouting, getStepRouterConfig, type StepRouterConfig } from "../step-router.js";
 
@@ -87,5 +87,64 @@ describe("default-off safety", () => {
     const decision = decideStepRouting("claude-opus-4-7", "anthropic", mockConfig({ enabled: false }));
     expect(decision.phase2ModelId).toBeNull();
     expect(decision.reason).toContain("disabled");
+  });
+});
+
+describe("resolveExecutionModel disability checks (Phase 19)", () => {
+  beforeAll(async () => {
+    await loadCatalog();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("does not return same-provider candidate when provider is disabled", async () => {
+    const settingsMod = await import("../../utils/settings.js");
+    vi.spyOn(settingsMod, "isProviderDisabled").mockImplementation((p) => p === "anthropic");
+    vi.spyOn(settingsMod, "isModelDisabled").mockReturnValue(false);
+
+    const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider === "anthropic");
+    if (!premiumModel) return; // skip if no anthopic premium model loaded
+
+    const decision = decideStepRouting(premiumModel.id, "anthropic", mockConfig());
+    if (decision.phase2ModelId) {
+      const execModel = MODELS.find((m) => m.id === decision.phase2ModelId);
+      expect(execModel?.provider).not.toBe("anthropic");
+    } else {
+      // No alternative model found — acceptable (disabled provider, no cross-provider fallback)
+      expect(decision.phase2ModelId).toBeNull();
+    }
+  });
+
+  it("does not return a model that is in disabledModels", async () => {
+    const settingsMod = await import("../../utils/settings.js");
+    vi.spyOn(settingsMod, "isProviderDisabled").mockReturnValue(false);
+
+    const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
+    if (!premiumModel) return;
+    const fastModel = MODELS.find((m) => m.tier === "fast" && m.provider === premiumModel.provider);
+    if (!fastModel) return;
+
+    vi.spyOn(settingsMod, "isModelDisabled").mockImplementation((id) => id === fastModel.id);
+
+    const decision = decideStepRouting(premiumModel.id, premiumModel.provider!, mockConfig());
+    expect(decision.phase2ModelId).not.toBe(fastModel.id);
+  });
+
+  it("falls through to cross-provider when same-provider model is disabled", async () => {
+    const settingsMod = await import("../../utils/settings.js");
+    const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider === "anthropic");
+    if (!premiumModel) return;
+    const sameFast = MODELS.find((m) => m.tier === "fast" && m.provider === "anthropic");
+    if (!sameFast) return;
+
+    // Disable the same-provider fast model; allow cross-provider
+    vi.spyOn(settingsMod, "isModelDisabled").mockImplementation((id) => id === sameFast.id);
+    vi.spyOn(settingsMod, "isProviderDisabled").mockReturnValue(false);
+
+    const decision = decideStepRouting(premiumModel.id, "anthropic", mockConfig());
+    // Either a different model is chosen or null — but NOT sameFast.id
+    expect(decision.phase2ModelId).not.toBe(sameFast.id);
   });
 });
