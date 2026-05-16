@@ -63,14 +63,14 @@ describe("printCostForensics", () => {
     expect(out).toContain("504,737");
   });
 
-  it("flags the Phase A3 NULL message_seq regression", () => {
+  it("flags the NULL message_seq regression (A5 write-ahead bypass)", () => {
     const out = captureStdout(() =>
       printCostForensics(summary([event({ source: "message", inputTokens: 10_000, messageSeq: null })])),
     );
-    expect(out).toContain("Phase A3 fix not active");
+    expect(out).toContain("A5 message write-ahead bypassed");
   });
 
-  it("flags Phase C1 when DeepSeek has zero cache creation across large input", () => {
+  it("flags deepseek route only when deepseek events sum >50k input with zero cache_creation", () => {
     const out = captureStdout(() =>
       printCostForensics(
         summary([
@@ -78,7 +78,28 @@ describe("printCostForensics", () => {
         ]),
       ),
     );
-    expect(out).toContain("Phase C1 open");
+    expect(out).toContain("deepseek route has zero cache_creation_tokens");
+  });
+
+  it("does NOT fire the deepseek anomaly on a pure non-deepseek session", () => {
+    const out = captureStdout(() =>
+      printCostForensics(
+        summary([event({ source: "message", model: "gpt-5.4", inputTokens: 60_000, cacheCreationTokens: 0 })]),
+      ),
+    );
+    expect(out).not.toContain("deepseek route has zero cache_creation_tokens");
+  });
+
+  it("does NOT fire the deepseek anomaly when deepseek events sum under the 50k threshold", () => {
+    const out = captureStdout(() =>
+      printCostForensics(
+        summary([
+          event({ source: "message", model: "gpt-5.4", inputTokens: 60_000, cacheCreationTokens: 0 }),
+          event({ source: "message", model: "deepseek-v4-flash", inputTokens: 5_000, cacheCreationTokens: 0 }),
+        ]),
+      ),
+    );
+    expect(out).not.toContain("deepseek route has zero cache_creation_tokens");
   });
 
   it("reports no anomalies on a healthy session", () => {

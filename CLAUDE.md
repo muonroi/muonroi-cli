@@ -282,13 +282,19 @@ Inline anomaly flags (each tied to a plan phase target):
 | Anomaly | Meaning |
 |---|---|
 | `peak single-call input > 80,000` | Sub-agent cumulative cap did NOT engage (Phase B target breach). Check `getSubAgentBudgetChars()` + the `wrapToolSetWithCap` wiring around `childBaseTools` in `runTaskRequest` / `runTaskRequestBatch`. |
-| `NULL message_seq on 'message' source` | The fix in `orchestrator.recordUsage()` was bypassed; verify `lastPersistedSeq(this.messageSeqs)` is being called. |
-| `zero cache_creation across deepseek route` | DeepSeek prompt caching never writes — Phase C1 still open. `createOpenAICompatible` adapter drops `providerOptions` silently. |
+| `NULL message_seq on 'message' source` | Phase A5 message write-ahead bypassed. Verify `persistMessageWriteAhead` is called BEFORE streamText in `processMessage` (sees `messageSeqs.push(seq)` not `push(null)`). |
+| `zero cache_creation_tokens across deepseek input tokens` | Scoped to deepseek events only; expected behaviour (DeepSeek never emits cache_creation — it has cache reads only via `prompt_cache_hit_tokens`). The C1 fix made the metric flow correctly; the warning is conservative and may fire on legitimate deepseek-dominant sessions — only treat as a regression if `cacheReadTokens` is ALSO 0 across the same events. |
 
-The known-bad baseline is session `b58603caceb9` (peak 504,737 input, single
-prompt, all three anomalies). After Phase B1+B2 ship, an equivalent
-"explore OAuth wiring" prompt should bring peak ≤ ~120,000 chars / ~30K
-tokens — well under the 80K acceptance target.
+Known baselines:
+- **Pre-fix worst case**: session `b58603caceb9` (peak 504,737 input on a
+  single prompt — all anomalies firing).
+- **Post-fix DeepSeek**: session `5f349ef73ccb` (peak 31,702 input on the
+  same "explore oauth" prompt — 16x reduction, 41.6% cache hit).
+- **Post-fix OAuth gpt-5.4**: session `63974a79c0cd` (peak 31,827 input,
+  97% cache hit on shorter prompts).
+
+After A1-A5 + B1-B4 + C1-C3 + F1 + G1-G2 + M1 + O1 ship, peak should
+stay ≤ 80K input tokens on any single call.
 
 ## Verifying provider-layer behavior with the mock model (H1)
 
