@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -238,6 +239,24 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   }
 
   return { model, modelId, modelInfo, providerOptions, unsupportedParams };
+}
+
+/**
+ * F1: derive a stable OpenAI prompt-cache key from the session id.
+ *
+ * The AI SDK's agentic streamText loop sends one OpenAI call per tool round.
+ * Without a stable `promptCacheKey`, OpenAI auto-hashes prompt content — so
+ * the moment any later message changes (which always happens between rounds),
+ * the cache is busted. Hashing session.id gives every round in the same
+ * session the same key, so the unchanging system + early-message prefix
+ * keeps hitting the cache. Cache TTL is short (minutes) but covers a turn.
+ *
+ * Returns undefined when there is no session id (e.g. headless one-shot
+ * requests with no persistence) — callers must skip setting the field.
+ */
+export function computePromptCacheKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId) return undefined;
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
 }
 
 /**

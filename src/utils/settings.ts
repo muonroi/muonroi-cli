@@ -883,6 +883,66 @@ export function getSubAgentBudgetChars(): number {
 }
 
 /**
+ * Phase B3 — threshold (in chars of cumulative message content) above which
+ * the sub-agent `prepareStep` compactor rewrites older tool_result parts
+ * into short summary stubs. Below the threshold compaction is a no-op.
+ * Env override: MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS.
+ */
+export function getSubAgentCompactThresholdChars(): number {
+  const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 500_000) return Math.floor(n);
+  }
+  return 80_000;
+}
+
+/**
+ * Phase B3 — number of trailing tool turns kept verbatim during sub-agent
+ * compaction. Each tool turn = one assistant tool-call + one tool message.
+ * Env override: MUONROI_SUBAGENT_COMPACT_KEEP_LAST.
+ */
+export function getSubAgentCompactKeepLast(): number {
+  const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 1 && n <= 20) return Math.floor(n);
+  }
+  return 3;
+}
+
+/**
+ * Phase B4 — threshold (in chars of cumulative message content) above which
+ * the top-level `prepareStep` compactor rewrites older tool_result parts
+ * into short summary stubs. Higher than the sub-agent default because
+ * top-level loops typically carry more useful early context.
+ * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
+ */
+export function getTopLevelCompactThresholdChars(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+  }
+  return 200_000;
+}
+
+/**
+ * Phase B4 — number of trailing tool turns kept verbatim during top-level
+ * compaction. Higher than sub-agent default because top-level agents make
+ * decisions across longer horizons.
+ * Env override: MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST.
+ */
+export function getTopLevelCompactKeepLast(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
+  }
+  return 5;
+}
+
+/**
  * Per-turn cap on cumulative tool-output chars inside the top-level
  * orchestrator agentic loop. Same tiered compression as the sub-agent cap,
  * higher default so single-tool turns are unaffected. Env override:

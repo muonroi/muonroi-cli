@@ -69,7 +69,12 @@ function promptCharCount(prompt: LanguageModelV3Prompt): number {
         // Tool results are part of the message bytes; approximate via JSON serialization.
         total += JSON.stringify(part.output ?? "").length;
       } else if (part.type === "tool-call") {
-        total += (part.input ?? "").length + part.toolName.length;
+        // `input` is normalized by the AI SDK to whatever the provider expects
+        // — string for legacy providers, object for v6+ tool definitions.
+        // Both contribute bytes; serialize uniformly so promptChars never NaNs.
+        const input = part.input;
+        const inputLen = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
+        total += inputLen + part.toolName.length;
       }
     }
   }

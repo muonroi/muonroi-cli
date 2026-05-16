@@ -102,6 +102,14 @@ export interface ProcessMessageUsage {
   costUsdTicks?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  /**
+   * Input tokens that did NOT hit a server-side cache. Populated when the
+   * provider reports a cache-miss split (e.g. DeepSeek `prompt_cache_miss_tokens`,
+   * OpenAI `prompt_tokens_details.cached_tokens` derivative). When undefined,
+   * downstream consumers should compute it as
+   * `max(0, inputTokens - cacheReadTokens - cacheCreationTokens)`.
+   */
+  noCacheInputTokens?: number;
 }
 
 export interface ProcessMessageStepStart {
