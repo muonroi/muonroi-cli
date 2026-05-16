@@ -8,6 +8,7 @@
 
 import { realpathSync, statSync } from "node:fs";
 import * as path from "node:path";
+import { detectBBFramework } from "./init-new.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -31,7 +32,11 @@ export interface PointToExistingResult {
   reason: PointToExistingReason;
   recipe?: unknown;
   absolutePath: string;
+  /** Detected target framework (e.g. "muonroi-building-block") when BB heuristic matches. */
+  targetFramework?: "muonroi-building-block" | string;
 }
+
+export { detectBBFramework };
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -73,5 +78,6 @@ export async function pointToExisting(opts: PointToExistingOptions): Promise<Poi
   }
 
   // Step 4: success.
-  return { ok: true, reason: "ok", recipe, absolutePath };
+  const targetFramework = detectBBFramework(absolutePath);
+  return { ok: true, reason: "ok", recipe, absolutePath, ...(targetFramework ? { targetFramework } : {}) };
 }
