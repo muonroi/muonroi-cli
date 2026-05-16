@@ -215,16 +215,25 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
     );
   }
   if (summary.events.some((e) => e.messageSeq === null && e.source === "message")) {
-    anomalies.push(`some 'message' events have NULL message_seq — Phase A3 fix not active in this session`);
-  }
-  if (
-    summary.totalInput > 50_000 &&
-    summary.totalCacheCreation === 0 &&
-    summary.events.some((e) => e.model.startsWith("deepseek"))
-  ) {
     anomalies.push(
-      `deepseek route has zero cache_creation_tokens across ${summary.totalInput} input tokens — prompt caching not wired (Phase C1 open)`,
+      `some 'message' events have NULL message_seq — Phase A5 message write-ahead bypassed (check persistMessageWriteAhead wiring)`,
     );
+  }
+  // C1 acceptance check: only count DeepSeek-route events. Earlier versions
+  // fired whenever ANY event in the session was deepseek (council/compaction
+  // side-calls could trigger the warning on otherwise-pure OAuth sessions).
+  // Now we scope the check to deepseek events only and require both:
+  //   - at least 50k input tokens went through the deepseek route, AND
+  //   - those deepseek events sum to zero cache_creation_tokens.
+  const deepseekEvents = summary.events.filter((e) => e.model.startsWith("deepseek"));
+  if (deepseekEvents.length > 0) {
+    const deepseekInput = deepseekEvents.reduce((acc, e) => acc + (e.inputTokens ?? 0), 0);
+    const deepseekCacheCreate = deepseekEvents.reduce((acc, e) => acc + (e.cacheCreationTokens ?? 0), 0);
+    if (deepseekInput > 50_000 && deepseekCacheCreate === 0) {
+      anomalies.push(
+        `deepseek route has zero cache_creation_tokens across ${formatNum(deepseekInput)} deepseek input tokens — DeepSeek does not emit cache_creation (cache reads only); if this fires on a non-deepseek-dominant session, ignore`,
+      );
+    }
   }
   if (anomalies.length > 0) {
     w(`Anomalies:`);
