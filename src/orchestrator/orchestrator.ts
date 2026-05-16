@@ -1,6 +1,5 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
-import { createHash } from "node:crypto";
 import { APICallError } from "@ai-sdk/provider";
 import { convertToBase64 } from "@ai-sdk/provider-utils";
 import { generateText, type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
@@ -54,6 +53,7 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
+  computePromptCacheKey,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
@@ -118,6 +118,10 @@ import {
   getRoleModel,
   getRoleModels,
   getSubAgentBudgetChars,
+  getSubAgentCompactKeepLast,
+  getSubAgentCompactThresholdChars,
+  getTopLevelCompactKeepLast,
+  getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
@@ -211,6 +215,7 @@ import {
 } from "./prompts";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import {
   combineAbortSignals,
@@ -1369,6 +1374,11 @@ export class Agent {
       // the same guard, causing G1: "Task failed: No output generated.").
       const childDropMaxOutput = shouldDropParam(childRuntime, "maxOutputTokens");
       const childDropTemperature = shouldDropParam(childRuntime, "temperature");
+      // Phase B3: compact older tool_results out of the running message history
+      // before each AI SDK step. First step (stepNumber === 0) has no history
+      // worth compacting; later steps are where cumulative input balloons.
+      const compactThreshold = getSubAgentCompactThresholdChars();
+      const compactKeepLast = getSubAgentCompactKeepLast();
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1377,6 +1387,20 @@ export class Agent {
         stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
         maxRetries: 0,
         abortSignal: signal,
+        prepareStep: ({ messages, stepNumber }) => {
+          if (stepNumber < 1) return undefined;
+          const compacted = compactSubAgentMessages(messages, {
+            thresholdChars: compactThreshold,
+            keepLastTurns: compactKeepLast,
+          });
+          if (compacted === messages || compacted.length === messages.length) {
+            // Identity / length match — no rewrites happened.
+            // (compactSubAgentMessages returns a new array but length === input
+            // when below threshold; cheap heuristic to skip the override.)
+            if (compacted === messages) return undefined;
+          }
+          return { messages: compacted };
+        },
         ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
         ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
@@ -3907,19 +3931,9 @@ export class Agent {
           const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
           if (turnProvider === "openai") {
             const existing = (providerOpts.openai ?? {}) as { store?: boolean; promptCacheKey?: string };
-            // Stable prompt-cache key per session — the AI SDK's agentic
-            // streamText loop sends multiple OpenAI calls per turn (one per
-            // tool round). Without a stable key, OpenAI auto-hashes the
-            // prompt content, which busts the cache the moment messages
-            // change between rounds. Hashing the session ID gives every
-            // round in the same session the same cache key so subsequent
-            // rounds hit the cache for the unchanging prefix (system +
-            // earlier messages). Cache TTL is short (a few minutes) but
-            // covers a multi-round turn comfortably.
-            const sessionId = this.session?.id;
-            const promptCacheKey =
-              existing.promptCacheKey ??
-              (sessionId ? createHash("sha256").update(sessionId).digest("hex").slice(0, 32) : undefined);
+            // Stable prompt-cache key per session — see computePromptCacheKey
+            // doc in src/providers/runtime.ts for the rationale.
+            const promptCacheKey = existing.promptCacheKey ?? computePromptCacheKey(this.session?.id);
             providerOpts.openai = {
               ...existing,
               store: existing.store ?? true,
@@ -3985,6 +3999,15 @@ export class Agent {
             toolsCount,
           };
 
+          // Phase B4: compact older tool_result parts before each top-level
+          // step once cumulative message chars exceed the configured threshold.
+          // The compactor preserves system + first user verbatim and keeps the
+          // last N tool turns intact; older results are rewritten into short
+          // stubs. Symmetric to the B3 sub-agent path; reuses the same module
+          // with `label: "top-level"` so the stub text reflects which loop
+          // elided the content.
+          const topLevelCompactThreshold = getTopLevelCompactThresholdChars();
+          const topLevelCompactKeepLast = getTopLevelCompactKeepLast();
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -3997,6 +4020,15 @@ export class Agent {
                 : stepCountIs(this.maxToolRounds),
             maxRetries: 0,
             abortSignal: signal,
+            prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
+              if (sn < 1) return {};
+              const compacted = compactSubAgentMessages(stepMessages, {
+                thresholdChars: topLevelCompactThreshold,
+                keepLastTurns: topLevelCompactKeepLast,
+                label: "top-level",
+              });
+              return compacted === stepMessages ? {} : { messages: compacted };
+            },
             temperature: 0.7,
             ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
