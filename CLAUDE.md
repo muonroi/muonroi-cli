@@ -38,6 +38,22 @@ Core components:
 - `tests/harness/` — E2E specs (no platform guards — run on Windows and POSIX via `test-spawn.ts`)
 - `tests/harness/helpers.ts` — shared `spawnHarness()` helper used by all spawn-based specs
 
+## BB-aware `/ideal`
+
+When the scaffold target resolves to `muonroi-building-block` (BB) — i.e., presence of `Directory.Build.props` + `*.sln` + any `src/Muonroi.*` directory — `/ideal` injects BB-specific context into the council system prompt at CB-1. Key files:
+
+- `src/ee/bb-retrieval.ts` — `fetchBBContext(prompt, opts)` queries EE collections `bb-recipes`, `bb-behavioral`, `experience-principles` in parallel with retry-once + graceful degrade. Token budget 1500. Marker-stamped output for Layer 3 dedup.
+- `src/product-loop/loop-driver.ts` — CB-1 entry point that injects the retrieved BB context BEFORE council debate fires.
+- `src/pil/layer3-ee-injection.ts` — scans `ctx.enriched` for `<!-- bb-context-injected:<sha> -->` markers and skips already-injected hits.
+- `src/scaffold/init-new.ts` — detects BB target heuristically, sets `IntentDetectionTrace.targetFramework = "muonroi-building-block"`.
+- `src/scaffold/bb-ecosystem-apply.ts` — applies senior-bar code-gen (Program.cs wiring, sample rule + test, props minimalism, modular-boundaries gate).
+- `src/scaffold/bb-quality-gate.ts` — runs `dotnet restore` + `dotnet build` + `check-modular-boundaries.ps1` + sentinel regex check after scaffold.
+- `src/scaffold/resume-from-gate-failures.ts` — `/ideal --resume <path>` re-enters CB-1 with `EE-GATE-FAILURES.md` context.
+
+Ingestion + collection layout: `docs/agent-harness/EE-INGESTION.md`.
+
+Feature flag: `userSettings.eeBBContext: false` to disable BB retrieval.
+
 ## Workflow: verify a new TUI feature
 
 When you add a new TUI component or behavior and want to verify it as a real user would experience it:
