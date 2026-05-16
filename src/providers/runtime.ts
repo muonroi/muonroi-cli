@@ -275,6 +275,14 @@ export function shouldDropParam(
   if (param === "maxOutputTokens" && runtime.modelInfo?.supportsMaxOutputTokens === false) {
     return true;
   }
+  // Reasoning models (gpt-5.x, o1/o3/o4, deepseek-r1, claude reasoning, etc.)
+  // reject `temperature` and `topP` at the provider — OpenAI Responses API
+  // emits an AI SDK warning and the param is silently ignored. Drop them at
+  // the source so the warning stops and no future strict-mode provider
+  // surfaces a hard error. G2 — sibling of G1 (maxOutputTokens drop).
+  if ((param === "temperature" || param === "topP") && runtime.modelInfo?.reasoning === true) {
+    return true;
+  }
   return runtime.unsupportedParams?.includes(param) ?? false;
 }
 

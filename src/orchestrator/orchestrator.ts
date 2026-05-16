@@ -1954,8 +1954,8 @@ export class Agent {
       model: runtime.model,
       system,
       prompt,
-      maxOutputTokens: maxTokens,
-      temperature: 0.7,
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
+      ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.7 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
     this._councilStats.calls++;
@@ -2012,8 +2012,8 @@ export class Agent {
         prompt: userPrompt,
         tools: researchTools,
         stopWhen: stepCountIs(10),
-        maxOutputTokens: 4096,
-        temperature: 0.3,
+        ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
+        ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.3 }),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       });
@@ -4116,7 +4116,7 @@ export class Agent {
               });
               return compacted === stepMessages ? {} : { messages: compacted };
             },
-            temperature: 0.7,
+            ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
             ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
             experimental_onStepStart: (event: unknown) => {
