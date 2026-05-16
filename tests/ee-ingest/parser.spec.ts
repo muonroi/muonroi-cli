@@ -39,14 +39,7 @@ function parseDeepMap(content: string): DeepMapRow[] {
         .filter(Boolean);
       if (cells.length >= 3) {
         const [file, classOrInterface, ...rest] = cells;
-        if (
-          file === "File" ||
-          file === "Tool" ||
-          file === "Sample" ||
-          file === "Area" ||
-          file === "Command"
-        )
-          continue;
+        if (file === "File" || file === "Tool" || file === "Sample" || file === "Area" || file === "Command") continue;
         const keyMethods = rest.join(" | ");
         if (currentPackage && file && classOrInterface) {
           rows.push({ package: currentPackage, file, classOrInterface, keyMethods });
@@ -65,13 +58,9 @@ interface PackageFamilyRow {
 
 function parsePackageFamilies(content: string): PackageFamilyRow[] {
   const rows: PackageFamilyRow[] = [];
-  if (!content.includes("## Package Families") && !content.includes("## Package families"))
-    return rows;
+  if (!content.includes("## Package Families") && !content.includes("## Package families")) return rows;
 
-  const sectionStart = Math.max(
-    content.indexOf("## Package Families"),
-    content.indexOf("## Package families"),
-  );
+  const sectionStart = Math.max(content.indexOf("## Package Families"), content.indexOf("## Package families"));
   const sectionEnd = content.indexOf("\n##", sectionStart + 1);
   const section = sectionEnd === -1 ? content.slice(sectionStart) : content.slice(sectionStart, sectionEnd);
 
@@ -110,6 +99,7 @@ interface OssBoundaryRule {
 }
 
 function parseOssBoundary(content: string): OssBoundaryRule[] {
+  content = content.replace(/\r\n/g, "\n");
   const rules: OssBoundaryRule[] = [];
 
   const ruleSection = content.match(/## Rule\n([\s\S]*?)(?=\n##)/);
@@ -123,7 +113,10 @@ function parseOssBoundary(content: string): OssBoundaryRule[] {
   const ossSection = content.match(/## OSS Packages[\s\S]*?\n([\s\S]*?)(?=\n## Commercial)/);
   if (ossSection) {
     for (const line of ossSection[1].split("\n")) {
-      const pkg = line.replace(/^-\s*/, "").trim().replace(/\s+\(.*\)/, "");
+      const pkg = line
+        .replace(/^-\s*/, "")
+        .trim()
+        .replace(/\s+\(.*\)/, "");
       if (pkg.startsWith("Muonroi.")) {
         rules.push({
           type: "oss-pkg",
@@ -138,7 +131,10 @@ function parseOssBoundary(content: string): OssBoundaryRule[] {
   const commercialSection = content.match(/## Commercial Packages[\s\S]*?\n([\s\S]*?)$/);
   if (commercialSection) {
     for (const line of commercialSection[1].split("\n")) {
-      const pkg = line.replace(/^-\s*/, "").trim().replace(/\s+\(.*\)/, "");
+      const pkg = line
+        .replace(/^-\s*/, "")
+        .trim()
+        .replace(/\s+\(.*\)/, "");
       if (pkg.startsWith("Muonroi.")) {
         rules.push({
           type: "commercial-pkg",
@@ -160,7 +156,10 @@ function parseOssBoundary(content: string): OssBoundaryRule[] {
 import { createHash } from "node:crypto";
 
 function deterministicId(source: string, text: string): string {
-  return createHash("sha256").update(source + text, "utf8").digest("hex").slice(0, 32);
+  return createHash("sha256")
+    .update(source + text, "utf8")
+    .digest("hex")
+    .slice(0, 32);
 }
 
 // ---------------------------------------------------------------------------
