@@ -350,6 +350,7 @@ interface OssBoundaryRule {
 }
 
 function parseOssBoundary(content: string): OssBoundaryRule[] {
+  content = content.replace(/\r\n/g, "\n");
   const rules: OssBoundaryRule[] = [];
 
   // General rules section
