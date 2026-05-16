@@ -246,6 +246,12 @@ export interface UserSettings {
   disabledProviders?: ProviderId[];
   /** Models the user has explicitly disabled in the model picker. Migration: missing field -> empty array. */
   disabledModels?: string[];
+  /**
+   * BB-aware EE context injection in /ideal CB-1 council prompts.
+   * When false, fetchBBContext returns empty immediately — no network call, no telemetry.
+   * Default: true.
+   */
+  eeBBContext?: boolean;
   /** Step-aware model routing: downgrade to cheaper model for tool-execution steps. */
   stepRouter?: {
     /** Enable step-aware routing. Default: true. */

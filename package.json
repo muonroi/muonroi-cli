@@ -37,7 +37,8 @@
     "lint:semantic": "bun scripts/check-semantic-wrap.ts",
     "pre-commit": "lint-staged",
     "prepare": "husky",
-    "postinstall": "bun run scripts/postinstall.ts"
+    "postinstall": "bun run scripts/postinstall.ts",
+    "ee:ingest-bb": "bun run scripts/ingest-bb-to-ee.mts"
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"
@@ -72,6 +73,7 @@
     "ai": "6.0.169",
     "commander": "^12.1.0",
     "diff": "^8.0.3",
+    "fast-xml-parser": "^4.4.1",
     "gpt-tokenizer": "^3.4.0",
     "keytar": "^7.9.0",
     "ollama-ai-provider-v2": "1.5.5",

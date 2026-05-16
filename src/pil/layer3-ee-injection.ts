@@ -6,8 +6,16 @@
  * Thin-client aware: when `serverBaseUrl` is configured in ~/.experience/config.json
  * `searchByText` issues a single `/api/search` round-trip (server embeds + Qdrant
  * search server-side). Otherwise falls back to in-process embed + Qdrant.
+ *
+ * ## BB dedup (shared contract with src/ee/bb-retrieval.ts)
+ * Before appending any EE hit this layer scans `ctx.enriched` for
+ * `<!-- bb-context-injected:<sha16> -->` markers written by bb-retrieval.ts.
+ * When the computed sha of an EE hit payload matches a marker already present,
+ * the hit is skipped — preventing double-injection when both CB-1 (loop-driver)
+ * and PIL Layer 3 are active on the same pipeline run.
  */
 
+import { createHash } from "node:crypto";
 import type { EEPoint } from "../ee/bridge.js";
 import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
@@ -40,6 +48,28 @@ const PIL_PRINCIPLES_FLOOR = Math.max(0, PIL_SCORE_FLOOR - 0.15);
 // hitCount threshold for promoting a behavioral point to T1 "proven" reflex.
 // Mirrors the EE evolution promotion rule (3 confirmed hits → T1).
 const T1_HIT_THRESHOLD = 3;
+
+/**
+ * Extract all sha16 values from `<!-- bb-context-injected:<sha16> -->` markers
+ * already present in the enriched context string.
+ */
+function extractBBMarkerShas(enriched: string): Set<string> {
+  const shas = new Set<string>();
+  const regex = /<!-- bb-context-injected:([0-9a-f]{16}) -->/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(enriched)) !== null) {
+    shas.add(m[1]);
+  }
+  return shas;
+}
+
+/**
+ * Compute sha16 for a payload text (mirrors bbContextMarker in bb-retrieval.ts).
+ * Used to check whether an EE hit payload was already injected by the BB path.
+ */
+function payloadSha16(text: string): string {
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
+}
 
 // Server-side `/api/search` whitelist (experience-engine/server.js):
 //   experience-behavioral  — extracted behavioral patterns (T1/T2, seeded by evolve/extract)
@@ -218,7 +248,24 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     };
   }
 
-  const allPoints = [...principlePoints, ...behavioralPoints];
+  // BB dedup: skip any EE hit whose payload text sha16 is already marked in ctx.enriched.
+  // This prevents double-injection when loop-driver CB-1 already injected BB context
+  // via bb-retrieval.ts on the same pipeline run.
+  const bbMarkerShas = extractBBMarkerShas(ctx.enriched);
+  const deduplicatedPrinciples = bbMarkerShas.size > 0
+    ? principlePoints.filter((p) => {
+        const text = extractPointText(p);
+        return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
+      })
+    : principlePoints;
+  const deduplicatedBehavioral = bbMarkerShas.size > 0
+    ? behavioralPoints.filter((p) => {
+        const text = extractPointText(p);
+        return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
+      })
+    : behavioralPoints;
+
+  const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral];
 
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
@@ -248,9 +295,9 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   const behavioralBudget = Math.floor(ctx.tokenBudget * 0.15);
 
   const parts: string[] = [];
-  const rulesText = formatPrincipleRules(principlePoints);
+  const rulesText = formatPrincipleRules(deduplicatedPrinciples);
   if (rulesText) parts.push(truncateToBudget(rulesText, principlesBudget));
-  const hintsText = formatExperienceHints(behavioralPoints);
+  const hintsText = formatExperienceHints(deduplicatedBehavioral);
   if (hintsText) parts.push(truncateToBudget(hintsText, behavioralBudget));
   const injected = parts.join("\n");
 
@@ -284,7 +331,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
       {
         name: "ee-experience-injection",
         applied: true,
-        delta: `principles=${principlePoints.length} behavioral=${behavioralPoints.length} t1=${t1Rules.length} chars=${injected.length}`,
+        delta: `principles=${deduplicatedPrinciples.length} behavioral=${deduplicatedBehavioral.length} t1=${t1Rules.length} chars=${injected.length}${bbMarkerShas.size > 0 ? ` bb-dedup=${bbMarkerShas.size}` : ""}`,
       },
     ],
   };

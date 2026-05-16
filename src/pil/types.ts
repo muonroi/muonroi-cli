@@ -98,6 +98,12 @@ export interface PipelineContext {
  * — at most one of `pass1/2/3` should be true for `*Hit` fields.
  */
 export interface IntentDetectionTrace {
+  /**
+   * Detected target framework for BB-aware retrieval.
+   * "muonroi-building-block" when Directory.Build.props + *.sln + src/Muonroi.* heuristic matches.
+   * Undefined when no framework-specific signals detected.
+   */
+  targetFramework?: "muonroi-building-block" | string;
   /** Classifier reason string (e.g. "regex:debug", "tree-sitter:typescript"). */
   pass1Reason: string;
   /** Confidence reported by the classifier (0..1). */
