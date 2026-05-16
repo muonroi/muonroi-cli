@@ -60,6 +60,7 @@ import {
   type ProviderFactory,
   type ResolvedModelRuntime as RuntimeResult,
   resolveModelRuntime as resolveRuntime,
+  shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
@@ -1366,10 +1367,8 @@ export class Agent {
       // rejects `max_output_tokens` with HTTP 400; top-level orchestrator
       // already strips it via `dropParam`, the sub-agent path was missing
       // the same guard, causing G1: "Task failed: No output generated.").
-      const childDropMaxOutput =
-        childRuntime.modelInfo?.supportsMaxOutputTokens === false ||
-        (childRuntime.unsupportedParams?.includes("maxOutputTokens") ?? false);
-      const childDropTemperature = childRuntime.unsupportedParams?.includes("temperature") ?? false;
+      const childDropMaxOutput = shouldDropParam(childRuntime, "maxOutputTokens");
+      const childDropTemperature = shouldDropParam(childRuntime, "temperature");
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -3927,8 +3926,9 @@ export class Agent {
               ...(promptCacheKey ? { promptCacheKey } : {}),
             };
           }
-          const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean =>
-            runtime.unsupportedParams?.includes(p) ?? false;
+          // Top-level dropParam — shared with sub-agent path via shouldDropParam.
+          // See src/providers/runtime.ts for the central rule.
+          const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
@@ -3998,9 +3998,7 @@ export class Agent {
             maxRetries: 0,
             abortSignal: signal,
             temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false || dropParam("maxOutputTokens")
-              ? {}
-              : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+            ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
             experimental_onStepStart: (event: unknown) => {
               stepNumber = getStepNumber(event, stepNumber + 1);

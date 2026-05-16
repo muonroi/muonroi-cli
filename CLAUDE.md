@@ -290,6 +290,82 @@ prompt, all three anomalies). After Phase B1+B2 ship, an equivalent
 "explore OAuth wiring" prompt should bring peak ≤ ~120,000 chars / ~30K
 tokens — well under the 80K acceptance target.
 
+## Verifying provider-layer behavior with the mock model (H1)
+
+Forensics tells you what happened *after* a real session. To verify a
+provider-layer fix *before* burning real tokens, install
+`MockLanguageModelV3` from `ai/test` in front of the orchestrator's
+`streamText` calls and assert against the recorded `doStreamCalls`.
+
+The harness pieces live in:
+
+- `src/agent-harness/mock-model.ts` — `createMockModel`, `installMockModel`, `textOnlyStream`, `toolCallStream`
+- `src/providers/runtime.ts` — `resolveModelRuntime()` short-circuits when `globalThis.__muonroiMockModel` is set
+- `src/providers/runtime.ts` — `shouldDropParam(runtime, param)` — central rule used by orchestrator AND specs (do NOT inline this logic in specs)
+- `tests/harness/recording.ts` — `inspectAll`, `inspectByRole`, `cumulativePromptChars`, `assertParamAbsent`, `assertParamPresent`, `getProviderOption`
+
+### Pattern: write a cost-leak spec
+
+```ts
+// tests/harness/cost-leak-<id>.spec.ts
+import { streamText } from "ai";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { installMockModel, textOnlyStream } from "../../src/agent-harness/mock-model.js";
+import { loadCatalog } from "../../src/models/registry.js";
+import { resolveModelRuntime, shouldDropParam } from "../../src/providers/runtime.js";
+import { assertParamAbsent, inspectAll } from "./recording.js";
+
+describe("<leak id>: <one-line claim>", () => {
+  beforeAll(async () => { await loadCatalog(); });
+  let cleanup: (() => void) | null = null;
+  afterEach(() => { cleanup?.(); cleanup = null; });
+
+  it("<expected behaviour>", async () => {
+    const handle = installMockModel({
+      fixture: { stream: textOnlyStream("done") },
+      unsupportedParams: ["maxOutputTokens"],   // simulate OAuth registry
+      defaultProviderOptions: { store: false },  // simulate provider quirks
+    });
+    cleanup = handle.uninstall;
+
+    const runtime = resolveModelRuntime(/* stub factory */, "gpt-5.4");
+    const result = streamText({
+      model: runtime.model,
+      system: "You are the Explore sub-agent.",
+      messages: [{ role: "user", content: "go" }],
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 8192 }),
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    });
+    for await (const _ of result.fullStream) { /* drain */ }
+
+    assertParamAbsent(inspectAll(handle)[0]!, "maxOutputTokens");
+  });
+});
+```
+
+Run only the harness suite — natively on Windows (named pipes) and POSIX
+(fd 3/4); WSL fallback identical:
+
+```powershell
+bunx vitest -c vitest.harness.config.ts run tests/harness/
+```
+
+### Coverage map by leak
+
+| Leak | Spec | What it asserts |
+|---|---|---|
+| **G1** — OAuth backend rejects `max_output_tokens` | `cost-leak-g1.spec.ts` | `assertParamAbsent(call, "maxOutputTokens")` when `unsupportedParams` includes it; control test asserts param IS present otherwise. |
+| **F1** — Stable OpenAI `promptCacheKey` | `cost-leak-f1.spec.ts` *(TODO)* | `getProviderOption(call, "openai", "promptCacheKey")` returns a deterministic sha256 prefix across rounds in the same session. |
+| **B3** — Sub-agent `prepareStep` compaction | `cost-leak-b3.spec.ts` *(TODO)* | `inspectByRole(handle, "sub-agent")` shows `promptChars` plateaus across rounds past the compaction threshold. |
+| **B4** — Top-level `prepareStep` compaction | `cost-leak-b4.spec.ts` *(TODO)* | `cumulativePromptChars(handle)` stays under `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` across a tool-loop scenario. |
+| **C1** — DeepSeek `cache_creation_tokens` field | `cost-leak-c1.spec.ts` *(TODO)* | Mock emits a DeepSeek-shaped finish chunk; assert usage normalizer reads the correct field. |
+
+### Anti-patterns
+
+- **Do NOT inline `runtime.unsupportedParams?.includes(...)`** in specs. Always go through `shouldDropParam` so a future refactor of the rule updates both production and tests together.
+- **Do NOT depend on `globalThis.__muonroiMockModel` from the parent test process when you also spawn a TUI child** — the mock lives in the process that imports it. For TUI E2E, the fixture file's `model` block is loaded by the child via `loadMockModelFromDir` in `src/index.ts`.
+- **Do NOT skip `loadCatalog()` in `beforeAll`** — without it, `getModelInfo(modelId)` returns `undefined` and the `providerOptions` merge block silently no-ops.
+
 Optional env overrides for the caps:
 
 | Env | Range | Default | Effect |
