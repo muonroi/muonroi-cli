@@ -49,8 +49,13 @@ function mcpToolPrefix(server: McpServerConfig): string {
 // `jsonSchema(...)` in @ai-sdk/provider-utils — no `validate` arg). So this
 // change preserves the existing validation surface exactly (none on our side;
 // all enforced by the MCP server).
+// OpenAI Responses API rejects object schemas without a `properties` field
+// (HTTP 400 invalid_function_parameters). Anthropic/DeepSeek don't enforce
+// this. Always emit `properties: {}` alongside `additionalProperties: true`
+// so the schema is portable across providers.
 const LAZY_MCP_INPUT_SCHEMA = {
   type: "object" as const,
+  properties: {} as Record<string, unknown>,
   additionalProperties: true,
 };
 

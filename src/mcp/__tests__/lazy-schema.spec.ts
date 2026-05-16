@@ -107,11 +107,13 @@ describe("M1 — MCP lazy schema loading", () => {
     for (const tool of Object.values(bundle.tools)) {
       const schema = (tool as { inputSchema?: { jsonSchema?: Record<string, unknown> } }).inputSchema?.jsonSchema;
       expect(schema).toBeDefined();
-      // The lazy schema is exactly `{ type: "object", additionalProperties: true }`.
+      // The lazy schema is `{ type: "object", properties: {}, additionalProperties: true }`.
+      // OpenAI Responses API requires `properties` to be present (even empty);
+      // Anthropic / DeepSeek tolerate omitting it.
       expect(schema?.type).toBe("object");
       expect(schema?.additionalProperties).toBe(true);
-      // Crucially: no `properties`, no `required`, no `enum`/`pattern` blocks.
-      expect(schema).not.toHaveProperty("properties");
+      expect(schema?.properties).toEqual({});
+      // Crucially: no `required`, no `enum`/`pattern`/field-level descriptions.
       expect(schema).not.toHaveProperty("required");
       // Description is preserved (the model needs it to decide WHEN to call).
       expect((tool as { description?: string }).description).toMatch(/Synthetic MCP tool number/);
