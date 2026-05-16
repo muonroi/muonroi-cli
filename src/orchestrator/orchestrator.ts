@@ -909,6 +909,31 @@ export class Agent {
         this._lastProviderOptionsShape = null;
       }
     }
+    // Phase D — surfaced for harness E2E verification. Mirror the recorded usage
+    // event onto the agent-mode sidechannel so spec processes can assert on
+    // cacheReadTokens / cacheCreationTokens normalization without poking at the
+    // child's sqlite. Best-effort, only fires when agent-mode runtime is set.
+    try {
+      const rt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+        | { emitEvent?: (e: unknown) => void }
+        | undefined;
+      if (rt?.emitEvent) {
+        const lastSeqForEvent = this.session ? lastPersistedSeq(this.messageSeqs) : null;
+        rt.emitEvent({
+          t: "event",
+          kind: "usage",
+          source,
+          model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheCreationTokens: usage.cacheCreationTokens,
+          messageSeq: lastSeqForEvent,
+        });
+      }
+    } catch {
+      // best-effort: do not let sidechannel failures interrupt usage recording
+    }
     // Update status bar token counters + provider/model + cache metrics + cost
     const prev = statusBarStore.getState();
     const info = getModelInfo(model);

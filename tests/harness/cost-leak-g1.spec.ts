@@ -79,7 +79,9 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     });
     cleanup = handle.uninstall;
 
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    // gpt-4o (non-reasoning) — G2's temperature-drop rule does not apply, so
+    // temperature should remain present and isolate the maxOutputTokens drop.
+    const runtime = resolveModelRuntime(stubFactory(), "gpt-4o");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
@@ -97,13 +99,30 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     });
     cleanup = handle.uninstall;
 
-    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    // gpt-4o — non-reasoning, no G2 drop — both params should pass through.
+    const runtime = resolveModelRuntime(stubFactory(), "gpt-4o");
     const result = streamText(buildStreamTextOptions(runtime));
     await drain(result);
 
     const calls = inspectAll(handle);
     assertParamPresent(calls[0]!, "maxOutputTokens");
     assertParamPresent(calls[0]!, "temperature");
+  });
+
+  it("g2: drops temperature on reasoning models regardless of unsupportedParams", async () => {
+    const handle = installMockModel({
+      fixture: { stream: textOnlyStream("done") },
+      unsupportedParams: undefined,
+    });
+    cleanup = handle.uninstall;
+
+    // gpt-5.4 is a reasoning model — G2 rule fires: temperature dropped.
+    const runtime = resolveModelRuntime(stubFactory(), "gpt-5.4");
+    const result = streamText(buildStreamTextOptions(runtime));
+    await drain(result);
+
+    const calls = inspectAll(handle);
+    assertParamAbsent(calls[0]!, "temperature");
   });
 
   it("omits both maxOutputTokens and temperature when both are listed", async () => {
