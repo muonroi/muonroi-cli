@@ -5181,7 +5181,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     pendingCouncilQuestion,
   ]);
 
-  const hasMessages = messages.length > 0 || streamContent || isProcessing;
+  // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
+  // point-to-existing-form + council-progress) whenever ANY of these overlays
+  // is active. Previously only message-stream signals flipped this, which meant
+  // /ideal halts (and their --inject-halt E2E counterpart) registered the halt
+  // state but the home-screen branch never rendered the card → semantic tree
+  // missing → harness wait_for timed out across multiple specs.
+  const hasMessages =
+    messages.length > 0 ||
+    streamContent !== "" ||
+    isProcessing ||
+    activeHaltCard !== null ||
+    initNewForm !== null ||
+    pointToExistingForm !== null ||
+    councilProgress !== null;
 
   // SemanticProvider wraps the app root so descendant <Semantic> components can
   // register nodes into the runtime's registry. When agent-mode is inactive,

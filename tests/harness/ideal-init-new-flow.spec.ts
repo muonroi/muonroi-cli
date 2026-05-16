@@ -26,22 +26,15 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
 
 /*
- * KNOWN REGRESSION (2026-05-16): As of master @ e5fa3d1, multiple harness
- * specs (`ideal-halt.spec.ts`, `composer.spec.ts`, `askcard.spec.ts`, etc.) fail
- * with the same symptom — `wait_for({selector: "id=..."})` times out 8 s on
- * elements that ARE rendered (verified via downstream `queryAll` after a
- * type+Enter sequence). The semantic tree appears not to be flushed to the
- * harness sidechannel on first idle frame.
- *
- * Investigation needed in:
- *   - packages/agent-harness-opentui/src/reconciler-hook.ts (snapshot scheduler)
- *   - packages/agent-harness-core/src/driver.ts wait_for vs idle semantics
- *
- * This spec is written to the CORRECT pattern matching ideal-halt.spec.ts and
- * will run green once the upstream regression is fixed. Keeping it skipped
- * prevents CI noise while preserving the intent.
+ * Root cause for the prior skip (FIXED 2026-05-16): src/ui/app.tsx gated the
+ * "messages" branch (which contains <Semantic id="log">, <HaltRecoveryCard>,
+ * <InitNewFormCard>, etc.) on `hasMessages = messages.length > 0 ||
+ * streamContent || isProcessing`. With --inject-halt the halt state was set
+ * but no message had arrived → home branch rendered → semantic tree missing.
+ * Fix: include activeHaltCard / initNewForm / pointToExistingForm /
+ * councilProgress in the hasMessages predicate. Spec re-enabled.
  */
-describe.skip("/ideal halt → init-new → BB template picker E2E", () => {
+describe("/ideal halt → init-new → BB template picker E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
