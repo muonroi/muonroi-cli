@@ -25,6 +25,22 @@ import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
 
+/**
+ * Poll until `predicate()` returns true. Used to wait for state that depends
+ * on multiple Semantic register/unregister cycles to settle (e.g. when a form
+ * step transitions and the old step's options must fully unregister before
+ * we can assert their absence). `driver.wait_for` only waits for selector
+ * PRESENCE, not absence, so polling is needed here.
+ */
+async function waitForStable(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Timeout — let the caller's assertion fail with a meaningful message.
+}
+
 /*
  * Root cause for the prior skip (FIXED 2026-05-16): src/ui/app.tsx gated the
  * "messages" branch (which contains <Semantic id="log">, <HaltRecoveryCard>,
@@ -115,7 +131,7 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
   it("stage 3: Enter on FE stack advances to bb-template step", async () => {
     driver.press("Enter");
     await driver.wait_for({ selector: "id=init-new-form >> id=init-bb-option-mr-base-sln", timeoutMs: 5_000 });
-    // FE options should be gone now
+    // FE options should be unregistered after the step transition.
     const feOpts = driver.queryAll("id=init-new-form >> id^=init-fe-option-");
     expect(feOpts.length).toBe(0);
   });
@@ -170,7 +186,12 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
 
   it("stage 4: Up arrow restores selection Microservices → Modular", async () => {
     driver.press("Up");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Wait for the selected flag to actually transfer back to Modular —
+    // wait_for({idle}) can return before React commits the state setter.
+    await waitForStable(
+      () => driver.query("id=init-new-form >> id=init-bb-option-mr-mod-sln")?.selected === true,
+      3_000,
+    );
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-mod-sln")?.selected).toBe(true);
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-micro-sln")?.selected).toBeFalsy();
   });
@@ -180,12 +201,20 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
   // tests/harness/init-new-bb-template.spec.ts (mocked spawnSync).
   //
   // Dismiss the form to leave a clean state for afterAll.
-  it("stage 4: Escape dismisses the form", async () => {
+  it("stage 4: Escape returns from bb-template to fe-stack step", async () => {
     driver.press("Escape");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
-    // After Esc, form should be gone (current step="bb-template" returns to fe-stack
-    // per init-new-form-card.tsx — verify the bb-template options disappear).
+    // Escape on bb-template step is wired to go BACK to fe-stack (not close
+    // the form) — see app.tsx bb-template Escape handler.
+    // Wait for bb-options to fully unregister and fe-options to mount.
+    await waitForStable(
+      () =>
+        driver.queryAll("id=init-new-form >> id^=init-bb-option-").length === 0 &&
+        driver.queryAll("id=init-new-form >> id^=init-fe-option-").length === 3,
+      3_000,
+    );
     const bbOpts = driver.queryAll("id=init-new-form >> id^=init-bb-option-");
+    const feOpts = driver.queryAll("id=init-new-form >> id^=init-fe-option-");
     expect(bbOpts.length).toBe(0);
+    expect(feOpts.length).toBe(3);
   });
 });
