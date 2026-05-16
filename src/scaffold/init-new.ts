@@ -75,18 +75,32 @@ export interface BBTemplateInfo {
   version: string;
 }
 
-/** Known BB template package descriptors. ShortNames discovered at install time. */
+/**
+ * Known BB template package descriptors with pinned versions.
+ * Update these constants when bumping to a newer published nupkg version on NuGet.org.
+ * `userSettings.bbTemplateVersions` can override at runtime.
+ */
 export const BB_TEMPLATE_PACKAGES: ReadonlyArray<Omit<BBTemplateInfo, "shortName">> = [
-  { nugetId: "Muonroi.BaseTemplate", version: "latest" },
-  { nugetId: "Muonroi.Modular.Template", version: "latest" },
-  { nugetId: "Muonroi.Microservices.Template", version: "latest" },
+  { nugetId: "Muonroi.BaseTemplate", version: "1.0.0-alpha.3" },
+  { nugetId: "Muonroi.Modular.Template", version: "1.10.0" },
+  { nugetId: "Muonroi.Microservices.Template", version: "1.10.0" },
 ];
 
-/** Maps NuGet package id → expected dotnet new shortName (best-effort; runtime parse overrides). */
+/**
+ * Maps NuGet package id → actual `dotnet new` shortName as registered by the
+ * published template.json. Verified empirically against NuGet 2026-05-16:
+ *   Muonroi.BaseTemplate@1.0.0-alpha.3   → mr-base-sln
+ *   Muonroi.Modular.Template@1.10.0       → mr-mod-sln
+ *   Muonroi.Microservices.Template@1.10.0 → mr-micro-sln
+ *
+ * Note: each package also registers ancillary templates (e.g. tenant-service,
+ * tenant-site-module). The CLI only consumes the *-sln entry points; the
+ * ancillary templates are out-of-scope for /ideal scaffold.
+ */
 const NUGET_TO_SHORTNAME: Record<string, string> = {
-  "Muonroi.BaseTemplate": "muonroi-base",
-  "Muonroi.Modular.Template": "muonroi-modular",
-  "Muonroi.Microservices.Template": "muonroi-microservices",
+  "Muonroi.BaseTemplate": "mr-base-sln",
+  "Muonroi.Modular.Template": "mr-mod-sln",
+  "Muonroi.Microservices.Template": "mr-micro-sln",
 };
 
 /**
@@ -128,21 +142,26 @@ export function detectInstalledBBTemplates(): Map<string, string> {
 }
 
 /**
- * Task 6.2 — Install BB dotnet templates from NuGet.
+ * Task 6.2 — Install BB dotnet templates from NuGet with pinned versions.
  * Returns true if install succeeded, false if NuGet unreachable (caller falls back to clone).
+ *
+ * Each package is installed individually as `Pkg::version` so a single failure
+ * (e.g. one version yanked) does not abort the whole batch.
  */
 export function installBBTemplates(): boolean {
-  const pkgs = BB_TEMPLATE_PACKAGES.map((p) => p.nugetId).join(" ");
-  const result = spawnSync("dotnet", ["new", "install", ...BB_TEMPLATE_PACKAGES.map((p) => p.nugetId)], {
-    encoding: "utf8",
-    timeout: 60000,
-  });
-  // NuGet feed unreachable: non-zero exit or NU-prefixed error
-  if (result.status !== 0) {
-    process.stderr.write(`[init-new] dotnet new install failed (${pkgs}): ${result.stderr ?? "unknown error"}\n`);
-    return false;
+  let allOk = true;
+  for (const pkg of BB_TEMPLATE_PACKAGES) {
+    const ref = pkg.version === "latest" ? pkg.nugetId : `${pkg.nugetId}::${pkg.version}`;
+    const result = spawnSync("dotnet", ["new", "install", ref], {
+      encoding: "utf8",
+      timeout: 60000,
+    });
+    if (result.status !== 0) {
+      process.stderr.write(`[init-new] dotnet new install failed (${ref}): ${result.stderr ?? "unknown error"}\n`);
+      allOk = false;
+    }
   }
-  return true;
+  return allOk;
 }
 
 // ---------------------------------------------------------------------------
