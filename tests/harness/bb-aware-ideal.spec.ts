@@ -14,7 +14,14 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { _resetBBRetrievalState, bbContextMarker, fetchBBContext, renderBBContextBlock } from "../../src/ee/bb-retrieval.js";
+import {
+  BB_INFER_SCORE_FLOOR,
+  _resetBBRetrievalState,
+  bbContextMarker,
+  fetchBBContext,
+  inferBBFromPrompt,
+  renderBBContextBlock,
+} from "../../src/ee/bb-retrieval.js";
 
 // ---------------------------------------------------------------------------
 // Mock EE server
@@ -253,5 +260,59 @@ describe("fetchBBContext graceful degrade", () => {
       spy.mockRestore();
       authSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Prompt-based BB inference (empty-cwd fallback for /ideal)
+// ---------------------------------------------------------------------------
+
+describe("inferBBFromPrompt", () => {
+  it("returns true when top bb-recipes hit score >= floor", async () => {
+    _resetBBRetrievalState();
+    // Mock returns score 0.92 for bb-recipes (see MOCK_RECIPES) — well above the floor
+    const inferred = await inferBBFromPrompt("build a CQRS service with Muonroi", {
+      eeBaseUrl: mockBaseUrl,
+      eeAuthToken: "tok",
+    });
+    expect(inferred).toBe(true);
+  });
+
+  it("returns false on empty / very short prompt", async () => {
+    _resetBBRetrievalState();
+    expect(await inferBBFromPrompt("", { eeBaseUrl: mockBaseUrl, eeAuthToken: "tok" })).toBe(false);
+    expect(await inferBBFromPrompt("hi", { eeBaseUrl: mockBaseUrl, eeAuthToken: "tok" })).toBe(false);
+  });
+
+  it("returns false when EE base URL is not configured", async () => {
+    _resetBBRetrievalState();
+    const authModule = await import("../../src/ee/auth.js");
+    const authSpy = vi.spyOn(authModule, "getCachedServerBaseUrl").mockReturnValue(null);
+    try {
+      const inferred = await inferBBFromPrompt("build a CQRS service with Muonroi", {});
+      expect(inferred).toBe(false);
+    } finally {
+      authSpy.mockRestore();
+    }
+  });
+
+  it("returns false when feature flag eeBBContext is false", async () => {
+    _resetBBRetrievalState();
+    const settingsModule = await import("../../src/utils/settings.js");
+    const spy = vi.spyOn(settingsModule, "loadUserSettings").mockReturnValue({ eeBBContext: false } as ReturnType<typeof settingsModule.loadUserSettings>);
+    try {
+      const inferred = await inferBBFromPrompt("build a CQRS service with Muonroi", {
+        eeBaseUrl: mockBaseUrl,
+        eeAuthToken: "tok",
+      });
+      expect(inferred).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("BB_INFER_SCORE_FLOOR is conservative (0.55-0.70 range)", () => {
+    expect(BB_INFER_SCORE_FLOOR).toBeGreaterThanOrEqual(0.55);
+    expect(BB_INFER_SCORE_FLOOR).toBeLessThanOrEqual(0.7);
   });
 });
