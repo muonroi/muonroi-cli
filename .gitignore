@@ -28,3 +28,9 @@ deps-outdated.txt
 .muonroi-cli/
 .muonroi-flow/
 /.claude
+
+# EE ingestion state cache — regenerated on each `ee:ingest-bb` run
+.ee-ingest-state.json
+
+# Throwaway scratch space (smoke tests, manual scaffold output)
+.scratch/
