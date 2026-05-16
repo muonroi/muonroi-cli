@@ -53,6 +53,19 @@ export type LiveFrame = {
 export type LiveEvent =
   | { t: "event"; kind: "stream.delta"; target: string; text: string }
   | { t: "event"; kind: "toast"; level: "info" | "warn" | "error"; text: string; ttlMs?: number }
+  // Phase D — surfaced for harness E2E verification of usage-event normalization
+  // (e.g. cost-leak-c1: DeepSeek prompt_cache_hit_tokens → cacheReadTokens).
+  | {
+      t: "event";
+      kind: "usage";
+      source: string;
+      model: string;
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+      messageSeq?: number | null;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;
