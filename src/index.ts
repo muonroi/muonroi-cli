@@ -834,7 +834,62 @@ program
       const { loadMockModelFromDir } = await import("./agent-harness/mock-model.js");
       const modelHandle = await loadMockModelFromDir(options.mockLlm).catch(() => null);
       if (modelHandle) {
-        (globalThis as Record<string, unknown>).__muonroiMockModel = modelHandle.model;
+        // Install all three globals atomically so the runtime sees a
+        // consistent picture: model + the OAuth-registry-equivalent
+        // unsupportedParams / defaultProviderOptions parsed from the fixture.
+        const g = globalThis as Record<string, unknown>;
+        g.__muonroiMockModel = modelHandle.model;
+        g.__muonroiMockUnsupportedParams = modelHandle.unsupportedParams;
+        g.__muonroiMockDefaultProviderOptions = modelHandle.defaultProviderOptions;
+
+        // Phase H3 — exfiltrate recordings to a file at exit so the parent
+        // vitest spec can assert across the child-process boundary. Activated
+        // only when MUONROI_MOCK_MODEL_DUMP is set; otherwise no-op.
+        const dumpPath = process.env.MUONROI_MOCK_MODEL_DUMP;
+        if (typeof dumpPath === "string" && dumpPath.length > 0) {
+          const { dumpRecordings } = await import("./agent-harness/mock-model.js");
+          let dumped = false;
+          const doDump = (): void => {
+            if (dumped) return;
+            dumped = true;
+            try {
+              dumpRecordings(dumpPath, modelHandle.model);
+            } catch (err) {
+              // Last-ditch: surface on stderr so the parent test can see why.
+              process.stderr.write(`[muonroi-cli] dumpRecordings failed: ${String(err)}\n`);
+            }
+          };
+          // Continuous dump: write after every streamText completes so tests
+          // can read the dump without relying on a graceful exit handler. On
+          // Windows + Bun + named pipes, `process.on("exit")` handlers may
+          // not fire when process.exit() is called from deep async chains
+          // (observed empirically — exit event reaches the parent, but the
+          // exit-handler callbacks in the child never run). Patching
+          // doStream guarantees the dump exists after at least one call.
+          const writeDumpAlways = (): void => {
+            try {
+              dumpRecordings(dumpPath, modelHandle.model);
+            } catch {
+              // ignore — best-effort
+            }
+          };
+          const origDoStream = modelHandle.model.doStream.bind(modelHandle.model);
+          modelHandle.model.doStream = async (options: unknown) => {
+            // biome-ignore lint/suspicious/noExplicitAny: AI SDK call options
+            const r = await origDoStream(options as any);
+            writeDumpAlways();
+            return r;
+          };
+          process.on("exit", doDump);
+          process.on("SIGINT", () => {
+            doDump();
+            process.exit(130);
+          });
+          process.on("SIGTERM", () => {
+            doDump();
+            process.exit(143);
+          });
+        }
       }
     }
 

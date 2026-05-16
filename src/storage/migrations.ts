@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 5;
+const LATEST_DB_VERSION = 6;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -57,6 +57,18 @@ export function applyMigrations(db: SQLiteDatabase): void {
           ON interaction_logs(event_type, created_at DESC);
       `);
       db.pragma("user_version = 5");
+    }
+    if (version < 6) {
+      // Phase O1 — record the SHAPE (not values) of providerOptions sent
+      // to streamText alongside each usage event. Enables post-mortem of
+      // "did this call carry store=true / promptCacheKey?" without
+      // leaking key material into the DB.
+      const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has("provider_options_shape")) {
+        db.exec("ALTER TABLE usage_events ADD COLUMN provider_options_shape TEXT");
+      }
+      db.pragma("user_version = 6");
     }
   });
 

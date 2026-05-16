@@ -22,6 +22,8 @@ export interface CostForensicsRow {
   cacheCreationTokens: number;
   costMicros: number;
   createdAt: string;
+  /** Phase O1 — JSON-shape of providerOptions on this call (types only). */
+  providerOptionsShape: string | null;
 }
 
 export interface CostForensicsSummary {
@@ -50,6 +52,7 @@ interface UsageRow {
   cache_creation_tokens: number;
   cost_micros: number;
   created_at: string;
+  provider_options_shape: string | null;
 }
 
 interface SessionRow {
@@ -85,7 +88,8 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
   const rows = db
     .prepare(`
     SELECT id, source, model, message_seq, input_tokens, output_tokens,
-           cache_read_tokens, cache_creation_tokens, cost_micros, created_at
+           cache_read_tokens, cache_creation_tokens, cost_micros, created_at,
+           provider_options_shape
     FROM usage_events
     WHERE session_id = ?
     ORDER BY id ASC
@@ -114,6 +118,7 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     cacheCreationTokens: r.cache_creation_tokens,
     costMicros: r.cost_micros,
     createdAt: r.created_at,
+    providerOptionsShape: r.provider_options_shape,
   }));
 
   let totalInput = 0;
@@ -189,6 +194,18 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
     );
   }
   w(``);
+
+  // Phase O1 — providerOptions shapes per event (types only, no values).
+  // Surface so post-mortem can answer "what providerOptions did this call carry?"
+  const shapedEvents = summary.events.filter((e) => e.providerOptionsShape);
+  if (shapedEvents.length > 0) {
+    w(`providerOptions shape (types only):`);
+    for (const e of shapedEvents) {
+      const seq = e.messageSeq === null ? "-" : String(e.messageSeq);
+      w(`  [seq=${seq.padEnd(4)} src=${e.source.padEnd(8)}] ${e.providerOptionsShape}`);
+    }
+    w(``);
+  }
 
   // Acceptance hints — surface anomalies relative to Phase A/B/C targets.
   const anomalies: string[] = [];

@@ -163,14 +163,42 @@ export function toolCallStream(opts: {
 }
 
 /**
+ * Loaded fixture handle. Extends the basic MockModelHandle with the optional
+ * provider-quirk simulation fields parsed out of the fixture file. The caller
+ * (e.g. src/index.ts mock-llm wiring) is expected to assign these to the
+ * `__muonroiMock*` globals atomically so `resolveModelRuntime` sees a
+ * consistent picture.
+ */
+export interface LoadedMockModelHandle extends MockModelHandle {
+  unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
+  defaultProviderOptions?: Record<string, unknown>;
+}
+
+/**
  * Fixture-file loader. Reads JSON files in `dir` looking for `{model: ...}`
  * blocks. The first file with a `model` block is used; remaining files are
  * inspected by mock-llm (text-only fallback) without conflict.
  *
  * Returns `null` if no fixture in the directory declares a `model` block —
  * caller decides whether to fall back to mock-llm or fail.
+ *
+ * Fixture file schema:
+ *
+ *   {
+ *     "model": {
+ *       "provider": "mock",
+ *       "modelId": "mock-gpt",
+ *       "stream": [/* StreamChunks (single round) OR StreamChunks[] (multi-round) *\/],
+ *       "unsupportedParams": ["maxOutputTokens"],
+ *       "defaultProviderOptions": { "openai": { "store": false } }
+ *     }
+ *   }
+ *
+ * `unsupportedParams` and `defaultProviderOptions` mirror the OAuth-registry
+ * fields exposed by `resolveModelRuntime` so TUI E2E specs can verify G1
+ * (param-drop) and F1 (provider-options injection) end-to-end.
  */
-export async function loadMockModelFromDir(dir: string): Promise<MockModelHandle | null> {
+export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModelHandle | null> {
   const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
@@ -182,7 +210,16 @@ export async function loadMockModelFromDir(dir: string): Promise<MockModelHandle
       };
     };
     if (raw.model !== undefined) {
-      return createMockModel(raw.model);
+      const base = createMockModel(raw.model);
+      return {
+        model: base.model,
+        get calls() {
+          return base.calls;
+        },
+        reset: base.reset,
+        unsupportedParams: raw.model.unsupportedParams,
+        defaultProviderOptions: raw.model.defaultProviderOptions,
+      };
     }
   }
   return null;
@@ -224,6 +261,53 @@ export interface InstalledMockHandle extends MockModelHandle {
  * and an `uninstall()` to clear globals — call in `afterEach` to keep specs
  * isolated.
  */
+/**
+ * Phase H3 — exfiltrate mock-model recordings from a child process.
+ *
+ * Serializes `model.doStreamCalls` as JSON to `path`. Writes atomically via
+ * `<path>.tmp` + `renameSync` so a parent spec never reads a half-written
+ * file. Strict input shape — throws if `model.doStreamCalls` is missing.
+ *
+ * The serializer falls back to a hand-written shape when `JSON.stringify`
+ * throws (e.g. circular tool refs). Each fallback entry preserves the fields
+ * cost-leak specs actually assert against.
+ */
+export function dumpRecordings(
+  path: string,
+  model: MockLanguageModelV3 | { doStreamCalls: ReadonlyArray<unknown> },
+): void {
+  if (!model || !Array.isArray((model as { doStreamCalls?: unknown }).doStreamCalls)) {
+    throw new Error("dumpRecordings: expected model with doStreamCalls array");
+  }
+  const calls = (model as { doStreamCalls: ReadonlyArray<unknown> }).doStreamCalls;
+  let payload: string;
+  try {
+    payload = JSON.stringify(calls, null, 2);
+  } catch {
+    // Hand-written fallback for circular refs.
+    const safe = calls.map((c) => {
+      const opts = c as LanguageModelV3CallOptions & { headers?: unknown; tools?: Array<{ name?: string }> };
+      return {
+        prompt: opts.prompt,
+        maxOutputTokens: opts.maxOutputTokens,
+        temperature: opts.temperature,
+        tools: Array.isArray(opts.tools) ? opts.tools.map((t) => ({ name: t.name })) : null,
+        providerOptions: opts.providerOptions,
+        headers: opts.headers,
+      };
+    });
+    payload = JSON.stringify(safe, null, 2);
+  }
+  // Atomic write: temp file + rename. fs imports kept sync to stay safe in
+  // process.on("exit") handlers where async work is silently dropped.
+  // biome-ignore lint/style/noNonNullAssertion: node built-ins always present
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require("node:fs") as typeof import("node:fs");
+  const tmp = `${path}.tmp`;
+  fs.writeFileSync(tmp, payload, "utf8");
+  fs.renameSync(tmp, path);
+}
+
 export function installMockModel(opts: MockInstallOptions): InstalledMockHandle {
   const handle = createMockModel(opts.fixture);
   const g = globalThis as MockGlobals;

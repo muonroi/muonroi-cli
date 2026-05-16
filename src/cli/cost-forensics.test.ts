@@ -14,6 +14,7 @@ function event(overrides: Partial<CostForensicsRow> = {}): CostForensicsRow {
     cacheCreationTokens: overrides.cacheCreationTokens ?? 0,
     costMicros: overrides.costMicros ?? 0,
     createdAt: overrides.createdAt ?? "2026-05-15T12:00:00.000Z",
+    providerOptionsShape: overrides.providerOptionsShape ?? null,
   };
 }
 

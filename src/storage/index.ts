@@ -14,6 +14,8 @@ export {
   loadRawTranscript,
   loadTranscript,
   loadTranscriptState,
+  markToolCallErrored,
+  persistToolCallWriteAhead,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { getSessionTotalTokens, listSessionUsage, recordUsageEvent, type TokenUsageLike } from "./usage";

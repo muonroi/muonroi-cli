@@ -377,6 +377,7 @@ Optional env overrides for the caps:
 | `MUONROI_SUBAGENT_COMPACT_KEEP_LAST` | 1–20 | 3 | Phase B3 — trailing tool turns kept verbatim during sub-agent compaction. |
 | `MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS` | 50_000–1_500_000 | 200_000 | Phase B4 — same as B3 threshold but for the top-level orchestrator loop. Higher default because top-level agents carry more useful early context. |
 | `MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST` | 1–30 | 5 | Phase B4 — trailing tool turns kept verbatim during top-level compaction. |
+| `MUONROI_CROSS_TURN_DEDUP` | `0` / `1` | `1` | Phase C3 — session-scoped dedup of identical tool outputs across user turns. Set to `0` to disable. When enabled, the second time the agent produces an identical tool result (e.g. `read_file` on the same file in turn 2), the content is replaced with `[tool_result identical to earlier turn — dedup ref sha1=..., originally from tool=... turn=...]`. LRU cap 200 entries per session, min 500 chars to qualify. |
 | `MUONROI_DEBUG_SUBAGENT` | `0` / `1` | `0` | Emit detailed stderr telemetry from `task` sub-agents: streamText start config, per-part stream counts, finish reason, error parts, full catch-block error shape (name/statusCode/cause/responseBody/stack). Use when diagnosing silent task failures (e.g. "No output generated" with reasoning models). |
 
 ## When you finish a feature

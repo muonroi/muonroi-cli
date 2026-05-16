@@ -77,6 +77,8 @@ import {
   loadTranscript,
   loadTranscriptState,
   logInteraction,
+  markToolCallErrored,
+  persistToolCallWriteAhead,
   recordUsageEvent,
   SessionStore,
 } from "../storage/index";
@@ -196,6 +198,7 @@ import {
   relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
+import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
@@ -213,6 +216,7 @@ import {
   type SystemPromptParts,
   VISION_MODEL,
 } from "./prompts";
+import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
@@ -362,6 +366,13 @@ export class Agent {
    * non-message calls don't reuse stale data.
    */
   private _lastPromptBreakdown: Record<string, number> | null = null;
+  /**
+   * Phase O1 — JSON-shape of the providerOptions object on the most
+   * recent streamText call. Captured immediately before streamText and
+   * consumed by recordUsage; cleared after. Cost-leak forensics surfaces
+   * this so we can answer "did this billed call carry store=true?" etc.
+   */
+  private _lastProviderOptionsShape: string | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -416,6 +427,10 @@ export class Agent {
    * V1 only supports user messages (avoids splitting tool-call/result pairs).
    */
   private _pinnedSeqs = new Set<number>();
+
+  // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
+  // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
+  private _crossTurnDedup: CrossTurnDedup | null = isCrossTurnDedupEnabled() ? new CrossTurnDedup() : null;
 
   constructor(
     apiKey: string | undefined,
@@ -870,10 +885,25 @@ export class Agent {
       // Attribute usage to the most recent persisted message — this lets
       // per-prompt cost analysis work (was null hardcoded → impossible).
       const lastSeq = lastPersistedSeq(this.messageSeqs);
-      recordUsageEvent(this.session.id, source, model, usage, lastSeq, pilActive, enrichmentDelta);
+      // Phase O1 — providerOptions shape (types only, no values) attached
+      // to every usage event so post-mortem can answer "what provider
+      // options did this billed call carry?". Cleared below for "message"
+      // sources so non-message calls don't reuse stale data.
+      const providerOptionsShape = this._lastProviderOptionsShape;
+      recordUsageEvent(
+        this.session.id,
+        source,
+        model,
+        usage,
+        lastSeq,
+        pilActive,
+        enrichmentDelta,
+        providerOptionsShape,
+      );
       if (source === "message") {
         this._pilActive = false;
         this._pilEnrichmentDelta = 0;
+        this._lastProviderOptionsShape = null;
       }
     }
     // Update status bar token counters + provider/model + cache metrics + cost
@@ -1234,7 +1264,10 @@ export class Agent {
     // gets a fresh budget.
     const subAgentCapBudget = getSubAgentBudgetChars();
     const subAgentCap = wrapToolSetWithCap(childBaseToolsRaw, { maxCumulativeChars: subAgentCapBudget });
-    const childBaseTools = subAgentCap.tools;
+    // Phase C3: layer cross-turn dedup ON TOP of the per-invocation cap. The
+    // cap sees raw output (for accurate cumulative accounting); dedup sees
+    // the already-trimmed output that will actually reach the model.
+    const childBaseTools = wrapToolSetWithDedup(subAgentCap.tools, this._crossTurnDedup);
     const initialDetail = isExplore
       ? "Scanning the codebase"
       : isVerifyDetect
@@ -1379,6 +1412,8 @@ export class Agent {
       // worth compacting; later steps are where cumulative input balloons.
       const compactThreshold = getSubAgentCompactThresholdChars();
       const compactKeepLast = getSubAgentCompactKeepLast();
+      // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
+      this._lastProviderOptionsShape = extractProviderOptionsShape(childRuntime.providerOptions);
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -3018,6 +3053,8 @@ export class Agent {
           });
 
           const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
+          // Phase O1 — capture providerOptions SHAPE for batch path too.
+          this._lastProviderOptionsShape = extractProviderOptionsShape(runtime.providerOptions);
           await addBatchRequests({
             ...this.getBatchClientOptions(signal),
             batchId: batch.batch_id,
@@ -3227,6 +3264,10 @@ export class Agent {
     }
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
+
+    // Phase C3: advance the cross-turn dedup turn counter so stubs can point
+    // back to the correct prior turn.
+    this._crossTurnDedup?.beginTurn();
 
     // P0 native observation: turn boundary. Capture the prior batch via
     // resetBatch — file-revert detection (in the hook layer) reads it on
@@ -3896,7 +3937,8 @@ export class Agent {
             highTierRatio: 0.8,
             label: "top-level",
           });
-          const tools: ToolSet = topLevelCap.tools;
+          // Phase C3: layer cross-turn dedup on top of the top-level cap.
+          const tools: ToolSet = wrapToolSetWithDedup(topLevelCap.tools, this._crossTurnDedup);
           captureToolSchemas(tools);
           let responseToolCalled = false;
 
@@ -4008,6 +4050,9 @@ export class Agent {
           // elided the content.
           const topLevelCompactThreshold = getTopLevelCompactThresholdChars();
           const topLevelCompactKeepLast = getTopLevelCompactKeepLast();
+          // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
+          this._lastProviderOptionsShape =
+            Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -4162,6 +4207,33 @@ export class Agent {
                   // Attach callId to the ToolCall so tool-result can end it.
                   (tc as ToolCall & { _pendingCallId?: string })._pendingCallId = callId;
                 }
+
+                // Phase A4: write-ahead persistence — insert a pending row into
+                // tool_calls BEFORE executing the tool. If the stream throws
+                // mid-call (e.g. provider 5xx, abort, network drop), this row
+                // remains as `pending` so `usage forensics` can show the args
+                // the model passed. The post-stream appendMessages() path
+                // (INSERT OR IGNORE + UPDATE) will finalize this row to
+                // `completed` once the turn settles normally.
+                if (this.sessionStore && this.session) {
+                  // Predicted assistant seq: user message + assistant message
+                  // are appended atomically by appendCompletedTurn().
+                  // getNextMessageSequence() returns the seq the user message
+                  // will get; the assistant message is the next one after.
+                  let predictedSeq = -1;
+                  try {
+                    predictedSeq = getNextMessageSequence(this.session.id) + 1;
+                  } catch {
+                    /* fail-open — leave predictedSeq=-1; post-stream UPDATE corrects it */
+                  }
+                  persistToolCallWriteAhead(
+                    this.session.id,
+                    predictedSeq,
+                    tc.id,
+                    tc.function.name,
+                    tc.function.arguments || "{}",
+                  );
+                }
                 notifyObserver(observer?.onToolStart, {
                   toolCall: tc,
                   timestamp: Date.now(),
@@ -4314,6 +4386,15 @@ export class Agent {
                   const pending = activeToolCalls.find((t) => t.id === errPart.toolCallId);
                   const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
                   if (callId) void this.pendingCalls.end(callId, "settled").catch(() => {});
+                }
+
+                // Phase A4: mark the write-ahead tool_calls row as `errored`.
+                // The post-stream appendMessages() path does NOT see tool-error
+                // parts in the assistant message content (the SDK doesn't emit
+                // them there), so without this explicit update the row would
+                // remain `pending` after a clean tool failure.
+                if (this.session) {
+                  markToolCallErrored(this.session.id, errPart.toolCallId, errMsg);
                 }
 
                 // Fire PostToolUseFailure so EE judge can record IGNORED outcome.

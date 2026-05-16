@@ -1,4 +1,5 @@
 import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
+import { jsonSchema } from "@ai-sdk/provider-utils";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ToolSet } from "ai";
@@ -26,6 +27,42 @@ async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfi
 
 function mcpToolPrefix(server: McpServerConfig): string {
   return `mcp_${server.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+// Phase M1 — lazy schema loading.
+//
+// The AI SDK's MCP client returns tools whose `inputSchema` carries the full
+// JSON Schema advertised by the MCP server. That schema is serialized into the
+// provider tool definition for EVERY `streamText` call, regardless of which
+// MCP tools the model actually invokes. With 5+ servers × 20+ tools × 1-5 KB
+// per schema, this trivially adds 100-500 KB of overhead to every model call.
+//
+// The fix: ship a minimal placeholder schema (`{ type: "object",
+// additionalProperties: true }`) to the model, and let the real MCP server
+// validate args downstream when the tool is actually called. The model
+// continues to know the tool's name + description so it can decide when to
+// call; the real schema only matters at execution time, which the MCP server
+// already enforces.
+//
+// Args validation: the AI SDK's `dynamicTool` factory only runs `validate()`
+// when present on the schema, and the MCP client never sets it (see
+// `jsonSchema(...)` in @ai-sdk/provider-utils — no `validate` arg). So this
+// change preserves the existing validation surface exactly (none on our side;
+// all enforced by the MCP server).
+const LAZY_MCP_INPUT_SCHEMA = {
+  type: "object" as const,
+  additionalProperties: true,
+};
+
+function stripMcpInputSchema<T extends { inputSchema?: unknown; description?: string }>(tool: T): T {
+  // Replace the full schema with a permissive placeholder. We keep `description`
+  // and `execute` (and any other fields) intact. Many MCP tools also have an
+  // `outputSchema`; we leave that alone since the AI SDK uses it only to parse
+  // structured tool results — it doesn't ship to the model.
+  return {
+    ...tool,
+    inputSchema: jsonSchema(LAZY_MCP_INPUT_SCHEMA),
+  };
 }
 
 function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider) {
@@ -101,10 +138,11 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
 
       for (const [name, tool] of Object.entries(mcpTools)) {
         const prefixedName = `${prefix}__${name}`;
+        const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
         tools[prefixedName] = {
-          ...tool,
+          ...(stripped as object),
           description: `[MCP ${server.label}] ${tool.description ?? name}`,
-        };
+        } as ToolSet[string];
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

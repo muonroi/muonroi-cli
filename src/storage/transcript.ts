@@ -253,6 +253,70 @@ export function appendSystemMessage(sessionId: string, content: string): number 
   return appendMessages(sessionId, [{ role: "system", content }])[0] ?? null;
 }
 
+/**
+ * Phase A4 — Write-ahead persistence for tool_calls.
+ *
+ * The orchestrator's streamText loop sees a `tool-call` part *before* the
+ * assistant message is finalized. If the stream throws between this point
+ * and `appendCompletedTurn(...)`, the row that the post-stream
+ * `appendMessages(...)` path would have written never materializes — and
+ * `usage forensics <prefix>` has no record of what input the model passed.
+ *
+ * This helper writes a `pending` row immediately. The downstream
+ * `appendMessages(...)` path uses `INSERT OR IGNORE` + `UPDATE` keyed on
+ * `(session_id, tool_call_id)`, so the same row is finalized to `completed`
+ * once the turn settles. On mid-stream failure the row stays as `pending`,
+ * giving forensics + recovery a recoverable trail.
+ *
+ * `messageSeq` is the predicted assistant seq (typically
+ * `getNextMessageSequence(sessionId) + 1` if the user message is also being
+ * inserted as part of the same turn). It is corrected by the post-stream
+ * UPDATE if the prediction was off.
+ */
+export function persistToolCallWriteAhead(
+  sessionId: string,
+  messageSeq: number,
+  toolCallId: string,
+  toolName: string,
+  argsJson: string,
+): void {
+  const now = new Date().toISOString();
+  try {
+    getDatabase()
+      .prepare(`
+        INSERT OR IGNORE INTO tool_calls (
+          session_id, message_seq, tool_call_id, tool_name, args_json, status, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
+      `)
+      .run(sessionId, messageSeq, toolCallId, toolName, argsJson, now);
+  } catch {
+    // Fail-open: write-ahead is best-effort. The post-stream UPDATE path
+    // will still finalize the row from `appendMessages(...)`.
+  }
+}
+
+/**
+ * Phase A4 — Mark a write-ahead tool_call row as `errored` when the AI SDK
+ * surfaces a `tool-error` stream part (tool execution threw/aborted before
+ * a tool-result was emitted). The post-stream `appendMessages(...)` path
+ * does NOT see tool-error parts in the assistant message content, so without
+ * this update the row would stay `pending` forever.
+ */
+export function markToolCallErrored(sessionId: string, toolCallId: string, errorMessage: string): void {
+  const now = new Date().toISOString();
+  try {
+    getDatabase()
+      .prepare(`
+        UPDATE tool_calls
+        SET status = 'errored', completed_at = ?, args_json = COALESCE(args_json, ?)
+        WHERE session_id = ? AND tool_call_id = ?
+      `)
+      .run(now, JSON.stringify({ error: errorMessage.slice(0, 500) }), sessionId, toolCallId);
+  } catch {
+    /* fail-open */
+  }
+}
+
 export function appendCompaction(sessionId: string, firstKeptSeq: number, summary: string, tokensBefore: number): void {
   withTransaction((db) => {
     db.prepare(`
