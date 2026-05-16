@@ -41,6 +41,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
+    MUONROI_TEST_NO_PERSIST: "1",
     ...(opts.env ?? {}),
   };
 

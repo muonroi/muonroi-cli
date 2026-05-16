@@ -77,10 +77,10 @@ describe("end-to-end: create factory + resolve runtime", () => {
     expect(typeof pf.factory.responses).toBe("function");
   });
 
-  test("openai factory does not have responses method", () => {
+  test("openai factory exposes a responses method (needed for ChatGPT OAuth backend)", () => {
     const pf = createProviderFactory("openai", {
       apiKey: "sk-openai-test-key-long-enough-for-validation",
     });
-    expect(pf.factory.responses).toBeUndefined();
+    expect(typeof pf.factory.responses).toBe("function");
   });
 });

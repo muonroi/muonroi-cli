@@ -250,6 +250,39 @@ bun run src/index.ts --smoke-boot-only
 printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"v","version":"0"}}}\n{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}\n{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tui.capabilities","arguments":{}}}\n' | bun run src/index.ts mcp-driver
 ```
 
+## Cost-leak forensics & acceptance checks
+
+When investigating "why did this prompt cost so much" or verifying the
+Phase A/B/C cost-optimization caps still hold:
+
+```bash
+# Per-event breakdown of a recent session by ID prefix.
+bun run src/index.ts usage forensics <id-prefix>          # human-readable
+bun run src/index.ts usage forensics <id-prefix> --json   # machine-parseable
+```
+
+Inline anomaly flags (each tied to a plan phase target):
+
+| Anomaly | Meaning |
+|---|---|
+| `peak single-call input > 80,000` | Sub-agent cumulative cap did NOT engage (Phase B target breach). Check `getSubAgentBudgetChars()` + the `wrapToolSetWithCap` wiring around `childBaseTools` in `runTaskRequest` / `runTaskRequestBatch`. |
+| `NULL message_seq on 'message' source` | The fix in `orchestrator.recordUsage()` was bypassed; verify `lastPersistedSeq(this.messageSeqs)` is being called. |
+| `zero cache_creation across deepseek route` | DeepSeek prompt caching never writes — Phase C1 still open. `createOpenAICompatible` adapter drops `providerOptions` silently. |
+
+The known-bad baseline is session `b58603caceb9` (peak 504,737 input, single
+prompt, all three anomalies). After Phase B1+B2 ship, an equivalent
+"explore OAuth wiring" prompt should bring peak ≤ ~120,000 chars / ~30K
+tokens — well under the 80K acceptance target.
+
+Optional env overrides for the caps:
+
+| Env | Range | Default | Effect |
+|---|---|---|---|
+| `MUONROI_MAX_TOOL_OUTPUT_CHARS` | 10_000–200_000 | 32_000 | Per-call tool-output cap (applies to every tool returning text). |
+| `MUONROI_SUB_AGENT_BUDGET_CHARS` | 20_000–600_000 | 120_000 | Cumulative budget the `task` sub-agent may receive across one invocation. Tiers at 30%/70% (aggressive). |
+| `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` | 50_000–1_500_000 | 400_000 | Cumulative budget for the TOP-LEVEL agentic tool loop, fresh per turn. Tiers at 50%/80% (loose — single-tool turns unaffected). Kicks in when sub-agent path fails and the top-level loop has to fall back to direct tool calls. |
+| `MUONROI_DEBUG_SUBAGENT` | `0` / `1` | `0` | Emit detailed stderr telemetry from `task` sub-agents: streamText start config, per-part stream counts, finish reason, error parts, full catch-block error shape (name/statusCode/cause/responseBody/stack). Use when diagnosing silent task failures (e.g. "No output generated" with reasoning models). |
+
 ## When you finish a feature
 
 Before opening a PR:
