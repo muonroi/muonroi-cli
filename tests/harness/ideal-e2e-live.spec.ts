@@ -1,20 +1,35 @@
 /**
  * ideal-e2e-live.spec.ts — REAL-USER E2E for the full /ideal flow.
  *
+ * STATUS: reference/manual-only. NOT a CI gate.
+ *
  * Drives the production TUI as a real user would: real LLM (DeepSeek via
- * keychain), real Experience Engine (production at 72.61.127.154:8082),
- * real `dotnet new` scaffold into an OS tempdir.
+ * keychain), real Experience Engine, real `dotnet new` scaffold.
+ *
+ * Why this is not a CI gate
+ * -------------------------
+ * The council debate path through /ideal is deeply non-deterministic with a
+ * real LLM:
+ *   - Layer-1 complexity routing can send the prompt down the hot-path
+ *     (skipping council entirely) unless --force-council is set.
+ *   - Even with --force-council, the council emits a variable chain of
+ *     askcard modals (productType, fe-stack, …) depending on the LLM's
+ *     interpretation of the idea on a given day.
+ *   - Each askcard ack is itself an LLM round-trip; the path to CB-3 halt
+ *     is not stable across runs.
+ *
+ * Use the synthetic --inject-halt specs in tests/harness/ as the CI gate
+ * for /ideal flow correctness. This spec exists for ad-hoc smoke runs.
  *
  * Gated on MUONROI_E2E_LIVE=1 — does NOT run by default. Costs real LLM
- * tokens (~$0.20/run) and takes ~3-5 minutes.
+ * tokens (~$0.20/run) and takes 10-15 minutes including dotnet build.
  *
  * Run with:
  *   MUONROI_E2E_LIVE=1 bunx vitest -c vitest.harness.config.ts run \
  *     tests/harness/ideal-e2e-live.spec.ts
  *
- * Assertions are milestone-based (halt card mounted, form-card progresses
- * through 3 steps, scaffold dir + EE-INTENT.md emitted). No assertions on
- * LLM-generated text content — that is non-deterministic by design.
+ * Diagnostics:
+ *   .scratch/e2e-diag.log — per-stage frame dumps (id tree, modal state)
  */
 import type { ChildProcess } from "node:child_process";
 import { appendFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
@@ -28,6 +43,36 @@ import { loadKeyForProvider } from "../../src/providers/keychain.js";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 
 const LIVE = process.env.MUONROI_E2E_LIVE === "1";
+
+const DIAG_LOG = "D:/sources/Core/muonroi-cli/.scratch/e2e-diag.log";
+
+function dumpFrame(driver: Driver, label: string): void {
+  const frame = driver.snapshot();
+  if (!frame) {
+    try { appendFileSync(DIAG_LOG, `[${label}] NO FRAME\n`); } catch {}
+    return;
+  }
+  const lines: string[] = [];
+  const walk = (nodes: typeof frame.nodes, depth = 0): void => {
+    for (const n of nodes) {
+      const flags = [
+        n.focus ? "focus" : null,
+        n.selected ? "sel" : null,
+        n.isModal ? "modal" : null,
+      ].filter(Boolean).join(",");
+      const value = n.value ? ` value=${JSON.stringify(String(n.value).slice(0, 120))}` : "";
+      const name = n.name ? ` name=${JSON.stringify(String(n.name).slice(0, 80))}` : "";
+      lines.push(`${"  ".repeat(depth)}${n.id}(${n.role})${flags ? `[${flags}]` : ""}${name}${value}`);
+      if (n.children) walk(n.children, depth + 1);
+    }
+  };
+  walk(frame.nodes);
+  const summary = [
+    `[${label}] seq=${frame.seq} focus=${frame.focus} modals=${JSON.stringify(frame.modals)}`,
+    ...lines,
+  ].join("\n");
+  try { appendFileSync(DIAG_LOG, summary + "\n"); } catch {}
+}
 
 // ---------------------------------------------------------------------------
 // Live spawn — NO --mock-llm. Lets the TUI hit real DeepSeek via keychain.
@@ -124,9 +169,10 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
       cwd: workDir,
       env: {
         MUONROI_API_KEY: deepseekKey,
-        // Ensure SiliconFlow proxy can also see the key — some downstream
-        // model calls route through here.
         SILICONFLOW_API_KEY: deepseekKey,
+        // Verbose sub-agent telemetry on stderr — useful for diagnosing why
+        // the council debate doesn't halt as expected.
+        MUONROI_DEBUG_SUBAGENT: "1",
       },
     });
     proc = ctx.proc;
@@ -181,28 +227,17 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
   });
 
   it("stage 1d: typing idea + Enter dispatches /ideal command", async () => {
-    driver.type("build fraud detection service with rule engine");
+    // --force-council bypasses Layer-1 complexity routing (low → hot-path);
+    // ensures the council debate actually runs so CB-3 can emit a halt chunk
+    // when no verify recipe is found in the empty cwd.
+    driver.type("--force-council build fraud detection service");
     driver.press("Enter");
     // Slash dispatched; composer clears, council debate begins.
     await driver.wait_for({ idle: true, timeoutMs: 10_000 });
     // Diagnostic — confirm /ideal actually dispatched. Look for processing
     // indicator (statusbar value or message item) before waiting 180s for halt.
     await new Promise((r) => setTimeout(r, 2_000));
-    const frame = driver.snapshot();
-    const ids: string[] = [];
-    const walk = (nodes: typeof frame.nodes): void => {
-      for (const n of nodes) {
-        ids.push(`${n.id}(${n.role})`);
-        if (n.children) walk(n.children);
-      }
-    };
-    if (frame) walk(frame.nodes);
-    try {
-      appendFileSync(
-        "D:/sources/Core/muonroi-cli/.scratch/e2e-diag.log",
-        `[post-dispatch] focus=${frame?.focus} modals=${JSON.stringify(frame?.modals)} ids=${JSON.stringify(ids)}\n`,
-      );
-    } catch {}
+    dumpFrame(driver, "post-dispatch");
   });
 
   // -------------------------------------------------------------------------
@@ -210,11 +245,33 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
   // -------------------------------------------------------------------------
 
   it("stage 2: CB-3 halts on missing verify recipe (real council debate)", async () => {
-    // Empty cwd → CB-2 cannot detect a verify recipe → CB-3 yields halt chunk
-    // → setActiveHaltCard fires → HaltRecoveryCard mounts.
+    // With --force-council, the council debate runs and surfaces askcard
+    // modals for clarifying questions (productType, fe-stack, etc). For an
+    // unsupervised E2E we accept the recommended answer for every askcard
+    // until the council reaches the halt state (no verify recipe found).
+    const start = Date.now();
+    const target = 420_000; // longer budget — council + ~5 askcards + halt
+    const pollMs = 5_000;
+    let askcardsAccepted = 0;
+    while (Date.now() - start < target) {
+      const halt = driver.query("id=ideal-halt-card");
+      if (halt) break;
+      const askcard = driver.query("id=askcard");
+      if (askcard) {
+        // Accept recommended option (already selected by default).
+        driver.press("Enter");
+        askcardsAccepted++;
+        dumpFrame(driver, `accepted-askcard-${askcardsAccepted}`);
+        // Give the council a moment to advance to the next phase.
+        await new Promise((r) => setTimeout(r, 3_000));
+        continue;
+      }
+      dumpFrame(driver, `wait-${Math.round((Date.now() - start) / 1000)}s`);
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
     await driver.wait_for({
       selector: "id=ideal-halt-card",
-      timeoutMs: 300_000,
+      timeoutMs: 5_000,
     });
     const card = driver.query("id=ideal-halt-card");
     expect(card?.role).toBe("dialog");
@@ -223,7 +280,7 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
     expect(opts).toHaveLength(3);
     expect(opts[0]?.name).toBe("Init new project");
-  }, 320_000);
+  }, 450_000);
 
   // -------------------------------------------------------------------------
   // Stage 3 — Init New form
