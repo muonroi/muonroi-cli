@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 6;
+const LATEST_DB_VERSION = 7;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -70,6 +70,26 @@ export function applyMigrations(db: SQLiteDatabase): void {
       }
       db.pragma("user_version = 6");
     }
+    if (version < 7) {
+      // Phase A5 — write-ahead persistence for assistant/user messages.
+      //
+      // `messages.status` carries the lifecycle of a row:
+      //   - 'pending'    — write-ahead INSERT before streamText fires; lets
+      //                    `recordUsage` resolve a real message_seq even when
+      //                    invoked mid-stream (was NULL → forensics anomaly).
+      //   - 'completed'  — turn settled, full message_json materialized.
+      //   - 'errored'    — stream threw mid-flight; row left with whatever
+      //                    partial content was captured.
+      //
+      // Nullable for back-compat: pre-A5 rows (legacy 'completed' state) read
+      // back as NULL and forensics treats NULL as 'completed'.
+      const cols = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has("status")) {
+        db.exec("ALTER TABLE messages ADD COLUMN status TEXT");
+      }
+      db.pragma("user_version = 7");
+    }
   });
 
   migrate();
@@ -105,6 +125,7 @@ function createInitialSchema(db: SQLiteDatabase): void {
       role TEXT NOT NULL,
       message_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
+      status TEXT,
       PRIMARY KEY (session_id, seq)
     ) STRICT;
 

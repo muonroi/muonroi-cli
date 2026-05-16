@@ -77,7 +77,10 @@ import {
   loadTranscript,
   loadTranscriptState,
   logInteraction,
+  markMessageCompleted,
+  markMessageErrored,
   markToolCallErrored,
+  persistMessageWriteAhead,
   persistToolCallWriteAhead,
   recordUsageEvent,
   SessionStore,
@@ -3217,6 +3220,28 @@ export class Agent {
       return;
     }
 
+    // Phase A5 — if the user message already has a persisted seq (set by
+    // the write-ahead path), skip re-inserting it. The write-ahead row
+    // will be upserted to status='completed' on the next `appendMessages`
+    // call that sees it via ON CONFLICT, but here we only need to insert
+    // the *new* assistant/tool messages so they get fresh sequence
+    // numbers contiguous with the user row.
+    const existingUserSeq = userIndex >= 0 ? this.messageSeqs[userIndex] : null;
+    if (typeof existingUserSeq === "number") {
+      // User row is already persisted (write-ahead). Insert only the new
+      // assistant/tool messages so they get fresh sequence numbers
+      // contiguous with the user row. Then flip the user row's status
+      // from 'pending' to 'completed' so forensics + replay tooling can
+      // tell the turn settled cleanly.
+      const insertedSeqs = appendMessages(this.session.id, newMessages);
+      markMessageCompleted(this.session.id, existingUserSeq);
+      this.messages.push(...newMessages);
+      this.messageSeqs.push(...insertedSeqs);
+      this.sessionStore.touchSession(this.session.id, this.bash.getCwd());
+      this.session = this.sessionStore.getRequiredSession(this.session.id);
+      return;
+    }
+
     const insertedSeqs = appendMessages(this.session.id, [userMessage, ...newMessages]);
     if (userIndex >= 0) {
       this.messageSeqs[userIndex] = insertedSeqs[0] ?? this.messageSeqs[userIndex];
@@ -3655,7 +3680,24 @@ export class Agent {
     }
 
     this.messages.push(userModelMessage);
-    this.messageSeqs.push(null);
+    // Phase A5 — write-ahead the user row so `recordUsage` mid-stream can
+    // attribute usage to a real `message_seq` instead of falling back to
+    // NULL (or to the previous turn's assistant seq for a session that has
+    // multi-turn history). The post-stream `appendCompletedTurn(...)` path
+    // upserts the same row to `status='completed'` via the
+    // `ON CONFLICT(session_id, seq) DO UPDATE` clause in `appendMessages`.
+    let userWriteAheadSeq: number | null = null;
+    if (this.session) {
+      try {
+        userWriteAheadSeq = getNextMessageSequence(this.session.id);
+        persistMessageWriteAhead(this.session.id, userWriteAheadSeq, "user", JSON.stringify(userModelMessage));
+      } catch {
+        // Fail-open: if seq lookup throws, fall back to the legacy NULL
+        // path. The forensics anomaly returns but the turn proceeds.
+        userWriteAheadSeq = null;
+      }
+    }
+    this.messageSeqs.push(userWriteAheadSeq);
 
     // Inject accumulated EE session guidance as a system message so the model
     // is informed of past warnings before making tool decisions this turn.
@@ -4744,6 +4786,12 @@ export class Agent {
           };
           if (assistantText.trim()) {
             this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+          } else if (this.session && userWriteAheadSeq != null) {
+            // Phase A5 — Stream threw before producing assistant text. The
+            // write-ahead user row is stuck at `status='pending'`. Mark it
+            // errored so forensics + recovery can distinguish "in-flight"
+            // from "crashed mid-flight".
+            markMessageErrored(this.session.id, userWriteAheadSeq);
           }
 
           // ROUTE-11: Fire routeFeedback for failed turns (error path).
