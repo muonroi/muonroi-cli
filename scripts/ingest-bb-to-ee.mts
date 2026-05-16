@@ -139,26 +139,46 @@ interface EEPoint {
 
 type IngestResult = { new: number; updated: number; unchanged: number; failed: number };
 
+const POST_THROTTLE_MS = Number(process.env.EE_POST_THROTTLE_MS ?? 250);
+const MAX_429_RETRIES = 4;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 async function postPoint(point: EEPoint): Promise<boolean> {
-  try {
-    const resp = await fetch(`${EE_URL}/api/extract`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${AUTH_TOKEN}`,
-      },
-      body: JSON.stringify(point),
-    });
-    if (!resp.ok) {
-      const body = await resp.text().catch(() => "");
-      console.error(`  POST /api/extract failed ${resp.status}: ${body.slice(0, 200)}`);
+  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+    try {
+      const resp = await fetch(`${EE_URL}/api/ingest-point`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${AUTH_TOKEN}`,
+        },
+        body: JSON.stringify(point),
+      });
+      if (resp.status === 429) {
+        // Exponential backoff on rate limit: 1s, 2s, 4s, 8s
+        const backoffMs = 1000 * 2 ** attempt;
+        if (attempt < MAX_429_RETRIES) {
+          await sleep(backoffMs);
+          continue;
+        }
+      }
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        console.error(`  POST /api/extract failed ${resp.status}: ${body.slice(0, 200)}`);
+        return false;
+      }
+      // Successful POST — apply throttle for the next request (rate-limit hygiene).
+      if (POST_THROTTLE_MS > 0) await sleep(POST_THROTTLE_MS);
+      return true;
+    } catch (e) {
+      console.error(`  Network error posting point: ${e}`);
       return false;
     }
-    return true;
-  } catch (e) {
-    console.error(`  Network error posting point: ${e}`);
-    return false;
   }
+  return false;
 }
 
 // ---------------------------------------------------------------------------
