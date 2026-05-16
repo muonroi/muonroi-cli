@@ -79,50 +79,91 @@ export async function requestDeviceCode(opts: RequestDeviceCodeOpts): Promise<De
     throw new Error(`Device code request failed (${res.status}): ${text}`);
   }
 
-  return (await res.json()) as DeviceCodeResponse;
+  // The actual OpenAI API returns a non-standard response shape:
+  //   { device_auth_id, user_code, expires_at (ISO string), interval (string) }
+  // with no `verification_uri` field at all. Transform it to DeviceCodeResponse.
+  const raw = (await res.json()) as Record<string, unknown>;
+  const expiresAt = raw.expires_at ? new Date(raw.expires_at as string).getTime() : Date.now() + 300_000;
+
+  return {
+    device_code: String(raw.device_auth_id ?? raw.device_code ?? ""),
+    user_code: String(raw.user_code ?? ""),
+    verification_uri: (raw.verification_uri as string | undefined) ?? `${opts.issuer}/device`,
+    expires_in: Math.max(0, Math.round((expiresAt - Date.now()) / 1000)),
+    interval: raw.interval != null ? Number(raw.interval) : 5,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Step 2: poll until approved
+// Step 2: poll token endpoint until approved (RFC 8628 device code grant)
 // ---------------------------------------------------------------------------
 
 export interface PollOpts {
   issuer: string;
+  clientId: string;
   deviceCode: string;
   pollIntervalMs?: number;
   timeoutMs?: number;
   fetchFn?: FetchFn;
 }
 
-export interface PollResult {
-  authorization_code: string;
-}
-
 /**
- * Poll the device-auth status endpoint until:
- * - status = "complete"  → returns { authorization_code }
- * - status = "denied"   → throws OAuthLoginError
- * - timeout exceeded    → throws Error
+ * Poll the OAuth token endpoint with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
+ * until the user authorizes or the request times out (RFC 8628).
+ *
+ * Returns tokens directly on success. Handles:
+ * - authorization_pending → keep polling
+ * - slow_down → increase interval
+ * - access_denied → throws
+ * - expired_token → throws
  */
-export async function pollDeviceAuthorization(opts: PollOpts): Promise<PollResult> {
+export async function pollDeviceAuthorization(opts: PollOpts): Promise<TokenExchangeResponse> {
   const fetch = opts.fetchFn ?? globalThis.fetch;
-  const pollInterval = opts.pollIntervalMs ?? 3_000;
+  let pollInterval = opts.pollIntervalMs ?? 3_000;
   const deadline = Date.now() + (opts.timeoutMs ?? 5 * 60_000);
 
-  const url = `${opts.issuer}/api/accounts/deviceauth/usercode?device_code=${encodeURIComponent(opts.deviceCode)}`;
+  const url = `${opts.issuer}/oauth/token`;
+  const body = {
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    device_code: opts.deviceCode,
+    client_id: opts.clientId,
+  };
 
   while (Date.now() < deadline) {
-    const res = await fetch(url, { method: "GET" });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
     if (res.ok) {
-      const data = (await res.json()) as { status?: string; authorization_code?: string };
-      if (data.status === "complete" && data.authorization_code) {
-        return { authorization_code: data.authorization_code };
-      }
-      if (data.status === "denied" || data.status === "expired") {
-        throw new Error(`Device authorization ${data.status}`);
-      }
-      // status === "pending" — keep polling
+      return (await res.json()) as TokenExchangeResponse;
+    }
+
+    // RFC 8628 error responses are JSON with an "error" field
+    let errorCode: string | undefined;
+    try {
+      const errBody = (await res.json()) as { error?: string };
+      errorCode = errBody.error;
+    } catch {
+      // non-JSON response — treat as unexpected
+    }
+
+    switch (errorCode) {
+      case "authorization_pending":
+        // user hasn't approved yet — keep polling
+        break;
+      case "slow_down":
+        // server asks us to back off
+        pollInterval += 5_000;
+        break;
+      case "access_denied":
+        throw new Error("Device authorization denied");
+      case "expired_token":
+        throw new Error("Device authorization expired");
+      default:
+        // Unknown or missing error field — fall through to keep polling
+        break;
     }
 
     await sleep(pollInterval);

@@ -139,6 +139,25 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
 }
 
 /**
+ * True when the active model's provider is authenticated via OAuth tokens
+ * (subscription login) instead of an API key. Lets the boot flow skip the
+ * first-run wizard for OAuth-only setups like a freshly logged-in ChatGPT
+ * subscription.
+ */
+async function hasOAuthForModel(modelId: string): Promise<boolean> {
+  const provider = detectProviderForModel(modelId);
+  try {
+    const { getOAuthProviderConfig } = await import("./providers/auth/registry.js");
+    const cfg = await getOAuthProviderConfig(provider);
+    if (!cfg) return false;
+    const tokens = await cfg.loadTokensWithRefresh();
+    return !!tokens?.accessToken;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * First-run wizard. If the keychain already has keys, prints a hint
  * (model probably doesn't match any stored provider). Otherwise prompts
  * for provider + key and persists to the OS keychain.
@@ -641,11 +660,16 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     if (!apiKey) {
       const modelForResolve = model ?? delegation.model ?? getCurrentModel("agent");
       const keychainKey = await resolveKeyForModel(modelForResolve);
-      if (keychainKey) apiKey = keychainKey;
+      if (keychainKey) {
+        apiKey = keychainKey;
+      } else if (await hasOAuthForModel(modelForResolve)) {
+        apiKey = "oauth";
+      }
     }
     if (!apiKey) {
       throw new Error(
-        "API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.",
+        "API key required. Set MUONROI_API_KEY, use --api-key, save it to ~/.muonroi-cli/user-settings.json, " +
+          "or run 'muonroi-cli keys login <provider>' for subscription OAuth.",
       );
     }
     const maxToolRounds =
@@ -715,7 +739,7 @@ function resolveConfig(options: CliOptions) {
   }
   const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), cliOverrides);
 
-  if (typeof options.apiKey === "string") {
+  if (typeof options.apiKey === "string" && process.env["MUONROI_TEST_NO_PERSIST"] !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.
     // Fire-and-forget: keychain write is async; if it fails (no keytar), the key still
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
@@ -846,6 +870,11 @@ program
       const keychainKey = await resolveKeyForModel(modelForResolve);
       if (keychainKey) {
         config.apiKey = keychainKey;
+      } else if (await hasOAuthForModel(modelForResolve)) {
+        // OAuth-authenticated provider — runtime will inject Bearer headers.
+        // Set placeholder so downstream gating code (which only checks for
+        // a truthy apiKey) is satisfied.
+        config.apiKey = "oauth";
       }
     }
 
@@ -1244,6 +1273,17 @@ usage
       top: parseInt(opts.top, 10) || 5,
       json: opts.json,
     });
+  });
+
+usage
+  .command("forensics <sessionPrefix>")
+  .description(
+    "Per-event token + cache breakdown for a session (joins usage_events ∪ interaction_logs). Use to verify Phase A/B/C cost-optimization caps.",
+  )
+  .option("--json", "Emit summary as JSON")
+  .action(async (sessionPrefix: string, opts: { json?: boolean }) => {
+    const { runCostForensics } = await import("./cli/cost-forensics.js");
+    await runCostForensics({ prefix: sessionPrefix, json: opts.json });
   });
 
 const mcp = program.command("mcp").description("Manage MCP server configuration");

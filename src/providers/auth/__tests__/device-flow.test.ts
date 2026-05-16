@@ -44,11 +44,10 @@ describe("requestDeviceCode", () => {
       ok: true,
       json: () =>
         Promise.resolve({
-          device_code: "dev_abc",
+          device_auth_id: "deviceauth_dev_abc",
           user_code: "ABCD-1234",
-          verification_uri: "https://auth.openai.com/activate",
-          expires_in: 300,
-          interval: 3,
+          expires_at: new Date(Date.now() + 300_000).toISOString(),
+          interval: "5",
         }),
     });
 
@@ -64,9 +63,10 @@ describe("requestDeviceCode", () => {
     expect(url).toBe("https://auth.openai.com/api/accounts/deviceauth/usercode");
     expect(init.method).toBe("POST");
 
-    expect(result.device_code).toBe("dev_abc");
+    expect(result.device_code).toBe("deviceauth_dev_abc");
     expect(result.user_code).toBe("ABCD-1234");
-    expect(result.verification_uri).toBe("https://auth.openai.com/activate");
+    expect(result.verification_uri).toBe("https://auth.openai.com/device");
+    expect(result.interval).toBe(5);
   });
 
   it("throws on HTTP error", async () => {
@@ -92,36 +92,51 @@ describe("requestDeviceCode", () => {
 // ---------------------------------------------------------------------------
 
 describe("pollDeviceAuthorization", () => {
-  it("polls until status = complete and returns authorization_code", async () => {
+  it("polls token endpoint until 200 and returns tokens (RFC 8628)", async () => {
+    const pending = { error: "authorization_pending" };
+    const tokens = { access_token: "acc_tok", refresh_token: "ref_tok", expires_in: 3600 };
     const responses = [
-      { ok: true, json: () => Promise.resolve({ status: "pending" }) },
-      { ok: true, json: () => Promise.resolve({ status: "pending" }) },
-      { ok: true, json: () => Promise.resolve({ status: "complete", authorization_code: "auth_code_xyz" }) },
+      { ok: false, status: 400, json: () => Promise.resolve(pending) },
+      { ok: false, status: 400, json: () => Promise.resolve(pending) },
+      { ok: true, status: 200, json: () => Promise.resolve(tokens) },
     ];
     let callCount = 0;
     const mockFetch = vi.fn().mockImplementation(() => Promise.resolve(responses[callCount++]));
 
     const result = await pollDeviceAuthorization({
       issuer: "https://auth.openai.com",
+      clientId: "test_client",
       deviceCode: "dev_abc",
       pollIntervalMs: 0, // instant for tests
       timeoutMs: 10_000,
       fetchFn: mockFetch as any,
     });
 
-    expect(result.authorization_code).toBe("auth_code_xyz");
+    expect(result.access_token).toBe("acc_tok");
+    expect(result.refresh_token).toBe("ref_tok");
     expect(mockFetch).toHaveBeenCalledTimes(3);
+
+    // Verify it POSTs to the token endpoint with the right body
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://auth.openai.com/oauth/token");
+    expect(init.method).toBe("POST");
+    const sentBody = JSON.parse(init.body as string);
+    expect(sentBody.grant_type).toBe("urn:ietf:params:oauth:grant-type:device_code");
+    expect(sentBody.device_code).toBe("dev_abc");
+    expect(sentBody.client_id).toBe("test_client");
   });
 
-  it("throws when status = denied", async () => {
+  it("throws when access_denied", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ status: "denied" }),
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: "access_denied" }),
     });
 
     await expect(
       pollDeviceAuthorization({
         issuer: "https://auth.openai.com",
+        clientId: "test_client",
         deviceCode: "dev_abc",
         pollIntervalMs: 0,
         timeoutMs: 5_000,
@@ -130,15 +145,60 @@ describe("pollDeviceAuthorization", () => {
     ).rejects.toThrow("denied");
   });
 
-  it("throws when timeout exceeded", async () => {
+  it("throws when expired_token", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ status: "pending" }),
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: "expired_token" }),
     });
 
     await expect(
       pollDeviceAuthorization({
         issuer: "https://auth.openai.com",
+        clientId: "test_client",
+        deviceCode: "dev_abc",
+        pollIntervalMs: 0,
+        timeoutMs: 5_000,
+        fetchFn: mockFetch as any,
+      }),
+    ).rejects.toThrow("expired");
+  });
+
+  it("increases interval on slow_down and eventually succeeds", async () => {
+    // Only one slow_down so the 5s bump is manageable
+    const slow = { error: "slow_down" };
+    const tokens = { access_token: "acc_tok", refresh_token: "ref_tok", expires_in: 3600 };
+    const responses = [
+      { ok: false, status: 400, json: () => Promise.resolve(slow) },
+      { ok: true, status: 200, json: () => Promise.resolve(tokens) },
+    ];
+    let callCount = 0;
+    const mockFetch = vi.fn().mockImplementation(() => Promise.resolve(responses[callCount++]));
+
+    const result = await pollDeviceAuthorization({
+      issuer: "https://auth.openai.com",
+      clientId: "test_client",
+      deviceCode: "dev_abc",
+      pollIntervalMs: 0,
+      timeoutMs: 30_000,
+      fetchFn: mockFetch as any,
+    });
+
+    expect(result.access_token).toBe("acc_tok");
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws when timeout exceeded", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: "authorization_pending" }),
+    });
+
+    await expect(
+      pollDeviceAuthorization({
+        issuer: "https://auth.openai.com",
+        clientId: "test_client",
         deviceCode: "dev_abc",
         pollIntervalMs: 0,
         timeoutMs: 1, // 1ms — immediately times out
