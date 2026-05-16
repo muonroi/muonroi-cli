@@ -162,9 +162,18 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
   const insertedSeqs: number[] = [];
   withTransaction((db) => {
     const nextSeq = getNextSequence(db, sessionId);
+    // Phase A5 — `INSERT OR REPLACE` so a pre-existing write-ahead row
+    // (status='pending', placeholder message_json) is finalized atomically
+    // with `status='completed'` and the full message_json. Pre-A5 callers
+    // hit this path identically: there is no pending row so the IGNORE
+    // branch is unused and the INSERT wins.
     const insertMessage = db.prepare(`
-      INSERT INTO messages (session_id, seq, role, message_json, created_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO messages (session_id, seq, role, message_json, created_at, status)
+      VALUES (?, ?, ?, ?, ?, 'completed')
+      ON CONFLICT(session_id, seq) DO UPDATE SET
+        role = excluded.role,
+        message_json = excluded.message_json,
+        status = 'completed'
     `);
     const insertToolCall = db.prepare(`
       INSERT OR IGNORE INTO tool_calls (
@@ -302,6 +311,90 @@ export function persistToolCallWriteAhead(
  * does NOT see tool-error parts in the assistant message content, so without
  * this update the row would stay `pending` forever.
  */
+/**
+ * Phase A5 — Write-ahead persistence for `messages`.
+ *
+ * Mirrors {@link persistToolCallWriteAhead} for the assistant/user row that
+ * `streamText` will accumulate. The orchestrator's `onStepFinish` callback
+ * fires `recordUsage` while the stream is in-flight; without a pre-existing
+ * row, `lastPersistedSeq(this.messageSeqs)` returns the previous turn's seq
+ * (or NULL for the first turn → exactly the anomaly forensics surfaces).
+ *
+ * Strategy:
+ *   1. Caller computes the next seq via `getNextMessageSequence(sessionId)`.
+ *   2. Caller invokes this helper just before pushing the message into
+ *      `this.messages` and BEFORE calling streamText.
+ *   3. Caller stores the seq into `this.messageSeqs` so subsequent
+ *      `recordUsage` calls resolve `message_seq` to a non-NULL value.
+ *   4. After the turn settles, `appendMessages(...)` upserts the same row
+ *      via `ON CONFLICT(session_id, seq) DO UPDATE` — finalizing
+ *      `status='completed'` and overwriting the placeholder `message_json`.
+ *
+ * `message_json` is initially a placeholder so the column's NOT NULL
+ * constraint is satisfied; the post-stream UPDATE overwrites it.
+ *
+ * Fail-open: callers are inside the orchestrator hot path, so a SQL
+ * exception here MUST NOT propagate. The downstream `appendMessages(...)`
+ * still writes the row (just without a write-ahead trail in forensics).
+ */
+export function persistMessageWriteAhead(sessionId: string, seq: number, role: string, messageJson: string): void {
+  const now = new Date().toISOString();
+  try {
+    getDatabase()
+      .prepare(`
+        INSERT OR IGNORE INTO messages (
+          session_id, seq, role, message_json, created_at, status
+        ) VALUES (?, ?, ?, ?, ?, 'pending')
+      `)
+      .run(sessionId, seq, role, messageJson, now);
+  } catch {
+    /* fail-open */
+  }
+}
+
+/**
+ * Phase A5 — Finalize a write-ahead message row from `status='pending'`
+ * to `status='completed'`. Called by `appendCompletedTurn(...)` after the
+ * stream settles successfully. The row's `message_json` already contains
+ * the final payload (written by `persistMessageWriteAhead(...)`), so this
+ * is a cheap status flip.
+ */
+export function markMessageCompleted(sessionId: string, seq: number): void {
+  try {
+    getDatabase()
+      .prepare(`
+        UPDATE messages
+        SET status = 'completed'
+        WHERE session_id = ? AND seq = ? AND status = 'pending'
+      `)
+      .run(sessionId, seq);
+  } catch {
+    /* fail-open */
+  }
+}
+
+/**
+ * Phase A5 — Mark a write-ahead message row as `errored` when the stream
+ * throws between `persistMessageWriteAhead(...)` and the post-stream
+ * `appendMessages(...)` finalize step.
+ *
+ * Without this, a crashed turn would leave the row stuck at `pending`
+ * forever, indistinguishable from "stream still in-flight" in forensics.
+ */
+export function markMessageErrored(sessionId: string, seq: number): void {
+  try {
+    getDatabase()
+      .prepare(`
+        UPDATE messages
+        SET status = 'errored'
+        WHERE session_id = ? AND seq = ? AND status = 'pending'
+      `)
+      .run(sessionId, seq);
+  } catch {
+    /* fail-open */
+  }
+}
+
 export function markToolCallErrored(sessionId: string, toolCallId: string, errorMessage: string): void {
   const now = new Date().toISOString();
   try {

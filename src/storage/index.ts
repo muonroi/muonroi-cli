@@ -14,7 +14,10 @@ export {
   loadRawTranscript,
   loadTranscript,
   loadTranscriptState,
+  markMessageCompleted,
+  markMessageErrored,
   markToolCallErrored,
+  persistMessageWriteAhead,
   persistToolCallWriteAhead,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
