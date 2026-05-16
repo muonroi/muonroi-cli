@@ -135,6 +135,19 @@ export async function createProviderFactoryAsync(
   return createProviderFactory(id, opts);
 }
 
+/**
+ * Test-harness hook: when `globalThis.__muonroiMockModel` is set, swap in a
+ * mock LanguageModelV3 and skip the real provider factory entirely. The
+ * providerOptions and unsupportedParams branches below run as usual so
+ * cost-leak specs can verify the merged shape that streamText receives.
+ * See src/agent-harness/mock-model.ts for the install helper.
+ */
+interface MockRuntimeGlobals {
+  __muonroiMockModel?: unknown;
+  __muonroiMockUnsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
+  __muonroiMockDefaultProviderOptions?: Record<string, unknown>;
+}
+
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-ai/DeepSeek-V4-Flash") BEFORE invoking the factory.
@@ -142,16 +155,37 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // the alias is not a valid model id on their API.
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
-  // G1 fix: OpenAI reasoning models (gpt-5.x, o1, o3, o4) require the
-  // Responses API even on the API-key path. The chat-completions endpoint
-  // accepts the request but returns an empty assistant message, which AI
-  // SDK then surfaces as "AI_NoOutputGeneratedError" → "Task failed: No
-  // output generated". The OAuth path already routes through .responses()
-  // when the factory is constructed (see createProviderFactory), but the
-  // API-key path used plain chat completions.
-  const needsResponsesApi =
-    modelInfo?.responsesOnly === true || (modelInfo?.provider === "openai" && modelInfo?.reasoning === true);
-  const model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
+
+  const mockGlobals = globalThis as MockRuntimeGlobals;
+  const mockModel = mockGlobals.__muonroiMockModel;
+
+  // Determine the language model + unsupportedParams + provider-level defaults.
+  // Test path: mockModel is a MockLanguageModelV3 from ai/test. Overrides for
+  // unsupportedParams / defaultProviderOptions simulate OAuth registry state.
+  // Prod path: factory builds the real provider model (api-key or OAuth).
+  // biome-ignore lint/suspicious/noExplicitAny: ai-sdk model shape is provider-specific
+  let model: any;
+  let unsupportedParams: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP"> | undefined;
+  let providerLevelDefaults: Record<string, unknown> | undefined;
+
+  if (mockModel) {
+    model = mockModel;
+    unsupportedParams = mockGlobals.__muonroiMockUnsupportedParams;
+    providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
+  } else {
+    // G1 fix: OpenAI reasoning models (gpt-5.x, o1, o3, o4) require the
+    // Responses API even on the API-key path. The chat-completions endpoint
+    // accepts the request but returns an empty assistant message, which AI
+    // SDK then surfaces as "AI_NoOutputGeneratedError" → "Task failed: No
+    // output generated". The OAuth path already routes through .responses()
+    // when the factory is constructed (see createProviderFactory), but the
+    // API-key path used plain chat completions.
+    const needsResponsesApi =
+      modelInfo?.responsesOnly === true || (modelInfo?.provider === "openai" && modelInfo?.reasoning === true);
+    model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
+    unsupportedParams = factory.unsupportedParams;
+    providerLevelDefaults = factory.defaultProviderOptions;
+  }
 
   let providerOptions: Record<string, unknown> | undefined;
 
@@ -191,18 +225,38 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject
   // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
   // backend-specific quirks centralized in src/providers/auth/registry.ts.
-  if (factory.defaultProviderOptions && modelInfo?.provider) {
+  // In the mock path `providerLevelDefaults` is the test-supplied override.
+  if (providerLevelDefaults && modelInfo?.provider) {
     const key = modelInfo.provider;
     providerOptions = {
       ...providerOptions,
       [key]: {
-        ...factory.defaultProviderOptions,
+        ...providerLevelDefaults,
         ...((providerOptions?.[key] as Record<string, unknown> | undefined) ?? {}),
       },
     };
   }
 
-  return { model, modelId, modelInfo, providerOptions, unsupportedParams: factory.unsupportedParams };
+  return { model, modelId, modelInfo, providerOptions, unsupportedParams };
+}
+
+/**
+ * Returns true when a top-level streamText param should be omitted because
+ * either (a) the model catalog explicitly marks it unsupported, or (b) the
+ * OAuth provider registry attached `unsupportedParams` to the factory
+ * (e.g. ChatGPT Codex rejects `max_output_tokens` with HTTP 400 — see G1).
+ *
+ * Centralizes the dropParam test so the orchestrator's sub-agent path,
+ * top-level path, and cost-leak specs cannot drift apart.
+ */
+export function shouldDropParam(
+  runtime: ResolvedModelRuntime,
+  param: "maxOutputTokens" | "temperature" | "topP",
+): boolean {
+  if (param === "maxOutputTokens" && runtime.modelInfo?.supportsMaxOutputTokens === false) {
+    return true;
+  }
+  return runtime.unsupportedParams?.includes(param) ?? false;
 }
 
 export function detectProviderForModel(modelId: string): ProviderId {

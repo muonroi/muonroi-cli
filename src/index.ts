@@ -826,6 +826,16 @@ program
     if (typeof options.mockLlm === "string") {
       const { createMockLlm } = await import("@muonroi/agent-harness-core/mock-llm");
       (globalThis as Record<string, unknown>).__muonroiMockLlm = createMockLlm({ dir: options.mockLlm });
+
+      // Phase H1: AI-SDK-level mock. If any fixture declares a `model` block
+      // it is installed so `resolveModelRuntime` returns it instead of the
+      // real provider model. This enables cost-leak verification (G1, F1,
+      // B3/B4, C1) through the orchestrator's streamText path.
+      const { loadMockModelFromDir } = await import("./agent-harness/mock-model.js");
+      const modelHandle = await loadMockModelFromDir(options.mockLlm).catch(() => null);
+      if (modelHandle) {
+        (globalThis as Record<string, unknown>).__muonroiMockModel = modelHandle.model;
+      }
     }
 
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
