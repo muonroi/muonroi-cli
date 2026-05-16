@@ -146,6 +146,25 @@ export function assertParamPresent(
   }
 }
 
+/**
+ * Phase H3 — load recordings dumped from a child process by `dumpRecordings`.
+ * Returns the same `InspectedCall` shape as `inspectAll`, so cumulative /
+ * role / param helpers all work identically against dumped data.
+ *
+ * Strict: throws when the file is missing or not an array of call options.
+ */
+export function loadDumpedRecordings(path: string): InspectedCall[] {
+  // biome-ignore lint/correctness/noNodejsModules: test-only helper
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require("node:fs") as typeof import("node:fs");
+  const raw = fs.readFileSync(path, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`loadDumpedRecordings: expected array at ${path}`);
+  }
+  return parsed.map((opts, i) => inspectCall(opts as LanguageModelV3CallOptions, i));
+}
+
 /** Extract a nested providerOptions field for assertion. */
 export function getProviderOption<T = unknown>(
   call: LanguageModelV3CallOptions | InspectedCall,

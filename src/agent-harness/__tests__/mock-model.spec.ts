@@ -3,12 +3,16 @@
  * sequential stream semantics that downstream cost-leak specs depend on.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { stepCountIs, streamText, tool } from "ai";
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { createMockModel, textOnlyStream, toolCallStream } from "../mock-model.js";
+import { createMockModel, loadMockModelFromDir, textOnlyStream, toolCallStream } from "../mock-model.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
 async function drainStream(result: { fullStream: AsyncIterable<any> }): Promise<void> {
@@ -111,5 +115,81 @@ describe("createMockModel", () => {
     const chunks = toolCallStream({ toolCallId: "x", toolName: "t", input: {} });
     const finish = chunks.find((c): c is Extract<LanguageModelV3StreamPart, { type: "finish" }> => c.type === "finish");
     expect(finish?.finishReason.unified).toBe("tool-calls");
+  });
+});
+
+describe("loadMockModelFromDir", () => {
+  // Hermetic temp dirs so tests don't depend on tests/harness/fixtures layout.
+  const tmpDirs: string[] = [];
+  function mkFixtureDir(model: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), "mock-model-fx-"));
+    writeFileSync(join(dir, "fixture.json"), JSON.stringify({ model }), "utf8");
+    tmpDirs.push(dir);
+    return dir;
+  }
+  afterAll(() => {
+    for (const d of tmpDirs) {
+      try {
+        rmSync(d, { recursive: true, force: true });
+      } catch {
+        // ignore — best-effort cleanup
+      }
+    }
+  });
+
+  it("propagates unsupportedParams from the fixture file", async () => {
+    const dir = mkFixtureDir({
+      provider: "mock",
+      modelId: "mock-gpt",
+      stream: textOnlyStream("hello"),
+      unsupportedParams: ["maxOutputTokens"],
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+    expect(handle?.unsupportedParams).toEqual(["maxOutputTokens"]);
+    // Sanity: the model itself is usable downstream.
+    const r = streamText({ model: handle!.model, prompt: "hi" });
+    await drainStream(r);
+    expect(handle?.calls.length).toBe(1);
+  });
+
+  it("propagates defaultProviderOptions from the fixture file", async () => {
+    const dir = mkFixtureDir({
+      provider: "mock",
+      modelId: "mock-gpt",
+      stream: textOnlyStream("hello"),
+      defaultProviderOptions: { openai: { store: false } },
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+    expect(handle?.defaultProviderOptions).toEqual({ openai: { store: false } });
+  });
+
+  it("supports multi-round stream arrays from the fixture file", async () => {
+    const dir = mkFixtureDir({
+      provider: "mock",
+      modelId: "mock-gpt",
+      // Nested array → one entry consumed per doStream call.
+      stream: [toolCallStream({ toolCallId: "1", toolName: "echo", input: { msg: "hi" } }), textOnlyStream("done")],
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+
+    const echoTool = tool({
+      description: "echo",
+      inputSchema: z.object({ msg: z.string() }),
+      execute: async ({ msg }: { msg: string }) => `echoed: ${msg}`,
+    });
+
+    const r = streamText({
+      model: handle!.model,
+      prompt: "use echo",
+      tools: { echo: echoTool },
+      stopWhen: stepCountIs(3),
+    });
+    await drainStream(r);
+
+    expect(handle?.calls.length).toBe(2);
+    expect(handle?.calls[1]?.prompt.length).toBeGreaterThan(handle?.calls[0]?.prompt.length ?? 0);
   });
 });

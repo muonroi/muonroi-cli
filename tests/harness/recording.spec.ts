@@ -3,11 +3,14 @@
  * crafted prompts and asserts every helper reads the shape it claims to.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { LanguageModelV3CallOptions, LanguageModelV3Prompt } from "@ai-sdk/provider";
 import { streamText } from "ai";
 import { describe, expect, it } from "vitest";
 
-import { createMockModel, textOnlyStream } from "../../src/agent-harness/mock-model.js";
+import { createMockModel, dumpRecordings, textOnlyStream } from "../../src/agent-harness/mock-model.js";
 import {
   assertParamAbsent,
   assertParamPresent,
@@ -15,6 +18,7 @@ import {
   getProviderOption,
   inspectAll,
   inspectByRole,
+  loadDumpedRecordings,
 } from "./recording.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
@@ -83,6 +87,31 @@ describe("recording helpers", () => {
   it("assertParamPresent throws when the param is undefined", () => {
     const call = { prompt: [] as LanguageModelV3Prompt } as LanguageModelV3CallOptions;
     expect(() => assertParamPresent(call, "temperature")).toThrow(/expected temperature to be present/);
+  });
+
+  it("dumpRecordings + loadDumpedRecordings round-trip matches inspectAll", async () => {
+    const handle = createMockModel({ stream: textOnlyStream("done") });
+    const result = streamText({
+      model: handle.model,
+      system: "You are the top-level assistant.",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    await drain(result);
+
+    const dir = mkdtempSync(join(tmpdir(), "muonroi-h3-"));
+    const path = join(dir, "calls.json");
+    try {
+      dumpRecordings(path, handle.model);
+      const loaded = loadDumpedRecordings(path);
+      const live = inspectAll(handle);
+      expect(loaded.length).toBe(live.length);
+      expect(loaded[0]?.systemText).toBe(live[0]?.systemText);
+      expect(loaded[0]?.userText).toBe(live[0]?.userText);
+      expect(loaded[0]?.role).toBe(live[0]?.role);
+      expect(loaded[0]?.promptChars).toBe(live[0]?.promptChars);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("getProviderOption extracts nested providerOptions values", () => {
