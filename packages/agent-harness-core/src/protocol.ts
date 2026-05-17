@@ -35,6 +35,7 @@ export type UINode = {
   selected?: true;
   disabled?: true;
   hidden?: true;
+  isModal?: true;
   state?: string;
   props?: Record<string, unknown>;
   children?: UINode[];

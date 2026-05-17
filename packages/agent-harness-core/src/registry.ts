@@ -73,6 +73,7 @@ export function createSemanticRegistry(): SemanticRegistry {
       if (input.selected) node.selected = true;
       if (input.disabled) node.disabled = true;
       if (input.hidden) node.hidden = true;
+      if (input.isModal) node.isModal = true;
       if (input.state !== undefined) node.state = input.state;
       if (input.props !== undefined) node.props = input.props;
       return node;
