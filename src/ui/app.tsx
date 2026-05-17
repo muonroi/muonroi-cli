@@ -2632,7 +2632,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   // Render the card via dedicated state — do NOT bleed text into
                   // the assistant stream (that caused the freetext-soup look).
                   setPendingCouncilQuestion(cq);
-                  setCouncilCardState(initialCardState(cq));
+                  setCouncilCardStateSync(initialCardState(cq));
                   // Task 2.3 — emit askcard-open harness event (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
@@ -2653,7 +2653,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.councilPreflight) {
                   applyLocalAssistantDelta(chunk.content || "");
                   setPendingCouncilPreflight(chunk.councilPreflight);
-                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 break;
               case "council_message":
@@ -3113,7 +3113,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
                   const cq2 = chunk.councilQuestion;
                   setPendingCouncilQuestion(cq2);
-                  setCouncilCardState(initialCardState(cq2));
+                  setCouncilCardStateSync(initialCardState(cq2));
                   // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
@@ -3131,7 +3131,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setPendingCouncilPreflight(chunk.councilPreflight);
-                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 if (chunk.type === "council_message" && chunk.councilMessage) {
                   const cm = chunk.councilMessage;
@@ -3303,7 +3303,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
                   const cq3 = chunk.councilQuestion;
                   setPendingCouncilQuestion(cq3);
-                  setCouncilCardState(initialCardState(cq3));
+                  setCouncilCardStateSync(initialCardState(cq3));
                   // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
                   try {
                     agentRuntime?.emitEvent({
@@ -3328,7 +3328,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     return prev;
                   });
                   setPendingCouncilPreflight(chunk.councilPreflight);
-                  setPreflightCardState(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                 }
                 if (chunk.type === "council_message" && chunk.councilMessage) {
                   const cm = chunk.councilMessage;
@@ -5203,9 +5203,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       messages,
       startupConfig.version,
       pendingCouncilQuestion,
-      councilCardState,
       pendingCouncilPreflight,
-      preflightCardState,
       slashSearchQuery.length,
       slashSearchQuery.slice,
       activeHaltCard,
@@ -5337,7 +5335,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     if (pendingCouncilQuestion) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestion(null);
-      setCouncilCardState(null);
+      setCouncilCardStateSync(null);
       agent.respondToCouncilQuestion(qid, message.trim());
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
