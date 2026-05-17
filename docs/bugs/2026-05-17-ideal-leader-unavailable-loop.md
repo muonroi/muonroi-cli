@@ -95,6 +95,51 @@ logging) + spec race fix (Down→wait_for(idle)→Enter):
   instant? Suspect provider HTTP-client retry config (e.g. exponential backoff
   on transient errors that incorrectly treats 401 as transient).
 
+## 2026-05-17 follow-up #2 — NEW DEEPER BUG: drain pipeline stalls on q5
+
+After landing Layer A + Layer B + race fix + leader 401 fast-fail (commits
+`bbd11a4` through `fefdadc`), live E2E reaches:
+
+1. productType askcard ×3 (Layer B retry budget escalates after 3 skips) ✅
+2. targetPlatform askcard ×1 (q4) ✅
+3. **HANG** — q5 (targetPlatform attempt 2) emit-question fires, register-resolver
+   fires, but drain loop NEVER yields q5 to consumer.
+
+### Evidence (commits `d4cce6f`, `5a230b2` add the diag taps)
+
+Stderr after q4 answered:
+```
+[responder] respondToCouncilQuestion 81be174c (q4)
+[tuiask] await-resolved q4 (173ms)
+[interview-timing] userPrompt-resolved q4
+[tuiask] info-emit "Required question cannot be skipped"  ← pushed content chunk
+[interview-timing] iter-start targetPlatform skip=1
+[tuiask] emit-question 75e825ad/c06c2f2b  ← pushed q5 chunk
+[tuiask] await-start q5
+[responder] register-resolver q5
+<silence for 450s — no drain tick, no yield, no exit/error>
+```
+
+### What this tells us
+
+- Queue has [content, q5_council_question]; gather is paused on `await respondToQuestion(q5)`.
+- The drain loop in `loop-driver.ts` is at `await new Promise(r => setTimeout(r, 50))`.
+- The `setTimeout(50)` callback NEVER fires for the remaining 450s.
+- Event loop IS alive (leader-debug + leader-timing for targetPlatform fired 264ms async earlier in the same run).
+- For-await loop in `app.tsx` is awaiting `iter.next()` — generator must yield to wake consumer.
+- No `[ideal-loop-exit]` or `[ideal-loop-error]` taps fire, so the consumer didn't break out.
+
+### Suspect
+
+OpenTUI reconciler may hold the JS event loop synchronously for askcard render in a way that blocks `setTimeout` while leaving microtask-based `await` chains alive. The 264ms leader call is awaited via fetch/HTTP (libcurl/undici), which may use a different scheduler than `setTimeout`.
+
+### Recommended next step
+
+Add a non-`setTimeout` yield in the drain loop (e.g. `await Promise.resolve()` + `process.nextTick(() => {})` combo, or `queueMicrotask` poll) to test whether the issue is specifically with `setTimeout` scheduling under OpenTUI reconciler load.
+
+Until this is fixed, the live E2E can't reach sprint-halt regardless of all
+upstream fixes.
+
 ## Recommended fix order
 
 1. Land Layer B option 1 (max-retry counter) — bounded scope, restores test progress, fail-soft on any future Layer A regression.
