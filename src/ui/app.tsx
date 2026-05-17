@@ -3115,6 +3115,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             try {
               const gen = (agent as any).runProductLoopV1(payload);
               for await (const chunk of gen) {
+                if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                  const cq = chunk.councilQuestion;
+                  process.stderr.write(
+                    `[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
+                  );
+                }
                 if (chunk.type === "content") {
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
