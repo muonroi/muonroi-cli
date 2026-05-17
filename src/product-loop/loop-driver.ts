@@ -1,10 +1,10 @@
 import * as path from "node:path";
-import { fetchBBContext, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
+import { fetchBBContext, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -278,36 +278,42 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             const c = gatherEmitted.shift() as StreamChunk;
             if (_drainDbg) {
               const cq = (c as { councilQuestion?: { questionId?: string } }).councilQuestion;
-              process.stderr.write(
-                `[drain] yield-chunk: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
-              );
+              process.stderr.write(`[drain] yield-chunk: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
             }
             yield c;
             if (_drainDbg) {
               process.stderr.write(`[drain] post-yield, queue=${gatherEmitted.length}\n`);
             }
           }
-          // Yield to the event loop briefly so emit + async respond can advance.
-          await new Promise<void>((r) => setTimeout(r, 50));
+          // Yield to the event loop so emit + async respond can advance.
+          // Microtask (Promise.resolve) is used by default because OpenTUI's
+          // setInterval-based reconciler can flood the macrotask queue when an
+          // askcard modal first mounts, starving a setTimeout-based poll for
+          // hundreds of seconds. Microtasks always drain before the next
+          // macrotask, so they cannot be starved by setInterval ticks.
+          // Every 10 spins we still yield one macrotask turn so the renderer
+          // gets a frame slot and we don't pin CPU.
           _drainTick++;
+          if (_drainTick % 10 === 0) {
+            await new Promise<void>((r) => setTimeout(r, 0));
+          } else {
+            await Promise.resolve();
+          }
           if (_drainDbg && _drainTick % 20 === 0) {
+            const tickType = _drainTick % 10 === 0 ? "macrotask(0)" : "microtask";
             process.stderr.write(
-              `[drain] tick=${_drainTick}, queue=${gatherEmitted.length}, done=${gatherDone.value}\n`,
+              `[drain] tick=${_drainTick}, queue=${gatherEmitted.length}, done=${gatherDone.value}, scheduler=${tickType}\n`,
             );
           }
         }
         if (_drainDbg) {
-          process.stderr.write(
-            `[drain] gather-done, flushing ${gatherEmitted.length} chunks\n`,
-          );
+          process.stderr.write(`[drain] gather-done, flushing ${gatherEmitted.length} chunks\n`);
         }
         while (gatherEmitted.length > 0) {
           const c = gatherEmitted.shift() as StreamChunk;
           if (_drainDbg) {
             const cq = (c as { councilQuestion?: { questionId?: string } }).councilQuestion;
-            process.stderr.write(
-              `[drain] final-flush: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
-            );
+            process.stderr.write(`[drain] final-flush: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
           }
           yield c;
         }
