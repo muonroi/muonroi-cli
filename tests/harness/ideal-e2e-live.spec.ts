@@ -296,10 +296,16 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
         const currentIdx = Math.max(0, opts.findIndex((o) => o.selected));
 
         const diff = targetIdx - currentIdx;
+        // Race fix: askcard's idx is React useState — synchronous key burst
+        // (Down,Down,Enter) lands before re-render commits idx update, so Enter
+        // resolves on the OLD idx. Wait for snapshot to settle between each key.
+        // Mirror of the showSlashMenuRef race fixed in 5ef5525.
         for (let i = 0; i < Math.abs(diff); i++) {
           driver.press(diff > 0 ? "Down" : "Up");
+          await driver.wait_for({ idle: true, timeoutMs: 1_000 }).catch(() => {});
         }
         driver.press("Enter");
+        await driver.wait_for({ idle: true, timeoutMs: 2_000 }).catch(() => {});
         askcardsAccepted++;
         const picked = opts[targetIdx]?.name ?? `idx${targetIdx}`;
         try {

@@ -70,6 +70,31 @@ Option 3 aligns best with existing CB-3 halt semantics. Option 1 is the smallest
 
 `.scratch/e2e-diag.log` from run `bb0s5nzqw` shows 5 consecutive identical askcards with PICKED="skip", followed by the spec timing out at 450s. No `sprint-halt` event fires.
 
+## 2026-05-17 follow-up — Layer A + B landed, NEW bug surfaced
+
+After fixes commits `eafc8e5` (Layer B retry budget) + `47cb460` (Layer A debug
+logging) + spec race fix (Down→wait_for(idle)→Enter):
+
+- Leader debug confirms `parseError: "Unauthorized"`, `rawResponse: ""`,
+  `model: "unknown"` → leader HTTP call is 401-ing, NOT a parser bug. The
+  `resolveLeaderModel(sessionModelId)` result is `"unknown"` — keychain →
+  model registry mismatch needs separate audit.
+- Layer B verified working end-to-end: 3× productType skip → outer loop
+  advanced to `targetPlatform` (q4 has different question name in dump).
+- New blocker: each askcard cycle takes ~110s real-time even though leader
+  returns immediately with 401. Likely an HTTP retry/backoff inside the
+  provider wrapper before the 401 surfaces as parse_fail. Profile / instrument
+  the leader.generate call timing to confirm.
+
+## Open
+
+- WHY does `resolveLeaderModel` return a model that 401s when the session
+  model itself works fine? Probably `getRoleModel("leader")` config or
+  provider key resolution mismatch.
+- WHERE is the ~100s/call delay coming from given a 401 response should be
+  instant? Suspect provider HTTP-client retry config (e.g. exponential backoff
+  on transient errors that incorrectly treats 401 as transient).
+
 ## Recommended fix order
 
 1. Land Layer B option 1 (max-retry counter) — bounded scope, restores test progress, fail-soft on any future Layer A regression.
