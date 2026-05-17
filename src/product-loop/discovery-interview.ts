@@ -87,12 +87,28 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
     // Resets when the user provides a real answer (accept/override).
     let skipAttempts = 0;
     const MAX_SKIP_ATTEMPTS = 3;
+    const _debugInterview = process.env.MUONROI_DEBUG_LEADER === "1";
 
     for (;;) {
+      const _iterStart = Date.now();
+      if (_debugInterview) {
+        process.stderr.write(
+          `[interview-timing] iter-start: ${JSON.stringify({ questionId: question.id, skipAttempts })}\n`,
+        );
+      }
       const ans = await opts.userPrompt({
         questionId: question.id,
         recommendation,
       });
+      if (_debugInterview) {
+        process.stderr.write(
+          `[interview-timing] userPrompt-resolved: ${JSON.stringify({
+            questionId: question.id,
+            durationMs: Date.now() - _iterStart,
+            action: ans.action,
+          })}\n`,
+        );
+      }
 
       if (ans.action === "skip") {
         if (effectivelyRequired) {
