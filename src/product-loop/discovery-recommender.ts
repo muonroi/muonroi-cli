@@ -33,6 +33,25 @@ function stripFences(s: string): string {
     .replace(/\s*```$/, "");
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic: MUONROI_DEBUG_LEADER=1 → emit JSON line to stderr on each attempt
+// Zero cost when envvar is unset.
+// ---------------------------------------------------------------------------
+interface LeaderDebugPayload {
+  attempt: number;
+  model: string;
+  system: string; // truncated to 500 chars
+  prompt: string; // truncated to 500 chars
+  rawResponse: string; // full
+  outcome: "parse_ok" | "parse_fail";
+  parseError?: string;
+}
+
+function emitLeaderDebug(payload: LeaderDebugPayload): void {
+  if (process.env.MUONROI_DEBUG_LEADER !== "1") return;
+  process.stderr.write("[leader-debug] " + JSON.stringify(payload) + "\n");
+}
+
 function parseLeaderResponse(raw: string): { primary: any; alternatives: any[] } | null {
   try {
     const parsed = JSON.parse(stripFences(raw));
@@ -56,6 +75,14 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
       cost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {
+        emitLeaderDebug({
+          attempt,
+          model: (leader as any).modelId ?? "unknown",
+          system: LEADER_SYSTEM.slice(0, 500),
+          prompt: prompt.slice(0, 500),
+          rawResponse: res.content,
+          outcome: "parse_ok",
+        });
         return {
           primary: parsed.primary,
           alternatives: parsed.alternatives,
@@ -63,7 +90,25 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
           costUsd: cost,
         };
       }
-    } catch {
+      emitLeaderDebug({
+        attempt,
+        model: (leader as any).modelId ?? "unknown",
+        system: LEADER_SYSTEM.slice(0, 500),
+        prompt: prompt.slice(0, 500),
+        rawResponse: res.content,
+        outcome: "parse_fail",
+        parseError: "parseLeaderResponse returned null",
+      });
+    } catch (err) {
+      emitLeaderDebug({
+        attempt,
+        model: (leader as any).modelId ?? "unknown",
+        system: LEADER_SYSTEM.slice(0, 500),
+        prompt: prompt.slice(0, 500),
+        rawResponse: "",
+        outcome: "parse_fail",
+        parseError: err instanceof Error ? err.message : String(err),
+      });
       /* retry */
     }
   }
@@ -196,6 +241,14 @@ export async function councilRecommend(
       synthCost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {
+        emitLeaderDebug({
+          attempt,
+          model: (leader as any).modelId ?? "unknown",
+          system: SYNTH_SYSTEM.slice(0, 500),
+          prompt: synthPrompt.slice(0, 500),
+          rawResponse: res.content,
+          outcome: "parse_ok",
+        });
         return {
           primary: parsed.primary,
           alternatives: parsed.alternatives,
@@ -204,7 +257,25 @@ export async function councilRecommend(
           tiebreakUsed: true,
         };
       }
-    } catch {
+      emitLeaderDebug({
+        attempt,
+        model: (leader as any).modelId ?? "unknown",
+        system: SYNTH_SYSTEM.slice(0, 500),
+        prompt: synthPrompt.slice(0, 500),
+        rawResponse: res.content,
+        outcome: "parse_fail",
+        parseError: "parseLeaderResponse returned null",
+      });
+    } catch (err) {
+      emitLeaderDebug({
+        attempt,
+        model: (leader as any).modelId ?? "unknown",
+        system: SYNTH_SYSTEM.slice(0, 500),
+        prompt: synthPrompt.slice(0, 500),
+        rawResponse: "",
+        outcome: "parse_fail",
+        parseError: err instanceof Error ? err.message : String(err),
+      });
       /* retry */
     }
   }

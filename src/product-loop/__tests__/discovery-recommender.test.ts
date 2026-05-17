@@ -1,5 +1,5 @@
 // src/product-loop/__tests__/discovery-recommender.test.ts
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   computeCostGuard,
   councilRecommend,
@@ -187,6 +187,105 @@ describe("discovery-recommender — council", () => {
     );
     expect(rec.source).toBe("leader");
     expect(rec.primary.value).toBe("monolith");
+  });
+});
+
+describe("discovery-recommender — MUONROI_DEBUG_LEADER instrumentation", () => {
+  const baseInput = {
+    question: { id: "productType", required: true, recommendMode: "leader", prompt: "What type?" } as any,
+    context: {},
+    detection: {
+      isGitRepo: false,
+      hasCommitHistory: false,
+      srcFileCount: 0,
+      manifests: [],
+      languages: [],
+      frameworks: [],
+      classification: "greenfield",
+    } as any,
+  };
+
+  let stderrLines: string[] = [];
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let originalDebug: string | undefined;
+
+  beforeEach(() => {
+    originalDebug = process.env.MUONROI_DEBUG_LEADER;
+    process.env.MUONROI_DEBUG_LEADER = "1";
+    stderrLines = [];
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      if (typeof chunk === "string") stderrLines.push(chunk);
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+    if (originalDebug === undefined) {
+      delete process.env.MUONROI_DEBUG_LEADER;
+    } else {
+      process.env.MUONROI_DEBUG_LEADER = originalDebug;
+    }
+  });
+
+  it("emits two [leader-debug] parse_fail lines when leader returns invalid responses twice", async () => {
+    // attempt 0: truncated fenced JSON — stripFences strips fences but JSON.parse fails
+    const markdownFenced = '```json\n{"primary":{"value":"saas"'; // truncated — no closing braces
+    // attempt 1: missing `value` field → parseLeaderResponse returns null
+    const truncated = '{"primary":{"rationale":"x"}}';
+
+    const leader = makeLeader([markdownFenced, truncated]);
+    const rec = await leaderRecommend(baseInput, leader as any);
+
+    expect(rec.source).toBe("user-only");
+
+    const debugLines = stderrLines.filter((l) => l.startsWith("[leader-debug] "));
+    expect(debugLines).toHaveLength(2);
+
+    const parsed0 = JSON.parse(debugLines[0]!.replace("[leader-debug] ", "").trim());
+    expect(parsed0.attempt).toBe(0);
+    expect(parsed0.outcome).toBe("parse_fail");
+    expect(parsed0.rawResponse).toBe(markdownFenced);
+    expect(parsed0).toHaveProperty("model");
+    expect(parsed0).toHaveProperty("system");
+    expect(parsed0).toHaveProperty("prompt");
+    expect(typeof parsed0.system).toBe("string");
+    expect(parsed0.system.length).toBeLessThanOrEqual(500);
+    expect(parsed0.prompt.length).toBeLessThanOrEqual(500);
+
+    const parsed1 = JSON.parse(debugLines[1]!.replace("[leader-debug] ", "").trim());
+    expect(parsed1.attempt).toBe(1);
+    expect(parsed1.outcome).toBe("parse_fail");
+    expect(parsed1.rawResponse).toBe(truncated);
+  });
+
+  it("emits one [leader-debug] parse_ok line when leader returns valid JSON", async () => {
+    const validResponse = JSON.stringify({
+      primary: { value: "saas", rationale: "good fit" },
+      alternatives: [{ value: "b2b", rationale: "alt" }],
+    });
+    const leader = makeLeader([validResponse]);
+    const rec = await leaderRecommend(baseInput, leader as any);
+
+    expect(rec.source).toBe("leader");
+    expect(rec.primary.value).toBe("saas");
+
+    const debugLines = stderrLines.filter((l) => l.startsWith("[leader-debug] "));
+    expect(debugLines).toHaveLength(1);
+
+    const parsed = JSON.parse(debugLines[0]!.replace("[leader-debug] ", "").trim());
+    expect(parsed.attempt).toBe(0);
+    expect(parsed.outcome).toBe("parse_ok");
+    expect(parsed.rawResponse).toBe(validResponse);
+  });
+
+  it("does NOT emit [leader-debug] lines when MUONROI_DEBUG_LEADER is unset", async () => {
+    delete process.env.MUONROI_DEBUG_LEADER;
+    const leader = makeLeader(["bad", "bad"]);
+    await leaderRecommend(baseInput, leader as any);
+
+    const debugLines = stderrLines.filter((l) => l.startsWith("[leader-debug] "));
+    expect(debugLines).toHaveLength(0);
   });
 });
 
