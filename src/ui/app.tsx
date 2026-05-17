@@ -925,6 +925,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
   const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
   const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
+  // Ref mirrors — keep current synchronously so keyboard-burst handlers read
+  // the correct idx without waiting on React's setState commit (same pattern as showSlashMenuRef).
+  const councilCardStateRef = useRef<CouncilCardState | null>(null);
+  const preflightCardStateRef = useRef<CouncilCardState | null>(null);
+  const setCouncilCardStateSync = useCallback(
+    (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
+      setCouncilCardState((prev) => {
+        const next = typeof v === "function" ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(prev) : v;
+        councilCardStateRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+  const setPreflightCardStateSync = useCallback(
+    (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
+      setPreflightCardState((prev) => {
+        const next = typeof v === "function" ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(prev) : v;
+        preflightCardStateRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
   const [pendingCouncilPreflight, setPendingCouncilPreflight] = useState<{
     preflightId: string;
     problemStatement: string;
@@ -4105,16 +4129,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
-      if (pendingCouncilQuestion && councilCardState) {
+      if (pendingCouncilQuestion && councilCardStateRef.current) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
-          const result = reduceCardKey(pendingCouncilQuestion, councilCardState, cardKey);
-          setCouncilCardState(result.state);
+          const result = reduceCardKey(pendingCouncilQuestion, councilCardStateRef.current, cardKey);
+          setCouncilCardStateSync(result.state);
           if (result.emit?.type === "answer") {
             const qid = pendingCouncilQuestion.questionId;
             const ans = result.emit.answer;
             setPendingCouncilQuestion(null);
-            setCouncilCardState(null);
+            setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text);
             setMessages((prev) => [...prev, buildUserEntry(formatAnswerForLog(ans))]);
             // Task 2.4 — emit askcard-answered harness event (agent-mode only).
@@ -4132,7 +4156,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           } else if (result.emit?.type === "cancel") {
             const qid = pendingCouncilQuestion.questionId;
             setPendingCouncilQuestion(null);
-            setCouncilCardState(null);
+            setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, "");
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
@@ -4579,8 +4603,21 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setSlashSearchQuery("");
             const ta = inputRef.current;
             if (ta) {
+              const _tabDebug = process.env.MUONROI_DEBUG_TAB === "1";
+              if (_tabDebug) {
+                process.stderr.write(
+                  `[tab-debug] before-clear: ${JSON.stringify({ filteredItems: filteredSlashItems.map((x) => x.id), slashMenuIndex, currentText: ta.plainText })}
+`,
+                );
+              }
               ta.clear?.();
               ta.insertText?.(completion);
+              if (_tabDebug) {
+                process.stderr.write(
+                  `[tab-debug] after-insertText: ${JSON.stringify({ textBeingInserted: completion, postInsertText: ta.plainText })}
+`,
+                );
+              }
               try {
                 ta.cursorOffset = completion.length;
               } catch {
@@ -4588,10 +4625,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               }
               // Re-focus the textarea so subsequent keystrokes land in the
               // input (clear/insertText can drop OpenTUI's internal focus).
+              let _focusErr: unknown = null;
               try {
                 (ta as unknown as { focus?: () => void }).focus?.();
-              } catch {
-                /* opentui versions vary */
+              } catch (err) {
+                _focusErr = err;
+              }
+              if (_tabDebug) {
+                const focused = (ta as unknown as { _focused?: boolean })._focused;
+                process.stderr.write(
+                  `[tab-debug] after-focus: ${JSON.stringify({ focused: focused ?? null, postFocusText: ta.plainText, focusError: _focusErr ? String(_focusErr) : null })}
+`,
+                );
               }
             }
           }
@@ -4723,22 +4768,22 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
-      if (pendingCouncilPreflight && preflightCardState) {
+      if (pendingCouncilPreflight && preflightCardStateRef.current) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
           const synthetic = buildPreflightQuestion(pendingCouncilPreflight);
-          const result = reduceCardKey(synthetic, preflightCardState, cardKey);
-          setPreflightCardState(result.state);
+          const result = reduceCardKey(synthetic, preflightCardStateRef.current, cardKey);
+          setPreflightCardStateSync(result.state);
           if (result.emit?.type === "answer") {
             const pid = pendingCouncilPreflight.preflightId;
             const value = result.emit.answer.text;
             setPendingCouncilPreflight(null);
-            setPreflightCardState(null);
+            setPreflightCardStateSync(null);
             agent.respondToCouncilPreflight(pid, value === "approve");
           } else if (result.emit?.type === "cancel") {
             const pid = pendingCouncilPreflight.preflightId;
             setPendingCouncilPreflight(null);
-            setPreflightCardState(null);
+            setPreflightCardStateSync(null);
             agent.respondToCouncilPreflight(pid, false);
           }
           return;
@@ -4747,14 +4792,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (key.sequence === "y" || key.sequence === "Y") {
           const pid = pendingCouncilPreflight.preflightId;
           setPendingCouncilPreflight(null);
-          setPreflightCardState(null);
+          setPreflightCardStateSync(null);
           agent.respondToCouncilPreflight(pid, true);
           return;
         }
         if (key.sequence === "n" || key.sequence === "N") {
           const pid = pendingCouncilPreflight.preflightId;
           setPendingCouncilPreflight(null);
-          setPreflightCardState(null);
+          setPreflightCardStateSync(null);
           agent.respondToCouncilPreflight(pid, false);
           return;
         }
