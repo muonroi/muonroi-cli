@@ -6061,9 +6061,11 @@ function PromptBox({
               id="composer"
               role="textbox"
               // Mirror current composer text so external harness drivers
-              // can read back what the user typed. Sourced from the parent's
-              // slashSearchQuery (only tracked while slash menu is open).
-              value={composerValue ?? ""}
+              // can read back what the user typed. When the slash menu is
+              // open, use the slashSearchQuery-derived composerValue.
+              // When the slash menu is closed, fall back to the textarea's
+              // actual plainText so post-Tab state is visible to the harness.
+              value={composerValue ?? (inputRef.current?.plainText ?? "")}
               focus={
                 !showModelPicker &&
                 !showSandboxPicker &&
