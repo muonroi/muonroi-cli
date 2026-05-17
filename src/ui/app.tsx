@@ -2609,6 +2609,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   // the assistant stream (that caused the freetext-soup look).
                   setPendingCouncilQuestion(cq);
                   setCouncilCardState(initialCardState(cq));
+                  // Task 2.3 — emit askcard-open harness event (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "askcard-open",
+                      questionId: cq.questionId,
+                      question: cq.question,
+                      phase: cq.phase ?? "clarify",
+                      optionCount: cq.options?.length ?? 0,
+                      defaultIndex: cq.defaultIndex,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 break;
               case "council_preflight":
@@ -2671,12 +2685,38 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                  // Task 2.2b — emit council-speaker harness event (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-speaker",
+                      role: cs.role ?? cs.label ?? "unknown",
+                      status: cs.state === "start" ? "start" : "done",
+                      correlationId: cs.statusId,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 break;
               case "council_phase":
                 if (chunk.councilPhase) {
                   const cp = chunk.councilPhase;
                   setCouncilPhases((prev) => upsertPhase(prev, cp));
+                  // Task 2.2 — emit council-step harness event (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-step",
+                      phaseId: cp.phaseId,
+                      phaseKind: cp.kind,
+                      state: cp.state,
+                      label: cp.label,
+                      elapsedMs: cp.elapsedMs,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 break;
               case "error":
@@ -3047,8 +3087,23 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   });
                 }
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
-                  setPendingCouncilQuestion(chunk.councilQuestion);
-                  setCouncilCardState(initialCardState(chunk.councilQuestion));
+                  const cq2 = chunk.councilQuestion;
+                  setPendingCouncilQuestion(cq2);
+                  setCouncilCardState(initialCardState(cq2));
+                  // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "askcard-open",
+                      questionId: cq2.questionId,
+                      question: cq2.question,
+                      phase: cq2.phase ?? "clarify",
+                      optionCount: cq2.options?.length ?? 0,
+                      defaultIndex: cq2.defaultIndex,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setPendingCouncilPreflight(chunk.councilPreflight);
@@ -3098,9 +3153,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                  // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-speaker",
+                      role: cs.role ?? cs.label ?? "unknown",
+                      status: cs.state === "start" ? "start" : "done",
+                      correlationId: cs.statusId,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "council_phase" && chunk.councilPhase) {
-                  setCouncilPhases((prev) => upsertPhase(prev, chunk.councilPhase!));
+                  const cp2 = chunk.councilPhase;
+                  setCouncilPhases((prev) => upsertPhase(prev, cp2));
+                  // Task 2.2 — emit council-step in branch 2 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-step",
+                      phaseId: cp2.phaseId,
+                      phaseKind: cp2.kind,
+                      state: cp2.state,
+                      label: cp2.label,
+                      elapsedMs: cp2.elapsedMs,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "product_status_card" && chunk.productStatusCard) {
                   const d = chunk.productStatusCard;
@@ -3195,9 +3277,23 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   });
                 }
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
-                  const cq = chunk.councilQuestion;
-                  setPendingCouncilQuestion(cq);
-                  setCouncilCardState(initialCardState(cq));
+                  const cq3 = chunk.councilQuestion;
+                  setPendingCouncilQuestion(cq3);
+                  setCouncilCardState(initialCardState(cq3));
+                  // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "askcard-open",
+                      questionId: cq3.questionId,
+                      question: cq3.question,
+                      phase: cq3.phase ?? "clarify",
+                      optionCount: cq3.options?.length ?? 0,
+                      defaultIndex: cq3.defaultIndex,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setMessages((prev) => {
@@ -3254,10 +3350,36 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     });
                   }
                   setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                  // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-speaker",
+                      role: cs.role ?? cs.label ?? "unknown",
+                      status: cs.state === "start" ? "start" : "done",
+                      correlationId: cs.statusId,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "council_phase" && chunk.councilPhase) {
-                  const cp = chunk.councilPhase;
-                  setCouncilPhases((prev) => upsertPhase(prev, cp));
+                  const cp3 = chunk.councilPhase;
+                  setCouncilPhases((prev) => upsertPhase(prev, cp3));
+                  // Task 2.2 — emit council-step in branch 3 (agent-mode only).
+                  try {
+                    agentRuntime?.emitEvent({
+                      t: "event",
+                      kind: "council-step",
+                      phaseId: cp3.phaseId,
+                      phaseKind: cp3.kind,
+                      state: cp3.state,
+                      label: cp3.label,
+                      elapsedMs: cp3.elapsedMs,
+                    });
+                  } catch {
+                    /* best-effort */
+                  }
                 }
                 if (chunk.type === "experience_warning" && chunk.experienceWarning) {
                   setMessages((prev) => {
@@ -3995,11 +4117,33 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setCouncilCardState(null);
             agent.respondToCouncilQuestion(qid, ans.text);
             setMessages((prev) => [...prev, buildUserEntry(formatAnswerForLog(ans))]);
+            // Task 2.4 — emit askcard-answered harness event (agent-mode only).
+            try {
+              agentRuntime?.emitEvent({
+                t: "event",
+                kind: "askcard-answered",
+                questionId: qid,
+                answerKind: ans.kind ?? "choice",
+                answerText: ans.text,
+              });
+            } catch {
+              /* best-effort */
+            }
           } else if (result.emit?.type === "cancel") {
             const qid = pendingCouncilQuestion.questionId;
             setPendingCouncilQuestion(null);
             setCouncilCardState(null);
             agent.respondToCouncilQuestion(qid, "");
+            // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
+            try {
+              agentRuntime?.emitEvent({
+                t: "event",
+                kind: "askcard-cancel",
+                questionId: qid,
+              });
+            } catch {
+              /* best-effort */
+            }
           }
           return;
         }
