@@ -1039,6 +1039,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       return next;
     });
   }, []);
+  // Diagnostic tap (MUONROI_DEBUG_TAB=1): log every showSlashMenu state
+  // transition so live runs can see if Tab autocomplete's close actually
+  // commits, or if a subsequent effect re-opens the menu.
+  useEffect(() => {
+    if (process.env.MUONROI_DEBUG_TAB === "1") {
+      process.stderr.write(
+        `[tab-debug] showSlashMenu-state-change: ${JSON.stringify({
+          showSlashMenu,
+          ref: showSlashMenuRef.current,
+          plainText: inputRef.current?.plainText ?? null,
+        })}\n`,
+      );
+    }
+  }, [showSlashMenu]);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [slashSearchQuery, setSlashSearchQuery] = useState("");
   const [btwState, setBtwState] = useState<BtwState | null>(null);
@@ -6104,11 +6118,12 @@ function PromptBox({
               id="composer"
               role="textbox"
               // Mirror current composer text so external harness drivers
-              // can read back what the user typed. When the slash menu is
-              // open, use the slashSearchQuery-derived composerValue.
-              // When the slash menu is closed, fall back to the textarea's
-              // actual plainText so post-Tab state is visible to the harness.
-              value={composerValue ?? (inputRef.current?.plainText ?? "")}
+              // can read back what the user typed. Prefer the textarea's
+              // actual plainText (ground truth) over composerValue (derived
+              // from slashSearchQuery). This makes post-Tab state visible
+              // even while the slash menu is technically still open — was
+              // hiding the trailing space inserted by Tab autocomplete.
+              value={inputRef.current?.plainText ?? composerValue ?? ""}
               focus={
                 !showModelPicker &&
                 !showSandboxPicker &&
