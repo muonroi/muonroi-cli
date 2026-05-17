@@ -55,10 +55,18 @@ export interface IterateOpts {
 
 export async function iterateInterview(opts: IterateOpts): Promise<ProjectContext> {
   const { flowDir, runId, detection } = opts;
+  const _itvDbg = process.env.MUONROI_DEBUG_LEADER === "1";
+  const _itvId = Math.random().toString(36).slice(2, 8);
+  if (_itvDbg) {
+    process.stderr.write(`[interview-entry] iterateInterview-CALLED itvId=${_itvId} runId=${runId}\n`);
+  }
   const state0 = await readDiscoveryState(flowDir, runId);
   if (!state0) throw new Error("discovery state not initialized — call initDiscoveryState first");
 
   for (const question of DISCOVERY_QUESTIONS) {
+    if (_itvDbg) {
+      process.stderr.write(`[interview-entry] outer-for itvId=${_itvId} questionId=${question.id}\n`);
+    }
     const state = await readDiscoveryState(flowDir, runId);
     if (!state) throw new Error("state lost mid-iteration");
     const isPrefilled =
