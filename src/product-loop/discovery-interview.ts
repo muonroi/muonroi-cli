@@ -125,9 +125,12 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
         break;
       }
 
-      // User provided a real answer — reset the skip counter.
-      skipAttempts = 0;
-
+      // NOTE: skipAttempts is intentionally NOT reset here. A successful answer
+      // breaks out of the inner loop and the outer for-loop re-declares
+      // skipAttempts = 0 for the next question, so the reset is redundant on
+      // the happy path. Resetting on every non-skip action (including invalid
+      // overrides) would allow an infinite skip→override(invalid)→skip loop —
+      // the budget must accumulate across all non-answer iterations.
       let chosenValue: any;
       if (ans.action === "accept") {
         chosenValue = recommendation.primary.value;
