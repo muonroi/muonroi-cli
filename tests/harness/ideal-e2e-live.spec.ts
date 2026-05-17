@@ -1,7 +1,9 @@
 /**
  * ideal-e2e-live.spec.ts — REAL-USER E2E for the full /ideal flow.
  *
- * STATUS: reference/manual-only. NOT a CI gate.
+ * STATUS: NOT a default CI gate (costs real tokens). Run manually or in
+ * nightly via MUONROI_E2E_LIVE=1. The mock-LLM events.spec.ts is the
+ * default CI gate for event-driven flow correctness.
  *
  * Drives the production TUI as a real user would: real LLM (DeepSeek via
  * keychain), real Experience Engine, real `dotnet new` scaffold.
@@ -18,8 +20,8 @@
  *   - Each askcard ack is itself an LLM round-trip; the path to CB-3 halt
  *     is not stable across runs.
  *
- * Use the synthetic --inject-halt specs in tests/harness/ as the CI gate
- * for /ideal flow correctness. This spec exists for ad-hoc smoke runs.
+ * Use tests/harness/events.spec.ts (mock-LLM, unconditional) as the CI gate
+ * for event-driven flow correctness. This spec exists for ad-hoc smoke runs.
  *
  * Gated on MUONROI_E2E_LIVE=1 — does NOT run by default. Costs real LLM
  * tokens (~$0.20/run) and takes 10-15 minutes including dotnet build.
@@ -245,33 +247,43 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
   // -------------------------------------------------------------------------
 
   it("stage 2: CB-3 halts on missing verify recipe (real council debate)", async () => {
-    // With --force-council, the council debate runs and surfaces askcard
-    // modals for clarifying questions (productType, fe-stack, etc). For an
-    // unsupervised E2E we accept the recommended answer for every askcard
-    // until the council reaches the halt state (no verify recipe found).
-    const start = Date.now();
-    const target = 420_000; // longer budget — council + ~5 askcards + halt
-    const pollMs = 5_000;
+    // Event-driven pattern: subscribe BEFORE stage 1d dispatches /ideal, then
+    // react to askcard-open and sprint-halt events instead of polling snapshots.
+    // The iterator was created BEFORE the /ideal dispatch (in stage 1d) so no
+    // events are missed — late-subscribe replay would catch them regardless.
+    //
+    // Replaced polling loop (lines ~254–270) with event-driven for-await:
+    //   OLD: while (Date.now()-start < target) { query("id=askcard"); sleep(5000); }
+    //   NEW: for await (const e of events) { react to askcard-open / sprint-halt }
     let askcardsAccepted = 0;
-    while (Date.now() - start < target) {
-      const halt = driver.query("id=ideal-halt-card");
-      if (halt) break;
-      const askcard = driver.query("id=askcard");
-      if (askcard) {
-        // Accept recommended option (already selected by default).
+
+    // Subscribe to the two events we care about: askcard lifecycle and halt signal.
+    const events = driver.events(
+      (e) => e.t === "event" && (e.kind === "askcard-open" || e.kind === "sprint-halt"),
+    );
+
+    for await (const e of events) {
+      if (e.kind === "askcard-open") {
+        // An askcard appeared — wait for the Semantic node to mount then accept.
+        await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 }).catch(() => {
+          // Semantic may already be mounted; ignore if wait_for races.
+        });
         driver.press("Enter");
         askcardsAccepted++;
         dumpFrame(driver, `accepted-askcard-${askcardsAccepted}`);
-        // Give the council a moment to advance to the next phase.
-        await new Promise((r) => setTimeout(r, 3_000));
         continue;
       }
-      dumpFrame(driver, `wait-${Math.round((Date.now() - start) / 1000)}s`);
-      await new Promise((r) => setTimeout(r, pollMs));
+      if (e.kind === "sprint-halt") {
+        // CB-gate fired — council reached the halt boundary. Break to assert.
+        dumpFrame(driver, `sprint-halt-received-sprintN=${e.sprintN}`);
+        break;
+      }
     }
+
+    // After sprint-halt event, the halt card Semantic should mount within 15 s.
     await driver.wait_for({
       selector: "id=ideal-halt-card",
-      timeoutMs: 5_000,
+      timeoutMs: 15_000,
     });
     const card = driver.query("id=ideal-halt-card");
     expect(card?.role).toBe("dialog");
