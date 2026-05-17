@@ -351,6 +351,12 @@ export class Agent {
    * non-message calls don't reuse stale data.
    */
   private _lastPromptBreakdown: Record<string, number> | null = null;
+  /**
+   * Task 2.6a — Per-streamText-call correlation ID for llm-token / llm-done harness events.
+   * Set to crypto.randomUUID() at the start of each streamText call; cleared to "" after llm-done.
+   * Empty string means no active call.
+   */
+  private _currentCallId = "";
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -1322,6 +1328,9 @@ export class Agent {
         });
       }
 
+      // Task 2.6a — assign a fresh correlation ID for this streamText call.
+      this._currentCallId = crypto.randomUUID();
+      const _subCallId = this._currentCallId;
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1335,7 +1344,7 @@ export class Agent {
           ? {}
           : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
-        onFinish: ({ totalUsage }) => {
+        onFinish: ({ totalUsage, finishReason }) => {
           const tu = totalUsage as Record<string, unknown>;
           const details = tu.inputTokenDetails as Record<string, unknown> | undefined;
           const raw = tu.raw as Record<string, unknown> | undefined;
@@ -1347,9 +1356,26 @@ export class Agent {
           const cacheCreationTokens =
             asNumber(details?.cacheWriteTokens) ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
           this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
+          // Task 2.6b — emit llm-done (agent-mode only).
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "llm-done",
+              correlationId: _subCallId,
+              totalChars: assistantText.length,
+              finishReason: finishReason ?? "stop",
+            });
+          } catch {
+            /* best-effort */
+          }
+          this._currentCallId = "";
         },
       });
 
+      let _subTokenIndex = 0;
       for await (const part of result.fullStream) {
         if (signal?.aborted) {
           break;
@@ -1357,6 +1383,21 @@ export class Agent {
 
         if (part.type === "text-delta") {
           assistantText += part.text;
+          // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "llm-token",
+              correlationId: _subCallId,
+              delta: part.text,
+              tokenIndex: _subTokenIndex++,
+            });
+          } catch {
+            /* best-effort */
+          }
           continue;
         }
 
@@ -3828,6 +3869,9 @@ export class Agent {
             toolsCount,
           };
 
+          // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
+          this._currentCallId = crypto.randomUUID();
+          const _topCallId = this._currentCallId;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -3867,9 +3911,27 @@ export class Agent {
                 this.recordUsage(stepUsage, "message", runtime.modelId);
               }
             },
-            onFinish: () => {},
+            onFinish: ({ finishReason }) => {
+              // Task 2.6b — emit llm-done (agent-mode only).
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "llm-done",
+                  correlationId: _topCallId,
+                  totalChars: assistantText.length,
+                  finishReason: finishReason ?? "stop",
+                });
+              } catch {
+                /* best-effort */
+              }
+              this._currentCallId = "";
+            },
           });
 
+          let _topTokenIndex = 0;
           for await (const part of result.fullStream) {
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
@@ -3879,6 +3941,21 @@ export class Agent {
             switch (part.type) {
               case "text-delta":
                 assistantText += part.text;
+                // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+                try {
+                  const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                    | { emitEvent: (e: unknown) => void }
+                    | undefined;
+                  _ar?.emitEvent({
+                    t: "event",
+                    kind: "llm-token",
+                    correlationId: _topCallId,
+                    delta: part.text,
+                    tokenIndex: _topTokenIndex++,
+                  });
+                } catch {
+                  /* best-effort */
+                }
                 yield { type: "content", content: part.text };
                 break;
 
