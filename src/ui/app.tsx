@@ -3121,6 +3121,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     `[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
                   );
                 }
+                const _chunkType = chunk.type;
                 if (chunk.type === "content") {
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
@@ -3283,8 +3284,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   });
                 }
                 if (chunk.type === "done") break;
+                if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                  process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);
+                }
+              }
+              if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                process.stderr.write(`[ideal-loop-exit] for-await ended cleanly\n`);
               }
             } catch (e: unknown) {
+              if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
+              }
               setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
             } finally {
               setCouncilPhases([]);

@@ -272,6 +272,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         // Drain emitted chunks while waiting for gatherTask to finish.
         const _drainDbg = process.env.MUONROI_DEBUG_LEADER === "1";
+        let _drainTick = 0;
         while (!gatherDone.value) {
           while (gatherEmitted.length > 0) {
             const c = gatherEmitted.shift() as StreamChunk;
@@ -282,9 +283,18 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               );
             }
             yield c;
+            if (_drainDbg) {
+              process.stderr.write(`[drain] post-yield, queue=${gatherEmitted.length}\n`);
+            }
           }
           // Yield to the event loop briefly so emit + async respond can advance.
           await new Promise<void>((r) => setTimeout(r, 50));
+          _drainTick++;
+          if (_drainDbg && _drainTick % 20 === 0) {
+            process.stderr.write(
+              `[drain] tick=${_drainTick}, queue=${gatherEmitted.length}, done=${gatherDone.value}\n`,
+            );
+          }
         }
         if (_drainDbg) {
           process.stderr.write(
