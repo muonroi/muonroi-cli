@@ -264,12 +264,47 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
 
     for await (const e of events) {
       if (e.kind === "askcard-open") {
-        // An askcard appeared — wait for the Semantic node to mount then accept.
-        await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 }).catch(() => {
-          // Semantic may already be mounted; ignore if wait_for races.
-        });
+        // Read the actual question + option list from the snapshot instead of
+        // blindly pressing Enter (which accepts the first option = often
+        // "override" — a meta-control that opens a freetext JSON prompt the
+        // spec cannot answer, causing council to loop the same question).
+        await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 }).catch(() => {});
+
+        const card = driver.query("id=askcard");
+        const question = card?.name ?? "<unknown>";
+        const opts = driver.queryAll("id=askcard >> role=button");
+        const optSummary = opts
+          .map((o) => `${o.id}${o.selected ? "[sel]" : ""}=${JSON.stringify(o.name ?? "")}`)
+          .join(", ");
+        try {
+          appendFileSync(
+            DIAG_LOG,
+            `[askcard-q${askcardsAccepted + 1}] Q=${JSON.stringify(question)}\n` +
+              `[askcard-q${askcardsAccepted + 1}] OPTS=${optSummary}\n`,
+          );
+        } catch {}
+
+        // Pick strategy:
+        //  1. Prefer 'skip' (universal "use defaults, move on")
+        //  2. Else first option whose id ≠ override/abort (real choice)
+        //  3. Else first option (last resort)
+        const skipIdx = opts.findIndex((o) => o.id === "askcard-option-skip");
+        const overrideOrAbort = (id?: string) =>
+          id === "askcard-option-override" || id === "askcard-option-abort";
+        const choiceIdx = opts.findIndex((o) => !overrideOrAbort(o.id));
+        const targetIdx = skipIdx >= 0 ? skipIdx : choiceIdx >= 0 ? choiceIdx : 0;
+        const currentIdx = Math.max(0, opts.findIndex((o) => o.selected));
+
+        const diff = targetIdx - currentIdx;
+        for (let i = 0; i < Math.abs(diff); i++) {
+          driver.press(diff > 0 ? "Down" : "Up");
+        }
         driver.press("Enter");
         askcardsAccepted++;
+        const picked = opts[targetIdx]?.name ?? `idx${targetIdx}`;
+        try {
+          appendFileSync(DIAG_LOG, `[askcard-q${askcardsAccepted}] PICKED=${JSON.stringify(picked)}\n`);
+        } catch {}
         dumpFrame(driver, `accepted-askcard-${askcardsAccepted}`);
         continue;
       }
