@@ -83,6 +83,11 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       recommendation = await opts.recommender.leaderRecommend(recInput);
     }
 
+    // Per-question skip-attempt counter for required questions.
+    // Resets when the user provides a real answer (accept/override).
+    let skipAttempts = 0;
+    const MAX_SKIP_ATTEMPTS = 3;
+
     for (;;) {
       const ans = await opts.userPrompt({
         questionId: question.id,
@@ -91,11 +96,21 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
 
       if (ans.action === "skip") {
         if (effectivelyRequired) {
+          skipAttempts += 1;
+          if (skipAttempts >= MAX_SKIP_ATTEMPTS) {
+            // Budget exhausted: escalate this question as unspecified and
+            // break out of the inner loop. Downstream CB-3 will surface a
+            // clean halt-card because a required dimension stays unresolved.
+            break;
+          }
           await opts.userPrompt({ questionId: question.id, message: "Required question cannot be skipped" });
           continue;
         }
         break;
       }
+
+      // User provided a real answer — reset the skip counter.
+      skipAttempts = 0;
 
       let chosenValue: any;
       if (ans.action === "accept") {
