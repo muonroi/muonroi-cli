@@ -62,7 +62,12 @@ function dumpFrame(driver: Driver, label: string): void {
         n.selected ? "sel" : null,
         n.isModal ? "modal" : null,
       ].filter(Boolean).join(",");
-      const value = n.value ? ` value=${JSON.stringify(String(n.value).slice(0, 120))}` : "";
+      // Always include value for the composer node even if empty — the post-Tab
+      // plainText fallback makes this the primary diagnostic for Tab autocomplete.
+      const value =
+        (n.id === "composer" || n.value)
+          ? ` value=${JSON.stringify(String(n.value ?? "").slice(0, 120))}`
+          : "";
       const name = n.name ? ` name=${JSON.stringify(String(n.name).slice(0, 80))}` : "";
       lines.push(`${"  ".repeat(depth)}${n.id}(${n.role})${flags ? `[${flags}]` : ""}${name}${value}`);
       if (n.children) walk(n.children, depth + 1);
@@ -73,7 +78,7 @@ function dumpFrame(driver: Driver, label: string): void {
     `[${label}] seq=${frame.seq} focus=${frame.focus} modals=${JSON.stringify(frame.modals)}`,
     ...lines,
   ].join("\n");
-  try { appendFileSync(DIAG_LOG, summary + "\n"); } catch {}
+  try { appendFileSync(DIAG_LOG, `${summary}\n`); } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -226,12 +231,18 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     // capture the space character before the menu auto-completes.
     driver.press("Tab");
     await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Diagnostic dump immediately after Tab: the composer node's value now
+    // reflects inputRef.current.plainText (not just slashSearchQuery), so a
+    // working Tab shows value="/ideal " while a failed Tab shows value="" or
+    // value="/ideal" (no trailing space). Also confirms slash-menu is gone.
+    dumpFrame(driver, "after-tab");
   });
 
   it("stage 1d: typing idea + Enter dispatches /ideal command", async () => {
     // --force-council bypasses Layer-1 complexity routing (low → hot-path);
     // ensures the council debate actually runs so CB-3 can emit a halt chunk
     // when no verify recipe is found in the empty cwd.
+    dumpFrame(driver, "before-dispatch");
     driver.type("--force-council build fraud detection service");
     driver.press("Enter");
     // Slash dispatched; composer clears, council debate begins.
