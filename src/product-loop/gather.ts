@@ -49,11 +49,22 @@ function buildLiveTuiAsk(
   respondToQuestion: (questionId: string) => Promise<string>,
 ): (label: string, options?: string[]) => Promise<string> {
   return async (label, options) => {
+    const _dbg = process.env.MUONROI_DEBUG_LEADER === "1";
     if (!options || options.length === 0) {
+      if (_dbg) {
+        process.stderr.write(
+          `[tuiask] info-emit: ${JSON.stringify({ labelPreview: label.slice(0, 80) })}\n`,
+        );
+      }
       emit({ type: "content", content: `\n> ${label}\n` } as StreamChunk);
       return "";
     }
     const questionId = crypto.randomUUID();
+    if (_dbg) {
+      process.stderr.write(
+        `[tuiask] emit-question: ${JSON.stringify({ questionId, labelPreview: label.slice(0, 80), optionCount: options.length })}\n`,
+      );
+    }
     emit({
       type: "council_question",
       content: label,
@@ -66,7 +77,17 @@ function buildLiveTuiAsk(
         defaultIndex: 0,
       },
     } as StreamChunk);
-    return await respondToQuestion(questionId);
+    const _awaitStart = Date.now();
+    if (_dbg) {
+      process.stderr.write(`[tuiask] await-start: ${JSON.stringify({ questionId })}\n`);
+    }
+    const result = await respondToQuestion(questionId);
+    if (_dbg) {
+      process.stderr.write(
+        `[tuiask] await-resolved: ${JSON.stringify({ questionId, durationMs: Date.now() - _awaitStart, resultPreview: result.slice(0, 40) })}\n`,
+      );
+    }
+    return result;
   };
 }
 
