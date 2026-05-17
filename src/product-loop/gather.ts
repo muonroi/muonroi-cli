@@ -3,7 +3,7 @@
 // buildDiscoveryDebateRunner ← Task 16
 // buildGatherUserPrompt      ← Task 17
 
-import { resolveLeaderModel } from "../council/leader.js";
+import { resolveLeaderModelDetailed } from "../council/leader.js";
 import type { ClarifiedSpec } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { detectExistingProject } from "./discovery-detection.js";
@@ -148,13 +148,27 @@ export async function runGatherPhase(
     if (existing) return existing;
 
     const detection = await detectExistingProject(cwd);
-    const leaderModelId = resolveLeaderModel(sessionModelId);
+    const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
+    const leaderModelId = leaderResolution.modelId;
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        "[leader-resolve] leaderModelId=" +
+          leaderModelId +
+          " sessionModelId=" +
+          sessionModelId +
+          (leaderResolution.promotedFrom ? " promotedFrom=" + leaderResolution.promotedFrom.modelId : "") +
+          (leaderResolution.defaulted ? " defaulted=true" : "") +
+          "\n",
+      );
+    }
 
     // Minimal LeaderLike adapter for parsePromptForContext / recommender.
     // LeaderLike expects {content, costUsd} but council llm.generate returns
     // just the text string — wrap it so leaderRecommend can parse the result
     // (otherwise res.content is undefined → falls back to "leader unavailable").
-    const leader: LeaderLike = {
+    // modelId is set so emitLeaderDebug logs the actual model instead of "unknown".
+    const leader: LeaderLike & { modelId: string } = {
+      modelId: leaderModelId,
       generate: async (args: { system: string; prompt: string; maxTokens: number }) => {
         const text = await llm.generate(leaderModelId, args.system, args.prompt, args.maxTokens);
         return { content: text, costUsd: 0 };
