@@ -2211,6 +2211,16 @@ export class Agent {
   // ========================================================================
 
   respondToCouncilQuestion(questionId: string, answer: string): void {
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        `[responder] respondToCouncilQuestion: ${JSON.stringify({
+          questionId,
+          answerPreview: answer.slice(0, 40),
+          hadResolver: this._councilQuestionResolvers.has(questionId),
+          pendingResolverCount: this._councilQuestionResolvers.size,
+        })}\n`,
+      );
+    }
     const resolver = this._councilQuestionResolvers.get(questionId);
     if (resolver) {
       resolver(answer);
@@ -2237,9 +2247,19 @@ export class Agent {
       new Promise<string>((resolve) => {
         const buffered = this._councilBufferedQuestionAnswers.get(questionId);
         if (buffered !== undefined) {
+          if (process.env.MUONROI_DEBUG_LEADER === "1") {
+            process.stderr.write(
+              `[responder] drain-buffered: ${JSON.stringify({ questionId, bufferedSize: this._councilBufferedQuestionAnswers.size })}\n`,
+            );
+          }
           this._councilBufferedQuestionAnswers.delete(questionId);
           resolve(buffered);
           return;
+        }
+        if (process.env.MUONROI_DEBUG_LEADER === "1") {
+          process.stderr.write(
+            `[responder] register-resolver: ${JSON.stringify({ questionId, totalResolvers: this._councilQuestionResolvers.size + 1 })}\n`,
+          );
         }
         this._councilQuestionResolvers.set(questionId, resolve);
       });
