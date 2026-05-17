@@ -289,6 +289,60 @@ describe("discovery-recommender — MUONROI_DEBUG_LEADER instrumentation", () =>
   });
 });
 
+describe("discovery-recommender — 401 fast-fail", () => {
+  const baseInput = {
+    question: { id: "productType", required: true, recommendMode: "leader", prompt: "What type?" } as any,
+    context: {},
+    detection: {
+      isGitRepo: false,
+      hasCommitHistory: false,
+      srcFileCount: 0,
+      manifests: [],
+      languages: [],
+      frameworks: [],
+      classification: "greenfield",
+    } as any,
+  };
+
+  it("does NOT call generate a second time when attempt 0 throws a 401 status error", async () => {
+    const unauthorizedErr = Object.assign(new Error("Unauthorized"), { status: 401 });
+    const leader = makeLeader([unauthorizedErr]);
+    // makeLeader only has one item — if attempt 1 fires it would throw "shift from empty"
+    // we spy to assert call count explicitly
+    const generateSpy = vi.spyOn(leader, "generate");
+
+    const rec = await leaderRecommend(baseInput, leader as any);
+
+    expect(generateSpy).toHaveBeenCalledTimes(1);
+    expect(rec.source).toBe("user-only");
+    expect(rec.primary.rationale).toBe("leader unavailable; awaiting user");
+  });
+
+  it("does NOT call generate a second time when attempt 0 throws a statusCode 401 error", async () => {
+    const unauthorizedErr = Object.assign(new Error("HTTP 401 Unauthorized"), { statusCode: 401 });
+    const leader = makeLeader([unauthorizedErr]);
+    const generateSpy = vi.spyOn(leader, "generate");
+
+    const rec = await leaderRecommend(baseInput, leader as any);
+
+    expect(generateSpy).toHaveBeenCalledTimes(1);
+    expect(rec.source).toBe("user-only");
+  });
+
+  it("DOES retry on a non-401 error (e.g. network timeout)", async () => {
+    const networkErr = new Error("ECONNRESET");
+    const leader = makeLeader([
+      networkErr,
+      JSON.stringify({ primary: { value: "saas", rationale: "ok" }, alternatives: [] }),
+    ]);
+
+    const rec = await leaderRecommend(baseInput, leader as any);
+
+    expect(rec.source).toBe("leader");
+    expect(rec.primary.value).toBe("saas");
+  });
+});
+
 describe("discovery-recommender — cost guard + 429", () => {
   it("guard = max($2.50, 0.15 * capUsd)", () => {
     expect(computeCostGuard(0)).toBe(2.5);
