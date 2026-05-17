@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "0.1.0" as const;
+export const PROTOCOL_VERSION = "0.2.0" as const;
 
 export type Role =
   | "dialog"
@@ -54,6 +54,100 @@ export type LiveFrame = {
 export type LiveEvent =
   | { t: "event"; kind: "stream.delta"; target: string; text: string }
   | { t: "event"; kind: "toast"; level: "info" | "warn" | "error"; text: string; ttlMs?: number }
+  // Phase 1 — lifecycle events (1.1–1.9)
+  | {
+      t: "event";
+      kind: "llm-token";
+      /** Correlation ID — matches the runId or callId passed at emit time. */
+      correlationId: string;
+      /** The raw text delta exactly as the model returned it. */
+      delta: string;
+      /** Monotonic token index within this call (0-based). */
+      tokenIndex: number;
+    }
+  | {
+      t: "event";
+      kind: "llm-done";
+      correlationId: string;
+      /** Total text chars emitted (not token count — avoids provider coupling). */
+      totalChars: number;
+      /** Finish reason from the AI SDK: "stop" | "length" | "tool-calls" | "error" | "other". */
+      finishReason: string;
+    }
+  | {
+      t: "event";
+      kind: "council-step";
+      phaseId: string;
+      /** CouncilPhaseKind string union (kept as string to avoid cross-package dep).
+       *  Source enum: CouncilPhaseKind in src/types/index.ts */
+      phaseKind: string;
+      /** "active" | "done" | "error" */
+      state: string;
+      label: string;
+      elapsedMs?: number;
+    }
+  | {
+      t: "event";
+      kind: "council-speaker";
+      /** The council role label (e.g. "architect", "security", "qa"). */
+      role: string;
+      /** "start" — speaker began their turn; "done" — speaker finished. */
+      status: "start" | "done";
+      /** Round number if available from the status chunk. */
+      round?: number;
+      /** Correlation ID linking this speaker event to the enclosing council run. */
+      correlationId: string;
+    }
+  | {
+      t: "event";
+      kind: "askcard-open";
+      questionId: string;
+      question: string;
+      /** "clarify" | "preflight" | "plan-confirm" | "post-debate" */
+      phase: string;
+      optionCount: number;
+      defaultIndex?: number;
+    }
+  | {
+      t: "event";
+      kind: "askcard-answered";
+      questionId: string;
+      /** "choice" | "freetext" | "chat" */
+      answerKind: string;
+      /** The answer text. Redacted to "[redacted]" if it contains any API key pattern. */
+      answerText: string;
+    }
+  | {
+      t: "event";
+      kind: "askcard-cancel";
+      questionId: string;
+    }
+  | {
+      t: "event";
+      kind: "sprint-stage";
+      /** Sprint number (1-based). */
+      sprintIndex: number;
+      /** Current stage entering. */
+      stage: "planning" | "implementation" | "verification" | "judgment";
+      runId: string;
+    }
+  | {
+      t: "event";
+      kind: "sprint-halt";
+      sprintN: number;
+      /** Halt reason as surfaced by the CB gate that fired. */
+      reason: string;
+      runId: string;
+    }
+  | {
+      t: "event";
+      kind: "route-decision";
+      /** "hot-path" | "council" */
+      path: "hot-path" | "council";
+      complexity: string;
+      forceCouncil: boolean;
+      runId: string;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;

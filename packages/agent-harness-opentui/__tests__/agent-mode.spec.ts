@@ -81,7 +81,7 @@ describe("AgentMode runtime", () => {
     const line = await readLine(out);
     const parsed = JSON.parse(line);
     expect(parsed.mode).toBe("live");
-    expect(parsed.version).toBe("0.1.0");
+    expect(parsed.version).toBe("0.2.0");
     expect(parsed.nodes).toHaveLength(1);
     expect(parsed.nodes[0]).toMatchObject({ id: "btn1", role: "button", name: "Send" });
   });

@@ -49,7 +49,7 @@ function makeStubDriver(frame: LiveFrame, nodes: UINode[]): Driver {
 
 const sampleFrame: LiveFrame = {
   mode: "live",
-  version: "0.1.0",
+  version: "0.2.0",
   seq: 7,
   ts: 0,
   nodes: [{ id: "n1", role: "button", name: "Send" }],
