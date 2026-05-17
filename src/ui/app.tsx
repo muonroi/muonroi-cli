@@ -1019,6 +1019,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [showSlashMenu, setShowSlashMenu] = useState(false);
+  // Ref stays current synchronously so keyboard-burst handlers read the right value
+  const showSlashMenuRef = useRef(false);
+  const setShowSlashMenuSync = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setShowSlashMenu((prev) => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      showSlashMenuRef.current = next;
+      return next;
+    });
+  }, []);
   const [slashMenuIndex, setSlashMenuIndex] = useState(0);
   const [slashSearchQuery, setSlashSearchQuery] = useState("");
   const [btwState, setBtwState] = useState<BtwState | null>(null);
@@ -3337,7 +3346,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handleSlashMenuSelect = useCallback(
     (item: SlashMenuItem) => {
-      setShowSlashMenu(false);
+      setShowSlashMenuSync(false);
       inputRef.current?.clear();
       switch (item.id) {
         case "new":
@@ -3662,7 +3671,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     showScheduleModal ||
     showAgentsModal ||
     showAgentsEditor ||
-    showUpdateModal;
+    showUpdateModal ||
+    // Overlay forms — when these are up the composer textarea must NOT capture
+    // Enter, otherwise PromptBox.onSubmit fires first and swallows the key
+    // before the global useKeyboard handler can route it to the overlay's
+    // own Enter handler (halt-card → init-new, init-new step transitions,
+    // point-to-existing path validation).
+    activeHaltCard !== null ||
+    initNewForm !== null ||
+    pointToExistingForm !== null;
 
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
@@ -4387,9 +4404,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
-      if (showSlashMenu) {
+      if (showSlashMenuRef.current) {
         if (isEscapeKey(key)) {
-          setShowSlashMenu(false);
+          setShowSlashMenuSync(false);
           setSlashSearchQuery("");
           inputRef.current?.clear();
           key.preventDefault?.();
@@ -4415,7 +4432,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             // No items match the current filter — close the menu and let
             // Enter fall through to the textarea's submit handler so the
             // typed command (e.g. "/council <topic>") is submitted as-is.
-            setShowSlashMenu(false);
+            setShowSlashMenuSync(false);
             setSlashSearchQuery("");
             // Do NOT call key.preventDefault() — textarea must receive Enter.
           }
@@ -4427,7 +4444,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           const item = filteredSlashItems[slashMenuIndex];
           if (item) {
             const completion = `/${item.id} `;
-            setShowSlashMenu(false);
+            setShowSlashMenuSync(false);
             setSlashSearchQuery("");
             const ta = inputRef.current;
             if (ta) {
@@ -4461,7 +4478,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           // If the query is already empty, the next backspace will eat the
           // leading "/" — close the menu so the user is back to free typing.
           if (slashSearchQuery.length === 0) {
-            setShowSlashMenu(false);
+            setShowSlashMenuSync(false);
           }
           return;
         }
@@ -4759,7 +4776,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       if (key.sequence === "/" && !isProcessing) {
         const text = inputRef.current?.plainText || "";
         if (!text.trim()) {
-          setShowSlashMenu(true);
+          setShowSlashMenuSync(true);
           setSlashMenuIndex(0);
           setSlashSearchQuery("");
           // Mirror the leading "/" into the input field so the cursor stays
@@ -5150,7 +5167,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       return;
     }
     if (handleCommand(message)) {
-      setShowSlashMenu(false);
+      setShowSlashMenuSync(false);
       setSlashSearchQuery("");
       return;
     }
