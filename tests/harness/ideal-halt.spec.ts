@@ -83,15 +83,16 @@ describe("ideal halt recovery card E2E", () => {
 
   it("Down arrow moves selection to second option", async () => {
     driver.press("Down");
-    // Poll for state to actually update — idle fires after 50ms but React's
-    // selected state commit may land within that window, creating a race.
-    let opts: ReturnType<typeof driver.queryAll> = [];
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
-      if (opts[1]?.selected === true) break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    // Wait for the snapshot to reflect the new selected state. Using a
+    // selector with the `selected` flag is more reliable than polling
+    // wait_for({idle}) — the latter resolves on the first idle event and
+    // can miss the window between React's batched state commit and the
+    // 16ms setInterval reconciler tick.
+    await driver.wait_for({
+      selector: "id=halt-option-point_to_existing selected",
+      timeoutMs: 10_000,
+    });
+    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
     expect(opts[0]?.selected).toBeFalsy();
     expect(opts[1]?.selected).toBe(true);
   });

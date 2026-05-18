@@ -46,15 +46,14 @@ describe("point-to-existing form E2E", () => {
   it("navigate Down to select 'Point to existing recipe'", async () => {
     // Default selection is index 0 (init_new). Press Down once to reach index 1.
     driver.press("Down");
-    // Poll for state to actually update — idle fires after 50ms but React's
-    // selected state commit may land within that window, creating a race.
-    let opts: ReturnType<typeof driver.queryAll> = [];
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline) {
-      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
-      if (opts[1]?.selected === true) break;
-      await new Promise((r) => setTimeout(r, 50));
-    }
+    // Wait for the snapshot to reflect the new selected state via selector
+    // with `selected` flag (more reliable than wait_for({idle}), which can
+    // resolve in the window between React's state commit and reconciler tick).
+    await driver.wait_for({
+      selector: "id=halt-option-point_to_existing selected",
+      timeoutMs: 10_000,
+    });
+    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
     expect(opts[1]?.selected).toBe(true);
   });
 
