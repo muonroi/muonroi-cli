@@ -46,14 +46,23 @@ describe("point-to-existing form E2E", () => {
   it("navigate Down to select 'Point to existing recipe'", async () => {
     // Default selection is index 0 (init_new). Press Down once to reach index 1.
     driver.press("Down");
-    // Wait for the snapshot to reflect the new selected state via selector
-    // with `selected` flag (more reliable than wait_for({idle}), which can
-    // resolve in the window between React's state commit and reconciler tick).
-    await driver.wait_for({
-      selector: "id=halt-option-point_to_existing selected",
-      timeoutMs: 10_000,
-    });
-    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+    // Sticky-poll — wait until 3 consecutive snapshots agree that opts[1] is
+    // selected. The single-frame check is racy on POSIX because React's
+    // useEffect cleanup/re-register cycle can leave items transiently missing
+    // from the snapshot while the listitems re-mount with new props.
+    let stable = 0;
+    const deadline = Date.now() + 10_000;
+    let opts: ReturnType<typeof driver.queryAll> = [];
+    while (Date.now() < deadline) {
+      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+      if (opts.length === 3 && opts[1]?.selected === true) {
+        stable++;
+        if (stable >= 3) break;
+      } else {
+        stable = 0;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(opts[1]?.selected).toBe(true);
   });
 
