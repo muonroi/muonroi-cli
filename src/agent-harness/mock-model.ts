@@ -80,6 +80,13 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
     doStream: async () => {
       const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
       callIdx += 1;
+      if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+        // Useful when diagnosing harness specs that stall before streamText —
+        // a missing log line means doStream was never invoked.
+        process.stderr.write(
+          `[mock-model] doStream #${callIdx} → ${chunks.length} parts, types=${chunks.map((c) => c.type).join(",")}\n`,
+        );
+      }
       return {
         stream: simulateReadableStream<LanguageModelV3StreamPart>({
           chunks,
@@ -134,6 +141,34 @@ export function textOnlyStream(text: string, usage?: { inputTokens: number; outp
       usage: buildUsage(inputTotal, outputTotal),
     },
   ];
+}
+
+/**
+ * Convenience: emit a deterministic error stream-part.
+ *
+ * Used by harness specs that need to verify the orchestrator's error-handling
+ * path (and the resulting `toast` LiveEvent emitted by app.tsx). The
+ * `LanguageModelV3StreamPart` of type `error` is what real providers emit when
+ * the API rejects or fails mid-stream; orchestrator.ts handles it by yielding
+ * a `type:"error"` StreamChunk, which app.tsx maps to a `toast` event.
+ *
+ * Unlike `mock-llm.ts` error injection (which depends on prompt-substring
+ * matching surviving the system-prompt prefix), this emits unconditionally on
+ * every `doStream` call, making it deterministic in CI.
+ */
+export function errorStream(opts?: { message?: string; injectStreamStart?: boolean }): StreamChunks {
+  const message = opts?.message ?? "mock LLM error: simulated provider failure";
+  const parts: StreamChunks = [];
+  if (opts?.injectStreamStart !== false) {
+    parts.push({ type: "stream-start", warnings: [] });
+  }
+  parts.push({ type: "error", error: new Error(message) });
+  parts.push({
+    type: "finish",
+    finishReason: { unified: "error" as const, raw: undefined },
+    usage: buildUsage(0, 0),
+  });
+  return parts;
 }
 
 /**
@@ -198,6 +233,24 @@ export interface LoadedMockModelHandle extends MockModelHandle {
  * fields exposed by `resolveModelRuntime` so TUI E2E specs can verify G1
  * (param-drop) and F1 (provider-options injection) end-to-end.
  */
+/**
+ * Normalize fixture-JSON stream parts: when an `{ type: "error" }` part is
+ * loaded from JSON, its `error` field arrives as a plain string. The
+ * orchestrator's `humanizeApiError` accepts non-Error inputs, but the AI SDK
+ * stream-loop (and downstream serializers) prefer `Error` instances. Wrap
+ * string payloads here so the rest of the pipeline sees a uniform shape.
+ */
+function normalizeStreamChunks(chunks: StreamChunks): StreamChunks {
+  return chunks.map((c) => {
+    if (c && (c as { type?: string }).type === "error") {
+      const raw = (c as { error?: unknown }).error;
+      const err = raw instanceof Error ? raw : new Error(typeof raw === "string" ? raw : "mock LLM error");
+      return { ...(c as object), error: err } as typeof c;
+    }
+    return c;
+  });
+}
+
 export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModelHandle | null> {
   const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -210,7 +263,16 @@ export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModel
       };
     };
     if (raw.model !== undefined) {
-      const base = createMockModel(raw.model);
+      // Wrap plain-string `error` payloads in Error instances before passing
+      // to createMockModel, so the AI SDK stream-loop and orchestrator see a
+      // consistent Error shape regardless of fixture serialization.
+      const normalized: MockModelFixture = {
+        ...raw.model,
+        stream: isNestedArray(raw.model.stream)
+          ? raw.model.stream.map(normalizeStreamChunks)
+          : normalizeStreamChunks(raw.model.stream),
+      };
+      const base = createMockModel(normalized);
       return {
         model: base.model,
         get calls() {

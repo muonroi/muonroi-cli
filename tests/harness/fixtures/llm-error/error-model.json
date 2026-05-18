@@ -1,0 +1,18 @@
+{
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-error",
+    "stream": [
+      { "type": "stream-start", "warnings": [] },
+      { "type": "error", "error": "mock LLM error: simulated provider failure" },
+      {
+        "type": "finish",
+        "finishReason": { "unified": "error", "raw": null },
+        "usage": {
+          "inputTokens": { "total": 0, "noCache": 0 },
+          "outputTokens": { "total": 0, "text": 0 }
+        }
+      }
+    ]
+  }
+}
