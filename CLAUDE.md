@@ -52,6 +52,9 @@ When the scaffold target resolves to `muonroi-building-block` (BB) — i.e., pre
 
 Ingestion + collection layout: `docs/agent-harness/EE-INGESTION.md`.
 
+EE failure-mode reference (what every call site does when EE is down):
+`docs/ee/EE-DOWN-BEHAVIOR.md`.
+
 Feature flag: `userSettings.eeBBContext: false` to disable BB retrieval.
 
 ## Workflow: verify a new TUI feature
