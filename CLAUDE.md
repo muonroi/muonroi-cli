@@ -483,7 +483,7 @@ Optional env overrides for the caps:
 
 Before opening a PR:
 1. `bunx tsc --noEmit` — 0 errors
-2. `bunx vitest run` from Windows — full unit + headless suite (4 pre-existing PIL failures are baseline noise unrelated to harness)
+2. `bunx vitest run` from Windows — full unit + headless suite. PIL suite is fully green (the 4 pre-existing PIL failures were resolved in commit `955b8c6`). On Linux, two unrelated flaky failures may surface: `src/mcp/smoke.test.ts` "discovers tools from stdio MCP echo stub" (needs node + MCP framing; already `skipIf` Windows/CI) and `packages/agent-harness-core/__tests__/browser-bundle.spec.ts` "contains no Node built-ins" (esbuild EPIPE teardown race). Neither blocks merge.
 3. `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest run tests/harness/'` — POSIX E2E confirmed
 4. If you added a TUI element: confirm `<Semantic>` is wrapping it (otherwise harness can't see it)
 5. If you added a slash command or modal: write an E2E spec under `tests/harness/`
