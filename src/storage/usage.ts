@@ -33,6 +33,7 @@ export function recordUsageEvent(
   messageSeq?: number | null,
   pilActive = false,
   enrichmentDelta = 0,
+  providerOptionsShape: string | null = null,
 ): void {
   if (!usage) return;
 
@@ -48,8 +49,8 @@ export function recordUsageEvent(
     .prepare(`
     INSERT INTO usage_events (
       session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at,
-      pil_active, enrichment_delta, cache_read_tokens, cache_creation_tokens
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      pil_active, enrichment_delta, cache_read_tokens, cache_creation_tokens, provider_options_shape
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
     .run(
       sessionId,
@@ -65,6 +66,7 @@ export function recordUsageEvent(
       enrichmentDelta,
       cacheReadTokens,
       cacheCreationTokens,
+      providerOptionsShape,
     );
 }
 

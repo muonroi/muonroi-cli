@@ -139,6 +139,25 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
 }
 
 /**
+ * True when the active model's provider is authenticated via OAuth tokens
+ * (subscription login) instead of an API key. Lets the boot flow skip the
+ * first-run wizard for OAuth-only setups like a freshly logged-in ChatGPT
+ * subscription.
+ */
+async function hasOAuthForModel(modelId: string): Promise<boolean> {
+  const provider = detectProviderForModel(modelId);
+  try {
+    const { getOAuthProviderConfig } = await import("./providers/auth/registry.js");
+    const cfg = await getOAuthProviderConfig(provider);
+    if (!cfg) return false;
+    const tokens = await cfg.loadTokensWithRefresh();
+    return !!tokens?.accessToken;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * First-run wizard. If the keychain already has keys, prints a hint
  * (model probably doesn't match any stored provider). Otherwise prompts
  * for provider + key and persists to the OS keychain.
@@ -641,11 +660,16 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     if (!apiKey) {
       const modelForResolve = model ?? delegation.model ?? getCurrentModel("agent");
       const keychainKey = await resolveKeyForModel(modelForResolve);
-      if (keychainKey) apiKey = keychainKey;
+      if (keychainKey) {
+        apiKey = keychainKey;
+      } else if (await hasOAuthForModel(modelForResolve)) {
+        apiKey = "oauth";
+      }
     }
     if (!apiKey) {
       throw new Error(
-        "API key required. Set MUONROI_API_KEY, use --api-key, or save it to ~/.muonroi-cli/user-settings.json.",
+        "API key required. Set MUONROI_API_KEY, use --api-key, save it to ~/.muonroi-cli/user-settings.json, " +
+          "or run 'muonroi-cli keys login <provider>' for subscription OAuth.",
       );
     }
     const maxToolRounds =
@@ -715,7 +739,7 @@ function resolveConfig(options: CliOptions) {
   }
   const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), cliOverrides);
 
-  if (typeof options.apiKey === "string") {
+  if (typeof options.apiKey === "string" && process.env["MUONROI_TEST_NO_PERSIST"] !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.
     // Fire-and-forget: keychain write is async; if it fails (no keytar), the key still
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
@@ -802,6 +826,71 @@ program
     if (typeof options.mockLlm === "string") {
       const { createMockLlm } = await import("@muonroi/agent-harness-core/mock-llm");
       (globalThis as Record<string, unknown>).__muonroiMockLlm = createMockLlm({ dir: options.mockLlm });
+
+      // Phase H1: AI-SDK-level mock. If any fixture declares a `model` block
+      // it is installed so `resolveModelRuntime` returns it instead of the
+      // real provider model. This enables cost-leak verification (G1, F1,
+      // B3/B4, C1) through the orchestrator's streamText path.
+      const { loadMockModelFromDir } = await import("./agent-harness/mock-model.js");
+      const modelHandle = await loadMockModelFromDir(options.mockLlm).catch(() => null);
+      if (modelHandle) {
+        // Install all three globals atomically so the runtime sees a
+        // consistent picture: model + the OAuth-registry-equivalent
+        // unsupportedParams / defaultProviderOptions parsed from the fixture.
+        const g = globalThis as Record<string, unknown>;
+        g.__muonroiMockModel = modelHandle.model;
+        g.__muonroiMockUnsupportedParams = modelHandle.unsupportedParams;
+        g.__muonroiMockDefaultProviderOptions = modelHandle.defaultProviderOptions;
+
+        // Phase H3 — exfiltrate recordings to a file at exit so the parent
+        // vitest spec can assert across the child-process boundary. Activated
+        // only when MUONROI_MOCK_MODEL_DUMP is set; otherwise no-op.
+        const dumpPath = process.env.MUONROI_MOCK_MODEL_DUMP;
+        if (typeof dumpPath === "string" && dumpPath.length > 0) {
+          const { dumpRecordings } = await import("./agent-harness/mock-model.js");
+          let dumped = false;
+          const doDump = (): void => {
+            if (dumped) return;
+            dumped = true;
+            try {
+              dumpRecordings(dumpPath, modelHandle.model);
+            } catch (err) {
+              // Last-ditch: surface on stderr so the parent test can see why.
+              process.stderr.write(`[muonroi-cli] dumpRecordings failed: ${String(err)}\n`);
+            }
+          };
+          // Continuous dump: write after every streamText completes so tests
+          // can read the dump without relying on a graceful exit handler. On
+          // Windows + Bun + named pipes, `process.on("exit")` handlers may
+          // not fire when process.exit() is called from deep async chains
+          // (observed empirically — exit event reaches the parent, but the
+          // exit-handler callbacks in the child never run). Patching
+          // doStream guarantees the dump exists after at least one call.
+          const writeDumpAlways = (): void => {
+            try {
+              dumpRecordings(dumpPath, modelHandle.model);
+            } catch {
+              // ignore — best-effort
+            }
+          };
+          const origDoStream = modelHandle.model.doStream.bind(modelHandle.model);
+          modelHandle.model.doStream = async (options: unknown) => {
+            // biome-ignore lint/suspicious/noExplicitAny: AI SDK call options
+            const r = await origDoStream(options as any);
+            writeDumpAlways();
+            return r;
+          };
+          process.on("exit", doDump);
+          process.on("SIGINT", () => {
+            doDump();
+            process.exit(130);
+          });
+          process.on("SIGTERM", () => {
+            doDump();
+            process.exit(143);
+          });
+        }
+      }
     }
 
     // CI smoke affordance — exit cleanly WITHOUT invoking the provider.
@@ -846,6 +935,11 @@ program
       const keychainKey = await resolveKeyForModel(modelForResolve);
       if (keychainKey) {
         config.apiKey = keychainKey;
+      } else if (await hasOAuthForModel(modelForResolve)) {
+        // OAuth-authenticated provider — runtime will inject Bearer headers.
+        // Set placeholder so downstream gating code (which only checks for
+        // a truthy apiKey) is satisfied.
+        config.apiKey = "oauth";
       }
     }
 
@@ -1244,6 +1338,17 @@ usage
       top: parseInt(opts.top, 10) || 5,
       json: opts.json,
     });
+  });
+
+usage
+  .command("forensics <sessionPrefix>")
+  .description(
+    "Per-event token + cache breakdown for a session (joins usage_events ∪ interaction_logs). Use to verify Phase A/B/C cost-optimization caps.",
+  )
+  .option("--json", "Emit summary as JSON")
+  .action(async (sessionPrefix: string, opts: { json?: boolean }) => {
+    const { runCostForensics } = await import("./cli/cost-forensics.js");
+    await runCostForensics({ prefix: sessionPrefix, json: opts.json });
   });
 
 const mcp = program.command("mcp").description("Manage MCP server configuration");

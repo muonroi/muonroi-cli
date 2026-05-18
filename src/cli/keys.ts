@@ -568,12 +568,13 @@ export async function runKeysLogin(provider: string): Promise<void> {
     const oauth = new OpenAIOAuthProvider();
 
     console.log("Logging in to openai via subscription OAuth...");
+    console.log("A browser window will open. Sign in with your ChatGPT account.");
 
     const tokens = await oauth.login({
-      onUserCode(code, url) {
-        console.log(`\n  Visit: ${url}`);
-        console.log(`  Code:  ${code}`);
-        console.log("\nWaiting for browser approval...");
+      onUserCode(authorizeUrl) {
+        console.log("\n  If the browser does not open, paste this URL manually:");
+        console.log(`  ${authorizeUrl}`);
+        console.log("\n  Waiting for authorization (loopback: http://localhost:1455/auth/callback)...");
       },
     });
 

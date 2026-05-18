@@ -11,18 +11,30 @@ const SUCCESS_HTML = `<!DOCTYPE html><html><body style="font-family:system-ui;te
 <h2>Authorization successful</h2><p>You can close this tab and return to the terminal.</p>
 </body></html>`;
 
-export function startOAuthCallbackServer(opts: {
+export interface StartCallbackServerOpts {
   onCode: (code: string, state: string) => void;
   timeoutMs?: number;
-}): Promise<OAuthCallbackServer> {
+  /** Port to bind. 0 (default) = OS-assigned random port. */
+  port?: number;
+  /** Callback path. Default "/callback". Must start with "/". */
+  path?: string;
+  /** Host to bind. Default "127.0.0.1". Pass "localhost" if the OAuth app registered "http://localhost:..." literally. */
+  host?: string;
+}
+
+export function startOAuthCallbackServer(opts: StartCallbackServerOpts): Promise<OAuthCallbackServer> {
+  const callbackPath = opts.path ?? "/callback";
+  const host = opts.host ?? "127.0.0.1";
+  const requestedPort = opts.port ?? 0;
+
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
-      if (!req.url?.startsWith("/callback")) {
+      if (!req.url?.startsWith(callbackPath)) {
         res.writeHead(404);
         res.end("Not found");
         return;
       }
-      const parsed = new URL(req.url, "http://127.0.0.1");
+      const parsed = new URL(req.url, `http://${host}`);
       const code = parsed.searchParams.get("code");
       const state = parsed.searchParams.get("state") ?? "";
       if (!code) {
@@ -35,14 +47,14 @@ export function startOAuthCallbackServer(opts: {
       opts.onCode(code, state);
     });
 
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(requestedPort, host, () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") {
         reject(new Error("Failed to start callback server"));
         return;
       }
       const port = addr.port;
-      const url = `http://127.0.0.1:${port}/callback`;
+      const url = `http://${host}:${port}${callbackPath}`;
 
       const timeout = setTimeout(() => {
         server.close();

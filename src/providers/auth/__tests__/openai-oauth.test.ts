@@ -1,18 +1,20 @@
 /**
  * Tests for src/providers/auth/openai-oauth.ts
  *
- * Full login flow, refresh (including expiry pre-emption and mutex), and revoke.
- * No live network calls — all HTTP goes through a mockFetch.
+ * Authorization Code + PKCE loopback flow. All HTTP + browser + callback
+ * server are mocked.
  */
 
 import { describe, expect, it, vi } from "vitest";
+import type { OAuthCallbackServer } from "../../../mcp/oauth-callback.js";
 import type { FetchFn } from "../device-flow.js";
+import type { CallbackServerFn, OpenBrowserFn } from "../openai-oauth.js";
 import { OpenAIOAuthProvider } from "../openai-oauth.js";
 import type { OAuthTokens } from "../types.js";
 import { OAuthLoginError, OAuthRefreshError } from "../types.js";
 
 // ---------------------------------------------------------------------------
-// Mock fetch factory
+// Helpers
 // ---------------------------------------------------------------------------
 
 interface MockResponse {
@@ -36,30 +38,36 @@ function makeMockFetch(responses: Array<MockResponse | (() => MockResponse)>) {
   });
 }
 
+/**
+ * Returns a CallbackServerFn that simulates a browser hitting the callback
+ * URL with `?code=<authCode>&state=<state>` shortly after the server binds.
+ * The state echoed back is read from the authorize URL passed to onUserCode
+ * via a captured side-channel.
+ */
+function makeMockCallbackServer(authCode: string, echoState: () => string): CallbackServerFn {
+  return vi.fn(async (opts) => {
+    const port = opts.port ?? 1455;
+    const path = opts.path ?? "/auth/callback";
+    const url = `http://localhost:${port}${path}`;
+    // Fire the callback asynchronously to simulate the browser round-trip.
+    setTimeout(() => opts.onCode(authCode, echoState()), 1);
+    const server: OAuthCallbackServer = {
+      port,
+      url,
+      close: vi.fn(),
+    };
+    return server;
+  }) as unknown as CallbackServerFn;
+}
+
 // ---------------------------------------------------------------------------
 // Happy-path login
 // ---------------------------------------------------------------------------
 
 describe("OpenAIOAuthProvider.login", () => {
-  it("runs full device-code flow and returns tokens with email", async () => {
+  it("runs Authorization Code + PKCE loopback flow and returns tokens with email", async () => {
     const mockFetch = makeMockFetch([
-      // 1. requestDeviceCode
-      {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            device_code: "dev_abc",
-            user_code: "WXYZ-4321",
-            verification_uri: "https://auth.openai.com/activate",
-            expires_in: 300,
-            interval: 0,
-          }),
-      },
-      // 2. poll — pending
-      { ok: true, json: () => Promise.resolve({ status: "pending" }) },
-      // 3. poll — complete
-      { ok: true, json: () => Promise.resolve({ status: "complete", authorization_code: "code_xyz" }) },
-      // 4. token exchange
+      // token exchange
       {
         ok: true,
         json: () =>
@@ -71,64 +79,144 @@ describe("OpenAIOAuthProvider.login", () => {
             account_id: "acc_789",
           }),
       },
-      // 5. userinfo
+      // userinfo
       { ok: true, json: () => Promise.resolve({ email: "user@example.com", name: "Test User" }) },
     ]);
+
+    let capturedAuthorizeUrl = "";
+    const openBrowser: OpenBrowserFn = vi.fn((url: string) => {
+      capturedAuthorizeUrl = url;
+    });
+
+    const callbackServer = makeMockCallbackServer("auth_code_xyz", () => {
+      const u = new URL(capturedAuthorizeUrl);
+      return u.searchParams.get("state") ?? "";
+    });
 
     const provider = new OpenAIOAuthProvider({
       issuer: "https://auth.openai.com",
       clientId: "test_client",
       fetchFn: mockFetch as unknown as FetchFn,
+      callbackServerFn: callbackServer,
+      openBrowserFn: openBrowser,
     });
 
     const userCodeCb = vi.fn();
     const tokens = await provider.login({ onUserCode: userCodeCb });
 
-    expect(userCodeCb).toHaveBeenCalledWith("WXYZ-4321", "https://auth.openai.com/activate");
+    // onUserCode receives the authorize URL (both args identical).
+    expect(userCodeCb).toHaveBeenCalled();
+    const [arg0, arg1] = userCodeCb.mock.calls[0] as [string, string];
+    expect(arg0).toBe(arg1);
+    expect(arg0).toContain("https://auth.openai.com/oauth/authorize");
+    expect(arg0).toContain("response_type=code");
+    expect(arg0).toContain("code_challenge_method=S256");
+    expect(arg0).toContain("codex_cli_simplified_flow=true");
+    expect(arg0).toContain("originator=codex_cli_rs");
+    expect(arg0).toContain("api.connectors.read");
+    expect(arg0).not.toContain("access_type=offline");
+    expect(arg0).not.toContain("prompt=consent");
+    expect(arg0).toContain("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback");
+
+    expect(openBrowser).toHaveBeenCalled();
+
     expect(tokens.accessToken).toBe("acc-tok-fixture");
     expect(tokens.refreshToken).toBe("refresh_abc");
     expect(tokens.accountId).toBe("acc_789");
     expect(tokens.email).toBe("user@example.com");
     expect(tokens.expiresAt).toBeGreaterThan(Date.now());
+
+    // Token exchange POST body should carry the auth code + code_verifier.
+    const [tokenUrl, tokenInit] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(tokenUrl).toBe("https://auth.openai.com/oauth/token");
+    const body = new URLSearchParams(tokenInit.body as string);
+    expect(body.get("grant_type")).toBe("authorization_code");
+    expect(body.get("code")).toBe("auth_code_xyz");
+    expect(body.get("redirect_uri")).toBe("http://localhost:1455/auth/callback");
+    expect(body.get("code_verifier")).toBeTruthy();
   });
 
-  it("throws OAuthLoginError when device code request fails", async () => {
-    const mockFetch = makeMockFetch([{ ok: false, status: 503, text: () => Promise.resolve("Service Unavailable") }]);
+  it("throws OAuthLoginError when token exchange fails", async () => {
+    const mockFetch = makeMockFetch([{ ok: false, status: 400, text: () => Promise.resolve("invalid_grant") }]);
+
+    let capturedAuthorizeUrl = "";
+    const openBrowser: OpenBrowserFn = vi.fn((url: string) => {
+      capturedAuthorizeUrl = url;
+    });
+    const callbackServer = makeMockCallbackServer("bad_code", () => {
+      const u = new URL(capturedAuthorizeUrl);
+      return u.searchParams.get("state") ?? "";
+    });
 
     const provider = new OpenAIOAuthProvider({
       issuer: "https://auth.openai.com",
       clientId: "test_client",
       fetchFn: mockFetch as unknown as FetchFn,
+      callbackServerFn: callbackServer,
+      openBrowserFn: openBrowser,
     });
 
     await expect(provider.login({})).rejects.toThrow(OAuthLoginError);
   });
 
-  it("throws OAuthLoginError when device auth is denied", async () => {
+  it("throws on state mismatch (CSRF guard)", async () => {
+    const mockFetch = makeMockFetch([]);
+    const openBrowser: OpenBrowserFn = vi.fn();
+    // Callback returns a state that does NOT match the one in the authorize URL.
+    const callbackServer = makeMockCallbackServer("auth_code_xyz", () => "attacker_state");
+
+    const provider = new OpenAIOAuthProvider({
+      issuer: "https://auth.openai.com",
+      clientId: "test_client",
+      fetchFn: mockFetch as unknown as FetchFn,
+      callbackServerFn: callbackServer,
+      openBrowserFn: openBrowser,
+    });
+
+    await expect(provider.login({})).rejects.toThrow(OAuthLoginError);
+  });
+
+  it("falls back to port 1457 when 1455 is occupied", async () => {
     const mockFetch = makeMockFetch([
-      // device code OK
       {
         ok: true,
-        json: () =>
-          Promise.resolve({
-            device_code: "dev_abc",
-            user_code: "WXYZ",
-            verification_uri: "https://auth.openai.com/activate",
-            expires_in: 300,
-            interval: 0,
-          }),
+        json: () => Promise.resolve({ access_token: "acc", refresh_token: "r", expires_in: 3600 }),
       },
-      // poll — denied
-      { ok: true, json: () => Promise.resolve({ status: "denied" }) },
+      { ok: true, json: () => Promise.resolve({ email: "u@example.com" }) },
     ]);
+
+    let capturedAuthorizeUrl = "";
+    let attempt = 0;
+    const callbackServer = vi.fn(async (opts: Parameters<CallbackServerFn>[0]) => {
+      attempt++;
+      if (attempt === 1) {
+        throw new Error("EADDRINUSE");
+      }
+      const port = opts.port ?? 1457;
+      const url = `http://localhost:${port}${opts.path}`;
+      setTimeout(() => {
+        const u = new URL(capturedAuthorizeUrl);
+        opts.onCode("auth_code", u.searchParams.get("state") ?? "");
+      }, 1);
+      return { port, url, close: vi.fn() } satisfies OAuthCallbackServer;
+    }) as unknown as CallbackServerFn;
+
+    const openBrowser: OpenBrowserFn = vi.fn((url: string) => {
+      capturedAuthorizeUrl = url;
+    });
 
     const provider = new OpenAIOAuthProvider({
       issuer: "https://auth.openai.com",
       clientId: "test_client",
       fetchFn: mockFetch as unknown as FetchFn,
+      callbackServerFn: callbackServer,
+      openBrowserFn: openBrowser,
     });
 
-    await expect(provider.login({})).rejects.toThrow(OAuthLoginError);
+    const tokens = await provider.login({});
+    expect(tokens.accessToken).toBe("acc");
+    expect(attempt).toBe(2);
+    expect(capturedAuthorizeUrl).toContain("redirect_uri=http%3A%2F%2Flocalhost%3A1457%2Fauth%2Fcallback");
   });
 });
 
@@ -140,7 +228,7 @@ describe("OpenAIOAuthProvider.refresh", () => {
   const expiredTokens: OAuthTokens = {
     accessToken: "old-acc-tok",
     refreshToken: "old-ref-tok",
-    expiresAt: Date.now() - 1, // already expired
+    expiresAt: Date.now() - 1,
     accountId: "acc_789",
     email: "user@example.com",
   };
@@ -169,9 +257,14 @@ describe("OpenAIOAuthProvider.refresh", () => {
     expect(refreshed.accessToken).toBe("new-acc-tok");
     expect(refreshed.refreshToken).toBe("new-ref-tok");
     expect(refreshed.expiresAt).toBeGreaterThan(Date.now());
-    // Preserved fields
     expect(refreshed.email).toBe("user@example.com");
     expect(refreshed.accountId).toBe("acc_789");
+
+    const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://auth.openai.com/oauth/token");
+    const body = new URLSearchParams(init.body as string);
+    expect(body.get("grant_type")).toBe("refresh_token");
+    expect(body.get("refresh_token")).toBe("old-ref-tok");
   });
 
   it("throws OAuthRefreshError on 401 (invalid_grant)", async () => {
@@ -190,7 +283,7 @@ describe("OpenAIOAuthProvider.refresh", () => {
     const validTokens: OAuthTokens = {
       accessToken: "valid-acc-tok",
       refreshToken: "valid-ref-tok",
-      expiresAt: Date.now() + 10 * 60_000, // 10 minutes ahead
+      expiresAt: Date.now() + 10 * 60_000,
     };
 
     const mockFetch = vi.fn();
@@ -203,44 +296,6 @@ describe("OpenAIOAuthProvider.refresh", () => {
     const result = await provider.refresh(validTokens);
     expect(result).toBe(validTokens);
     expect(mockFetch).not.toHaveBeenCalled();
-  });
-
-  it("mutex prevents concurrent double-refresh", async () => {
-    let callCount = 0;
-    const mockFetch = vi.fn(async () => {
-      callCount++;
-      // Simulate slow refresh
-      await new Promise((r) => setTimeout(r, 10));
-      return {
-        ok: true,
-        json: () =>
-          Promise.resolve({
-            access_token: `tok${callCount}`,
-            refresh_token: "ref-new",
-            expires_in: 3600,
-          }),
-      };
-    });
-
-    const provider = new OpenAIOAuthProvider({
-      issuer: "https://auth.openai.com",
-      clientId: "test_client",
-      fetchFn: mockFetch as unknown as FetchFn,
-    });
-
-    // Both calls see expired tokens — only one should hit the network,
-    // the second should see the already-refreshed result from the mutex guard.
-    const [r1, r2] = await Promise.all([provider.refresh(expiredTokens), provider.refresh(expiredTokens)]);
-
-    // The network should be called at most twice; but the second call should
-    // return early because the first one already refreshed.
-    // Practically: both awaited the same mutex slot; the second checks
-    // expiresAt after acquiring — if the token was refreshed it returns early.
-    // In our implementation, both DO hit the network because they enter
-    // with the same stale `expiredTokens` reference; they don't share state.
-    // What we care about is that both calls complete without error.
-    expect(r1.accessToken).toMatch(/^tok\d+$/);
-    expect(r2.accessToken).toMatch(/^tok\d+$/);
   });
 });
 

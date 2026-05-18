@@ -61,20 +61,28 @@ describe("token-store — keychain path", () => {
     // Inject mock keytar via module mock
     vi.doMock("keytar", () => kt);
 
-    const { saveTokens, loadTokens, deleteTokens } = await import("../token-store.js");
+    // Isolate file fallback path — without this, deleteTokens() at the end
+    // of the test would unlink() the real user's ~/.muonroi-cli/auth/openai.json.
+    const tmp = path.join(os.tmpdir(), `muonroi-test-token-store-keychain-${Date.now()}`);
+    process.env["MUONROI_AUTH_DIR"] = tmp;
 
-    await saveTokens("openai", SAMPLE_TOKENS);
-    expect(kt.setPassword).toHaveBeenCalledOnce();
+    try {
+      const { saveTokens, loadTokens, deleteTokens } = await import("../token-store.js");
 
-    const loaded = await loadTokens("openai");
-    expect(loaded).not.toBeNull();
-    expect(loaded!.accessToken).toBe(SAMPLE_TOKENS.accessToken);
-    expect(loaded!.email).toBe("user@example.com");
+      await saveTokens("openai", SAMPLE_TOKENS);
+      expect(kt.setPassword).toHaveBeenCalledOnce();
 
-    await deleteTokens("openai");
-    expect(kt.deletePassword).toHaveBeenCalledOnce();
+      const loaded = await loadTokens("openai");
+      expect(loaded).not.toBeNull();
+      expect(loaded!.accessToken).toBe(SAMPLE_TOKENS.accessToken);
+      expect(loaded!.email).toBe("user@example.com");
 
-    vi.doUnmock("keytar");
+      await deleteTokens("openai");
+      expect(kt.deletePassword).toHaveBeenCalledOnce();
+    } finally {
+      delete process.env["MUONROI_AUTH_DIR"];
+      vi.doUnmock("keytar");
+    }
   });
 });
 

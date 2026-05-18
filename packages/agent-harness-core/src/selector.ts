@@ -1,6 +1,6 @@
 import type { UINode } from "./protocol.js";
 
-export type Op = "=" | "~=" | "*=";
+export type Op = "=" | "~=" | "*=" | "^=";
 export type Term = { key: string; op: Op; value: string };
 export type Selector = {
   terms: Term[];
@@ -79,10 +79,10 @@ function parseSegment(input: string): Term[] {
       continue;
     }
 
-    // Check for key=value or key~=value or key*=value
-    // Key can contain dots (e.g., props.scrollTop)
-    // Match longer operators first: *=, ~=, then =
-    const kvMatch = current.match(/^([\w.]+)(\*=|~=|=)/);
+    // Check for key=value, key~=value, key*=value, or key^=value.
+    // Key can contain dots (e.g., props.scrollTop).
+    // Match longer operators first: *=, ~=, ^=, then =.
+    const kvMatch = current.match(/^([\w.]+)(\*=|~=|\^=|=)/);
     if (kvMatch) {
       const key = kvMatch[1];
       const op = kvMatch[2] as Op;
@@ -144,6 +144,7 @@ function termMatches(node: UINode, t: Term): boolean {
   if (t.op === "=") return s === t.value;
   if (t.op === "~=") return s.toLowerCase().includes(t.value.toLowerCase());
   if (t.op === "*=") return new RegExp(t.value).test(s);
+  if (t.op === "^=") return s.startsWith(t.value);
   return false;
 }
 

@@ -217,6 +217,10 @@ export function getBatchUsage(response: BatchChatCompletionResponse): ProcessMes
     costUsdTicks: asNumber(usage?.cost_in_usd_ticks),
     cacheReadTokens: asNumber(u?.cache_read_input_tokens) ?? asNumber(u?.prompt_cache_hit_tokens),
     cacheCreationTokens: asNumber(u?.cache_creation_input_tokens),
+    // Phase C1: DeepSeek's batch API reports a cache-miss split alongside the
+    // hit count. Surface it so downstream cost attribution can charge cached
+    // vs. non-cached input at the right rate.
+    noCacheInputTokens: asNumber(u?.prompt_cache_miss_tokens),
   };
 }
 
@@ -227,6 +231,12 @@ export function accumulateUsage(target: ProcessMessageUsage, usage: ProcessMessa
   target.costUsdTicks = (target.costUsdTicks ?? 0) + (usage.costUsdTicks ?? 0);
   target.cacheReadTokens = (target.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0);
   target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + (usage.cacheCreationTokens ?? 0);
+  // Only accumulate noCacheInputTokens when at least one side reported it; leave
+  // undefined when neither did so downstream consumers can fall back to the
+  // input - cacheRead - cacheCreation derivation without seeing a misleading 0.
+  if (target.noCacheInputTokens !== undefined || usage.noCacheInputTokens !== undefined) {
+    target.noCacheInputTokens = (target.noCacheInputTokens ?? 0) + (usage.noCacheInputTokens ?? 0);
+  }
 }
 
 export function hasUsage(usage: ProcessMessageUsage): boolean {

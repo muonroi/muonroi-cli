@@ -23,19 +23,40 @@ interface ToolRegistryOpts {
   modelId?: string;
 }
 
-const MAX_TOOL_OUTPUT_CHARS = 12_000;
+/**
+ * Default per-tool-call output cap in characters (~8k tokens).
+ *
+ * Read-side tools (read_file, grep, bash, process_logs) previously returned
+ * raw output uncapped, so a single large file read could dump ~28k tokens
+ * straight into the next LLM prompt. We now apply the cap uniformly to all
+ * tool results (head/tail-preserving), which is the primary cost-leak fix
+ * for sub-agent loops that read multiple files in one turn.
+ *
+ * Override with env `MUONROI_MAX_TOOL_OUTPUT_CHARS` (10_000–200_000).
+ */
+const DEFAULT_MAX_TOOL_OUTPUT_CHARS = 32_000;
 
-function truncateOutput(text: string, maxChars = MAX_TOOL_OUTPUT_CHARS): string {
+function resolveMaxToolOutputChars(): number {
+  const raw = process.env.MUONROI_MAX_TOOL_OUTPUT_CHARS;
+  if (!raw) return DEFAULT_MAX_TOOL_OUTPUT_CHARS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 10_000 || n > 200_000) return DEFAULT_MAX_TOOL_OUTPUT_CHARS;
+  return Math.floor(n);
+}
+
+export const MAX_TOOL_OUTPUT_CHARS = resolveMaxToolOutputChars();
+
+export function truncateOutput(text: string, maxChars = MAX_TOOL_OUTPUT_CHARS): string {
   if (text.length <= maxChars) return text;
   const half = Math.floor(maxChars / 2);
-  return `${text.slice(0, half)}\n\n... [${text.length - maxChars} chars truncated] ...\n\n${text.slice(-half)}`;
+  return `${text.slice(0, half)}\n\n... [${text.length - maxChars} chars truncated; full output in transcript] ...\n\n${text.slice(-half)}`;
 }
 
 function formatResult(result: ToolResult): string {
   if (result.success) {
-    return result.output ?? "OK";
+    return truncateOutput(result.output ?? "OK");
   }
-  return `ERROR: ${result.error ?? result.output ?? "Unknown error"}`;
+  return truncateOutput(`ERROR: ${result.error ?? result.output ?? "Unknown error"}`);
 }
 
 export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {

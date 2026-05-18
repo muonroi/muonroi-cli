@@ -4,7 +4,7 @@ import { resolveLeaderModelDetailed, resolveParticipants } from "../council/lead
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
-import { fetchBBContext, renderBBContextBlock } from "../ee/bb-retrieval.js";
+import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -424,8 +424,27 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
 
         // CB-1 — BB-aware context injection. Runs before council debate fires so
         // the research stances have access to relevant BB recipes and rules.
-        // Only active when IntentDetectionTrace signals "muonroi-building-block" target.
-        if (ctx._intentTrace?.targetFramework === "muonroi-building-block") {
+        //
+        // Two activation paths:
+        //   1. Filesystem-based: IntentDetectionTrace.targetFramework set by
+        //      detectBBFramework() (point-to-existing on an existing BB tree).
+        //   2. Prompt-based fallback: when targetFramework is undefined (empty
+        //      cwd / fresh init-new), infer from the user's idea against the
+        //      bb-recipes collection. Threshold 0.60 catches canonical BB
+        //      intents ("fraud detection", "loan approval", "multi-tenant",
+        //      "decision table FEEL") while rejecting generic prompts.
+        let bbActive = ctx._intentTrace?.targetFramework === "muonroi-building-block";
+        if (!bbActive) {
+          try {
+            bbActive = await inferBBFromPrompt(ctx.idea);
+            if (bbActive && ctx._intentTrace) {
+              ctx._intentTrace.targetFramework = "muonroi-building-block";
+            }
+          } catch {
+            /* graceful degrade — never block the research phase */
+          }
+        }
+        if (bbActive) {
           try {
             const bbCtx = await fetchBBContext(ctx.idea);
             const bbBlock = renderBBContextBlock(bbCtx);
