@@ -1,0 +1,33 @@
+﻿=== PIL Phase G Snapshot ===
+Date: 2026-05-17 09:07:02 +07:00
+Host: TCIS-SSC-01741
+Window: last 24h
+
+PIL monitor ΓÇö last 24h (69 events since 2026-05-16T02:07:03.168Z)
+
+unified_status:
+  ok          1 (1.4%)
+  fail        6 (8.7%)
+  skip       62 (89.9%)
+  unknown     0 (0.0%)
+
+latency (ms):
+  p50  90
+  p95  1666
+  p99  1674
+  max  1674
+
+timeout rate: 0/69 (0.0%)
+
+task types:
+     66  general
+      3  analyze
+
+ee modes:
+     69  thin
+
+Phase G gates:
+  FAIL  unified ok >= 95%            1.4%
+  PASS  timeout rate < 5%            0.0%
+  PASS  p95 latency < 2500ms         1666ms
+
