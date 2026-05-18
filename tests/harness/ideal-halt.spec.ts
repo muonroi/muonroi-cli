@@ -83,16 +83,25 @@ describe("ideal halt recovery card E2E", () => {
 
   it("Down arrow moves selection to second option", async () => {
     driver.press("Down");
-    // Wait for the snapshot to reflect the new selected state. Using a
-    // selector with the `selected` flag is more reliable than polling
-    // wait_for({idle}) — the latter resolves on the first idle event and
-    // can miss the window between React's batched state commit and the
-    // 16ms setInterval reconciler tick.
-    await driver.wait_for({
-      selector: "id=halt-option-point_to_existing selected",
-      timeoutMs: 10_000,
-    });
-    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+    // Sticky-poll the snapshot: wait_for({selector...selected}) can resolve
+    // momentarily during React's re-render cycle when only the listitem with
+    // the new selection is registered while the deselected one is still mid-
+    // useEffect-swap. Stay in the loop until 3 consecutive snapshots agree
+    // — that's longer than React's commit boundary so we know the state is
+    // settled.
+    let stable = 0;
+    const deadline = Date.now() + 10_000;
+    let opts: ReturnType<typeof driver.queryAll> = [];
+    while (Date.now() < deadline) {
+      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+      if (opts.length === 3 && opts[0]?.selected !== true && opts[1]?.selected === true) {
+        stable++;
+        if (stable >= 3) break;
+      } else {
+        stable = 0;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(opts[0]?.selected).toBeFalsy();
     expect(opts[1]?.selected).toBe(true);
   });
