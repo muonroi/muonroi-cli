@@ -112,8 +112,15 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     target: "pass",
     text: 500, // cap to 500 chars
   },
-  // "usage" is not a LiveEvent member with kind="usage" in the union — it's handled
-  // via the stream.delta path. No entry needed.
+  "usage": {
+    source: "pass",
+    model: "pass",
+    inputTokens: "pass",
+    outputTokens: "pass",
+    cacheReadTokens: "pass",
+    cacheCreationTokens: "pass",
+    messageSeq: "pass",
+  },
 };
 
 type EventKind = Extract<LiveEvent, { t: "event" }>["kind"];

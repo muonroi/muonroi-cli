@@ -34,6 +34,7 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "sprint-stage",
   "sprint-halt",
   "route-decision",
+  "usage",
 ]);
 
 /**
