@@ -155,8 +155,11 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
     };
   }
 
-  // No usable configured leader — pick best from session provider.
-  if (best) return { modelId: best.id, defaulted: true };
+  // No usable configured leader — use the session model itself. We intentionally
+  // do NOT silently promote to the highest-tier model on the provider: the
+  // user's account/key may not have access to that tier (e.g. SiliconFlow Pro),
+  // which would cause 401s on every leader call. Tier-upgrade is a deliberate
+  // choice — opt in by setting roleModels.leader in config.
   return { modelId: sessionModelId, defaulted: true };
 }
 
@@ -164,11 +167,8 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
 export function resolveLeaderModel(sessionModelId: string): string {
   const configured = getRoleModel("leader");
   if (configured) return configured;
-  const providerId = detectProviderForModel(sessionModelId);
-  const premium = getModelByTier("premium", providerId);
-  if (premium) return premium.id;
-  const anyPremium = getModelByTier("premium");
-  if (anyPremium) return anyPremium.id;
+  // See resolveLeaderModelDetailed for why we no longer silently upgrade to
+  // the premium tier on the session provider (user may not have access).
   return sessionModelId;
 }
 

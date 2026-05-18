@@ -1,10 +1,10 @@
 import * as path from "node:path";
-import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
+import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
@@ -271,16 +271,55 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         })();
 
         // Drain emitted chunks while waiting for gatherTask to finish.
+        const _drainDbg = process.env.MUONROI_DEBUG_LEADER === "1";
+        let _drainTick = 0;
+        let _emptyTicks = 0;
         while (!gatherDone.value) {
           while (gatherEmitted.length > 0) {
-            yield gatherEmitted.shift() as StreamChunk;
+            const c = gatherEmitted.shift() as StreamChunk;
+            if (_drainDbg) {
+              const cq = (c as { councilQuestion?: { questionId?: string } }).councilQuestion;
+              process.stderr.write(`[drain] yield-chunk: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
+            }
+            yield c;
+            if (_drainDbg) {
+              process.stderr.write(`[drain] post-yield, queue=${gatherEmitted.length}\n`);
+            }
+            _emptyTicks = 0;
           }
-          // Yield to the event loop briefly so emit + async respond can advance.
-          await new Promise<void>((r) => setTimeout(r, 50));
+          // Queue empty — wait for gatherTask to push the next chunk or to
+          // complete. setImmediate runs in the check phase of Node's event
+          // loop, between poll phases where HTTP responses are handled, and
+          // does NOT compete with OpenTUI's setInterval(16ms) macrotask queue
+          // (which is what starved the original setTimeout(50) poll).
+          // Adaptive backoff: hot setImmediate spinning at 30k ticks/sec was
+          // starving CPU from network I/O on the leader fetch, blocking the
+          // response for hundreds of seconds. After 100 empty ticks, escalate
+          // to setTimeout(1) to give the OS scheduler and I/O subsystems room
+          // to make progress. Resets to setImmediate the moment a chunk arrives.
+          _drainTick++;
+          _emptyTicks++;
+          if (_emptyTicks > 100) {
+            await new Promise<void>((r) => setTimeout(r, 1));
+          } else {
+            await new Promise<void>((r) => setImmediate(r));
+          }
+          if (_drainDbg && _drainTick % 200 === 0) {
+            process.stderr.write(
+              `[drain] tick=${_drainTick}, empty=${_emptyTicks}, queue=${gatherEmitted.length}, done=${gatherDone.value}\n`,
+            );
+          }
         }
-        // Flush any chunks emitted after the final await but before resolution.
+        if (_drainDbg) {
+          process.stderr.write(`[drain] gather-done, flushing ${gatherEmitted.length} chunks\n`);
+        }
         while (gatherEmitted.length > 0) {
-          yield gatherEmitted.shift() as StreamChunk;
+          const c = gatherEmitted.shift() as StreamChunk;
+          if (_drainDbg) {
+            const cq = (c as { councilQuestion?: { questionId?: string } }).councilQuestion;
+            process.stderr.write(`[drain] final-flush: type=${c.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
+          }
+          yield c;
         }
         await gatherTask;
         if (gatherError) throw gatherError;

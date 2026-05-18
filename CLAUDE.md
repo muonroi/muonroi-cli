@@ -175,6 +175,99 @@ driver.last_event("toast")              // most recent event of kind
 driver.render_text()                    // ASCII debug render
 ```
 
+## Event-driven E2E pattern
+
+Instead of polling `driver.query()` in a sleep loop, subscribe to the event stream.
+The canonical example is `tests/harness/events.spec.ts`.
+
+### Core concept
+
+The TUI emits discrete `LiveEvent` objects on the sidechannel whenever a
+lifecycle boundary is crossed (route decided, council phase changed, askcard
+opened, sprint stage entered, etc.). The driver buffers these in a ring (cap
+1000) and delivers them to `events()` subscribers.
+
+**Subscribe BEFORE dispatching the command** so no events are missed — though
+`events()` replays all buffered events on subscribe anyway, so late-subscribe
+also works.
+
+### Reacting to modal lifecycle
+
+```ts
+// Subscribe before dispatching the command so no events are missed.
+const events = driver.events(
+  (e) => e.kind === "askcard-open" || e.kind === "sprint-halt"
+);
+driver.type("/ideal --force-council build X");
+driver.press("Enter");
+
+for await (const e of events) {
+  if (e.kind === "askcard-open") {
+    await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
+    driver.press("Enter"); // accept default
+    continue;
+  }
+  if (e.kind === "sprint-halt") break;
+}
+await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 15_000 });
+```
+
+### Wait for a specific council phase to complete
+
+```ts
+await driver.wait_for({
+  event: "council-step",
+  match: (e) => e.kind === "council-step" && e.phaseKind === "synthesis" && e.state === "done",
+  timeoutMs: 60_000,
+});
+```
+
+### One-shot last_event check (after wait_for)
+
+```ts
+await driver.wait_for({ event: "route-decision", timeoutMs: 10_000 });
+const e = driver.last_event("route-decision");
+expect(e?.path).toBe("hot-path");
+```
+
+### `driver.events()` late-subscribe note
+
+The iterator replays all events already in the buffer (cap 1000, FIFO eviction)
+before streaming new ones. Subscribing after a fast event fires still captures
+it — no event is lost between `spawnHarness()` and the `events()` call.
+
+### `MUONROI_HARNESS_EVENTS` quick reference
+
+Controls which event kinds are emitted on the sidechannel.
+
+| Value | Effect |
+|---|---|
+| unset (default) | lifecycle preset — all kinds except `llm-token` |
+| `lifecycle` | same as default |
+| `*` or `all` | all kinds including high-volume `llm-token` |
+| `llm-token,council-step` | exact comma-separated allowlist |
+
+`llm-token` is off by default because DeepSeek Flash emits 80–120 tokens/sec —
+opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
+correlation.
+
+### All LiveEvent kinds (protocol version 0.2.0)
+
+| kind | When emitted | Key payload fields |
+|---|---|---|
+| `route-decision` | /ideal dispatched → routing decision made | `path`, `complexity`, `forceCouncil`, `runId` |
+| `council-step` | Council phase changes state | `phaseId`, `phaseKind`, `state`, `label`, `elapsedMs` |
+| `council-speaker` | Per-role speaker turn starts/ends | `role`, `status` ("start"\|"done"), `round`, `correlationId` |
+| `askcard-open` | Council question card appears | `questionId`, `question`, `phase`, `optionCount` |
+| `askcard-answered` | User answers question card | `questionId`, `answerKind`, `answerText` |
+| `askcard-cancel` | User presses Escape on question card | `questionId` |
+| `sprint-stage` | Sprint enters a new stage | `sprintIndex`, `stage` ("planning"\|"implementation"\|"verification"\|"judgment"), `runId` |
+| `sprint-halt` | CB-gate fires — sprint halted | `sprintN`, `reason`, `runId` |
+| `llm-token` | Text delta from model (opt-in only) | `correlationId`, `delta`, `tokenIndex` |
+| `llm-done` | LLM call completes | `correlationId`, `totalChars`, `finishReason` |
+| `toast` | Error/info toast displayed | `level`, `text` |
+| `stream.delta` | Streaming text chunk | `target`, `text` |
+
 ## Selector grammar quick reference
 
 ```

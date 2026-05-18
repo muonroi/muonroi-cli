@@ -17,8 +17,10 @@
  */
 
 import { createReadStream, createWriteStream } from "node:fs";
+import { createEventFilter } from "@muonroi/agent-harness-core/event-filter";
 import { createIdleDetector } from "@muonroi/agent-harness-core/idle";
 import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
+import { redactEvent } from "@muonroi/agent-harness-core/event-redact";
 import { createLineSplitter, createSidechannelWriter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { installOpenTUIHarness, type OpenTUIHarnessTransport } from "./install.js";
 import type { SemanticRegistry } from "./reconciler-hook.js";
@@ -157,6 +159,10 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     transport,
     fps: 60,
     onFrame: () => idle.markActivity(),
+    // Pass --agent-fake-clock through to the snapshot hook so LiveFrame.ts
+    // becomes deterministic (seq*16). Without this, ts = Date.now() and the
+    // determinism spec sees timestamps differ between runs.
+    fakeClock: opts.fakeClock,
   });
 
   // --- Command channel (in stream → handlers) ------------------------------
@@ -181,6 +187,10 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     splitter(chunk);
   });
 
+  // --- Volume filter -------------------------------------------------------
+  // Reads MUONROI_HARNESS_EVENTS once at startup; default drops "llm-token".
+  const isKindAllowed = createEventFilter(process.env["MUONROI_HARNESS_EVENTS"]);
+
   // --- Public API ----------------------------------------------------------
 
   // capture() is called from app.tsx's addPostProcessFn after each renderer
@@ -191,7 +201,13 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   };
 
   const emitEvent = (e: LiveEvent): void => {
-    outStream.write(createSidechannelWriter.serialize(e));
+    // t:"idle" is the idle sentinel — not a LiveEvent with kind; bypass filter.
+    if (e.t === "event") {
+      if (!isKindAllowed(e.kind)) return; // filtered out — no-op
+    }
+    // Redact payload before writing to the wire.
+    const safe = e.t === "event" ? redactEvent(e) : e;
+    outStream.write(createSidechannelWriter.serialize(safe));
     // stream.delta events mark activity (text is flowing — not yet idle).
     if (e.t === "event" && e.kind === "stream.delta") {
       idle.markActivity();

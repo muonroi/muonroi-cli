@@ -55,10 +55,18 @@ export interface IterateOpts {
 
 export async function iterateInterview(opts: IterateOpts): Promise<ProjectContext> {
   const { flowDir, runId, detection } = opts;
+  const _itvDbg = process.env.MUONROI_DEBUG_LEADER === "1";
+  const _itvId = Math.random().toString(36).slice(2, 8);
+  if (_itvDbg) {
+    process.stderr.write(`[interview-entry] iterateInterview-CALLED itvId=${_itvId} runId=${runId}\n`);
+  }
   const state0 = await readDiscoveryState(flowDir, runId);
   if (!state0) throw new Error("discovery state not initialized — call initDiscoveryState first");
 
   for (const question of DISCOVERY_QUESTIONS) {
+    if (_itvDbg) {
+      process.stderr.write(`[interview-entry] outer-for itvId=${_itvId} questionId=${question.id}\n`);
+    }
     const state = await readDiscoveryState(flowDir, runId);
     if (!state) throw new Error("state lost mid-iteration");
     const isPrefilled =
@@ -83,20 +91,54 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       recommendation = await opts.recommender.leaderRecommend(recInput);
     }
 
+    // Per-question skip-attempt counter for required questions.
+    // Resets when the user provides a real answer (accept/override).
+    let skipAttempts = 0;
+    const MAX_SKIP_ATTEMPTS = 3;
+    const _debugInterview = process.env.MUONROI_DEBUG_LEADER === "1";
+
     for (;;) {
+      const _iterStart = Date.now();
+      if (_debugInterview) {
+        process.stderr.write(
+          `[interview-timing] iter-start: ${JSON.stringify({ questionId: question.id, skipAttempts })}\n`,
+        );
+      }
       const ans = await opts.userPrompt({
         questionId: question.id,
         recommendation,
       });
+      if (_debugInterview) {
+        process.stderr.write(
+          `[interview-timing] userPrompt-resolved: ${JSON.stringify({
+            questionId: question.id,
+            durationMs: Date.now() - _iterStart,
+            action: ans.action,
+          })}\n`,
+        );
+      }
 
       if (ans.action === "skip") {
         if (effectivelyRequired) {
+          skipAttempts += 1;
+          if (skipAttempts >= MAX_SKIP_ATTEMPTS) {
+            // Budget exhausted: escalate this question as unspecified and
+            // break out of the inner loop. Downstream CB-3 will surface a
+            // clean halt-card because a required dimension stays unresolved.
+            break;
+          }
           await opts.userPrompt({ questionId: question.id, message: "Required question cannot be skipped" });
           continue;
         }
         break;
       }
 
+      // NOTE: skipAttempts is intentionally NOT reset here. A successful answer
+      // breaks out of the inner loop and the outer for-loop re-declares
+      // skipAttempts = 0 for the next question, so the reset is redundant on
+      // the happy path. Resetting on every non-skip action (including invalid
+      // overrides) would allow an infinite skip→override(invalid)→skip loop —
+      // the budget must accumulate across all non-answer iterations.
       let chosenValue: any;
       if (ans.action === "accept") {
         chosenValue = recommendation.primary.value;
@@ -136,9 +178,21 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
         await appendUserOverride(flowDir, runId, question.id, recommendation.primary.value, chosenValue, ans.reason);
       }
 
+      if (_debugInterview) {
+        process.stderr.write(`[persist-start] recordRecommendation ${question.id}\n`);
+      }
       await recordRecommendation(flowDir, runId, question.id, toEntry(recommendation), recommendation.costUsd);
+      if (_debugInterview) {
+        process.stderr.write(`[persist-mid] saveDiscoveryAnswer ${question.id}\n`);
+      }
       await saveDiscoveryAnswer(flowDir, runId, question.id, chosenValue);
+      if (_debugInterview) {
+        process.stderr.write(`[persist-end] ${question.id} saved\n`);
+      }
       break;
+    }
+    if (_itvDbg) {
+      process.stderr.write(`[interview-entry] inner-loop-exit itvId=${_itvId} questionId=${question.id}\n`);
     }
 
     // After each required answered, check if we've satisfied all effectively-required questions for user gate

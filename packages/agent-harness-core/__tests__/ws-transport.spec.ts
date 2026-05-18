@@ -85,7 +85,7 @@ describe("createWebSocketTransport", () => {
         const frameEnvelope: WsEnvelope = {
           dir: "frame",
           mode: "live",
-          version: "0.1.0",
+          version: "0.2.0",
           seq: 1,
           ts: Date.now(),
           nodes: [],
@@ -126,7 +126,7 @@ describe("createWebSocketTransport", () => {
     expect(received[0]!.dir).toBe("frame");
     const frame = received[0] as Extract<WsEnvelope, { dir: "frame" }>;
     expect(frame.mode).toBe("live");
-    expect(frame.version).toBe("0.1.0");
+    expect(frame.version).toBe("0.2.0");
     expect(frame.seq).toBe(1);
     expect(frame.nodes).toEqual([]);
   });

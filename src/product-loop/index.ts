@@ -137,6 +137,23 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     content: "\n> hot-path: complexity=low → single sprint, no council debate\n",
   } as StreamChunk;
 
+  // Emit route-decision harness event (agent-mode only; no-op otherwise).
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({
+      t: "event",
+      kind: "route-decision",
+      path: "hot-path",
+      complexity: opts.complexity ?? "low",
+      forceCouncil: false,
+      runId,
+    });
+  } catch {
+    /* best-effort */
+  }
+
   // Telemetry: log routing decision.
   try {
     logInteraction(opts.sessionId ?? runId, "routing", {
@@ -323,6 +340,23 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     capUsd: flags.maxCost,
   });
   yield { type: "content", content: `\n${formatCostPreview(preview)}\n` } as StreamChunk;
+
+  // Emit route-decision harness event (agent-mode only; no-op otherwise).
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({
+      t: "event",
+      kind: "route-decision",
+      path: "council",
+      complexity: opts.complexity ?? "unknown",
+      forceCouncil: !!opts.flags.forceCouncil,
+      runId,
+    });
+  } catch {
+    /* best-effort */
+  }
 
   const ctx: DriverContext = {
     runId,

@@ -28,7 +28,7 @@ const UINodeSchema: z.ZodType<unknown> = z.lazy(() =>
 const FrameEnvelopeSchema = z.object({
   dir: z.literal("frame"),
   mode: z.literal("live"),
-  version: z.literal("0.1.0"),
+  version: z.literal("0.2.0"),
   seq: z.number().int().nonnegative(),
   ts: z.number().int().nonnegative(),
   focus: z.string().optional(),

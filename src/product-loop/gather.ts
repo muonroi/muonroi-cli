@@ -3,7 +3,7 @@
 // buildDiscoveryDebateRunner ← Task 16
 // buildGatherUserPrompt      ← Task 17
 
-import { resolveLeaderModel } from "../council/leader.js";
+import { resolveLeaderModelDetailed } from "../council/leader.js";
 import type { ClarifiedSpec } from "../council/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { detectExistingProject } from "./discovery-detection.js";
@@ -49,11 +49,22 @@ function buildLiveTuiAsk(
   respondToQuestion: (questionId: string) => Promise<string>,
 ): (label: string, options?: string[]) => Promise<string> {
   return async (label, options) => {
+    const _dbg = process.env.MUONROI_DEBUG_LEADER === "1";
     if (!options || options.length === 0) {
+      if (_dbg) {
+        process.stderr.write(
+          `[tuiask] info-emit: ${JSON.stringify({ labelPreview: label.slice(0, 80) })}\n`,
+        );
+      }
       emit({ type: "content", content: `\n> ${label}\n` } as StreamChunk);
       return "";
     }
     const questionId = crypto.randomUUID();
+    if (_dbg) {
+      process.stderr.write(
+        `[tuiask] emit-question: ${JSON.stringify({ questionId, labelPreview: label.slice(0, 80), optionCount: options.length })}\n`,
+      );
+    }
     emit({
       type: "council_question",
       content: label,
@@ -66,7 +77,17 @@ function buildLiveTuiAsk(
         defaultIndex: 0,
       },
     } as StreamChunk);
-    return await respondToQuestion(questionId);
+    const _awaitStart = Date.now();
+    if (_dbg) {
+      process.stderr.write(`[tuiask] await-start: ${JSON.stringify({ questionId })}\n`);
+    }
+    const result = await respondToQuestion(questionId);
+    if (_dbg) {
+      process.stderr.write(
+        `[tuiask] await-resolved: ${JSON.stringify({ questionId, durationMs: Date.now() - _awaitStart, resultPreview: result.slice(0, 40) })}\n`,
+      );
+    }
+    return result;
   };
 }
 
@@ -148,13 +169,27 @@ export async function runGatherPhase(
     if (existing) return existing;
 
     const detection = await detectExistingProject(cwd);
-    const leaderModelId = resolveLeaderModel(sessionModelId);
+    const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
+    const leaderModelId = leaderResolution.modelId;
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        "[leader-resolve] leaderModelId=" +
+          leaderModelId +
+          " sessionModelId=" +
+          sessionModelId +
+          (leaderResolution.promotedFrom ? " promotedFrom=" + leaderResolution.promotedFrom.modelId : "") +
+          (leaderResolution.defaulted ? " defaulted=true" : "") +
+          "\n",
+      );
+    }
 
     // Minimal LeaderLike adapter for parsePromptForContext / recommender.
     // LeaderLike expects {content, costUsd} but council llm.generate returns
     // just the text string — wrap it so leaderRecommend can parse the result
     // (otherwise res.content is undefined → falls back to "leader unavailable").
-    const leader: LeaderLike = {
+    // modelId is set so emitLeaderDebug logs the actual model instead of "unknown".
+    const leader: LeaderLike & { modelId: string } = {
+      modelId: leaderModelId,
       generate: async (args: { system: string; prompt: string; maxTokens: number }) => {
         const text = await llm.generate(leaderModelId, args.system, args.prompt, args.maxTokens);
         return { content: text, costUsd: 0 };

@@ -94,6 +94,10 @@ export async function spawnCostLeakHarness(fixture: ModelFixture): Promise<CostL
   });
 
   await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
+  // POSIX race: the first idle event can fire after the empty seq=0 frame
+  // before React mounts. Wait for the textbox to actually appear before
+  // returning, so callers can dispatch keystrokes to a fully-rendered TUI.
+  await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
 
   return {
     proc: ctx.proc,
