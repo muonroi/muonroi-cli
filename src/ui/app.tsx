@@ -952,21 +952,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   );
   const setCouncilCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
-      setCouncilCardState((prev) => {
-        const next = typeof v === "function" ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(prev) : v;
-        councilCardStateRef.current = next;
-        return next;
-      });
+      // Compute the new value against the CURRENT ref so the ref reflects the
+      // latest state immediately — handlers running before React flushes the
+      // setState updater must see this value. Putting the ref write inside
+      // the updater closure defers it until React commits, which races with
+      // a harness Enter that arrives between this call and the React flush.
+      const next =
+        typeof v === "function"
+          ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(councilCardStateRef.current)
+          : v;
+      councilCardStateRef.current = next;
+      setCouncilCardState(next);
     },
     [],
   );
   const setPreflightCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
-      setPreflightCardState((prev) => {
-        const next = typeof v === "function" ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(prev) : v;
-        preflightCardStateRef.current = next;
-        return next;
-      });
+      // Same pattern as setCouncilCardStateSync — ref must be written before
+      // the React batch flush so synchronous handlers see the latest value.
+      const next =
+        typeof v === "function"
+          ? (v as (p: CouncilCardState | null) => CouncilCardState | null)(preflightCardStateRef.current)
+          : v;
+      preflightCardStateRef.current = next;
+      setPreflightCardState(next);
     },
     [],
   );
