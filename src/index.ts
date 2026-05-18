@@ -128,6 +128,11 @@ setRenderSink((lineOrChunk) => {
  * Returns null if nothing usable is configured anywhere.
  */
 async function resolveKeyForModel(modelId: string): Promise<string | null> {
+  // Test escape hatch: harness specs that need to assert the API-key modal
+  // appearance (api-key.spec.ts) set MUONROI_TEST_NO_KEYCHAIN=1 to suppress
+  // the dev machine's real keychain entry from masking the unauthenticated
+  // boot path. Honoured ONLY in tests — never read in production flows.
+  if (process.env["MUONROI_TEST_NO_KEYCHAIN"] === "1") return null;
   const provider = detectProviderForModel(modelId);
   try {
     const k = await loadKeyForProvider(provider);
@@ -145,6 +150,7 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
  * subscription.
  */
 async function hasOAuthForModel(modelId: string): Promise<boolean> {
+  if (process.env["MUONROI_TEST_NO_KEYCHAIN"] === "1") return false;
   const provider = detectProviderForModel(modelId);
   try {
     const { getOAuthProviderConfig } = await import("./providers/auth/registry.js");

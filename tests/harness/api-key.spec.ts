@@ -14,13 +14,11 @@ import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
 
-// TODO: Fails consistently on macOS + Windows CI runners (passes on Ubuntu).
-// The modal id="api-key-modal" never becomes visible to the harness on those
-// platforms — likely a system-keychain detection difference (macOS Keychain /
-// Windows Credential Manager may surface a stale entry, suppressing the
-// modal). Skip platforms where it cannot run rather than time out 15s every
-// CI invocation. Re-enable after the keychain probe is stubbed in test mode.
-describe.skipIf(process.platform === "win32" || process.platform === "darwin")("api-key modal E2E", () => {
+// Forces the API-key modal to appear by setting MUONROI_TEST_NO_KEYCHAIN=1,
+// which makes getApiKey()/resolveKeyForModel/hasOAuthForModel all return null
+// regardless of the dev machine's real keychain entries. Runs on every
+// platform — the modal path is OS-agnostic once the keychain probe is stubbed.
+describe("api-key modal E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
@@ -29,7 +27,7 @@ describe.skipIf(process.platform === "win32" || process.platform === "darwin")("
     // Spawn WITHOUT -k so the API-key modal actually appears.
     // --mock-llm is still passed so any accidental LLM call doesn't hit a real provider.
     // --agent-mode enables the sidechannel transport.
-    const ctx = await spawnHarness();
+    const ctx = await spawnHarness({ env: { MUONROI_TEST_NO_KEYCHAIN: "1" } });
     proc = ctx.proc;
     driver = ctx.driver;
     cleanup = ctx.cleanup;
