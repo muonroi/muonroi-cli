@@ -41,8 +41,8 @@ import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { loadKeyForProvider } from "../../src/providers/keychain.js";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
+import { loadKeyForProvider } from "../../src/providers/keychain.js";
 
 const LIVE = process.env.MUONROI_E2E_LIVE === "1";
 
@@ -51,23 +51,21 @@ const DIAG_LOG = "D:/sources/Core/muonroi-cli/.scratch/e2e-diag.log";
 function dumpFrame(driver: Driver, label: string): void {
   const frame = driver.snapshot();
   if (!frame) {
-    try { appendFileSync(DIAG_LOG, `[${label}] NO FRAME\n`); } catch {}
+    try {
+      appendFileSync(DIAG_LOG, `[${label}] NO FRAME\n`);
+    } catch {}
     return;
   }
   const lines: string[] = [];
   const walk = (nodes: typeof frame.nodes, depth = 0): void => {
     for (const n of nodes) {
-      const flags = [
-        n.focus ? "focus" : null,
-        n.selected ? "sel" : null,
-        n.isModal ? "modal" : null,
-      ].filter(Boolean).join(",");
+      const flags = [n.focus ? "focus" : null, n.selected ? "sel" : null, n.isModal ? "modal" : null]
+        .filter(Boolean)
+        .join(",");
       // Always include value for the composer node even if empty — the post-Tab
       // plainText fallback makes this the primary diagnostic for Tab autocomplete.
       const value =
-        (n.id === "composer" || n.value)
-          ? ` value=${JSON.stringify(String(n.value ?? "").slice(0, 120))}`
-          : "";
+        n.id === "composer" || n.value ? ` value=${JSON.stringify(String(n.value ?? "").slice(0, 120))}` : "";
       const name = n.name ? ` name=${JSON.stringify(String(n.name).slice(0, 80))}` : "";
       lines.push(`${"  ".repeat(depth)}${n.id}(${n.role})${flags ? `[${flags}]` : ""}${name}${value}`);
       if (n.children) walk(n.children, depth + 1);
@@ -78,7 +76,9 @@ function dumpFrame(driver: Driver, label: string): void {
     `[${label}] seq=${frame.seq} focus=${frame.focus} modals=${JSON.stringify(frame.modals)}`,
     ...lines,
   ].join("\n");
-  try { appendFileSync(DIAG_LOG, `${summary}\n`); } catch {}
+  try {
+    appendFileSync(DIAG_LOG, `${summary}\n`);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -168,8 +168,7 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     const deepseekKey = await loadKeyForProvider("deepseek").catch(() => "");
     if (!deepseekKey) {
       throw new Error(
-        "Live E2E requires a DeepSeek key in the OS keychain. " +
-          "Run `muonroi-cli keys set deepseek` and try again.",
+        "Live E2E requires a DeepSeek key in the OS keychain. " + "Run `muonroi-cli keys set deepseek` and try again.",
       );
     }
     const ctx = await spawnLive({
@@ -187,7 +186,9 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     cleanup = ctx.cleanup;
     proc.stderr?.on("data", (chunk: Buffer | string) => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      try { appendFileSync("D:/sources/Core/muonroi-cli/.scratch/e2e-tui-stderr.log", text); } catch {}
+      try {
+        appendFileSync("D:/sources/Core/muonroi-cli/.scratch/e2e-tui-stderr.log", text);
+      } catch {}
     });
     await driver.wait_for({ idle: true, timeoutMs: 30_000 });
     // Real TUI boot has more async work than synthetic spawn (provider init,
@@ -269,9 +270,7 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     let askcardsAccepted = 0;
 
     // Subscribe to the two events we care about: askcard lifecycle and halt signal.
-    const events = driver.events(
-      (e) => e.t === "event" && (e.kind === "askcard-open" || e.kind === "sprint-halt"),
-    );
+    const events = driver.events((e) => e.t === "event" && (e.kind === "askcard-open" || e.kind === "sprint-halt"));
 
     for await (const e of events) {
       if (e.kind === "askcard-open") {
@@ -296,15 +295,21 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
         } catch {}
 
         // Pick strategy:
-        //  1. Prefer 'skip' (universal "use defaults, move on")
-        //  2. Else first option whose id ≠ override/abort (real choice)
-        //  3. Else first option (last resort)
+        //  1. Prefer 'accept' when the leader returned a valid recommendation
+        //     (advances the flow quickly without burning skip budget).
+        //  2. Else 'skip' (universal "use defaults, move on" — leader unavailable
+        //     or recommendation null).
+        //  3. Else first option whose id ≠ override/abort (real choice).
+        //  4. Else first option (last resort).
+        const acceptIdx = opts.findIndex((o) => o.id === "askcard-option-accept");
         const skipIdx = opts.findIndex((o) => o.id === "askcard-option-skip");
-        const overrideOrAbort = (id?: string) =>
-          id === "askcard-option-override" || id === "askcard-option-abort";
+        const overrideOrAbort = (id?: string) => id === "askcard-option-override" || id === "askcard-option-abort";
         const choiceIdx = opts.findIndex((o) => !overrideOrAbort(o.id));
-        const targetIdx = skipIdx >= 0 ? skipIdx : choiceIdx >= 0 ? choiceIdx : 0;
-        const currentIdx = Math.max(0, opts.findIndex((o) => o.selected));
+        const targetIdx = acceptIdx >= 0 ? acceptIdx : skipIdx >= 0 ? skipIdx : choiceIdx >= 0 ? choiceIdx : 0;
+        const currentIdx = Math.max(
+          0,
+          opts.findIndex((o) => o.selected),
+        );
 
         const diff = targetIdx - currentIdx;
         // Race fix: askcard's idx is React useState — synchronous key burst
