@@ -55,22 +55,50 @@ export async function atomicWriteJSON(filePath: string, value: unknown): Promise
 export async function atomicWriteText(filePath: string, content: string): Promise<void> {
   const tmpPath = tmpPathFor(filePath);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  try {
-    await fs.writeFile(tmpPath, content, "utf8");
-    await fs.rename(tmpPath, filePath);
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException;
-    if (e.code === "ENOENT") {
-      try {
-        await fs.access(filePath);
-        return;
-      } catch {}
+  // Retry the write+rename pair up to 3 times with backoff. On Windows the
+  // rename can race with antivirus / Search Indexer / Explorer probes that
+  // briefly open the target for read; under load the OS sometimes returns
+  // EBUSY / EPERM, and observed once in E2E: the rename Promise hangs
+  // forever (Bun's libuv path on a contended target). The retry+timeout
+  // recovers without losing the write.
+  const RETRIES = 3;
+  const STEP_TIMEOUT_MS = 10_000;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      await withTimeout(fs.writeFile(tmpPath, content, "utf8"), STEP_TIMEOUT_MS, "writeFile");
+      await withTimeout(fs.rename(tmpPath, filePath), STEP_TIMEOUT_MS, "rename");
+      return;
+    } catch (err) {
+      lastErr = err;
+      const e = err as NodeJS.ErrnoException;
+      if (e?.code === "ENOENT") {
+        try {
+          await fs.access(filePath);
+          return; // race loser
+        } catch {}
+      }
+      await fs.unlink(tmpPath).catch(() => {
+        /* ignore */
+      });
+      if (attempt < RETRIES - 1) {
+        await new Promise((r) => setTimeout(r, 50 * 2 ** attempt));
+      }
     }
-    await fs.unlink(tmpPath).catch(() => {
-      /* ignore */
-    });
-    throw err;
   }
+  throw lastErr;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    p.finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`atomicWriteText.${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]);
 }
 
 /**
