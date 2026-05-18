@@ -31,13 +31,37 @@ describe("askcard E2E", () => {
   });
 
   it.skip("council question modal appears and is observable", async () => {
-    // requires mock-llm sequence mode (Phase B) to drive council orchestrator to emit a `council_question` chunk
+    // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
+    // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council
+    // fixture exists at tests/harness/fixtures/llm-council-question/ that returns
+    // a non-empty AMBIGUITIES array. But end-to-end the council_question chunk
+    // does not reach app.tsx within 30s, mirroring the pre-existing blocker
+    // documented in tests/harness/council-flow.spec.ts:60–68 ("runCouncilV2 is
+    // not reaching the phase chunk emission within 30s even with mock-llm hooked
+    // via Wave 2.5"). Root cause is in the council orchestrator's phase pipeline
+    // (preflight / debate-planner generateObject) rejecting mock fixture JSON,
+    // OR a downstream askcard step blocking on input the harness doesn't
+    // auto-answer. Fix requires instrumenting the council orchestrator and
+    // expanding fixture coverage — out of scope for the mock-llm error/sequence
+    // work in this commit.
     await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
     expect(driver.query("id=askcard")?.role).toBe("dialog");
   });
 
   it.skip("can navigate askcard options with arrow keys", async () => {
-    // requires mock-llm sequence mode (Phase B) to drive council orchestrator to emit a `council_question` chunk
+    // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
+    // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council
+    // fixture exists at tests/harness/fixtures/llm-council-question/ that returns
+    // a non-empty AMBIGUITIES array. But end-to-end the council_question chunk
+    // does not reach app.tsx within 30s, mirroring the pre-existing blocker
+    // documented in tests/harness/council-flow.spec.ts:60–68 ("runCouncilV2 is
+    // not reaching the phase chunk emission within 30s even with mock-llm hooked
+    // via Wave 2.5"). Root cause is in the council orchestrator's phase pipeline
+    // (preflight / debate-planner generateObject) rejecting mock fixture JSON,
+    // OR a downstream askcard step blocking on input the harness doesn't
+    // auto-answer. Fix requires instrumenting the council orchestrator and
+    // expanding fixture coverage — out of scope for the mock-llm error/sequence
+    // work in this commit.
     await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
     driver.press("Down");
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
