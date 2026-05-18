@@ -28,6 +28,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `for await` loops.
 
 ### Added
+- **`/ideal` × BB ecosystem**: scaffold flow now injects Experience Engine
+  context at CB-1 when the target resolves to `muonroi-building-block`.
+  - New EE collections `bb-recipes` (sample + template intents, 9 points)
+    and `bb-behavioral` (BB rules + REPO_DEEP_MAP + schemas, 596 points).
+  - `experience-principles` extended with 46 OSS-BOUNDARY hard rules +
+    Package Families decision table — drives PreToolUse hints automatically
+    via the existing semantic-retrieval interceptor (no static rule file
+    needed).
+  - `src/ee/bb-retrieval.ts` — `fetchBBContext` queries the three
+    collections in parallel with retry-once + graceful degrade + 1500-token
+    budget. Marker-stamped output for Layer 3 dedup.
+  - `src/scaffold/bb-ecosystem-apply.ts` — applies Program.cs wiring,
+    sample rule + test, `Directory.Packages.props` minimalism, and copies
+    `check-modular-boundaries.ps1` into the scaffold.
+  - `src/scaffold/bb-quality-gate.ts` — `dotnet restore`/`build` +
+    modular-boundaries gate + sentinel-regex DI verification with
+    retry-once via council and soft-fallback `EE-GATE-FAILURES.md`.
+  - `/ideal --resume <project-path>` — re-enters CB-1 with gate failures
+    as context (`src/scaffold/resume-from-gate-failures.ts`).
+  - New endpoint `POST /api/ingest-point` on EE for structured-point
+    backfills (embeds via `getEmbeddingRaw`, upserts to Qdrant directly,
+    gated by `KNOWN_COLLECTIONS`).
+  - Path canonicalization (`lib/path-canonical.js`) collapses
+    `D:/sources/`, `/d/Personal/`, `~/projects/...` into stable
+    `project_slug` values; `/api/stats` now reports `bySlug` counts.
+  - Feature flag `userSettings.eeBBContext: false` to disable.
+  - Docs: `docs/agent-harness/EE-INGESTION.md`.
 - **harness packages** (new):
   - `@muonroi/agent-harness-react` — React DOM adapter. Bundle gzip:
     346 B (harness OFF, tree-shaken via compile-time `__MUONROI_HARNESS__`

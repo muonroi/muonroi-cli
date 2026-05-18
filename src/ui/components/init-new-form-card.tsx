@@ -19,22 +19,26 @@ import type { Theme } from "../theme.js";
 
 export type FeStack = "react" | "angular" | "none";
 
-/** Task 6.2a — BB template choices shown in the picker step. */
+/**
+ * Task 6.2a — BB template choices shown in the picker step.
+ * shortName + version pinned to match published NuGet packages (verified 2026-05-16).
+ * When bumping versions, also update BB_TEMPLATE_PACKAGES in src/scaffold/init-new.ts.
+ */
 export const BB_TEMPLATE_OPTIONS: ReadonlyArray<{ label: string; desc: string; info: BBTemplateInfo }> = [
   {
     label: "BaseTemplate",
     desc: "Clean/Onion Architecture starter",
-    info: { shortName: "muonroi-base", nugetId: "Muonroi.BaseTemplate", version: "latest" },
+    info: { shortName: "mr-base-sln", nugetId: "Muonroi.BaseTemplate", version: "1.0.0-alpha.3" },
   },
   {
     label: "Modular",
     desc: "Modular Monolith",
-    info: { shortName: "muonroi-modular", nugetId: "Muonroi.Modular.Template", version: "latest" },
+    info: { shortName: "mr-mod-sln", nugetId: "Muonroi.Modular.Template", version: "1.10.0" },
   },
   {
     label: "Microservices",
     desc: "Microservices + YARP Gateway",
-    info: { shortName: "muonroi-microservices", nugetId: "Muonroi.Microservices.Template", version: "latest" },
+    info: { shortName: "mr-micro-sln", nugetId: "Muonroi.Microservices.Template", version: "1.10.0" },
   },
 ];
 

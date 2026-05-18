@@ -234,8 +234,21 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
       for (const f of r.files ?? []) parts.push(`\n── ${f.path} (${f.language}) ──\n${f.content}`);
       return parts.join("\n");
     }
-    default:
-      return JSON.stringify(d, null, 2);
+    case "general": {
+      const r = d as { response?: string; reasoning?: string };
+      return r.response ?? JSON.stringify(d, null, 2);
+    }
+    default: {
+      // Graceful fallback for unknown taskTypes; probe common text fields.
+      const obj = (d ?? {}) as Record<string, unknown>;
+      const primary =
+        (typeof obj["response"] === "string" && obj["response"]) ||
+        (typeof obj["summary"] === "string" && obj["summary"]) ||
+        (typeof obj["content"] === "string" && obj["content"]) ||
+        (typeof obj["text"] === "string" && obj["text"]) ||
+        null;
+      return primary || JSON.stringify(d, null, 2);
+    }
   }
 }
 
@@ -5419,7 +5432,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     pendingCouncilQuestion,
   ]);
 
-  const hasMessages = messages.length > 0 || streamContent || isProcessing;
+  // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
+  // point-to-existing-form + council-progress) whenever ANY of these overlays
+  // is active. Previously only message-stream signals flipped this, which meant
+  // /ideal halts (and their --inject-halt E2E counterpart) registered the halt
+  // state but the home-screen branch never rendered the card → semantic tree
+  // missing → harness wait_for timed out across multiple specs.
+  const hasMessages =
+    messages.length > 0 ||
+    streamContent !== "" ||
+    isProcessing ||
+    activeHaltCard !== null ||
+    initNewForm !== null ||
+    pointToExistingForm !== null ||
+    councilProgress !== null;
 
   // SemanticProvider wraps the app root so descendant <Semantic> components can
   // register nodes into the runtime's registry. When agent-mode is inactive,
@@ -6924,8 +6950,42 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
         </box>
       );
     }
-    default:
+    case "general": {
+      const g = d as { response?: string; reasoning?: string };
+      if (!g.response) return <text fg={t.textMuted}>{JSON.stringify(d, null, 2)}</text>;
+      return (
+        <box flexDirection="column" paddingLeft={2} marginTop={1}>
+          <text fg={t.text}>{g.response}</text>
+          {g.reasoning ? (
+            <text fg={t.textMuted}>
+              {"  ── reasoning: "}
+              {g.reasoning}
+            </text>
+          ) : null}
+        </box>
+      );
+    }
+    default: {
+      // Graceful fallback for taskTypes without a dedicated renderer (e.g. a new
+      // PIL schema added without UI updates). Probe for common text-bearing fields
+      // before falling back to raw JSON.
+      const obj = (d ?? {}) as Record<string, unknown>;
+      const primary =
+        (typeof obj["response"] === "string" && obj["response"]) ||
+        (typeof obj["summary"] === "string" && obj["summary"]) ||
+        (typeof obj["content"] === "string" && obj["content"]) ||
+        (typeof obj["text"] === "string" && obj["text"]) ||
+        null;
+      if (primary) {
+        return (
+          <box flexDirection="column" paddingLeft={2} marginTop={1}>
+            <text fg={t.text}>{primary}</text>
+            <text fg={t.textMuted}>{`  ── (renderer missing for taskType: ${sr.taskType})`}</text>
+          </box>
+        );
+      }
       return <text fg={t.text}>{JSON.stringify(d, null, 2)}</text>;
+    }
   }
 }
 

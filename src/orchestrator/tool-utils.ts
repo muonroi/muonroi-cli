@@ -147,30 +147,68 @@ export function getFinishReason(event: unknown): ProcessMessageFinishReason {
   return "other";
 }
 
+/**
+ * Normalize a streamText `onStepFinish` / `onFinish` event into ProcessMessageUsage.
+ *
+ * Reads cache metrics from THREE possible locations (in priority order):
+ *   1. `event.usage.cachedInputTokens` / `event.usage.inputTokenDetails.*` — AI SDK
+ *      v6 standardized fields (set by `@ai-sdk/anthropic`, `@ai-sdk/openai`).
+ *   2. `event.providerMetadata.<provider>.*` — provider-specific surface emitted
+ *      by `@ai-sdk/deepseek` as `{ deepseek: { promptCacheHitTokens, promptCacheMissTokens } }`
+ *      and by `@ai-sdk/openai` as `{ openai: { cachedPromptTokens } }`.
+ *   3. `event.usage.raw.*` — legacy escape hatch for raw provider response fields
+ *      (`prompt_cache_hit_tokens`, `cache_creation_input_tokens`). Kept for batch
+ *      compat with `getBatchUsage`.
+ *
+ * Phase C1 fix: previously this only read (1) and (3). DeepSeek goes through
+ * `@ai-sdk/openai-compatible`, which does NOT populate `usage.raw` AND does NOT
+ * populate the standardized fields — its cache metrics live in (2) under the
+ * provider id. Without reading providerMetadata, every DeepSeek request recorded
+ * `cache_read_tokens=0` even when the API charged the cached-input price, which
+ * is what `usage forensics` flagged as "zero cache_creation across deepseek route".
+ */
 export function getUsage(event: unknown): ProcessMessageUsage {
-  if (!(event && typeof event === "object" && "usage" in event)) {
+  if (!(event && typeof event === "object")) {
     return {};
   }
-  const usage = event.usage;
+  const evt = event as Record<string, unknown>;
+  const usage = evt.usage;
   if (!usage || typeof usage !== "object") {
     return {};
   }
   const u = usage as Record<string, unknown>;
   const details = u.inputTokenDetails as Record<string, unknown> | undefined;
   const raw = u.raw as Record<string, unknown> | undefined;
-  let cacheRead = asNumber(u.cachedInputTokens) ?? asNumber(details?.cacheReadTokens);
-  if (cacheRead == null && raw) {
-    cacheRead = asNumber(raw.prompt_cache_hit_tokens);
-  }
-  let cacheCreation = asNumber(details?.cacheWriteTokens);
-  if (cacheCreation == null && raw) {
-    cacheCreation = asNumber(raw.cache_creation_input_tokens);
-  }
+
+  // providerMetadata sits on the event, not inside usage. Pull each known
+  // provider bucket separately so a future provider addition is one new const.
+  const pm = evt.providerMetadata as Record<string, unknown> | undefined;
+  const deepseekMeta = pm?.deepseek as Record<string, unknown> | undefined;
+  const openaiMeta = pm?.openai as Record<string, unknown> | undefined;
+
+  // Cache reads: standardized field → deepseek meta → openai meta → raw passthrough.
+  const cacheRead =
+    asNumber(u.cachedInputTokens) ??
+    asNumber(details?.cacheReadTokens) ??
+    asNumber(deepseekMeta?.promptCacheHitTokens) ??
+    asNumber(openaiMeta?.cachedPromptTokens) ??
+    asNumber(raw?.prompt_cache_hit_tokens);
+
+  // Cache writes: only Anthropic exposes this today. DeepSeek's on-disk cache
+  // is write-only-server-side (no charged write), so leaving this undefined for
+  // DeepSeek is correct — do NOT zero-fill (that would mask provider regressions).
+  const cacheCreation = asNumber(details?.cacheWriteTokens) ?? asNumber(raw?.cache_creation_input_tokens);
+
+  // Non-cached input split. DeepSeek reports it directly; for others we leave
+  // undefined and let downstream derive it.
+  const noCacheInput = asNumber(deepseekMeta?.promptCacheMissTokens) ?? asNumber(raw?.prompt_cache_miss_tokens);
+
   return {
     inputTokens: typeof u.inputTokens === "number" ? u.inputTokens : undefined,
     outputTokens: typeof u.outputTokens === "number" ? u.outputTokens : undefined,
     totalTokens: typeof u.totalTokens === "number" ? u.totalTokens : undefined,
     cacheReadTokens: cacheRead ?? undefined,
     cacheCreationTokens: cacheCreation ?? undefined,
+    noCacheInputTokens: noCacheInput ?? undefined,
   };
 }

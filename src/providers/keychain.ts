@@ -181,13 +181,29 @@ export async function getConfiguredProviders(): Promise<ProviderId[]> {
     /* settings unreadable — keychain + env still work */
   }
 
+  // OAuth-authenticated providers (no API key, but tokens stored via `keys
+  // login`) need to count as configured — otherwise the model picker silently
+  // hides them. Source the eligible provider list from the OAuth registry so
+  // adding a new OAuth provider in registry.ts automatically wires it up here.
+  const oauthAuthenticated = new Set<ProviderId>();
+  try {
+    const { listOAuthProviderIds } = await import("./auth/registry.js");
+    const { loadTokens } = await import("./auth/token-store.js");
+    for (const p of await listOAuthProviderIds()) {
+      const t = await loadTokens(p).catch(() => null);
+      if (t?.accessToken) oauthAuthenticated.add(p);
+    }
+  } catch {
+    /* registry/token-store unreadable — fall through */
+  }
+
   const configured: ProviderId[] = [];
   for (const p of order) {
     if (p === "ollama") {
       configured.push(p);
       continue;
     }
-    if (stored.has(p)) {
+    if (stored.has(p) || oauthAuthenticated.has(p)) {
       configured.push(p);
       continue;
     }

@@ -261,6 +261,23 @@ export interface UserSettings {
     /** Switch back to premium for final synthesis. Default: false. */
     premiumSynthesis?: boolean;
   };
+  /**
+   * Maximum cumulative chars of tool output a `task` sub-agent may receive
+   * before its tool results get progressively trimmed (then stubbed out).
+   * Prevents one sub-agent from accumulating 500k+ billed input tokens via
+   * unbounded read_file/grep loops. Default 120_000 (~30k tokens). Range
+   * 20_000–600_000.
+   */
+  subAgentBudgetChars?: number;
+  /**
+   * Cumulative tool-output budget for the TOP-LEVEL orchestrator tool loop
+   * (the agentic streamText loop in runTurn, separate from sub-agents).
+   * Same tiered compression as the sub-agent cap, but with a larger
+   * default so casual single-tool turns are unaffected. Range
+   * 50_000–1_500_000. Env override: MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
+   * Default 400_000 (~100k tokens).
+   */
+  topLevelToolBudgetChars?: number;
 }
 
 export interface ProjectSettings {
@@ -847,6 +864,99 @@ export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
   if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
   return 0.25; // default 25% — compact later to reduce summarize-call frequency
+}
+
+/**
+ * Per-invocation cap on cumulative tool-output chars inside a `task`
+ * sub-agent. See orchestrator/sub-agent-cap.ts for the tiered compression
+ * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
+ */
+export function getSubAgentBudgetChars(): number {
+  const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 600_000) return Math.floor(n);
+  }
+  const val = loadUserSettings().subAgentBudgetChars;
+  if (typeof val === "number" && val >= 20_000 && val <= 600_000) return Math.floor(val);
+  return 120_000;
+}
+
+/**
+ * Phase B3 — threshold (in chars of cumulative message content) above which
+ * the sub-agent `prepareStep` compactor rewrites older tool_result parts
+ * into short summary stubs. Below the threshold compaction is a no-op.
+ * Env override: MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS.
+ */
+export function getSubAgentCompactThresholdChars(): number {
+  const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 500_000) return Math.floor(n);
+  }
+  return 80_000;
+}
+
+/**
+ * Phase B3 — number of trailing tool turns kept verbatim during sub-agent
+ * compaction. Each tool turn = one assistant tool-call + one tool message.
+ * Env override: MUONROI_SUBAGENT_COMPACT_KEEP_LAST.
+ */
+export function getSubAgentCompactKeepLast(): number {
+  const envRaw = process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 1 && n <= 20) return Math.floor(n);
+  }
+  return 3;
+}
+
+/**
+ * Phase B4 — threshold (in chars of cumulative message content) above which
+ * the top-level `prepareStep` compactor rewrites older tool_result parts
+ * into short summary stubs. Higher than the sub-agent default because
+ * top-level loops typically carry more useful early context.
+ * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
+ */
+export function getTopLevelCompactThresholdChars(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+  }
+  return 200_000;
+}
+
+/**
+ * Phase B4 — number of trailing tool turns kept verbatim during top-level
+ * compaction. Higher than sub-agent default because top-level agents make
+ * decisions across longer horizons.
+ * Env override: MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST.
+ */
+export function getTopLevelCompactKeepLast(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
+  }
+  return 5;
+}
+
+/**
+ * Per-turn cap on cumulative tool-output chars inside the top-level
+ * orchestrator agentic loop. Same tiered compression as the sub-agent cap,
+ * higher default so single-tool turns are unaffected. Env override:
+ * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
+ */
+export function getTopLevelToolBudgetChars(): number {
+  const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
+  if (envRaw) {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+  }
+  const val = loadUserSettings().topLevelToolBudgetChars;
+  if (typeof val === "number" && val >= 50_000 && val <= 1_500_000) return Math.floor(val);
+  return 400_000;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {

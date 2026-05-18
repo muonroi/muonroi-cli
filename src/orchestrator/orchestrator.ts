@@ -53,12 +53,14 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
+  computePromptCacheKey,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
   type ProviderFactory,
   type ResolvedModelRuntime as RuntimeResult,
   resolveModelRuntime as resolveRuntime,
+  shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
@@ -75,6 +77,11 @@ import {
   loadTranscript,
   loadTranscriptState,
   logInteraction,
+  markMessageCompleted,
+  markMessageErrored,
+  markToolCallErrored,
+  persistMessageWriteAhead,
+  persistToolCallWriteAhead,
   recordUsageEvent,
   SessionStore,
 } from "../storage/index";
@@ -115,6 +122,12 @@ import {
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
+  getSubAgentBudgetChars,
+  getSubAgentCompactKeepLast,
+  getSubAgentCompactThresholdChars,
+  getTopLevelCompactKeepLast,
+  getTopLevelCompactThresholdChars,
+  getTopLevelToolBudgetChars,
   isAutoCompactAfterTurnEnabled,
   isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
@@ -188,9 +201,11 @@ import {
   relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
+import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
+import { lastPersistedSeq } from "./message-seq.js";
 import { stableCallId } from "./pending-calls.js";
 import {
   applyModelConstraints,
@@ -204,7 +219,10 @@ import {
   type SystemPromptParts,
   VISION_MODEL,
 } from "./prompts";
+import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import {
   combineAbortSignals,
@@ -357,6 +375,13 @@ export class Agent {
    * Empty string means no active call.
    */
   private _currentCallId = "";
+  /**
+   * Phase O1 — JSON-shape of the providerOptions object on the most
+   * recent streamText call. Captured immediately before streamText and
+   * consumed by recordUsage; cleared after. Cost-leak forensics surfaces
+   * this so we can answer "did this billed call carry store=true?" etc.
+   */
+  private _lastProviderOptionsShape: string | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -411,6 +436,10 @@ export class Agent {
    * V1 only supports user messages (avoids splitting tool-call/result pairs).
    */
   private _pinnedSeqs = new Set<number>();
+
+  // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
+  // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
+  private _crossTurnDedup: CrossTurnDedup | null = isCrossTurnDedupEnabled() ? new CrossTurnDedup() : null;
 
   constructor(
     apiKey: string | undefined,
@@ -862,11 +891,54 @@ export class Agent {
     if (this.session) {
       const pilActive = source === "message" ? this._pilActive : false;
       const enrichmentDelta = source === "message" ? this._pilEnrichmentDelta : 0;
-      recordUsageEvent(this.session.id, source, model, usage, null, pilActive, enrichmentDelta);
+      // Attribute usage to the most recent persisted message — this lets
+      // per-prompt cost analysis work (was null hardcoded → impossible).
+      const lastSeq = lastPersistedSeq(this.messageSeqs);
+      // Phase O1 — providerOptions shape (types only, no values) attached
+      // to every usage event so post-mortem can answer "what provider
+      // options did this billed call carry?". Cleared below for "message"
+      // sources so non-message calls don't reuse stale data.
+      const providerOptionsShape = this._lastProviderOptionsShape;
+      recordUsageEvent(
+        this.session.id,
+        source,
+        model,
+        usage,
+        lastSeq,
+        pilActive,
+        enrichmentDelta,
+        providerOptionsShape,
+      );
       if (source === "message") {
         this._pilActive = false;
         this._pilEnrichmentDelta = 0;
+        this._lastProviderOptionsShape = null;
       }
+    }
+    // Phase D — surfaced for harness E2E verification. Mirror the recorded usage
+    // event onto the agent-mode sidechannel so spec processes can assert on
+    // cacheReadTokens / cacheCreationTokens normalization without poking at the
+    // child's sqlite. Best-effort, only fires when agent-mode runtime is set.
+    try {
+      const rt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+        | { emitEvent?: (e: unknown) => void }
+        | undefined;
+      if (rt?.emitEvent) {
+        const lastSeqForEvent = this.session ? lastPersistedSeq(this.messageSeqs) : null;
+        rt.emitEvent({
+          t: "event",
+          kind: "usage",
+          source,
+          model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheCreationTokens: usage.cacheCreationTokens,
+          messageSeq: lastSeqForEvent,
+        });
+      }
+    } catch {
+      // best-effort: do not let sidechannel failures interrupt usage recording
     }
     // Update status bar token counters + provider/model + cache metrics + cost
     const prev = statusBarStore.getState();
@@ -1219,7 +1291,17 @@ export class Agent {
         : this.bash.getSandboxSettings(),
       shellSettings: getCurrentShellSettings(),
     });
-    const childBaseTools = createTools(childBash, provider, childMode);
+    const childBaseToolsRaw = createTools(childBash, provider, childMode);
+    // Wrap with the cumulative cap so the sub-agent's tool loop cannot
+    // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
+    // tiered compression schedule. The cap is per-invocation; each sub-agent
+    // gets a fresh budget.
+    const subAgentCapBudget = getSubAgentBudgetChars();
+    const subAgentCap = wrapToolSetWithCap(childBaseToolsRaw, { maxCumulativeChars: subAgentCapBudget });
+    // Phase C3: layer cross-turn dedup ON TOP of the per-invocation cap. The
+    // cap sees raw output (for accurate cumulative accounting); dedup sees
+    // the already-trimmed output that will actually reach the model.
+    const childBaseTools = wrapToolSetWithDedup(subAgentCap.tools, this._crossTurnDedup);
     const initialDetail = isExplore
       ? "Scanning the codebase"
       : isVerifyDetect
@@ -1297,7 +1379,10 @@ export class Agent {
           },
         });
         closeMcp = mcpBundle.close;
-        childTools = { ...childBaseTools, ...mcpBundle.tools };
+        // Re-wrap merged tools through the same cumulative-cap state so MCP
+        // tools (which aren't part of childBaseTools) also count against and
+        // honor the sub-agent budget.
+        childTools = subAgentCap.rewrap({ ...childBaseTools, ...mcpBundle.tools });
         captureToolSchemas(childTools);
         if (mcpBundle.errors.length > 0) {
           lastActivity = `MCP unavailable: ${mcpBundle.errors.join(" | ")}`;
@@ -1331,6 +1416,41 @@ export class Agent {
       // Task 2.6a — assign a fresh correlation ID for this streamText call.
       this._currentCallId = crypto.randomUUID();
       const _subCallId = this._currentCallId;
+      // G1 debug: enable detailed sub-agent telemetry via env flag so we can
+      // diagnose "No output generated" / silent task failures (e.g. with
+      // gpt-5.4 reasoning models). Disabled by default — zero cost.
+      const debugSubagent = process.env.MUONROI_DEBUG_SUBAGENT === "1";
+      const debugLog = (line: string): void => {
+        if (debugSubagent) process.stderr.write(`[subagent] ${line}\n`);
+      };
+      if (debugSubagent) {
+        const mi = childRuntime.modelInfo;
+        debugLog(
+          `start: model=${childRuntime.modelId} provider=${mi?.provider} reasoning=${mi?.reasoning} thinkingType=${mi?.thinkingType} supportsClientTools=${mi?.supportsClientTools} supportsMaxOutputTokens=${mi?.supportsMaxOutputTokens} agent=${request.agent}`,
+        );
+        try {
+          debugLog(`providerOptions=${JSON.stringify(childRuntime.providerOptions ?? {})}`);
+        } catch {
+          /* providerOptions may contain non-serializable refs */
+        }
+        debugLog(
+          `toolCount=${Object.keys(childTools).length} stopWhen=stepCountIs(${Math.min(this.maxToolRounds, isExplore ? 60 : 120)})`,
+        );
+      }
+
+      // Honor `unsupportedParams` from OAuth registry (ChatGPT Codex backend
+      // rejects `max_output_tokens` with HTTP 400; top-level orchestrator
+      // already strips it via `dropParam`, the sub-agent path was missing
+      // the same guard, causing G1: "Task failed: No output generated.").
+      const childDropMaxOutput = shouldDropParam(childRuntime, "maxOutputTokens");
+      const childDropTemperature = shouldDropParam(childRuntime, "temperature");
+      // Phase B3: compact older tool_results out of the running message history
+      // before each AI SDK step. First step (stepNumber === 0) has no history
+      // worth compacting; later steps are where cumulative input balloons.
+      const compactThreshold = getSubAgentCompactThresholdChars();
+      const compactKeepLast = getSubAgentCompactKeepLast();
+      // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
+      this._lastProviderOptionsShape = extractProviderOptionsShape(childRuntime.providerOptions);
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1339,10 +1459,22 @@ export class Agent {
         stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
         maxRetries: 0,
         abortSignal: signal,
-        temperature: isExplore ? 0.2 : 0.5,
-        ...(childRuntime.modelInfo?.supportsMaxOutputTokens === false
-          ? {}
-          : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
+        prepareStep: ({ messages, stepNumber }) => {
+          if (stepNumber < 1) return undefined;
+          const compacted = compactSubAgentMessages(messages, {
+            thresholdChars: compactThreshold,
+            keepLastTurns: compactKeepLast,
+          });
+          if (compacted === messages || compacted.length === messages.length) {
+            // Identity / length match — no rewrites happened.
+            // (compactSubAgentMessages returns a new array but length === input
+            // when below threshold; cheap heuristic to skip the override.)
+            if (compacted === messages) return undefined;
+          }
+          return { messages: compacted };
+        },
+        ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
+        ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
         onFinish: ({ totalUsage, finishReason }) => {
           const tu = totalUsage as Record<string, unknown>;
@@ -1376,12 +1508,20 @@ export class Agent {
       });
 
       let _subTokenIndex = 0;
+      const partCounts: Record<string, number> = {};
+      let toolCallCount = 0;
+      let textDeltaCount = 0;
       for await (const part of result.fullStream) {
         if (signal?.aborted) {
           break;
         }
 
+        if (debugSubagent) {
+          partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+        }
+
         if (part.type === "text-delta") {
+          textDeltaCount++;
           assistantText += part.text;
           // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
           try {
@@ -1402,13 +1542,40 @@ export class Agent {
         }
 
         if (part.type === "tool-call") {
+          toolCallCount++;
           lastActivity = formatSubagentActivity(part.toolName, part.input);
           onActivity?.(lastActivity);
+          continue;
+        }
+
+        if (debugSubagent) {
+          // Capture finish reasons + error parts that we'd otherwise swallow.
+          if ((part as { type: string }).type === "error") {
+            const errPart = (part as { error?: unknown }).error ?? part;
+            const errStr = (() => {
+              try {
+                return JSON.stringify(errPart, Object.getOwnPropertyNames(errPart as object));
+              } catch {
+                return String(errPart);
+              }
+            })();
+            debugLog(`stream-error-part: ${errStr.slice(0, 500)}`);
+          }
+          if ((part as { type: string }).type === "finish") {
+            const reason = (part as { finishReason?: string }).finishReason ?? null;
+            debugLog(`stream-finish: reason=${reason}`);
+          }
         }
       }
 
       if (signal?.aborted) {
         return { success: false, output: "[Cancelled]" };
+      }
+
+      if (debugSubagent) {
+        debugLog(
+          `stream-end: textDeltas=${textDeltaCount} toolCalls=${toolCallCount} assistantTextLen=${assistantText.length} parts=${JSON.stringify(partCounts)}`,
+        );
       }
 
       await result.response;
@@ -1427,6 +1594,44 @@ export class Agent {
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
       const msg = err instanceof Error ? err.message : String(err);
+      // G1 diagnostic: surface the full error shape under
+      // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
+      // generated" (AI SDK validation failure on empty assistant response)
+      // or a deeper provider error.
+      if (process.env.MUONROI_DEBUG_SUBAGENT === "1") {
+        const e = err as {
+          name?: string;
+          message?: string;
+          cause?: unknown;
+          stack?: string;
+          statusCode?: number;
+          data?: unknown;
+          responseBody?: unknown;
+        };
+        process.stderr.write(
+          `[subagent] catch: name=${e.name ?? "?"} statusCode=${e.statusCode ?? "?"} message=${(e.message ?? "").slice(0, 400)}\n`,
+        );
+        if (e.cause !== undefined) {
+          try {
+            process.stderr.write(
+              `[subagent] catch.cause=${JSON.stringify(e.cause, Object.getOwnPropertyNames(e.cause as object)).slice(0, 600)}\n`,
+            );
+          } catch {
+            process.stderr.write(`[subagent] catch.cause(string)=${String(e.cause).slice(0, 400)}\n`);
+          }
+        }
+        if (e.responseBody !== undefined) {
+          process.stderr.write(`[subagent] catch.responseBody=${String(e.responseBody).slice(0, 600)}\n`);
+        }
+        if (e.data !== undefined) {
+          try {
+            process.stderr.write(`[subagent] catch.data=${JSON.stringify(e.data).slice(0, 400)}\n`);
+          } catch {
+            /* non-serializable */
+          }
+        }
+        if (e.stack) process.stderr.write(`[subagent] stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}\n`);
+      }
       const output = `Task failed: ${msg}`;
       return {
         success: false,
@@ -1815,8 +2020,8 @@ export class Agent {
       model: runtime.model,
       system,
       prompt,
-      maxOutputTokens: maxTokens,
-      temperature: 0.7,
+      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
+      ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.7 }),
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
     });
     this._councilStats.calls++;
@@ -1873,8 +2078,8 @@ export class Agent {
         prompt: userPrompt,
         tools: researchTools,
         stopWhen: stepCountIs(10),
-        maxOutputTokens: 4096,
-        temperature: 0.3,
+        ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
+        ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.3 }),
         ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
         ...(signal ? { abortSignal: signal } : {}),
       });
@@ -2937,6 +3142,8 @@ export class Agent {
           });
 
           const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
+          // Phase O1 — capture providerOptions SHAPE for batch path too.
+          this._lastProviderOptionsShape = extractProviderOptionsShape(runtime.providerOptions);
           await addBatchRequests({
             ...this.getBatchClientOptions(signal),
             batchId: batch.batch_id,
@@ -3099,6 +3306,28 @@ export class Agent {
       return;
     }
 
+    // Phase A5 — if the user message already has a persisted seq (set by
+    // the write-ahead path), skip re-inserting it. The write-ahead row
+    // will be upserted to status='completed' on the next `appendMessages`
+    // call that sees it via ON CONFLICT, but here we only need to insert
+    // the *new* assistant/tool messages so they get fresh sequence
+    // numbers contiguous with the user row.
+    const existingUserSeq = userIndex >= 0 ? this.messageSeqs[userIndex] : null;
+    if (typeof existingUserSeq === "number") {
+      // User row is already persisted (write-ahead). Insert only the new
+      // assistant/tool messages so they get fresh sequence numbers
+      // contiguous with the user row. Then flip the user row's status
+      // from 'pending' to 'completed' so forensics + replay tooling can
+      // tell the turn settled cleanly.
+      const insertedSeqs = appendMessages(this.session.id, newMessages);
+      markMessageCompleted(this.session.id, existingUserSeq);
+      this.messages.push(...newMessages);
+      this.messageSeqs.push(...insertedSeqs);
+      this.sessionStore.touchSession(this.session.id, this.bash.getCwd());
+      this.session = this.sessionStore.getRequiredSession(this.session.id);
+      return;
+    }
+
     const insertedSeqs = appendMessages(this.session.id, [userMessage, ...newMessages]);
     if (userIndex >= 0) {
       this.messageSeqs[userIndex] = insertedSeqs[0] ?? this.messageSeqs[userIndex];
@@ -3146,6 +3375,10 @@ export class Agent {
     }
     const signal = this.abortController.signal;
     this.emitSubagentStatus(null);
+
+    // Phase C3: advance the cross-turn dedup turn counter so stubs can point
+    // back to the correct prior turn.
+    this._crossTurnDedup?.beginTurn();
 
     // P0 native observation: turn boundary. Capture the prior batch via
     // resetBatch — file-revert detection (in the hook layer) reads it on
@@ -3533,7 +3766,24 @@ export class Agent {
     }
 
     this.messages.push(userModelMessage);
-    this.messageSeqs.push(null);
+    // Phase A5 — write-ahead the user row so `recordUsage` mid-stream can
+    // attribute usage to a real `message_seq` instead of falling back to
+    // NULL (or to the previous turn's assistant seq for a session that has
+    // multi-turn history). The post-stream `appendCompletedTurn(...)` path
+    // upserts the same row to `status='completed'` via the
+    // `ON CONFLICT(session_id, seq) DO UPDATE` clause in `appendMessages`.
+    let userWriteAheadSeq: number | null = null;
+    if (this.session) {
+      try {
+        userWriteAheadSeq = getNextMessageSequence(this.session.id);
+        persistMessageWriteAhead(this.session.id, userWriteAheadSeq, "user", JSON.stringify(userModelMessage));
+      } catch {
+        // Fail-open: if seq lookup throws, fall back to the legacy NULL
+        // path. The forensics anomaly returns but the turn proceeds.
+        userWriteAheadSeq = null;
+      }
+    }
+    this.messageSeqs.push(userWriteAheadSeq);
 
     // Inject accumulated EE session guidance as a system message so the model
     // is informed of past warnings before making tool decisions this turn.
@@ -3738,7 +3988,7 @@ export class Agent {
             );
           }
 
-          const baseTools = createTools(this.bash, provider, this.mode, {
+          const baseToolsRaw = createTools(this.bash, provider, this.mode, {
             runTask: (request, abortSignal) => this.runTask(request, combineAbortSignals(signal, abortSignal)),
             runDelegation: (request, abortSignal) =>
               this.runDelegation(request, combineAbortSignals(signal, abortSignal)),
@@ -3750,11 +4000,17 @@ export class Agent {
             sessionId: this.session?.id ?? undefined,
             modelId: turnModelId,
           });
+          // Top-level cumulative cap state. We accumulate the raw tool set
+          // (base + MCP + PIL response tools) across the assembly below,
+          // then apply the cap once. Tier ratios are looser than the
+          // sub-agent cap (50%/80%) so casual single-tool turns are not
+          // trimmed. See sub-agent-cap.ts.
           // Chitchat: drop builtin tools too (not just MCP). A 1-word greeting
           // never needs bash/read_file/edit_file/grep — those schemas alone
           // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
           // every non-chitchat turn (PIL gates conservatively).
-          let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseTools;
+          let rawToolSet: ToolSet =
+            runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseToolsRaw;
           // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
           // worth of tool schemas (~20K input tokens). PIL Layer 1 already
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
@@ -3789,8 +4045,7 @@ export class Agent {
               },
             });
             closeMcp = mcpBundle.close;
-            tools = { ...baseTools, ...mcpBundle.tools };
-            captureToolSchemas(tools);
+            rawToolSet = { ...rawToolSet, ...mcpBundle.tools };
             if (mcpBundle.errors.length > 0) {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
@@ -3798,9 +4053,21 @@ export class Agent {
 
           // PIL response tools: inject structured output tool when taskType detected
           if (_hasResponseTools && runtime.modelInfo?.supportsClientTools !== false) {
-            tools = { ...tools, ..._pilResponseTools };
+            rawToolSet = { ...rawToolSet, ..._pilResponseTools };
             captureToolSchemas(_pilResponseTools);
           }
+
+          // Apply the top-level cumulative cap once over the fully-assembled
+          // raw tool set. State is per-turn; each turn gets a fresh budget.
+          const topLevelCap = wrapToolSetWithCap(rawToolSet, {
+            maxCumulativeChars: getTopLevelToolBudgetChars(),
+            midTierRatio: 0.5,
+            highTierRatio: 0.8,
+            label: "top-level",
+          });
+          // Phase C3: layer cross-turn dedup on top of the top-level cap.
+          const tools: ToolSet = wrapToolSetWithDedup(topLevelCap.tools, this._crossTurnDedup);
+          captureToolSchemas(tools);
           let responseToolCalled = false;
 
           // Build provider options, optionally adding reasoning budget for capable models
@@ -3828,11 +4095,24 @@ export class Agent {
             providerOpts.anthropic.thinking = { type: "adaptive" as any };
           }
 
-          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache
+          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache.
+          // Respect an already-set `store` (Codex/ChatGPT backend sets store:false via
+          // OAuth registry defaults); only default to true for api.openai.com path.
           const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
           if (turnProvider === "openai") {
-            providerOpts.openai = { ...(providerOpts.openai ?? {}), store: true };
+            const existing = (providerOpts.openai ?? {}) as { store?: boolean; promptCacheKey?: string };
+            // Stable prompt-cache key per session — see computePromptCacheKey
+            // doc in src/providers/runtime.ts for the rationale.
+            const promptCacheKey = existing.promptCacheKey ?? computePromptCacheKey(this.session?.id);
+            providerOpts.openai = {
+              ...existing,
+              store: existing.store ?? true,
+              ...(promptCacheKey ? { promptCacheKey } : {}),
+            };
           }
+          // Top-level dropParam — shared with sub-agent path via shouldDropParam.
+          // See src/providers/runtime.ts for the central rule.
+          const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
@@ -3892,6 +4172,18 @@ export class Agent {
           // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
           this._currentCallId = crypto.randomUUID();
           const _topCallId = this._currentCallId;
+          // Phase B4: compact older tool_result parts before each top-level
+          // step once cumulative message chars exceed the configured threshold.
+          // The compactor preserves system + first user verbatim and keeps the
+          // last N tool turns intact; older results are rewritten into short
+          // stubs. Symmetric to the B3 sub-agent path; reuses the same module
+          // with `label: "top-level"` so the stub text reflects which loop
+          // elided the content.
+          const topLevelCompactThreshold = getTopLevelCompactThresholdChars();
+          const topLevelCompactKeepLast = getTopLevelCompactKeepLast();
+          // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
+          this._lastProviderOptionsShape =
+            Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -3904,10 +4196,17 @@ export class Agent {
                 : stepCountIs(this.maxToolRounds),
             maxRetries: 0,
             abortSignal: signal,
-            temperature: 0.7,
-            ...(runtime.modelInfo?.supportsMaxOutputTokens === false
-              ? {}
-              : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+            prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
+              if (sn < 1) return {};
+              const compacted = compactSubAgentMessages(stepMessages, {
+                thresholdChars: topLevelCompactThreshold,
+                keepLastTurns: topLevelCompactKeepLast,
+                label: "top-level",
+              });
+              return compacted === stepMessages ? {} : { messages: compacted };
+            },
+            ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
+            ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
             ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
             experimental_onStepStart: (event: unknown) => {
               stepNumber = getStepNumber(event, stepNumber + 1);
@@ -4072,6 +4371,33 @@ export class Agent {
                   // Attach callId to the ToolCall so tool-result can end it.
                   (tc as ToolCall & { _pendingCallId?: string })._pendingCallId = callId;
                 }
+
+                // Phase A4: write-ahead persistence — insert a pending row into
+                // tool_calls BEFORE executing the tool. If the stream throws
+                // mid-call (e.g. provider 5xx, abort, network drop), this row
+                // remains as `pending` so `usage forensics` can show the args
+                // the model passed. The post-stream appendMessages() path
+                // (INSERT OR IGNORE + UPDATE) will finalize this row to
+                // `completed` once the turn settles normally.
+                if (this.sessionStore && this.session) {
+                  // Predicted assistant seq: user message + assistant message
+                  // are appended atomically by appendCompletedTurn().
+                  // getNextMessageSequence() returns the seq the user message
+                  // will get; the assistant message is the next one after.
+                  let predictedSeq = -1;
+                  try {
+                    predictedSeq = getNextMessageSequence(this.session.id) + 1;
+                  } catch {
+                    /* fail-open — leave predictedSeq=-1; post-stream UPDATE corrects it */
+                  }
+                  persistToolCallWriteAhead(
+                    this.session.id,
+                    predictedSeq,
+                    tc.id,
+                    tc.function.name,
+                    tc.function.arguments || "{}",
+                  );
+                }
                 notifyObserver(observer?.onToolStart, {
                   toolCall: tc,
                   timestamp: Date.now(),
@@ -4150,15 +4476,22 @@ export class Agent {
                   await this.fireHook(postInput, signal).catch(() => {});
                 }
 
-                // Response tool: yield as structured_response instead of tool_result
+                // Response tool: yield as structured_response instead of tool_result.
+                // AI SDK v5 wraps tool outputs as `{type:"json", value:{...}}`; unwrap
+                // to expose the schema-shaped payload to the UI renderer.
                 if (isResponseTool(part.toolName)) {
                   responseToolCalled = true;
                   const taskType = getResponseTaskType(part.toolName);
+                  const rawOutput = part.output as unknown;
+                  const unwrapped =
+                    rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+                      ? ((rawOutput as { value?: unknown }).value ?? {})
+                      : (rawOutput ?? {});
                   yield {
                     type: "structured_response" as StreamChunk["type"],
                     structuredResponse: {
                       taskType: taskType ?? part.toolName,
-                      data: (part.output ?? {}) as Record<string, unknown>,
+                      data: unwrapped as Record<string, unknown>,
                     },
                   };
                   notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
@@ -4217,6 +4550,15 @@ export class Agent {
                   const pending = activeToolCalls.find((t) => t.id === errPart.toolCallId);
                   const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
                   if (callId) void this.pendingCalls.end(callId, "settled").catch(() => {});
+                }
+
+                // Phase A4: mark the write-ahead tool_calls row as `errored`.
+                // The post-stream appendMessages() path does NOT see tool-error
+                // parts in the assistant message content (the SDK doesn't emit
+                // them there), so without this explicit update the row would
+                // remain `pending` after a clean tool failure.
+                if (this.session) {
+                  markToolCallErrored(this.session.id, errPart.toolCallId, errMsg);
                 }
 
                 // Fire PostToolUseFailure so EE judge can record IGNORED outcome.
@@ -4566,6 +4908,12 @@ export class Agent {
           };
           if (assistantText.trim()) {
             this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+          } else if (this.session && userWriteAheadSeq != null) {
+            // Phase A5 — Stream threw before producing assistant text. The
+            // write-ahead user row is stuck at `status='pending'`. Mark it
+            // errored so forensics + recovery can distinguish "in-flight"
+            // from "crashed mid-flight".
+            markMessageErrored(this.session.id, userWriteAheadSeq);
           }
 
           // ROUTE-11: Fire routeFeedback for failed turns (error path).
@@ -4692,18 +5040,26 @@ export class Agent {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
 
-    if (this.providerId !== "openai") return;
     // Only upgrade when there is no explicit API key — OAuth is an alternative
     // auth path, not an override when the user deliberately passed a key.
-    if (this.apiKey) return;
+    // The boot wizard in src/index.ts uses the literal "oauth" as a sentinel
+    // to signal "no API key but OAuth tokens exist", so treat that as "no
+    // key" here.
+    if (this.apiKey && this.apiKey !== "oauth") return;
 
     try {
+      const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
+      const ids = await listOAuthProviderIds();
+      if (!ids.includes(this.providerId)) return;
+
       const effectiveBaseURL =
         this.baseURL &&
         this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
           ? this.baseURL
           : undefined;
-      const result = await createProviderFactoryAsync("openai", { baseURL: effectiveBaseURL ?? undefined });
+      const result = await createProviderFactoryAsync(this.providerId, {
+        baseURL: effectiveBaseURL ?? undefined,
+      });
       this.provider = result.factory;
     } catch {
       // Fail-open — provider remains null; requireProvider() will surface the error

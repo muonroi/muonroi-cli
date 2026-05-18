@@ -1,0 +1,33 @@
+# BB-aware /ideal — EE coverage probe (post-Phase 3 ingestion)
+# Date: 2026-05-16
+
+### Query: decision table FEEL
+  [bb-recipes] 0.82: Quickstart Decision Table Sample: - Minimal host wiring with `AddDecisionTableWeb(...)` and FEEL end
+  [bb-behavioral] 0.76: DecisionTableGen: `tools/Muonroi.DecisionTableGen/` — Decision table code gen CLI
+  [experience-principles] 0.70: Commercial package Muonroi.RuleEngine.DecisionTable.Web requires a valid Muonroi commercial license 
+
+### Query: observability tracing
+  [bb-recipes] 0.54: Template Muonroi Microservices Solution (mr-micro-sln): Muonroi microservices template with selectab
+  [bb-behavioral] 0.71: Use `IMLog<T>` from `Muonroi.Logging.Abstractions` for structured logging, replacing raw logging met
+  [experience-principles] 0.64: When debugging or monitoring rule execution issues, do use diagnostic tools like AuditTrailHook or I
+
+### Query: fraud detection
+  [bb-recipes] 0.63: FraudDetection Sample: - `AddCepWeb()` with the new DI-backed `ICepConfigRepository`. - `CepWindowB
+  [bb-behavioral] 0.63: Schema antitamper/baseline/tamper-check.v1.json (6 fields, category: antitamper)
+  [experience-principles] 0.56: Commercial package Muonroi.Secrets requires a valid Muonroi commercial license for production use
+
+### Query: loan approval
+  [bb-recipes] 0.68: LoanApproval Sample: - Code-first rule orchestration with `IRule<TContext>` and `RuleOrchestrator<TC
+  [bb-behavioral] 0.56: Schema antitamper/contracts/tamper-check.v1.json (6 fields, category: antitamper)
+  [experience-principles] 0.58: Commercial package Muonroi.AuthZ requires a valid Muonroi commercial license for production use
+
+### Query: multi-tenant SaaS
+  [bb-recipes] 0.84: MultiTenantSaaS Sample: - Tenant-specific rule registration with `[TenantRuleGroup("pricing", "<tena
+  [bb-behavioral] 0.73: Use the SharedSchema strategy by implementing `ITenantScoped` on your entities and leveraging `Tenan
+  [experience-principles] 0.63: Infrastructure area packages: Muonroi.AspNetCore (OSS), Muonroi.Tenancy (OSS), Muonroi.Observability
+
+### Query: OSS package must not reference commercial
+  [bb-recipes] 0.47: Template Muonroi BuildingBlock Solution (mr-base-sln): Muonroi base solution template with selectabl
+  [bb-behavioral] 0.54: Use `services.AddLicenseProtection(configuration)` for OSS projects and `services.AddMEnterpriseGove
+  [experience-principles] 0.84: OSS package Muonroi.RuleEngine.Testing MUST NOT reference any Commercial package
+

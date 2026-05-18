@@ -395,3 +395,53 @@ export function _resetBBRetrievalState(): void {
   _noRecipeLogged = false;
   _networkErrorLogged = false;
 }
+
+/**
+ * Threshold above which a prompt is inferred to target muonroi-building-block.
+ * Calibrated against the 2026-05-16 coverage probe: "fraud detection" → 0.63,
+ * "loan approval" → 0.68, "multi-tenant SaaS" → 0.84, "decision table FEEL" → 0.82.
+ * Generic prompts ("write a TODO app") fall well below 0.55.
+ */
+export const BB_INFER_SCORE_FLOOR = 0.6;
+
+/**
+ * Infer whether a free-form prompt likely targets muonroi-building-block.
+ * Used by the loop-driver as a fallback when filesystem-based `detectBBFramework`
+ * returns undefined (e.g. empty cwd in init-new flow). Queries `bb-recipes` once
+ * with the prompt and returns true iff the top hit score ≥ BB_INFER_SCORE_FLOOR.
+ *
+ * Graceful degrade: returns false on any error (EE unconfigured, network fail,
+ * feature flag off). Never throws.
+ */
+export async function inferBBFromPrompt(
+  prompt: string,
+  opts: FetchBBContextOpts = {},
+): Promise<boolean> {
+  const settings = loadUserSettings();
+  if (settings.eeBBContext === false) return false;
+  if (!prompt || prompt.trim().length < 4) return false;
+
+  let baseUrl = opts.eeBaseUrl;
+  let authToken: string | null = opts.eeAuthToken ?? null;
+  if (!baseUrl) {
+    try {
+      authToken = await loadEEAuthToken();
+    } catch {}
+    baseUrl = getCachedServerBaseUrl() ?? undefined;
+  }
+  if (!baseUrl) return false;
+
+  const timeoutMs = opts.timeoutMs ?? BB_RETRIEVAL_TIMEOUT_MS;
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const signal: AbortSignal = opts.signal
+    ? (AbortSignal as unknown as { any: (signals: AbortSignal[]) => AbortSignal }).any([opts.signal, timeout])
+    : timeout;
+
+  try {
+    const points = await queryWithRetry(prompt, "bb-recipes", baseUrl, authToken, signal);
+    const top = points[0]?.score ?? 0;
+    return top >= BB_INFER_SCORE_FLOOR;
+  } catch {
+    return false;
+  }
+}

@@ -28,7 +28,9 @@ export default defineConfig({
     include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}", "tests/perf/**/*.bench.ts"],
     exclude: [
       "dist/**",
+      "**/dist/**",
       "node_modules/**",
+      "**/node_modules/**",
       "tmp/**",
       ".claude/**",
       ".cursor/**",
@@ -44,6 +46,9 @@ export default defineConfig({
       "packages/agent-harness-react/**",
       // React E2E tests — require happy-dom / WS transport setup
       "tests/harness-react/**",
+      // OpenTUI E2E specs require the dedicated harness config (longer timeouts,
+      // fileParallelism:false). Run via: bunx vitest -c vitest.harness.config.ts run tests/harness/
+      "tests/harness/**",
     ],
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 30_000,

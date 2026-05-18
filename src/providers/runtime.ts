@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -5,6 +6,7 @@ import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { createOllama } from "ollama-ai-provider-v2";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
+import { getReasoningEffortForModel } from "../utils/settings.js";
 import { OPENAI_COMPATIBLE_BASE_URLS } from "./endpoints.js";
 import type { ProviderId } from "./types.js";
 
@@ -12,6 +14,10 @@ import type { ProviderId } from "./types.js";
 export type ProviderFactory = ((modelId: string) => any) & {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   responses?: (modelId: string) => any;
+  /** Provider-level options to merge into providerOptions[<provider>] on every call. */
+  defaultProviderOptions?: Record<string, unknown>;
+  /** AI SDK top-level call params to strip (backend doesn't accept them). */
+  unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
 };
 
 export interface ProviderFactoryResult {
@@ -26,6 +32,8 @@ export interface ResolvedModelRuntime {
   modelInfo?: ModelInfo;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: any;
+  /** Top-level streamText params to omit (backend doesn't accept them). */
+  unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
 }
 
 export function createProviderFactory(
@@ -40,14 +48,24 @@ export function createProviderFactory(
       return { id, factory };
     }
     case "openai": {
-      const p = opts.headers
+      // OAuth subscription tokens cannot call api.openai.com — they must hit
+      // ChatGPT's backend (https://chatgpt.com/backend-api/codex) using the
+      // Responses API, not Chat Completions.
+      const isOAuth = !!opts.headers;
+      const p = isOAuth
         ? createOpenAI({
-            apiKey: opts.apiKey ?? "oauth", // placeholder when using OAuth headers
-            baseURL: opts.baseURL,
+            apiKey: opts.apiKey ?? "oauth",
+            baseURL: opts.baseURL ?? "https://chatgpt.com/backend-api/codex",
             headers: opts.headers,
           })
         : createOpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-      return { id, factory: (modelId: string) => p(modelId) };
+      const factory: ProviderFactory = isOAuth
+        ? // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
+          (modelId: string) => (p as any).responses(modelId)
+        : (modelId: string) => p(modelId);
+      // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
+      factory.responses = (modelId: string) => (p as any).responses(modelId);
+      return { id, factory };
     }
     case "google": {
       const p = opts.headers
@@ -90,33 +108,45 @@ export async function createProviderFactoryAsync(
   id: ProviderId,
   opts: { apiKey?: string; baseURL?: string },
 ): Promise<ProviderFactoryResult> {
-  if (id === "openai") {
-    try {
-      const { loadTokensWithRefresh, openAIOAuth } = await import("./auth/openai-oauth.js");
-      const tokens = await loadTokensWithRefresh("openai").catch(() => null);
+  try {
+    const { getOAuthProviderConfig } = await import("./auth/registry.js");
+    const cfg = await getOAuthProviderConfig(id);
+    if (cfg) {
+      const tokens = await cfg.loadTokensWithRefresh().catch(() => null);
       if (tokens) {
-        const headers = openAIOAuth.authHeaders(tokens);
-        return createProviderFactory(id, { ...opts, headers });
+        const headers = cfg.provider.authHeaders(tokens);
+        // OAuth subscription tokens may need a different base URL than the
+        // provider's API-key endpoint (e.g. OpenAI's ChatGPT backend).
+        const baseURL = opts.baseURL ?? cfg.baseURL;
+        const result = createProviderFactory(id, { ...opts, baseURL, headers });
+        // Attach provider-level OAuth-only defaults so downstream code can merge them.
+        if (cfg.defaultProviderOptions) {
+          result.factory.defaultProviderOptions = cfg.defaultProviderOptions;
+        }
+        if (cfg.unsupportedParams) {
+          result.factory.unsupportedParams = cfg.unsupportedParams;
+        }
+        return result;
       }
-    } catch {
-      // OAuth module unavailable or token load failed — fall through to API key
     }
-  }
-
-  if (id === "google") {
-    try {
-      const { loadGeminiTokensWithRefresh, geminiOAuth } = await import("./auth/gemini-oauth.js");
-      const tokens = await loadGeminiTokensWithRefresh().catch(() => null);
-      if (tokens) {
-        const headers = geminiOAuth.authHeaders(tokens);
-        return createProviderFactory(id, { ...opts, headers });
-      }
-    } catch {
-      // OAuth module unavailable or token load failed — fall through to API key
-    }
+  } catch {
+    /* registry unavailable or token load failed — fall through to API key */
   }
 
   return createProviderFactory(id, opts);
+}
+
+/**
+ * Test-harness hook: when `globalThis.__muonroiMockModel` is set, swap in a
+ * mock LanguageModelV3 and skip the real provider factory entirely. The
+ * providerOptions and unsupportedParams branches below run as usual so
+ * cost-leak specs can verify the merged shape that streamText receives.
+ * See src/agent-harness/mock-model.ts for the install helper.
+ */
+interface MockRuntimeGlobals {
+  __muonroiMockModel?: unknown;
+  __muonroiMockUnsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
+  __muonroiMockDefaultProviderOptions?: Record<string, unknown>;
 }
 
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
@@ -126,24 +156,134 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // the alias is not a valid model id on their API.
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
-  const model = factory(canonicalId);
+
+  const mockGlobals = globalThis as MockRuntimeGlobals;
+  const mockModel = mockGlobals.__muonroiMockModel;
+
+  // Determine the language model + unsupportedParams + provider-level defaults.
+  // Test path: mockModel is a MockLanguageModelV3 from ai/test. Overrides for
+  // unsupportedParams / defaultProviderOptions simulate OAuth registry state.
+  // Prod path: factory builds the real provider model (api-key or OAuth).
+  // biome-ignore lint/suspicious/noExplicitAny: ai-sdk model shape is provider-specific
+  let model: any;
+  let unsupportedParams: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP"> | undefined;
+  let providerLevelDefaults: Record<string, unknown> | undefined;
+
+  if (mockModel) {
+    model = mockModel;
+    unsupportedParams = mockGlobals.__muonroiMockUnsupportedParams;
+    providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
+  } else {
+    // G1 fix: OpenAI reasoning models (gpt-5.x, o1, o3, o4) require the
+    // Responses API even on the API-key path. The chat-completions endpoint
+    // accepts the request but returns an empty assistant message, which AI
+    // SDK then surfaces as "AI_NoOutputGeneratedError" → "Task failed: No
+    // output generated". The OAuth path already routes through .responses()
+    // when the factory is constructed (see createProviderFactory), but the
+    // API-key path used plain chat completions.
+    const needsResponsesApi =
+      modelInfo?.responsesOnly === true || (modelInfo?.provider === "openai" && modelInfo?.reasoning === true);
+    model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
+    unsupportedParams = factory.unsupportedParams;
+    providerLevelDefaults = factory.defaultProviderOptions;
+  }
 
   let providerOptions: Record<string, unknown> | undefined;
 
-  if (modelInfo?.thinkingType === "adaptive") {
-    providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
-  } else if (modelInfo?.thinkingType === "enabled") {
-    providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
+  // `thinking` is an Anthropic-specific provider option. Setting it on
+  // non-Anthropic models was dead-code (AI SDK silently strips wrong-provider
+  // keys) but masked the actual issue when debugging.
+  if (modelInfo?.provider === "anthropic") {
+    if (modelInfo.thinkingType === "adaptive") {
+      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
+    } else if (modelInfo.thinkingType === "enabled") {
+      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
+    }
   }
+
+  const userEffort = getReasoningEffortForModel(modelId);
 
   if (modelInfo?.provider === "xai" && modelInfo.supportsReasoningEffort) {
     providerOptions = {
       ...providerOptions,
-      xai: { reasoningEffort: modelInfo.defaultReasoningEffort ?? "medium" },
+      xai: { reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium" },
     };
   }
 
-  return { model, modelId, modelInfo, providerOptions };
+  // Forward reasoning effort generically for any provider whose catalog entry
+  // declares `supportsReasoningEffort`. AI SDK accepts "low"|"medium"|"high"|"xhigh"
+  // for openai (matching Codex CLI's UI labels) and similar for other providers.
+  if (modelInfo?.provider === "openai" && modelInfo.supportsReasoningEffort) {
+    providerOptions = {
+      ...providerOptions,
+      openai: {
+        ...(providerOptions?.openai as Record<string, unknown> | undefined),
+        reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium",
+      },
+    };
+  }
+
+  // Merge provider-level defaults from the factory (e.g. OAuth backends inject
+  // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
+  // backend-specific quirks centralized in src/providers/auth/registry.ts.
+  // In the mock path `providerLevelDefaults` is the test-supplied override.
+  if (providerLevelDefaults && modelInfo?.provider) {
+    const key = modelInfo.provider;
+    providerOptions = {
+      ...providerOptions,
+      [key]: {
+        ...providerLevelDefaults,
+        ...((providerOptions?.[key] as Record<string, unknown> | undefined) ?? {}),
+      },
+    };
+  }
+
+  return { model, modelId, modelInfo, providerOptions, unsupportedParams };
+}
+
+/**
+ * F1: derive a stable OpenAI prompt-cache key from the session id.
+ *
+ * The AI SDK's agentic streamText loop sends one OpenAI call per tool round.
+ * Without a stable `promptCacheKey`, OpenAI auto-hashes prompt content — so
+ * the moment any later message changes (which always happens between rounds),
+ * the cache is busted. Hashing session.id gives every round in the same
+ * session the same key, so the unchanging system + early-message prefix
+ * keeps hitting the cache. Cache TTL is short (minutes) but covers a turn.
+ *
+ * Returns undefined when there is no session id (e.g. headless one-shot
+ * requests with no persistence) — callers must skip setting the field.
+ */
+export function computePromptCacheKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId) return undefined;
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/**
+ * Returns true when a top-level streamText param should be omitted because
+ * either (a) the model catalog explicitly marks it unsupported, or (b) the
+ * OAuth provider registry attached `unsupportedParams` to the factory
+ * (e.g. ChatGPT Codex rejects `max_output_tokens` with HTTP 400 — see G1).
+ *
+ * Centralizes the dropParam test so the orchestrator's sub-agent path,
+ * top-level path, and cost-leak specs cannot drift apart.
+ */
+export function shouldDropParam(
+  runtime: ResolvedModelRuntime,
+  param: "maxOutputTokens" | "temperature" | "topP",
+): boolean {
+  if (param === "maxOutputTokens" && runtime.modelInfo?.supportsMaxOutputTokens === false) {
+    return true;
+  }
+  // Reasoning models (gpt-5.x, o1/o3/o4, deepseek-r1, claude reasoning, etc.)
+  // reject `temperature` and `topP` at the provider — OpenAI Responses API
+  // emits an AI SDK warning and the param is silently ignored. Drop them at
+  // the source so the warning stops and no future strict-mode provider
+  // surfaces a hard error. G2 — sibling of G1 (maxOutputTokens drop).
+  if ((param === "temperature" || param === "topP") && runtime.modelInfo?.reasoning === true) {
+    return true;
+  }
+  return runtime.unsupportedParams?.includes(param) ?? false;
 }
 
 export function detectProviderForModel(modelId: string): ProviderId {
