@@ -1,0 +1,15 @@
+{
+  "___comment": "Council fixture that produces ONE clarification question (instead of an empty array). Used by tests/harness/askcard.spec.ts to verify the askcard modal renders + the askcard-open LiveEvent fires. The test stops once the modal is visible; we do not need to drive the council to completion, but the sequence includes fallback entries so follow-up calls return deterministically rather than throwing 'no fixture matches'.",
+  "sequence": [
+    {
+      "match": "AMBIGUITIES",
+      "text": "[{\"question\":\"Which deployment target should we optimize for?\",\"why\":\"The topic does not specify deployment context.\",\"suggestions\":[\"Linux server\",\"Edge / serverless\",\"Local CLI\"],\"recommended\":\"Linux server\",\"isRequired\":true}]",
+      "___comment": "Clarifier round 1 — return one question with three suggestions so an askcard renders."
+    },
+    {
+      "text": "[]",
+      "___comment": "Fallback (no match constraint) — drains any remaining calls with an empty list / harmless response."
+    }
+  ],
+  "responses": [{ "match": "*", "text": "[]" }]
+}
