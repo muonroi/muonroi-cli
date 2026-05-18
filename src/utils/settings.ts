@@ -418,6 +418,9 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
 }
 
 export function getApiKey(): string | undefined {
+  // Test escape hatch (api-key harness spec): suppress all key sources so the
+  // boot flow reaches the API-key modal. See src/index.ts resolveKeyForModel.
+  if (process.env.MUONROI_TEST_NO_KEYCHAIN === "1") return undefined;
   return process.env.MUONROI_API_KEY || loadUserSettings().apiKey;
 }
 

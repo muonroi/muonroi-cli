@@ -29,6 +29,9 @@ import { spawnHarness } from "./helpers.js";
 // sidechannel drops the toast event before ingestion. Skip until the harness
 // has a deterministic error-injection hook that doesn't depend on prompt
 // matching.
+// Re-enable once the harness gains a deterministic error-injection hook
+// (e.g. an MCP-level `tui.inject_stream_error` command) that does not rely
+// on prompt substring matching surviving the system-prompt prefix.
 describe.skip("error states E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
