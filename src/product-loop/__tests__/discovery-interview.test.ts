@@ -158,6 +158,114 @@ describe("discovery-interview", () => {
     expect(calls).not.toContain("productType");
   });
 
+  describe("skip-budget: required question escalation", () => {
+    it("exits inner loop after 3 skips and leaves question unresolved", async () => {
+      const validAnswers = {
+        productType: "saas",
+        targetPlatform: ["cli"],
+        audience: { persona: "devs", scale: "1k-100k", geography: "SEA" },
+        backendArchitecture: "monolith",
+        backendStack: { language: "TS", framework: "Nest" },
+        dbStrategy: { mode: "greenfield", engine: "PG" },
+      };
+      // leader returns null ONLY for productType; valid values for everything else
+      const nullProductTypeRec = {
+        leaderRecommend: vi.fn(async ({ question }: any) => ({
+          primary: {
+            value: question.id === "productType" ? null : validAnswers[question.id as keyof typeof validAnswers],
+            rationale: question.id === "productType" ? "unavailable" : "r",
+          },
+          alternatives: [],
+          source: "leader" as const,
+          costUsd: 0,
+        })),
+        councilRecommend: vi.fn(async ({ question }: any) => ({
+          primary: { value: validAnswers[question.id as keyof typeof validAnswers], rationale: "r" },
+          alternatives: [],
+          source: "council" as const,
+          costUsd: 0.3,
+        })),
+      };
+
+      // Optional questions that have no valid recommendation in this test:
+      // skip them so we don't loop on failed validation.
+      const OPTIONAL_IDS = new Set(["frontendApproach", "baStatus", "designStatus", "deployment"]);
+      let productTypePromptCount = 0;
+      const userPrompt: UserPromptFn = async ({ questionId, message }) => {
+        if (message) return { action: "more-options" }; // "cannot be skipped" info calls
+        if (questionId === "productType") {
+          productTypePromptCount += 1;
+          return { action: "skip" };
+        }
+        if (questionId === "__user_gate__") return { action: "proceed" };
+        if (OPTIONAL_IDS.has(questionId)) return { action: "skip" };
+        return { action: "accept" };
+      };
+
+      await iterateInterview({
+        flowDir,
+        runId,
+        idea: "x",
+        capUsd: 50,
+        detection: FAKE_DETECTION,
+        userPrompt,
+        recommender: nullProductTypeRec as any,
+      });
+
+      // Exactly 3 skip prompts for productType — budget exhausted, loop exited.
+      // A 4th prompt would mean the infinite-loop bug is still present.
+      expect(productTypePromptCount).toBe(3);
+
+      // productType not in questionsAnswered → escalated as unspecified
+      const state = await readDiscoveryState(flowDir, runId);
+      expect(state?.questionsAnswered).not.toContain("productType");
+    });
+
+    it("resets skip counter when user provides a real answer after skips", async () => {
+      const answers = {
+        productType: "saas",
+        targetPlatform: ["cli"],
+        audience: { persona: "devs", scale: "1k-100k", geography: "SEA" },
+        backendArchitecture: "monolith",
+        backendStack: { language: "TS", framework: "Nest" },
+        dbStrategy: { mode: "greenfield", engine: "PG" },
+      };
+      const rec = makeRecommender(answers);
+
+      // productType: first 2 skips are rejected, then override → answer saved
+      // This verifies that if the user later provides override, counter resets.
+      let productTypeAttempts = 0;
+      const userPrompt: UserPromptFn = async ({ questionId, message }) => {
+        if (message) return { action: "more-options" };
+        if (questionId === "productType") {
+          productTypeAttempts += 1;
+          if (productTypeAttempts <= 2) return { action: "skip" };
+          // 3rd attempt: user provides override
+          return { action: "override", value: "saas", reason: "ok" };
+        }
+        if (questionId === "__user_gate__") return { action: "proceed" };
+        return { action: "accept" };
+      };
+
+      await iterateInterview({
+        flowDir,
+        runId,
+        idea: "x",
+        capUsd: 50,
+        detection: FAKE_DETECTION,
+        userPrompt,
+        recommender: rec as any,
+      });
+
+      // productType must be in questionsAnswered (override on 3rd attempt)
+      const state = await readDiscoveryState(flowDir, runId);
+      expect(state?.questionsAnswered).toContain("productType");
+      expect(state?.answers.productType).toBe("saas");
+      // exactly 3 real prompts for productType (2 skips + 1 override)
+      expect(productTypeAttempts).toBe(3);
+    });
+  });
+
   it("rejects FE policy violation and re-prompts", async () => {
     const answers = {
       productType: "saas",

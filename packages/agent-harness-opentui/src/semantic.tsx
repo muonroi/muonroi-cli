@@ -33,16 +33,40 @@ export function Semantic(props: SemanticProps) {
   const parentId = React.useContext(ParentIdContext);
   const { children, ...node } = props;
 
-  // nodeKey serializes all node fields so that prop changes (without unmount)
-  // trigger the effect. `node` itself is intentionally NOT in the dep array —
-  // it is a new object on every render and would cause infinite re-registration.
+  // nodeKey serializes all node fields so an update effect runs when props
+  // change. The mount/unmount effect uses a SEPARATE dep array so register
+  // only fires on actual mount — this preserves the registry's insertion
+  // order across re-renders. Without this split, useEffect cleanup would
+  // delete the entry and the re-register would push it to the end of the
+  // Map, rotating queryAll order on every prop change.
   const nodeKey = JSON.stringify(node);
+  const nodeRef = React.useRef(node);
+  nodeRef.current = node;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: nodeKey is the intentional cache-bust for node fields; adding `node` would cause infinite re-registration
+  // Mount/unmount: register once, unregister on real unmount.
   React.useEffect(() => {
     if (!registry) return;
-    const unregister = registry.register({ ...node, parentId });
+    const unregister = registry.register({ ...nodeRef.current, parentId });
     return unregister;
+  }, [registry, parentId, node.id]);
+
+  // Updates: re-register on prop change. This calls register() with the new
+  // node fields; Map.set on an existing key preserves insertion order.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: nodeKey is the intentional cache-bust for node fields
+  React.useEffect(() => {
+    if (!registry) return;
+    if (!nodeKey) return;
+    // Skip the very first run — the mount effect above already registered.
+    // We detect "subsequent run" by checking if the entry exists in the
+    // registry. On mount, the order is: this effect runs after the mount
+    // effect, so the entry IS present. We then call register() again with
+    // the same node — that's a no-op write that updates fields without
+    // changing position. On subsequent renders with different nodeKey,
+    // register() updates the fields in place.
+    registry.register({ ...nodeRef.current, parentId });
+    // No cleanup — the mount effect's cleanup is the single source of
+    // truth for unmounting. If we returned a cleanup here, it would race
+    // with re-renders and re-delete the entry.
   }, [registry, parentId, nodeKey]);
 
   if (!registry) return children ?? null;

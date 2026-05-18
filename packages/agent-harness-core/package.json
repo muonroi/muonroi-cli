@@ -67,6 +67,14 @@
       "types": "./src/mcp-server.ts",
       "node": "./dist/node/mcp-server.js",
       "default": "./src/mcp-server.ts"
+    },
+    "./event-filter": {
+      "types": "./src/event-filter.ts",
+      "default": "./src/event-filter.ts"
+    },
+    "./event-redact": {
+      "types": "./src/event-redact.ts",
+      "default": "./src/event-redact.ts"
     }
   },
   "scripts": {

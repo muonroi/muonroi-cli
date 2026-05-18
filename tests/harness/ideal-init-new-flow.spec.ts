@@ -179,7 +179,12 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
 
   it("stage 4: Down arrow again moves selection Modular → Microservices", async () => {
     driver.press("Down");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // wait_for({idle}) can return before React commits the state setter —
+    // use the same waitForStable pattern as the Up arrow test below.
+    await waitForStable(
+      () => driver.query("id=init-new-form >> id=init-bb-option-mr-micro-sln")?.selected === true,
+      3_000,
+    );
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-mod-sln")?.selected).toBeFalsy();
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-micro-sln")?.selected).toBe(true);
   });

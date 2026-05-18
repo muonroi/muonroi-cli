@@ -33,6 +33,49 @@ function stripFences(s: string): string {
     .replace(/\s*```$/, "");
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic: MUONROI_DEBUG_LEADER=1 → emit JSON line to stderr on each attempt
+// Zero cost when envvar is unset.
+// ---------------------------------------------------------------------------
+interface LeaderDebugPayload {
+  attempt: number;
+  model: string;
+  system: string; // truncated to 500 chars
+  prompt: string; // truncated to 500 chars
+  rawResponse: string; // full
+  outcome: "parse_ok" | "parse_fail";
+  parseError?: string;
+}
+
+interface LeaderTimingPayload {
+  attempt: number;
+  durationMs: number;
+  outcome: "ok" | "throw" | "parse_fail";
+  modelId: string;
+}
+
+function emitLeaderDebug(payload: LeaderDebugPayload): void {
+  if (process.env.MUONROI_DEBUG_LEADER !== "1") return;
+  process.stderr.write("[leader-debug] " + JSON.stringify(payload) + "\n");
+}
+
+function emitLeaderTiming(payload: LeaderTimingPayload): void {
+  if (process.env.MUONROI_DEBUG_LEADER !== "1") return;
+  process.stderr.write("[leader-timing] " + JSON.stringify(payload) + "\n");
+}
+
+/**
+ * Returns true when the error represents a deterministic auth failure (401).
+ * On a 401 there is no point retrying — the same key will fail again.
+ */
+function isUnauthorizedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as Error & { status?: number; statusCode?: number };
+  if (e.status === 401 || e.statusCode === 401) return true;
+  const msg = e.message ?? "";
+  return msg.includes("401") || /unauthorized/i.test(msg);
+}
+
 function parseLeaderResponse(raw: string): { primary: any; alternatives: any[] } | null {
   try {
     const parsed = JSON.parse(stripFences(raw));
@@ -46,16 +89,28 @@ function parseLeaderResponse(raw: string): { primary: any; alternatives: any[] }
 
 export async function leaderRecommend(input: RecommendInput, leader: LeaderLike): Promise<RecommendOutput> {
   const prompt = buildLeaderPrompt(input);
+  const modelId: string = (leader as any).modelId ?? "unknown";
   let cost = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const t0 = Date.now();
     try {
       // 4096 (was 1024) — reasoner models (deepseek-v4-pro, o3) consume the
       // output budget for reasoning_tokens, so 1024 routinely truncates the
       // JSON tail and makes parseLeaderResponse fail twice → "leader unavailable".
       const res = await leader.generate({ system: LEADER_SYSTEM, prompt, maxTokens: 4096 });
+      const durationMs = Date.now() - t0;
       cost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {
+        emitLeaderDebug({
+          attempt,
+          model: modelId,
+          system: LEADER_SYSTEM.slice(0, 500),
+          prompt: prompt.slice(0, 500),
+          rawResponse: res.content,
+          outcome: "parse_ok",
+        });
+        emitLeaderTiming({ attempt, durationMs, outcome: "ok", modelId });
         return {
           primary: parsed.primary,
           alternatives: parsed.alternatives,
@@ -63,8 +118,31 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
           costUsd: cost,
         };
       }
-    } catch {
-      /* retry */
+      emitLeaderDebug({
+        attempt,
+        model: modelId,
+        system: LEADER_SYSTEM.slice(0, 500),
+        prompt: prompt.slice(0, 500),
+        rawResponse: res.content,
+        outcome: "parse_fail",
+        parseError: "parseLeaderResponse returned null",
+      });
+      emitLeaderTiming({ attempt, durationMs, outcome: "parse_fail", modelId });
+    } catch (err) {
+      const durationMs = Date.now() - t0;
+      emitLeaderDebug({
+        attempt,
+        model: modelId,
+        system: LEADER_SYSTEM.slice(0, 500),
+        prompt: prompt.slice(0, 500),
+        rawResponse: "",
+        outcome: "parse_fail",
+        parseError: err instanceof Error ? err.message : String(err),
+      });
+      emitLeaderTiming({ attempt, durationMs, outcome: "throw", modelId });
+      // 401 is a deterministic auth failure — retrying won't help. Skip to fallback.
+      if (isUnauthorizedError(err)) break;
+      /* retry on other errors */
     }
   }
   return {
@@ -189,13 +267,25 @@ export async function councilRecommend(
 
   // Three-way split → synth tiebreak
   const synthPrompt = chunks.stances.map((s) => `[${s.name}] ${JSON.stringify(s.value)} :: ${s.rationale}`).join("\n");
+  const synthModelId: string = (leader as any).modelId ?? "unknown";
   let synthCost = 0;
   for (let attempt = 0; attempt < 2; attempt++) {
+    const t0 = Date.now();
     try {
       const res = await leader.generate({ system: SYNTH_SYSTEM, prompt: synthPrompt, maxTokens: 4096 });
+      const durationMs = Date.now() - t0;
       synthCost += res.costUsd;
       const parsed = parseLeaderResponse(res.content);
       if (parsed) {
+        emitLeaderDebug({
+          attempt,
+          model: synthModelId,
+          system: SYNTH_SYSTEM.slice(0, 500),
+          prompt: synthPrompt.slice(0, 500),
+          rawResponse: res.content,
+          outcome: "parse_ok",
+        });
+        emitLeaderTiming({ attempt, durationMs, outcome: "ok", modelId: synthModelId });
         return {
           primary: parsed.primary,
           alternatives: parsed.alternatives,
@@ -204,8 +294,31 @@ export async function councilRecommend(
           tiebreakUsed: true,
         };
       }
-    } catch {
-      /* retry */
+      emitLeaderDebug({
+        attempt,
+        model: synthModelId,
+        system: SYNTH_SYSTEM.slice(0, 500),
+        prompt: synthPrompt.slice(0, 500),
+        rawResponse: res.content,
+        outcome: "parse_fail",
+        parseError: "parseLeaderResponse returned null",
+      });
+      emitLeaderTiming({ attempt, durationMs, outcome: "parse_fail", modelId: synthModelId });
+    } catch (err) {
+      const durationMs = Date.now() - t0;
+      emitLeaderDebug({
+        attempt,
+        model: synthModelId,
+        system: SYNTH_SYSTEM.slice(0, 500),
+        prompt: synthPrompt.slice(0, 500),
+        rawResponse: "",
+        outcome: "parse_fail",
+        parseError: err instanceof Error ? err.message : String(err),
+      });
+      emitLeaderTiming({ attempt, durationMs, outcome: "throw", modelId: synthModelId });
+      // 401 is deterministic — skip retry
+      if (isUnauthorizedError(err)) break;
+      /* retry on other errors */
     }
   }
   // Synth failed → confidence fallback

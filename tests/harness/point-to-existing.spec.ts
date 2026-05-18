@@ -27,6 +27,9 @@ describe("point-to-existing form E2E", () => {
     cleanup = ctx.cleanup;
 
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // POSIX race: idle can fire on the empty seq=0 frame before --inject-halt
+    // mounts the halt card. Wait for it explicitly.
+    await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 8_000 });
   }, 20_000);
 
   afterAll(() => {
@@ -43,8 +46,23 @@ describe("point-to-existing form E2E", () => {
   it("navigate Down to select 'Point to existing recipe'", async () => {
     // Default selection is index 0 (init_new). Press Down once to reach index 1.
     driver.press("Down");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
-    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+    // Sticky-poll — wait until 3 consecutive snapshots agree that opts[1] is
+    // selected. The single-frame check is racy on POSIX because React's
+    // useEffect cleanup/re-register cycle can leave items transiently missing
+    // from the snapshot while the listitems re-mount with new props.
+    let stable = 0;
+    const deadline = Date.now() + 10_000;
+    let opts: ReturnType<typeof driver.queryAll> = [];
+    while (Date.now() < deadline) {
+      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+      if (opts.length === 3 && opts[1]?.selected === true) {
+        stable++;
+        if (stable >= 3) break;
+      } else {
+        stable = 0;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(opts[1]?.selected).toBe(true);
   });
 

@@ -42,14 +42,16 @@ function makeStubDriver(frame: LiveFrame, nodes: UINode[]): Driver {
     count: () => nodes.length,
     expect: () => true,
     last_event: () => null,
+    events: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined as any, done: true as const }) }) }),
     render_text: () => "[rendered]",
     _ingest: () => {},
+    _closeAllSubscribers: () => {},
   };
 }
 
 const sampleFrame: LiveFrame = {
   mode: "live",
-  version: "0.1.0",
+  version: "0.2.0",
   seq: 7,
   ts: 0,
   nodes: [{ id: "n1", role: "button", name: "Send" }],

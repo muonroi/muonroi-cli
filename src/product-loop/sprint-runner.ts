@@ -138,12 +138,37 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         },
       ],
     };
+    // Emit sprint-halt BEFORE yielding the halt chunk so the driver receives the
+    // event before the modal appears (agent-mode only; no-op otherwise).
+    try {
+      const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+        | { emitEvent: (e: unknown) => void }
+        | undefined;
+      _ar?.emitEvent({
+        t: "event",
+        kind: "sprint-halt",
+        sprintN,
+        reason: cb3.reason ?? "no_recipe",
+        runId: ctx.runId,
+      });
+    } catch {
+      /* best-effort */
+    }
     yield haltChunk as unknown as StreamChunk;
     return undefined as unknown as IterationState;
   }
 
   // ── Step 3: Plan stage (council, skipClarification=true) ──────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Planning\n` };
+  // 2.5a — planning stage entry
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "planning", runId: ctx.runId });
+  } catch {
+    /* best-effort */
+  }
 
   const carryOverContext =
     history.length > 0
@@ -212,6 +237,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 4: Implement stage — pipe plan through host process loop ─────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Implementation\n` };
+  // 2.5b — implementation stage entry
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "implementation", runId: ctx.runId });
+  } catch {
+    /* best-effort */
+  }
   if (ctx.processMessageFn && planSynthesis.trim()) {
     const implGen = ctx.processMessageFn(planSynthesis);
     for await (const chunk of implGen) {
@@ -226,6 +260,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
+  // 2.5c — verification stage entry
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "verification", runId: ctx.runId });
+  } catch {
+    /* best-effort */
+  }
   const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
   const verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
@@ -253,6 +296,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 6: Read current criteria + judge stage ──────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Judgment\n` };
+  // 2.5d — judgment stage entry
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "judgment", runId: ctx.runId });
+  } catch {
+    /* best-effort */
+  }
   const currentCriteria = await readCriteria(ctx.flowDir, ctx.runId);
 
   // When a phaseScope is provided (subsystem E), evaluate the done-gate only
