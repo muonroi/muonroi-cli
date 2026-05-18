@@ -42,6 +42,13 @@ export interface InstallOpenTUIHarnessOptions {
    *   installOpenTUIHarness({ ..., onFrame: () => idle.markActivity() })
    */
   onFrame?: (frame: object) => void;
+  /**
+   * When true, frame timestamps become a deterministic function of seq
+   * (ts = seq * 16) instead of `Date.now()`. Used by the determinism harness
+   * spec to assert byte-identical LiveFrame traces across runs. Set this from
+   * the `--agent-fake-clock` CLI flag.
+   */
+  fakeClock?: boolean;
 }
 
 export interface OpenTUIHarnessHandle {
@@ -74,10 +81,13 @@ export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenT
   const intervalMs = Math.max(1, Math.round(1000 / fps));
 
   let seq = 0;
+  const fakeClock = opts.fakeClock ?? false;
   const hook = createReconcilerHook({
     registry: opts.registry,
     getSeq: () => seq++,
-    getTs: () => Date.now(),
+    // When fakeClock is on, ts is purely a function of seq — same input
+    // produces the same trace across runs (used by the determinism spec).
+    getTs: fakeClock ? () => seq * 16 : () => Date.now(),
   });
 
   function trySend(): void {

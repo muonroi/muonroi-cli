@@ -27,6 +27,8 @@ describe("subagents modal E2E", () => {
     cleanup = ctx.cleanup;
 
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
+    await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
   }, 20_000);
 
   afterAll(() => {
