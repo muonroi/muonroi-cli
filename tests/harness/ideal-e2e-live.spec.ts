@@ -278,11 +278,24 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
         // blindly pressing Enter (which accepts the first option = often
         // "override" — a meta-control that opens a freetext JSON prompt the
         // spec cannot answer, causing council to loop the same question).
-        await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 }).catch(() => {});
+        // 30s timeout — council-mode recommendations (backendArchitecture,
+        // backendStack, deployment) involve multiple LLM calls and can take
+        // 10-20s before the askcard mounts. Hard-fail without .catch so we
+        // don't silently dispatch Enter to a stale frame.
+        await driver.wait_for({ selector: "id=askcard", timeoutMs: 30_000 });
 
-        const card = driver.query("id=askcard");
+        // Poll briefly until the options actually populate — wait_for(selector)
+        // resolves on the first frame containing #askcard, but the Semantic
+        // children (option buttons) may register on the next frame.
+        let card = driver.query("id=askcard");
+        let opts = driver.queryAll("id=askcard >> role=button");
+        const optsDeadline = Date.now() + 2_000;
+        while (opts.length === 0 && Date.now() < optsDeadline) {
+          await new Promise((r) => setTimeout(r, 50));
+          card = driver.query("id=askcard");
+          opts = driver.queryAll("id=askcard >> role=button");
+        }
         const question = card?.name ?? "<unknown>";
-        const opts = driver.queryAll("id=askcard >> role=button");
         const optSummary = opts
           .map((o) => `${o.id}${o.selected ? "[sel]" : ""}=${JSON.stringify(o.name ?? "")}`)
           .join(", ");
