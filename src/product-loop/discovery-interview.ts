@@ -178,9 +178,21 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
         await appendUserOverride(flowDir, runId, question.id, recommendation.primary.value, chosenValue, ans.reason);
       }
 
+      if (_debugInterview) {
+        process.stderr.write(`[persist-start] recordRecommendation ${question.id}\n`);
+      }
       await recordRecommendation(flowDir, runId, question.id, toEntry(recommendation), recommendation.costUsd);
+      if (_debugInterview) {
+        process.stderr.write(`[persist-mid] saveDiscoveryAnswer ${question.id}\n`);
+      }
       await saveDiscoveryAnswer(flowDir, runId, question.id, chosenValue);
+      if (_debugInterview) {
+        process.stderr.write(`[persist-end] ${question.id} saved\n`);
+      }
       break;
+    }
+    if (_itvDbg) {
+      process.stderr.write(`[interview-entry] inner-loop-exit itvId=${_itvId} questionId=${question.id}\n`);
     }
 
     // After each required answered, check if we've satisfied all effectively-required questions for user gate

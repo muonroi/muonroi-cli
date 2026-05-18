@@ -927,8 +927,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
   // Ref mirrors — keep current synchronously so keyboard-burst handlers read
   // the correct idx without waiting on React's setState commit (same pattern as showSlashMenuRef).
+  const pendingCouncilQuestionRef = useRef<CouncilQuestionData | null>(null);
   const councilCardStateRef = useRef<CouncilCardState | null>(null);
   const preflightCardStateRef = useRef<CouncilCardState | null>(null);
+  const setPendingCouncilQuestionSync = useCallback(
+    (v: CouncilQuestionData | null) => {
+      pendingCouncilQuestionRef.current = v;
+      setPendingCouncilQuestion(v);
+    },
+    [],
+  );
   const setCouncilCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
       setCouncilCardState((prev) => {
@@ -2645,7 +2653,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   const cq = chunk.councilQuestion;
                   // Render the card via dedicated state — do NOT bleed text into
                   // the assistant stream (that caused the freetext-soup look).
-                  setPendingCouncilQuestion(cq);
+                  // Sync ref + React state — ref is checked by the key handler
+                  // so a fast harness Enter after the askcard-open event lands
+                  // even before React commits (mirror of councilCardStateRef).
+                  setPendingCouncilQuestionSync(cq);
                   setCouncilCardStateSync(initialCardState(cq));
                   // Task 2.3 — emit askcard-open harness event (agent-mode only).
                   try {
@@ -3133,7 +3144,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 }
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
                   const cq2 = chunk.councilQuestion;
-                  setPendingCouncilQuestion(cq2);
+                  setPendingCouncilQuestionSync(cq2);
                   setCouncilCardStateSync(initialCardState(cq2));
                   // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
                   try {
@@ -3332,7 +3343,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 }
                 if (chunk.type === "council_question" && chunk.councilQuestion) {
                   const cq3 = chunk.councilQuestion;
-                  setPendingCouncilQuestion(cq3);
+                  setPendingCouncilQuestionSync(cq3);
                   setCouncilCardStateSync(initialCardState(cq3));
                   // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
                   try {
@@ -4159,15 +4170,21 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
-      if (pendingCouncilQuestion && councilCardStateRef.current) {
+      // Use ref instead of React state: a synchronous keyboard burst from
+      // the harness arriving right after askcard-open emit can race React's
+      // batched setState commit. Ref is updated synchronously in
+      // setPendingCouncilQuestionSync so the handler sees the new question
+      // immediately. (Mirror of councilCardStateRef pattern.)
+      const pendingQuestion = pendingCouncilQuestionRef.current;
+      if (pendingQuestion && councilCardStateRef.current) {
         const cardKey = mapCouncilCardKey(key);
         if (cardKey) {
-          const result = reduceCardKey(pendingCouncilQuestion, councilCardStateRef.current, cardKey);
+          const result = reduceCardKey(pendingQuestion, councilCardStateRef.current, cardKey);
           setCouncilCardStateSync(result.state);
           if (result.emit?.type === "answer") {
-            const qid = pendingCouncilQuestion.questionId;
+            const qid = pendingQuestion.questionId;
             const ans = result.emit.answer;
-            setPendingCouncilQuestion(null);
+            setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text);
             setMessages((prev) => [...prev, buildUserEntry(formatAnswerForLog(ans))]);
@@ -4184,8 +4201,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               /* best-effort */
             }
           } else if (result.emit?.type === "cancel") {
-            const qid = pendingCouncilQuestion.questionId;
-            setPendingCouncilQuestion(null);
+            const qid = pendingQuestion.questionId;
+            setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, "");
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
@@ -5364,7 +5381,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     // before the card was wired up.
     if (pendingCouncilQuestion) {
       const qid = pendingCouncilQuestion.questionId;
-      setPendingCouncilQuestion(null);
+      setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
       agent.respondToCouncilQuestion(qid, message.trim());
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);

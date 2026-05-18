@@ -273,6 +273,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // Drain emitted chunks while waiting for gatherTask to finish.
         const _drainDbg = process.env.MUONROI_DEBUG_LEADER === "1";
         let _drainTick = 0;
+        let _emptyTicks = 0;
         while (!gatherDone.value) {
           while (gatherEmitted.length > 0) {
             const c = gatherEmitted.shift() as StreamChunk;
@@ -284,25 +285,28 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             if (_drainDbg) {
               process.stderr.write(`[drain] post-yield, queue=${gatherEmitted.length}\n`);
             }
+            _emptyTicks = 0;
           }
-          // Yield to the event loop so emit + async respond can advance.
-          // Microtask (Promise.resolve) is used by default because OpenTUI's
-          // setInterval-based reconciler can flood the macrotask queue when an
-          // askcard modal first mounts, starving a setTimeout-based poll for
-          // hundreds of seconds. Microtasks always drain before the next
-          // macrotask, so they cannot be starved by setInterval ticks.
-          // Every 10 spins we still yield one macrotask turn so the renderer
-          // gets a frame slot and we don't pin CPU.
+          // Queue empty — wait for gatherTask to push the next chunk or to
+          // complete. setImmediate runs in the check phase of Node's event
+          // loop, between poll phases where HTTP responses are handled, and
+          // does NOT compete with OpenTUI's setInterval(16ms) macrotask queue
+          // (which is what starved the original setTimeout(50) poll).
+          // Adaptive backoff: hot setImmediate spinning at 30k ticks/sec was
+          // starving CPU from network I/O on the leader fetch, blocking the
+          // response for hundreds of seconds. After 100 empty ticks, escalate
+          // to setTimeout(1) to give the OS scheduler and I/O subsystems room
+          // to make progress. Resets to setImmediate the moment a chunk arrives.
           _drainTick++;
-          if (_drainTick % 10 === 0) {
-            await new Promise<void>((r) => setTimeout(r, 0));
+          _emptyTicks++;
+          if (_emptyTicks > 100) {
+            await new Promise<void>((r) => setTimeout(r, 1));
           } else {
-            await Promise.resolve();
+            await new Promise<void>((r) => setImmediate(r));
           }
-          if (_drainDbg && _drainTick % 20 === 0) {
-            const tickType = _drainTick % 10 === 0 ? "macrotask(0)" : "microtask";
+          if (_drainDbg && _drainTick % 200 === 0) {
             process.stderr.write(
-              `[drain] tick=${_drainTick}, queue=${gatherEmitted.length}, done=${gatherDone.value}, scheduler=${tickType}\n`,
+              `[drain] tick=${_drainTick}, empty=${_emptyTicks}, queue=${gatherEmitted.length}, done=${gatherDone.value}\n`,
             );
           }
         }
