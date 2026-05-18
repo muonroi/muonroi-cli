@@ -370,6 +370,12 @@ export class Agent {
    */
   private _lastPromptBreakdown: Record<string, number> | null = null;
   /**
+   * Task 2.6a — Per-streamText-call correlation ID for llm-token / llm-done harness events.
+   * Set to crypto.randomUUID() at the start of each streamText call; cleared to "" after llm-done.
+   * Empty string means no active call.
+   */
+  private _currentCallId = "";
+  /**
    * Phase O1 — JSON-shape of the providerOptions object on the most
    * recent streamText call. Captured immediately before streamText and
    * consumed by recordUsage; cleared after. Cost-leak forensics surfaces
@@ -1407,6 +1413,9 @@ export class Agent {
         });
       }
 
+      // Task 2.6a — assign a fresh correlation ID for this streamText call.
+      this._currentCallId = crypto.randomUUID();
+      const _subCallId = this._currentCallId;
       // G1 debug: enable detailed sub-agent telemetry via env flag so we can
       // diagnose "No output generated" / silent task failures (e.g. with
       // gpt-5.4 reasoning models). Disabled by default — zero cost.
@@ -1467,7 +1476,7 @@ export class Agent {
         ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
         ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.maxTokens, 8_192) }),
         ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
-        onFinish: ({ totalUsage }) => {
+        onFinish: ({ totalUsage, finishReason }) => {
           const tu = totalUsage as Record<string, unknown>;
           const details = tu.inputTokenDetails as Record<string, unknown> | undefined;
           const raw = tu.raw as Record<string, unknown> | undefined;
@@ -1479,9 +1488,26 @@ export class Agent {
           const cacheCreationTokens =
             asNumber(details?.cacheWriteTokens) ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
           this.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
+          // Task 2.6b — emit llm-done (agent-mode only).
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "llm-done",
+              correlationId: _subCallId,
+              totalChars: assistantText.length,
+              finishReason: finishReason ?? "stop",
+            });
+          } catch {
+            /* best-effort */
+          }
+          this._currentCallId = "";
         },
       });
 
+      let _subTokenIndex = 0;
       const partCounts: Record<string, number> = {};
       let toolCallCount = 0;
       let textDeltaCount = 0;
@@ -1497,6 +1523,21 @@ export class Agent {
         if (part.type === "text-delta") {
           textDeltaCount++;
           assistantText += part.text;
+          // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "llm-token",
+              correlationId: _subCallId,
+              delta: part.text,
+              tokenIndex: _subTokenIndex++,
+            });
+          } catch {
+            /* best-effort */
+          }
           continue;
         }
 
@@ -2375,6 +2416,16 @@ export class Agent {
   // ========================================================================
 
   respondToCouncilQuestion(questionId: string, answer: string): void {
+    if (process.env.MUONROI_DEBUG_LEADER === "1") {
+      process.stderr.write(
+        `[responder] respondToCouncilQuestion: ${JSON.stringify({
+          questionId,
+          answerPreview: answer.slice(0, 40),
+          hadResolver: this._councilQuestionResolvers.has(questionId),
+          pendingResolverCount: this._councilQuestionResolvers.size,
+        })}\n`,
+      );
+    }
     const resolver = this._councilQuestionResolvers.get(questionId);
     if (resolver) {
       resolver(answer);
@@ -2401,9 +2452,19 @@ export class Agent {
       new Promise<string>((resolve) => {
         const buffered = this._councilBufferedQuestionAnswers.get(questionId);
         if (buffered !== undefined) {
+          if (process.env.MUONROI_DEBUG_LEADER === "1") {
+            process.stderr.write(
+              `[responder] drain-buffered: ${JSON.stringify({ questionId, bufferedSize: this._councilBufferedQuestionAnswers.size })}\n`,
+            );
+          }
           this._councilBufferedQuestionAnswers.delete(questionId);
           resolve(buffered);
           return;
+        }
+        if (process.env.MUONROI_DEBUG_LEADER === "1") {
+          process.stderr.write(
+            `[responder] register-resolver: ${JSON.stringify({ questionId, totalResolvers: this._councilQuestionResolvers.size + 1 })}\n`,
+          );
         }
         this._councilQuestionResolvers.set(questionId, resolve);
       });
@@ -4108,6 +4169,9 @@ export class Agent {
             toolsCount,
           };
 
+          // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
+          this._currentCallId = crypto.randomUUID();
+          const _topCallId = this._currentCallId;
           // Phase B4: compact older tool_result parts before each top-level
           // step once cumulative message chars exceed the configured threshold.
           // The compactor preserves system + first user verbatim and keeps the
@@ -4166,9 +4230,27 @@ export class Agent {
                 this.recordUsage(stepUsage, "message", runtime.modelId);
               }
             },
-            onFinish: () => {},
+            onFinish: ({ finishReason }) => {
+              // Task 2.6b — emit llm-done (agent-mode only).
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "llm-done",
+                  correlationId: _topCallId,
+                  totalChars: assistantText.length,
+                  finishReason: finishReason ?? "stop",
+                });
+              } catch {
+                /* best-effort */
+              }
+              this._currentCallId = "";
+            },
           });
 
+          let _topTokenIndex = 0;
           for await (const part of result.fullStream) {
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
@@ -4178,6 +4260,21 @@ export class Agent {
             switch (part.type) {
               case "text-delta":
                 assistantText += part.text;
+                // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+                try {
+                  const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                    | { emitEvent: (e: unknown) => void }
+                    | undefined;
+                  _ar?.emitEvent({
+                    t: "event",
+                    kind: "llm-token",
+                    correlationId: _topCallId,
+                    delta: part.text,
+                    tokenIndex: _topTokenIndex++,
+                  });
+                } catch {
+                  /* best-effort */
+                }
                 yield { type: "content", content: part.text };
                 break;
 

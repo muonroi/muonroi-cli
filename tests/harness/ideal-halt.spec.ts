@@ -28,6 +28,9 @@ describe("ideal halt recovery card E2E", () => {
 
     // Wait for TUI to be idle (synthetic halt card is rendered immediately on mount).
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // POSIX race: idle can fire on the empty seq=0 frame before the halt card
+    // mounts. Wait for it explicitly so subsequent tests can query it.
+    await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 8_000 });
   }, 20_000);
 
   afterAll(() => {
@@ -80,8 +83,25 @@ describe("ideal halt recovery card E2E", () => {
 
   it("Down arrow moves selection to second option", async () => {
     driver.press("Down");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
-    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+    // Sticky-poll the snapshot: wait_for({selector...selected}) can resolve
+    // momentarily during React's re-render cycle when only the listitem with
+    // the new selection is registered while the deselected one is still mid-
+    // useEffect-swap. Stay in the loop until 3 consecutive snapshots agree
+    // — that's longer than React's commit boundary so we know the state is
+    // settled.
+    let stable = 0;
+    const deadline = Date.now() + 10_000;
+    let opts: ReturnType<typeof driver.queryAll> = [];
+    while (Date.now() < deadline) {
+      opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+      if (opts.length === 3 && opts[0]?.selected !== true && opts[1]?.selected === true) {
+        stable++;
+        if (stable >= 3) break;
+      } else {
+        stable = 0;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
     expect(opts[0]?.selected).toBeFalsy();
     expect(opts[1]?.selected).toBe(true);
   });

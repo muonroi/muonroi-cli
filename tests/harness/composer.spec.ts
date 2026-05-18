@@ -20,6 +20,9 @@ describe("composer E2E", () => {
     // (e.g., CI runners without a keychain). Mock-LLM intercepts before the key
     // is ever validated against a real provider.
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
+    // Wait for the textbox before querying.
+    await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
   }, 20_000);
 
   afterAll(() => {

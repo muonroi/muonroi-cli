@@ -1,7 +1,9 @@
 /**
  * ideal-e2e-live.spec.ts — REAL-USER E2E for the full /ideal flow.
  *
- * STATUS: reference/manual-only. NOT a CI gate.
+ * STATUS: NOT a default CI gate (costs real tokens). Run manually or in
+ * nightly via MUONROI_E2E_LIVE=1. The mock-LLM events.spec.ts is the
+ * default CI gate for event-driven flow correctness.
  *
  * Drives the production TUI as a real user would: real LLM (DeepSeek via
  * keychain), real Experience Engine, real `dotnet new` scaffold.
@@ -18,8 +20,8 @@
  *   - Each askcard ack is itself an LLM round-trip; the path to CB-3 halt
  *     is not stable across runs.
  *
- * Use the synthetic --inject-halt specs in tests/harness/ as the CI gate
- * for /ideal flow correctness. This spec exists for ad-hoc smoke runs.
+ * Use tests/harness/events.spec.ts (mock-LLM, unconditional) as the CI gate
+ * for event-driven flow correctness. This spec exists for ad-hoc smoke runs.
  *
  * Gated on MUONROI_E2E_LIVE=1 — does NOT run by default. Costs real LLM
  * tokens (~$0.20/run) and takes 10-15 minutes including dotnet build.
@@ -39,8 +41,8 @@ import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { loadKeyForProvider } from "../../src/providers/keychain.js";
 import { type SpawnResult, spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
+import { loadKeyForProvider } from "../../src/providers/keychain.js";
 
 const LIVE = process.env.MUONROI_E2E_LIVE === "1";
 
@@ -49,18 +51,21 @@ const DIAG_LOG = "D:/sources/Core/muonroi-cli/.scratch/e2e-diag.log";
 function dumpFrame(driver: Driver, label: string): void {
   const frame = driver.snapshot();
   if (!frame) {
-    try { appendFileSync(DIAG_LOG, `[${label}] NO FRAME\n`); } catch {}
+    try {
+      appendFileSync(DIAG_LOG, `[${label}] NO FRAME\n`);
+    } catch {}
     return;
   }
   const lines: string[] = [];
   const walk = (nodes: typeof frame.nodes, depth = 0): void => {
     for (const n of nodes) {
-      const flags = [
-        n.focus ? "focus" : null,
-        n.selected ? "sel" : null,
-        n.isModal ? "modal" : null,
-      ].filter(Boolean).join(",");
-      const value = n.value ? ` value=${JSON.stringify(String(n.value).slice(0, 120))}` : "";
+      const flags = [n.focus ? "focus" : null, n.selected ? "sel" : null, n.isModal ? "modal" : null]
+        .filter(Boolean)
+        .join(",");
+      // Always include value for the composer node even if empty — the post-Tab
+      // plainText fallback makes this the primary diagnostic for Tab autocomplete.
+      const value =
+        n.id === "composer" || n.value ? ` value=${JSON.stringify(String(n.value ?? "").slice(0, 120))}` : "";
       const name = n.name ? ` name=${JSON.stringify(String(n.name).slice(0, 80))}` : "";
       lines.push(`${"  ".repeat(depth)}${n.id}(${n.role})${flags ? `[${flags}]` : ""}${name}${value}`);
       if (n.children) walk(n.children, depth + 1);
@@ -71,7 +76,9 @@ function dumpFrame(driver: Driver, label: string): void {
     `[${label}] seq=${frame.seq} focus=${frame.focus} modals=${JSON.stringify(frame.modals)}`,
     ...lines,
   ].join("\n");
-  try { appendFileSync(DIAG_LOG, summary + "\n"); } catch {}
+  try {
+    appendFileSync(DIAG_LOG, `${summary}\n`);
+  } catch {}
 }
 
 // ---------------------------------------------------------------------------
@@ -161,8 +168,7 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     const deepseekKey = await loadKeyForProvider("deepseek").catch(() => "");
     if (!deepseekKey) {
       throw new Error(
-        "Live E2E requires a DeepSeek key in the OS keychain. " +
-          "Run `muonroi-cli keys set deepseek` and try again.",
+        "Live E2E requires a DeepSeek key in the OS keychain. " + "Run `muonroi-cli keys set deepseek` and try again.",
       );
     }
     const ctx = await spawnLive({
@@ -180,7 +186,9 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     cleanup = ctx.cleanup;
     proc.stderr?.on("data", (chunk: Buffer | string) => {
       const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      try { appendFileSync("D:/sources/Core/muonroi-cli/.scratch/e2e-tui-stderr.log", text); } catch {}
+      try {
+        appendFileSync("D:/sources/Core/muonroi-cli/.scratch/e2e-tui-stderr.log", text);
+      } catch {}
     });
     await driver.wait_for({ idle: true, timeoutMs: 30_000 });
     // Real TUI boot has more async work than synthetic spawn (provider init,
@@ -224,12 +232,18 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
     // capture the space character before the menu auto-completes.
     driver.press("Tab");
     await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Diagnostic dump immediately after Tab: the composer node's value now
+    // reflects inputRef.current.plainText (not just slashSearchQuery), so a
+    // working Tab shows value="/ideal " while a failed Tab shows value="" or
+    // value="/ideal" (no trailing space). Also confirms slash-menu is gone.
+    dumpFrame(driver, "after-tab");
   });
 
   it("stage 1d: typing idea + Enter dispatches /ideal command", async () => {
     // --force-council bypasses Layer-1 complexity routing (low → hot-path);
     // ensures the council debate actually runs so CB-3 can emit a halt chunk
     // when no verify recipe is found in the empty cwd.
+    dumpFrame(driver, "before-dispatch");
     driver.type("--force-council build fraud detection service");
     driver.press("Enter");
     // Slash dispatched; composer clears, council debate begins.
@@ -245,33 +259,88 @@ describe.skipIf(!LIVE)("/ideal full flow — live LLM + EE + dotnet new", () => 
   // -------------------------------------------------------------------------
 
   it("stage 2: CB-3 halts on missing verify recipe (real council debate)", async () => {
-    // With --force-council, the council debate runs and surfaces askcard
-    // modals for clarifying questions (productType, fe-stack, etc). For an
-    // unsupervised E2E we accept the recommended answer for every askcard
-    // until the council reaches the halt state (no verify recipe found).
-    const start = Date.now();
-    const target = 420_000; // longer budget — council + ~5 askcards + halt
-    const pollMs = 5_000;
+    // Event-driven pattern: subscribe BEFORE stage 1d dispatches /ideal, then
+    // react to askcard-open and sprint-halt events instead of polling snapshots.
+    // The iterator was created BEFORE the /ideal dispatch (in stage 1d) so no
+    // events are missed — late-subscribe replay would catch them regardless.
+    //
+    // Replaced polling loop (lines ~254–270) with event-driven for-await:
+    //   OLD: while (Date.now()-start < target) { query("id=askcard"); sleep(5000); }
+    //   NEW: for await (const e of events) { react to askcard-open / sprint-halt }
     let askcardsAccepted = 0;
-    while (Date.now() - start < target) {
-      const halt = driver.query("id=ideal-halt-card");
-      if (halt) break;
-      const askcard = driver.query("id=askcard");
-      if (askcard) {
-        // Accept recommended option (already selected by default).
+
+    // Subscribe to the two events we care about: askcard lifecycle and halt signal.
+    const events = driver.events((e) => e.t === "event" && (e.kind === "askcard-open" || e.kind === "sprint-halt"));
+
+    for await (const e of events) {
+      if (e.kind === "askcard-open") {
+        // Read the actual question + option list from the snapshot instead of
+        // blindly pressing Enter (which accepts the first option = often
+        // "override" — a meta-control that opens a freetext JSON prompt the
+        // spec cannot answer, causing council to loop the same question).
+        await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 }).catch(() => {});
+
+        const card = driver.query("id=askcard");
+        const question = card?.name ?? "<unknown>";
+        const opts = driver.queryAll("id=askcard >> role=button");
+        const optSummary = opts
+          .map((o) => `${o.id}${o.selected ? "[sel]" : ""}=${JSON.stringify(o.name ?? "")}`)
+          .join(", ");
+        try {
+          appendFileSync(
+            DIAG_LOG,
+            `[askcard-q${askcardsAccepted + 1}] Q=${JSON.stringify(question)}\n` +
+              `[askcard-q${askcardsAccepted + 1}] OPTS=${optSummary}\n`,
+          );
+        } catch {}
+
+        // Pick strategy:
+        //  1. Prefer 'accept' when the leader returned a valid recommendation
+        //     (advances the flow quickly without burning skip budget).
+        //  2. Else 'skip' (universal "use defaults, move on" — leader unavailable
+        //     or recommendation null).
+        //  3. Else first option whose id ≠ override/abort (real choice).
+        //  4. Else first option (last resort).
+        const acceptIdx = opts.findIndex((o) => o.id === "askcard-option-accept");
+        const skipIdx = opts.findIndex((o) => o.id === "askcard-option-skip");
+        const overrideOrAbort = (id?: string) => id === "askcard-option-override" || id === "askcard-option-abort";
+        const choiceIdx = opts.findIndex((o) => !overrideOrAbort(o.id));
+        const targetIdx = acceptIdx >= 0 ? acceptIdx : skipIdx >= 0 ? skipIdx : choiceIdx >= 0 ? choiceIdx : 0;
+        const currentIdx = Math.max(
+          0,
+          opts.findIndex((o) => o.selected),
+        );
+
+        const diff = targetIdx - currentIdx;
+        // Race fix: askcard's idx is React useState — synchronous key burst
+        // (Down,Down,Enter) lands before re-render commits idx update, so Enter
+        // resolves on the OLD idx. Wait for snapshot to settle between each key.
+        // Mirror of the showSlashMenuRef race fixed in 5ef5525.
+        for (let i = 0; i < Math.abs(diff); i++) {
+          driver.press(diff > 0 ? "Down" : "Up");
+          await driver.wait_for({ idle: true, timeoutMs: 1_000 }).catch(() => {});
+        }
         driver.press("Enter");
+        await driver.wait_for({ idle: true, timeoutMs: 2_000 }).catch(() => {});
         askcardsAccepted++;
+        const picked = opts[targetIdx]?.name ?? `idx${targetIdx}`;
+        try {
+          appendFileSync(DIAG_LOG, `[askcard-q${askcardsAccepted}] PICKED=${JSON.stringify(picked)}\n`);
+        } catch {}
         dumpFrame(driver, `accepted-askcard-${askcardsAccepted}`);
-        // Give the council a moment to advance to the next phase.
-        await new Promise((r) => setTimeout(r, 3_000));
         continue;
       }
-      dumpFrame(driver, `wait-${Math.round((Date.now() - start) / 1000)}s`);
-      await new Promise((r) => setTimeout(r, pollMs));
+      if (e.kind === "sprint-halt") {
+        // CB-gate fired — council reached the halt boundary. Break to assert.
+        dumpFrame(driver, `sprint-halt-received-sprintN=${e.sprintN}`);
+        break;
+      }
     }
+
+    // After sprint-halt event, the halt card Semantic should mount within 15 s.
     await driver.wait_for({
       selector: "id=ideal-halt-card",
-      timeoutMs: 5_000,
+      timeoutMs: 15_000,
     });
     const card = driver.query("id=ideal-halt-card");
     expect(card?.role).toBe("dialog");
