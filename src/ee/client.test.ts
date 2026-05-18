@@ -22,14 +22,14 @@ const mockPayload: PostToolPayload = {
 describe("EEClient - health", () => {
   it("Test 1: health 200 returns { ok: true, status: 200 }", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const result = await ee.health();
     expect(result).toEqual({ ok: true, status: 200 });
   });
 
   it("Test 2: health 502 returns { ok: false, status: 502 } without throwing", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 502 });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const result = await ee.health();
     expect(result).toEqual({ ok: false, status: 502 });
   });
@@ -51,7 +51,7 @@ describe("EEClient - intercept", () => {
       status: 200,
       json: async () => ({ decision: "allow" }),
     });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const result = await ee.intercept(mockReq);
     expect(result.decision).toBe("allow");
   });
@@ -62,7 +62,7 @@ describe("EEClient - intercept", () => {
       status: 200,
       json: async () => ({ decision: "block", reason: "dangerous command" }),
     });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const result = await ee.intercept(mockReq);
     expect(result.decision).toBe("block");
     expect(result.reason).toBe("dangerous command");
@@ -71,7 +71,7 @@ describe("EEClient - intercept", () => {
   it("Test 5: intercept 5xx falls back to { decision: 'allow', reason: 'ee-unreachable' }", async () => {
     const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 503 });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
     const result = await ee.intercept(mockReq);
     expect(result.decision).toBe("allow");
     expect(result.reason).toBe("ee-unreachable");
@@ -92,7 +92,7 @@ describe("EEClient - intercept", () => {
         }
       });
     });
-    const ee = createEEClient({ fetchImpl: mockFetch, timeoutMs: 50 });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch, timeoutMs: 50 });
     // Advance timers to trigger AbortSignal.timeout
     const resultPromise = ee.intercept(mockReq);
     await vi.advanceTimersByTimeAsync(200);
@@ -105,7 +105,7 @@ describe("EEClient - intercept", () => {
 describe("EEClient - posttool", () => {
   it("Test 7: posttool is awaitable — returns Promise<void> and fetch is called", async () => {
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
 
     // posttool is now async (awaitable by PostToolUse handler)
     const returnValue = ee.posttool(mockPayload);
@@ -116,7 +116,7 @@ describe("EEClient - posttool", () => {
 
   it("Test 8: posttool swallows errors silently", async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("network error"));
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
 
     // Must not throw even when awaited
     await expect(ee.posttool(mockPayload)).resolves.toBeUndefined();
@@ -134,7 +134,7 @@ describe("EEClient - auth", () => {
       status: 200,
       json: async () => ({ decision: "allow" }),
     });
-    const ee = createEEClient({ authToken: "my-token", fetchImpl: mockFetch });
+    const ee = createEEClient({ authToken: "my-token", fetchImpl: mockFetch as unknown as typeof fetch });
     await ee.intercept(mockReq);
 
     const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
@@ -148,7 +148,7 @@ describe("EEClient - auth", () => {
       status: 200,
       json: async () => ({ decision: "allow" }),
     });
-    const ee = createEEClient({ fetchImpl: mockFetch });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
 
     // Even if toolInput somehow contains key-like values, the intercept payload
     // schema is toolName + toolInput + cwd only — no auth tokens from the CLI config

@@ -22,7 +22,7 @@ vi.mock("./keychain.js", () => ({
 }));
 
 const mockFetch = vi.fn();
-global.fetch = mockFetch;
+global.fetch = mockFetch as unknown as typeof fetch;
 
 describe("bridgeMcpToolResult", () => {
   beforeEach(() => vi.clearAllMocks());

@@ -50,7 +50,7 @@ describe("EEClient feedback + touch fire-and-forget", () => {
   it("feedback() never throws even on network error", () => {
     const broken = createEEClient({
       baseUrl: "http://localhost:1",
-      fetchImpl: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
+      fetchImpl: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch,
     });
     expect(() =>
       broken.feedback({
@@ -66,7 +66,7 @@ describe("EEClient feedback + touch fire-and-forget", () => {
   it("touch() never throws even on network error", () => {
     const broken = createEEClient({
       baseUrl: "http://localhost:1",
-      fetchImpl: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
+      fetchImpl: vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch,
     });
     expect(() => broken.touch("X", "local")).not.toThrow();
   });

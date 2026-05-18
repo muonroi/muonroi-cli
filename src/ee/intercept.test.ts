@@ -169,7 +169,7 @@ describe("401 refresh path", () => {
     // The 401 is surfaced by the client as reason='auth-required'.
     // For this test, we'll mock the fetch to return 401 first, then succeed.
     let fetchCallCount = 0;
-    const mockFetch: typeof fetch = async (input, init) => {
+    const mockFetch = (async (input: string | URL | Request, init?: RequestInit) => {
       fetchCallCount++;
       if (fetchCallCount === 1) {
         // First call: return 401
@@ -182,7 +182,7 @@ describe("401 refresh path", () => {
       const url = typeof input === "string" ? input : (input as Request).url;
       const stubUrl = url.replace(/http:\/\/[^/]+/, `http://127.0.0.1:${stub.port}`);
       return fetch(stubUrl, init);
-    };
+    }) as unknown as typeof fetch;
 
     const client = createEEClient({
       baseUrl: `http://127.0.0.1:${stub.port}`,

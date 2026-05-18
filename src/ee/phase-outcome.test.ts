@@ -73,7 +73,7 @@ describe("firePhaseOutcome", () => {
   });
 
   it("returns null on network error", async () => {
-    const stubFetch = (() => Promise.reject(new Error("network down"))) as typeof fetch;
+    const stubFetch = (() => Promise.reject(new Error("network down"))) as unknown as typeof fetch;
     const result = await firePhaseOutcome(samplePayload, {
       fetchImpl: stubFetch,
     });
@@ -99,7 +99,7 @@ describe("fireAndForgetPhaseOutcome", () => {
   beforeEach(() => _resetPhaseOutcomeState());
 
   it("does not throw on rejection", () => {
-    const stubFetch = (() => Promise.reject(new Error("nope"))) as typeof fetch;
+    const stubFetch = (() => Promise.reject(new Error("nope"))) as unknown as typeof fetch;
     expect(() => {
       fireAndForgetPhaseOutcome(samplePayload, { fetchImpl: stubFetch });
     }).not.toThrow();

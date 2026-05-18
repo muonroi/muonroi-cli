@@ -15,7 +15,7 @@ function mockFetch(response: unknown, ok = true) {
   globalThis.fetch = vi.fn().mockResolvedValue({
     ok,
     json: () => Promise.resolve(response),
-  });
+  }) as unknown as typeof fetch;
 }
 
 describe("ollamaClassify", () => {
@@ -44,7 +44,7 @@ describe("ollamaClassify", () => {
   });
 
   it("returns null when fetch throws (Ollama unavailable)", async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    globalThis.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch;
     const result = await ollamaClassify("test prompt");
     expect(result).toBeNull();
   });
@@ -56,7 +56,7 @@ describe("ollamaClassify", () => {
   });
 
   it("returns null when fetch is aborted (timeout)", async () => {
-    globalThis.fetch = vi.fn().mockRejectedValue(new DOMException("Aborted", "AbortError"));
+    globalThis.fetch = vi.fn().mockRejectedValue(new DOMException("Aborted", "AbortError")) as unknown as typeof fetch;
     const result = await ollamaClassify("test prompt");
     expect(result).toBeNull();
   });
