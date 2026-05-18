@@ -159,6 +159,10 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
     transport,
     fps: 60,
     onFrame: () => idle.markActivity(),
+    // Pass --agent-fake-clock through to the snapshot hook so LiveFrame.ts
+    // becomes deterministic (seq*16). Without this, ts = Date.now() and the
+    // determinism spec sees timestamps differ between runs.
+    fakeClock: opts.fakeClock,
   });
 
   // --- Command channel (in stream → handlers) ------------------------------
