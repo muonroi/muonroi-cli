@@ -30,6 +30,11 @@ Execute these steps in order:
    - FALLBACK: list the project directory, then read whichever of \`README.md\`, \`AGENTS.md\`, \`Agent.md\`, \`EE-INTENT.md\` actually exist (do NOT assume — missing files are fine, just skip them).
    - Identify: project name, main entry point (Program.cs / Gateway), modular boundaries, where to add new domain code.
 
+IMPORTANT — Template sample files are REFERENCE ONLY:
+   - The BB template ships example code (e.g. \`todo-app.Catalog\`, sample \`TodoRepository\`, \`Catalog\` controller, \`DocTemplateDbContext\`) named after the template/demo, NOT after the user's project.
+   - Read AT MOST ONE such sample file to learn the convention, then DELETE all template sample directories before generating your real domain code. They are reference, not the user's feature.
+   - Do not re-read the same sample file repeatedly. If you need its pattern again, recall from memory or rely on \`docs.search\`.
+
 2. Design the feature
    - List the domain entity(ies), DTOs, endpoints, persistence model.
    - Match BB conventions (controller-per-resource, MediatR/CQRS if used, validation patterns observed in step 1).
