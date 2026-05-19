@@ -10,6 +10,7 @@
 - v1.5 Self-Driving Product Loop (Phase 13) - shipped 2026-05-07
 - v1.6 Council Quality & Trust (Phases 14-17) - active
 - v1.7 Auth Flexibility (Phase 18) - planned
+- v1.8 Hardening & Resilience (Phase 20-22) - planned
 
 ## Phases
 
@@ -70,6 +71,14 @@ See milestone archive for details.
 **Milestone Goal:** Allow users to authenticate to LLM providers via their existing subscription (ChatGPT Plus/Pro/Codex) using OAuth Device-Code + PKCE against `auth.openai.com`, alongside the existing API-key path. Interface-first so Anthropic/Google can be added later. Driven by adoption friction: users with paid ChatGPT subscriptions shouldn't need separate API credits.
 
 - [ ] **Phase 18: OAuth Provider Auth** — `ProviderOAuth` interface; `OpenAIOAuthProvider` impl (Device-Code + PKCE); `GeminiOAuthProvider` impl (browser-redirect + PKCE, Google Gemini support); keychain/file token store with auto-refresh + mutex; `keys login/logout` subcommands for both openai and google; adapter wiring; API-key path unchanged. See `.planning/notes/oauth-provider-auth.md`.
+
+### v1.8 Hardening & Resilience
+
+**Milestone Goal:** Address code-review findings (2026-05-19): close test-coverage blind spots, instrument silent failure paths, and pay down small but compounding tech debt before they regress on a release. Triggered by review of 2026-05-19 identifying 16 skipped harness tests, silent EE timeouts, sha1-12 collision risk, and an undocumented backwards-compat shim.
+
+- [ ] **Phase 20: Harness Test Coverage Hardening** — audit every `.skip`/`.todo` in `tests/harness/**`; require comment `// SKIP: <reason> — issue #<n>` per skip; add `lint:harness-skips` npm script that warns when skipped/todo > 10% of total; restore feasibly un-skippable specs (api-key, askcard, council-flow, ideal where blockers are gone). See review of 2026-05-19.
+- [ ] **Phase 21: EE Observability & Resilience** — emit `agentRuntime.emitEvent('ee-timeout', {source, elapsedMs})` from every EE call site that catches silently; surface a passive toast "running without BB context" when BB retrieval times out; expose `eeBBContext` flag in `/config` UI; re-tune `PIL_SEARCH_TIMEOUT_MS` against SiliconFlow thin-client measurements; structured log on every `.catch(() => {})` EE path.
+- [ ] **Phase 22: Small Hardening Bundle** — upgrade cross-turn dedup hash from sha1-12 → sha256-16 (`src/orchestrator/cross-turn-dedup.ts`) and re-validate `cost-leak-c3.spec.ts`; add deprecation `console.warn` on `src/agent-harness/index.ts` shim when imported externally; link CHANGELOG migration section to `@muonroi/agent-harness-core`.
 
 ## Phase Details
 

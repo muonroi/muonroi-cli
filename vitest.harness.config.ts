@@ -35,5 +35,9 @@ export default defineConfig({
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 60_000,
     fileParallelism: false,
+    env: {
+      // Suppress the agent-harness shim deprecation warning for in-repo runs.
+      MUONROI_INTERNAL_SHIM_OK: "1",
+    },
   },
 });

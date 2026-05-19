@@ -57,6 +57,20 @@ The adapter is safe under React 18 StrictMode (effect double-mount → register/
 - [PROTOCOL.md](../../docs/agent-harness/PROTOCOL.md)
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md)
 
+## Migration
+
+The legacy in-repo shim at `src/agent-harness/*` is deprecated for external use.
+See the [`[Unreleased] / BREAKING / harness` block in CHANGELOG.md](../../CHANGELOG.md)
+for the full migration notes.
+
+```ts
+// Before (deprecated, OpenTUI-flavoured shim)
+import { Semantic } from "muonroi-cli/src/agent-harness";
+
+// After (React adapter)
+import { Semantic, installReactHarness } from "@muonroi/agent-harness-react";
+```
+
 ## License
 
 Internal — Muonroi.

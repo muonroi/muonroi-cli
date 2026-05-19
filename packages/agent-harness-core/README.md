@@ -43,7 +43,7 @@ The `browser` export condition strips Node-only modules (`mcp-server.ts`, `trans
 | `findUnwrappedComponents` | Node-only lint helper for `lint:semantic` |
 | `PROTOCOL_VERSION`, `UINode`, `LiveFrame`, `LiveEvent` | Protocol types |
 
-## Event protocol (v0.2.0)
+## Event protocol (v0.3.0)
 
 `LiveEvent` is a discriminated union of all harness events. Events are
 serialized as JSONL on the sidechannel (fd 3 / named pipe) and ingested by
@@ -116,6 +116,20 @@ in the ring buffer.
 - [PROTOCOL.md](../../docs/agent-harness/PROTOCOL.md) — wire-level types
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md) — fd/pipe/WebSocket envelope spec
 - [Multi-framework layout](../../CLAUDE.md) — how adapters plug in
+
+## Migration
+
+The legacy in-repo shim at `src/agent-harness/*` is deprecated for external use.
+See the [`[Unreleased] / BREAKING / harness` block in CHANGELOG.md](../../CHANGELOG.md)
+for the full migration notes.
+
+```ts
+// Before (deprecated)
+import { createDriver } from "muonroi-cli/src/agent-harness";
+
+// After
+import { createDriver } from "@muonroi/agent-harness-core";
+```
 
 ## License
 

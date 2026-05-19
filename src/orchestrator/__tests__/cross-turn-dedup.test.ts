@@ -21,7 +21,36 @@ describe("CrossTurnDedup", () => {
       expect(second).toContain("identical to earlier turn");
       expect(second).toContain("tool=read_file");
       expect(second).toContain("turn=1");
-      expect(second).toContain("sha1=");
+      expect(second).toContain("sha256=");
+    });
+
+    it("distinct large tool outputs do not collide on sha256-16", () => {
+      // Two large strings differing only in last char must produce different
+      // stubs (i.e. no false-positive dedup hit). Regression coverage for the
+      // sha1-12 → sha256-16 upgrade — at 48 bits the birthday bound made this
+      // theoretically plausible; at 64 bits it's astronomically unlikely.
+      const dedup = new CrossTurnDedup({ minChars: 100 });
+      dedup.beginTurn();
+      const a = "A".repeat(2_000);
+      const b = "A".repeat(1_999) + "B";
+
+      expect(dedup.maybeDedup("read_file", a)).toBeNull();
+      // Distinct content must NOT hit the cache.
+      expect(dedup.maybeDedup("read_file", b)).toBeNull();
+
+      // Re-emitting `a` must produce a stub whose hash differs from the one
+      // that would be produced for `b` — i.e. distinct cache entries coexist.
+      const stubA = dedup.maybeDedup("read_file", a);
+      const stubB = dedup.maybeDedup("read_file", b);
+      expect(stubA).not.toBeNull();
+      expect(stubB).not.toBeNull();
+      const hashA = /sha256=([0-9a-f]+)/.exec(stubA as string)?.[1];
+      const hashB = /sha256=([0-9a-f]+)/.exec(stubB as string)?.[1];
+      expect(hashA).toBeDefined();
+      expect(hashB).toBeDefined();
+      expect(hashA).toHaveLength(16);
+      expect(hashB).toHaveLength(16);
+      expect(hashA).not.toBe(hashB);
     });
 
     it("does not dedup different outputs", () => {

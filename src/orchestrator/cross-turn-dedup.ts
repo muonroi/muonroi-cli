@@ -2,7 +2,7 @@
  * Cross-turn tool-output deduplication (Phase C3).
  *
  * Phase C2 dedupes identical tool outputs WITHIN a single sub-agent
- * invocation via sha1-12 content hashing (see sub-agent-cap.ts). Phase
+ * invocation via short-hash content hashing (see sub-agent-cap.ts). Phase
  * C3 extends this dedup across MULTIPLE turns of the same orchestrator
  * session — if the user prompts again in the same session and the agent
  * runs `read_file("x.ts")` twice, the second call's tool_result is
@@ -12,7 +12,7 @@
  * Design:
  *  - One CrossTurnDedup instance lives on the Orchestrator for the
  *    lifetime of the session.
- *  - Each tool-output string is hashed (sha1, first 12 chars). The first
+ *  - Each tool-output string is hashed (sha256, first 16 hex chars). The first
  *    occurrence is cached verbatim; subsequent identical strings are
  *    replaced with a stub.
  *  - Cache is capped at 200 entries (LRU eviction via Map insertion
@@ -58,8 +58,9 @@ export interface CrossTurnDedupOptions {
   enabled?: boolean;
 }
 
+// 16 hex chars = 64 bits → birthday collision at ~4B entries; LRU cap is 200, so overkill-safe.
 function shortHash(text: string): string {
-  return createHash("sha1").update(text).digest("hex").slice(0, 12);
+  return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
 export class CrossTurnDedup {
@@ -114,7 +115,7 @@ export class CrossTurnDedup {
       // Refresh LRU position so frequently-reused outputs survive eviction.
       this.cache.delete(hash);
       this.cache.set(hash, existing);
-      return `[tool_result identical to earlier turn — dedup ref sha1=${hash}, originally from tool=${existing.firstSeenToolName} turn=${existing.firstSeenTurn}]`;
+      return `[tool_result identical to earlier turn — dedup ref sha256=${hash}, originally from tool=${existing.firstSeenToolName} turn=${existing.firstSeenTurn}]`;
     }
     // Insert new entry, evicting oldest if over cap.
     this.cache.set(hash, {
