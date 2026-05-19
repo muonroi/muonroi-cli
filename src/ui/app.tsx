@@ -15,6 +15,7 @@ import { Agent } from "../orchestrator/orchestrator";
 import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
@@ -4454,7 +4455,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     try {
                       agent.setCwd(result.projectDir);
                     } catch (_) {}
-                    const continuationPrompt = `${originalPrompt}\n\n--- system note ---\nThe project has been scaffolded at ${result.projectDir} using BB template ${templateName}.\nRead README.md + Agent.md + EE-INTENT.md (if present) first to understand the\nexisting structure, then continue implementing the originally requested feature.`;
+                    const continuationPrompt = buildIdealContinuationPrompt({
+                      originalPrompt,
+                      projectDir: result.projectDir,
+                      templateName,
+                    });
                     logUIInteraction(agent.getSessionId() ?? undefined, {
                       subtype: "init_new_resume",
                       data: { projectDir: result.projectDir, templateName, originalPrompt },
@@ -4540,7 +4545,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       agent.setCwd(result.projectDir);
                     } catch (_) {}
                     const tplLabel = templateName ?? "bb-template";
-                    const continuationPrompt = `${originalPrompt}\n\n--- system note ---\nThe project has been scaffolded at ${result.projectDir} using BB template ${tplLabel}.\nRead README.md + Agent.md + EE-INTENT.md (if present) first to understand the\nexisting structure, then continue implementing the originally requested feature.`;
+                    const continuationPrompt = buildIdealContinuationPrompt({
+                      originalPrompt,
+                      projectDir: result.projectDir,
+                      templateName: tplLabel,
+                    });
                     logUIInteraction(agent.getSessionId() ?? undefined, {
                       subtype: "init_new_resume",
                       data: { projectDir: result.projectDir, templateName: tplLabel, originalPrompt },
