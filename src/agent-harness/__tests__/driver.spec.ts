@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const frame: LiveFrame = {
   mode: "live",
-  version: "0.3.0",
+  version: "0.4.0",
   seq: 1,
   ts: 0,
   focus: "composer",
@@ -85,7 +85,7 @@ describe("driver", () => {
       kind: "frame",
       frame: {
         mode: "live",
-        version: "0.3.0",
+        version: "0.4.0",
         seq: 1,
         ts: 0,
         nodes: [
@@ -109,7 +109,7 @@ describe("driver", () => {
       kind: "frame",
       frame: {
         mode: "live",
-        version: "0.3.0",
+        version: "0.4.0",
         seq: 1,
         ts: 0,
         nodes: [
@@ -134,7 +134,7 @@ describe("driver", () => {
       kind: "frame",
       frame: {
         mode: "live",
-        version: "0.3.0",
+        version: "0.4.0",
         seq: 1,
         ts: 0,
         nodes: [

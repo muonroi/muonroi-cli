@@ -6,7 +6,7 @@ describe("validateSpec", () => {
   it("accepts a valid spec", () => {
     const spec: DesignSpec = {
       mode: "design",
-      version: "0.3.0",
+      version: "0.4.0",
       scenes: [{ id: "s", name: "S", layout: { id: "root", role: "dialog" } }],
     };
     expect(validateSpec(spec).ok).toBe(true);
@@ -15,7 +15,7 @@ describe("validateSpec", () => {
   it("rejects wrong mode", () => {
     const spec = {
       mode: "live",
-      version: "0.3.0",
+      version: "0.4.0",
       scenes: [{ id: "s", name: "S", layout: { id: "root", role: "dialog" } }],
     };
     expect(validateSpec(spec).ok).toBe(false);
@@ -25,7 +25,7 @@ describe("validateSpec", () => {
 describe("querySpec", () => {
   const spec: DesignSpec = {
     mode: "design",
-    version: "0.3.0",
+    version: "0.4.0",
     scenes: [
       {
         id: "s",
@@ -54,12 +54,12 @@ describe("querySpec", () => {
 describe("diffSpecs", () => {
   const a: DesignSpec = {
     mode: "design",
-    version: "0.3.0",
+    version: "0.4.0",
     scenes: [{ id: "s", name: "S", layout: { id: "root", role: "dialog" } }],
   };
   const b: DesignSpec = {
     mode: "design",
-    version: "0.3.0",
+    version: "0.4.0",
     scenes: [
       {
         id: "s",

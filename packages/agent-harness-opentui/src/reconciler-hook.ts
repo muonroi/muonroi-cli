@@ -62,7 +62,7 @@ export function createReconcilerHook(opts: {
 
     const frame: LiveFrame = {
       mode: "live",
-      version: "0.3.0",
+      version: "0.4.0",
       seq: getSeq(),
       ts: getTs(),
       nodes: snap.nodes,

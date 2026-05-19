@@ -5,7 +5,7 @@ describe("protocol types", () => {
   it("compiles a minimal LiveFrame", () => {
     const frame: LiveFrame = {
       mode: "live",
-      version: "0.3.0",
+      version: "0.4.0",
       seq: 0,
       ts: 0,
       nodes: [],
@@ -32,7 +32,7 @@ describe("protocol types", () => {
   it("compiles a DesignSpec with state patches", () => {
     const spec: DesignSpec = {
       mode: "design",
-      version: "0.3.0",
+      version: "0.4.0",
       scenes: [
         {
           id: "s1",
