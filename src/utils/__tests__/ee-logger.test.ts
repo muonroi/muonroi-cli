@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { classifyEeError, logEeFailure } from "../ee-logger.js";
+import { classifyEeError, logEeFailure, withEeTimeout } from "../ee-logger.js";
 
 type RuntimeStub = { emitEvent: ReturnType<typeof vi.fn> };
 
@@ -165,6 +165,33 @@ describe("ee-logger", () => {
 
     it("classifies plain object with TimeoutError name as timeout", () => {
       expect(classifyEeError({ name: "TimeoutError" })).toBe("timeout");
+    });
+  });
+
+  describe("withEeTimeout (Phase 21.5)", () => {
+    it("resolves through when the inner promise settles in time", async () => {
+      const v = await withEeTimeout(Promise.resolve(42), 50);
+      expect(v).toBe(42);
+    });
+
+    it("rejects with TimeoutError when the inner promise takes too long", async () => {
+      const slow = new Promise<number>((resolve) => setTimeout(() => resolve(7), 100));
+      await expect(withEeTimeout(slow, 20)).rejects.toMatchObject({ name: "TimeoutError" });
+    });
+
+    it("forwards inner rejection unchanged when it beats the timeout", async () => {
+      const err = new Error("inner boom");
+      await expect(withEeTimeout(Promise.reject(err), 50)).rejects.toBe(err);
+    });
+
+    it("rejected error classifies as timeout via classifyEeError", async () => {
+      const slow = new Promise<number>((resolve) => setTimeout(() => resolve(0), 100));
+      try {
+        await withEeTimeout(slow, 10);
+        throw new Error("should not reach");
+      } catch (e) {
+        expect(classifyEeError(e)).toBe("timeout");
+      }
     });
   });
 });
