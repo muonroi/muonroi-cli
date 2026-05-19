@@ -14,7 +14,7 @@
  *
  * Fail-open: any logging error is swallowed so we never break the main flow.
  */
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -22,12 +22,35 @@ const ENABLED = process.env.MUONROI_DEBUG_LLM_WIRE === "1";
 
 const LOG_FILE = process.env.MUONROI_DEBUG_LLM_WIRE_PATH ?? join(homedir(), ".muonroi-cli", "llm-wire.log");
 
+// Cap individual log files at ~25 MB. When exceeded we rotate to .1 and start
+// fresh. A single noisy /ideal session produces ~2 MB; the cap leaves room for
+// ~10 sessions before older evidence is dropped.
+const MAX_LOG_BYTES = 25 * 1024 * 1024;
 let _dirEnsured = false;
-function ensureDir(): void {
-  if (_dirEnsured) return;
+let _rotateChecked = false;
+
+function ensureDirAndRotate(): void {
+  if (_dirEnsured && _rotateChecked) return;
   try {
-    mkdirSync(dirname(LOG_FILE), { recursive: true });
-    _dirEnsured = true;
+    if (!_dirEnsured) {
+      mkdirSync(dirname(LOG_FILE), { recursive: true });
+      _dirEnsured = true;
+    }
+    if (!_rotateChecked && existsSync(LOG_FILE)) {
+      const size = statSync(LOG_FILE).size;
+      if (size > MAX_LOG_BYTES) {
+        const rotated = LOG_FILE + ".1";
+        if (existsSync(rotated)) {
+          try {
+            unlinkSync(rotated);
+          } catch {
+            /* fail-open */
+          }
+        }
+        renameSync(LOG_FILE, rotated);
+      }
+    }
+    _rotateChecked = true;
   } catch {
     /* fail-open */
   }
@@ -36,7 +59,7 @@ function ensureDir(): void {
 function append(label: string, data: unknown): void {
   if (!ENABLED) return;
   try {
-    ensureDir();
+    ensureDirAndRotate();
     const line = JSON.stringify({ t: new Date().toISOString(), label, data });
     appendFileSync(LOG_FILE, line + "\n", "utf8");
   } catch {
