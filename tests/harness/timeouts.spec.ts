@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 
 const minimalFrame: LiveFrame = {
   mode: "live",
-  version: "0.2.0",
+  version: "0.3.0",
   seq: 1,
   ts: 0,
   nodes: [

@@ -163,7 +163,7 @@ describe("Angular adapter E2E — WS transport", () => {
 
     const frame = frames[0] as FrameEnvelope;
     expect(frame.mode).toBe("live");
-    expect(frame.version).toBe("0.2.0");
+    expect(frame.version).toBe("0.3.0");
 
     // Find root-button node somewhere in the tree.
     function findNode(nodes: FrameEnvelope["nodes"], id: string): (typeof nodes)[number] | undefined {

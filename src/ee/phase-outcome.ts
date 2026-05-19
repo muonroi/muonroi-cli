@@ -16,6 +16,7 @@
  * caller explicitly awaits the returned Promise.
  */
 
+import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import type { CouncilJudgeResult } from "./judge.js";
 import type { Scope } from "./types.js";
 
@@ -113,7 +114,8 @@ export async function firePhaseOutcome(
 
 /** Fire-and-forget wrapper that never throws. */
 export function fireAndForgetPhaseOutcome(payload: PhaseOutcomePayload, opts: FirePhaseOutcomeOpts = {}): void {
-  void firePhaseOutcome(payload, opts).catch(() => {
+  void firePhaseOutcome(payload, opts).catch((err) => {
+    logEeFailure("phase-outcome.fireAndForgetPhaseOutcome", classifyEeError(err), err);
     /* swallow */
   });
 }
@@ -156,7 +158,8 @@ export function recordCouncilOutcome(
     },
   };
 
-  void firePhaseOutcome(payload, { baseUrl: opts.baseUrl, authToken: opts.authToken }).catch(() => {
+  void firePhaseOutcome(payload, { baseUrl: opts.baseUrl, authToken: opts.authToken }).catch((err) => {
+    logEeFailure("phase-outcome.recordCouncilOutcome", classifyEeError(err), err);
     /* swallow — non-critical */
   });
 }
