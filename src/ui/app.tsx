@@ -18,6 +18,7 @@ import type { ProviderId } from "../providers/types.js";
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { logUIInteraction } from "../storage/index.js";
 import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -2795,6 +2796,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   } catch {
                     /* best-effort */
                   }
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "askcard_open",
+                    data: {
+                      questionId: cq.questionId,
+                      question: cq.question,
+                      phase: cq.phase ?? "clarify",
+                      optionCount: cq.options?.length ?? 0,
+                      defaultIndex: cq.defaultIndex,
+                    },
+                  });
                 }
                 break;
               case "council_preflight":
@@ -3307,6 +3318,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   } catch {
                     /* best-effort */
                   }
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "askcard_open",
+                    data: {
+                      questionId: cq2.questionId,
+                      question: cq2.question,
+                      phase: cq2.phase ?? "clarify",
+                      optionCount: cq2.options?.length ?? 0,
+                      defaultIndex: cq2.defaultIndex,
+                    },
+                  });
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setPendingCouncilPreflight(chunk.councilPreflight);
@@ -3514,6 +3535,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   } catch {
                     /* best-effort */
                   }
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "askcard_open",
+                    data: {
+                      questionId: cq3.questionId,
+                      question: cq3.question,
+                      phase: cq3.phase ?? "clarify",
+                      optionCount: cq3.options?.length ?? 0,
+                      defaultIndex: cq3.defaultIndex,
+                    },
+                  });
                 }
                 if (chunk.type === "council_preflight" && chunk.councilPreflight) {
                   setMessages((prev) => {
@@ -4507,6 +4538,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             } catch {
               /* best-effort */
             }
+            logUIInteraction(agent.getSessionId() ?? undefined, {
+              subtype: "askcard_answered",
+              data: { questionId: qid, answerKind: ans.kind ?? "choice", answerText: ans.text },
+            });
           } else if (result.emit?.type === "cancel") {
             const qid = pendingQuestion.questionId;
             setPendingCouncilQuestionSync(null);
@@ -4522,6 +4557,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             } catch {
               /* best-effort */
             }
+            logUIInteraction(agent.getSessionId() ?? undefined, {
+              subtype: "askcard_cancel",
+              data: { questionId: qid },
+            });
           }
           return;
         }
