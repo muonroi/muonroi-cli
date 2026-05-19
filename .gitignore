@@ -34,3 +34,6 @@ deps-outdated.txt
 
 # Throwaway scratch space (smoke tests, manual scaffold output)
 .scratch/
+
+# PIL Phase G snapshots — manual debug captures, not versioned
+docs/phase-g-snapshots/
