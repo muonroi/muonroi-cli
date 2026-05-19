@@ -288,13 +288,13 @@ describe("initNewProject — bbTemplate + EE packages (Plan 23-01b)", () => {
       (c) => c.cmd === "dotnet" && c.args[0] === "new" && c.args[1] === "install",
     );
     expect(installCall).toBeDefined();
-    expect(installCall!.args[2]).toBe("Muonroi.BaseTemplate::1.0.0-alpha.3");
+    expect(installCall!.args[2]).toBe("Muonroi.BaseTemplate@1.0.0-alpha.3");
 
     // Only the chosen template was installed — sibling templates left alone.
     const installRefs = spawnSyncCalls
       .filter((c) => c.args[0] === "new" && c.args[1] === "install")
       .map((c) => c.args[2]);
-    expect(installRefs).toEqual(["Muonroi.BaseTemplate::1.0.0-alpha.3"]);
+    expect(installRefs).toEqual(["Muonroi.BaseTemplate@1.0.0-alpha.3"]);
 
     // The exec recorder should contain `dotnet new mr-base-sln`, restore, and
     // both `dotnet add package` calls (one per EE package).
