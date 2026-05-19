@@ -64,6 +64,7 @@ import {
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
+import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
@@ -1460,6 +1461,16 @@ export class Agent {
       const compactKeepLast = getSubAgentCompactKeepLast();
       // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
       this._lastProviderOptionsShape = extractProviderOptionsShape(childRuntime.providerOptions);
+      if (wireDebug.enabled) {
+        wireDebug.logRequest({
+          providerId: childRuntime.modelInfo?.provider ?? "unknown",
+          modelId: childRuntime.modelId,
+          messages: childMessages as readonly unknown[],
+          systemChars: childSystem?.length ?? 0,
+          toolNames: childTools ? Object.keys(childTools) : undefined,
+          providerOptions: childRuntime.providerOptions,
+        });
+      }
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1520,6 +1531,7 @@ export class Agent {
       const partCounts: Record<string, number> = {};
       let toolCallCount = 0;
       let textDeltaCount = 0;
+      const _wireProviderIdSub = childRuntime.modelInfo?.provider ?? "unknown";
       for await (const part of result.fullStream) {
         if (signal?.aborted) {
           break;
@@ -1527,6 +1539,25 @@ export class Agent {
 
         if (debugSubagent) {
           partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+        }
+
+        if (wireDebug.enabled) {
+          wireDebug.logChunk(_wireProviderIdSub, String(part.type ?? "unknown"), {
+            hasText:
+              typeof (part as { text?: string }).text === "string" ? (part as { text: string }).text.length : undefined,
+            hasReasoning:
+              typeof (part as unknown as { reasoning?: string }).reasoning === "string"
+                ? (part as unknown as { reasoning: string }).reasoning.length
+                : undefined,
+            errorMsg:
+              part.type === "error"
+                ? (() => {
+                    const e = (part as { error?: unknown }).error;
+                    wireDebug.logError(_wireProviderIdSub, e);
+                    return typeof (e as Error)?.message === "string" ? (e as Error).message : String(e);
+                  })()
+                : undefined,
+          });
         }
 
         if (part.type === "text-delta") {
@@ -4285,6 +4316,16 @@ export class Agent {
           // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
           this._lastProviderOptionsShape =
             Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null;
+          if (wireDebug.enabled) {
+            wireDebug.logRequest({
+              providerId: runtime.modelInfo?.provider ?? "unknown",
+              modelId: runtime.modelId,
+              messages: this.messages as readonly unknown[],
+              systemChars: systemForModel?.length ?? 0,
+              toolNames: tools ? Object.keys(tools as Record<string, unknown>) : undefined,
+              providerOptions: providerOpts,
+            });
+          }
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -4352,10 +4393,27 @@ export class Agent {
           });
 
           let _topTokenIndex = 0;
+          const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
           for await (const part of result.fullStream) {
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
               break;
+            }
+
+            if (wireDebug.enabled) {
+              wireDebug.logChunk(_wireProviderIdTop, String(part.type ?? "unknown"), {
+                hasText:
+                  typeof (part as { text?: string }).text === "string"
+                    ? (part as { text: string }).text.length
+                    : undefined,
+                hasReasoning:
+                  typeof (part as unknown as { reasoning?: string }).reasoning === "string"
+                    ? (part as unknown as { reasoning: string }).reasoning.length
+                    : undefined,
+              });
+              if (part.type === "error") {
+                wireDebug.logError(_wireProviderIdTop, (part as { error?: unknown }).error);
+              }
             }
 
             switch (part.type) {
