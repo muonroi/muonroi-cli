@@ -136,12 +136,24 @@ export const SHORTNAME_TO_NUGET: Record<string, string> = Object.fromEntries(
 );
 
 /**
+ * Windows shells resolve `dotnet` to `dotnet.exe` via PATHEXT lookup, which
+ * spawnSync only does when `shell: true` is passed. Without it, the
+ * "command not found" branch fires even though `dotnet --version` works
+ * fine in a terminal. POSIX shells don't need this flag.
+ */
+const NEEDS_SHELL = process.platform === "win32";
+
+/**
  * Task 6.1 — Detect dotnet SDK availability via spawnSync.
  * Returns the dotnet version string, or null if not found.
  */
 export function detectDotnet(): string | null {
   try {
-    const result = spawnSync("dotnet", ["--version"], { encoding: "utf8", timeout: 5000 });
+    const result = spawnSync("dotnet", ["--version"], {
+      encoding: "utf8",
+      timeout: 5000,
+      shell: NEEDS_SHELL,
+    });
     if (result.status === 0 && result.stdout) {
       return result.stdout.trim();
     }
@@ -156,7 +168,11 @@ export function detectDotnet(): string | null {
  * Returns map of nugetId → shortName for installed templates.
  */
 export function detectInstalledBBTemplates(): Map<string, string> {
-  const result = spawnSync("dotnet", ["new", "list"], { encoding: "utf8", timeout: 15000 });
+  const result = spawnSync("dotnet", ["new", "list"], {
+    encoding: "utf8",
+    timeout: 15000,
+    shell: NEEDS_SHELL,
+  });
   const installed = new Map<string, string>();
   if (result.status !== 0 || !result.stdout) return installed;
 
@@ -200,6 +216,7 @@ export function installBBTemplates(nugetIds?: string[]): boolean {
     const result = spawnSync("dotnet", ["new", "install", ref], {
       encoding: "utf8",
       timeout: 60000,
+      shell: NEEDS_SHELL,
     });
     const alreadyInstalled = result.status === 106 || (result.stdout ?? "").includes("is already installed");
     if (result.status !== 0 && !alreadyInstalled) {
