@@ -1234,6 +1234,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // form can route it through designBBPackages() for EE-driven template + pkg
   // suggestion. Empty string falls back to the manual template menu.
   const lastIdealIdeaRef = useRef<string>("");
+  const originalIdealPromptRef = useRef<string | null>(null);
   const isProcessingRef = useRef(false);
   const hasApiKeyRef = useRef(initialHasApiKey);
   const showApiKeyModalRef = useRef(!initialHasApiKey);
@@ -3288,6 +3289,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             // Plan 23-02 — capture the original idea for EE-driven BB design.
             if (payload.subcommand === "start" && typeof payload.idea === "string") {
               lastIdealIdeaRef.current = payload.idea;
+              originalIdealPromptRef.current = payload.idea;
             }
             const heading =
               payload.subcommand === "start"
