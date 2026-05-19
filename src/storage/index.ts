@@ -21,5 +21,6 @@ export {
   persistToolCallWriteAhead,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
+export { logUIInteraction, type UIInteractionSubtype } from "./ui-interaction-log.js";
 export { getSessionTotalTokens, listSessionUsage, recordUsageEvent, type TokenUsageLike } from "./usage";
 export { loadUsage, saveUsage, type UsageState } from "./usage-cap.js";

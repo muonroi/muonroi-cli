@@ -10,7 +10,7 @@ import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
-import { logInteraction } from "../storage/index.js";
+import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
@@ -163,6 +163,10 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
   } catch {
     // DB errors must not break /ideal
   }
+  logUIInteraction(opts.sessionId, {
+    subtype: "route_decision",
+    data: { path: "hot-path", complexity: opts.complexity ?? "low", forceCouncil: false, runId },
+  });
 
   // Build a minimal ProductSpec inline (no LLM calls needed for the hot-path).
   const productSpec: ProductSpec = {
@@ -357,6 +361,15 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   } catch {
     /* best-effort */
   }
+  logUIInteraction(opts.sessionId, {
+    subtype: "route_decision",
+    data: {
+      path: "council",
+      complexity: opts.complexity ?? "unknown",
+      forceCouncil: !!opts.flags.forceCouncil,
+      runId,
+    },
+  });
 
   const ctx: DriverContext = {
     runId,

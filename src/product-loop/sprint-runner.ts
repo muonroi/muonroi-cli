@@ -27,6 +27,7 @@ import { runCouncil } from "../council/index.js";
 import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { detectProviderForModel } from "../providers/runtime.js";
+import { logUIInteraction } from "../storage/index.js";
 import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
 import { commitToProduct, release } from "../usage/ledger.js";
 import { CapBreachError } from "../usage/types.js";
@@ -154,6 +155,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     } catch {
       /* best-effort */
     }
+    logUIInteraction(ctx.sessionId, {
+      subtype: "sprint_halt",
+      data: { sprintN, reason: cb3.reason ?? "no_recipe", runId: ctx.runId },
+    });
     // Wrap the structured halt payload into the canonical StreamChunk shape
     // the TUI consumer expects: `{ type: "halt", haltChunk }`. Yielding the
     // bare HaltChunk caused the TUI to silently swallow the chunk because
@@ -173,6 +178,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   } catch {
     /* best-effort */
   }
+  logUIInteraction(ctx.sessionId, {
+    subtype: "sprint_stage",
+    data: { sprintIndex: sprintN, stage: "planning", runId: ctx.runId },
+  });
 
   const carryOverContext =
     history.length > 0
@@ -256,6 +265,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   } catch {
     /* best-effort */
   }
+  logUIInteraction(ctx.sessionId, {
+    subtype: "sprint_stage",
+    data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
+  });
   if (ctx.processMessageFn && planSynthesis.trim()) {
     const implGen = ctx.processMessageFn(planSynthesis);
     for await (const chunk of implGen) {
@@ -279,6 +292,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   } catch {
     /* best-effort */
   }
+  logUIInteraction(ctx.sessionId, {
+    subtype: "sprint_stage",
+    data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
+  });
   const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
   const verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
@@ -315,6 +332,10 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   } catch {
     /* best-effort */
   }
+  logUIInteraction(ctx.sessionId, {
+    subtype: "sprint_stage",
+    data: { sprintIndex: sprintN, stage: "judgment", runId: ctx.runId },
+  });
   const currentCriteria = await readCriteria(ctx.flowDir, ctx.runId);
 
   // When a phaseScope is provided (subsystem E), evaluate the done-gate only

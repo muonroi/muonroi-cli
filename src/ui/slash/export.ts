@@ -19,10 +19,62 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getDatabase } from "../../storage/db.js";
 import { buildChatEntries } from "../../storage/transcript.js";
 import type { ChatEntry } from "../../types/index.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
+
+interface InteractionRow {
+  event_type: string;
+  event_subtype: string | null;
+  metadata_json: string | null;
+  created_at: string;
+}
+
+function selectInteractionTimeline(sessionId: string): InteractionRow[] {
+  try {
+    const db = getDatabase();
+    return db
+      .prepare(
+        `SELECT event_type, event_subtype, metadata_json, created_at
+         FROM interaction_logs
+         WHERE session_id = ?
+           AND event_type IN ('ui_interaction', 'routing', 'council', 'ee_injection')
+         ORDER BY created_at ASC, id ASC`,
+      )
+      .all(sessionId) as InteractionRow[];
+  } catch {
+    return [];
+  }
+}
+
+function renderInteractionTimeline(rows: readonly InteractionRow[]): string[] {
+  if (rows.length === 0) return [];
+  const lines: string[] = ["── Interaction Timeline ──", ""];
+  for (const r of rows) {
+    const ts = formatTimestamp(r.created_at);
+    const label = r.event_subtype ? `${r.event_type}.${r.event_subtype}` : r.event_type;
+    let detail = "";
+    if (r.metadata_json) {
+      try {
+        const meta = JSON.parse(r.metadata_json) as Record<string, unknown>;
+        const parts: string[] = [];
+        for (const [k, v] of Object.entries(meta)) {
+          if (v === null || v === undefined) continue;
+          const vStr = typeof v === "string" ? (v.length > 80 ? `${v.slice(0, 77)}…` : v) : JSON.stringify(v);
+          parts.push(`${k}=${vStr}`);
+        }
+        detail = parts.length > 0 ? ` ${parts.join(" ")}` : "";
+      } catch {
+        // Leave detail empty on bad JSON
+      }
+    }
+    lines.push(`[${ts}] ${label}${detail}`);
+  }
+  lines.push("");
+  return lines;
+}
 
 function formatTimestamp(ts: Date | string | undefined): string {
   if (!ts) return "";
@@ -83,7 +135,9 @@ function signature(entries: readonly ChatEntry[]): string {
 function formatExport(
   dbEntries: readonly ChatEntry[],
   liveEntries: readonly ChatEntry[],
+  timeline: readonly InteractionRow[],
 ): { text: string; mode: "db_only" | "live_only" | "merged" | "synced" } {
+  const timelineBlock = renderInteractionTimeline(timeline);
   const dbSig = signature(dbEntries);
   const liveSig = signature(liveEntries);
   const header: string[] = [
@@ -92,6 +146,7 @@ function formatExport(
     "  Exported: " + formatTimestamp(new Date()),
     `  DB entries:    ${dbEntries.length}`,
     `  Live entries:  ${liveEntries.length}`,
+    `  Timeline rows: ${timeline.length}`,
     "=".repeat(72),
     "",
   ];
@@ -103,6 +158,7 @@ function formatExport(
         ...header,
         "(DB and TUI scrollback match — single rendering)",
         "",
+        ...timelineBlock,
         ...renderEntries(dbEntries),
         "=".repeat(72),
         "  End of export",
@@ -122,6 +178,7 @@ function formatExport(
         `means the conversation consisted of streamed chunks (council debate, tool traces)`,
         `that render to the TUI but are not persisted as ModelMessages. Showing TUI scrollback.`,
         "",
+        ...timelineBlock,
         "── TUI Scrollback (in-memory) ──",
         "",
         ...renderEntries(liveEntries),
@@ -141,6 +198,7 @@ function formatExport(
         ...header,
         "(Live scrollback unavailable — showing DB only)",
         "",
+        ...timelineBlock,
         ...renderEntries(dbEntries),
         "=".repeat(72),
         "  End of export",
@@ -161,6 +219,7 @@ function formatExport(
       `  Live signature:  ${liveSig}`,
       `Both renderings are included below for comparison.`,
       "",
+      ...timelineBlock,
       "─".repeat(72),
       "── Section A: Persisted (DB)",
       "─".repeat(72),
@@ -187,12 +246,13 @@ export const handleExportSlash: SlashHandler = async (_args, ctx) => {
 
   const dbEntries = buildChatEntries(sessionId);
   const liveEntries = ctx.getLiveEntries?.() ?? [];
+  const timeline = selectInteractionTimeline(sessionId);
 
-  if (dbEntries.length === 0 && liveEntries.length === 0) {
-    return "No messages in the current session to export (both DB and TUI scrollback are empty).";
+  if (dbEntries.length === 0 && liveEntries.length === 0 && timeline.length === 0) {
+    return "No messages in the current session to export (DB, TUI scrollback, and timeline are all empty).";
   }
 
-  const { text, mode } = formatExport(dbEntries, liveEntries);
+  const { text, mode } = formatExport(dbEntries, liveEntries, timeline);
 
   const fileName = `chat-export-${sessionId}.txt`;
   const filePath = path.resolve(ctx.cwd, fileName);
