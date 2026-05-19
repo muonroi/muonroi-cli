@@ -20,7 +20,8 @@ export type InteractionEventType =
   | "council"
   | "ee_intercept"
   | "ee_judge"
-  | "ee_injection";
+  | "ee_injection"
+  | "stream_retry";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace
 // needs longer history (e.g. forensic post-mortems).
