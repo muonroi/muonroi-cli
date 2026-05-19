@@ -21,6 +21,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
 import { loadUserSettings } from "../utils/settings.js";
 import { getCachedServerBaseUrl, loadEEAuthToken } from "./auth.js";
 
@@ -82,7 +83,9 @@ export interface FetchBBContextOpts {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-const BB_RETRIEVAL_TIMEOUT_MS = 800;
+// Phase 21 / Plan 02 / T4: overridable via `MUONROI_BB_RETRIEVAL_TIMEOUT_MS`
+// env (clamped to [300, 3000]).
+const BB_RETRIEVAL_TIMEOUT_MS = readTimeoutEnv("MUONROI_BB_RETRIEVAL_TIMEOUT_MS", 800, 300, 3000);
 const BB_MAX_TOKENS_DEFAULT = 1500;
 
 let _noRecipeLogged = false;
@@ -109,7 +112,7 @@ async function queryCollection(
 ): Promise<RawSearchPoint[]> {
   const url = `${baseUrl.replace(/\/$/, "")}/api/search`;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
 
   const resp = await fetch(url, {
     method: "POST",
@@ -295,7 +298,27 @@ export async function fetchBBContext(prompt: string, opts: FetchBBContextOpts = 
       _networkErrorLogged = true;
       process.stderr.write(`[ee.bb] network error fetching BB context: ${String(err)}\n`);
     }
+    // Phase 21 / Plan 02: emit structured signal so the TUI can surface a
+    // "running without BB context" toast and harness specs can assert.
+    logEeFailure("bb-retrieval.fetchBBContext", classifyEeError(err), err, {
+      elapsedMs: Date.now() - t0,
+      budgetMs: timeoutMs,
+    });
     return { ...empty, latencyMs: Date.now() - t0 };
+  }
+
+  // If the AbortSignal fired but Promise.all resolved (all 3 retries swallowed
+  // the abort internally and returned []), still emit a timeout event so the
+  // observability contract holds. We treat "all three collections returned 0
+  // points AND budget elapsed" as a timeout — bb-retrieval is a best-effort
+  // path, so consistent signaling matters more than perfect classification.
+  if (signal.aborted && recipeRaw.length === 0 && behavioralRaw.length === 0 && packagesRaw.length === 0) {
+    logEeFailure(
+      "bb-retrieval.fetchBBContext",
+      "timeout",
+      Object.assign(new Error("BB retrieval aborted"), { name: "TimeoutError" }),
+      { elapsedMs: Date.now() - t0, budgetMs: timeoutMs },
+    );
   }
 
   const latencyMs = Date.now() - t0;
@@ -413,10 +436,7 @@ export const BB_INFER_SCORE_FLOOR = 0.6;
  * Graceful degrade: returns false on any error (EE unconfigured, network fail,
  * feature flag off). Never throws.
  */
-export async function inferBBFromPrompt(
-  prompt: string,
-  opts: FetchBBContextOpts = {},
-): Promise<boolean> {
+export async function inferBBFromPrompt(prompt: string, opts: FetchBBContextOpts = {}): Promise<boolean> {
   const settings = loadUserSettings();
   if (settings.eeBBContext === false) return false;
   if (!prompt || prompt.trim().length < 4) return false;

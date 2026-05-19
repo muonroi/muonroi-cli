@@ -111,6 +111,7 @@ import {
 } from "./components/point-to-existing-form-card.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
+import { Toast, type ToastLevel } from "./components/Toast.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
 import { type TypeaheadState, useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
@@ -242,10 +243,10 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
       // Graceful fallback for unknown taskTypes; probe common text fields.
       const obj = (d ?? {}) as Record<string, unknown>;
       const primary =
-        (typeof obj["response"] === "string" && obj["response"]) ||
-        (typeof obj["summary"] === "string" && obj["summary"]) ||
-        (typeof obj["content"] === "string" && obj["content"]) ||
-        (typeof obj["text"] === "string" && obj["text"]) ||
+        (typeof obj.response === "string" && obj.response) ||
+        (typeof obj.summary === "string" && obj.summary) ||
+        (typeof obj.content === "string" && obj.content) ||
+        (typeof obj.text === "string" && obj.text) ||
         null;
       return primary || JSON.stringify(d, null, 2);
     }
@@ -870,6 +871,105 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   }, [renderer, agentRuntime]);
   // Wire fd4 input bridge: translate agent JSONL ops → synthetic key events.
   useAgentInputBridge(agentRuntime);
+
+  // ─── Phase 21 / Plan 02 — Toast subscriber ────────────────────────────────
+  // Hook into the same agentRuntime.emitEvent sink used by `logEeFailure` so
+  // EE failures (and any explicit `kind: "toast"` event) surface visually.
+  //
+  // Implementation: monkey-patch `agentRuntime.emitEvent` once on mount to tee
+  // events into a local React state setter. When agentRuntime is absent (no
+  // agent-mode), we fall back to a global-bus tap so the toast still renders
+  // for normal users.
+  const [activeToast, setActiveToast] = useState<{
+    level: ToastLevel;
+    text: string;
+    id: number;
+  } | null>(null);
+  const toastIdRef = useRef(0);
+  const eeToastSeenSessionsRef = useRef<Set<string>>(new Set());
+  const lastBootSessionIdRef = useRef<string | null>(null);
+
+  // Reset the per-session EE-toast debounce when a new session boots.
+  // Read sessionId via the agent (component-state `sessionId` is declared
+  // later in the function body; agent.getSessionId() is stable through the
+  // session lifetime so this poll is cheap).
+  useEffect(() => {
+    const id = setInterval(() => {
+      const sid = agent.getSessionId() ?? null;
+      if (sid !== lastBootSessionIdRef.current) {
+        lastBootSessionIdRef.current = sid;
+        eeToastSeenSessionsRef.current = new Set();
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [agent]);
+
+  const pushToast = useCallback((level: ToastLevel, text: string) => {
+    toastIdRef.current += 1;
+    setActiveToast({ level, text, id: toastIdRef.current });
+  }, []);
+
+  // Stable handler — only reads from refs, never recreated, so the patched
+  // emitEvent reference below remains valid for the lifetime of the runtime.
+  const handleHarnessEvent = useCallback(
+    (raw: unknown) => {
+      if (!raw || typeof raw !== "object") return;
+      const e = raw as Record<string, unknown>;
+      if (e.t !== "event") return;
+
+      if (e.kind === "toast") {
+        const lvl = e.level === "warn" || e.level === "error" ? (e.level as ToastLevel) : "info";
+        const text = typeof e.text === "string" ? e.text : "";
+        if (text) pushToast(lvl, text);
+        return;
+      }
+
+      if (e.kind === "ee-timeout") {
+        const source = typeof e.source === "string" ? e.source : "";
+        if (source.startsWith("bb-retrieval")) {
+          const sessionKey = lastBootSessionIdRef.current ?? "__no_session__";
+          if (!eeToastSeenSessionsRef.current.has(sessionKey)) {
+            eeToastSeenSessionsRef.current.add(sessionKey);
+            pushToast("warn", "running without BB context (EE slow or down)");
+          }
+        }
+      }
+    },
+    [pushToast],
+  );
+
+  useEffect(() => {
+    // Tap point 1: patch agentRuntime.emitEvent if present.
+    if (agentRuntime && typeof agentRuntime.emitEvent === "function") {
+      const original = agentRuntime.emitEvent.bind(agentRuntime);
+      const patched = (e: unknown) => {
+        try {
+          handleHarnessEvent(e);
+        } catch {
+          /* never let the toast subscriber break the harness pipeline */
+        }
+        // Forward to the original sink (sidechannel write).
+        (original as (e: unknown) => void)(e);
+      };
+      (agentRuntime as { emitEvent: (e: unknown) => void }).emitEvent = patched;
+      return () => {
+        try {
+          (agentRuntime as { emitEvent: (e: unknown) => void }).emitEvent = original as (e: unknown) => void;
+        } catch {
+          /* restoration best-effort */
+        }
+      };
+    }
+    // Tap point 2 (no agent-mode): subscribe to a global bus so EE failures
+    // still surface a toast in normal user sessions. logEeFailure reads
+    // __muonroiAgentRuntime — when undefined, no event flows; the warn line
+    // still appears on stderr. No bus to wire here.
+    return undefined;
+  }, [handleHarnessEvent]);
+
+  const dismissToast = useCallback(() => setActiveToast(null), []);
+  // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
+
   useEffect(() => {
     let cancelled = false;
     getConfiguredProviders()
@@ -943,13 +1043,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const pendingCouncilQuestionRef = useRef<CouncilQuestionData | null>(null);
   const councilCardStateRef = useRef<CouncilCardState | null>(null);
   const preflightCardStateRef = useRef<CouncilCardState | null>(null);
-  const setPendingCouncilQuestionSync = useCallback(
-    (v: CouncilQuestionData | null) => {
-      pendingCouncilQuestionRef.current = v;
-      setPendingCouncilQuestion(v);
-    },
-    [],
-  );
+  const setPendingCouncilQuestionSync = useCallback((v: CouncilQuestionData | null) => {
+    pendingCouncilQuestionRef.current = v;
+    setPendingCouncilQuestion(v);
+  }, []);
   const setCouncilCardStateSync = useCallback(
     (v: CouncilCardState | null | ((prev: CouncilCardState | null) => CouncilCardState | null)) => {
       // Compute the new value against the CURRENT ref so the ref reflects the
@@ -2983,6 +3080,28 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         processMessage(COMMIT_PR_PROMPT);
         return true;
       }
+      // Phase 21 / Plan 02 / T3: BB-context feature flag toggle.
+      // `/ee-context on|off|status` — surfaces userSettings.eeBBContext.
+      if (c === "/ee-context" || c.startsWith("/ee-context ")) {
+        const arg = c.slice("/ee-context".length).trim();
+        const current = loadUserSettings().eeBBContext !== false; // default ON
+        if (arg === "" || arg === "status") {
+          pushToast("info", `BB context: ${current ? "ON" : "OFF"}`);
+          return true;
+        }
+        if (arg === "on") {
+          saveUserSettings({ eeBBContext: true });
+          pushToast("info", "BB context: ON");
+          return true;
+        }
+        if (arg === "off") {
+          saveUserSettings({ eeBBContext: false });
+          pushToast("info", "BB context: OFF");
+          return true;
+        }
+        pushToast("warn", "Usage: /ee-context on|off|status");
+        return true;
+      }
       if (c.startsWith("/btw ") || c === "/btw") {
         const question = cmd.trim().slice(4).trim();
         if (!question) {
@@ -3150,9 +3269,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               for await (const chunk of gen) {
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   const cq = chunk.councilQuestion;
-                  process.stderr.write(
-                    `[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
-                  );
+                  process.stderr.write(`[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
                 }
                 const _chunkType = chunk.type;
                 if (chunk.type === "content") {
@@ -3677,6 +3794,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           inputRef.current?.clear();
           inputRef.current?.insertText("/ee route ");
           break;
+        case "ee-context-on":
+          handleCommand("/ee-context on");
+          break;
+        case "ee-context-off":
+          handleCommand("/ee-context off");
+          break;
+        case "ee-context-status":
+          handleCommand("/ee-context status");
+          break;
         case "update":
           setIsUpdating(true);
           setUpdateOutput(null);
@@ -3843,6 +3969,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [
       agent,
       handleExit,
+      handleCommand,
       model,
       messages,
       openAgentsModal,
@@ -3853,6 +3980,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       processMessage,
       resetToNewSession,
       startupConfig.version,
+      setShowSlashMenuSync,
     ],
   );
 
@@ -5263,7 +5391,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       walletFocusIndex,
       walletDisplayInfo,
       applyWalletSettings,
-      showSlashMenu,
       slashMenuIndex,
       submitApiKey,
       submitPlanAnswers,
@@ -5271,7 +5398,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       toggleSavedMcp,
       messages,
       startupConfig.version,
-      pendingCouncilQuestion,
       pendingCouncilPreflight,
       slashSearchQuery.length,
       slashSearchQuery.slice,
@@ -5280,6 +5406,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       initNewForm,
       toggleModelDisabled,
       pointToExistingForm,
+      setCouncilCardStateSync,
+      setPendingCouncilQuestionSync,
+      setShowSlashMenuSync,
+      setPreflightCardStateSync,
     ],
   );
   useKeyboard(handleKey);
@@ -5439,6 +5569,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     scrollToBottom,
     pendingCouncilQuestion?.questionId,
     pendingCouncilQuestion,
+    setShowSlashMenuSync,
+    setPendingCouncilQuestionSync,
+    setCouncilCardStateSync,
   ]);
 
   // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
@@ -5478,6 +5611,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         onMouseDown={handleRootMouseDown}
       >
         {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
+        {activeToast ? (
+          <Toast
+            key={activeToast.id}
+            level={activeToast.level}
+            text={activeToast.text}
+            theme={t}
+            onDismiss={dismissToast}
+          />
+        ) : null}
         {hasMessages ? (
           <box flexGrow={1} flexDirection="column">
             <SessionHeader
@@ -6980,10 +7122,10 @@ function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Structured
       // before falling back to raw JSON.
       const obj = (d ?? {}) as Record<string, unknown>;
       const primary =
-        (typeof obj["response"] === "string" && obj["response"]) ||
-        (typeof obj["summary"] === "string" && obj["summary"]) ||
-        (typeof obj["content"] === "string" && obj["content"]) ||
-        (typeof obj["text"] === "string" && obj["text"]) ||
+        (typeof obj.response === "string" && obj.response) ||
+        (typeof obj.summary === "string" && obj.summary) ||
+        (typeof obj.content === "string" && obj.content) ||
+        (typeof obj.text === "string" && obj.text) ||
         null;
       if (primary) {
         return (
