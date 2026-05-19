@@ -254,7 +254,7 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
-### All LiveEvent kinds (protocol version 0.3.0)
+### All LiveEvent kinds (protocol version 0.4.0)
 
 | kind | When emitted | Key payload fields |
 |---|---|---|
@@ -266,6 +266,7 @@ correlation.
 | `askcard-cancel` | User presses Escape on question card | `questionId` |
 | `sprint-stage` | Sprint enters a new stage | `sprintIndex`, `stage` ("planning"\|"implementation"\|"verification"\|"judgment"), `runId` |
 | `sprint-halt` | CB-gate fires — sprint halted | `sprintN`, `reason`, `runId` |
+| `sprint-plan-committed` | Leader/council commits final sprint plan, before first sprint fires | `runId`, `projectDir`, `sprintCount`, `sprintIds`, `source` ("leader"\|"council"\|"auto"), `ts` |
 | `llm-token` | Text delta from model (opt-in only) | `correlationId`, `delta`, `tokenIndex` |
 | `llm-done` | LLM call completes | `correlationId`, `totalChars`, `finishReason` |
 | `toast` | Error/info toast displayed | `level`, `text` |

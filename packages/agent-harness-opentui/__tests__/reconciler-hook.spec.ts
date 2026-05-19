@@ -35,7 +35,7 @@ describe("ReconcilerHook", () => {
     const frame = hook.capture();
     expect(frame).not.toBeNull();
     expect(frame!.mode).toBe("live");
-    expect(frame!.version).toBe("0.3.0");
+    expect(frame!.version).toBe("0.4.0");
     expect(frame!.seq).toBe(1);
     expect(frame!.nodes).toHaveLength(1);
     expect(frame!.nodes[0]).toMatchObject({ id: "btn1", role: "button", name: "Send" });

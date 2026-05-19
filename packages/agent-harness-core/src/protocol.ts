@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "0.3.0" as const;
+export const PROTOCOL_VERSION = "0.4.0" as const;
 
 export type Role =
   | "dialog"
@@ -138,6 +138,20 @@ export type LiveEvent =
       /** Halt reason as surfaced by the CB gate that fired. */
       reason: string;
       runId: string;
+    }
+  | {
+      t: "event";
+      kind: "sprint-plan-committed";
+      runId: string;
+      /** Absolute path to the scaffolded project directory, or null when not a scaffolded project. */
+      projectDir: string | null;
+      /** Total number of sprints in the committed plan. */
+      sprintCount: number;
+      /** Stable per-sprint identifiers (e.g. "sprint-1", "sprint-2", ...). */
+      sprintIds: readonly string[];
+      /** Who decided the plan: "leader" = council path, "auto" = hot-path. */
+      source: "leader" | "council" | "auto";
+      ts: number;
     }
   | {
       t: "event";

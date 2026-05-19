@@ -168,6 +168,24 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     data: { path: "hot-path", complexity: opts.complexity ?? "low", forceCouncil: false, runId },
   });
 
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({
+      t: "event",
+      kind: "sprint-plan-committed",
+      runId,
+      projectDir: opts.cwd ?? null,
+      sprintCount: 1,
+      sprintIds: ["sprint-1"],
+      source: "auto",
+      ts: Date.now(),
+    });
+  } catch {
+    /* best-effort */
+  }
+
   // Build a minimal ProductSpec inline (no LLM calls needed for the hot-path).
   const productSpec: ProductSpec = {
     idea,
@@ -412,6 +430,26 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   // Phase 2: sprint loop until done or halted.
   const productSpec = await loadProductSpec(flowDir, runId, idea, opts.flags.stack);
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
+
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    const sprintCount = flags.maxSprints;
+    const sprintIds = Array.from({ length: sprintCount }, (_, i) => `sprint-${i + 1}`);
+    _ar?.emitEvent({
+      t: "event",
+      kind: "sprint-plan-committed",
+      runId,
+      projectDir: opts.cwd ?? null,
+      sprintCount,
+      sprintIds,
+      source: "council",
+      ts: Date.now(),
+    });
+  } catch {
+    /* best-effort */
+  }
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
   if (process.env.MUONROI_PHASE_MODE !== "0") {

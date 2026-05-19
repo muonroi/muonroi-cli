@@ -18,7 +18,7 @@ describe("design-output", () => {
       ],
     });
     expect(spec.mode).toBe("design");
-    expect(spec.version).toBe("0.3.0");
+    expect(spec.version).toBe("0.4.0");
     expect(spec.scenes[0].id).toBe("composer");
   });
 
