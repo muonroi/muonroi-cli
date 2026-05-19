@@ -142,7 +142,12 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
       const prefix = mcpToolPrefix(server);
 
       for (const [name, tool] of Object.entries(mcpTools)) {
-        const prefixedName = `${prefix}__${name}`;
+        // OpenAI/DeepSeek function-name regex: ^[a-zA-Z0-9_-]+$. MCP spec
+        // does not restrict server-side tool names, so we sanitize here.
+        // The tool's execute() closure still calls the MCP server with the
+        // original name — we only rename what the LLM sees.
+        const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const prefixedName = `${prefix}__${safeName}`;
         const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
         tools[prefixedName] = {
           ...(stripped as object),
