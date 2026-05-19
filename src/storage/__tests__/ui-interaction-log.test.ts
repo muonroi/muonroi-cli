@@ -58,6 +58,23 @@ describe("logUIInteraction", () => {
       },
       { subtype: "sprint_halt" as const, data: { sprintN: 2, reason: "no_recipe", runId: "r9" } },
       { subtype: "askcard_cancel" as const, data: { questionId: "q9" } },
+      {
+        subtype: "halt_card_open" as const,
+        data: {
+          reason: "no_recipe",
+          optionCount: 3,
+          optionIds: ["init_new", "point_to_existing", "continue_as_council"],
+        },
+      },
+      {
+        subtype: "halt_card_answered" as const,
+        data: { chosenId: "init_new", chosenLabel: "Init new project", index: 0 },
+      },
+      { subtype: "init_new_step" as const, data: { from: "name", to: "fe-stack" } },
+      {
+        subtype: "init_new_submitted" as const,
+        data: { projectName: "todo-app", feStack: "react", bbTemplate: "mr-base-sln", packageCount: 5 },
+      },
     ];
     for (const c of cases) {
       logUIInteraction("sess-2", c);
@@ -67,6 +84,10 @@ describe("logUIInteraction", () => {
       "sprint_stage",
       "sprint_halt",
       "askcard_cancel",
+      "halt_card_open",
+      "halt_card_answered",
+      "init_new_step",
+      "init_new_submitted",
     ]);
   });
 

@@ -21,7 +21,11 @@ export type UIInteractionSubtype =
   | "sprint_halt"
   | "askcard_open"
   | "askcard_answered"
-  | "askcard_cancel";
+  | "askcard_cancel"
+  | "halt_card_open"
+  | "halt_card_answered"
+  | "init_new_step"
+  | "init_new_submitted";
 
 interface RouteDecisionPayload {
   path: "hot-path" | "council";
@@ -60,13 +64,41 @@ interface AskcardCancelPayload {
   questionId: string;
 }
 
+interface HaltCardOpenPayload {
+  reason: string;
+  optionCount: number;
+  optionIds: string[];
+}
+
+interface HaltCardAnsweredPayload {
+  chosenId: string;
+  chosenLabel: string;
+  index: number;
+}
+
+interface InitNewStepPayload {
+  from: string;
+  to: string;
+}
+
+interface InitNewSubmittedPayload {
+  projectName: string;
+  feStack: string;
+  bbTemplate: string | null;
+  packageCount: number;
+}
+
 type Payload =
   | { subtype: "route_decision"; data: RouteDecisionPayload }
   | { subtype: "sprint_stage"; data: SprintStagePayload }
   | { subtype: "sprint_halt"; data: SprintHaltPayload }
   | { subtype: "askcard_open"; data: AskcardOpenPayload }
   | { subtype: "askcard_answered"; data: AskcardAnsweredPayload }
-  | { subtype: "askcard_cancel"; data: AskcardCancelPayload };
+  | { subtype: "askcard_cancel"; data: AskcardCancelPayload }
+  | { subtype: "halt_card_open"; data: HaltCardOpenPayload }
+  | { subtype: "halt_card_answered"; data: HaltCardAnsweredPayload }
+  | { subtype: "init_new_step"; data: InitNewStepPayload }
+  | { subtype: "init_new_submitted"; data: InitNewSubmittedPayload };
 
 /**
  * Persist a UI lifecycle event. Caller passes a discriminated payload so

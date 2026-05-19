@@ -1102,6 +1102,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
+  const lastInitNewStepRef = useRef<string | null>(null);
+  useEffect(() => {
+    const cur = initNewForm?.step ?? null;
+    const prev = lastInitNewStepRef.current;
+    if (cur !== prev) {
+      if (cur !== null) {
+        logUIInteraction(agent.getSessionId() ?? undefined, {
+          subtype: "init_new_step",
+          data: { from: prev ?? "(closed)", to: cur },
+        });
+      }
+      lastInitNewStepRef.current = cur;
+    }
+  }, [initNewForm?.step, agent]);
   const [pointToExistingForm, setPointToExistingForm] = useState<PointToExistingFormState | null>(null);
   const [councilProgress, setCouncilProgress] = useState<{
     status: "running" | "done" | "error";
@@ -2930,6 +2944,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 if (chunk.haltChunk) {
                   setActiveHaltCard(chunk.haltChunk);
                   setHaltSelectedIndex(0);
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "halt_card_open",
+                    data: {
+                      reason: chunk.haltChunk.reason,
+                      optionCount: chunk.haltChunk.recovery_options.length,
+                      optionIds: chunk.haltChunk.recovery_options.map((o) => o.id),
+                    },
+                  });
                 }
                 break;
               case "done":
@@ -3469,6 +3491,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   // silently dropped and the TUI looked frozen.
                   setActiveHaltCard(chunk.haltChunk);
                   setHaltSelectedIndex(0);
+                  logUIInteraction(agent.getSessionId() ?? undefined, {
+                    subtype: "halt_card_open",
+                    data: {
+                      reason: chunk.haltChunk.reason,
+                      optionCount: chunk.haltChunk.recovery_options.length,
+                      optionIds: chunk.haltChunk.recovery_options.map((o: { id: string }) => o.id),
+                    },
+                  });
                 }
                 if (chunk.type === "done") break;
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
@@ -4364,6 +4394,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const projectName = initNewForm.nameInput.trim();
             const commercial = initNewForm.allowCommercial;
             setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            logUIInteraction(agent.getSessionId() ?? undefined, {
+              subtype: "init_new_submitted",
+              data: {
+                projectName,
+                feStack,
+                bbTemplate: design.template.shortName ?? design.template.nugetId,
+                packageCount: selectedPackages.length,
+              },
+            });
             initNewProject({
               projectName,
               feStack,
@@ -4413,6 +4452,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
             const projectName = initNewForm.nameInput.trim();
             setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            logUIInteraction(agent.getSessionId() ?? undefined, {
+              subtype: "init_new_submitted",
+              data: {
+                projectName,
+                feStack,
+                bbTemplate: bbTemplate?.shortName ?? bbTemplate?.nugetId ?? null,
+                packageCount: 0,
+              },
+            });
             initNewProject({ projectName, feStack, bbTemplate })
               .then((result) => {
                 setInitNewForm((s) =>
@@ -4461,6 +4509,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (key.name === "return") {
           const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
           if (chosen) {
+            logUIInteraction(agent.getSessionId() ?? undefined, {
+              subtype: "halt_card_answered",
+              data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltSelectedIndex },
+            });
             if (chosen.id === "init_new") {
               // Task 5.3 — open init-new form; close halt card.
               // Plan 23-02 — pass the captured /ideal intent so the form can
