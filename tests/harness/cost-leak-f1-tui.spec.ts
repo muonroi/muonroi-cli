@@ -44,6 +44,7 @@ describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", 
   // Follow-up: thread provider-id override through --mock-llm fixture so the
   // mock claims to be the openai provider while still being routed through
   // resolveModelRuntime.
+  // SKIP: openai.promptCacheKey branch not exercised under deepseek model — blocker: src/agent-harness/mock-llm.ts needs provider-id override threaded through --mock-llm so mock claims openai provider; track in CLAUDE.md known caveats
   it.skip("every recorded call exposes the same providerOptions.openai.promptCacheKey", async () => {
     handle.driver.type("hello");
     handle.driver.press("Enter");

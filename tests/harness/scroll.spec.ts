@@ -25,10 +25,12 @@
 import { describe, it } from "vitest";
 
 describe("scroll E2E", () => {
+  // TODO: scrollable listbox — depends on <Semantic role="listbox" props={{ scrollTop }}> wired in src/ui/; remove .todo when wired
   it.todo(
     "no scrollable listbox exposes props.scrollTop: the TUI has no <Semantic role='listbox' props={{ scrollTop }}> wired; LiveFrame.nodes is always empty so scroll position cannot be observed via the driver",
   );
 
+  // TODO: 200-item fixture — depends on UI-node fixture mechanism beyond mock-llm; remove .todo when wired
   it.todo(
     "no fixture currently provides a 200-item scrollable list: mock-llm fixture controls only LLM text responses, not UI node population; a separate fixture mechanism would be needed",
   );

@@ -35,6 +35,8 @@
     "format:fix": "biome format --write src/",
     "lint:fix": "biome check --fix src/",
     "lint:semantic": "bun scripts/check-semantic-wrap.ts",
+    "lint:harness-skips": "bun run scripts/check-harness-skips.ts",
+    "lint:harness-skips:strict": "bun run scripts/check-harness-skips.ts --strict",
     "pre-commit": "lint-staged",
     "prepare": "husky",
     "postinstall": "bun run scripts/postinstall.ts",

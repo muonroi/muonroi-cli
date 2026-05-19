@@ -61,7 +61,25 @@ describe("disconnect E2E", () => {
     );
   });
 
-  it.todo(
-    "driver does not surface a typed disconnect error: wiring the out transport 'end'/'close' event to a driver._ingest({ kind: 'disconnect' }) path would allow tests to assert a DisconnectError instead of waiting for a generic timeout",
-  );
+  it("emits a typed disconnect event when the transport closes", async () => {
+    // The previous test already killed proc and the transport's 'end'/'close'
+    // listener in helpers.ts should have ingested a disconnect event. Poll
+    // briefly to allow the stream teardown to propagate.
+    const deadline = Date.now() + 1_000;
+    let disc: ReturnType<typeof driver.last_event> = null;
+    while (Date.now() < deadline) {
+      disc = driver.last_event("disconnect");
+      if (disc) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(disc).not.toBeNull();
+    expect(disc?.t).toBe("event");
+    if (disc && "kind" in disc) {
+      expect(disc.kind).toBe("disconnect");
+      // 'end' or 'close' both acceptable — order/source depends on platform
+      // (POSIX fd 3/4 vs Windows named pipe) and on whether the kill closes
+      // the readable cleanly or aborts.
+      expect(["end", "close"]).toContain((disc as { reason: string }).reason);
+    }
+  });
 });
