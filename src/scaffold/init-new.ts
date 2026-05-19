@@ -558,8 +558,13 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
 
       try {
         // Task 6.3 — run: dotnet new <shortName> -n <name> -o <target>/server
+        // NOTE: do NOT pass --no-restore here. BB custom templates (e.g.
+        // mr-micro-sln) reject unknown flags with
+        //   '--no-restore' is not a valid option
+        // breaking the scaffold. We do an explicit `dotnet restore` below
+        // anyway, so the template's auto-restore is harmless duplication.
         await fsOps.exec(
-          `dotnet new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)} --no-restore`,
+          `dotnet new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)}`,
           root,
         );
 
