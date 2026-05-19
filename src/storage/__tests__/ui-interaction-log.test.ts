@@ -75,6 +75,10 @@ describe("logUIInteraction", () => {
         subtype: "init_new_submitted" as const,
         data: { projectName: "todo-app", feStack: "react", bbTemplate: "mr-base-sln", packageCount: 5 },
       },
+      {
+        subtype: "init_new_result" as const,
+        data: { outcome: "error" as const, message: "dotnet new install failed: exit 1" },
+      },
     ];
     for (const c of cases) {
       logUIInteraction("sess-2", c);
@@ -88,6 +92,7 @@ describe("logUIInteraction", () => {
       "halt_card_answered",
       "init_new_step",
       "init_new_submitted",
+      "init_new_result",
     ]);
   });
 

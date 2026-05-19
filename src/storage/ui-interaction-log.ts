@@ -25,7 +25,8 @@ export type UIInteractionSubtype =
   | "halt_card_open"
   | "halt_card_answered"
   | "init_new_step"
-  | "init_new_submitted";
+  | "init_new_submitted"
+  | "init_new_result";
 
 interface RouteDecisionPayload {
   path: "hot-path" | "council";
@@ -88,6 +89,12 @@ interface InitNewSubmittedPayload {
   packageCount: number;
 }
 
+interface InitNewResultPayload {
+  outcome: "done" | "error";
+  message: string;
+  usedDotnetTemplate?: boolean;
+}
+
 type Payload =
   | { subtype: "route_decision"; data: RouteDecisionPayload }
   | { subtype: "sprint_stage"; data: SprintStagePayload }
@@ -98,7 +105,8 @@ type Payload =
   | { subtype: "halt_card_open"; data: HaltCardOpenPayload }
   | { subtype: "halt_card_answered"; data: HaltCardAnsweredPayload }
   | { subtype: "init_new_step"; data: InitNewStepPayload }
-  | { subtype: "init_new_submitted"; data: InitNewSubmittedPayload };
+  | { subtype: "init_new_submitted"; data: InitNewSubmittedPayload }
+  | { subtype: "init_new_result"; data: InitNewResultPayload };
 
 /**
  * Persist a UI lifecycle event. Caller passes a discriminated payload so
