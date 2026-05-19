@@ -74,6 +74,20 @@ Bundle gzip: ≤ 8 KB (Angular library overhead — `ng-package` metadata + `ɵf
 - [PROTOCOL.md](../../docs/agent-harness/PROTOCOL.md)
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md)
 
+## Migration
+
+The legacy in-repo shim at `src/agent-harness/*` is deprecated for external use.
+See the [`[Unreleased] / BREAKING / harness` block in CHANGELOG.md](../../CHANGELOG.md)
+for the full migration notes.
+
+```ts
+// Before (deprecated, OpenTUI-flavoured shim)
+import { Semantic } from "muonroi-cli/src/agent-harness";
+
+// After (Angular adapter)
+import { SemanticRegistryService } from "@muonroi/agent-harness-angular";
+```
+
 ## License
 
 Internal — Muonroi.

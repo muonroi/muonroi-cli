@@ -44,6 +44,20 @@ const uninstall = installOpenTUIHarness({ registry, transport, fps: 60 });
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md)
 - [Verification workflow](../../CLAUDE.md)
 
+## Migration
+
+The legacy in-repo shim at `src/agent-harness/*` is deprecated for external use.
+See the [`[Unreleased] / BREAKING / harness` block in CHANGELOG.md](../../CHANGELOG.md)
+for the full migration notes.
+
+```ts
+// Before (deprecated)
+import { Semantic, startAgentMode } from "muonroi-cli/src/agent-harness";
+
+// After
+import { Semantic, startAgentMode } from "@muonroi/agent-harness-opentui";
+```
+
 ## License
 
 Internal — Muonroi.

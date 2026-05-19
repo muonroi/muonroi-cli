@@ -42,6 +42,9 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     MUONROI_TEST_NO_PERSIST: "1",
+    // Suppress the agent-harness shim deprecation warning in the spawned
+    // child — this is an internal-callsite spawn, not an external consumer.
+    MUONROI_INTERNAL_SHIM_OK: "1",
     ...(opts.env ?? {}),
   };
 
@@ -75,6 +78,24 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   outRead.on("data", (chunk: Buffer | string) => {
     splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   });
+
+  // Phase 21 / disconnect — surface transport teardown as a typed event so
+  // E2E specs can assert a disconnect contract instead of waiting for a
+  // wait_for timeout. Both 'end' (orderly EOF) and 'close' (possibly with
+  // error) are forwarded — duplicates are harmless because last_event reads
+  // the most recent matching kind.
+  let disconnected = false;
+  const emitDisconnect = (reason: "end" | "close") => {
+    if (disconnected) return;
+    disconnected = true;
+    driver._ingest({
+      kind: "event",
+      event: { t: "event", kind: "disconnect", reason, ts: Date.now() },
+    });
+    driver._closeAllSubscribers();
+  };
+  outRead.on("end", () => emitDisconnect("end"));
+  outRead.on("close", () => emitDisconnect("close"));
 
   return { proc, driver, cleanup };
 }

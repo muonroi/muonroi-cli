@@ -68,6 +68,13 @@ Audit reference: `.planning/research/v1.6-council-quality-context.md` — full r
 
 ## Accumulated Context
 
+### Roadmap Evolution
+
+- 2026-05-19: Milestone v1.8 "Hardening & Resilience" added with Phases 20-22 (origin: code review 2026-05-19, see `.planning/notes/code-review-2026-05-19.md`).
+- 2026-05-19: Phase 20 added — Harness Test Coverage Hardening.
+- 2026-05-19: Phase 21 added — EE Observability & Resilience.
+- 2026-05-19: Phase 22 added — Small Hardening Bundle (sha256 dedup + shim deprecation).
+
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
