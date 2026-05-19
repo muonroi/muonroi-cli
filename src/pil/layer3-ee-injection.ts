@@ -21,13 +21,17 @@ import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
 import { getRenderSink } from "../ee/render.js";
 import { logInteraction } from "../storage/interaction-log.js";
+import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
 // Budget for the HTTP/in-process search round-trip. 60ms (legacy) was tuned for
 // localhost Ollama and routinely tripped the abort on VPS thin-client setups
 // where embedding goes through SiliconFlow.
-const PIL_SEARCH_TIMEOUT_MS = 1500;
+//
+// Phase 21 / Plan 02 / T4: overridable via `MUONROI_PIL_SEARCH_TIMEOUT_MS` env
+// (clamped to [500, 5000]).
+const PIL_SEARCH_TIMEOUT_MS = readTimeoutEnv("MUONROI_PIL_SEARCH_TIMEOUT_MS", 1500, 500, 5000);
 
 // Score floor — points scoring below this are treated as noise and dropped
 // before injection. Mirrors the server-side `minConfidence` (0.55) used by
@@ -78,10 +82,10 @@ function payloadSha16(text: string): string {
 
 function extractPointText(p: EEPoint): string {
   const payload = p.payload ?? {};
-  const text = (payload["text"] as string) ?? "";
+  const text = (payload.text as string) ?? "";
   if (text) return text;
   try {
-    const parsed = JSON.parse((payload["json"] as string) || "{}") as {
+    const parsed = JSON.parse((payload.json as string) || "{}") as {
       solution?: string;
       principle?: string;
       judgment?: string;
@@ -94,7 +98,7 @@ function extractPointText(p: EEPoint): string {
 
 function isT1Proven(p: EEPoint): boolean {
   try {
-    const parsed = JSON.parse(((p.payload ?? {})["json"] as string) || "{}") as {
+    const parsed = JSON.parse((p.payload?.json as string) || "{}") as {
       tier?: string;
       hitCount?: number;
     };
@@ -134,6 +138,7 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
 
     return { principlePoints, behavioralPoints, t1Rules, filtered };
   } catch (err) {
+    logEeFailure("pil.layer3.queryEeBridge", classifyEeError(err), err, { budgetMs: PIL_SEARCH_TIMEOUT_MS });
     return { principlePoints: [], behavioralPoints: [], t1Rules: [], error: String(err) };
   }
 }
@@ -252,18 +257,20 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // This prevents double-injection when loop-driver CB-1 already injected BB context
   // via bb-retrieval.ts on the same pipeline run.
   const bbMarkerShas = extractBBMarkerShas(ctx.enriched);
-  const deduplicatedPrinciples = bbMarkerShas.size > 0
-    ? principlePoints.filter((p) => {
-        const text = extractPointText(p);
-        return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
-      })
-    : principlePoints;
-  const deduplicatedBehavioral = bbMarkerShas.size > 0
-    ? behavioralPoints.filter((p) => {
-        const text = extractPointText(p);
-        return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
-      })
-    : behavioralPoints;
+  const deduplicatedPrinciples =
+    bbMarkerShas.size > 0
+      ? principlePoints.filter((p) => {
+          const text = extractPointText(p);
+          return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
+        })
+      : principlePoints;
+  const deduplicatedBehavioral =
+    bbMarkerShas.size > 0
+      ? behavioralPoints.filter((p) => {
+          const text = extractPointText(p);
+          return text.length === 0 || !bbMarkerShas.has(payloadSha16(text));
+        })
+      : behavioralPoints;
 
   const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral];
 

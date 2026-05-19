@@ -58,6 +58,20 @@ export function getEmbeddingModelVersion(): string {
 }
 
 export function getCachedServerBaseUrl(): string | null {
+  // Test/CI override — lets harness specs point EE traffic at an unreachable
+  // stub URL without writing ~/.experience/config.json. Validated as a URL
+  // before being returned so a bad env value falls through to the cached
+  // config value instead of breaking fetch calls downstream.
+  const envOverride = process.env.MUONROI_EE_BASE_URL;
+  if (envOverride !== undefined && envOverride !== "") {
+    try {
+      // Throws on malformed URLs; falls through to _serverBaseUrl on error.
+      const parsed = new URL(envOverride);
+      return parsed.toString().replace(/\/$/, "");
+    } catch {
+      // Invalid override — ignore and use cached config value.
+    }
+  }
   return _serverBaseUrl;
 }
 
