@@ -79,12 +79,35 @@ export interface BBTemplateInfo {
  * Known BB template package descriptors with pinned versions.
  * Update these constants when bumping to a newer published nupkg version on NuGet.org.
  * `userSettings.bbTemplateVersions` can override at runtime.
+ *
+ * `minSdkMajor` is the minimum dotnet SDK major version that ships a runtime
+ * matching the template's embedded `<TargetFramework>`. Verified from NuGet
+ * nuspec target frameworks 2026-05-19:
+ *   - Muonroi.BaseTemplate@1.0.0-alpha.3 → group targetFramework="net9.0"
+ *   - Muonroi.Modular.Template@1.10.0    → net8 LTS line (no nuspec TFM)
+ *   - Muonroi.Microservices.Template@1.10.0 → net8 LTS line (no nuspec TFM)
+ * SDK 10 is forward-compatible with net8/9 targets, so users on SDK 10 can
+ * install + scaffold all three; the floor is what blocks SDK 7 / 6.
  */
-export const BB_TEMPLATE_PACKAGES: ReadonlyArray<Omit<BBTemplateInfo, "shortName">> = [
-  { nugetId: "Muonroi.BaseTemplate", version: "1.0.0-alpha.3" },
-  { nugetId: "Muonroi.Modular.Template", version: "1.10.0" },
-  { nugetId: "Muonroi.Microservices.Template", version: "1.10.0" },
+export const BB_TEMPLATE_PACKAGES: ReadonlyArray<Omit<BBTemplateInfo, "shortName"> & { minSdkMajor: number }> = [
+  { nugetId: "Muonroi.BaseTemplate", version: "1.0.0-alpha.3", minSdkMajor: 9 },
+  { nugetId: "Muonroi.Modular.Template", version: "1.10.0", minSdkMajor: 8 },
+  { nugetId: "Muonroi.Microservices.Template", version: "1.10.0", minSdkMajor: 8 },
 ];
+
+/** Parse "10.0.201" / "8.0.404" → 10 / 8. Returns null on garbage input. */
+export function parseDotnetMajor(version: string | null): number | null {
+  if (!version) return null;
+  const m = version.match(/^(\d+)\./);
+  if (!m) return null;
+  const n = Number.parseInt(m[1], 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Look up the min SDK major for a given nugetId. Returns null if unknown. */
+export function getMinSdkMajor(nugetId: string): number | null {
+  return BB_TEMPLATE_PACKAGES.find((p) => p.nugetId === nugetId)?.minSdkMajor ?? null;
+}
 
 /**
  * Maps NuGet package id → actual `dotnet new` shortName as registered by the
@@ -158,8 +181,13 @@ export function detectInstalledBBTemplates(): Map<string, string> {
  * triggered by EE-driven BB design — Plan 23-01b). When omitted, installs all
  * `BB_TEMPLATE_PACKAGES` (back-compat for legacy callers and tests).
  *
- * Each package is installed individually as `Pkg::version` so a single failure
- * (e.g. one version yanked) does not abort the whole batch.
+ * Each package is installed individually as `Pkg@version` (canonical separator
+ * since dotnet 8; `::` is deprecated in dotnet 9+) so a single failure (e.g.
+ * one version yanked) does not abort the whole batch.
+ *
+ * Exit code 106 ("template package already installed") is treated as success —
+ * the package being available is what we need, regardless of whether this call
+ * installed it or it was already there.
  */
 export function installBBTemplates(nugetIds?: string[]): boolean {
   const targets =
@@ -168,12 +196,13 @@ export function installBBTemplates(nugetIds?: string[]): boolean {
       : BB_TEMPLATE_PACKAGES;
   let allOk = true;
   for (const pkg of targets) {
-    const ref = pkg.version === "latest" ? pkg.nugetId : `${pkg.nugetId}::${pkg.version}`;
+    const ref = pkg.version === "latest" ? pkg.nugetId : `${pkg.nugetId}@${pkg.version}`;
     const result = spawnSync("dotnet", ["new", "install", ref], {
       encoding: "utf8",
       timeout: 60000,
     });
-    if (result.status !== 0) {
+    const alreadyInstalled = result.status === 106 || (result.stdout ?? "").includes("is already installed");
+    if (result.status !== 0 && !alreadyInstalled) {
       process.stderr.write(`[init-new] dotnet new install failed (${ref}): ${result.stderr ?? "unknown error"}\n`);
       allOk = false;
     }
@@ -481,8 +510,26 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
 
   if (opts.bbTemplate) {
     const dotnetVersion = detectDotnet();
-    if (dotnetVersion) {
-      // Plan 23-01b — auto-install the chosen BB template from NuGet if missing.
+    if (!dotnetVersion) {
+      throw new Error(
+        `Scaffold failed: .NET SDK not found on PATH.\n` +
+          `→ Install .NET SDK 8.0 or 9.0 from https://dotnet.microsoft.com/download\n` +
+          `  (BB template ${opts.bbTemplate.shortName} requires SDK ${getMinSdkMajor(opts.bbTemplate.nugetId) ?? 8}+)`,
+      );
+    }
+    // Plan 23-XX — SDK version compatibility pre-flight.
+    const sdkMajor = parseDotnetMajor(dotnetVersion);
+    const required = getMinSdkMajor(opts.bbTemplate.nugetId);
+    if (sdkMajor !== null && required !== null && sdkMajor < required) {
+      throw new Error(
+        `Scaffold failed: .NET SDK ${dotnetVersion} is too old.\n` +
+          `→ Template ${opts.bbTemplate.shortName} (${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}) requires SDK ${required}.0+ runtime.\n` +
+          `  Install SDK ${required}.0 from https://dotnet.microsoft.com/download/dotnet/${required}.0\n` +
+          `  Alternatively, pick a different template via the manual menu (Esc → select another template).`,
+      );
+    }
+    // Plan 23-01b — auto-install the chosen BB template from NuGet if missing.
+    {
       const installed = detectInstalledBBTemplates();
       if (!installed.has(opts.bbTemplate.nugetId)) {
         const ok = installBBTemplates([opts.bbTemplate.nugetId]);
@@ -555,11 +602,16 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
 
   if (!usedDotnetTemplate) {
     if (opts.bbTemplate) {
-      throw new Error(
-        `Scaffold failed: dotnet template ${opts.bbTemplate.shortName} could not be applied. ` +
-          `Check that .NET SDK is installed and NuGet is reachable. ` +
-          `Run: dotnet new install ${opts.bbTemplate.nugetId}::${opts.bbTemplate.version}`,
-      );
+      const dotnetVersion = detectDotnet() ?? "(not detected)";
+      const required = getMinSdkMajor(opts.bbTemplate.nugetId);
+      const hint =
+        required !== null
+          ? `→ Template ${opts.bbTemplate.shortName} requires SDK ${required}.0+; you have ${dotnetVersion}.\n` +
+            `  If NuGet feed is configured (run \`dotnet nuget list source\`), retry; otherwise:\n` +
+            `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`
+          : `→ Try installing the template manually:\n` +
+            `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`;
+      throw new Error(`Scaffold failed: dotnet template ${opts.bbTemplate.shortName} could not be applied.\n${hint}`);
     }
     // No bbTemplate provided → FE-only project, skip BE scaffold entirely.
   }
