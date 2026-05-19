@@ -144,10 +144,47 @@ export const SHORTNAME_TO_NUGET: Record<string, string> = Object.fromEntries(
 const NEEDS_SHELL = process.platform === "win32";
 
 /**
+ * Common dotnet install locations checked as a fallback when `dotnet --version`
+ * via PATH fails. Some users have dotnet installed system-wide but the TUI
+ * inherits a PATH from a shell where the install dir wasn't added (e.g. a
+ * bare cmd.exe launched without the system profile loaded).
+ */
+const fsExistsSync = existsSync;
+function getDotnetFallbackPaths(): string[] {
+  if (process.platform !== "win32") return ["/usr/local/share/dotnet/dotnet", "/usr/share/dotnet/dotnet"];
+  const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
+  return [
+    "C:\\Program Files\\dotnet\\dotnet.exe",
+    "C:\\Program Files (x86)\\dotnet\\dotnet.exe",
+    ...(home ? [path.join(home, ".dotnet", "dotnet.exe")] : []),
+  ];
+}
+
+/**
+ * Last-resolved absolute path to dotnet, when PATH-based lookup failed and we
+ * had to fall back. Set by detectDotnet on success-via-fallback so callers
+ * (installBBTemplates, `dotnet new`, `dotnet add package`, etc.) can re-use
+ * the same binary instead of re-discovering on every spawn.
+ */
+let _resolvedDotnetPath: string | null = null;
+
+/** Diagnostic — last spawn attempt result, for surfacing in errors. */
+let _lastDotnetDetectDiagnostic: string = "";
+
+/**
  * Task 6.1 — Detect dotnet SDK availability via spawnSync.
  * Returns the dotnet version string, or null if not found.
+ *
+ * Strategy:
+ *   1. Try `dotnet --version` via PATH (with shell:true on Windows).
+ *   2. If that fails, walk common install locations and call them directly
+ *      by absolute path. If any one returns version, remember it for reuse.
+ *   3. On total failure, populate _lastDotnetDetectDiagnostic so the
+ *      "SDK not found" error can show the user *why* (status, stderr).
  */
 export function detectDotnet(): string | null {
+  _resolvedDotnetPath = null;
+  let pathDiag = "";
   try {
     const result = spawnSync("dotnet", ["--version"], {
       encoding: "utf8",
@@ -157,10 +194,50 @@ export function detectDotnet(): string | null {
     if (result.status === 0 && result.stdout) {
       return result.stdout.trim();
     }
-    return null;
-  } catch {
-    return null;
+    pathDiag =
+      `PATH lookup: status=${result.status} ` +
+      `stderr=${(result.stderr ?? "").trim().slice(0, 120) || "(empty)"} ` +
+      `error=${result.error?.message ?? "(none)"}`;
+  } catch (err) {
+    pathDiag = `PATH lookup threw: ${err instanceof Error ? err.message : String(err)}`;
   }
+
+  // Fallback — try absolute paths
+  const fallbackTries: string[] = [];
+  for (const candidate of getDotnetFallbackPaths()) {
+    if (!fsExistsSync(candidate)) {
+      fallbackTries.push(`${candidate}: not present`);
+      continue;
+    }
+    try {
+      const result = spawnSync(candidate, ["--version"], {
+        encoding: "utf8",
+        timeout: 5000,
+        shell: false,
+      });
+      if (result.status === 0 && result.stdout) {
+        _resolvedDotnetPath = candidate;
+        _lastDotnetDetectDiagnostic = `${pathDiag} | fallback: ${candidate} ok`;
+        return result.stdout.trim();
+      }
+      fallbackTries.push(`${candidate}: status=${result.status}`);
+    } catch (err) {
+      fallbackTries.push(`${candidate}: threw ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  _lastDotnetDetectDiagnostic = `${pathDiag} | fallbacks: ${fallbackTries.join("; ")}`;
+  return null;
+}
+
+/** Returns the absolute dotnet path discovered via fallback, or "dotnet" for normal PATH use. */
+export function getDotnetCommand(): string {
+  return _resolvedDotnetPath ?? "dotnet";
+}
+
+/** Test-only / diagnostic accessor. */
+export function getDotnetDiagnostic(): string {
+  return _lastDotnetDetectDiagnostic;
 }
 
 /**
@@ -168,7 +245,7 @@ export function detectDotnet(): string | null {
  * Returns map of nugetId → shortName for installed templates.
  */
 export function detectInstalledBBTemplates(): Map<string, string> {
-  const result = spawnSync("dotnet", ["new", "list"], {
+  const result = spawnSync(getDotnetCommand(), ["new", "list"], {
     encoding: "utf8",
     timeout: 15000,
     shell: NEEDS_SHELL,
@@ -213,7 +290,7 @@ export function installBBTemplates(nugetIds?: string[]): boolean {
   let allOk = true;
   for (const pkg of targets) {
     const ref = pkg.version === "latest" ? pkg.nugetId : `${pkg.nugetId}@${pkg.version}`;
-    const result = spawnSync("dotnet", ["new", "install", ref], {
+    const result = spawnSync(getDotnetCommand(), ["new", "install", ref], {
       encoding: "utf8",
       timeout: 60000,
       shell: NEEDS_SHELL,
@@ -528,10 +605,12 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   if (opts.bbTemplate) {
     const dotnetVersion = detectDotnet();
     if (!dotnetVersion) {
+      const diag = getDotnetDiagnostic();
       throw new Error(
         `Scaffold failed: .NET SDK not found on PATH.\n` +
           `→ Install .NET SDK 8.0 or 9.0 from https://dotnet.microsoft.com/download\n` +
-          `  (BB template ${opts.bbTemplate.shortName} requires SDK ${getMinSdkMajor(opts.bbTemplate.nugetId) ?? 8}+)`,
+          `  (BB template ${opts.bbTemplate.shortName} requires SDK ${getMinSdkMajor(opts.bbTemplate.nugetId) ?? 8}+)\n` +
+          (diag ? `  diagnostic: ${diag}` : ""),
       );
     }
     // Plan 23-XX — SDK version compatibility pre-flight.
@@ -563,8 +642,9 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         //   '--no-restore' is not a valid option
         // breaking the scaffold. We do an explicit `dotnet restore` below
         // anyway, so the template's auto-restore is harmless duplication.
+        const dotnetCmd = getDotnetCommand() === "dotnet" ? "dotnet" : JSON.stringify(getDotnetCommand());
         await fsOps.exec(
-          `dotnet new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)}`,
+          `${dotnetCmd} new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)}`,
           root,
         );
 
@@ -579,7 +659,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
 
         // Task 6.3 — verify with dotnet restore --nologo
         const restoreResult = await fsOps
-          .exec("dotnet restore --nologo", serverDir)
+          .exec(`${dotnetCmd} restore --nologo`, serverDir)
           .catch((e: unknown) => ({ stdout: "", stderr: String(e) }));
         if (restoreResult.stderr && restoreResult.stderr.includes("error")) {
           process.stderr.write(`[init-new] dotnet restore reported errors; continuing best-effort\n`);
@@ -591,7 +671,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         // Single-package failures are logged but do NOT abort the scaffold.
         for (const pkgId of opts.eePackages ?? []) {
           try {
-            await fsOps.exec(`dotnet add package ${pkgId}`, serverDir);
+            await fsOps.exec(`${dotnetCmd} add package ${pkgId}`, serverDir);
             filesWritten.push(`server/${path.basename(serverDir)}/<csproj-updated-${pkgId}>`);
           } catch (e) {
             process.stderr.write(
