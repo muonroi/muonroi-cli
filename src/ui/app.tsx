@@ -4393,7 +4393,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const projectName = initNewForm.nameInput.trim();
             const commercial = initNewForm.allowCommercial;
-            setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            setInitNewForm((s) =>
+              s ? { ...s, step: "running", progressMessage: "dotnet new — scaffolding template…" } : s,
+            );
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "init_new_submitted",
               data: {
@@ -4409,6 +4411,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               bbTemplate: design.template,
               eePackages: selectedPackages,
               commercial,
+              onPackageProgress: (info) => {
+                const verb = info.status === "start" ? "Adding" : info.status === "ok" ? "Added" : "Failed";
+                setInitNewForm((s) =>
+                  s
+                    ? {
+                        ...s,
+                        progressMessage: `[${info.index}/${info.total}] ${verb} package ${info.pkgId}…`,
+                      }
+                    : s,
+                );
+              },
             })
               .then((result) => {
                 logUIInteraction(agent.getSessionId() ?? undefined, {
@@ -4463,7 +4476,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
             const projectName = initNewForm.nameInput.trim();
-            setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            setInitNewForm((s) =>
+              s ? { ...s, step: "running", progressMessage: "dotnet new — scaffolding template…" } : s,
+            );
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "init_new_submitted",
               data: {

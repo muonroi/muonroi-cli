@@ -339,6 +339,30 @@ export function getDotnetDiagnostic(): string {
 }
 
 /**
+ * HEAD-check the NuGet flatcontainer index for a package id. Manually verified
+ * 2026-05-19 against Muonroi.Ui.Engine.Mvc (404) vs Muonroi.AspNetCore (200):
+ * each HEAD returns in 250-400ms vs the 5-10s timeout `dotnet add package`
+ * suffers when a 404 is discovered mid-resolution.
+ *
+ * On any error (DNS, abort, offline) → returns true so the dotnet command
+ * runs and reports the real error. Pre-validation is an optimization, not a
+ * gate.
+ */
+export async function isPackageOnNuGet(pkgId: string, timeoutMs = 3000): Promise<boolean> {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const url = `https://api.nuget.org/v3-flatcontainer/${pkgId.toLowerCase()}/index.json`;
+    const res = await fetch(url, { method: "HEAD", signal: ctl.signal });
+    return res.ok;
+  } catch {
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Task 6.2 — Detect which BB templates are installed by parsing `dotnet new list`.
  * Returns map of nugetId → shortName for installed templates.
  */
@@ -437,6 +461,24 @@ export interface InitNewOptions {
     exec: (cmd: string, cwd: string) => Promise<{ stdout: string; stderr: string }>;
     exists: (p: string) => boolean;
   };
+  /**
+   * Diagnostic log callback. When provided, replaces direct `process.stderr.write`
+   * which would bleed into the OpenTUI render buffer and corrupt the screen.
+   * Called once per warning/non-fatal error. Receives a single line (no trailing newline).
+   */
+  onLog?: (line: string) => void;
+  /**
+   * Per-package progress callback during the `dotnet add package` loop. Lets the
+   * TUI update its "running" step with the current package index/name instead of
+   * appearing frozen for ~15s while 9 sequential NuGet lookups happen.
+   */
+  onPackageProgress?: (info: {
+    index: number;
+    total: number;
+    pkgId: string;
+    status: "start" | "ok" | "fail";
+    error?: string;
+  }) => void;
 }
 
 export interface InitNewResult {
@@ -445,6 +487,8 @@ export interface InitNewResult {
   files: string[];
   /** Whether the dotnet-template path ran successfully (false for FE-only projects). */
   usedDotnetTemplate?: boolean;
+  /** Non-fatal warnings collected during scaffold (template install, package add, restore errors). */
+  warnings?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +713,11 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
 
   const hasClient = feStack !== "none";
   const filesWritten: string[] = [];
+  const warnings: string[] = [];
+  const logWarn = (line: string): void => {
+    warnings.push(line);
+    opts.onLog?.(line);
+  };
 
   // Helper to write and track.
   async function write(relPath: string, content: string) {
@@ -728,7 +777,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
       if (!installed.has(opts.bbTemplate.nugetId)) {
         const ok = installBBTemplates([opts.bbTemplate.nugetId]);
         if (!ok) {
-          process.stderr.write(`[init-new] failed to install ${opts.bbTemplate.nugetId} from NuGet\n`);
+          logWarn(`[init-new] failed to install ${opts.bbTemplate.nugetId} from NuGet`);
           // fall through to throw below (no clone fallback)
         }
       }
@@ -760,7 +809,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
           .exec(`${dotnetCmd} restore --nologo`, serverDir)
           .catch((e: unknown) => ({ stdout: "", stderr: String(e) }));
         if (restoreResult.stderr && restoreResult.stderr.includes("error")) {
-          process.stderr.write(`[init-new] dotnet restore reported errors; continuing best-effort\n`);
+          logWarn(`[init-new] dotnet restore reported errors; continuing best-effort`);
         } else {
           usedDotnetTemplate = true;
         }
@@ -773,14 +822,34 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         // single warning if none is found instead of spamming N failures.
         const targetCsproj = findPrimaryCsproj(serverDir);
         if (!targetCsproj && (opts.eePackages?.length ?? 0) > 0) {
-          process.stderr.write(
+          logWarn(
             `[init-new] no .csproj found under ${serverDir} — skipping ${opts.eePackages?.length ?? 0} dotnet add package call(s). ` +
-              `Packages were still pinned in Directory.Packages.props if present.\n`,
+              `Packages were still pinned in Directory.Packages.props if present.`,
           );
         }
         // Single-package failures are logged but do NOT abort the scaffold.
         if (targetCsproj) {
-          for (const pkgId of opts.eePackages ?? []) {
+          // Pre-validate against NuGet flatcontainer. Some EE-recommended
+          // packages (e.g. Muonroi.Ui.Engine.Mvc as of 2026-05-19) exist
+          // locally in source repos but haven't been published. A HEAD
+          // request takes <500ms vs a 5-10s timeout if dotnet add discovers
+          // the 404 itself. Verified manually: response time ~250-400ms,
+          // reliable 404 detection.
+          const pkgList = opts.eePackages ?? [];
+          const validatedList: string[] = [];
+          for (const pkgId of pkgList) {
+            const available = await isPackageOnNuGet(pkgId);
+            if (available) {
+              validatedList.push(pkgId);
+            } else {
+              logWarn(
+                `[init-new] package ${pkgId} not found on nuget.org — skipping (publish or use local nupkg source to include)`,
+              );
+            }
+          }
+          for (let i = 0; i < validatedList.length; i++) {
+            const pkgId = validatedList[i]!;
+            opts.onPackageProgress?.({ index: i + 1, total: validatedList.length, pkgId, status: "start" });
             try {
               // `--prerelease` is required because Muonroi.* packages currently
               // ship only alpha versions on NuGet (manually verified 2026-05-19
@@ -793,10 +862,17 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
                 serverDir,
               );
               filesWritten.push(path.relative(root, targetCsproj));
+              opts.onPackageProgress?.({ index: i + 1, total: validatedList.length, pkgId, status: "ok" });
             } catch (e) {
-              process.stderr.write(
-                `[init-new] dotnet add package ${pkgId} failed: ${e instanceof Error ? e.message : String(e)}\n`,
-              );
+              const msg = e instanceof Error ? e.message : String(e);
+              logWarn(`[init-new] dotnet add package ${pkgId} failed: ${msg}`);
+              opts.onPackageProgress?.({
+                index: i + 1,
+                total: validatedList.length,
+                pkgId,
+                status: "fail",
+                error: msg,
+              });
             }
           }
         }
@@ -815,8 +891,8 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
           }),
         );
       } catch (err) {
-        process.stderr.write(
-          `[init-new] dotnet new ${opts.bbTemplate.shortName} failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        logWarn(
+          `[init-new] dotnet new ${opts.bbTemplate.shortName} failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         usedDotnetTemplate = false;
       }
@@ -852,7 +928,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
     await write("client/src/app/app.component.ts", angularAppComponentTs(projectName));
   }
 
-  return { projectDir, files: filesWritten, usedDotnetTemplate };
+  return { projectDir, files: filesWritten, usedDotnetTemplate, warnings: warnings.length > 0 ? warnings : undefined };
 }
 
 // ---------------------------------------------------------------------------
