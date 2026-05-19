@@ -436,6 +436,8 @@ export class Agent {
    * V1 only supports user messages (avoids splitting tool-call/result pairs).
    */
   private _pinnedSeqs = new Set<number>();
+  /** One-shot cwd note injected at the start of the next processMessage turn after setCwd(). Cleared after injection. */
+  private _pendingCwdNote: string | null = null;
 
   // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
   // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
@@ -619,6 +621,7 @@ export class Agent {
 
   setCwd(dir: string): void {
     this.bash.setCwd(dir);
+    this._pendingCwdNote = `(system: working directory has been changed to ${dir} — subsequent shell commands run from there; do NOT cd to that path again)`;
   }
 
   getMessages(): ModelMessage[] {
@@ -3708,17 +3711,23 @@ export class Agent {
       turnProvider = this.requireProvider();
     }
 
+    // E4: prepend one-shot cwd note when setCwd() changed the working directory
+    // mid-session. Clears after injection so only the first subsequent turn sees it.
+    const cwdNote = this._pendingCwdNote;
+    this._pendingCwdNote = null;
+    const messageForModel = cwdNote ? `${cwdNote}\n\n${enrichedMessage}` : enrichedMessage;
+
     let userModelMessage: ModelMessage;
     if (images?.length) {
       const parts: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
-        { type: "text", text: enrichedMessage },
+        { type: "text", text: messageForModel },
       ];
       for (const img of images) {
         parts.push({ type: "image", image: img.base64, mediaType: img.mediaType });
       }
       userModelMessage = { role: "user", content: parts };
     } else {
-      userModelMessage = { role: "user", content: enrichedMessage };
+      userModelMessage = { role: "user", content: messageForModel };
     }
 
     // Vision proxy: convert images to text for models that don't support vision.
