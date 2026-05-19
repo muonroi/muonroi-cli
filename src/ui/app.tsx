@@ -4434,17 +4434,35 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     usedDotnetTemplate: result.usedDotnetTemplate,
                   },
                 });
+                const templateName = design.template.nugetId;
+                const originalPrompt = originalIdealPromptRef.current;
                 setInitNewForm((s) =>
                   s
                     ? {
                         ...s,
                         step: "done",
-                        resultMessage: `Created: ${result.projectDir}`,
-                        scaffoldedTemplate: design.template.nugetId,
+                        resultMessage: originalPrompt
+                          ? `Created: ${result.projectDir}`
+                          : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
+                        scaffoldedTemplate: templateName,
                         scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
                       }
                     : s,
                 );
+                if (originalPrompt) {
+                  setTimeout(() => {
+                    try {
+                      agent.setCwd(result.projectDir);
+                    } catch (_) {}
+                    const continuationPrompt = `${originalPrompt}\n\n--- system note ---\nThe project has been scaffolded at ${result.projectDir} using BB template ${templateName}.\nRead README.md + Agent.md + EE-INTENT.md (if present) first to understand the\nexisting structure, then continue implementing the originally requested feature.`;
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "init_new_resume",
+                      data: { projectDir: result.projectDir, templateName, originalPrompt },
+                    });
+                    originalIdealPromptRef.current = null;
+                    void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
+                  }, 500);
+                }
               })
               .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);
@@ -4500,18 +4518,37 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     usedDotnetTemplate: result.usedDotnetTemplate,
                   },
                 });
+                const templateName = bbTemplate?.nugetId ?? null;
+                const originalPrompt = originalIdealPromptRef.current;
                 setInitNewForm((s) =>
                   s
                     ? {
                         ...s,
                         step: "done",
-                        resultMessage: `Created: ${result.projectDir}`,
-                        scaffoldedTemplate: bbTemplate?.nugetId,
+                        resultMessage: originalPrompt
+                          ? `Created: ${result.projectDir}`
+                          : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
+                        scaffoldedTemplate: templateName ?? undefined,
                         // Coverage derived from usedDotnetTemplate flag
                         scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
                       }
                     : s,
                 );
+                if (originalPrompt) {
+                  setTimeout(() => {
+                    try {
+                      agent.setCwd(result.projectDir);
+                    } catch (_) {}
+                    const tplLabel = templateName ?? "bb-template";
+                    const continuationPrompt = `${originalPrompt}\n\n--- system note ---\nThe project has been scaffolded at ${result.projectDir} using BB template ${tplLabel}.\nRead README.md + Agent.md + EE-INTENT.md (if present) first to understand the\nexisting structure, then continue implementing the originally requested feature.`;
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "init_new_resume",
+                      data: { projectDir: result.projectDir, templateName: tplLabel, originalPrompt },
+                    });
+                    originalIdealPromptRef.current = null;
+                    void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
+                  }, 500);
+                }
               })
               .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);
