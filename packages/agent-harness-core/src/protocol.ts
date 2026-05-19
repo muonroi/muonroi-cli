@@ -205,6 +205,19 @@ export type LiveEvent =
       reason: "end" | "close";
       ts: number;
     }
+  // Transient stream error retry — emitted by the orchestrator retry loop
+  // before each backoff sleep. Lets E2E specs assert retry semantics without
+  // waiting for the full backoff period.
+  | {
+      t: "event";
+      kind: "stream-retry";
+      /** 1-based retry attempt number (first retry = 1). */
+      attempt: number;
+      maxAttempts: number;
+      errorName: string;
+      errorMessage: string;
+      nextDelayMs: number;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;

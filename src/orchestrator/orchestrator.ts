@@ -221,6 +221,8 @@ import {
 } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { classifyStreamError } from "./retry-classifier.js";
+import { withStreamRetry } from "./retry-stream.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
@@ -1600,6 +1602,16 @@ export class Agent {
       };
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
+      // Re-throw transient network errors when no content has flowed so the
+      // caller (runTask) can retry with withStreamRetry. Only re-throw when
+      // assistantText is empty — if the agent produced partial output we must
+      // NOT restart, as that would corrupt the task output.
+      if (!assistantText.trim()) {
+        const { transient } = classifyStreamError(err);
+        if (transient) {
+          throw err;
+        }
+      }
       const msg = err instanceof Error ? err.message : String(err);
       // G1 diagnostic: surface the full error shape under
       // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
@@ -1667,17 +1679,53 @@ export class Agent {
 
     let result: ToolResult;
     try {
-      result = await this.runTaskRequest(
-        request,
-        (detail) => {
-          if (abortSignal?.aborted) return;
-          this.emitSubagentStatus({
-            agent: request.agent,
-            description: request.description,
-            detail,
-          });
+      result = await withStreamRetry(
+        () =>
+          this.runTaskRequest(
+            request,
+            (detail) => {
+              if (abortSignal?.aborted) return;
+              this.emitSubagentStatus({
+                agent: request.agent,
+                description: request.description,
+                detail,
+              });
+            },
+            abortSignal,
+          ),
+        {
+          signal: abortSignal,
+          onRetry: (info) => {
+            // Emit harness telemetry
+            try {
+              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar?.emitEvent({
+                t: "event",
+                kind: "stream-retry",
+                ...info,
+              });
+            } catch {
+              /* best-effort */
+            }
+            try {
+              if (this.session) {
+                logInteraction(this.session.id, "stream_retry", {
+                  data: {
+                    attempt: info.attempt,
+                    maxAttempts: info.maxAttempts,
+                    errorName: info.errorName,
+                    errorMessage: info.errorMessage.slice(0, 200),
+                    nextDelayMs: info.nextDelayMs,
+                  },
+                });
+              }
+            } catch {
+              /* fail-open */
+            }
+          },
         },
-        abortSignal,
       );
     } finally {
       this.emitSubagentStatus(null);
@@ -3075,6 +3123,8 @@ export class Agent {
   }): AsyncGenerator<StreamChunk, void, unknown> {
     const { userModelMessage, observer, provider, subagents, system, runtime, modelInfo, signal } = args;
     let attemptedOverflowRecovery = false;
+    let streamRetryCount = 0;
+    const MAX_STREAM_RETRIES = 2;
 
     while (true) {
       this._compactedThisTurn = false;
@@ -3275,6 +3325,40 @@ export class Agent {
         if (!attemptedOverflowRecovery && turnMessages.length === 0 && modelInfo && isContextLimitError(err)) {
           attemptedOverflowRecovery = true;
           continue;
+        }
+
+        // Transient retry — batch mode: only retry when no tool messages yet
+        if (turnMessages.length === 0 && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted) {
+          const { transient } = classifyStreamError(err);
+          if (transient) {
+            streamRetryCount++;
+            const baseMs = 500;
+            const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
+            const spread = expMs * 0.25;
+            const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+            const errorName = err instanceof Error ? err.name : "Error";
+            const errorMessage = err instanceof Error ? err.message : String(err);
+            try {
+              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar?.emitEvent({
+                t: "event",
+                kind: "stream-retry",
+                attempt: streamRetryCount,
+                maxAttempts: MAX_STREAM_RETRIES + 1,
+                errorName,
+                errorMessage,
+                nextDelayMs,
+              });
+            } catch {
+              /* best-effort */
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+            if (!signal.aborted) {
+              continue;
+            }
+          }
         }
 
         const authError = isAuthenticationError(err);
@@ -3867,6 +3951,10 @@ export class Agent {
 
     this.planContext = null;
     let attemptedOverflowRecovery = false;
+    // Stream-retry state: track how many transient retries have been attempted
+    // for the current turn. Reset to 0 on each new user turn (we're in processMessage).
+    let streamRetryCount = 0;
+    const MAX_STREAM_RETRIES = 2; // 3 total attempts = 1 first try + 2 retries
 
     // Auto-council: route to multi-model debate when EITHER
     //   (a) PIL classified taskType=plan|analyze with high confidence, OR
@@ -4906,6 +4994,59 @@ export class Agent {
           if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(err)) {
             attemptedOverflowRecovery = true;
             continue;
+          }
+
+          // Transient network/server error retry — up to MAX_STREAM_RETRIES extra attempts.
+          // Only retry when no content has flowed yet (assistantText empty) to avoid
+          // partial-output corruption. Honour the abort signal between retries.
+          if (!assistantText.trim() && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted) {
+            const { transient } = classifyStreamError(err);
+            if (transient) {
+              streamRetryCount++;
+              // Exponential backoff: 500 → 2000 ms with ±25% jitter
+              const baseMs = 500;
+              const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
+              const spread = expMs * 0.25;
+              const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+              const errorName = err instanceof Error ? err.name : "Error";
+              const errorMessage = err instanceof Error ? err.message : String(err);
+              // Emit harness telemetry event
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "stream-retry",
+                  attempt: streamRetryCount,
+                  maxAttempts: MAX_STREAM_RETRIES + 1,
+                  errorName,
+                  errorMessage,
+                  nextDelayMs,
+                });
+              } catch {
+                /* best-effort */
+              }
+              try {
+                if (this.session) {
+                  logInteraction(this.session.id, "stream_retry", {
+                    data: {
+                      attempt: streamRetryCount,
+                      maxAttempts: MAX_STREAM_RETRIES + 1,
+                      errorName,
+                      errorMessage: errorMessage.slice(0, 200),
+                      nextDelayMs,
+                    },
+                  });
+                }
+              } catch {
+                /* fail-open */
+              }
+              await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+              if (!signal.aborted) {
+                continue;
+              }
+            }
           }
 
           const authError = isAuthenticationError(err);
