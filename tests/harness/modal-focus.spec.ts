@@ -1,38 +1,64 @@
 /**
  * modal-focus.spec.ts
  *
- * Goal: open a modal (e.g. /council triggers a picker), press Esc, confirm
- * focus returns to the composer textbox.
+ * Goal: assert composer focus is observable through the harness and document
+ * the remaining work for a true modal-Esc-restore scenario.
  *
- * Investigation result:
- * - The TUI /council command does NOT open a picker modal. It directly runs
- *   a council round via agent.runCouncilRound(topic) (see src/ui/slash/council.ts
- *   and app.tsx ~line 3072).
- * - app.tsx handles Esc for several modals (MCP, agents, sandbox, model-picker,
- *   slash-menu, etc.) but none of these modals register <Semantic> nodes, so
- *   no role=dialog or role=textbox nodes appear in LiveFrame.nodes.
- * - The app uses <SemanticProvider> at the root but has zero <Semantic> components
- *   in src/ui/app.tsx or any ui/*.tsx — the registry never receives node
- *   registrations, so driver.query() always returns null.
- * - Without <Semantic role="dialog"> wrapping an actual modal and
- *   <Semantic role="textbox" focus> wired to the composer, this test cannot
- *   make meaningful assertions.
+ * History:
+ *   The original investigation comment claimed no <Semantic> nodes were
+ *   wired. That was true at the time. Commit 8f55bbb landed
+ *   `<Semantic id="composer" role="textbox" focus={...}>` around
+ *   `src/ui/app.tsx:6326`, so the first todo is no longer accurate — focus
+ *   IS observable when no blocking modal (model picker, sandbox picker,
+ *   api-key modal, etc.) is open.
  *
- * What would be needed to enable this test:
- *   1. Add <Semantic id="composer" role="textbox" focus={composerFocused}> to
- *      the composer box in app.tsx.
- *   2. Add <Semantic id="some-modal" role="dialog" name="..." isModal> to an
- *      existing dismissible modal (e.g. model picker or MCP browser).
- *   3. After Esc, assert the frame shows focus=composer.
+ *   The second todo (dismissible dialog -> Esc -> focus returns to composer)
+ *   still has no <Semantic role="dialog" isModal> in any picker, so it stays
+ *   as `it.todo`.
  */
 
-import { describe, it } from "vitest";
+import type { ChildProcess } from "node:child_process";
+import type { Driver } from "@muonroi/agent-harness-core/driver";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { spawnHarness } from "./helpers.js";
 
 describe("modal focus E2E", () => {
-  it.todo(
-    "TUI has no <Semantic> nodes wired: app.tsx uses SemanticProvider but no component registers role=dialog or role=textbox nodes, so LiveFrame.nodes is always empty and driver.query() cannot observe focus state",
-  );
+  let proc: ChildProcess;
+  let driver: Driver;
+  let cleanup: () => void;
 
+  beforeAll(async () => {
+    // Pre-seed a fake API key so the api-key modal does not steal focus from
+    // the composer. The composer's focus prop checks !showApiKeyModal among
+    // the gating conditions (src/ui/app.tsx:6336-6345).
+    const ctx = await spawnHarness({
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      idleTimeoutMs: 20_000,
+    });
+    proc = ctx.proc;
+    driver = ctx.driver;
+    cleanup = ctx.cleanup;
+
+    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    await driver.wait_for({ selector: "id=composer", timeoutMs: 5_000 });
+  }, 25_000);
+
+  afterAll(() => {
+    proc?.kill();
+    cleanup?.();
+  });
+
+  it("composer reports focus=true when no blocking modal is open", () => {
+    const composer = driver.query("id=composer");
+    expect(composer).not.toBeNull();
+    expect(composer?.role).toBe("textbox");
+    // Focus mirrors the app-level gating conditions in src/ui/app.tsx:6336.
+    // With no model picker, sandbox picker, wallet picker, plan questions,
+    // api-key modal, or blockPrompt active, focus must be true.
+    expect(composer?.focus).toBe(true);
+  });
+
+  // TODO: dismissible modal — depends on <Semantic role="dialog" isModal> wired to a real modal (e.g. model picker) in src/ui/; remove .todo when wired
   it.todo(
     "/council does not open a modal picker: it calls agent.runCouncilRound() directly; there is no dismissible dialog to press Esc on in the harness",
   );

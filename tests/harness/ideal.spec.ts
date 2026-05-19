@@ -46,6 +46,7 @@ describe("ideal E2E", () => {
   // 30s. Likely cause: src/product-loop/loop-driver.ts gates the emit behind a phase the
   // mock fixture doesn't satisfy (discover → spec → sprint protocol — needs deeper RE).
   // Next step: instrument loop-driver.ts to log which phase rejects the mock JSON.
+  // SKIP: product_status_card chunk does not arrive within 30s under mock-llm — blocker: src/product-loop/loop-driver.ts phase gating rejects mock JSON; track in CLAUDE.md known caveats
   it.skip("ideal status card renders after starting a run", async () => {
     // loop-driver.ts emits product_status_card after the discover phase
     // (before gather blocks on user input), so id=ideal-status appears without
@@ -65,6 +66,7 @@ describe("ideal E2E", () => {
   });
 
   // Blocker (2026-05-14): depends on "ideal status card renders" above — same skip reason.
+  // SKIP: depends on ideal-status card above — blocker: src/product-loop/loop-driver.ts; track in CLAUDE.md known caveats
   it.skip("can advance through ideal phases", async () => {
     // ProductStatusCard renders <Semantic id="ideal-phase-sprint" role="listitem">
     // and <Semantic id="ideal-phase-cost" role="listitem"> as children of id=ideal-status.

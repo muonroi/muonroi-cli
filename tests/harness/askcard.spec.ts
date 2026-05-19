@@ -30,6 +30,7 @@ describe("askcard E2E", () => {
     expect(driver.query("role=textbox")?.role).toBe("textbox");
   });
 
+  // SKIP: council_question chunk doesn't reach app.tsx within 30s — blocker: src/council/orchestrator.ts phase pipeline rejects mock fixture JSON; track in CLAUDE.md known caveats
   it.skip("council question modal appears and is observable", async () => {
     // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
     // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council
@@ -48,6 +49,7 @@ describe("askcard E2E", () => {
     expect(driver.query("id=askcard")?.role).toBe("dialog");
   });
 
+  // SKIP: same council orchestrator phase rejection as above — blocker: src/council/orchestrator.ts; track in CLAUDE.md known caveats
   it.skip("can navigate askcard options with arrow keys", async () => {
     // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
     // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council

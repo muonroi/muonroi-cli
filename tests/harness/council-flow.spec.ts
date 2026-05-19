@@ -66,6 +66,7 @@ describe("council flow E2E", () => {
   // OR a follow-up askcard step blocks on user-input that the harness doesn't auto-answer.
   // Next step: instrument src/council/orchestrator.ts to log which phase rejects, then
   // refine tests/harness/fixtures/llm/council.json sequence entries to match.
+  // SKIP: runCouncilV2 phase chunk emission doesn't fire within 30s under mock-llm — blocker: src/council/orchestrator.ts preflight/debate-planner generateObject rejects mock JSON; track in CLAUDE.md known caveats
   it.skip("full council flow reaches Phase/Status renders", async () => {
     // Type the full command including the topic. The slash menu opens on "/" and
     // the filter narrows as we type — once the query is "council analyze..." no

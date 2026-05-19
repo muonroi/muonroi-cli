@@ -84,7 +84,11 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
       // frames the capture interval happened to emit, which is jitter-prone.
       const normalized = last
         ? (() => {
-            const { seq: _seq, ts: _ts, ...rest } = last as LiveFrame & {
+            const {
+              seq: _seq,
+              ts: _ts,
+              ...rest
+            } = last as LiveFrame & {
               seq: number;
               ts: number;
             };
@@ -114,7 +118,8 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
             // startup-time variance: instead of a fixed 1500ms window
             // that sometimes catches the response and sometimes doesn't,
             // we wait until the deterministic outcome is observed.
-            const nodes = (frame as unknown as { nodes?: Array<{ id?: string; children?: Array<{ id?: string }> }> }).nodes ?? [];
+            const nodes =
+              (frame as unknown as { nodes?: Array<{ id?: string; children?: Array<{ id?: string }> }> }).nodes ?? [];
             const log = nodes.find((n) => n.id === "log");
             const hasMsg = log?.children?.some((c) => c.id === "msg-0") ?? false;
             if (hasMsg) {
@@ -210,11 +215,10 @@ describe(`determinism: ${N}× identical LiveFrame final state`, () => {
     }
   }, 240_000);
 
-  it.todo(
-    "ts-identity assertion is included above because --agent-fake-clock IS implemented (src/index.ts line 781): fakeClock sets ts = seq * 16 making it deterministic across runs",
-  );
-
-  it.todo(
-    "if app.tsx never wires <Semantic> nodes, all traces will be empty arrays and the byte-identity assertion trivially passes without testing anything meaningful; add <Semantic> components to make this test load-bearing",
-  );
+  // Note: the parent test above already covers both properties this file used
+  // to document as `.todo` stubs:
+  //   1. ts-determinism via `--agent-fake-clock` (src/index.ts:781) — the
+  //      normalized comparison would fail if ts were non-deterministic.
+  //   2. <Semantic> wiring — `runWithRetry` requires `msg-0` to be present
+  //      in the trace, so an empty-trace trivial pass is not possible.
 });
