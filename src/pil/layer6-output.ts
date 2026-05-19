@@ -15,6 +15,8 @@
 
 import type { ToolSet } from "ai";
 import { classifyViaBrain } from "../ee/bridge.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import type { ProviderId } from "../providers/types.js";
 import { buildResponseTools } from "./response-tools.js";
 import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -52,19 +54,15 @@ const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
 //              this task type has the weakest text suffix today and suffers the
 //              most from verbose padding
 //
-// Disabled (escaping cost dominates):
+// Disabled at task-type level (escaping cost dominates):
 //   - generate (large file contents in JSON strings)
 //   - refactor (multi-file diffs)
 //   - documentation (large markdown blocks)
-//   - general (plain text; Zod wrapper has no structural benefit, and some
-//     models — notably DeepSeek V4 Flash — leak special tokens like
-//     <｜DSML｜> into the JSON body, failing Zod validation and triggering
-//     retry storms before falling back to text. Skipping the tool wrap for
-//     `general` lets the OUTPUT RULES suffix drive plain-text replies
-//     directly — same UX, zero parser failures. See session 528ffe653f16
-//     for the failure mode this guards against.)
 // For these, the orchestrator falls back to the markdown OUTPUT RULES suffix.
-const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan", "debug"]);
+// Per-PROVIDER disabling is layered on top via ProviderCapabilities — see
+// `src/providers/capabilities.ts`. A task type listed here may still be
+// dropped at runtime if the active provider's capability returns false.
+const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan", "debug", "general"]);
 
 // PIL-04 Tier 1.2: per-task output token budget.
 // Hint to model. Empirically derived from interaction_logs avg output sizes;
@@ -161,11 +159,18 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   return result;
 }
 
-export function getResponseToolSet(ctx: PipelineContext): ToolSet {
+export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId): ToolSet {
   if (!ctx.taskType) return {};
   // PIL-04 Tier 1.1: gate JSON-structured output to list-shaped tasks where it
   // wins on tokens. Code-heavy tasks fall through to markdown OUTPUT RULES.
   if (!RESPONSE_TOOL_TASK_TYPES.has(ctx.taskType)) return {};
+  // Provider-aware gating: a provider may report it can't reliably emit
+  // valid JSON tool input for this task type (e.g. DeepSeek leaks special
+  // tokens into `general` responses). Drop the tool to avoid retry storms.
+  if (providerId) {
+    const caps = getProviderCapabilities(providerId);
+    if (!caps.supportsResponseTool(ctx.taskType)) return {};
+  }
   return buildResponseTools(ctx.taskType);
 }
 

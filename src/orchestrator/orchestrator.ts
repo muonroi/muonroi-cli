@@ -3801,7 +3801,7 @@ export class Agent {
 
     const provider = turnProvider;
     const subagents = loadValidSubAgents();
-    const _pilResponseTools = getResponseToolSet(pilCtx);
+    const _pilResponseTools = getResponseToolSet(pilCtx, this.providerId);
     const _hasResponseTools = Object.keys(_pilResponseTools).length > 0;
     const systemParts = buildSystemPromptParts(
       this.bash.getCwd(),

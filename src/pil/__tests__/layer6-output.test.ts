@@ -103,8 +103,21 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     expect(getResponseToolSet(makeCtx("documentation", null))).toEqual({});
   });
 
-  it("returns empty toolset for general (plain text — DeepSeek V4 leaks special tokens into JSON; see session 528ffe653f16)", () => {
-    expect(getResponseToolSet(makeCtx("general", null))).toEqual({});
+  it("returns response tool for general when no providerId is passed (back-compat)", () => {
+    const tools = getResponseToolSet(makeCtx("general", null));
+    expect(Object.keys(tools)).toContain("respond_general");
+  });
+
+  it("drops respond_general when providerId is deepseek (token leak quirk)", () => {
+    expect(getResponseToolSet(makeCtx("general", null), "deepseek")).toEqual({});
+    expect(getResponseToolSet(makeCtx("general", null), "siliconflow")).toEqual({});
+  });
+
+  it("keeps respond_general for openai/anthropic/google", () => {
+    for (const id of ["openai", "anthropic", "google", "xai"] as const) {
+      const tools = getResponseToolSet(makeCtx("general", null), id);
+      expect(Object.keys(tools)).toContain("respond_general");
+    }
   });
 
   it("returns empty toolset when taskType is null", () => {
