@@ -4411,6 +4411,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               commercial,
             })
               .then((result) => {
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "init_new_result",
+                  data: {
+                    outcome: "done",
+                    message: `Created: ${result.projectDir}`,
+                    usedDotnetTemplate: result.usedDotnetTemplate,
+                  },
+                });
                 setInitNewForm((s) =>
                   s
                     ? {
@@ -4425,6 +4433,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               })
               .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "init_new_result",
+                  data: { outcome: "error", message: msg },
+                });
                 setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
               });
             return;
@@ -4463,6 +4475,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             });
             initNewProject({ projectName, feStack, bbTemplate })
               .then((result) => {
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "init_new_result",
+                  data: {
+                    outcome: "done",
+                    message: `Created: ${result.projectDir}`,
+                    usedDotnetTemplate: result.usedDotnetTemplate,
+                  },
+                });
                 setInitNewForm((s) =>
                   s
                     ? {
@@ -4478,6 +4498,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               })
               .catch((err) => {
                 const msg = err instanceof Error ? err.message : String(err);
+                logUIInteraction(agent.getSessionId() ?? undefined, {
+                  subtype: "init_new_result",
+                  data: { outcome: "error", message: msg },
+                });
                 setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
               });
             return;
