@@ -1,39 +1,33 @@
 /**
- * Smoke test for initNewProject — real filesystem + real exec.
+ * Smoke test for initNewProject — real filesystem.
  *
- * Gated behind env var MUONROI_SMOKE_INIT_NEW=1 because:
- *   - Runs `git init --bare` + `git clone` in a tmp dir (slow, ~2-5s)
- *   - Writes real files to OS temp directory
- *   - On CI, named pipes or sandbox restrictions may prevent git operations
+ * Plan 23-01b retired the git-clone fallback: BE scaffold now requires a
+ * `bbTemplate` and a working `dotnet` SDK + NuGet feed. The legacy bare-repo
+ * smoke variants were removed; we now exercise FE-only scaffolds (no
+ * bbTemplate) so the test stays portable across machines without .NET SDK.
+ *
+ * Gated behind env var MUONROI_SMOKE_INIT_NEW=1 because it writes real files
+ * to the OS temp directory.
  *
  * Run locally with:
  *   MUONROI_SMOKE_INIT_NEW=1 bunx vitest run src/scaffold/__tests__/init-new.smoke.spec.ts
  */
 
-import { exec as nodeExec } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { initNewProject } from "../init-new.js";
-
-const execAsync = promisify(nodeExec);
 
 const SMOKE_ENABLED = process.env.MUONROI_SMOKE_INIT_NEW === "1";
 
 describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () => {
   let tmpDir: string;
-  let bareRepoPath: string;
 
   beforeAll(async () => {
     // Create a temp workspace.
     tmpDir = await mkdtemp(path.join(tmpdir(), "muonroi-smoke-"));
-
-    // Create a minimal bare git repo to act as the BE source.
-    bareRepoPath = path.join(tmpDir, "fake-building-block.git");
-    await execAsync(`git init --bare ${JSON.stringify(bareRepoPath)}`);
   }, 30_000);
 
   afterAll(async () => {
@@ -42,12 +36,11 @@ describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () =
     }
   });
 
-  it("scaffolds a react project with expected file structure", async () => {
+  it("scaffolds a react project with expected file structure (FE-only)", async () => {
     const projectsRoot = path.join(tmpDir, "projects");
 
     const result = await initNewProject({
       projectName: "smoke-app",
-      beSource: bareRepoPath,
       feStack: "react",
       projectsRoot,
     });
@@ -61,7 +54,7 @@ describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () =
     expect(pkgJson.workspaces).toContain("client");
     expect(pkgJson.workspaces).toContain("server");
 
-    // Server directory created by git clone.
+    // Server directory created (empty placeholder when no bbTemplate).
     expect(existsSync(path.join(result.projectDir, "server"))).toBe(true);
 
     // Client files exist.
@@ -75,12 +68,11 @@ describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () =
     expect(mainTsx).toContain("@muonroi/agent-harness-react");
   }, 30_000);
 
-  it("scaffolds an angular project with expected file structure", async () => {
+  it("scaffolds an angular project with expected file structure (FE-only)", async () => {
     const projectsRoot = path.join(tmpDir, "projects-ng");
 
     const result = await initNewProject({
       projectName: "smoke-ng",
-      beSource: bareRepoPath,
       feStack: "angular",
       projectsRoot,
     });
@@ -88,10 +80,7 @@ describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () =
     expect(existsSync(result.projectDir)).toBe(true);
     expect(existsSync(path.join(result.projectDir, "client", "src", "app", "app.component.ts"))).toBe(true);
 
-    const component = await readFile(
-      path.join(result.projectDir, "client", "src", "app", "app.component.ts"),
-      "utf-8",
-    );
+    const component = await readFile(path.join(result.projectDir, "client", "src", "app", "app.component.ts"), "utf-8");
     expect(component).toContain("muonroiSemantic");
   }, 30_000);
 
@@ -100,7 +89,6 @@ describe.skipIf(!SMOKE_ENABLED)("initNewProject smoke — real filesystem", () =
 
     const result = await initNewProject({
       projectName: "smoke-be",
-      beSource: bareRepoPath,
       feStack: "none",
       projectsRoot,
     });

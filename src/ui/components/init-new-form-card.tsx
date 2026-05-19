@@ -13,8 +13,9 @@
  * Wrapped in <Semantic id="init-new-form" role="dialog"> for harness visibility.
  */
 
-import type { BBTemplateInfo } from "../../scaffold/init-new.js";
 import { Semantic } from "@muonroi/agent-harness-opentui";
+import type { BBDesign } from "../../ee/bb-design.js";
+import type { BBTemplateInfo } from "../../scaffold/init-new.js";
 import type { Theme } from "../theme.js";
 
 export type FeStack = "react" | "angular" | "none";
@@ -43,7 +44,7 @@ export const BB_TEMPLATE_OPTIONS: ReadonlyArray<{ label: string; desc: string; i
 ];
 
 export interface InitNewFormState {
-  step: "name" | "fe-stack" | "bb-template" | "running" | "done" | "error";
+  step: "name" | "fe-stack" | "designing" | "design-preview" | "bb-template" | "running" | "done" | "error";
   /** Current text in the project name input. */
   nameInput: string;
   /** Validation error for name input. */
@@ -63,6 +64,18 @@ export interface InitNewFormState {
   scaffoldedTemplate?: string;
   /** Task 6.6 — coverage status shown post-scaffold. */
   scaffoldedCoverage?: "full" | "partial";
+  /** Plan 23-02 — /ideal intent captured at form open. Empty string → manual menu fallback. */
+  intent: string;
+  /** Plan 23-02 — EE design result; null while loading or on failure. */
+  bbDesign: BBDesign | null;
+  /** Plan 23-02 — Whether to allow commercial packages in design re-runs. */
+  allowCommercial: boolean;
+  /** Plan 23-02 — Per-package on/off toggles, aligned with bbDesign.packageIds order. */
+  packageToggles: boolean[];
+  /** Plan 23-02 — Cursor position in design-preview package list. */
+  designCursor: number;
+  /** Plan 23-02 — Stored when design fails or times out — surfaced for user feedback. */
+  designError: string | null;
 }
 
 export const FE_STACK_OPTIONS: { label: string; value: FeStack; desc: string }[] = [
@@ -71,7 +84,7 @@ export const FE_STACK_OPTIONS: { label: string; value: FeStack; desc: string }[]
   { label: "None", value: "none", desc: "Skip client — backend only" },
 ];
 
-export function initialInitNewFormState(): InitNewFormState {
+export function initialInitNewFormState(intent: string = ""): InitNewFormState {
   return {
     step: "name",
     nameInput: "",
@@ -80,6 +93,12 @@ export function initialInitNewFormState(): InitNewFormState {
     bbTemplateIndex: 0, // default: BaseTemplate
     eeRecommendedTemplateIndex: null,
     resultMessage: null,
+    intent,
+    bbDesign: null,
+    allowCommercial: false,
+    packageToggles: [],
+    designCursor: 0,
+    designError: null,
   };
 }
 
@@ -112,7 +131,11 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
           </text>
 
           {/* Step 1: project name */}
-          {(state.step === "name" || state.step === "fe-stack" || state.step === "bb-template") && (
+          {(state.step === "name" ||
+            state.step === "fe-stack" ||
+            state.step === "bb-template" ||
+            state.step === "designing" ||
+            state.step === "design-preview") && (
             <box flexDirection="column" marginTop={1}>
               <text fg={t.initFormLabel}>Project name:</text>
               <box flexDirection="row" marginTop={0}>
@@ -181,6 +204,116 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
             </box>
           )}
 
+          {/* Plan 23-02 — EE designing (spinner) */}
+          {state.step === "designing" && (
+            // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid harness Role; not a DOM element
+            <Semantic id="init-designing" role="statusbar" name="EE designing">
+              <box flexDirection="column" marginTop={1}>
+                <text fg={t.initFormLabel}>EE designing BB packages for: {state.intent || "(no intent)"}</text>
+                <text fg={t.initFormHint}>Esc to skip → manual template menu</text>
+              </box>
+            </Semantic>
+          )}
+
+          {/* Plan 23-02 — EE design preview */}
+          {state.step === "design-preview" && state.bbDesign && (
+            // biome-ignore lint/a11y/useValidAriaRole: harness Role union, not a DOM element
+            <Semantic id="init-design-preview" role="region" name="EE design preview">
+              <box flexDirection="column" marginTop={1}>
+                <text fg={t.initFormLabel}>
+                  Template: {state.bbDesign.template.shortName} ({state.bbDesign.template.nugetId}@
+                  {state.bbDesign.template.version})
+                </text>
+                <text
+                  fg={
+                    state.bbDesign.confidence >= 0.6
+                      ? t.initFormSuccess
+                      : state.bbDesign.confidence >= 0.4
+                        ? t.initFormOptionSelected
+                        : t.initFormError
+                  }
+                >
+                  Confidence: {Math.round(state.bbDesign.confidence * 100)}%
+                </text>
+                {state.bbDesign.rationale && (
+                  <text fg={t.initFormHint}>
+                    {state.bbDesign.rationale.length > 200
+                      ? `${state.bbDesign.rationale.slice(0, 197)}…`
+                      : state.bbDesign.rationale}
+                  </text>
+                )}
+
+                {/* biome-ignore lint/a11y/useValidAriaRole: harness Role union, not a DOM element */}
+                <Semantic id="init-design-packages" role="listbox" name="Designed OSS packages">
+                  <box flexDirection="column" marginTop={1}>
+                    <text fg={t.initFormLabel}>Packages (OSS):</text>
+                    {state.bbDesign.packageIds.map((pkgId, i) => {
+                      const isCursor = i === state.designCursor;
+                      const isOn = state.packageToggles[i] ?? true;
+                      return (
+                        <Semantic
+                          key={pkgId}
+                          id={`design-pkg-${i}`}
+                          role="listitem"
+                          name={pkgId}
+                          selected={isCursor || undefined}
+                        >
+                          <box flexDirection="row">
+                            <text fg={isCursor ? t.initFormOptionSelected : t.initFormOptionDefault}>
+                              {isCursor ? "▶ " : "  "}
+                              {isOn ? "[x] " : "[ ] "}
+                              {pkgId}
+                            </text>
+                          </box>
+                        </Semantic>
+                      );
+                    })}
+                  </box>
+                </Semantic>
+
+                {state.bbDesign.commercialBlocked.length > 0 && (
+                  <Semantic
+                    id="init-design-commercial"
+                    role="listbox"
+                    name={`Commercial blocked: ${state.bbDesign.commercialBlocked.join(", ")}`}
+                  >
+                    <box flexDirection="column" marginTop={1}>
+                      <text fg={t.initFormHint}>Commercial (need --commercial flag):</text>
+                      {state.bbDesign.commercialBlocked.map((pkgId) => (
+                        <Semantic key={pkgId} id={`design-commercial-${pkgId}`} role="listitem" name={pkgId}>
+                          <text fg={t.initFormHint}>
+                            {"  · "}
+                            {pkgId}
+                          </text>
+                        </Semantic>
+                      ))}
+                    </box>
+                  </Semantic>
+                )}
+
+                {state.bbDesign.behavioralHints.length > 0 && (
+                  <box flexDirection="column" marginTop={1}>
+                    <text fg={t.initFormHint}>Hints:</text>
+                    {state.bbDesign.behavioralHints.map((h, i) => (
+                      <text key={i} fg={t.initFormHint}>
+                        {"  · "}
+                        {h.length > 120 ? `${h.slice(0, 117)}…` : h}
+                      </text>
+                    ))}
+                  </box>
+                )}
+              </box>
+            </Semantic>
+          )}
+
+          {/* Plan 23-02 — Design error fallback hint */}
+          {state.step === "design-preview" && !state.bbDesign && state.designError && (
+            <box flexDirection="column" marginTop={1}>
+              <text fg={t.initFormError}>EE design failed: {state.designError}</text>
+              <text fg={t.initFormHint}>Esc to use manual menu</text>
+            </box>
+          )}
+
           {/* Running state */}
           {state.step === "running" && (
             <box flexDirection="column" marginTop={1}>
@@ -191,14 +324,13 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
 
           {/* Done state — task 6.6: show template + coverage */}
           {state.step === "done" && (
+            // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid harness Role; not a DOM element
             <Semantic id="init-new-result" role="statusbar" name="Scaffold complete">
               <box flexDirection="column" marginTop={1}>
                 <text fg={t.initFormSuccess} attributes={1}>
                   ✓ Project scaffolded successfully!
                 </text>
-                {state.scaffoldedTemplate && (
-                  <text fg={t.initFormLabel}>Template: {state.scaffoldedTemplate}</text>
-                )}
+                {state.scaffoldedTemplate && <text fg={t.initFormLabel}>Template: {state.scaffoldedTemplate}</text>}
                 {state.scaffoldedCoverage && (
                   <text fg={state.scaffoldedCoverage === "full" ? t.initFormSuccess : t.initFormHint}>
                     Coverage: {state.scaffoldedCoverage}
@@ -211,6 +343,7 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
 
           {/* Error state */}
           {state.step === "error" && (
+            // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid harness Role; not a DOM element
             <Semantic id="init-new-result" role="statusbar" name="Scaffold failed">
               <box flexDirection="column" marginTop={1}>
                 <text fg={t.initFormError} attributes={1}>
@@ -226,6 +359,8 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
             {state.step === "name" && "Type project name · Enter next · Esc cancel"}
             {state.step === "fe-stack" && "↑↓ select · Enter next · Esc back"}
             {state.step === "bb-template" && "↑↓ select · Enter confirm · Esc back"}
+            {state.step === "designing" && "EE designing… · Esc skip to manual"}
+            {state.step === "design-preview" && "Space toggle · c allow-commercial · Enter confirm · Esc manual"}
             {state.step === "running" && "Please wait…"}
             {(state.step === "done" || state.step === "error") && "Esc / Enter dismiss"}
           </text>

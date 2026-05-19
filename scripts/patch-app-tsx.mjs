@@ -1,5 +1,20 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
+// NOTE (Plan 23-02): This patch script targets the pre-Plan-23 state of
+// src/ui/app.tsx and is now STALE. The current app.tsx contains:
+//   - Plan 23-02: lastIdealIdeaRef capture, EE design routing in fe-stack
+//     Enter handler, designing/design-preview keyboard blocks
+//   - bb-template manual picker step (Task 6.2a)
+//   - point-to-existing form intercept block
+// None of these anchors exist in the patches below — running this script
+// against the current app.tsx will fail on step 3 (TODO halt handler) or
+// step 4 (halt guard block already replaced) and exit non-zero, which is
+// the desired safe behavior.
+//
+// If a future refactor wants to regenerate app.tsx from scratch via this
+// script, update each patch block to match the current state-of-the-art
+// behavior in src/ui/app.tsx including the EE design flow.
+
 let src = readFileSync("src/ui/app.tsx", "utf-8");
 
 // ---------------------------------------------------------------------------
@@ -128,13 +143,8 @@ const initFormBlock = `      // Init-new form intercepts all input while open.
           if (key.name === "return") {
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const projectName = initNewForm.nameInput.trim();
-            const beSource =
-              process.env.MUONROI_BUILDING_BLOCK_URL ??
-              (process.env.HOME
-                ? process.env.HOME + "/muonroi-building-block"
-                : "muonroi-building-block");
             setInitNewForm((s) => s ? { ...s, step: "running" } : s);
-            initNewProject({ projectName, beSource, feStack })
+            initNewProject({ projectName, feStack })
               .then((result) => {
                 setInitNewForm((s) =>
                   s ? { ...s, step: "done", resultMessage: "Created: " + result.projectDir } : s,

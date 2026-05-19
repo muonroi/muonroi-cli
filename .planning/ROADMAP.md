@@ -11,6 +11,7 @@
 - v1.6 Council Quality & Trust (Phases 14-17) - active
 - v1.7 Auth Flexibility (Phase 18) - planned
 - v1.8 Hardening & Resilience (Phase 20-22) - planned
+- v1.9 EE-driven Scaffold (Phase 23) - planned
 
 ## Phases
 
@@ -79,6 +80,12 @@ See milestone archive for details.
 - [x] **Phase 20: Harness Test Coverage Hardening** — audit every `.skip`/`.todo` in `tests/harness/**`; require comment `// SKIP: <reason> — issue #<n>` per skip; add `lint:harness-skips` npm script that warns when skipped/todo > 10% of total; restore feasibly un-skippable specs (api-key, askcard, council-flow, ideal where blockers are gone). See review of 2026-05-19.
 - [x] **Phase 21: EE Observability & Resilience** — emit `agentRuntime.emitEvent('ee-timeout', {source, elapsedMs})` from every EE call site that catches silently; surface a passive toast "running without BB context" when BB retrieval times out; expose `eeBBContext` flag in `/config` UI; re-tune `PIL_SEARCH_TIMEOUT_MS` against SiliconFlow thin-client measurements; structured log on every `.catch(() => {})` EE path.
 - [x] **Phase 22: Small Hardening Bundle** — upgrade cross-turn dedup hash from sha1-12 → sha256-16 (`src/orchestrator/cross-turn-dedup.ts`) and re-validate `cost-leak-c3.spec.ts`; add deprecation `console.warn` on `src/agent-harness/index.ts` shim when imported externally; link CHANGELOG migration section to `@muonroi/agent-harness-core`.
+
+### v1.9 EE-driven Scaffold
+
+**Milestone Goal:** Close the gap between EE brain's structured BB package knowledge and the scaffold pipeline. Today `/ideal → Init new project` silently fails because `eePackages` is never filled and `installBBTemplates()` is never called. Replace the broken "prose-only council context → undefined eePackages → silent git clone fallback" path with a deterministic `designBBPackages(intent)` extractor that reads brain recipes, parses the `uses:` list, filters commercial packages, and feeds it to `initNewProject`.
+
+- [x] **Phase 23: EE-driven BB Package Design** — add `src/ee/bb-design.ts` deterministic extractor (queries `bb-recipes` + `experience-principles` + `bb-behavioral` in parallel via existing `/api/search`); wire into `init-new-form-card.tsx` as a preview step with per-package toggle; refactor `initNewProject` to auto-install only the selected template via `installBBTemplates()`, run `dotnet add package <id>` for each `eePackages` entry, and drop the legacy `git clone` fallback (`init-new.ts:518-522`) + the `${HOME}/muonroi-building-block` default in `app.tsx:4234`/`patch-app-tsx.mjs:131`. Graceful degrade to the current manual template menu when EE times out.
 
 ## Phase Details
 
