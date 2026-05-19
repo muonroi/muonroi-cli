@@ -55,4 +55,10 @@ describe("buildIdealContinuationPrompt", () => {
     const result = buildIdealContinuationPrompt(base);
     expect(result.toLowerCase()).toContain("missing files are fine");
   });
+
+  it("warns that template sample files are reference-only and should be deleted", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result).toContain("REFERENCE ONLY");
+    expect(result.toLowerCase()).toContain("delete all template sample");
+  });
 });
