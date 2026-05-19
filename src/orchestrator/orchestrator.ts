@@ -62,6 +62,7 @@ import {
   resolveModelRuntime as resolveRuntime,
   shouldDropParam,
 } from "../providers/runtime.js";
+import { stripReasoningForSiliconflow } from "../providers/siliconflow-history.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -1471,10 +1472,19 @@ export class Agent {
           providerOptions: childRuntime.providerOptions,
         });
       }
+      // SiliconFlow DeepSeek thinking-mode rejects assistant history with
+      // `reasoning` parts (HTTP 400 code 20015) because @ai-sdk/openai-compatible
+      // does not serialize them as the `reasoning_content` field SiliconFlow
+      // expects. Strip them on the SiliconFlow path only — DeepSeek native +
+      // every other provider receive history unchanged.
+      const _subMessagesForCall =
+        childRuntime.modelInfo?.provider === "siliconflow"
+          ? (stripReasoningForSiliconflow(childMessages) as typeof childMessages)
+          : childMessages;
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
-        messages: childMessages,
+        messages: _subMessagesForCall,
         tools: childRuntime.modelInfo?.supportsClientTools === false ? {} : childTools,
         stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
         maxRetries: 0,
@@ -4326,10 +4336,16 @@ export class Agent {
               providerOptions: providerOpts,
             });
           }
+          // SiliconFlow DeepSeek thinking-mode reasoning_content workaround
+          // (see siliconflow-history.ts). Sub-agent path applies the same strip.
+          const _topMessagesForCall =
+            runtime.modelInfo?.provider === "siliconflow"
+              ? (stripReasoningForSiliconflow(this.messages) as typeof this.messages)
+              : this.messages;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
-            messages: this.messages,
+            messages: _topMessagesForCall,
             tools,
             toolChoice: _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false ? "auto" : undefined,
             stopWhen:
