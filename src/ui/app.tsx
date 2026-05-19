@@ -4592,25 +4592,25 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltSelectedIndex },
             });
             if (chosen.id === "init_new") {
-              // Task 5.3 — open init-new form; close halt card.
-              // Plan 23-02 — pass the captured /ideal intent so the form can
-              // route through designBBPackages() for EE template + pkg picks.
+              // Abort any in-flight LLM stream so its text reply doesn't bleed
+              // into the TUI while the init-new form runs (observed session
+              // 6ff8dabe1aa7: hot-path "Bạn muốn tạo..." reply landed 20s
+              // after halt-card was answered, mid-scaffold).
+              interruptActiveRun();
               setInitNewForm(initialInitNewFormState(lastIdealIdeaRef.current));
               setActiveHaltCard(null);
               setHaltSelectedIndex(0);
               return;
             }
             if (chosen.id === "point_to_existing") {
-              // Task 5.4 — open point-to-existing form; close halt card.
+              interruptActiveRun();
               setPointToExistingForm(initialPointToExistingFormState());
               setActiveHaltCard(null);
               setHaltSelectedIndex(0);
               return;
             }
             if (chosen.id === "continue_as_council") {
-              // Task 5.5 — kick off council brainstorm; production council wiring
-              // (real orchestrator inject) is deferred, scaffolder writes a
-              // header-only spec.md when no runCouncil is provided.
+              interruptActiveRun();
               setActiveHaltCard(null);
               setHaltSelectedIndex(0);
               void continueAsCouncil({ prompt: activeHaltCard.detail ?? "(no prompt)" })
