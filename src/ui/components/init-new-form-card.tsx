@@ -76,6 +76,8 @@ export interface InitNewFormState {
   designCursor: number;
   /** Plan 23-02 — Stored when design fails or times out — surfaced for user feedback. */
   designError: string | null;
+  /** Progress line shown during `step: "running"` so the user knows the CLI is still working. */
+  progressMessage?: string | null;
 }
 
 export const FE_STACK_OPTIONS: { label: string; value: FeStack; desc: string }[] = [
@@ -318,7 +320,7 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
           {state.step === "running" && (
             <box flexDirection="column" marginTop={1}>
               <text fg={t.initFormLabel}>Scaffolding project "{state.nameInput}"…</text>
-              <text fg={t.initFormHint}>Running dotnet new + applying BB ecosystem…</text>
+              <text fg={t.initFormHint}>{state.progressMessage ?? "Running dotnet new + applying BB ecosystem…"}</text>
             </box>
           )}
 
