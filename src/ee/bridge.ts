@@ -11,7 +11,15 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
-import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
+import { classifyEeError, logEeFailure, readTimeoutEnv, withEeTimeout } from "../utils/ee-logger.js";
+
+/**
+ * Phase 21.5 — `routeModel` / `routeTask` budget. EE server unreachability used
+ * to hang `/ideal` for the OS-level fetch connect timeout (~5 min on Windows).
+ * 1000ms is generous for a healthy EE (typical p95 ~80ms via SiliconFlow) and
+ * cheap to retry-skip via the null fallback when EE is down.
+ */
+const EE_ROUTE_TIMEOUT_MS = readTimeoutEnv("MUONROI_EE_ROUTE_TIMEOUT_MS", 1000, 200, 5000);
 
 // ─── Internal type contract (matches experience-core.js module.exports shape) ──
 // NOT exported — callers use the narrower return types from the public API below.
@@ -159,10 +167,19 @@ export async function classifyViaBrain(prompt: string, timeoutMs = 5000): Promis
 
   const core = await getEECore();
   if (!core) return null;
+  const started = Date.now();
   try {
-    return await silentCall(() => core.classifyViaBrain(prompt, timeoutMs));
+    // Race the in-process call against `timeoutMs + 200ms` so a buggy core that
+    // ignores its own timeout argument cannot hang the host CLI.
+    return await withEeTimeout(
+      silentCall(() => core.classifyViaBrain(prompt, timeoutMs)),
+      timeoutMs + 200,
+    );
   } catch (err) {
-    logEeFailure("bridge.classifyViaBrain", classifyEeError(err), err, { budgetMs: timeoutMs });
+    logEeFailure("bridge.classifyViaBrain", classifyEeError(err), err, {
+      elapsedMs: Date.now() - started,
+      budgetMs: timeoutMs + 200,
+    });
     return null;
   }
 }
@@ -198,10 +215,17 @@ export async function routeModel(
 ): Promise<EERouteResult | null> {
   const core = await getEECore();
   if (!core) return null;
+  const started = Date.now();
   try {
-    return await silentCall(() => core.routeModel(task, context, runtime));
+    return await withEeTimeout(
+      silentCall(() => core.routeModel(task, context, runtime)),
+      EE_ROUTE_TIMEOUT_MS,
+    );
   } catch (err) {
-    logEeFailure("bridge.routeModel", classifyEeError(err), err);
+    logEeFailure("bridge.routeModel", classifyEeError(err), err, {
+      elapsedMs: Date.now() - started,
+      budgetMs: EE_ROUTE_TIMEOUT_MS,
+    });
     return null;
   }
 }
@@ -239,10 +263,17 @@ export async function routeTask(
 ): Promise<EERouteTaskResult | null> {
   const core = await getEECore();
   if (!core?.routeTask) return null;
+  const started = Date.now();
   try {
-    return await silentCall(() => core.routeTask(task, context, runtime));
+    return await withEeTimeout(
+      silentCall(() => core.routeTask(task, context, runtime)),
+      EE_ROUTE_TIMEOUT_MS,
+    );
   } catch (err) {
-    logEeFailure("bridge.routeTask", classifyEeError(err), err);
+    logEeFailure("bridge.routeTask", classifyEeError(err), err, {
+      elapsedMs: Date.now() - started,
+      budgetMs: EE_ROUTE_TIMEOUT_MS,
+    });
     return null;
   }
 }

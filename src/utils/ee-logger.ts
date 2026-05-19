@@ -49,6 +49,35 @@ export interface EeFailureExtra {
   [k: string]: unknown;
 }
 
+/**
+ * Phase 21.5 — hotfix for `routeModel` / `routeTask` hanging when EE server is
+ * unreachable. Those core calls do not accept an AbortSignal, so we race the
+ * promise against a `TimeoutError` rejection. The caller's existing catch arm
+ * then runs `logEeFailure(source, "timeout", err)` and falls back to null.
+ *
+ * Rejected error has `name = "TimeoutError"` so `classifyEeError` treats it as
+ * a timeout (not a generic error), keeping forensics + harness events tidy.
+ */
+export async function withEeTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const handle = setTimeout(() => {
+      const e = new Error(`EE call exceeded ${timeoutMs}ms`);
+      e.name = "TimeoutError";
+      reject(e);
+    }, timeoutMs);
+    p.then(
+      (v) => {
+        clearTimeout(handle);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(handle);
+        reject(err);
+      },
+    );
+  });
+}
+
 interface AgentRuntimeLike {
   emitEvent?: (e: unknown) => void;
 }
