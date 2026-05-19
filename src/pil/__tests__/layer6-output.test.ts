@@ -103,9 +103,8 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     expect(getResponseToolSet(makeCtx("documentation", null))).toEqual({});
   });
 
-  it("returns response tool for general (pure text schema, zero escaping overhead)", () => {
-    const tools = getResponseToolSet(makeCtx("general", null));
-    expect(Object.keys(tools)).toContain("respond_general");
+  it("returns empty toolset for general (plain text — DeepSeek V4 leaks special tokens into JSON; see session 528ffe653f16)", () => {
+    expect(getResponseToolSet(makeCtx("general", null))).toEqual({});
   });
 
   it("returns empty toolset when taskType is null", () => {

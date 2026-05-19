@@ -56,8 +56,15 @@ const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
 //   - generate (large file contents in JSON strings)
 //   - refactor (multi-file diffs)
 //   - documentation (large markdown blocks)
+//   - general (plain text; Zod wrapper has no structural benefit, and some
+//     models — notably DeepSeek V4 Flash — leak special tokens like
+//     <｜DSML｜> into the JSON body, failing Zod validation and triggering
+//     retry storms before falling back to text. Skipping the tool wrap for
+//     `general` lets the OUTPUT RULES suffix drive plain-text replies
+//     directly — same UX, zero parser failures. See session 528ffe653f16
+//     for the failure mode this guards against.)
 // For these, the orchestrator falls back to the markdown OUTPUT RULES suffix.
-const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan", "debug", "general"]);
+const RESPONSE_TOOL_TASK_TYPES = new Set<TaskType>(["analyze", "plan", "debug"]);
 
 // PIL-04 Tier 1.2: per-task output token budget.
 // Hint to model. Empirically derived from interaction_logs avg output sizes;
