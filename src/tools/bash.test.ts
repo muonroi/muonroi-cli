@@ -329,6 +329,18 @@ describe("BashTool sandbox state", () => {
     expect(bash.getCwd()).toBe(root);
   });
 
+  it("strips trailing backslash from quoted cd target on Windows (E1 regression)", async () => {
+    if (process.platform !== "win32") return;
+    const root = makeTempDir("muonroi-bash-trailbs-");
+    const bash = new BashTool(os.tmpdir());
+    // Simulate: cd "C:\foo\bar\" && pwd  — the trailing \" is mis-parsed as
+    // escaped quote, leaving the path as "C:\foo\bar\". After the fix the
+    // trailing backslash is stripped and the directory resolves correctly.
+    const result = await bash.execute(`cd "${root}\\"`);
+    expect(result.success).toBe(true);
+    expect(bash.getCwd()).toBe(root);
+  });
+
   it("includes network status in tool description when allowNet is set", () => {
     const netOn = new BashTool("/repo", {
       sandboxMode: "shuru",

@@ -62,7 +62,11 @@ export class BashTool {
         const dir = command
           .substring(3)
           .trim()
-          .replace(/^["']|["']$/g, "");
+          .replace(/^["']|["']$/g, "")
+          // Strip a trailing backslash that was an escaped quote in the shell
+          // parse (e.g. cd "C:\foo\" && cmd → C:\foo). Only strip on Windows
+          // because on POSIX a trailing backslash is a valid path continuation.
+          .replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
         try {
           // Translate POSIX-style absolute paths (e.g. /d/sources/x, ~/foo)
           // when the active shell understands them, so cwd tracking matches
