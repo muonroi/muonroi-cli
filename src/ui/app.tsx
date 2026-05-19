@@ -1215,6 +1215,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
   const startTimeRef = useRef(0);
+  // Plan 23-02 — Capture the most recent `/ideal "..."` idea so the init-new
+  // form can route it through designBBPackages() for EE-driven template + pkg
+  // suggestion. Empty string falls back to the manual template menu.
+  const lastIdealIdeaRef = useRef<string>("");
   const isProcessingRef = useRef(false);
   const hasApiKeyRef = useRef(initialHasApiKey);
   const showApiKeyModalRef = useRef(!initialHasApiKey);
@@ -3248,6 +3252,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
               return;
             }
+            // Plan 23-02 — capture the original idea for EE-driven BB design.
+            if (payload.subcommand === "start" && typeof payload.idea === "string") {
+              lastIdealIdeaRef.current = payload.idea;
+            }
             const heading =
               payload.subcommand === "start"
                 ? `/ideal "${payload.idea ?? ""}"`
@@ -4205,8 +4213,150 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             return;
           }
           if (key.name === "return") {
-            // Advance to bb-template picker (task 6.2a)
+            // Plan 23-02 — when /ideal intent is captured, route through EE design.
+            if (initNewForm.intent.trim().length > 0) {
+              setInitNewForm((s) => (s ? { ...s, step: "designing", designError: null } : s));
+              (async () => {
+                try {
+                  const { designBBPackages } = await import("../ee/bb-design.js");
+                  const result = await designBBPackages(initNewForm.intent, {
+                    allowCommercial: initNewForm.allowCommercial,
+                  });
+                  setInitNewForm((s) => {
+                    if (!s) return s;
+                    if (result) {
+                      return {
+                        ...s,
+                        step: "design-preview",
+                        bbDesign: result,
+                        packageToggles: result.packageIds.map(() => true),
+                        designCursor: 0,
+                      };
+                    }
+                    return { ...s, step: "bb-template", designError: "EE unavailable" };
+                  });
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  setInitNewForm((s) => (s ? { ...s, step: "bb-template", designError: msg } : s));
+                }
+              })();
+              return;
+            }
+            // No intent → manual template picker (task 6.2a, back-compat).
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
+            return;
+          }
+          return;
+        }
+        // Plan 23-02 — EE designing step. Esc skips to manual menu; ignore other keys.
+        if (initNewForm.step === "designing") {
+          if (isEscapeKey(key)) {
+            setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
+            return;
+          }
+          return;
+        }
+        // Plan 23-02 — EE design-preview step: navigate / toggle / confirm.
+        if (initNewForm.step === "design-preview") {
+          if (isEscapeKey(key)) {
+            setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
+            return;
+          }
+          if (key.name === "up") {
+            setInitNewForm((s) => (s ? { ...s, designCursor: Math.max(0, s.designCursor - 1) } : s));
+            return;
+          }
+          if (key.name === "down") {
+            setInitNewForm((s) =>
+              s
+                ? {
+                    ...s,
+                    designCursor: Math.min((s.bbDesign?.packageIds.length ?? 1) - 1, s.designCursor + 1),
+                  }
+                : s,
+            );
+            return;
+          }
+          if (key.name === "space" || key.sequence === " ") {
+            setInitNewForm((s) => {
+              if (!s || !s.bbDesign) return s;
+              const toggles = [...s.packageToggles];
+              toggles[s.designCursor] = !(toggles[s.designCursor] ?? true);
+              return { ...s, packageToggles: toggles };
+            });
+            return;
+          }
+          if (key.sequence === "c" || key.sequence === "C") {
+            // Toggle commercial flag + re-run design.
+            const nextAllowCommercial = !initNewForm.allowCommercial;
+            setInitNewForm((s) =>
+              s
+                ? {
+                    ...s,
+                    step: "designing",
+                    allowCommercial: nextAllowCommercial,
+                    designError: null,
+                  }
+                : s,
+            );
+            (async () => {
+              try {
+                const { designBBPackages } = await import("../ee/bb-design.js");
+                const result = await designBBPackages(initNewForm.intent, {
+                  allowCommercial: nextAllowCommercial,
+                });
+                setInitNewForm((s) => {
+                  if (!s) return s;
+                  if (result) {
+                    return {
+                      ...s,
+                      step: "design-preview",
+                      bbDesign: result,
+                      packageToggles: result.packageIds.map(() => true),
+                      designCursor: 0,
+                    };
+                  }
+                  return { ...s, step: "bb-template", designError: "EE unavailable" };
+                });
+              } catch (err) {
+                const msg = err instanceof Error ? err.message : String(err);
+                setInitNewForm((s) => (s ? { ...s, step: "bb-template", designError: msg } : s));
+              }
+            })();
+            return;
+          }
+          if (key.name === "return") {
+            const design = initNewForm.bbDesign;
+            if (!design) return;
+            const selectedPackages = design.packageIds.filter((_, i) => initNewForm.packageToggles[i] ?? true);
+            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
+            const projectName = initNewForm.nameInput.trim();
+            const commercial = initNewForm.allowCommercial;
+            setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
+            initNewProject({
+              projectName,
+              feStack,
+              bbTemplate: design.template,
+              eePackages: selectedPackages,
+              commercial,
+            })
+              .then((result) => {
+                setInitNewForm((s) =>
+                  s
+                    ? {
+                        ...s,
+                        step: "done",
+                        resultMessage: `Created: ${result.projectDir}`,
+                        scaffoldedTemplate: design.template.nugetId,
+                        scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
+                      }
+                    : s,
+                );
+              })
+              .catch((err) => {
+                const msg = err instanceof Error ? err.message : String(err);
+                setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
+              });
             return;
           }
           return;
@@ -4231,11 +4381,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
             const projectName = initNewForm.nameInput.trim();
-            const beSource =
-              process.env.MUONROI_BUILDING_BLOCK_URL ??
-              (process.env.HOME ? `${process.env.HOME}/muonroi-building-block` : "muonroi-building-block");
             setInitNewForm((s) => (s ? { ...s, step: "running" } : s));
-            initNewProject({ projectName, beSource, feStack, bbTemplate })
+            initNewProject({ projectName, feStack, bbTemplate })
               .then((result) => {
                 setInitNewForm((s) =>
                   s
@@ -4285,7 +4432,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (chosen) {
             if (chosen.id === "init_new") {
               // Task 5.3 — open init-new form; close halt card.
-              setInitNewForm(initialInitNewFormState());
+              // Plan 23-02 — pass the captured /ideal intent so the form can
+              // route through designBBPackages() for EE template + pkg picks.
+              setInitNewForm(initialInitNewFormState(lastIdealIdeaRef.current));
               setActiveHaltCard(null);
               setHaltSelectedIndex(0);
               return;

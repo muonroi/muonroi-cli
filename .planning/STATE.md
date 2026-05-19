@@ -79,6 +79,9 @@ Audit reference: `.planning/research/v1.6-council-quality-context.md` — full r
 - 2026-05-19: Phase 21 COMPLETED (commits `c1a58b5` + `cee8f42`) — `ee-logger` + 13 silent-catch refactors, protocol bump 0.2.0 → 0.3.0 with `ee-timeout` + `ee-error` events, Toast component + `/ee-context` slash command, 3 timeout env overrides, harness E2E spec.
 - 2026-05-19: Side fix — `src/pil/layer1-intent.test.ts` 4 pre-existing fails resolved by mocking `pilContext` + `isUnifiedPilEnabled=false` (committed with 21-01).
 - 2026-05-19: Full suite verified — **2432 pass / 0 fail / 10 skip / 2 todo** (was 2428 pass / 4 fail / 10 skip / 2 todo).
+- 2026-05-19: Milestone v1.9 "EE-driven Scaffold" added with Phase 23 (origin: user-reported scaffold failure in session 368eeee4b3f0 + brain probe at http://72.61.127.154:8082 confirming `bb-recipes` has structured `Template <name> (<short>): ... | uses: <pkg1>, <pkg2>, ...` entries already).
+- 2026-05-19: Phase 23 added — EE-driven BB Package Design (deterministic `designBBPackages(intent)` extractor, wire `eePackages` into init-new-form preview, auto-install templates + `dotnet add package`, drop legacy git clone fallback).
+- 2026-05-19: Phase 23 COMPLETED — `src/ee/bb-design.ts` shipped (5 unit tests green); `installBBTemplates(nugetIds?)` selective install + `dotnet add package` loop wired; legacy clone fallback + `beSource` field removed; form gains "designing"/"design-preview" steps with package toggles + commercial section + `c` re-run; `lastIdealIdeaRef` captures `/ideal` intent for the form; new harness E2E spec `tests/harness/init-new-ee-design.spec.ts` (happy path + EE-down fallback, both pass). Scoped suite: 208 pass / 0 fail / 3 skip. tsc clean.
 
 ### Decisions
 

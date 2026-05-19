@@ -1,6 +1,6 @@
 /**
  * init-new.ts — Scaffolds a new muonroi project with:
- *   - <name>/server/  cloned from muonroi-building-block (BE)
+ *   - <name>/server/  scaffolded via `dotnet new <bbTemplate.shortName>` (BE)
  *   - <name>/client/  scaffolded with React or Angular + SemanticProvider wiring
  *
  * Phase 6 additions:
@@ -104,6 +104,15 @@ const NUGET_TO_SHORTNAME: Record<string, string> = {
 };
 
 /**
+ * Reverse lookup: dotnet shortName → NuGet package id.
+ * Used by `src/ee/bb-design.ts` to map an EE recipe's shortName back to
+ * the canonical nugetId for `dotnet new install`.
+ */
+export const SHORTNAME_TO_NUGET: Record<string, string> = Object.fromEntries(
+  Object.entries(NUGET_TO_SHORTNAME).map(([k, v]) => [v, k]),
+);
+
+/**
  * Task 6.1 — Detect dotnet SDK availability via spawnSync.
  * Returns the dotnet version string, or null if not found.
  */
@@ -143,14 +152,22 @@ export function detectInstalledBBTemplates(): Map<string, string> {
 
 /**
  * Task 6.2 — Install BB dotnet templates from NuGet with pinned versions.
- * Returns true if install succeeded, false if NuGet unreachable (caller falls back to clone).
+ * Returns true if install succeeded, false if NuGet unreachable.
+ *
+ * When `nugetIds` is provided, installs ONLY those packages (selective install
+ * triggered by EE-driven BB design — Plan 23-01b). When omitted, installs all
+ * `BB_TEMPLATE_PACKAGES` (back-compat for legacy callers and tests).
  *
  * Each package is installed individually as `Pkg::version` so a single failure
  * (e.g. one version yanked) does not abort the whole batch.
  */
-export function installBBTemplates(): boolean {
+export function installBBTemplates(nugetIds?: string[]): boolean {
+  const targets =
+    nugetIds && nugetIds.length > 0
+      ? BB_TEMPLATE_PACKAGES.filter((p) => nugetIds.includes(p.nugetId))
+      : BB_TEMPLATE_PACKAGES;
   let allOk = true;
-  for (const pkg of BB_TEMPLATE_PACKAGES) {
+  for (const pkg of targets) {
     const ref = pkg.version === "latest" ? pkg.nugetId : `${pkg.nugetId}::${pkg.version}`;
     const result = spawnSync("dotnet", ["new", "install", ref], {
       encoding: "utf8",
@@ -171,15 +188,15 @@ export function installBBTemplates(): boolean {
 export interface InitNewOptions {
   /** Target directory name; created at projectsRoot (or cwd). */
   projectName: string;
-  /** Absolute path or git URL for the muonroi-building-block source. */
-  beSource: string;
   /** "react" | "angular" | "none" */
   feStack: "react" | "angular" | "none";
   /** Where to write the project. Defaults to process.cwd(). */
   projectsRoot?: string;
   /**
-   * Task 6.2b — BB template selection.
-   * When absent → current clone path (backward-compatible).
+   * Task 6.2b / Plan 23-01b — BB template selection.
+   * When absent → FE-only project (BE scaffold skipped entirely).
+   * When provided → `dotnet new <shortName>` runs against the chosen template;
+   * the template is auto-installed from NuGet if not already present.
    */
   bbTemplate?: BBTemplateInfo;
   /**
@@ -205,7 +222,7 @@ export interface InitNewResult {
   projectDir: string;
   /** Relative paths of files written (relative to projectDir). */
   files: string[];
-  /** Whether dotnet-template path was used (vs. legacy clone path). */
+  /** Whether the dotnet-template path ran successfully (false for FE-only projects). */
   usedDotnetTemplate?: boolean;
 }
 
@@ -223,9 +240,7 @@ function validateProjectName(name: string): void {
     throw new Error(`Project name "${name}" contains path traversal characters. Use a simple name like "my-app".`);
   }
   if (!VALID_NAME_RE.test(name)) {
-    throw new Error(
-      `Project name "${name}" is invalid. Use kebab-case alphanumeric only (e.g. "my-app", "project1").`,
-    );
+    throw new Error(`Project name "${name}" is invalid. Use kebab-case alphanumeric only (e.g. "my-app", "project1").`);
   }
 }
 
@@ -409,7 +424,7 @@ function angularTsConfig(): string {
 // ---------------------------------------------------------------------------
 
 export async function initNewProject(opts: InitNewOptions): Promise<InitNewResult> {
-  const { projectName, beSource, feStack, projectsRoot } = opts;
+  const { projectName, feStack, projectsRoot } = opts;
 
   // 1. Validate project name.
   validateProjectName(projectName);
@@ -454,15 +469,29 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   // 5. Write root package.json.
   await write("package.json", rootPackageJson(projectName, hasClient));
 
-  // 6. Task 6.3 — Scaffold BE source.
-  //    If bbTemplate is provided + dotnet is available → use dotnet new template path.
-  //    Otherwise → fall back to legacy git clone path.
+  // 6. Task 6.3 / Plan 23-01b — Scaffold BE source via `dotnet new <bbTemplate>`.
+  //    Auto-installs the BB template from NuGet when not already present
+  //    (selective: only the chosen template, via `installBBTemplates([nugetId])`).
+  //    After scaffold + restore, runs `dotnet add package <id>` for each
+  //    EE-recommended package so .csproj <PackageReference> entries are added
+  //    by the SDK (Directory.Packages.props still pins versions when present).
+  //    The legacy git-clone fallback has been retired (Plan 23-01b).
   const serverDir = path.join(projectDir, "server");
   let usedDotnetTemplate = false;
 
   if (opts.bbTemplate) {
     const dotnetVersion = detectDotnet();
     if (dotnetVersion) {
+      // Plan 23-01b — auto-install the chosen BB template from NuGet if missing.
+      const installed = detectInstalledBBTemplates();
+      if (!installed.has(opts.bbTemplate.nugetId)) {
+        const ok = installBBTemplates([opts.bbTemplate.nugetId]);
+        if (!ok) {
+          process.stderr.write(`[init-new] failed to install ${opts.bbTemplate.nugetId} from NuGet\n`);
+          // fall through to throw below (no clone fallback)
+        }
+      }
+
       try {
         // Task 6.3 — run: dotnet new <shortName> -n <name> -o <target>/server
         await fsOps.exec(
@@ -471,6 +500,8 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         );
 
         // Task 6.3 — inject EE-recommended packages into Directory.Packages.props
+        // (pins versions; `dotnet add package` below adds the <PackageReference>
+        // entries to the .csproj without overriding those pins).
         const propsPath = path.join(serverDir, "Directory.Packages.props");
         if (opts.eePackages && opts.eePackages.length > 0 && fsOps.exists(propsPath)) {
           await injectPackagesProps(propsPath, opts.eePackages, opts.commercial ?? false, fsOps);
@@ -482,14 +513,22 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
           .exec("dotnet restore --nologo", serverDir)
           .catch((e: unknown) => ({ stdout: "", stderr: String(e) }));
         if (restoreResult.stderr && restoreResult.stderr.includes("error")) {
-          // Restore failed — roll back props file if we injected it and fall through to clone
-          process.stderr.write(`[init-new] dotnet restore failed after template scaffold; falling back to clone\n`);
-          // Attempt to re-restore without custom props (original props)
-          await fsOps
-            .exec("dotnet restore --nologo", serverDir)
-            .catch(() => {});
+          process.stderr.write(`[init-new] dotnet restore reported errors; continuing best-effort\n`);
         } else {
           usedDotnetTemplate = true;
+        }
+
+        // Plan 23-01b — add each EE-recommended package via `dotnet add package`.
+        // Single-package failures are logged but do NOT abort the scaffold.
+        for (const pkgId of opts.eePackages ?? []) {
+          try {
+            await fsOps.exec(`dotnet add package ${pkgId}`, serverDir);
+            filesWritten.push(`server/${path.basename(serverDir)}/<csproj-updated-${pkgId}>`);
+          } catch (e) {
+            process.stderr.write(
+              `[init-new] dotnet add package ${pkgId} failed: ${e instanceof Error ? e.message : String(e)}\n`,
+            );
+          }
         }
 
         // Task 6.5 — Emit EE-INTENT.md
@@ -506,9 +545,8 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
           }),
         );
       } catch (err) {
-        // dotnet new failed — fall through to clone path
         process.stderr.write(
-          `[init-new] dotnet new ${opts.bbTemplate.shortName} failed: ${err instanceof Error ? err.message : String(err)}; falling back to clone\n`,
+          `[init-new] dotnet new ${opts.bbTemplate.shortName} failed: ${err instanceof Error ? err.message : String(err)}\n`,
         );
         usedDotnetTemplate = false;
       }
@@ -516,9 +554,14 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   }
 
   if (!usedDotnetTemplate) {
-    // Legacy path: git clone BE source into server/
-    const cloneTarget = path.join(projectDir, "server");
-    await fsOps.exec(`git clone ${beSource} ${JSON.stringify(cloneTarget)}`, root);
+    if (opts.bbTemplate) {
+      throw new Error(
+        `Scaffold failed: dotnet template ${opts.bbTemplate.shortName} could not be applied. ` +
+          `Check that .NET SDK is installed and NuGet is reachable. ` +
+          `Run: dotnet new install ${opts.bbTemplate.nugetId}::${opts.bbTemplate.version}`,
+      );
+    }
+    // No bbTemplate provided → FE-only project, skip BE scaffold entirely.
   }
 
   // 7. Scaffold FE client.
@@ -618,9 +661,7 @@ async function injectPackagesProps(
     updatedContent = builder.build(parsed) as string;
   } catch {
     // fast-xml-parser not available or parse failed — append raw entries as comment
-    const rawEntries = filteredPackages
-      .map((pkg) => `  <PackageVersion Include="${pkg}" Version="*" />`)
-      .join("\n");
+    const rawEntries = filteredPackages.map((pkg) => `  <PackageVersion Include="${pkg}" Version="*" />`).join("\n");
     updatedContent = propsContent.replace(
       "</Project>",
       `  <!-- muonroi-cli:injected:ee-packages -->\n${rawEntries}\n  <!-- /muonroi-cli:injected:ee-packages -->\n</Project>`,
@@ -671,7 +712,7 @@ ${packageList}
 
 ## Coverage
 **Status:** ${opts.coverage}
-${opts.coverage === "partial" ? "\n> Some recommended packages have weak EE coverage (< 0.70). Code-gen applied generic wiring only for low-coverage packages. Run \`bun run ee:ingest-bb\` to improve coverage.\n" : ""}
+${opts.coverage === "partial" ? "\n> Some recommended packages have weak EE coverage (< 0.70). Code-gen applied generic wiring only for low-coverage packages. Run `bun run ee:ingest-bb` to improve coverage.\n" : ""}
 
 ## Resume
 To re-apply or fix scaffold issues interactively:

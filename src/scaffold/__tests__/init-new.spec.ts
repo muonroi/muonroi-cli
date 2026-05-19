@@ -4,7 +4,61 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { InitNewOptions } from "../init-new.js";
+
+// ---------------------------------------------------------------------------
+// Mock node:child_process so the bbTemplate path can run without real dotnet.
+//   - `dotnet --version`   → simulate dotnet present / absent via SPAWN_MODE
+//   - `dotnet new list`    → empty (template not installed) so installBBTemplates fires
+//   - `dotnet new install` → ok (status 0)
+// All test exec() calls go through opts.fs.exec (a vi.fn), so spawnSync is
+// only invoked by detectDotnet / detectInstalledBBTemplates / installBBTemplates.
+// ---------------------------------------------------------------------------
+const spawnSyncCalls: Array<{ cmd: string; args: string[] }> = [];
+let SPAWN_MODE: "dotnet-present" | "dotnet-absent" = "dotnet-absent";
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return {
+    ...actual,
+    spawnSync: (cmd: string, args: string[]) => {
+      spawnSyncCalls.push({ cmd, args });
+      if (cmd !== "dotnet") {
+        return { status: 1, stdout: "", stderr: "no such command", pid: 0, output: [], signal: null } as ReturnType<
+          typeof actual.spawnSync
+        >;
+      }
+      if (args[0] === "--version") {
+        return SPAWN_MODE === "dotnet-present"
+          ? ({ status: 0, stdout: "9.0.100\n", stderr: "", pid: 0, output: [], signal: null } as ReturnType<
+              typeof actual.spawnSync
+            >)
+          : ({ status: 1, stdout: "", stderr: "not found", pid: 0, output: [], signal: null } as ReturnType<
+              typeof actual.spawnSync
+            >);
+      }
+      if (args[0] === "new" && args[1] === "list") {
+        // Pretend nothing is installed so installBBTemplates fires.
+        return {
+          status: 0,
+          stdout: "Template Name      Short Name\n--------------\n",
+          stderr: "",
+          pid: 0,
+          output: [],
+          signal: null,
+        } as ReturnType<typeof actual.spawnSync>;
+      }
+      if (args[0] === "new" && args[1] === "install") {
+        return { status: 0, stdout: "installed", stderr: "", pid: 0, output: [], signal: null } as ReturnType<
+          typeof actual.spawnSync
+        >;
+      }
+      return { status: 1, stdout: "", stderr: "unhandled", pid: 0, output: [], signal: null } as ReturnType<
+        typeof actual.spawnSync
+      >;
+    },
+  };
+});
+
 import { initNewProject } from "../init-new.js";
 
 // ---------------------------------------------------------------------------
@@ -30,11 +84,10 @@ function makeMockFs(opts?: { mkdirThrows?: string; existsReturns?: boolean }) {
 // ---------------------------------------------------------------------------
 
 describe("initNewProject — react", () => {
-  it("creates expected directories and files for react stack", async () => {
+  it("creates expected directories and files for react stack (FE-only, no bbTemplate)", async () => {
     const fs = makeMockFs();
     const result = await initNewProject({
       projectName: "test-app",
-      beSource: "/fake/bb",
       feStack: "react",
       projectsRoot: "/tmp/projects",
       fs,
@@ -54,12 +107,10 @@ describe("initNewProject — react", () => {
     expect(result.files).toContain("client/index.html");
     expect(result.files).toContain("client/src/main.tsx");
 
-    // git clone invoked with beSource
-    const execCalls = fs.exec.mock.calls;
-    expect(execCalls.length).toBe(1);
-    const cloneCmd = execCalls[0][0] as string;
-    expect(cloneCmd).toContain("git clone");
-    expect(cloneCmd).toContain("/fake/bb");
+    // No bbTemplate → no BE scaffold commands run (clone fallback retired).
+    const execCmds = fs.exec.mock.calls.map((c) => c[0] as string);
+    expect(execCmds.every((cmd) => !cmd.startsWith("git clone"))).toBe(true);
+    expect(execCmds.every((cmd) => !cmd.startsWith("dotnet"))).toBe(true);
 
     // main.tsx contains SemanticProvider
     const writeFileCalls = fs.writeFile.mock.calls;
@@ -81,7 +132,6 @@ describe("initNewProject — angular", () => {
     const fs = makeMockFs();
     const result = await initNewProject({
       projectName: "ng-app",
-      beSource: "/fake/bb",
       feStack: "angular",
       projectsRoot: "/tmp/projects",
       fs,
@@ -120,7 +170,6 @@ describe("initNewProject — none", () => {
     const fs = makeMockFs();
     const result = await initNewProject({
       projectName: "be-only",
-      beSource: "/fake/bb",
       feStack: "none",
       projectsRoot: "/tmp/projects",
       fs,
@@ -137,8 +186,8 @@ describe("initNewProject — none", () => {
     // root package.json still written
     expect(result.files).toContain("package.json");
 
-    // git clone still runs
-    expect(fs.exec.mock.calls.length).toBe(1);
+    // No BE commands either (no bbTemplate provided).
+    expect(fs.exec.mock.calls.length).toBe(0);
   });
 });
 
@@ -152,7 +201,6 @@ describe("initNewProject — existence guard", () => {
     await expect(
       initNewProject({
         projectName: "existing-app",
-        beSource: "/fake/bb",
         feStack: "react",
         projectsRoot: "/tmp/projects",
         fs,
@@ -171,7 +219,6 @@ describe("initNewProject — name validation", () => {
     await expect(
       initNewProject({
         projectName: "../escape",
-        beSource: "/fake/bb",
         feStack: "react",
         fs,
       }),
@@ -183,7 +230,6 @@ describe("initNewProject — name validation", () => {
     await expect(
       initNewProject({
         projectName: "",
-        beSource: "/fake/bb",
         feStack: "react",
         fs,
       }),
@@ -195,7 +241,6 @@ describe("initNewProject — name validation", () => {
     await expect(
       initNewProject({
         projectName: "foo\\bar",
-        beSource: "/fake/bb",
         feStack: "react",
         fs,
       }),
@@ -207,10 +252,93 @@ describe("initNewProject — name validation", () => {
     await expect(
       initNewProject({
         projectName: "my app",
-        beSource: "/fake/bb",
         feStack: "react",
         fs,
       }),
     ).rejects.toThrow(/invalid/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 6 (Plan 23-01b): bbTemplate path auto-installs missing template and
+// invokes `dotnet add package` per EE package.
+// ---------------------------------------------------------------------------
+
+describe("initNewProject — bbTemplate + EE packages (Plan 23-01b)", () => {
+  it("auto-installs the chosen template when missing and runs `dotnet add package` per EE package", async () => {
+    SPAWN_MODE = "dotnet-present";
+    spawnSyncCalls.length = 0;
+
+    const fs = makeMockFs();
+    const result = await initNewProject({
+      projectName: "todo-api",
+      feStack: "none",
+      projectsRoot: "/tmp/projects",
+      bbTemplate: {
+        shortName: "mr-base-sln",
+        nugetId: "Muonroi.BaseTemplate",
+        version: "1.0.0-alpha.3",
+      },
+      eePackages: ["Muonroi.AspNetCore", "Muonroi.Tenancy"],
+      fs,
+    });
+
+    // installBBTemplates was invoked with the selective nugetId.
+    const installCall = spawnSyncCalls.find(
+      (c) => c.cmd === "dotnet" && c.args[0] === "new" && c.args[1] === "install",
+    );
+    expect(installCall).toBeDefined();
+    expect(installCall!.args[2]).toBe("Muonroi.BaseTemplate::1.0.0-alpha.3");
+
+    // Only the chosen template was installed — sibling templates left alone.
+    const installRefs = spawnSyncCalls
+      .filter((c) => c.args[0] === "new" && c.args[1] === "install")
+      .map((c) => c.args[2]);
+    expect(installRefs).toEqual(["Muonroi.BaseTemplate::1.0.0-alpha.3"]);
+
+    // The exec recorder should contain `dotnet new mr-base-sln`, restore, and
+    // both `dotnet add package` calls (one per EE package).
+    const execCmds = fs.exec.mock.calls.map((c) => [c[0] as string, c[1] as string]);
+    expect(execCmds.some(([cmd]) => cmd.startsWith("dotnet new mr-base-sln "))).toBe(true);
+    expect(execCmds.some(([cmd]) => cmd === "dotnet restore --nologo")).toBe(true);
+
+    const addPackageCalls = execCmds.filter(([cmd]) => cmd.startsWith("dotnet add package "));
+    expect(addPackageCalls.length).toBe(2);
+    expect(
+      addPackageCalls.some(([cmd, cwd]) => cmd === "dotnet add package Muonroi.AspNetCore" && cwd.includes("server")),
+    ).toBe(true);
+    expect(
+      addPackageCalls.some(([cmd, cwd]) => cmd === "dotnet add package Muonroi.Tenancy" && cwd.includes("server")),
+    ).toBe(true);
+
+    // No legacy `git clone` ever runs.
+    expect(execCmds.every(([cmd]) => !cmd.startsWith("git clone"))).toBe(true);
+
+    // Result flagged with template usage.
+    expect(result.usedDotnetTemplate).toBe(true);
+  });
+
+  it("throws (no clone fallback) when dotnet is unavailable but bbTemplate is requested", async () => {
+    SPAWN_MODE = "dotnet-absent";
+    spawnSyncCalls.length = 0;
+
+    const fs = makeMockFs();
+    await expect(
+      initNewProject({
+        projectName: "todo-api3",
+        feStack: "none",
+        projectsRoot: "/tmp/projects",
+        bbTemplate: {
+          shortName: "mr-base-sln",
+          nugetId: "Muonroi.BaseTemplate",
+          version: "1.0.0-alpha.3",
+        },
+        fs,
+      }),
+    ).rejects.toThrow(/Scaffold failed/i);
+
+    // No git clone command ever runs (no fallback).
+    const execCmds = fs.exec.mock.calls.map((c) => c[0] as string);
+    expect(execCmds.every((cmd) => !cmd.startsWith("git clone"))).toBe(true);
   });
 });
