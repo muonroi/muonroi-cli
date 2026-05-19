@@ -333,6 +333,17 @@ export function getDotnetCommand(): string {
   return _resolvedDotnetPath ?? "dotnet";
 }
 
+/**
+ * Whether to wrap spawnSync in a shell. We need shell:true on Windows ONLY when
+ * relying on PATHEXT resolution of the literal "dotnet". When we have an
+ * absolute resolved path (e.g. "C:\\Program Files\\dotnet\\dotnet.exe"), shell:true
+ * triggers a quoting bug — cmd.exe splits the path at the first space and
+ * fails with "'C:\\Program' is not recognized". Use shell:false in that case.
+ */
+function dotnetSpawnShell(): boolean {
+  return NEEDS_SHELL && _resolvedDotnetPath === null;
+}
+
 /** Test-only / diagnostic accessor. */
 export function getDotnetDiagnostic(): string {
   return _lastDotnetDetectDiagnostic;
@@ -370,7 +381,7 @@ export function detectInstalledBBTemplates(): Map<string, string> {
   const result = spawnSync(getDotnetCommand(), ["new", "list"], {
     encoding: "utf8",
     timeout: 15000,
-    shell: NEEDS_SHELL,
+    shell: dotnetSpawnShell(),
   });
   const installed = new Map<string, string>();
   if (result.status !== 0 || !result.stdout) return installed;
@@ -415,7 +426,7 @@ export function installBBTemplates(nugetIds?: string[]): boolean {
     const result = spawnSync(getDotnetCommand(), ["new", "install", ref], {
       encoding: "utf8",
       timeout: 60000,
-      shell: NEEDS_SHELL,
+      shell: dotnetSpawnShell(),
     });
     const alreadyInstalled = result.status === 106 || (result.stdout ?? "").includes("is already installed");
     if (result.status !== 0 && !alreadyInstalled) {
