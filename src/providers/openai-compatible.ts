@@ -12,6 +12,7 @@ import { redactor } from "../utils/redactor.js";
 import { OPENAI_COMPATIBLE_BASE_URLS as DEFAULT_BASE_URLS } from "./endpoints.js";
 import { streamFromFullStream } from "./stream-loop.js";
 import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
+import { wireDebug } from "./wire-debug.js";
 
 /**
  * Create an OpenAI-compatible adapter (DeepSeek, SiliconFlow, xAI/Grok, or custom).
@@ -32,6 +33,18 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
   return {
     id: config.id as import("./types.js").ProviderId,
     async *stream(req: AdapterRequest): ProviderStream {
+      if (wireDebug.enabled) {
+        wireDebug.logRequest({
+          providerId: config.id,
+          modelId: config.model,
+          messages: req.messages as readonly unknown[],
+          toolNames: req.tools
+            ? Array.isArray(req.tools)
+              ? (req.tools as Array<{ name?: string }>).map((t) => t?.name ?? "?")
+              : Object.keys(req.tools as Record<string, unknown>)
+            : undefined,
+        });
+      }
       const result = streamText({
         model: provider(config.model),
         messages: req.messages,
@@ -39,7 +52,7 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
         toolChoice: req.toolChoice as any,
         abortSignal: req.abortSignal,
       });
-      yield* streamFromFullStream(result.fullStream);
+      yield* streamFromFullStream(result.fullStream, config.id);
     },
   };
 }
