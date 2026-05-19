@@ -72,8 +72,13 @@ Audit reference: `.planning/research/v1.6-council-quality-context.md` — full r
 
 - 2026-05-19: Milestone v1.8 "Hardening & Resilience" added with Phases 20-22 (origin: code review 2026-05-19, see `.planning/notes/code-review-2026-05-19.md`).
 - 2026-05-19: Phase 20 added — Harness Test Coverage Hardening.
-- 2026-05-19: Phase 21 added — EE Observability & Resilience.
+- 2026-05-19: Phase 21 added — EE Observability & Resilience (split into 21-01 backend + 21-02 UI).
 - 2026-05-19: Phase 22 added — Small Hardening Bundle (sha256 dedup + shim deprecation).
+- 2026-05-19: Phase 22 COMPLETED (commit `4ff9ca1`) — sha256-16 dedup, agent-harness shim deprecation, 4 README migration sections.
+- 2026-05-19: Phase 20 COMPLETED (commit `94fa1e3`) — 35 specs inventoried, 3 specs un-skipped (api-key, disconnect, modal-focus composer), 2 doc-stub todos removed, `lint:harness-skips` script + allowlist, ratio 39% → 28.6%.
+- 2026-05-19: Phase 21 COMPLETED (commits `c1a58b5` + `cee8f42`) — `ee-logger` + 13 silent-catch refactors, protocol bump 0.2.0 → 0.3.0 with `ee-timeout` + `ee-error` events, Toast component + `/ee-context` slash command, 3 timeout env overrides, harness E2E spec.
+- 2026-05-19: Side fix — `src/pil/layer1-intent.test.ts` 4 pre-existing fails resolved by mocking `pilContext` + `isUnifiedPilEnabled=false` (committed with 21-01).
+- 2026-05-19: Full suite verified — **2432 pass / 0 fail / 10 skip / 2 todo** (was 2428 pass / 4 fail / 10 skip / 2 todo).
 
 ### Decisions
 
