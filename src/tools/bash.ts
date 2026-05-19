@@ -1,5 +1,5 @@
 import { type ChildProcess, exec, spawn } from "child_process";
-import { createReadStream, createWriteStream } from "fs";
+import { createReadStream, createWriteStream, existsSync } from "fs";
 import { mkdtemp, rm, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
@@ -383,6 +383,16 @@ export class BashTool {
 
   getCwd(): string {
     return this.cwd;
+  }
+
+  setCwd(next: string): void {
+    if (!path.isAbsolute(next)) {
+      throw new Error(`setCwd: path must be absolute, got: ${next}`);
+    }
+    if (!existsSync(next)) {
+      throw new Error(`setCwd: path does not exist: ${next}`);
+    }
+    this.cwd = next;
   }
 
   getSandboxMode(): SandboxMode {

@@ -617,6 +617,10 @@ export class Agent {
     return this.bash.getCwd();
   }
 
+  setCwd(dir: string): void {
+    this.bash.setCwd(dir);
+  }
+
   getMessages(): ModelMessage[] {
     return this.messages;
   }
