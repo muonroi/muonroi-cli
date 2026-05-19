@@ -170,14 +170,16 @@ describe("sprint-runner", () => {
     expect(haltChunks).toHaveLength(1);
     expect(haltChunks[0]).toMatchObject({
       type: "halt",
-      reason: "no_recipe",
-      recovery_options: expect.arrayContaining([
-        expect.objectContaining({ id: "init_new" }),
-        expect.objectContaining({ id: "point_to_existing" }),
-        expect.objectContaining({ id: "continue_as_council" }),
-      ]),
+      haltChunk: {
+        reason: "no_recipe",
+        recovery_options: expect.arrayContaining([
+          expect.objectContaining({ id: "init_new" }),
+          expect.objectContaining({ id: "point_to_existing" }),
+          expect.objectContaining({ id: "continue_as_council" }),
+        ]),
+      },
     });
-    expect((haltChunks[0] as any).recovery_options).toHaveLength(3);
+    expect((haltChunks[0] as any).haltChunk.recovery_options).toHaveLength(3);
     expect(runCouncil).not.toHaveBeenCalled();
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
@@ -442,8 +444,8 @@ describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
     // Halt chunk must be in the yielded stream.
     const halt = chunks.find((c: any) => c.type === "halt");
     expect(halt).toBeDefined();
-    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
-    expect((halt as any).recovery_options).toHaveLength(3);
+    expect(halt).toMatchObject({ type: "halt", haltChunk: { reason: "no_recipe" } });
+    expect((halt as any).haltChunk.recovery_options).toHaveLength(3);
     // Planner and verifier must NOT have run.
     expect(runCouncil).not.toHaveBeenCalled();
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
@@ -462,8 +464,8 @@ describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
     expect(error).toBeUndefined();
     const halt = chunks.find((c: any) => c.type === "halt");
     expect(halt).toBeDefined();
-    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
-    expect((halt as any).recovery_options).toHaveLength(3);
+    expect(halt).toMatchObject({ type: "halt", haltChunk: { reason: "no_recipe" } });
+    expect((halt as any).haltChunk.recovery_options).toHaveLength(3);
   });
 
   it("call site 3 pattern — CB-3 halt chunk is forwarded through phase-runner sprintRunner adapter", async () => {
@@ -488,8 +490,8 @@ describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
     expect(error).toBeUndefined();
     const halt = chunks.find((c: any) => c.type === "halt");
     expect(halt).toBeDefined();
-    expect(halt).toMatchObject({ type: "halt", reason: "no_recipe" });
-    expect((halt as any).recovery_options).toHaveLength(3);
+    expect(halt).toMatchObject({ type: "halt", haltChunk: { reason: "no_recipe" } });
+    expect((halt as any).haltChunk.recovery_options).toHaveLength(3);
     // Planner must NOT have been called.
     expect(runCouncil).not.toHaveBeenCalled();
   });

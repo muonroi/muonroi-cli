@@ -154,7 +154,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     } catch {
       /* best-effort */
     }
-    yield haltChunk as unknown as StreamChunk;
+    // Wrap the structured halt payload into the canonical StreamChunk shape
+    // the TUI consumer expects: `{ type: "halt", haltChunk }`. Yielding the
+    // bare HaltChunk caused the TUI to silently swallow the chunk because
+    // `chunk.haltChunk` was undefined at the consumer site (src/ui/app.tsx).
+    yield { type: "halt", haltChunk } as StreamChunk;
     return undefined as unknown as IterationState;
   }
 
@@ -242,7 +246,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
       | { emitEvent: (e: unknown) => void }
       | undefined;
-    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "implementation", runId: ctx.runId });
+    _ar?.emitEvent({
+      t: "event",
+      kind: "sprint-stage",
+      sprintIndex: sprintN,
+      stage: "implementation",
+      runId: ctx.runId,
+    });
   } catch {
     /* best-effort */
   }
