@@ -62,7 +62,11 @@ function renderInteractionTimeline(rows: readonly InteractionRow[]): string[] {
         const parts: string[] = [];
         for (const [k, v] of Object.entries(meta)) {
           if (v === null || v === undefined) continue;
-          const vStr = typeof v === "string" ? (v.length > 80 ? `${v.slice(0, 77)}…` : v) : JSON.stringify(v);
+          // Error/diagnostic fields get a larger budget so root cause is
+          // legible directly in the timeline. Other strings stay terse.
+          const isLongField = k === "message" || k === "error" || k === "reason";
+          const cap = isLongField ? 400 : 80;
+          const vStr = typeof v === "string" ? (v.length > cap ? `${v.slice(0, cap - 3)}…` : v) : JSON.stringify(v);
           parts.push(`${k}=${vStr}`);
         }
         detail = parts.length > 0 ? ` ${parts.join(" ")}` : "";
