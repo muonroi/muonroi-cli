@@ -45,9 +45,14 @@ describe("buildIdealContinuationPrompt", () => {
     expect(result).not.toContain("with packages:");
   });
 
-  it("mentions docs.search and dotnet build", () => {
+  it("mentions docs_search MCP tool and dotnet build", () => {
     const result = buildIdealContinuationPrompt(base);
-    expect(result).toContain("docs.search");
+    expect(result).toContain("docs_search");
     expect(result).toContain("dotnet build");
+  });
+
+  it("instructs LLM to tolerate missing README/AGENTS files", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result.toLowerCase()).toContain("missing files are fine");
   });
 });

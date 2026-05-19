@@ -26,8 +26,8 @@ You MUST implement this feature now. Do NOT ask the user for clarification unles
 Execute these steps in order:
 
 1. Discover structure (1-2 tool calls max)
-   - If the \`muonroi-docs\` MCP server is available, call \`docs.search({query:"${templateName} structure overview"})\` to get a structured summary.
-   - Otherwise read these files in parallel: \`README.md\`, \`Agent.md\`, \`AGENTS.md\`, \`EE-INTENT.md\`.
+   - PREFERRED: if a \`muonroi-docs\` MCP tool is in your tool list (look for any \`mcp_*docs*_docs_search\` tool), call it with query \`"${templateName} structure overview"\`. This is faster than reading files.
+   - FALLBACK: list the project directory, then read whichever of \`README.md\`, \`AGENTS.md\`, \`Agent.md\`, \`EE-INTENT.md\` actually exist (do NOT assume — missing files are fine, just skip them).
    - Identify: project name, main entry point (Program.cs / Gateway), modular boundaries, where to add new domain code.
 
 2. Design the feature
