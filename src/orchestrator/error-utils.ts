@@ -26,7 +26,16 @@ export function isAuthenticationError(error: unknown): boolean {
   );
 }
 
+export function isMalformedFunctionNameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Expected ['"]function\.name['"] to be a string/i.test(message);
+}
+
 export function humanizeApiError(error: unknown): string {
+  if (isMalformedFunctionNameError(error)) {
+    return "Model emitted a malformed tool call (function.name missing). Skipping this turn — please retry or rephrase.";
+  }
+
   if (APICallError.isInstance(error)) {
     const detail = extractResponseDetail(error.responseBody);
     if (detail) return detail;
