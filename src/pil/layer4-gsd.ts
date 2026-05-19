@@ -22,6 +22,7 @@ import { scoreComplexity } from "../gsd/complexity.js";
 import { buildDirective } from "../gsd/directives.js";
 import { detectGrayAreas } from "../gsd/gray-areas.js";
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
+import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -67,7 +68,10 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   // any phase L1 derived is already on ctx.gsdPhase, and a separate routeTask
   // round-trip would duplicate the brain hit the unified endpoint replaces.
   if (!phase && !ctx._brainData) {
-    const eeRoute = await routeTask(ctx.raw).catch(() => null);
+    const eeRoute = await routeTask(ctx.raw).catch((err) => {
+      logEeFailure("pil.layer4.routeTask", classifyEeError(err), err);
+      return null;
+    });
     if (eeRoute?.route && !eeRoute.needs_disambiguation && eeRoute.confidence >= 0.6) {
       phase = mapRouteToPhase(eeRoute.route);
       routeSource = `ee:${eeRoute.source}`;

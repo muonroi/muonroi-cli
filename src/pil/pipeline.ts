@@ -16,6 +16,7 @@
 
 import { getCachedServerBaseUrl } from "../ee/auth.js";
 import { getCachedEEClientMode } from "../ee/client-mode.js";
+import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";
 import { layer1Intent } from "./layer1-intent.js";
@@ -149,7 +150,10 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
     layers: layerSnapshots,
     fallbackReason: ctx.fallbackReason ?? null,
     intentDetection: ctx._intentTrace ?? null,
-  }).catch(() => undefined);
+  }).catch((err) => {
+    logEeFailure("pil.pipeline.logInteraction", classifyEeError(err), err);
+    return undefined;
+  });
 
   return ctx;
 }

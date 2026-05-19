@@ -1,4 +1,4 @@
-export const PROTOCOL_VERSION = "0.2.0" as const;
+export const PROTOCOL_VERSION = "0.3.0" as const;
 
 export type Role =
   | "dialog"
@@ -160,6 +160,36 @@ export type LiveEvent =
       cacheReadTokens?: number;
       cacheCreationTokens?: number;
       messageSeq?: number | null;
+    }
+  // Phase 21 — Experience Engine observability. Emitted by src/utils/ee-logger.ts
+  // whenever a silent EE catch site fires. `source` is a stable identifier (e.g.
+  // `bridge.classifyViaBrain`, `pil.pipeline.logInteraction`) — see Plan 21-01
+  // table for the canonical list.
+  | {
+      t: "event";
+      kind: "ee-timeout";
+      source: string;
+      elapsedMs?: number;
+      budgetMs?: number;
+      ts: number;
+    }
+  | {
+      t: "event";
+      kind: "ee-error";
+      source: string;
+      name?: string;
+      message?: string;
+      ts: number;
+    }
+  // Transport-level event — fired by the harness helper when the underlying
+  // outRead stream emits 'end' or 'close'. Lets E2E specs assert a typed
+  // disconnect contract instead of waiting for a generic wait_for timeout.
+  | {
+      t: "event";
+      kind: "disconnect";
+      /** "end" — orderly EOF; "close" — stream closed (possibly with error). */
+      reason: "end" | "close";
+      ts: number;
     }
   | { t: "idle" };
 

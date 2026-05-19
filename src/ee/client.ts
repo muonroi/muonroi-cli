@@ -1,3 +1,4 @@
+import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { drainQueue, enqueue } from "./offline-queue.js";
 import type {
   ColdRouteRequest,
@@ -298,7 +299,8 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => {
+      }).catch((err) => {
+        logEeFailure("client.posttool", classifyEeError(err), err);
         /* fire-and-forget error swallowed */
       });
     },
@@ -346,7 +348,8 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => {
+      }).catch((err) => {
+        logEeFailure("client.feedback", classifyEeError(err), err);
         void enqueue({ endpoint: "/api/feedback", body: payload, enqueuedAt: Date.now() });
       });
     },
@@ -356,7 +359,8 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({ tenantId }),
-      }).catch(() => {
+      }).catch((err) => {
+        logEeFailure("client.touch", classifyEeError(err), err);
         /* fire-and-forget */
       });
     },
@@ -367,7 +371,8 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
-      }).catch(() => {
+      }).catch((err) => {
+        logEeFailure("client.routeFeedback", classifyEeError(err), err);
         /* fire-and-forget */
       });
     },

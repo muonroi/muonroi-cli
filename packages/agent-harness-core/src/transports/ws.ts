@@ -44,7 +44,7 @@ const FrameEnvelopeSchema = z.object({
   dir: z.literal("frame"),
   mode: z.literal("live"),
   // NOTE: field name is `version`, NOT `protocolVersion` — see TRANSPORTS.md Editor Note.
-  version: z.literal("0.2.0"),
+  version: z.literal("0.3.0"),
   seq: z.number().int().nonnegative(),
   ts: z.number().int().nonnegative(),
   focus: z.string().optional(),

@@ -254,7 +254,7 @@ Controls which event kinds are emitted on the sidechannel.
 opt in with `MUONROI_HARNESS_EVENTS=llm-token` only when you need token-level
 correlation.
 
-### All LiveEvent kinds (protocol version 0.2.0)
+### All LiveEvent kinds (protocol version 0.3.0)
 
 | kind | When emitted | Key payload fields |
 |---|---|---|
@@ -270,6 +270,8 @@ correlation.
 | `llm-done` | LLM call completes | `correlationId`, `totalChars`, `finishReason` |
 | `toast` | Error/info toast displayed | `level`, `text` |
 | `stream.delta` | Streaming text chunk | `target`, `text` |
+| `ee-timeout` | Experience Engine call exceeded its budget | `source`, `elapsedMs`, `budgetMs`, `ts` |
+| `ee-error` | Experience Engine call failed with a non-timeout error | `source`, `name`, `message`, `ts` |
 
 ## Selector grammar quick reference
 
@@ -337,15 +339,19 @@ wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && bunx vitest run tests/harness/mcp
 
 ## Known caveats (read before debugging "test failures")
 
-1. **`composer.spec.ts` asserting `query("focus")`** can fail on a fresh WSL clone because the API-key modal grabs focus when no key is configured. The composer Semantic is correctly wired but reports `focus: undefined`. Either pre-seed a key (`bun run src/index.ts -k FAKE -m gpt-4o-mini --smoke-boot-only` won't persist it; need keychain) or relax the test to assert role only.
+1. **`composer.spec.ts` asserting `query("focus")`** can fail on a fresh WSL clone because the API-key modal grabs focus when no key is configured. The composer Semantic is correctly wired but reports `focus: undefined`. Either pre-seed a key (`bun run src/index.ts -k FAKE -m gpt-4o-mini --smoke-boot-only` won't persist it; need keychain) or relax the test to assert role only. (The api-key modal spec itself is fully un-skipped — see commit `62ec65a` wiring `MUONROI_TEST_NO_KEYCHAIN=1`.)
 
-2. **`council-flow.spec.ts` and `determinism.spec.ts` are `describe.skip`** — they wait for a Council picker dialog that the TUI doesn't render yet. Re-enable after wrapping the picker (if it gets built) with `<Semantic role="dialog" name="Council" isModal>`.
+2. **`council-flow.spec.ts:69` and `askcard.spec.ts:33,51` and `ideal.spec.ts:49,68` are `it.skip`** (not `describe.skip`). Blocker: the council/loop orchestrator phase pipeline (preflight + debate-planner `generateObject`, and `src/product-loop/loop-driver.ts` phase gating) rejects the mock-llm fixture JSON, so the `council_question` / `product_status_card` chunks never reach `app.tsx` within 30s. Fix requires instrumenting the orchestrator and expanding fixture coverage — out of scope for harness work.
 
-3. **`scroll.spec.ts`, `modal-focus.spec.ts`, `error-states.spec.ts`** have `it.todo` stubs documenting features the TUI doesn't yet expose (props.scrollTop, modal focus restore, mock-llm error injection).
+3. **`scroll.spec.ts`, `modal-focus.spec.ts`** have `it.todo` stubs documenting features the TUI doesn't yet expose (props.scrollTop on a scrollable listbox, modal focus restore). `error-states.spec.ts` was un-skipped in commit `96ae341` and is now active.
 
-4. **Frame timing**: `addPostProcessFn` fires at targetFps (~60Hz) even without React changes. The harness dedupes via hash. If you see suspiciously many duplicate `LiveFrame` lines in fd3, the dedup may have broken — see spike-0a-findings.md.
+4. **`cost-leak-f1-tui.spec.ts:47` is `it.skip`** — the `openai.promptCacheKey` branch in `src/orchestrator/orchestrator.ts` is not exercised because the mock-llm path uses a deepseek model id. Fix requires threading a provider-id override through `--mock-llm` so the mock claims the openai provider while still being routed through `resolveModelRuntime`.
 
-5. **Windows native fd3/4**: bun's `spawn` accepts `stdio: [..., "pipe", "pipe"]` on Linux/macOS but fails on Windows. The MCP driver's `tui.start` explicitly returns `windows_unsupported` rather than trying. To extend to Windows, swap fd3/4 for named pipes (~½ day, not started).
+5. **Frame timing**: `addPostProcessFn` fires at targetFps (~60Hz) even without React changes. The harness dedupes via hash. If you see suspiciously many duplicate `LiveFrame` lines in fd3, the dedup may have broken — see spike-0a-findings.md.
+
+6. **Windows native fd3/4**: bun's `spawn` accepts `stdio: [..., "pipe", "pipe"]` on Linux/macOS but fails on Windows. The MCP driver's `tui.start` explicitly returns `windows_unsupported` rather than trying. To extend to Windows, swap fd3/4 for named pipes (~½ day, not started).
+
+7. **Skip ratio policing**: `bun run lint:harness-skips` audits every `.skip` / `.todo` in `tests/harness/**` against `scripts/.harness-skips-allow.json`. Default threshold 40% (warn-only); `lint:harness-skips:strict` exits non-zero in CI when the ratio is exceeded or a new skip is added without an allowlist entry.
 
 ## Headless verification (no TUI, no terminal)
 

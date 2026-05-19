@@ -7,6 +7,11 @@ vi.mock("../router/classifier/index.js", () => ({
 
 vi.mock("../ee/bridge.js", () => ({
   classifyViaBrain: vi.fn(),
+  pilContext: vi.fn(),
+}));
+
+vi.mock("./config.js", () => ({
+  isUnifiedPilEnabled: vi.fn(() => false),
 }));
 
 import { classifyViaBrain } from "../ee/bridge.js";

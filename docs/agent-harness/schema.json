@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://muonroi.dev/agent-harness/0.2.0/schema.json",
+  "$id": "https://muonroi.dev/agent-harness/0.3.0/schema.json",
   "title": "Agent Harness Protocol",
   "definitions": {
     "Role": {
@@ -54,7 +54,7 @@
       "additionalProperties": false,
       "properties": {
         "mode": { "const": "live" },
-        "version": { "const": "0.2.0" },
+        "version": { "const": "0.3.0" },
         "seq": { "type": "integer", "minimum": 0 },
         "ts": { "type": "integer", "minimum": 0 },
         "focus": { "type": "string" },
@@ -110,7 +110,7 @@
       "additionalProperties": false,
       "properties": {
         "mode": { "const": "design" },
-        "version": { "const": "0.2.0" },
+        "version": { "const": "0.3.0" },
         "target": { "enum": ["tui", "react", "angular", "any"] },
         "scenes": {
           "type": "array",

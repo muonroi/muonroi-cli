@@ -11,6 +11,7 @@ import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
+import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 
 // ─── Internal type contract (matches experience-core.js module.exports shape) ──
 // NOT exported — callers use the narrower return types from the public API below.
@@ -151,7 +152,8 @@ export async function classifyViaBrain(prompt: string, timeoutMs = 5000): Promis
       // Server unreachable — fall through to in-process path so a fat-client
       // box still works after a transient network blip.
     }
-  } catch {
+  } catch (err) {
+    logEeFailure("bridge.classifyViaBrain", classifyEeError(err), err, { budgetMs: timeoutMs });
     /* fall through */
   }
 
@@ -159,7 +161,8 @@ export async function classifyViaBrain(prompt: string, timeoutMs = 5000): Promis
   if (!core) return null;
   try {
     return await silentCall(() => core.classifyViaBrain(prompt, timeoutMs));
-  } catch {
+  } catch (err) {
+    logEeFailure("bridge.classifyViaBrain", classifyEeError(err), err, { budgetMs: timeoutMs });
     return null;
   }
 }
@@ -197,7 +200,8 @@ export async function routeModel(
   if (!core) return null;
   try {
     return await silentCall(() => core.routeModel(task, context, runtime));
-  } catch {
+  } catch (err) {
+    logEeFailure("bridge.routeModel", classifyEeError(err), err);
     return null;
   }
 }
@@ -237,7 +241,8 @@ export async function routeTask(
   if (!core?.routeTask) return null;
   try {
     return await silentCall(() => core.routeTask(task, context, runtime));
-  } catch {
+  } catch (err) {
+    logEeFailure("bridge.routeTask", classifyEeError(err), err);
     return null;
   }
 }
@@ -307,7 +312,8 @@ export async function searchByText(
         payload: { text: p.text },
         collection: p.collection,
       }));
-    } catch {
+    } catch (err) {
+      logEeFailure("bridge.searchByText", classifyEeError(err), err);
       return [];
     }
   }

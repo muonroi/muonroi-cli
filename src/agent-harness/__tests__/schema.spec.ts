@@ -34,7 +34,7 @@ describe("schema rejects invalid data", () => {
       $ref: `${schema.$id}#/definitions/LiveFrame`,
     });
     const badData = {
-      version: "0.2.0",
+      version: "0.3.0",
       seq: 0,
       ts: 0,
       nodes: [],
@@ -48,7 +48,7 @@ describe("schema rejects invalid data", () => {
     });
     const badData = {
       mode: "live",
-      version: "0.2.0",
+      version: "0.3.0",
       seq: 0,
       ts: 0,
       nodes: [],
