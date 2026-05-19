@@ -3433,6 +3433,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     ];
                   });
                 }
+                if (chunk.type === "halt" && chunk.haltChunk) {
+                  // Surface the structured recovery card. The /ideal product-loop
+                  // emits halt when CB-1 / CB-3 trip (e.g. no verify recipe in
+                  // the target directory). Without this branch the chunk was
+                  // silently dropped and the TUI looked frozen.
+                  setActiveHaltCard(chunk.haltChunk);
+                  setHaltSelectedIndex(0);
+                }
                 if (chunk.type === "done") break;
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);

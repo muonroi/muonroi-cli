@@ -218,7 +218,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
       if (step.value && (step.value as StreamChunk).type === "halt") {
         yield step.value as StreamChunk;
         const manifest = await readManifest(flowDir, runId);
-        const haltReason = (step.value as any).reason ?? "no_recipe";
+        const haltReason = (step.value as StreamChunk).haltChunk?.reason ?? "no_recipe";
         if (manifest) {
           await writeManifest(flowDir, runId, {
             ...manifest,
@@ -450,7 +450,7 @@ async function* drainSprints(args: {
         // Site 2 — forward halt chunk to UI, mark stage halted, stop iteration.
         if (step.value && (step.value as StreamChunk).type === "halt") {
           yield step.value as StreamChunk;
-          const haltReason = (step.value as any).reason ?? "no_recipe";
+          const haltReason = (step.value as StreamChunk).haltChunk?.reason ?? "no_recipe";
           const manifest = await readManifest(ctx.flowDir, ctx.runId);
           if (manifest) {
             await writeManifest(ctx.flowDir, ctx.runId, {

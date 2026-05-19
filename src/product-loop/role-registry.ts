@@ -129,9 +129,18 @@ export async function resolveRoles(opts: {
   }
 
   // 4. Apply EE overrides last
+  //
+  // Phase 21.5 hotfix: query EE for all role slots IN PARALLEL. Sequential
+  // awaits used to multiply the per-call EE timeout by ROLE_SLOTS.length —
+  // when EE is unreachable that meant 6× the route timeout (~6s with the
+  // 1000ms default) before /ideal hot-path could yield its first Sprint
+  // chunk. The override lambda already swallows errors and returns null on
+  // failure, so Promise.all preserves semantics.
   if (eeRouteOverride) {
-    for (const slot of ROLE_SLOTS) {
-      const override = await eeRouteOverride(slot);
+    const overrides = await Promise.all(ROLE_SLOTS.map((slot) => eeRouteOverride(slot).catch(() => null)));
+    for (let i = 0; i < ROLE_SLOTS.length; i++) {
+      const slot = ROLE_SLOTS[i]!;
+      const override = overrides[i];
       if (override) {
         // Only apply if it's in inventory AND doesn't cause PO/Customer collision if slot is PO/Customer
         const inInventory = inventory.find((m) => m.id === override.model);
