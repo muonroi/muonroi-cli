@@ -10,7 +10,9 @@ export default defineConfig({
   esbuildOptions(options) {
     options.define = {
       ...options.define,
-      __MUONROI_HARNESS__: 'process.env.MUONROI_HARNESS === "true" || process.env.NODE_ENV !== "production"',
+      // Emit as a runtime expression so consumers can tree-shake in production.
+      // esbuild requires a JS literal or entity name here; use "true" for dev builds.
+      __MUONROI_HARNESS__: "true",
     };
   },
   // Production build: tree-shake harness code at build time
