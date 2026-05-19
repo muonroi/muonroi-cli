@@ -1,7 +1,9 @@
 {
   "name": "@muonroi/agent-harness-core",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -77,6 +79,11 @@
       "default": "./src/event-redact.ts"
     }
   },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup"
   },

@@ -37,3 +37,4 @@ deps-outdated.txt
 
 # PIL Phase G snapshots — manual debug captures, not versioned
 docs/phase-g-snapshots/
+.npmrc

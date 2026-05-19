@@ -1,7 +1,9 @@
 {
   "name": "@muonroi/agent-harness-react",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./src/index.ts",
   "module": "./src/index.ts",
@@ -14,6 +16,11 @@
       "default": "./src/index.ts"
     }
   },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "bunx vitest run"
@@ -23,7 +30,7 @@
     "react-dom": ">=18"
   },
   "dependencies": {
-    "@muonroi/agent-harness-core": "*"
+    "@muonroi/agent-harness-core": "^0.1.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",

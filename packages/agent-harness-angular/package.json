@@ -1,11 +1,17 @@
 {
   "name": "@muonroi/agent-harness-angular",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "./src/public-api.ts",
   "module": "./src/public-api.ts",
   "types": "./src/public-api.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "types": "./src/public-api.ts",
@@ -22,7 +28,7 @@
     "zone.js": "*"
   },
   "dependencies": {
-    "@muonroi/agent-harness-core": "*"
+    "@muonroi/agent-harness-core": "^0.1.0"
   },
   "devDependencies": {
     "@angular/common": "^17.3.0",
