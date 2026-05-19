@@ -17,7 +17,7 @@
  */
 
 import { exec as nodeExec, spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -150,6 +150,104 @@ const NEEDS_SHELL = process.platform === "win32";
  * bare cmd.exe launched without the system profile loaded).
  */
 const fsExistsSync = existsSync;
+
+/**
+ * Walks `root` recursively (depth-limited) to find the most likely "primary"
+ * .csproj file — the one a user would target for `dotnet add package`.
+ *
+ * Empirically verified against published BB templates 2026-05-19 by manually
+ * scaffolding into /tmp/muonroi-scaffold-test-851:
+ *   mr-micro-sln (Muonroi.Microservices.Template@1.10.0) →
+ *     - src/Gateways/<App>.Gateway/<App>.Gateway.csproj         (Sdk="Web")
+ *     - src/Services/<App>.Catalog/<App>.Catalog.csproj         (Sdk="Web")
+ *     - src/Services/<App>.Core/<App>.Core.csproj
+ *     - src/Services/<App>.Data/<App>.Data.csproj
+ *   mr-mod-sln (Muonroi.Modular.Template@1.10.0) →
+ *     - src/Host/<App>.Host/<App>.Host.csproj                   (Sdk="Web")
+ *     - src/Modules/Catalog/<App>.Modules.Catalog.csproj
+ *     - src/Modules/Identity/<App>.Modules.Identity.csproj
+ *     - src/Shared/<App>.Kernel/<App>.Kernel.csproj
+ *     - src/Shared/<App>.Shared/<App>.Shared.csproj
+ *
+ * Heuristic priority (highest first):
+ *   1. Skip noise dirs (bin, obj, .git, node_modules, .vs, .vscode)
+ *   2. Exclude test projects (.Tests / .Test / .Specs suffix)
+ *   3. Prefer Web SDK csproj (Sdk="Microsoft.NET.Sdk.Web" inside <Project>)
+ *   4. Within Web SDK group, prefer paths containing /Gateway/ or /Host/
+ *      (entry-project convention)
+ *   5. Tie-break by shallowest depth, then alphabetical
+ *
+ * Returns absolute path or null if no csproj found under root.
+ */
+export interface FindCsprojFs {
+  readdir: (p: string) => Array<{ name: string; isDir: boolean; isFile: boolean }>;
+  readFile: (p: string) => string;
+}
+
+const defaultFindCsprojFs: FindCsprojFs = {
+  readdir: (p: string) =>
+    readdirSync(p, { withFileTypes: true, encoding: "utf8" }).map((e) => ({
+      name: String(e.name),
+      isDir: e.isDirectory(),
+      isFile: e.isFile(),
+    })),
+  readFile: (p: string) => readFileSync(p, "utf8"),
+};
+
+export function findPrimaryCsproj(
+  root: string,
+  maxDepth = 6,
+  fsAdapter: FindCsprojFs = defaultFindCsprojFs,
+): string | null {
+  const skipDirs = new Set(["bin", "obj", ".git", "node_modules", ".vs", ".vscode"]);
+  const candidates: Array<{
+    absPath: string;
+    depth: number;
+    isTest: boolean;
+    isWebSdk: boolean;
+    isEntry: boolean;
+  }> = [];
+
+  function walk(dir: string, depth: number): void {
+    if (depth > maxDepth) return;
+    let entries: ReturnType<FindCsprojFs["readdir"]>;
+    try {
+      entries = fsAdapter.readdir(dir);
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isDir) {
+        if (skipDirs.has(e.name)) continue;
+        walk(path.join(dir, e.name), depth + 1);
+      } else if (e.isFile && e.name.endsWith(".csproj")) {
+        const stem = e.name.slice(0, -".csproj".length);
+        const isTest = /\.(Tests?|Specs)$/i.test(stem);
+        const absPath = path.join(dir, e.name);
+        let isWebSdk = false;
+        try {
+          isWebSdk = /Sdk="Microsoft\.NET\.Sdk\.Web"/.test(fsAdapter.readFile(absPath));
+        } catch {
+          /* unreadable — leave as non-web */
+        }
+        const isEntry = /[/\\](Gateway|Host)s?[/\\]/i.test(absPath);
+        candidates.push({ absPath, depth, isTest, isWebSdk, isEntry });
+      }
+    }
+  }
+  walk(root, 0);
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => {
+    if (a.isTest !== b.isTest) return a.isTest ? 1 : -1;
+    if (a.isWebSdk !== b.isWebSdk) return a.isWebSdk ? -1 : 1;
+    if (a.isEntry !== b.isEntry) return a.isEntry ? -1 : 1;
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    return a.absPath.localeCompare(b.absPath);
+  });
+  return candidates[0]?.absPath ?? null;
+}
+
 function getDotnetFallbackPaths(): string[] {
   if (process.platform !== "win32") return ["/usr/local/share/dotnet/dotnet", "/usr/share/dotnet/dotnet"];
   const home = process.env.USERPROFILE ?? process.env.HOME ?? "";
@@ -668,15 +766,38 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         }
 
         // Plan 23-01b — add each EE-recommended package via `dotnet add package`.
+        // BB solution templates (mr-micro-sln, mr-modular-sln) create nested
+        // structures under server/ — no .csproj sits directly in serverDir, so
+        // `dotnet add package` from serverDir fails with "Could not find any
+        // project". Discover the primary csproj first; skip the loop with a
+        // single warning if none is found instead of spamming N failures.
+        const targetCsproj = findPrimaryCsproj(serverDir);
+        if (!targetCsproj && (opts.eePackages?.length ?? 0) > 0) {
+          process.stderr.write(
+            `[init-new] no .csproj found under ${serverDir} — skipping ${opts.eePackages?.length ?? 0} dotnet add package call(s). ` +
+              `Packages were still pinned in Directory.Packages.props if present.\n`,
+          );
+        }
         // Single-package failures are logged but do NOT abort the scaffold.
-        for (const pkgId of opts.eePackages ?? []) {
-          try {
-            await fsOps.exec(`${dotnetCmd} add package ${pkgId}`, serverDir);
-            filesWritten.push(`server/${path.basename(serverDir)}/<csproj-updated-${pkgId}>`);
-          } catch (e) {
-            process.stderr.write(
-              `[init-new] dotnet add package ${pkgId} failed: ${e instanceof Error ? e.message : String(e)}\n`,
-            );
+        if (targetCsproj) {
+          for (const pkgId of opts.eePackages ?? []) {
+            try {
+              // `--prerelease` is required because Muonroi.* packages currently
+              // ship only alpha versions on NuGet (manually verified 2026-05-19
+              // against Muonroi.AspNetCore@1.0.0-alpha.14, Muonroi.Governance@
+              // 1.0.0-alpha.14). Without the flag, dotnet errors:
+              //   "There are no stable versions available, 1.0.0-alpha.14 is
+              //    the best available. Consider adding the --prerelease option"
+              await fsOps.exec(
+                `${dotnetCmd} add ${JSON.stringify(targetCsproj)} package ${pkgId} --prerelease`,
+                serverDir,
+              );
+              filesWritten.push(path.relative(root, targetCsproj));
+            } catch (e) {
+              process.stderr.write(
+                `[init-new] dotnet add package ${pkgId} failed: ${e instanceof Error ? e.message : String(e)}\n`,
+              );
+            }
           }
         }
 
