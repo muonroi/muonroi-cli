@@ -120,6 +120,7 @@ import {
   SubagentTaskLine,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
+import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
 import { useTypeahead } from "./hooks/useTypeahead.js";
@@ -943,30 +944,42 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const mcpArgsRef = useRef<TextareaRenderable>(null);
   const mcpCwdRef = useRef<TextareaRenderable>(null);
   const mcpEnvRef = useRef<TextareaRenderable>(null);
-  const [showAgentsModal, setShowAgentsModal] = useState(false);
-  const [showAgentsEditor, setShowAgentsEditor] = useState(false);
-  const [subAgents, setSubAgents] = useState<CustomSubagentConfig[]>(() => loadValidSubAgents());
-  const [agentsSearchQuery, setAgentsSearchQuery] = useState("");
-  const [agentsModalIndex, setAgentsModalIndex] = useState(0);
-  const [editingSubagent, setEditingSubagent] = useState<CustomSubagentConfig | null>(null);
-  const [agentsEditorDraft, setAgentsEditorDraft] = useState({ name: "", instruction: "" });
-  const [agentsEditorField, setAgentsEditorField] = useState<SubagentEditorField>("name");
-  const [agentsEditorModelIndex, setAgentsEditorModelIndex] = useState(() =>
-    Math.max(
-      0,
-      MODELS.findIndex((model) => model.id === DEFAULT_MODEL),
-    ),
-  );
-  const [agentsEditorSyncKey, setAgentsEditorSyncKey] = useState(0);
-  const [agentsEditorError, setAgentsEditorError] = useState<string | null>(null);
+  const {
+    showAgentsModal,
+    setShowAgentsModal,
+    showAgentsEditor,
+    setShowAgentsEditor,
+    subAgents,
+    setSubAgents,
+    agentsSearchQuery,
+    setAgentsSearchQuery,
+    agentsModalIndex,
+    setAgentsModalIndex,
+    editingSubagent,
+    setEditingSubagent,
+    agentsEditorDraft,
+    setAgentsEditorDraft,
+    agentsEditorField,
+    setAgentsEditorField,
+    agentsEditorModelIndex,
+    setAgentsEditorModelIndex,
+    agentsEditorSyncKey,
+    setAgentsEditorSyncKey,
+    agentsEditorError,
+    setAgentsEditorError,
+    showScheduleModal,
+    setShowScheduleModal,
+    schedules,
+    setSchedules,
+    scheduleSearchQuery,
+    setScheduleSearchQuery,
+    scheduleModalIndex,
+    setScheduleModalIndex,
+  } = useAgentEditor();
   const showAgentsModalRef = useRef(false);
   const showAgentsEditorRef = useRef(false);
   const subagentNameRef = useRef<TextareaRenderable>(null);
   const subagentInstructionRef = useRef<TextareaRenderable>(null);
-  const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [schedules, setSchedules] = useState<StoredSchedule[]>([]);
-  const [scheduleSearchQuery, setScheduleSearchQuery] = useState("");
-  const [scheduleModalIndex, setScheduleModalIndex] = useState(0);
   const showScheduleModalRef = useRef(false);
 
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
@@ -1310,6 +1323,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [mcpRows.length, mcpServers, syncStoredMcpServers],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
   const openAgentsModal = useCallback(() => {
     setSubAgents(loadValidSubAgents());
     setAgentsSearchQuery("");
@@ -1320,6 +1334,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setShowAgentsModal(true);
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
   const openScheduleModal = useCallback(() => {
     void agent
       .listSchedules()
@@ -1335,6 +1350,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       });
   }, [agent]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setMessages is stable, setScheduleModalIndex is stable useState setter from useAgentEditor hook
   const showScheduleDetails = useCallback(
     (schedule: StoredSchedule) => {
       void agent
@@ -1359,6 +1375,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [agent],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setSchedules is stable useState setter from useAgentEditor hook
   const removeSchedule = useCallback(
     (schedule: StoredSchedule) => {
       void agent
@@ -1384,6 +1401,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [agent],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
   const openSubagentEditor = useCallback((agent: CustomSubagentConfig | null) => {
     setEditingSubagent(agent);
     if (agent) {
@@ -1410,6 +1428,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setShowAgentsModal(true);
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
   const submitSubagentEditor = useCallback(() => {
     const name = (subagentNameRef.current?.plainText || "").trim();
     const instruction = subagentInstructionRef.current?.plainText || "";
@@ -1447,6 +1466,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setAgentsEditorError(null);
   }, [agentsEditorModelIndex, editingSubagent, subAgents]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useAgentEditor are stable useState setters
   const removeEditingSubagent = useCallback(() => {
     if (!editingSubagent) return;
 
@@ -1621,6 +1641,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setMcpModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, mcpRows.length - 1))));
   }, [mcpRows.length]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setScheduleModalIndex is a stable useState setter from useAgentEditor hook
   useEffect(() => {
     setScheduleModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, scheduleRows.length - 1))));
   }, [scheduleRows.length]);
