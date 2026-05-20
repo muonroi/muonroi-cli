@@ -100,6 +100,7 @@ import {
   type ProcessMessageUsage,
   type ResolvedModelRuntime,
 } from "./agent-options";
+import { BatchTurnRunner, type BatchTurnRunnerDeps } from "./batch-turn-runner.js";
 import {
   accumulateUsage,
   buildAssistantBatchMessage,
@@ -2179,7 +2180,10 @@ export class Agent {
   }
 
   // ========================================================================
-  // processMessageBatchTurn — batch API message processing loop
+  // processMessageBatchTurn — batch API message processing loop.
+  // Body extracted into BatchTurnRunner (Phase 12.5). Thin wrapper preserved
+  // so MessageProcessorDeps' `processMessageBatchTurn` callback continues to
+  // dispatch through `Agent.processMessageBatchTurn` unchanged.
   // ========================================================================
 
   private async *processMessageBatchTurn(args: {
@@ -2192,270 +2196,65 @@ export class Agent {
     modelInfo: ReturnType<typeof getModelInfo>;
     signal: AbortSignal;
   }): AsyncGenerator<StreamChunk, void, unknown> {
-    const { userModelMessage, observer, provider, subagents, system, runtime, modelInfo, signal } = args;
-    let attemptedOverflowRecovery = false;
-    let streamRetryCount = 0;
-    const MAX_STREAM_RETRIES = 2;
+    const runner = new BatchTurnRunner(this._buildBatchTurnRunnerDeps());
+    yield* runner.run(args);
+  }
 
-    while (true) {
-      this._compactedThisTurn = false;
-      let closeMcp: (() => Promise<void>) | undefined;
-      const turnMessages: ModelMessage[] = [];
-      const totalUsage: ProcessMessageUsage = {};
-
-      try {
-        const settings = attemptedOverflowRecovery
-          ? relaxCompactionSettings(this.getCompactionSettings(modelInfo?.contextWindow))
-          : this.getCompactionSettings(modelInfo?.contextWindow);
-        if (modelInfo?.contextWindow) {
-          await this.compactForContext(
-            provider,
-            system,
-            modelInfo.contextWindow,
-            signal,
-            settings,
-            attemptedOverflowRecovery,
-          );
-        }
-
-        const batchCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
-        if (batchCaps.usesResponsesAPI(runtime.modelInfo)) {
-          throw new Error("Batch mode currently supports chat-completions models only.");
-        }
-
-        const baseTools = createTools(this.bash, provider, this.mode, {
-          runTask: (request, abortSignal) => this.runTask(request, combineAbortSignals(signal, abortSignal)),
-          runDelegation: (request, abortSignal) =>
-            this.runDelegation(request, combineAbortSignals(signal, abortSignal)),
-          readDelegation: (id) => this.readDelegation(id),
-          listDelegations: () => this.listDelegations(),
-          scheduleManager: this.schedules,
-          subagents,
-          sendTelegramFile: this.sendTelegramFile ?? undefined,
-          sessionId: this.session?.id ?? undefined,
-        });
-        let tools: ToolSet = !batchCaps.supportsClientTools(runtime.modelInfo) ? {} : baseTools;
-        if (this.mode === "agent" && batchCaps.supportsClientTools(runtime.modelInfo)) {
-          const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
-            onOAuthRequired: (_serverId, url) => {
-              const urlStr = url.toString();
-              import("child_process").then(({ exec }) => {
-                const cmd =
-                  process.platform === "win32"
-                    ? `start "" "${urlStr}"`
-                    : process.platform === "darwin"
-                      ? `open "${urlStr}"`
-                      : `xdg-open "${urlStr}"`;
-                exec(cmd);
-              });
-            },
-          });
-          closeMcp = mcpBundle.close;
-          tools = { ...baseTools, ...mcpBundle.tools };
-          if (mcpBundle.errors.length > 0) {
-            yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
-          }
-        }
-
-        const batchTools = !batchCaps.supportsClientTools(runtime.modelInfo) ? [] : await toolSetToBatchTools(tools);
-        const batch = await createBatch({
-          ...this.getBatchClientOptions(signal),
-          name: buildBatchName("session", this.getSessionId() || runtime.modelId),
-        });
-
-        for (let round = 0; round < this.maxToolRounds; round++) {
-          const stepNumber = round + 1;
-          notifyObserver(observer?.onStepStart, {
-            stepNumber,
-            timestamp: Date.now(),
-          });
-
-          const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
-          // Phase O1 — capture providerOptions SHAPE for batch path too.
-          this._lastProviderOptionsShape = extractProviderOptionsShape(runtime.providerOptions);
-          await addBatchRequests({
-            ...this.getBatchClientOptions(signal),
-            batchId: batch.batch_id,
-            batchRequests: [
-              {
-                batch_request_id: batchRequestId,
-                batch_request: {
-                  chat_get_completion: buildBatchChatCompletionRequest({
-                    modelId: runtime.modelId,
-                    system,
-                    messages: [...this.messages, ...turnMessages],
-                    temperature: 0.7,
-                    maxOutputTokens: !batchCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
-                      ? undefined
-                      : this.maxTokens,
-                    reasoningEffort: runtime.providerOptions?.xai.reasoningEffort,
-                    tools: batchTools,
-                  }),
-                },
-              },
-            ],
-          });
-
-          const result = await pollBatchRequestResult({
-            ...this.getBatchClientOptions(signal),
-            batchId: batch.batch_id,
-            batchRequestId,
-          });
-          const response = getBatchChatCompletion(result);
-          const choice = response.choices[0];
-          if (!choice) {
-            throw new Error("Batch response did not contain any choices.");
-          }
-
-          const usage = getBatchUsage(response);
-          accumulateUsage(totalUsage, usage);
-          const finishReason = getBatchFinishReason(choice.finish_reason);
-
-          const content = choice.message.content ?? "";
-          if (content) {
-            yield { type: "content", content };
-          }
-
-          const requestMessages = [...this.messages, ...turnMessages];
-          const toolCalls = (choice.message.tool_calls ?? []).map(toLocalToolCall);
-          const assistantMessage = buildAssistantBatchMessage(content, toolCalls);
-          if (assistantMessage) {
-            turnMessages.push(assistantMessage);
-          }
-
-          if (toolCalls.length === 0) {
-            notifyObserver(observer?.onStepFinish, {
-              stepNumber,
-              timestamp: Date.now(),
-              finishReason,
-              usage,
-            });
-            if (hasUsage(totalUsage)) {
-              this.recordUsage(totalUsage, "message", runtime.modelId);
-            }
-            this.appendCompletedTurn(userModelMessage, turnMessages);
-            if (modelInfo?.contextWindow) {
-              await this.postTurnCompact(provider, system, modelInfo.contextWindow, signal);
-            }
-            yield { type: "done" };
-            return;
-          }
-
-          yield { type: "tool_calls", toolCalls };
-
-          const toolParts: ExecutedBatchTool[] = [];
-          for (const toolCall of toolCalls) {
-            notifyObserver(observer?.onToolStart, {
-              toolCall,
-              timestamp: Date.now(),
-            });
-
-            const executed = await this.executeBatchToolCall(tools, toolCall, requestMessages, signal);
-            notifyObserver(observer?.onToolFinish, {
-              toolCall,
-              toolResult: executed.result,
-              timestamp: Date.now(),
-            });
-            yield { type: "tool_result", toolCall, toolResult: executed.result };
-            toolParts.push({
-              toolCall,
-              input: executed.input,
-              toolResult: executed.result,
-            });
-          }
-
-          const toolMessage = buildToolBatchMessage(toolParts);
-          if (toolMessage) {
-            turnMessages.push(toolMessage);
-          }
-          notifyObserver(observer?.onStepFinish, {
-            stepNumber,
-            timestamp: Date.now(),
-            finishReason,
-            usage,
-          });
-        }
-
-        const message = `Error: Reached max tool rounds (${this.maxToolRounds}) in batch mode.`;
-        notifyObserver(observer?.onError, {
-          message,
-          timestamp: Date.now(),
-        });
-        if (hasUsage(totalUsage)) {
-          this.recordUsage(totalUsage, "message", runtime.modelId);
-        }
-        this.appendCompletedTurn(userModelMessage, turnMessages);
-        yield { type: "error", content: message };
-        yield { type: "done" };
-        return;
-      } catch (err: unknown) {
-        if (signal.aborted) {
-          this.discardAbortedTurn(userModelMessage);
-          yield { type: "content", content: "\n\n[Cancelled]" };
-          yield { type: "done" };
-          return;
-        }
-
-        if (!attemptedOverflowRecovery && turnMessages.length === 0 && modelInfo && isContextLimitError(err)) {
-          attemptedOverflowRecovery = true;
-          continue;
-        }
-
-        // Transient retry — batch mode: only retry when no tool messages yet
-        if (turnMessages.length === 0 && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted) {
-          const { transient } = classifyStreamError(err);
-          if (transient) {
-            streamRetryCount++;
-            const baseMs = 500;
-            const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
-            const spread = expMs * 0.25;
-            const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
-            const errorName = err instanceof Error ? err.name : "Error";
-            const errorMessage = err instanceof Error ? err.message : String(err);
-            try {
-              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-                | { emitEvent: (e: unknown) => void }
-                | undefined;
-              _ar?.emitEvent({
-                t: "event",
-                kind: "stream-retry",
-                attempt: streamRetryCount,
-                maxAttempts: MAX_STREAM_RETRIES + 1,
-                errorName,
-                errorMessage,
-                nextDelayMs,
-              });
-            } catch {
-              /* best-effort */
-            }
-            await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
-            if (!signal.aborted) {
-              continue;
-            }
-          }
-        }
-
-        const authError = isAuthenticationError(err);
-        const friendly = humanizeApiError(err);
-        notifyObserver(observer?.onError, {
-          message: friendly,
-          timestamp: Date.now(),
-        });
-        if (hasUsage(totalUsage)) {
-          this.recordUsage(totalUsage, "message", runtime.modelId);
-        }
-        this.appendCompletedTurn(userModelMessage, turnMessages);
-        yield {
-          type: "error",
-          content: friendly,
-          isAuthError: authError,
-        };
-        yield { type: "done" };
-        return;
-      } finally {
-        await closeMcp?.().catch(() => {});
-      }
-    }
+  /**
+   * Build the DI surface BatchTurnRunner (Phase 12.5) needs to reach back
+   * into Agent state without holding a circular reference. Callback names
+   * align with `MessageProcessorDeps` where the signature matches so a
+   * future `TurnRunnerDepsBase` hoist is mechanical. Built per call —
+   * allocation cost is negligible against the batch polling spend.
+   */
+  private _buildBatchTurnRunnerDeps(): BatchTurnRunnerDeps {
+    const self = this;
+    return {
+      get messages() {
+        return self.messages;
+      },
+      get bash() {
+        return self.bash;
+      },
+      get mode() {
+        return self.mode;
+      },
+      get maxToolRounds() {
+        return self.maxToolRounds;
+      },
+      get maxTokens() {
+        return self.maxTokens;
+      },
+      get schedules() {
+        return self.schedules;
+      },
+      get sendTelegramFile() {
+        return self.sendTelegramFile;
+      },
+      getSessionId: () => self.session?.id ?? null,
+      getCompactedThisTurn: () => self._compactedThisTurn,
+      setCompactedThisTurn: (v) => {
+        self._compactedThisTurn = v;
+      },
+      setLastProviderOptionsShape: (shape) => {
+        self._lastProviderOptionsShape = shape;
+      },
+      getBatchClientOptions: (signal) => self.getBatchClientOptions(signal),
+      getCompactionSettings: (cw) => self.getCompactionSettings(cw),
+      compactForContext: (provider, system, cw, signal, settings, overflow) =>
+        self.compactForContext(provider, system, cw, signal, settings, overflow),
+      postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
+      createTools: (bash, provider, mode, opts) => createTools(bash, provider, mode, opts),
+      runTask: (request, signal) => self.runTask(request, signal),
+      runDelegation: (request, signal) => self.runDelegation(request, signal),
+      readDelegation: (id) => self.readDelegation(id),
+      listDelegations: () => self.listDelegations(),
+      executeBatchToolCall: (tools, toolCall, messages, signal) =>
+        self.executeBatchToolCall(tools, toolCall, messages, signal),
+      appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
+      discardAbortedTurn: (user) => self.discardAbortedTurn(user),
+      recordUsage: (usage, source, model) => self.recordUsage(usage, source, model),
+    };
   }
 
   private appendCompletedTurn(userMessage: ModelMessage, newMessages: ModelMessage[]): void {
