@@ -6,6 +6,7 @@ import { runPreflight } from "../council/preflight.js";
 import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
@@ -19,6 +20,20 @@ import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } fr
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
+
+/**
+ * Best-effort interaction_logs writer for the loop-driver. Swallows failures
+ * so a broken DB never blocks the FSM. `ctx.sessionId` falls back to runId
+ * for legacy callers that don't pass a chat session id.
+ */
+function logLoopEvent(ctx: DriverContext, subtype: string, data: Record<string, unknown>): void {
+  try {
+    const sid = ctx.sessionId ?? ctx.runId;
+    logInteraction(sid, "council", { eventSubtype: subtype, data });
+  } catch {
+    /* non-critical — audit trail only */
+  }
+}
 
 function buildWorkspaceDiscoveryCard(d: DiscoveryResult, a: RepoAudit, priorRunCount: number): CouncilInfoCard | null {
   const sections: CouncilInfoCard["sections"] = [];
@@ -380,6 +395,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           return { runId: ctx.runId, stage: "error", success: false, reason: "missing_spec_for_research" };
         }
 
+        const researchPhaseStartMs = Date.now();
         yield phaseStart({
           phaseId: "loop:research",
           kind: "research",
@@ -422,7 +438,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               return s;
             });
           }
-        } catch {
+        } catch (err) {
+          logLoopEvent(ctx, "council_error", {
+            phase: "research",
+            stage: "ecosystem-bias",
+            error: err instanceof Error ? err.message : String(err),
+            severity: "warn",
+          });
           /* graceful — fallback to generic stances */
         }
 
@@ -458,7 +480,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             if (bbActive && ctx._intentTrace) {
               ctx._intentTrace.targetFramework = "muonroi-building-block";
             }
-          } catch {
+          } catch (err) {
+            logLoopEvent(ctx, "council_error", {
+              phase: "research",
+              stage: "bb-infer",
+              error: err instanceof Error ? err.message : String(err),
+              severity: "warn",
+            });
             /* graceful degrade — never block the research phase */
           }
         }
@@ -469,7 +497,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             if (bbBlock) {
               conversationContext = `${bbBlock}\n\n${conversationContext}`;
             }
-          } catch {
+          } catch (err) {
+            logLoopEvent(ctx, "council_error", {
+              phase: "research",
+              stage: "bb-context",
+              error: err instanceof Error ? err.message : String(err),
+              severity: "warn",
+            });
             /* graceful degrade — never block the research phase */
           }
         }
@@ -490,15 +524,58 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // is NOT addressed to them. We still pass through phase/status events
         // so the UI keeps a live progress indicator. After the debate completes
         // we emit a single condensed summary.
-        while (true) {
-          const { value, done } = await debateGen.next();
-          if (done) {
-            debateState = value as DebateState;
-            break;
+        try {
+          while (true) {
+            const { value, done } = await debateGen.next();
+            if (done) {
+              debateState = value as DebateState;
+              break;
+            }
+            const chunk = value as StreamChunk;
+            if (chunk.type === "content") continue;
+            yield chunk;
           }
-          const chunk = value as StreamChunk;
-          if (chunk.type === "content") continue;
-          yield chunk;
+        } catch (err) {
+          // The debate iterator hit an exception (e.g. provider 5xx after the
+          // retry budget). Persist an audit row before re-throwing so we have
+          // a forensics trail — without it the FSM unwinds silently and the
+          // session looks like "research = 0 word" in the DB.
+          logLoopEvent(ctx, "council_error", {
+            phase: "research",
+            stage: "debate",
+            error: err instanceof Error ? err.message : String(err),
+            roundCount: debateState?.roundCount ?? 0,
+            participantCount: participants.length,
+            elapsedMs: Date.now() - researchPhaseStartMs,
+          });
+          throw err;
+        }
+
+        // Forensics row mirrors the council/index.ts council_summary record
+        // (which only fires for sprint planning via runCouncil). The /ideal
+        // initial debate goes through runDebate here and was previously
+        // invisible to `usage forensics`. Excerpts are capped to keep
+        // metadata_json bounded (~2-4KB per debate).
+        if (debateState) {
+          const stancesForLog = participants.slice(0, 8).map((p, i) => {
+            const finalPosition = debateState!.active?.[i]?.position ?? "";
+            return {
+              role: p.role,
+              model: p.model,
+              stanceName: p.stance?.name,
+              finalPositionExcerpt: finalPosition.slice(0, 400),
+            };
+          });
+          logLoopEvent(ctx, "council_summary", {
+            phase: "research",
+            topic: ctx.idea,
+            roundCount: debateState.roundCount ?? 0,
+            participantCount: participants.length,
+            stances: stancesForLog,
+            summaryExcerpt: (debateState.runningSummary ?? "").slice(0, 1500),
+            researchFindingsExcerpt: (debateState.researchFindings ?? "").slice(0, 1500),
+            durationMs: Date.now() - researchPhaseStartMs,
+          });
         }
 
         const summaryText =
@@ -537,7 +614,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               councilInfoCard: buildAssumptionsCard(extracted.length, renderLedgerSummary(ledger)),
             } as StreamChunk;
           }
-        } catch {
+        } catch (err) {
+          logLoopEvent(ctx, "council_error", {
+            phase: "research",
+            stage: "assumption-extract",
+            error: err instanceof Error ? err.message : String(err),
+            severity: "warn",
+          });
           /* non-critical */
         }
 
