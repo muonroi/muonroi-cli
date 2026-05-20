@@ -50,6 +50,7 @@ See milestone archive for details.
 
 - [x] **Phase 12.1: Orchestrator.ts Refactor** — SHIPPED 2026-05-20 (12.1-01 utilities + 12.1-02 CouncilManager + 12.1-03 sweep). orchestrator.ts: 5371 → 4922 lines (-449). Council subsystem migrated from Agent class to dedicated `src/orchestrator/council-manager.ts` module with callback-DI; agent.test.ts + council/__tests__ + harness smoke all green.
 - [x] **Phase 12.2: Provider Isolation Refactor** — SHIPPED 2026-05-20 — Provider-specific quirks (orchestrator/runtime/prompts/forensics) moved to `ProviderCapabilities` + per-provider strategies. 5 group: G1 capability flags (`18a7678`) → G2 sanitizeHistory (`862b312`) → G3 buildProviderOptions (`2011973`) → G4 runtime dispatcher (`ccca13d`) → G5 sweep duplicates + cosmetic capabilities (`168f0df`)
+- [ ] **Phase 12.3: Extract StreamRunner from runTaskRequest** — Decompose ~470-line sub-agent driver (`runTaskRequest`) into a focused `StreamRunner` class with DI. 3 plans: 12.3-01 skeleton + setup → 12.3-02 prepareStep + onFinish + fullStream loop → 12.3-03 error path + thin shell. Target: orchestrator.ts ≤ 4500 LOC; F1/G1/B3/C1/C3 cost-leak harness specs preserved.
 
 ### v1.5 Self-Driving Product Loop
 
@@ -65,7 +66,7 @@ See milestone archive for details.
 
 - [x] **Phase 14: Council Accounting & Research MCP Wiring** — fix `stats.calls`/`finalPositions` accounting bugs; wire MCP servers (tavily, playwright, chrome-devtools, filesystem) into `llm.research()`; require browser tool when topic contains URL; enforce 3-section research output (Source/Internet/Frontend) with citations — completed 2026-05-08
 - [x] **Phase 15: Tool-grounded Debate Rounds** — opening/response/followup support tools; verify-then-refute pattern with `[REFUTED via tool:evidence]`; leader evaluator adds `evidenceDensity`/`disagreementResolved`; per-round persistence; debate-planner uses structured JSON output
-- [ ] **Phase 16: PIL + EE Integration into Council** — PIL runs at council start; `ee/council-bridge.queryExperience` returns past warnings; auto-add "Experience Auditor" stance on warnings; tool calls in rounds wrapped with EE PreToolUse check; `ee/judge` scores synthesis confidence; outcomes feed brain learning; `council.experienceMode` flag (off|advisory|enforcing)
+- [x] **Phase 16: PIL + EE Integration into Council** — SHIPPED 2026-05-20 — PIL runs at council start, `ee/council-bridge.queryExperience` returns past warnings, Experience Auditor auto-added, tool-call EE PreToolUse check, `ee/judge` synthesis scoring, `council.experienceMode` flag (off|advisory|enforcing). 13/13 verification truths green: setActiveEeYield wired into `src/ui/app.tsx` main stream (plan 16-09 / commit `778b190`); `pilCtx.taskType` + `complexityTier` forwarded to `debate-planner.planDebate` (plan 16-10); `pilCtx.outputStyle` threaded from runCouncil through runPlanning into buildSynthesisPrompt (plan 16-11)
 - [x] **Phase 17: Council Robustness & Observability** — `parseOutcome` raw-log + shape-fallback; `/council inspect <session-id>` slash command; `[Council Tool Trace]` persistence; doctor warnings on missing MCP; `docs/Council.md` flow documentation (completed 2026-05-08)
 
 ### v1.7 Auth Flexibility
