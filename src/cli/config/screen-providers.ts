@@ -1,4 +1,4 @@
-import { getModelsForProvider } from "../../models/registry.js";
+import { getModelByTier, getModelsForProvider } from "../../models/registry.js";
 import { PROVIDER_ENDPOINTS } from "../../providers/endpoints.js";
 import {
   KEYCHAIN_PROVIDER_IDS,
@@ -7,12 +7,24 @@ import {
   setKeyForProvider,
 } from "../../providers/keychain.js";
 import type { ProviderId } from "../../providers/types.js";
-import { getCurrentModel, getDisabledProviders, saveUserSettings, setProviderDisabled } from "../../utils/settings.js";
-import { openModelPicker } from "./model-picker.js";
-import { fetchProviderModels } from "./provider-fetch.js";
+import {
+  getDefaultProvider,
+  getDisabledProviders,
+  saveUserSettings,
+  setDefaultProvider,
+  setProviderDisabled,
+} from "../../utils/settings.js";
 import { A, captureKey, divider, enterRawMode, hiddenPrompt, maskKey } from "./tui.js";
 
-const ALL_PROVIDERS: ProviderId[] = [...KEYCHAIN_PROVIDER_IDS, "ollama"];
+/**
+ * Providers the splash/config UI exposes. The codebase still supports the
+ * other providers in KEYCHAIN_PROVIDER_IDS, but we hide them from the picker
+ * until their integration is hardened — the router can still target them
+ * programmatically. To re-expose one, add its id here.
+ */
+const VISIBLE_PROVIDERS: ProviderId[] = ["deepseek", "siliconflow"];
+const ALL_PROVIDERS: ProviderId[] = [...VISIBLE_PROVIDERS, "ollama"];
+void KEYCHAIN_PROVIDER_IDS;
 
 interface ProviderRow {
   id: ProviderId;
@@ -24,7 +36,7 @@ interface ProviderRow {
 async function loadRows(): Promise<ProviderRow[]> {
   const stored = new Set(await listStoredProviders());
   const disabled = new Set(getDisabledProviders());
-  const currentModel = getCurrentModel();
+  const defaultProvider = getDefaultProvider();
 
   const rows: ProviderRow[] = [];
   for (const id of ALL_PROVIDERS) {
@@ -41,12 +53,23 @@ async function loadRows(): Promise<ProviderRow[]> {
       }
     }
 
-    const modelsForProvider = getModelsForProvider(id);
-    const isDefault = modelsForProvider.some((m) => m.id === currentModel);
-
-    rows.push({ id, maskedKey, enabled: !disabled.has(id), isDefault });
+    rows.push({ id, maskedKey, enabled: !disabled.has(id), isDefault: defaultProvider === id });
   }
   return rows;
+}
+
+/**
+ * Pick the model the router should use when a provider is set as default.
+ * Preference: balanced → fast → premium → any model in catalog for the
+ * provider. Returns null when the provider has no catalog entries.
+ */
+function pickModelForProvider(id: ProviderId): string | null {
+  for (const tier of ["balanced", "fast", "premium"] as const) {
+    const m = getModelByTier(tier, id);
+    if (m && m.provider === id) return m.id;
+  }
+  const fallback = getModelsForProvider(id);
+  return fallback[0]?.id ?? null;
 }
 
 function renderScreen(rows: ProviderRow[], cursor: number, statusMsg: string, width: number): string {
@@ -71,7 +94,8 @@ function renderScreen(rows: ProviderRow[], cursor: number, statusMsg: string, wi
 
   lines.push(divider(width));
   if (statusMsg) lines.push(`${A.YELLOW}${statusMsg}${A.RESET}`);
-  lines.push(`${A.DIM}[k] set/update key  [space] toggle  [d] set default  [r] fetch models  [Esc] back${A.RESET}`);
+  lines.push(`${A.DIM}[k] set/update key  [space] toggle  [d] set as default  [Esc] back${A.RESET}`);
+  lines.push(`${A.DIM}Router auto-picks the model from the default provider.${A.RESET}`);
   return lines.join("\n");
 }
 
@@ -148,68 +172,23 @@ export async function runProviderScreen(): Promise<void> {
       }
 
       if (key.name === "d") {
-        const models = getModelsForProvider(row.id);
-        if (models.length === 0) {
-          statusMsg = `No catalog models for ${row.id}`;
-          continue;
-        }
-        saveUserSettings({ defaultModel: models[0]!.id });
-        rows = await loadRows();
-        statusMsg = `Default model set to ${models[0]!.id}`;
-        continue;
-      }
-
-      if (key.name === "r") {
-        if (row.id === "ollama") {
-          statusMsg = "Ollama model discovery not supported here";
-          continue;
-        }
-        if (!row.maskedKey) {
+        if (!row.maskedKey && row.id !== "ollama") {
           statusMsg = "Press [k] to set key first";
           continue;
         }
-
-        restore();
-        process.stdout.write("\nFetching models from provider...\n");
-        let apiKey: string;
-        try {
-          apiKey = await loadKeyForProvider(row.id);
-        } catch {
-          statusMsg = "Could not load key from keychain";
-          enterRawMode();
+        if (!row.enabled) {
+          statusMsg = `Enable ${row.id} first (press [space])`;
           continue;
         }
-
-        const baseURL = PROVIDER_ENDPOINTS[row.id].apiBase;
-        let live: Awaited<ReturnType<typeof fetchProviderModels>> = [];
-        try {
-          live = await fetchProviderModels(baseURL, apiKey);
-        } catch {
-          statusMsg = "Failed to fetch models from provider";
-          enterRawMode();
+        const modelId = pickModelForProvider(row.id);
+        if (!modelId) {
+          statusMsg = `No catalog models for ${row.id}`;
           continue;
         }
-
-        if (live.length === 0) {
-          process.stdout.write("Could not fetch models (check key/network). Using catalog only.\n");
-        }
-
-        const liveWithProvider = live.map((m) => ({ ...m, provider: row.id }));
-        let chosen: string | null = null;
-        try {
-          chosen = await openModelPicker(row.id, liveWithProvider);
-        } catch {
-          statusMsg = "Model picker error";
-          enterRawMode();
-          continue;
-        }
-
-        if (chosen) {
-          saveUserSettings({ defaultModel: chosen });
-          rows = await loadRows();
-          statusMsg = `Default model set to ${chosen}`;
-        }
-        enterRawMode();
+        setDefaultProvider(row.id);
+        saveUserSettings({ defaultModel: modelId });
+        rows = await loadRows();
+        statusMsg = `Default provider: ${row.id} (router picks model: ${modelId})`;
       }
     }
   } finally {

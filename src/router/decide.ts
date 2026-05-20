@@ -170,22 +170,32 @@ function resolveTierModel(
 function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
   // Inherit-sentinel: warm path may emit an empty provider to signal
   // "trust upstream choice" — see PROVIDER_INHERIT in provider-sentinel.ts.
-  if (isInheritProvider(decision.provider) || decision.provider === opts.defaultProvider) return decision;
-  // If the default provider is disabled, don't constrain back to it —
-  // the EE already picked a model from a non-disabled provider.
+  if (isInheritProvider(decision.provider)) return decision;
+
+  // Provider-only UX: the user enables N providers and pins one as default.
+  // Routing rules:
+  //   - decision.provider is enabled → keep it (router may switch across
+  //     enabled providers when >1 is on).
+  //   - decision.provider is disabled → constrain back to the default
+  //     provider's tier model, falling back to defaultModel.
+  //   - All providers disabled → leave the EE decision alone (caller will
+  //     surface a config error elsewhere).
+  const decisionDisabled = isProviderDisabled(decision.provider as ProviderId);
+  if (!decisionDisabled) {
+    return decision;
+  }
+
   if (isProviderDisabled(opts.defaultProvider as ProviderId)) {
     return {
       ...decision,
-      reason: `${decision.reason}|provider-not-constrained(disabled)`,
+      reason: `${decision.reason}|provider-not-constrained(default-also-disabled)`,
     };
   }
+
   const sameProviderModel = getModelByTier(
     decision.tier === "hot" ? "fast" : decision.tier === "cold" ? "premium" : "balanced",
     opts.defaultProvider,
   );
-  // Guard: getModelByTier may return a model from a different provider when
-  // the preferred provider has no model for the requested tier. Verify the
-  // returned model's provider before accepting it.
   if (sameProviderModel && sameProviderModel.provider !== opts.defaultProvider) {
     return {
       ...decision,

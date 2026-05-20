@@ -1,11 +1,14 @@
 import { Command } from "commander";
 import { loadCatalog } from "../../models/registry.js";
 import { listStoredProviders } from "../../providers/keychain.js";
-import { getDisabledModels, getDisabledProviders, getRoleModels } from "../../utils/settings.js";
+import { getDisabledProviders, getRoleModels } from "../../utils/settings.js";
 import { runCouncilScreen } from "./screen-council.js";
-import { runModelsScreen } from "./screen-models.js";
 import { runProviderScreen } from "./screen-providers.js";
-import { A, captureKey, divider, enterRawMode } from "./tui.js";
+// screen-models.ts (per-model enable grid) is intentionally not wired into
+// the menu anymore — the splash now exposes provider-only selection and the
+// router auto-picks the model. The file is kept on disk so any code that
+// imports its named exports compiles.
+import { A, captureKey, enterRawMode } from "./tui.js";
 
 const MENU_ITEMS = [
   {
@@ -25,14 +28,6 @@ const MENU_ITEMS = [
       const roles = getRoleModels();
       const count = Object.keys(roles).length;
       return count > 0 ? `${count} role${count > 1 ? "s" : ""} set` : "no roles set";
-    },
-  },
-  {
-    id: "models",
-    label: "Models",
-    badge: async () => {
-      const disabled = getDisabledModels();
-      return disabled.length > 0 ? `${disabled.length} disabled` : "all enabled";
     },
   },
 ];
@@ -88,8 +83,6 @@ async function runConfigMenu(): Promise<void> {
           await runProviderScreen();
         } else if (item.id === "council") {
           await runCouncilScreen();
-        } else if (item.id === "models") {
-          await runModelsScreen();
         }
 
         const newBadges = await Promise.all(MENU_ITEMS.map((mi) => mi.badge()));

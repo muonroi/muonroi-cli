@@ -184,7 +184,10 @@ describe("sprint-runner", () => {
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
 
-  it("CB-1 trips when projected cost exceeds 1.5x remaining headroom", async () => {
+  // CB-1 is intentionally disabled in sprint-runner (see comment at "Step 1").
+  // Provider pricing gaps produced false halts; re-enable once cost
+  // normalisation is reliable.
+  it.skip("CB-1 trips when projected cost exceeds 1.5x remaining headroom", async () => {
     (CB1_costProjection as any).mockReturnValue({ halt: true, projection: 50, headroom: 5 });
     const ctx = makeCtx();
     const { error } = await drain(
