@@ -50,7 +50,7 @@ See milestone archive for details.
 
 - [x] **Phase 12.1: Orchestrator.ts Refactor** — SHIPPED 2026-05-20 (12.1-01 utilities + 12.1-02 CouncilManager + 12.1-03 sweep). orchestrator.ts: 5371 → 4922 lines (-449). Council subsystem migrated from Agent class to dedicated `src/orchestrator/council-manager.ts` module with callback-DI; agent.test.ts + council/__tests__ + harness smoke all green.
 - [x] **Phase 12.2: Provider Isolation Refactor** — SHIPPED 2026-05-20 — Provider-specific quirks (orchestrator/runtime/prompts/forensics) moved to `ProviderCapabilities` + per-provider strategies. 5 group: G1 capability flags (`18a7678`) → G2 sanitizeHistory (`862b312`) → G3 buildProviderOptions (`2011973`) → G4 runtime dispatcher (`ccca13d`) → G5 sweep duplicates + cosmetic capabilities (`168f0df`)
-- [ ] **Phase 12.3: Extract StreamRunner from runTaskRequest** — Decompose ~470-line sub-agent driver (`runTaskRequest`) into a focused `StreamRunner` class with DI. 3 plans: 12.3-01 skeleton + setup → 12.3-02 prepareStep + onFinish + fullStream loop → 12.3-03 error path + thin shell. Target: orchestrator.ts ≤ 4500 LOC; F1/G1/B3/C1/C3 cost-leak harness specs preserved.
+- [x] **Phase 12.3: Extract StreamRunner from runTaskRequest** — SHIPPED 2026-05-20 (12.3-01 add StreamRunner module `1bf4db6` + 12.3-02 delegate runTaskRequest `0511230` + 12.3-03 sweep unused imports + tests `531cf77`). orchestrator.ts: 4923 → 4458 LOC (-465). StreamRunner: 580 LOC owns sub-agent stream lifecycle via 14-callback DI; 4 new unit tests cover setup short-circuit + DI invariants; all 582 unit tests + 20/20 cost-leak harness specs (F1/G1/B3/B4/C3/composer) green.
 
 ### v1.5 Self-Driving Product Loop
 
