@@ -704,6 +704,13 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           return { runId: ctx.runId, stage: "error", success: false, reason: "missing_state_for_scoping" };
         }
 
+        const scopingPhaseStartMs = Date.now();
+        // Mark phase entry in interaction_logs so a hung synthesis is
+        // detectable from outside the process (session 8a35be9891bd hit this
+        // exact silent stall — DB had council_summary but no row for the
+        // next 25+ minutes while the synthesis llm.generate call hung).
+        logLoopEvent(ctx, "phase_start", { phase: "scoping" });
+
         yield phaseStart({
           phaseId: "loop:scoping",
           kind: "synthesis",
@@ -739,16 +746,36 @@ interface ProductSpec {
   costEstimate: number;
 }
 `;
-        const rawSpec = await ctx.llm.generate(
-          leaderModelId,
-          "You are a Product Owner synthesizing a technical specification.",
-          synthesisPrompt,
-        );
+        // The scoping phase's only LLM call. Wrapped so a provider hang/
+        // timeout leaves a council_error audit row instead of swallowing the
+        // session into silence (the failure mode session 8a35be hit).
+        let rawSpec: string;
+        try {
+          rawSpec = await ctx.llm.generate(
+            leaderModelId,
+            "You are a Product Owner synthesizing a technical specification.",
+            synthesisPrompt,
+          );
+        } catch (err) {
+          logLoopEvent(ctx, "council_error", {
+            phase: "scoping",
+            stage: "synthesis-llm",
+            error: err instanceof Error ? err.message : String(err),
+            elapsedMs: Date.now() - scopingPhaseStartMs,
+          });
+          throw err;
+        }
         try {
           const match = rawSpec.match(/\{[\s\S]*\}/);
           productSpec = match ? JSON.parse(match[0]) : ({} as ProductSpec);
           productSpec!.createdAt = new Date();
         } catch (err) {
+          logLoopEvent(ctx, "council_error", {
+            phase: "scoping",
+            stage: "synthesis-parse",
+            error: err instanceof Error ? err.message : String(err),
+            rawSpecExcerpt: rawSpec.slice(0, 800),
+          });
           return { runId: ctx.runId, stage: "error", success: false, reason: "failed_to_synthesize_spec" };
         }
 
