@@ -41,6 +41,80 @@ const FORCE_LOW_RE = /\b(fix typo|rename|delete|format|lint|whitespace|comment o
 const FORCE_HIGH_RE =
   /\b(architect|architecture|migrate|migration|refactor|design|platform|multi-tenant|microservic|distributed|scale)\b/i;
 
+// ---------------------------------------------------------------------------
+// Sufficiency heuristic — does the prompt carry enough context to skip Council?
+// Inverted relative to complexity: vague/short prompts about ambiguous products
+// (e.g. "todo app", "build a chat platform") MUST go through Council so AskCard
+// can surface persona/MVP/architecture/verify questions before code is written.
+// ---------------------------------------------------------------------------
+
+export type SufficiencyMissing = "scope" | "target" | "intent";
+
+export interface SufficiencyInput {
+  rawText: string;
+}
+
+export interface SufficiencyOutput {
+  sufficient: boolean;
+  missing: readonly SufficiencyMissing[];
+}
+
+/** Vague product/system nouns whose scope is undefined without follow-up Qs. */
+const VAGUE_PRODUCT_RE = /\b(app|application|site|service|product|system|platform|tool|website|dashboard|portal)\b/i;
+
+/** Concrete imperative verbs that pin the action to a specific change. */
+const CONCRETE_VERB_RE =
+  /\b(fix|rename|delete|remove|add|move|extract|inline|format|lint|update|upgrade|bump|revert)\b/i;
+
+/** Source-y nouns that imply a localized target even without a file path. */
+const SCOPE_NOUN_RE = /\b(function|class|method|file|test|endpoint|component|module|package|hook|schema|migration)\b/i;
+
+/**
+ * Score whether a prompt has enough context for the hot-path to be safe.
+ *
+ * The router treats `!sufficient` as a forced-Council signal — empty AskCard
+ * answers are cheaper than scaffolding the wrong product. Returned `missing`
+ * categories drive the discovery seed prompts in the Council preflight.
+ *
+ * Categories:
+ *  - "target": no file ref + no concrete verb → "fix what?", "rename what?"
+ *  - "scope":  vague product noun in a short prompt → persona/MVP/architecture
+ *  - "intent": very short, no scope-noun, no file-ref → "create new / fix bug / refactor?"
+ */
+export function scoreSufficiency(input: SufficiencyInput): SufficiencyOutput {
+  const text = input.rawText ?? "";
+  const trimmed = text.trim();
+  const len = trimmed.length;
+
+  // Empty prompts are degenerate — caller catches them earlier, but be safe.
+  if (len === 0) {
+    return { sufficient: false, missing: ["intent", "target", "scope"] };
+  }
+
+  const hasFileRef = FILE_REF_RE.test(trimmed);
+  // Reset lastIndex for regex with /g flag so subsequent calls don't skip.
+  FILE_REF_RE.lastIndex = 0;
+  const hasConcreteVerb = CONCRETE_VERB_RE.test(trimmed);
+  const hasScopeNoun = SCOPE_NOUN_RE.test(trimmed);
+  const isVagueProduct = VAGUE_PRODUCT_RE.test(trimmed);
+
+  const missing: SufficiencyMissing[] = [];
+
+  // 1. target — what concrete thing are we changing?
+  //    File ref OR concrete verb is enough to establish the target.
+  if (!hasFileRef && !hasConcreteVerb) missing.push("target");
+
+  // 2. scope — vague product noun in a short prompt means architecture unknown.
+  //    Threshold 80 chars: long descriptions usually carry the scope themselves.
+  if (isVagueProduct && len < 80) missing.push("scope");
+
+  // 3. intent — too short to know what kind of task this is.
+  //    Catches single-word prompts like "todo", "auth" that lack any verb/noun signal.
+  if (!hasScopeNoun && !hasFileRef && !hasConcreteVerb && len < 30) missing.push("intent");
+
+  return { sufficient: missing.length === 0, missing };
+}
+
 /**
  * Score a prompt's complexity using cheap, purely local heuristics.
  * Returns a bucketed label and the raw score so callers can log both.

@@ -154,6 +154,13 @@ export interface DriverContext {
    * "muonroi-building-block", loop-driver injects BB context before council debate.
    */
   _intentTrace?: import("../pil/types.js").IntentDetectionTrace | null;
+  /**
+   * Sufficiency gap signals from PIL Layer 1. When non-empty, the dispatcher
+   * forced the Council path because the prompt lacked context (no file ref,
+   * vague product noun, etc.). The driver seeds AskCard discovery questions
+   * for each missing category.
+   */
+  sufficiencyMissing?: readonly import("../pil/layer1-intent.js").SufficiencyMissing[];
 }
 
 export interface DriverResult {
