@@ -6,7 +6,7 @@
 - v1.1 EE-Native CLI (Phases 05-07) - shipped 2026-05-01
 - v1.2 Close EE Learning Loop (Phases 08-10) - shipped
 - v1.3 Quality of Life (Phase 11) - planned
-- v1.4 Architecture Quality (Phase 12.1, 12.2) - active
+- v1.4 Architecture Quality (Phase 12.1, 12.2, 12.3, 12.4) - active
 - v1.5 Self-Driving Product Loop (Phase 13) - shipped 2026-05-07
 - v1.6 Council Quality & Trust (Phases 14-17) - active
 - v1.7 Auth Flexibility (Phase 18) - planned
@@ -51,6 +51,7 @@ See milestone archive for details.
 - [x] **Phase 12.1: Orchestrator.ts Refactor** — SHIPPED 2026-05-20 (12.1-01 utilities + 12.1-02 CouncilManager + 12.1-03 sweep). orchestrator.ts: 5371 → 4922 lines (-449). Council subsystem migrated from Agent class to dedicated `src/orchestrator/council-manager.ts` module with callback-DI; agent.test.ts + council/__tests__ + harness smoke all green.
 - [x] **Phase 12.2: Provider Isolation Refactor** — SHIPPED 2026-05-20 — Provider-specific quirks (orchestrator/runtime/prompts/forensics) moved to `ProviderCapabilities` + per-provider strategies. 5 group: G1 capability flags (`18a7678`) → G2 sanitizeHistory (`862b312`) → G3 buildProviderOptions (`2011973`) → G4 runtime dispatcher (`ccca13d`) → G5 sweep duplicates + cosmetic capabilities (`168f0df`)
 - [x] **Phase 12.3: Extract StreamRunner from runTaskRequest** — SHIPPED 2026-05-20 (12.3-01 add StreamRunner module `1bf4db6` + 12.3-02 delegate runTaskRequest `0511230` + 12.3-03 sweep unused imports + tests `531cf77`). orchestrator.ts: 4923 → 4458 LOC (-465). StreamRunner: 580 LOC owns sub-agent stream lifecycle via 14-callback DI; 4 new unit tests cover setup short-circuit + DI invariants; all 582 unit tests + 20/20 cost-leak harness specs (F1/G1/B3/B4/C3/composer) green.
+- [x] **Phase 12.4: Extract MessageProcessor from processMessage** — SHIPPED 2026-05-20 (12.4-01 add MessageProcessor module `a6803db` + 12.4-02 delegate processMessage + sweep imports `139e909` + 12.4-03 focused unit tests). orchestrator.ts: 4447 → ~2900 LOC (~-1500). MessageProcessor: ~2020 LOC owns the streaming turn loop (PIL enrichment, ROUTE-11, vision proxy, auto-council gate, top-level streamText with prepareStep + onFinish + fullStream consumer, A4/A5 write-ahead, B4 compaction, C3 dedup) via wide-property MessageProcessorDeps surface; 5 unit tests cover DI invariants + batch / council short-circuits; full unit suite 2688 passes; F1/G1/B3/B4/C3 cost-leak harness specs green.
 
 ### v1.5 Self-Driving Product Loop
 
