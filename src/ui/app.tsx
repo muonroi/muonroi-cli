@@ -149,6 +149,19 @@ import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
 import "./slash/export.js";
+import type {
+  ActiveTurnState,
+  AppProps,
+  ContextStats,
+  FileMentionBlock,
+  PasteBlock,
+  QueuedMessage,
+  SandboxRow,
+  WalletDisplayInfo,
+  WalletRow,
+} from "./types.js";
+
+export type { AppStartupConfig } from "./types.js";
 
 import {
   getEffectiveReasoningEffort,
@@ -336,23 +349,7 @@ const PROMPT_LOADING_FRAMES = [
 
 type Star = { col: number; ch: string };
 type Row = { stars: Star[]; brand?: number };
-type ContextStats = {
-  contextWindow: number;
-  usedTokens: number;
-  remainingTokens: number;
-  ratioUsed: number;
-  ratioRemaining: number;
-};
-type PasteBlock = {
-  id: number;
-  content: string;
-  lines: number;
-  isImage?: boolean;
-  clipboardBase64?: string;
-  clipboardMediaType?: string;
-};
-type FileMentionBlock = { id: number; path: string };
-type QueuedMessage = { text: string; displayText: string };
+// ContextStats, PasteBlock, FileMentionBlock, QueuedMessage extracted to ./types.ts
 
 function getPasteBlockToken(block: Pick<PasteBlock, "id" | "lines" | "isImage">): string {
   if (block.isImage) {
@@ -602,15 +599,7 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/debug",
 ]);
 
-interface SandboxRow {
-  key: string;
-  label: string;
-  type: "toggle" | "text";
-  placeholder?: string;
-  getDisplay: (mode: SandboxMode, s: SandboxSettings) => string;
-  getOptions?: () => string[];
-  apply: (mode: SandboxMode, s: SandboxSettings, value: string) => { mode?: SandboxMode; settings?: SandboxSettings };
-}
+// SandboxRow extracted to ./types.ts
 
 const SANDBOX_ROWS: SandboxRow[] = [
   {
@@ -701,20 +690,7 @@ function getSandboxVisibleRows(mode: SandboxMode): SandboxRow[] {
   return mode === "shuru" ? SANDBOX_ROWS : SANDBOX_ROWS.slice(0, 1);
 }
 
-interface WalletDisplayInfo {
-  address: string | null;
-  ethBalance: string | null;
-  usdcBalance: string | null;
-}
-
-interface WalletRow {
-  key: string;
-  label: string;
-  type: "toggle" | "readonly";
-  getDisplay: (settings: Required<PaymentSettings>, info: WalletDisplayInfo) => string;
-  getOptions?: () => string[];
-  apply?: (settings: Required<PaymentSettings>, value: string) => Partial<PaymentSettings>;
-}
+// WalletDisplayInfo, WalletRow extracted to ./types.ts
 
 const WALLET_ROWS: WalletRow[] = [
   {
@@ -809,40 +785,7 @@ const CONNECT_CHANNELS: { id: string; label: string; description: string }[] = [
 const MCP_REMOTE_FIELDS: McpEditorField[] = ["transport", "label", "url", "headers", "env"];
 const MCP_STDIO_FIELDS: McpEditorField[] = ["transport", "label", "command", "args", "cwd", "env"];
 
-export interface AppStartupConfig {
-  apiKey: string | undefined;
-  baseURL: string;
-  model: string;
-  sandboxMode: SandboxMode;
-  sandboxSettings: SandboxSettings;
-  maxToolRounds: number;
-  version: string;
-  /**
-   * TEST SEAM (Task 5.2): when true, dispatch a synthetic halt chunk after the
-   * TUI reaches its first idle state. Lets harness E2E specs verify the recovery
-   * card without triggering a real CB-3 sprint run.
-   * Never set this in production — only passed via --inject-halt CLI flag.
-   */
-  injectHalt?: boolean;
-}
-
-interface AppProps {
-  agent: Agent;
-  startupConfig: AppStartupConfig;
-  initialMessage?: string;
-  onExit?: () => void;
-}
-
-interface ActiveTurnState {
-  kind: "local" | "telegram";
-  agent: Agent;
-  modeColor?: string;
-  remoteKey?: string;
-  sourceLabel?: string;
-  userId?: number;
-  latestAssistantText: string;
-  flushedAssistantChars: number;
-}
+// AppStartupConfig, AppProps, ActiveTurnState extracted to ./types.ts
 
 export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
   const t = dark;
