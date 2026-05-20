@@ -103,6 +103,20 @@ export interface InitNewFormState {
    * re-run). Set when scaffold inputs are persisted in the parent ref.
    */
   errorRetryable?: boolean;
+  /**
+   * Scaffold-checkpoint integration — inputs captured at submit time so the
+   * Retry handler (R key on error step) can replay initNewProject() without
+   * walking back through the form. Mirrors ScaffoldCheckpoint["inputs"].
+   */
+  replayInputs?: {
+    projectName: string;
+    feStack: FeStack;
+    bbTemplate?: BBTemplateInfo;
+    eePackages?: string[];
+    commercial?: boolean;
+  };
+  /** Loop-driver run id (or session id fallback) used as checkpoint key. */
+  checkpointRunId?: string;
 }
 
 export const FE_STACK_OPTIONS: { label: string; value: FeStack; desc: string }[] = [
