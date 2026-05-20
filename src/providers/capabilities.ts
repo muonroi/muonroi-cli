@@ -26,6 +26,7 @@
  */
 
 import type { ModelInfo } from "../types/index.js";
+import { stripReasoningForSiliconflow } from "./siliconflow-history.js";
 import type { ProviderId } from "./types.js";
 
 /**
@@ -64,6 +65,15 @@ export interface ProviderCapabilities {
    *     silently ignore them on the provider side.
    */
   acceptsParam(param: "maxOutputTokens" | "temperature" | "topP", model: ModelInfo | undefined): boolean;
+  /**
+   * Transform conversation history before sending to the provider. Default is
+   * identity (returns input by reference). Providers override when they
+   * reject specific message parts — e.g. SiliconFlow's DeepSeek thinking-mode
+   * endpoint returns HTTP 400 code 20015 when assistant `reasoning` parts are
+   * present, because @ai-sdk/openai-compatible does not serialize them as the
+   * `reasoning_content` field SiliconFlow expects.
+   */
+  sanitizeHistory<T>(messages: readonly T[]): readonly T[];
 }
 
 /**
@@ -89,6 +99,9 @@ class ReliableProviderCapabilities implements ProviderCapabilities {
     }
     return true;
   }
+  sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
+    return messages;
+  }
 }
 
 /**
@@ -111,6 +124,19 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
 }
 
 /**
+ * SiliconFlow shares DeepSeek's tool-call quirk but additionally rejects
+ * assistant history with `reasoning` parts on its DeepSeek thinking-mode
+ * endpoint (HTTP 400 code 20015). See siliconflow-history.ts for the wire
+ * evidence. DeepSeek's native api.deepseek.com endpoint handles reasoning
+ * differently and MUST NOT be touched, so this override is siliconflow-only.
+ */
+class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
+  override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
+    return stripReasoningForSiliconflow(messages);
+  }
+}
+
+/**
  * Local Ollama models are heterogeneous; some emit clean tool JSON, some
  * don't. Treat conservatively until per-checkpoint capability detection
  * is added (Phase 24 candidate).
@@ -128,7 +154,7 @@ const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   google: new ReliableProviderCapabilities(),
   xai: new ReliableProviderCapabilities(),
   deepseek: new DeepSeekProviderCapabilities(),
-  siliconflow: new DeepSeekProviderCapabilities(),
+  siliconflow: new SiliconflowProviderCapabilities(),
   ollama: new OllamaProviderCapabilities(),
 };
 

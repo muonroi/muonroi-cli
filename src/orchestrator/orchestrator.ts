@@ -63,7 +63,6 @@ import {
   resolveModelRuntime as resolveRuntime,
   shouldDropParam,
 } from "../providers/runtime.js";
-import { stripReasoningForSiliconflow } from "../providers/siliconflow-history.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -1487,14 +1486,9 @@ export class Agent {
         });
       }
       // SiliconFlow DeepSeek thinking-mode rejects assistant history with
-      // `reasoning` parts (HTTP 400 code 20015) because @ai-sdk/openai-compatible
-      // does not serialize them as the `reasoning_content` field SiliconFlow
-      // expects. Strip them on the SiliconFlow path only — DeepSeek native +
-      // every other provider receive history unchanged.
-      const _subMessagesForCall =
-        childRuntime.modelInfo?.provider === "siliconflow"
-          ? (stripReasoningForSiliconflow(childMessages) as typeof childMessages)
-          : childMessages;
+      // `reasoning` parts (HTTP 400 code 20015). The siliconflow capability
+      // override strips them; every other provider's capability is identity.
+      const _subMessagesForCall = taskCaps.sanitizeHistory(childMessages) as typeof childMessages;
       const result = streamText({
         model: childRuntime.model,
         system: childSystem,
@@ -1508,11 +1502,9 @@ export class Agent {
           // SiliconFlow internal multi-step loop: AI-SDK accumulates streamed
           // reasoning parts into in-flight assistant history and re-POSTs them
           // on the next step within the same streamText call — orchestrator-
-          // level strip at call setup never sees this. Strip per step too.
-          const stripped =
-            childRuntime.modelInfo?.provider === "siliconflow"
-              ? (stripReasoningForSiliconflow(messages) as typeof messages)
-              : messages;
+          // level strip at call setup never sees this. Strip per step too via
+          // the capability hook (identity for non-siliconflow providers).
+          const stripped = taskCaps.sanitizeHistory(messages) as typeof messages;
           const compacted = compactSubAgentMessages(stripped, {
             thresholdChars: compactThreshold,
             keepLastTurns: compactKeepLast,
@@ -4364,11 +4356,9 @@ export class Agent {
             });
           }
           // SiliconFlow DeepSeek thinking-mode reasoning_content workaround
-          // (see siliconflow-history.ts). Sub-agent path applies the same strip.
-          const _topMessagesForCall =
-            runtime.modelInfo?.provider === "siliconflow"
-              ? (stripReasoningForSiliconflow(this.messages) as typeof this.messages)
-              : this.messages;
+          // (see siliconflow-history.ts). Sub-agent path applies the same strip
+          // via the capability hook; identity for every other provider.
+          const _topMessagesForCall = turnCaps.sanitizeHistory(this.messages) as typeof this.messages;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -4383,10 +4373,7 @@ export class Agent {
             abortSignal: signal,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
-              const stripped =
-                runtime.modelInfo?.provider === "siliconflow"
-                  ? (stripReasoningForSiliconflow(stepMessages) as typeof stepMessages)
-                  : stepMessages;
+              const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
               const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
                 keepLastTurns: topLevelCompactKeepLast,
