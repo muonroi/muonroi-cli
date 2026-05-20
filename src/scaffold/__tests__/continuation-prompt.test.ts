@@ -61,4 +61,19 @@ describe("buildIdealContinuationPrompt", () => {
     expect(result).toContain("REFERENCE ONLY");
     expect(result.toLowerCase()).toContain("delete all template sample");
   });
+
+  it("instructs LLM to rename BaseTemplate/DocTemplate identifiers", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result).toContain("BaseTemplate");
+    expect(result).toContain("DocTemplate");
+    expect(result.toLowerCase()).toContain("rename");
+  });
+
+  it("calls out .NET conventions explicitly", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result).toContain("CancellationToken");
+    expect(result).toContain("Async");
+    expect(result).toContain("DTO");
+    expect(result.toLowerCase()).toContain("namespace must mirror");
+  });
 });
