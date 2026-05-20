@@ -1,6 +1,6 @@
 # CLAUDE.md — Agent harness verification workflow
 
-> Project context lives in `AGENTS.md`. This file is the **operating manual** for verifying TUI features end-to-end via the agent harness (`src/agent-harness/`, `src/mcp/harness-driver.ts`).
+> Project context lives in `AGENTS.md`. This file is the **operating manual** for verifying TUI features end-to-end via the agent harness (`packages/agent-harness-core/`, in-repo shim at `src/agent-harness/index.ts`, MCP server at `packages/agent-harness-core/src/mcp-server.ts`).
 > If you are a new agent session starting work on `muonroi-cli`, read this top-to-bottom before writing E2E tests or debugging harness failures.
 
 ## TL;DR
@@ -25,18 +25,21 @@ The agent harness lets external CLIs (`claude`, `codex`, `gemini`) drive the TUI
 
 The WSL workflow remains documented below as a fallback for CI environments that don't support named pipes or for comparing POSIX vs Windows behaviour.
 
-Core components:
-- `src/agent-harness/protocol.ts` — `LiveFrame` / `LiveEvent` / `UINode` / `DesignSpec`
-- `src/agent-harness/selector.ts` — `parseSelector`, `matchSelector` (CSS-like grammar)
-- `src/agent-harness/predicate.ts` — Zod-typed predicate evaluator
-- `src/agent-harness/driver.ts` — in-process `Driver` API
-- `src/agent-harness/test-spawn.ts` — cross-platform spawn helper (fd 3/4 on POSIX, named pipes on Windows)
-- `src/agent-harness/semantic.tsx` — `<Semantic id="..." role="...">` React wrapper
-- `src/agent-harness/reconciler-hook.ts` — `SemanticRegistry`, snapshot to `LiveFrame`
-- `src/agent-harness/mock-llm.ts` — fixture-based provider for deterministic tests
-- `src/mcp/harness-driver.ts` — `mcp-driver` subcommand, 16 tools over stdio MCP
+Core components (post Phase 6 multi-package split — see "Multi-framework package layout" below):
+- `packages/agent-harness-core/src/protocol.ts` — `LiveFrame` / `LiveEvent` / `UINode` / `DesignSpec` (protocol v0.4.0)
+- `packages/agent-harness-core/src/selector.ts` — `parseSelector`, `matchSelector` (CSS-like grammar)
+- `packages/agent-harness-core/src/predicate.ts` — Zod-typed predicate evaluator
+- `packages/agent-harness-core/src/driver.ts` — in-process `Driver` API
+- `packages/agent-harness-core/src/mcp-server.ts` — `createMcpHarnessServer`, 16 `tui.*` tools over stdio MCP (Windows + POSIX)
+- `packages/agent-harness-opentui/src/semantic.tsx` — `<Semantic id="..." role="...">` React wrapper
+- `packages/agent-harness-opentui/src/reconciler-hook.ts` — `SemanticRegistry`, snapshot to `LiveFrame`
+- `packages/agent-harness-opentui/src/agent-mode.ts` — Windows named-pipe + POSIX fd 3/4 transport
+- `src/agent-harness/test-spawn.ts` — cross-platform spawn helper used by spec files
+- `src/agent-harness/mock-model.ts` — `MockLanguageModelV3` install hook for provider-layer tests
+- `src/index.ts:1403` — CLI wiring for `mcp-driver` subcommand
 - `tests/harness/` — E2E specs (no platform guards — run on Windows and POSIX via `test-spawn.ts`)
 - `tests/harness/helpers.ts` — shared `spawnHarness()` helper used by all spawn-based specs
+- Imports inside this repo go through the in-repo shim `src/agent-harness/index.ts` which re-exports from `@muonroi/agent-harness-core` + `@muonroi/agent-harness-opentui`
 
 ## BB-aware `/ideal`
 
@@ -256,6 +259,8 @@ correlation.
 
 ### All LiveEvent kinds (protocol version 0.4.0)
 
+> Authoritative reference: [`reference/protocol-schema`](https://docs.muonroi.com/docs/cli/reference/protocol-schema) on docs.muonroi.com — covers all **18** kinds including `usage`, `disconnect`, `stream-retry` and the `{t:"idle"}` sentinel. The table below summarizes the most commonly-used 14.
+
 | kind | When emitted | Key payload fields |
 |---|---|---|
 | `route-decision` | /ideal dispatched → routing decision made | `path`, `complexity`, `forceCouncil`, `runId` |
@@ -291,7 +296,7 @@ Field names: `id`, `role`, `name`, `value`, `state`, `props.<key>` (dotted neste
 ## MCP path (external agent driving the TUI)
 
 ```bash
-bun run src/index.ts mcp-driver         # boots stdio MCP server, advertises 16 tools
+bun run src/index.ts mcp-driver         # boots stdio MCP server, advertises 16 tools (incl. changes_since)
 ```
 
 Add to your MCP client config (Claude Desktop / Cursor / etc.):
@@ -313,7 +318,7 @@ Then drive via tool calls: `tui.start`, `tui.snapshot`, `tui.press`, `tui.type`,
 - env strip: `NODE_OPTIONS`, `BUN_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `LD_AUDIT`, `NODE_PATH` removed
 - cwd containment: `realpathSync` against `homedir()` or repo root
 - mock-llm path: must resolve inside repo root
-- Windows: returns `{error: "windows_unsupported"}` — POSIX-only
+- Windows: **supported** via named-pipe transport (`packages/agent-harness-opentui/src/agent-mode.ts:73`); the legacy `windows_unsupported` guard is no longer emitted
 
 ## WSL setup (one-time)
 
@@ -350,7 +355,7 @@ wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && bunx vitest run tests/harness/mcp
 
 5. **Frame timing**: `addPostProcessFn` fires at targetFps (~60Hz) even without React changes. The harness dedupes via hash. If you see suspiciously many duplicate `LiveFrame` lines in fd3, the dedup may have broken — see spike-0a-findings.md.
 
-6. **Windows native fd3/4**: bun's `spawn` accepts `stdio: [..., "pipe", "pipe"]` on Linux/macOS but fails on Windows. The MCP driver's `tui.start` explicitly returns `windows_unsupported` rather than trying. To extend to Windows, swap fd3/4 for named pipes (~½ day, not started).
+6. **Windows native fd3/4**: bun's `spawn` accepts `stdio: [..., "pipe", "pipe"]` on Linux/macOS but fails on Windows. The harness now uses **named pipes** (`\\.\pipe\muonroi-harness-{pid}-{uuid}-{in|out}`) on Windows transparently — `tui.start` no longer returns `windows_unsupported`. Implementation: `packages/agent-harness-opentui/src/agent-mode.ts:73`.
 
 7. **Skip ratio policing**: `bun run lint:harness-skips` audits every `.skip` / `.todo` in `tests/harness/**` against `scripts/.harness-skips-allow.json`. Default threshold 40% (warn-only); `lint:harness-skips:strict` exits non-zero in CI when the ratio is exceeded or a new skip is added without an allowlist entry.
 
@@ -408,7 +413,7 @@ provider-layer fix *before* burning real tokens, install
 
 The harness pieces live in:
 
-- `src/agent-harness/mock-model.ts` — `createMockModel`, `installMockModel`, `textOnlyStream`, `toolCallStream`
+- `src/agent-harness/mock-model.ts` — `createMockModel`, `installMockModel`, `textOnlyStream`, `toolCallStream` (one of the few files still living directly under `src/agent-harness/` after the package split)
 - `src/providers/runtime.ts` — `resolveModelRuntime()` short-circuits when `globalThis.__muonroiMockModel` is set
 - `src/providers/runtime.ts` — `shouldDropParam(runtime, param)` — central rule used by orchestrator AND specs (do NOT inline this logic in specs)
 - `tests/harness/recording.ts` — `inspectAll`, `inspectByRole`, `cumulativePromptChars`, `assertParamAbsent`, `assertParamPresent`, `getProviderOption`
