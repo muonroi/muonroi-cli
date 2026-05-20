@@ -48,7 +48,7 @@ See milestone archive for details.
 
 **Milestone Goal:** Eliminate tech debt in the orchestrator and improve codebase maintainability through modular extraction.
 
-- [ ] **Phase 12.1: Orchestrator.ts Refactor** — Split 4605-line orchestrator.ts into 7 focused modules
+- [x] **Phase 12.1: Orchestrator.ts Refactor** — SHIPPED 2026-05-20 (12.1-01 utilities + 12.1-02 CouncilManager + 12.1-03 sweep). orchestrator.ts: 5371 → 4922 lines (-449). Council subsystem migrated from Agent class to dedicated `src/orchestrator/council-manager.ts` module with callback-DI; agent.test.ts + council/__tests__ + harness smoke all green.
 - [x] **Phase 12.2: Provider Isolation Refactor** — SHIPPED 2026-05-20 — Provider-specific quirks (orchestrator/runtime/prompts/forensics) moved to `ProviderCapabilities` + per-provider strategies. 5 group: G1 capability flags (`18a7678`) → G2 sanitizeHistory (`862b312`) → G3 buildProviderOptions (`2011973`) → G4 runtime dispatcher (`ccca13d`) → G5 sweep duplicates + cosmetic capabilities (`168f0df`)
 
 ### v1.5 Self-Driving Product Loop
