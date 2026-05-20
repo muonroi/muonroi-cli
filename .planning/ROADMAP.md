@@ -6,7 +6,7 @@
 - v1.1 EE-Native CLI (Phases 05-07) - shipped 2026-05-01
 - v1.2 Close EE Learning Loop (Phases 08-10) - shipped
 - v1.3 Quality of Life (Phase 11) - planned
-- v1.4 Architecture Quality (Phase 12.1) - active
+- v1.4 Architecture Quality (Phase 12.1, 12.2) - active
 - v1.5 Self-Driving Product Loop (Phase 13) - shipped 2026-05-07
 - v1.6 Council Quality & Trust (Phases 14-17) - active
 - v1.7 Auth Flexibility (Phase 18) - planned
@@ -49,6 +49,7 @@ See milestone archive for details.
 **Milestone Goal:** Eliminate tech debt in the orchestrator and improve codebase maintainability through modular extraction.
 
 - [ ] **Phase 12.1: Orchestrator.ts Refactor** — Split 4605-line orchestrator.ts into 7 focused modules
+- [x] **Phase 12.2: Provider Isolation Refactor** — SHIPPED 2026-05-20 — Provider-specific quirks (orchestrator/runtime/prompts/forensics) moved to `ProviderCapabilities` + per-provider strategies. 5 group: G1 capability flags (`18a7678`) → G2 sanitizeHistory (`862b312`) → G3 buildProviderOptions (`2011973`) → G4 runtime dispatcher (`ccca13d`) → G5 sweep duplicates + cosmetic capabilities (`168f0df`)
 
 ### v1.5 Self-Driving Product Loop
 
