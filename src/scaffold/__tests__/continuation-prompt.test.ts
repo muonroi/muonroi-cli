@@ -76,4 +76,18 @@ describe("buildIdealContinuationPrompt", () => {
     expect(result).toContain("DTO");
     expect(result.toLowerCase()).toContain("namespace must mirror");
   });
+
+  it("instructs LLM to preserve SemanticProvider in client scaffolds", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result).toContain("SemanticProvider");
+    expect(result).toContain("VITE_API_BASE");
+    expect(result.toLowerCase()).toContain("never delete or overwrite");
+  });
+
+  it("requires three async view states + strict ts + build verification on client", () => {
+    const result = buildIdealContinuationPrompt(base);
+    expect(result.toLowerCase()).toContain("loading, empty, error");
+    expect(result).toContain('"strict": true');
+    expect(result).toContain("bunx tsc --noEmit");
+  });
 });

@@ -44,6 +44,16 @@ IMPORTANT — Template sample files are REFERENCE ONLY:
    - DTO ≠ Entity. Don't return EF entities from controllers — always project to a DTO.
    - DI registration uses \`AddX*\` extension methods in a static class under \`Extensions/\` or \`DependencyInjection/\`; wire them from \`Program.cs\`. Do not register services inline in \`Program.cs\`.
 
+Frontend / client/ conventions (apply ONLY if a \`client/\` directory exists in the scaffold):
+   - NEVER delete or overwrite \`SemanticProvider\`, \`createSemanticRegistry\`, or any \`<Semantic ...>\` wrapper that the scaffold wrote into \`main.tsx\` / \`app.component.ts\`. The agent harness depends on them — removing them silently breaks all E2E specs. If you rewrite \`main.tsx\`, re-include the existing SemanticProvider block verbatim.
+   - Wrap every NEW user-visible region with \`<Semantic id="..." role="..." name="...">\` (composer, list, listitem, modal, statusbar). Pick \`role\` from the union in \`@muonroi/agent-harness-core/protocol\`.
+   - NEVER hardcode API URLs in components. Read from \`import.meta.env.VITE_API_BASE\` (React/Vite) or \`environment.apiBase\` (Angular). If \`.env.example\` does not exist yet, create it with a sensible default; never inline \`http://localhost:5000\` or similar in source.
+   - Put HTTP + DTO code under \`client/src/api/\`. Define request/response types in \`api/types.ts\` (mirror the C# DTO names). Components import a typed client; never call \`fetch\` directly.
+   - Every async view needs THREE states: loading, empty, error. Surface errors via a toast/notification component, not \`console.error\`. Provide an \`ErrorBoundary\` at the app shell.
+   - No inline \`style={{...}}\` literals — use CSS modules (\`*.module.css\`) or utility classes (Tailwind if scaffolded). If neither is present, write tokens + reset into \`src/styles/app.css\` and import it ONCE in main; reference variables via \`var(--color-...)\`.
+   - TypeScript MUST be strict. If \`tsconfig.json\` does not have \`"strict": true\`, add it. Run \`bunx tsc --noEmit\` before declaring done — it must exit 0.
+   - Run \`bun run build\` from \`client/\` before declaring done — it must exit 0 with zero browser-side console errors.
+
 2. Design the feature
    - List the domain entity(ies), DTOs, endpoints, persistence model.
    - Match BB conventions (controller-per-resource, MediatR/CQRS if used, validation patterns observed in step 1).

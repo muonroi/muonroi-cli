@@ -623,19 +623,266 @@ function reactMainTsx(): string {
 import { createRoot } from "react-dom/client";
 import { SemanticProvider, Semantic } from "@muonroi/agent-harness-react";
 import { createSemanticRegistry } from "@muonroi/agent-harness-core/registry";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import "./styles/app.css";
 
 const registry = createSemanticRegistry();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <SemanticProvider registry={registry}>
-      <Semantic id="root" role="region" name="App root">
-        {/* Your application components go here */}
-        <h1>Hello from ${"{projectName}"}</h1>
-      </Semantic>
+      <ErrorBoundary>
+        <Semantic id="root" role="region" name="App root">
+          {/* Your application components go here */}
+          <h1>Hello from ${"{projectName}"}</h1>
+        </Semantic>
+      </ErrorBoundary>
     </SemanticProvider>
   </StrictMode>,
 );
+`;
+}
+
+function reactTsConfig(): string {
+  return JSON.stringify(
+    {
+      compilerOptions: {
+        target: "ES2022",
+        useDefineForClassFields: true,
+        lib: ["ES2022", "DOM", "DOM.Iterable"],
+        module: "ESNext",
+        skipLibCheck: true,
+        moduleResolution: "bundler",
+        allowImportingTsExtensions: true,
+        resolveJsonModule: true,
+        isolatedModules: true,
+        noEmit: true,
+        jsx: "react-jsx",
+        strict: true,
+        noUnusedLocals: true,
+        noUnusedParameters: true,
+        noFallthroughCasesInSwitch: true,
+        types: ["vite/client"],
+      },
+      include: ["src"],
+    },
+    null,
+    2,
+  );
+}
+
+function reactEnvExample(): string {
+  return `# Copy to .env.local and edit. NEVER commit .env.local.
+VITE_API_BASE=http://localhost:5000
+`;
+}
+
+function reactGitignore(): string {
+  return `node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.vite/
+coverage/
+`;
+}
+
+function reactReadme(projectName: string): string {
+  return `# ${projectName} — client
+
+React + Vite + TypeScript (strict) frontend wired to the agent harness via
+\`@muonroi/agent-harness-react\`.
+
+## Setup
+
+\`\`\`bash
+bun install
+cp .env.example .env.local   # then edit VITE_API_BASE
+bun run dev
+\`\`\`
+
+## Layout
+
+- \`src/api/\`        — typed HTTP client + DTO types (mirror server contracts)
+- \`src/components/\` — reusable UI (ErrorBoundary, Toast)
+- \`src/styles/\`     — tokens + global reset
+- \`src/main.tsx\`    — bootstrap (do NOT remove SemanticProvider)
+
+## Conventions
+
+- Every async view has loading / empty / error states.
+- No inline \`style={{...}}\` — use CSS modules or tokens from \`styles/app.css\`.
+- API base lives in \`import.meta.env.VITE_API_BASE\`. Never hardcode URLs.
+- Wrap user-visible regions with \`<Semantic id role name>\` so harness specs can target them.
+`;
+}
+
+function reactApiClient(): string {
+  return `/**
+ * Typed HTTP client. Reads API base from \`VITE_API_BASE\` env var.
+ * Never hardcode URLs in components — import this client.
+ */
+
+const API_BASE: string = import.meta.env.VITE_API_BASE ?? "";
+
+if (!API_BASE) {
+  // Surfaces during dev if VITE_API_BASE is missing from .env.local.
+  console.warn("[api] VITE_API_BASE is empty — set it in .env.local");
+}
+
+export class ApiError extends Error {
+  constructor(public readonly status: number, public readonly body: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+interface RequestOptions {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  body?: unknown;
+  signal?: AbortSignal;
+  token?: string | null;
+}
+
+export async function apiFetch<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = opts.token ?? (typeof localStorage !== "undefined" ? localStorage.getItem("access_token") : null);
+  if (token) headers.Authorization = \`Bearer \${token}\`;
+
+  const res = await fetch(\`\${API_BASE}\${path}\`, {
+    method: opts.method ?? "GET",
+    headers,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    signal: opts.signal,
+  });
+
+  let body: unknown = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = text;
+    }
+  }
+
+  if (!res.ok) {
+    throw new ApiError(res.status, body, \`HTTP \${res.status} on \${opts.method ?? "GET"} \${path}\`);
+  }
+  return body as T;
+}
+`;
+}
+
+function reactApiTypes(): string {
+  return `/**
+ * API request/response DTOs. Mirror server-side contracts here so the
+ * compiler catches contract drift early. Replace the placeholder once
+ * you generate domain types.
+ */
+export interface Envelope<T> {
+  result: T;
+  error?: string | null;
+}
+
+// EXAMPLE — delete or replace with your real DTOs.
+// export interface TodoDto {
+//   id: string;
+//   title: string;
+//   isCompleted: boolean;
+//   createdAt: string;
+// }
+export {};
+`;
+}
+
+function reactErrorBoundary(): string {
+  return `import { Component, type ErrorInfo, type ReactNode } from "react";
+
+interface Props {
+  children: ReactNode;
+  fallback?: (error: Error) => ReactNode;
+}
+
+interface State {
+  error: Error | null;
+}
+
+/**
+ * Root-level error boundary. Catches uncaught render/effect errors and
+ * shows a fallback instead of an unmounted blank page. Logs to console
+ * for dev; replace the logger with your telemetry sink in prod.
+ */
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = { error: null };
+
+  static getDerivedStateFromError(error: Error): State {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("[ErrorBoundary]", error, info);
+  }
+
+  render(): ReactNode {
+    if (this.state.error) {
+      if (this.props.fallback) return this.props.fallback(this.state.error);
+      return (
+        <div role="alert" style={{ padding: "1rem", color: "var(--color-error, #b91c1c)" }}>
+          <h2>Something went wrong</h2>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{this.state.error.message}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+`;
+}
+
+function reactAppCss(): string {
+  return `:root {
+  --color-bg: #ffffff;
+  --color-fg: #111827;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-border: #e5e7eb;
+  --color-error: #b91c1c;
+  --color-success: #15803d;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --radius: 0.5rem;
+  --font-stack: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0b1220;
+    --color-fg: #f3f4f6;
+    --color-muted: #9ca3af;
+    --color-border: #1f2937;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; }
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-stack);
+  line-height: 1.5;
+}
+button { font: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; }
+a { color: var(--color-primary); }
 `;
 }
 
@@ -669,9 +916,18 @@ function angularClientPackageJson(projectName: string): string {
 
 function angularMainTs(): string {
   return `import { bootstrapApplication } from "@angular/platform-browser";
+import { ErrorHandler } from "@angular/core";
+import { provideHttpClient } from "@angular/common/http";
 import { AppComponent } from "./app/app.component";
+import { AppErrorHandler } from "./app/error-handler";
+import "./styles.css";
 
-bootstrapApplication(AppComponent).catch(console.error);
+bootstrapApplication(AppComponent, {
+  providers: [
+    provideHttpClient(),
+    { provide: ErrorHandler, useClass: AppErrorHandler },
+  ],
+}).catch((err) => console.error(err));
 `;
 }
 
@@ -702,6 +958,10 @@ function angularTsConfig(): string {
         module: "ES2022",
         lib: ["ES2022", "dom"],
         strict: true,
+        noImplicitOverride: true,
+        noPropertyAccessFromIndexSignature: true,
+        noImplicitReturns: true,
+        noFallthroughCasesInSwitch: true,
         experimentalDecorators: true,
         emitDecoratorMetadata: false,
         moduleResolution: "bundler",
@@ -710,6 +970,204 @@ function angularTsConfig(): string {
     null,
     2,
   );
+}
+
+function angularEnvironmentTs(): string {
+  return `/**
+ * Build-time environment config. Angular CLI swaps this file with
+ * \`environment.prod.ts\` when building for production via fileReplacements
+ * in angular.json. Never hardcode API URLs in components — import this.
+ */
+export const environment = {
+  production: false,
+  apiBase: "http://localhost:5000",
+};
+`;
+}
+
+function angularEnvironmentProdTs(): string {
+  return `export const environment = {
+  production: true,
+  // Replaced at build time; set via your deploy pipeline.
+  apiBase: "",
+};
+`;
+}
+
+function angularApiServiceTs(): string {
+  return `import { Injectable, inject } from "@angular/core";
+import { HttpClient, HttpErrorResponse, HttpHeaders } from "@angular/common/http";
+import { Observable, catchError, throwError } from "rxjs";
+import { environment } from "../environments/environment";
+
+/**
+ * Typed HTTP client wrapper. Reads API base from environment.apiBase.
+ * Components must call methods on this service, never inject HttpClient
+ * directly, so URL configuration stays centralized.
+ */
+export class ApiError extends Error {
+  constructor(public readonly status: number, public readonly body: unknown, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+@Injectable({ providedIn: "root" })
+export class ApiService {
+  private readonly http = inject(HttpClient);
+
+  private headers(): HttpHeaders {
+    let h = new HttpHeaders({ "Content-Type": "application/json" });
+    const token =
+      typeof localStorage !== "undefined" ? localStorage.getItem("access_token") : null;
+    if (token) h = h.set("Authorization", \`Bearer \${token}\`);
+    return h;
+  }
+
+  private wrap<T>(obs: Observable<T>): Observable<T> {
+    return obs.pipe(
+      catchError((err: HttpErrorResponse) =>
+        throwError(() => new ApiError(err.status, err.error, err.message)),
+      ),
+    );
+  }
+
+  get<T>(path: string): Observable<T> {
+    return this.wrap(this.http.get<T>(\`\${environment.apiBase}\${path}\`, { headers: this.headers() }));
+  }
+
+  post<T>(path: string, body: unknown): Observable<T> {
+    return this.wrap(
+      this.http.post<T>(\`\${environment.apiBase}\${path}\`, body, { headers: this.headers() }),
+    );
+  }
+
+  put<T>(path: string, body: unknown): Observable<T> {
+    return this.wrap(
+      this.http.put<T>(\`\${environment.apiBase}\${path}\`, body, { headers: this.headers() }),
+    );
+  }
+
+  delete<T>(path: string): Observable<T> {
+    return this.wrap(
+      this.http.delete<T>(\`\${environment.apiBase}\${path}\`, { headers: this.headers() }),
+    );
+  }
+}
+`;
+}
+
+function angularErrorHandlerTs(): string {
+  return `import { ErrorHandler, Injectable } from "@angular/core";
+
+/**
+ * Root error handler. Replace the console sink with your telemetry
+ * provider in prod. Angular wires this via providers: [{ provide:
+ * ErrorHandler, useClass: AppErrorHandler }].
+ */
+@Injectable({ providedIn: "root" })
+export class AppErrorHandler implements ErrorHandler {
+  handleError(error: unknown): void {
+    console.error("[AppErrorHandler]", error);
+  }
+}
+`;
+}
+
+function angularStylesCss(): string {
+  return `:root {
+  --color-bg: #ffffff;
+  --color-fg: #111827;
+  --color-muted: #6b7280;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-border: #e5e7eb;
+  --color-error: #b91c1c;
+  --color-success: #15803d;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --radius: 0.5rem;
+  --font-stack: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0b1220;
+    --color-fg: #f3f4f6;
+    --color-muted: #9ca3af;
+    --color-border: #1f2937;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-stack);
+  line-height: 1.5;
+}
+button { font: inherit; cursor: pointer; }
+input, textarea, select { font: inherit; }
+a { color: var(--color-primary); }
+`;
+}
+
+function angularGitignore(): string {
+  return `node_modules/
+dist/
+.angular/
+.env
+.env.local
+*.log
+coverage/
+`;
+}
+
+function angularReadme(projectName: string): string {
+  return `# ${projectName} — client
+
+Angular (standalone components) + agent harness via \`@muonroi/agent-harness-angular\`.
+
+## Setup
+
+\`\`\`bash
+bun install
+bun run dev
+\`\`\`
+
+Edit \`src/environments/environment.ts\` to point \`apiBase\` at your backend.
+
+## Layout
+
+- \`src/api/\`          — \`ApiService\` (typed HTTP) + DTO types
+- \`src/environments/\` — env config (dev + prod). \`apiBase\` is the only URL knob.
+- \`src/app/\`          — components. Do NOT remove \`muonroiSemantic\` attributes.
+
+## Conventions
+
+- Every async view has loading / empty / error states.
+- API URLs come from \`environment.apiBase\`. Never hardcode.
+- Wrap user-visible regions with \`[muonroiSemantic]\` so harness specs can target them.
+- AppErrorHandler is wired via providers — extend it instead of console.error.
+`;
+}
+
+function angularApiTypes(): string {
+  return `/**
+ * API request/response DTOs. Mirror server-side contracts here so the
+ * compiler catches contract drift early.
+ */
+export interface Envelope<T> {
+  result: T;
+  error?: string | null;
+}
+export {};
+`;
 }
 
 // ---------------------------------------------------------------------------
@@ -951,11 +1409,27 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   if (feStack === "react") {
     await write("client/package.json", reactClientPackageJson(projectName));
     await write("client/vite.config.ts", reactViteConfig());
+    await write("client/tsconfig.json", reactTsConfig());
+    await write("client/.env.example", reactEnvExample());
+    await write("client/.gitignore", reactGitignore());
+    await write("client/README.md", reactReadme(projectName));
     await write("client/index.html", reactIndexHtml(projectName));
     await write("client/src/main.tsx", reactMainTsx());
+    await write("client/src/api/client.ts", reactApiClient());
+    await write("client/src/api/types.ts", reactApiTypes());
+    await write("client/src/components/ErrorBoundary.tsx", reactErrorBoundary());
+    await write("client/src/styles/app.css", reactAppCss());
   } else if (feStack === "angular") {
     await write("client/package.json", angularClientPackageJson(projectName));
     await write("client/tsconfig.json", angularTsConfig());
+    await write("client/.gitignore", angularGitignore());
+    await write("client/README.md", angularReadme(projectName));
+    await write("client/src/styles.css", angularStylesCss());
+    await write("client/src/environments/environment.ts", angularEnvironmentTs());
+    await write("client/src/environments/environment.prod.ts", angularEnvironmentProdTs());
+    await write("client/src/api/api.service.ts", angularApiServiceTs());
+    await write("client/src/api/types.ts", angularApiTypes());
+    await write("client/src/app/error-handler.ts", angularErrorHandlerTs());
     await write("client/src/main.ts", angularMainTs());
     await write("client/src/app/app.component.ts", angularAppComponentTs(projectName));
   }
