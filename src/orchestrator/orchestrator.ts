@@ -1,70 +1,36 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
-import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
-import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
-import { routeFeedback, routeModel } from "../ee/bridge.js";
+import type { ModelMessage, ToolSet } from "ai";
 import { extractSession } from "../ee/extract-session.js";
-import {
-  bootstrapEEClient,
-  getDefaultEEClient,
-  getDefaultEEClient as getEEClientForVeto,
-  getLastSurfacedState,
-} from "../ee/intercept.js";
-import { getMistakeDetector } from "../ee/mistake-detector.js";
-import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
-import * as phaseTracker from "../ee/phase-tracker.js";
-import { buildScope as buildScopeForVeto } from "../ee/scope.js";
-import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
-import { getTenantId, getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
+import { getTenantId } from "../ee/tenant.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
   PostCompactHookInput,
-  PostToolUseFailureHookInput,
-  PostToolUseHookInput,
   PreCompactHookInput,
-  PreToolUseHookInput,
   SessionEndHookInput,
-  SessionStartHookInput,
-  StopFailureHookInput,
-  StopHookInput,
   SubagentStartHookInput,
   SubagentStopHookInput,
   TaskCompletedHookInput,
   TaskCreatedHookInput,
-  UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelByTier, getModelInfo, normalizeModelId } from "../models/registry.js";
-import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
-import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
-  bridgeMcpToolResult,
-  getVisionGuidanceForTextOnly,
-  scrubImagePayloadsInMessages,
-} from "../providers/mcp-vision-bridge.js";
-import { captureToolSchemas } from "../providers/patch-zod-schema.js";
-import {
-  buildTurnProviderOptions,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
   resolveModelRuntime as resolveRuntime,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
-import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
-import { wireDebug } from "../providers/wire-debug.js";
-import { reportRouteOutcome } from "../router/decide.js";
-import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
-import { routerStore } from "../router/store.js";
 import {
   appendCompaction,
   appendMessages,
@@ -76,10 +42,6 @@ import {
   loadTranscriptState,
   logInteraction,
   markMessageCompleted,
-  markMessageErrored,
-  markToolCallErrored,
-  persistMessageWriteAhead,
-  persistToolCallWriteAhead,
   recordUsageEvent,
   SessionStore,
 } from "../storage/index";
@@ -100,32 +62,24 @@ import type {
   VerifyRecipe,
   WorkspaceInfo,
 } from "../types/index";
-import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
-import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
+import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
   getAutoCompactThresholdPct,
-  getAutoCouncilConfidence,
-  getAutoCouncilMinRoles,
   getCouncilRounds,
   getCurrentModel,
   getCurrentShellSettings,
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
-  getTopLevelCompactKeepLast,
-  getTopLevelCompactThresholdChars,
-  getTopLevelToolBudgetChars,
   isAutoCompactAfterTurnEnabled,
-  isAutoCouncilEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
   loadMcpServers,
-  loadValidSubAgents,
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
@@ -174,34 +128,20 @@ import {
   shouldCompactContext,
 } from "./compaction";
 import { CouncilManager } from "./council-manager.js";
-import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "./cross-turn-dedup.js";
+import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
-import { stableCallId } from "./pending-calls.js";
-import { applyModelConstraints, buildSystemPrompt, buildSystemPromptParts, MAX_TOOL_ROUNDS } from "./prompts";
+import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
-import { getReadPathBudgetCap, ReadPathBudget, wrapToolSetWithReadBudget } from "./read-path-budget.js";
-import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import { withStreamRetry } from "./retry-stream.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
-import {
-  combineAbortSignals,
-  firstLine,
-  formatSubagentActivity,
-  getFinishReason,
-  getStepNumber,
-  getUsage,
-  notifyObserver,
-  toToolCall,
-  toToolResult,
-} from "./tool-utils";
+import { combineAbortSignals, firstLine, formatSubagentActivity, notifyObserver, toToolResult } from "./tool-utils";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -332,12 +272,6 @@ export class Agent {
    */
   private _lastPromptBreakdown: Record<string, number> | null = null;
   /**
-   * Task 2.6a — Per-streamText-call correlation ID for llm-token / llm-done harness events.
-   * Set to crypto.randomUUID() at the start of each streamText call; cleared to "" after llm-done.
-   * Empty string means no active call.
-   */
-  private _currentCallId = "";
-  /**
    * Phase O1 — JSON-shape of the providerOptions object on the most
    * recent streamText call. Captured immediately before streamText and
    * consumed by recordUsage; cleared after. Cost-leak forensics surfaces
@@ -374,7 +308,9 @@ export class Agent {
   >();
   /** P0 native observation: rolling buffer of assistant reasoning text in current turn — last 200 chars sent as intent_context.assistantReasoningExcerpt. */
   private _turnAssistantReasoning = "";
-  /** P0 native observation: cached user goal for current turn — first 200 chars of userMessage. */
+  /** Per-call correlation id for top-level streamText; set in MessageProcessor, consumed by recordUsage / onFinish llm-done. */
+  private _currentCallId = "";
+  /** P0 native observation: first 200 chars of the user's current turn — sent as intent_context.userGoalExcerpt to PreToolUse. */
   private _turnUserGoalExcerpt = "";
   /** Compaction statistics tracking count and total tokens saved. */
   private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
@@ -780,7 +716,7 @@ export class Agent {
    * Returns true if the message was found, is a user message, and got pinned.
    */
   pinMessageBySeq(seq: number): boolean {
-    const idx = this.messageSeqs.findIndex((s) => s === seq);
+    const idx = this.messageSeqs.indexOf(seq);
     if (idx < 0) return false;
     if (this.messages[idx]?.role !== "user") return false;
     this._pinnedSeqs.add(seq);
@@ -1521,7 +1457,7 @@ export class Agent {
     const pinnedReinjectionSeqs: Array<number | null> = [];
     for (const seq of [...this._pinnedSeqs].sort((a, b) => a - b)) {
       if (keptSeqSet.has(seq)) continue;
-      const idx = this.messageSeqs.findIndex((s) => s === seq);
+      const idx = this.messageSeqs.indexOf(seq);
       if (idx < 0) {
         // Pinned seq no longer present (shouldn't happen, but stay defensive).
         this._pinnedSeqs.delete(seq);
@@ -1649,12 +1585,13 @@ export class Agent {
     this.councilManager.respondToPreflight(preflightId, approved);
   }
 
-  /** Internal hook used by agent.test.ts (private API — do not call externally). */
+  // Internal hooks used by orchestrator.agent.test.ts to exercise buffered
+  // question / preflight delivery through CouncilManager. They are reached
+  // through `as unknown as` casts in the test; keep them private but stable.
   private _createQuestionResponder(): (questionId: string) => Promise<string> {
     return this.councilManager.createQuestionResponder();
   }
 
-  /** Internal hook used by agent.test.ts (private API — do not call externally). */
   private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
     return this.councilManager.createPreflightResponder();
   }
@@ -1805,7 +1742,7 @@ export class Agent {
 
   async *runCouncilRound(
     topic: string,
-    observer?: ProcessMessageObserver,
+    _observer?: ProcessMessageObserver,
     rounds?: number,
     userModelMessage?: ModelMessage,
   ): AsyncGenerator<StreamChunk, void, unknown> {
@@ -2174,7 +2111,7 @@ export class Agent {
       const readablePart = synthesisText.includes("---READABLE---")
         ? synthesisText.split("---READABLE---")[1]?.trim()
         : synthesisText;
-      yield { type: "content", content: (readablePart || synthesisText) + "\n" };
+      yield { type: "content", content: `${readablePart || synthesisText}\n` };
 
       // Parse structured outcome and execute actions
       const structuredOutcome = this.councilManager.parseOutcome(synthesisText, topic);
