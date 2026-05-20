@@ -1,14 +1,9 @@
 import { createHash } from "node:crypto";
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import { createOllama } from "ollama-ai-provider-v2";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
-import { OPENAI_COMPATIBLE_BASE_URLS } from "./endpoints.js";
+import { getProviderStrategy } from "./strategies/registry.js";
 import type { ProviderId } from "./types.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -37,62 +32,17 @@ export interface ResolvedModelRuntime {
   unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
 }
 
+/**
+ * Phase 12.2-G4: thin dispatcher delegating to the provider strategy registry.
+ * Each provider's SDK wiring + `factory.responses` + `defaultProviderOptions`
+ * baseline lives in `src/providers/strategies/<provider>.strategy.ts`.
+ */
 export function createProviderFactory(
   id: ProviderId,
   opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
 ): ProviderFactoryResult {
-  switch (id) {
-    case "anthropic": {
-      const p = createAnthropic({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-      const factory: ProviderFactory = (modelId: string) => p(modelId);
-      factory.responses = (modelId: string) => (p as any).responses(modelId);
-      return { id, factory };
-    }
-    case "openai": {
-      // OAuth subscription tokens cannot call api.openai.com — they must hit
-      // ChatGPT's backend (https://chatgpt.com/backend-api/codex) using the
-      // Responses API, not Chat Completions.
-      const isOAuth = !!opts.headers;
-      const p = isOAuth
-        ? createOpenAI({
-            apiKey: opts.apiKey ?? "oauth",
-            baseURL: opts.baseURL ?? "https://chatgpt.com/backend-api/codex",
-            headers: opts.headers,
-          })
-        : createOpenAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-      const factory: ProviderFactory = isOAuth
-        ? // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
-          (modelId: string) => (p as any).responses(modelId)
-        : (modelId: string) => p(modelId);
-      // biome-ignore lint/suspicious/noExplicitAny: ai-sdk responses() typed any
-      factory.responses = (modelId: string) => (p as any).responses(modelId);
-      return { id, factory };
-    }
-    case "google": {
-      const p = opts.headers
-        ? createGoogleGenerativeAI({
-            apiKey: opts.apiKey ?? "oauth", // placeholder when using OAuth headers
-            baseURL: opts.baseURL,
-            headers: opts.headers,
-          })
-        : createGoogleGenerativeAI({ apiKey: opts.apiKey, baseURL: opts.baseURL });
-      return { id, factory: (modelId: string) => p(modelId) };
-    }
-    case "deepseek":
-    case "siliconflow":
-    case "xai": {
-      const p = createOpenAICompatible({
-        name: id,
-        baseURL: opts.baseURL ?? OPENAI_COMPATIBLE_BASE_URLS[id],
-        apiKey: opts.apiKey,
-      });
-      return { id, factory: (modelId: string) => p(modelId) };
-    }
-    case "ollama": {
-      const p = createOllama({ baseURL: opts.baseURL ?? "http://localhost:11434/api" });
-      return { id, factory: (modelId: string) => p(modelId) };
-    }
-  }
+  const strategy = getProviderStrategy(id);
+  return { id, factory: strategy.createFactory(opts) };
 }
 
 /**
@@ -157,6 +107,8 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // the alias is not a valid model id on their API.
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
+  const providerId = (modelInfo?.provider ?? "anthropic") as ProviderId;
+  const userEffort = getReasoningEffortForModel(modelId);
 
   const mockGlobals = globalThis as MockRuntimeGlobals;
   const mockModel = mockGlobals.__muonroiMockModel;
@@ -164,55 +116,55 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // Determine the language model + unsupportedParams + provider-level defaults.
   // Test path: mockModel is a MockLanguageModelV3 from ai/test. Overrides for
   // unsupportedParams / defaultProviderOptions simulate OAuth registry state.
-  // Prod path: factory builds the real provider model (api-key or OAuth).
-  // biome-ignore lint/suspicious/noExplicitAny: ai-sdk model shape is provider-specific
-  let model: any;
-  let unsupportedParams: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP"> | undefined;
+  // Prod path: delegate to the per-provider strategy which knows how to
+  // route via factory.responses vs factory(modelId).
+  let resolved: ResolvedModelRuntime;
   let providerLevelDefaults: Record<string, unknown> | undefined;
 
   if (mockModel) {
-    model = mockModel;
-    unsupportedParams = mockGlobals.__muonroiMockUnsupportedParams;
+    const caps = getProviderCapabilities(providerId);
+    const providerOptions = caps.buildProviderOptions({
+      model: modelInfo,
+      reasoningEffort: userEffort,
+    });
+    resolved = {
+      model: mockModel,
+      modelId: canonicalId,
+      modelInfo,
+      providerOptions,
+      unsupportedParams: mockGlobals.__muonroiMockUnsupportedParams,
+    };
     providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
   } else {
-    // G3: Responses-API routing is now a capability decision. OpenAI reasoning
-    // models (gpt-5.x, o1, o3, o4) return false from `usesResponsesAPI` until
-    // OpenAIProviderCapabilities promotes both responsesOnly=true AND
-    // reasoning=true. Other providers fall through to factory(canonicalId).
-    const caps = getProviderCapabilities((modelInfo?.provider ?? "anthropic") as ProviderId);
-    const needsResponsesApi = caps.usesResponsesAPI(modelInfo);
-    model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
-    unsupportedParams = factory.unsupportedParams;
+    const strategy = getProviderStrategy(providerId);
+    resolved = strategy.resolve({
+      factory,
+      modelId: canonicalId,
+      modelInfo,
+      reasoningEffort: userEffort,
+    });
     providerLevelDefaults = factory.defaultProviderOptions;
   }
-
-  // G3: assemble providerOptions via the capability layer. No sessionId at
-  // resolve time — only the stable bits (anthropic.thinking, openai/xai
-  // reasoningEffort) come from here. Per-turn fields like
-  // openai.promptCacheKey are layered in by `buildTurnProviderOptions`.
-  const caps = getProviderCapabilities((modelInfo?.provider ?? "anthropic") as ProviderId);
-  const userEffort = getReasoningEffortForModel(modelId);
-  let providerOptions: Record<string, unknown> | undefined = caps.buildProviderOptions({
-    model: modelInfo,
-    reasoningEffort: userEffort,
-  });
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject
   // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
   // backend-specific quirks centralized in src/providers/auth/registry.ts.
   // In the mock path `providerLevelDefaults` is the test-supplied override.
+  // OpenAIStrategy.createFactory also seeds `{ store: true }` here on the
+  // API-key path (orchestrator policy migrated in G4).
   if (providerLevelDefaults && modelInfo?.provider) {
     const key = modelInfo.provider;
-    providerOptions = {
-      ...providerOptions,
+    const existingForProvider = (resolved.providerOptions?.[key] as Record<string, unknown> | undefined) ?? {};
+    resolved.providerOptions = {
+      ...resolved.providerOptions,
       [key]: {
         ...providerLevelDefaults,
-        ...((providerOptions?.[key] as Record<string, unknown> | undefined) ?? {}),
+        ...existingForProvider,
       },
     };
   }
 
-  return { model, modelId, modelInfo, providerOptions, unsupportedParams };
+  return resolved;
 }
 
 /**
