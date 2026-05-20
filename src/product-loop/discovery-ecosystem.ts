@@ -109,6 +109,8 @@ export function buildEcosystemResearchSeed(): EcosystemResearchSeed {
     researcherLens:
       "Query muonroi-docs MCP first (`docs_search` for BB package usage, recipes, conventions). " +
       "Fall back to web search ONLY when muonroi-docs returns nothing relevant. " +
+      "When the user names a specific URL on docs.muonroi.com, fetch it directly via web_fetch — " +
+      "the same content is in MCP but the URL anchor signals the user wants that exact page. " +
       "Identify which existing BB / template packages address the user's need before proposing new code.",
     architectLens:
       "Compose the solution from EXISTING ecosystem packages (BB, Muonroi.* templates, " +
