@@ -94,7 +94,17 @@ export interface StreamRunnerDeps {
   /** Per-session read-path budget enforcer. */
   getReadBudget(): ReadPathBudget | null;
   /** Record usage event (C1 cache split happens in onFinish). */
-  recordUsage(usage: unknown, source: "task", model?: string): void;
+  recordUsage(
+    usage: {
+      totalTokens?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheCreationTokens?: number;
+    },
+    source: "task",
+    model?: string,
+  ): void;
   /** Set the current call id (for forensics correlation). */
   setCurrentCallId(id: string): void;
   /** Persist the last providerOptions shape (O1 forensics). */
