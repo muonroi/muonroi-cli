@@ -196,13 +196,12 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
-  getCompactionSummaryText,
-  isCompactionSummaryMessage,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
   relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
+import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
@@ -399,24 +398,11 @@ export class Agent {
   private _activeRunId: string | null = null;
   /** Resume digest loaded from active flow run state.md. */
   private _resumeDigest: string | null = null;
-  /** Last council synthesis text for auto-continue after debate. */
-  private _lastCouncilSynthesis: string | null = null;
-  /** Guard: prevent recursive council auto-continue from triggering another council. */
-  private _isCouncilContinuation = false;
-  /** Pending council question resolvers (questionId → resolve callback). */
-  private _councilQuestionResolvers = new Map<string, (answer: string) => void>();
-  /** Pending council preflight resolvers (preflightId → resolve callback). */
-  private _councilPreflightResolvers = new Map<string, (approved: boolean) => void>();
   /**
-   * Buffered answers from headless auto-answer mode. The interceptor in
-   * `runHeadless` resolves askcards immediately after the chunk is yielded,
-   * which fires BEFORE the council generator registers its Promise resolver
-   * (`respondToQuestion` runs after the yield resumes). Without buffering the
-   * resolve is dropped and the generator awaits forever. Pre-supplied answers
-   * land here and `_createQuestionResponder` drains them on next call.
+   * Phase 12.1-02: All council state (synthesis/continuation flags, resolver
+   * + buffer maps, stats) lives inside CouncilManager. Agent holds one ref.
    */
-  private _councilBufferedQuestionAnswers = new Map<string, string>();
-  private _councilBufferedPreflightApprovals = new Map<string, boolean>();
+  private councilManager: CouncilManager;
   /** Whether compaction already ran during the current turn (prevents double-compact). */
   private _compactedThisTurn = false;
   /** Guard: OAuth provider init runs at most once per Agent instance. */
@@ -469,6 +455,17 @@ export class Agent {
       shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
     this.delegations = new DelegationManager(() => this.bash.getCwd());
+    // Phase 12.1-02: council state + helpers live in CouncilManager. DI via
+    // getter callbacks so the manager reads live Agent state without holding
+    // a circular reference to the Agent instance.
+    this.councilManager = new CouncilManager({
+      getModelId: () => this.modelId,
+      getSessionId: () => this.session?.id ?? null,
+      hasSessionStore: () => this.sessionStore !== null,
+      getMessages: () => this.messages,
+      getBash: () => this.bash,
+      getMode: () => this.mode,
+    });
 
     const initialMode: AgentMode = "agent";
     this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
@@ -2111,91 +2108,63 @@ export class Agent {
   }
 
   // ========================================================================
-  // Council system — multi-model debate rounds
+  // Council system — delegated to CouncilManager (Phase 12.1-02)
+  //
+  // All council state + sub-call helpers (generate/research/prompt builders/
+  // outcome parser/executor/candidate resolution) live in CouncilManager.
+  // The thin facade below preserves the public API the UI + tests rely on
+  // (respondToCouncilQuestion/Preflight + the internal _create*Responder
+  // hooks used by orchestrator.agent.test.ts).
   // ========================================================================
 
-  private _councilStats = { calls: 0, startMs: 0 };
+  respondToCouncilQuestion(questionId: string, answer: string): void {
+    this.councilManager.respondToQuestion(questionId, answer);
+  }
 
-  private async _councilGenerate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
-    const providerId = detectProviderForModel(modelId);
-    const key = await loadKeyForProvider(providerId);
-    const provider = createProvider(providerId, key);
-    const runtime = resolveModelRuntime(provider, modelId);
-    const { text } = await generateText({
-      model: runtime.model,
-      system,
-      prompt,
-      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: maxTokens }),
-      ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.7 }),
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-    });
-    this._councilStats.calls++;
-    return text;
+  respondToCouncilPreflight(preflightId: string, approved: boolean): void {
+    this.councilManager.respondToPreflight(preflightId, approved);
+  }
+
+  /** Internal hook used by agent.test.ts (private API — do not call externally). */
+  private _createQuestionResponder(): (questionId: string) => Promise<string> {
+    return this.councilManager.createQuestionResponder();
+  }
+
+  /** Internal hook used by agent.test.ts (private API — do not call externally). */
+  private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
+    return this.councilManager.createPreflightResponder();
   }
 
   /**
-   * Research phase for council: runs a model with tools (bash, grep, read_file, search_web)
-   * to gather real data about the topic before discussion.
-   * Returns a structured research findings string.
+   * @deprecated Internal — kept to satisfy lingering references to the old
+   * provider-fallback resolver. Returns a fresh model id chosen from non-
+   * disabled providers; falls back to the session model when nothing is
+   * reachable. Will be removed once dispatch is fully migrated.
    */
+  private async _resolveNonDisabledFallback(): Promise<{ modelId: string }> {
+    return this.councilManager.resolveNonDisabledFallback();
+  }
+
+  // ========================================================================
+  // Legacy council generator stubs (call CouncilManager helpers inline)
+  // ========================================================================
+
+  /** Wrapper: delegates to CouncilManager.generate so legacy runCouncilRound keeps its old call shape. */
+  private async _councilGenerate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
+    return this.councilManager.generate(modelId, system, prompt, maxTokens);
+  }
+
+  /** Wrapper: delegates to CouncilManager.research. */
   private async _councilResearch(
     modelId: string,
     topic: string,
     conversationContext: string,
     signal?: AbortSignal,
   ): Promise<string> {
-    const providerId = detectProviderForModel(modelId);
-    const key = await loadKeyForProvider(providerId);
-    const provider = createProvider(providerId, key);
-    const runtime = resolveModelRuntime(provider, modelId);
-
-    // Build tool set with bash, grep, read_file for codebase research
-    const researchTools = createTools(this.bash, provider, this.mode, {
-      sessionId: this.session?.id ?? undefined,
-    });
-
-    const systemPrompt =
-      `You are a research specialist. Your job is to gather FACTS about the topic below.\n\n` +
-      `## Instructions\n` +
-      `- Use available tools (bash, read_file, grep) to investigate the codebase and find relevant files, code, or configurations\n` +
-      `- Search for existing patterns, implementations, or decisions related to the topic\n` +
-      `- Report EXACT findings: file paths, function names, error messages, code snippets\n` +
-      `- Do NOT make assumptions or speculate — only report what you find\n` +
-      `- If you can't find anything relevant, say so explicitly\n\n` +
-      `## Output Format\n` +
-      `After your investigation, produce a research report with:\n` +
-      `## Research Findings\n` +
-      `- [fact 1 with source]\n` +
-      `- [fact 2 with source]\n\n` +
-      `## Key Evidence\n` +
-      `- [code snippets or file paths that are most relevant]\n\n` +
-      `## Gaps\n` +
-      `- [what we don't know yet or couldn't verify]\n`;
-
-    const userPrompt = conversationContext
-      ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`
-      : `## Research Topic\n${topic}\n\nInvestigate the codebase and report your findings.`;
-
-    try {
-      const { text } = await generateText({
-        model: runtime.model,
-        system: systemPrompt,
-        prompt: userPrompt,
-        tools: researchTools,
-        stopWhen: stepCountIs(10),
-        ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 4096 }),
-        ...(shouldDropParam(runtime, "temperature") ? {} : { temperature: 0.3 }),
-        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-        ...(signal ? { abortSignal: signal } : {}),
-      });
-      this._councilStats.calls++;
-      return text;
-    } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      return `## Research Findings\n[Research failed: ${errMsg}]\n\n## Gaps\n- Could not complete research due to error`;
-    }
+    return this.councilManager.research(modelId, topic, conversationContext, signal);
   }
 
+  /** Wrapper: delegates to CouncilManager.buildDiscussPrompt. */
   private _buildDiscussPrompt(
     phase: "open" | "respond" | "followup" | "convergence-check",
     ctx: {
@@ -2210,383 +2179,53 @@ export class Agent {
       runningSummary?: string;
     },
   ): { system: string; prompt: string } {
-    switch (phase) {
-      case "open":
-        return {
-          system:
-            `You are a ${ctx.speakerRole} specialist. You are entering a discussion with a ${ctx.partnerRole} specialist about a technical topic.\n\n` +
-            (ctx.conversationContext
-              ? `## Conversation Context (before this discussion)\n${ctx.conversationContext}\n\n---\n\n`
-              : "") +
-            `Share your analysis naturally — explain your reasoning, the trade-offs you see, and what concerns you.\n` +
-            `End by asking the ${ctx.partnerRole} for their perspective on your analysis. What do they see differently?`,
-          prompt: `Topic for discussion:\n${ctx.topic}`,
-        };
-
-      case "respond":
-        return {
-          system:
-            `You are a ${ctx.speakerRole} specialist in a discussion with a ${ctx.partnerRole} specialist.\n\n` +
-            `A colleague shared their analysis below. Give your honest take:\n` +
-            `- Where you agree, say so briefly and build on it\n` +
-            `- Where you disagree, explain why with your own reasoning — not to attack, but to offer a different lens\n` +
-            `- Share what you think they might be missing from your ${ctx.speakerRole} perspective\n\n` +
-            `End with a question back to them: based on your analysis, what's their view? Do they agree, or do they see it differently?`,
-          prompt:
-            `Their analysis (${ctx.partnerRole}):\n${ctx.partnerPosition}\n\n` +
-            `Your own analysis for context:\n${ctx.speakerPosition}`,
-        };
-
-      case "followup":
-        return {
-          system:
-            `You are a ${ctx.speakerRole} specialist continuing a discussion (round ${ctx.round}) with a ${ctx.partnerRole} specialist.\n\n` +
-            (ctx.runningSummary
-              ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` +
-                `Focus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
-              : "") +
-            `Read their latest response and the exchange so far. Then:\n` +
-            `- If they raised valid points, acknowledge them and update your thinking\n` +
-            `- If you still disagree on something, explain why — bring new evidence or a different angle, not the same argument again\n` +
-            `- If you've changed your mind on something, say so explicitly\n\n` +
-            `Be concise. End with: do you agree with where we've landed? Or is there something we're still seeing differently?`,
-          prompt:
-            `Discussion so far:\n${ctx.exchangeHistory}\n\n` +
-            `Their latest response (${ctx.partnerRole}):\n${ctx.partnerPosition}`,
-        };
-
-      case "convergence-check":
-        return {
-          system:
-            `Analyze this discussion between a ${ctx.speakerRole} and a ${ctx.partnerRole}. ` +
-            `Respond with ONLY a JSON object, no other text:\n` +
-            `{"converged": true/false, "reason": "one sentence explaining why"}`,
-          prompt: `Discussion:\n${ctx.exchangeHistory}`,
-        };
-    }
+    return this.councilManager.buildDiscussPrompt(phase, ctx);
   }
 
+  /** Wrapper: delegates to CouncilManager.generateRoundSummary. */
   private async _generateRoundSummary(
     exchangeLogs: Map<string, string[]>,
     topic: string,
     round: number,
     modelId: string,
   ): Promise<string> {
-    const allExchanges = [...exchangeLogs.values()].flat().slice(-6).join("\n\n");
-    return this._councilGenerate(
-      modelId,
-      "Summarize this discussion in 3-5 bullet points. Focus on:\n" +
-        "1. Points where participants AGREE\n" +
-        "2. Points still in DISPUTE (with each side's core argument)\n" +
-        "3. New EVIDENCE or perspectives raised this round\n" +
-        "Be concise — one line per bullet. No preamble.",
-      `Round ${round} discussion on: ${topic}\n\n${allExchanges}`,
-      512,
-    );
+    return this.councilManager.generateRoundSummary(exchangeLogs, topic, round, modelId);
   }
 
-  /**
-   * Build conversation context for council discussion from current session messages.
-   * Extracts: compaction summary, recent user messages, key decisions.
-   * Limited to ~3000 tokens to avoid excessive cost.
-   */
+  /** Wrapper: delegates to CouncilManager.buildContext. */
   private _buildCouncilContext(): string {
-    const parts: string[] = [];
-
-    // 1. Compaction summary (first message if it's a summary)
-    if (this.messages.length > 0) {
-      const first = this.messages[0];
-      if (isCompactionSummaryMessage(first)) {
-        const summary = getCompactionSummaryText(first);
-        if (summary) {
-          parts.push(`## Session Context (from compaction summary)\n${summary}`);
-        }
-      }
-    }
-
-    // 2. Recent user messages (last 3-5 user turns)
-    const userMessages: string[] = [];
-    for (let i = this.messages.length - 1; i >= 0 && userMessages.length < 5; i--) {
-      const msg = this.messages[i];
-      if (msg.role === "user") {
-        const text = typeof msg.content === "string" ? msg.content : extractUserContent(msg.content);
-        if (text.trim()) {
-          userMessages.unshift(`- ${text.slice(0, 2000).trim()}`);
-        }
-      }
-    }
-    if (userMessages.length > 0) {
-      parts.push(`## Recent User Messages\n${userMessages.join("\n")}`);
-    }
-
-    // 3. Key decisions from council memory if available
-    const councilMemories: string[] = [];
-    for (const msg of this.messages) {
-      if (msg.role === "system" && typeof msg.content === "string" && msg.content.includes("[Council Memory]")) {
-        councilMemories.push(msg.content);
-      }
-    }
-    if (councilMemories.length > 0) {
-      parts.push(`## Previous Council Outcomes\n${councilMemories.slice(-2).join("\n\n")}`);
-    }
-
-    const combined = parts.join("\n\n---\n\n");
-    // Rough token estimate: char/4
-    if (combined.length > 12000) {
-      return combined.slice(0, 12000) + "\n\n[... context truncated to fit token budget]";
-    }
-    return combined;
+    return this.councilManager.buildContext();
   }
 
-  private _parseCouncilOutcome(synthesisText: string, _topic: string): CouncilOutcome | null {
-    try {
-      const jsonMatch = synthesisText.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) return null;
-      const parsed = JSON.parse(jsonMatch[0]) as Partial<CouncilOutcome>;
-      if (!parsed.type || !parsed.summary) return null;
-      return {
-        type: parsed.type,
-        summary: parsed.summary,
-        agreed: parsed.agreed ?? [],
-        tradeoffs: parsed.tradeoffs ?? [],
-        recommendation: parsed.recommendation ?? "",
-        actionItems: parsed.actionItems,
-        planUpdate: parsed.planUpdate,
-        resolvedQuestion: parsed.resolvedQuestion,
-      };
-    } catch {
-      return null;
-    }
+  /** Wrapper: delegates to CouncilManager.parseOutcome. */
+  private _parseCouncilOutcome(synthesisText: string, topic: string): CouncilOutcome | null {
+    return this.councilManager.parseOutcome(synthesisText, topic);
   }
 
+  /** Wrapper: delegates to CouncilManager.executeOutcome. */
   private async *_executeCouncilOutcome(
     outcome: CouncilOutcome,
     topic: string,
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    switch (outcome.type) {
-      case "decision":
-        if (this.session) {
-          try {
-            appendSystemMessage(
-              this.session.id,
-              `[Council Decision]\nTopic: ${topic}\n${outcome.summary}\nAgreed: ${outcome.agreed.join("; ")}\nRecommendation: ${outcome.recommendation}`,
-            );
-          } catch {
-            /* non-critical */
-          }
-        }
-        yield { type: "content", content: `\n> Decision recorded.\n` };
-        break;
-
-      case "action_items":
-        if (outcome.actionItems?.length) {
-          const itemsText = outcome.actionItems.map((item, i) => `${i + 1}. ${item}`).join("\n");
-          yield { type: "content", content: `\n### Action Items\n${itemsText}\n` };
-          if (this.session) {
-            try {
-              appendSystemMessage(this.session.id, `[Council Action Items]\nTopic: ${topic}\n${itemsText}`);
-            } catch {
-              /* non-critical */
-            }
-          }
-        }
-        break;
-
-      case "plan_update":
-        if (outcome.planUpdate) {
-          try {
-            const { ensureFlowDir } = await import("../flow/scaffold.js");
-            const { getActiveRunId, updateRunFile } = await import("../flow/run-manager.js");
-            const { readArtifact } = await import("../flow/artifact-io.js");
-            const nodePath = await import("node:path");
-            const flowDir = await ensureFlowDir(this.bash.getCwd());
-            const runId = await getActiveRunId(flowDir);
-            if (runId) {
-              const currentPlan = await readArtifact(nodePath.join(flowDir, "runs", runId), "roadmap.md");
-              if (currentPlan) {
-                currentPlan.sections.set("Council Update", outcome.planUpdate);
-                await updateRunFile(flowDir, runId, "roadmap.md", currentPlan);
-                yield { type: "content", content: `\n> Plan updated with council recommendations.\n` };
-              }
-            }
-          } catch {
-            /* flow dir may not exist — non-critical */
-          }
-          if (this.session) {
-            try {
-              appendSystemMessage(this.session.id, `[Council Plan Update]\nTopic: ${topic}\n${outcome.planUpdate}`);
-            } catch {
-              /* non-critical */
-            }
-          }
-        }
-        break;
-
-      case "resolve_question":
-        if (outcome.resolvedQuestion) {
-          yield { type: "content", content: `\n> Question resolved: ${outcome.resolvedQuestion.question}\n` };
-          if (this.session) {
-            try {
-              appendSystemMessage(
-                this.session.id,
-                `[Council Resolution]\nQ: ${outcome.resolvedQuestion.question}\nA: ${outcome.resolvedQuestion.answer}`,
-              );
-            } catch {
-              /* non-critical */
-            }
-          }
-        }
-        break;
-    }
+    yield* this.councilManager.executeOutcome(outcome, topic);
   }
 
+  /** Wrapper: delegates to CouncilManager.hasMultiProviderConfig. */
   private _hasMultiProviderConfig(roleModels: Partial<Record<ModelRole, string>>): boolean {
-    const providers = new Set<string>();
-    for (const modelId of Object.values(roleModels)) {
-      if (modelId) providers.add(detectProviderForModel(modelId));
-    }
-    return providers.size >= 2;
+    return this.councilManager.hasMultiProviderConfig(roleModels);
   }
 
-  /**
-   * When the session's default provider is disabled, find the first
-   * non-disabled provider with a reachable key and return its model.
-   * Falls back to the session model if no alternative is available.
-   */
-  private async _resolveNonDisabledFallback(): Promise<{ modelId: string }> {
-    const fallbackProviders: ProviderId[] = [
-      "anthropic",
-      "openai",
-      "google",
-      "deepseek",
-      "siliconflow",
-      "xai",
-      "ollama",
-    ];
-    for (const p of fallbackProviders) {
-      if (!isProviderDisabled(p)) {
-        const key = await loadKeyForProvider(p).catch(() => null);
-        if (key) {
-          const m = getModelByTier("balanced", p);
-          // Guard: getModelByTier may return a model from a different provider
-          // when the preferred provider has no model for the requested tier.
-          if (m && m.provider === p) return { modelId: m.id };
-          const models = getModelsForProvider(p);
-          if (models.length > 0) return { modelId: models[0].id };
-        }
-      }
-    }
-    // All fallback providers also disabled or unreachable — keep session model
-    return { modelId: this.modelId };
-  }
-
+  /** Wrapper: delegates to CouncilManager.resolveSameProviderCandidates. */
   private async _resolveSameProviderCandidates(
     providerId: ProviderId,
     roles: ModelRole[],
   ): Promise<Array<{ role: ModelRole; model: string }>> {
-    const canReach = await loadKeyForProvider(providerId)
-      .then(() => true)
-      .catch(() => false);
-    if (!canReach) return [];
-
-    const providerModels = getModelsForProvider(providerId);
-    if (providerModels.length === 0) {
-      return roles.map((role) => ({ role, model: this.modelId }));
-    }
-
-    const tierPreference: Record<string, Array<"fast" | "balanced" | "premium">> = {
-      implement: ["balanced", "premium", "fast"],
-      verify: ["premium", "balanced", "fast"],
-      research: ["fast", "balanced", "premium"],
-    };
-
-    const usedModels = new Set<string>();
-    const candidates: Array<{ role: ModelRole; model: string }> = [];
-
-    for (const role of roles) {
-      const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
-      let picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
-      if (!picked) picked = providerModels.find((m) => !usedModels.has(m.id));
-      if (!picked) picked = providerModels[0];
-
-      candidates.push({ role, model: picked.id });
-      usedModels.add(picked.id);
-    }
-
-    return candidates;
+    return this.councilManager.resolveSameProviderCandidates(providerId, roles);
   }
 
   // ========================================================================
   // Council v2 — Clarify → Confirm → Debate → Plan → Execute
   // ========================================================================
-
-  respondToCouncilQuestion(questionId: string, answer: string): void {
-    if (process.env.MUONROI_DEBUG_LEADER === "1") {
-      process.stderr.write(
-        `[responder] respondToCouncilQuestion: ${JSON.stringify({
-          questionId,
-          answerPreview: answer.slice(0, 40),
-          hadResolver: this._councilQuestionResolvers.has(questionId),
-          pendingResolverCount: this._councilQuestionResolvers.size,
-        })}\n`,
-      );
-    }
-    const resolver = this._councilQuestionResolvers.get(questionId);
-    if (resolver) {
-      resolver(answer);
-      this._councilQuestionResolvers.delete(questionId);
-    } else {
-      // Headless auto-answer: response arrived before the generator registered
-      // its resolver. Buffer it; `_createQuestionResponder` will drain it.
-      this._councilBufferedQuestionAnswers.set(questionId, answer);
-    }
-  }
-
-  respondToCouncilPreflight(preflightId: string, approved: boolean): void {
-    const resolver = this._councilPreflightResolvers.get(preflightId);
-    if (resolver) {
-      resolver(approved);
-      this._councilPreflightResolvers.delete(preflightId);
-    } else {
-      this._councilBufferedPreflightApprovals.set(preflightId, approved);
-    }
-  }
-
-  private _createQuestionResponder(): (questionId: string) => Promise<string> {
-    return (questionId: string) =>
-      new Promise<string>((resolve) => {
-        const buffered = this._councilBufferedQuestionAnswers.get(questionId);
-        if (buffered !== undefined) {
-          if (process.env.MUONROI_DEBUG_LEADER === "1") {
-            process.stderr.write(
-              `[responder] drain-buffered: ${JSON.stringify({ questionId, bufferedSize: this._councilBufferedQuestionAnswers.size })}\n`,
-            );
-          }
-          this._councilBufferedQuestionAnswers.delete(questionId);
-          resolve(buffered);
-          return;
-        }
-        if (process.env.MUONROI_DEBUG_LEADER === "1") {
-          process.stderr.write(
-            `[responder] register-resolver: ${JSON.stringify({ questionId, totalResolvers: this._councilQuestionResolvers.size + 1 })}\n`,
-          );
-        }
-        this._councilQuestionResolvers.set(questionId, resolve);
-      });
-  }
-
-  private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
-    return (preflightId: string) =>
-      new Promise<boolean>((resolve) => {
-        const buffered = this._councilBufferedPreflightApprovals.get(preflightId);
-        if (buffered !== undefined) {
-          this._councilBufferedPreflightApprovals.delete(preflightId);
-          resolve(buffered);
-          return;
-        }
-        this._councilPreflightResolvers.set(preflightId, resolve);
-      });
-  }
 
   async *runCouncilV2(
     topic: string,
@@ -2629,7 +2268,7 @@ export class Agent {
     } while (!result.done);
 
     const synthesis = result.value;
-    this._lastCouncilSynthesis = synthesis;
+    this.councilManager.setLastSynthesis(synthesis);
 
     if (options?.userModelMessage && synthesis) {
       this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
@@ -2736,7 +2375,7 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const maxRounds = rounds ?? getCouncilRounds();
     const ALL_ROLES: ModelRole[] = ["implement", "verify", "research"];
-    this._councilStats = { calls: 0, startMs: Date.now() };
+    this.councilManager.resetStats(Date.now());
 
     // Resolve council participants: same-provider by default, multi-provider only when configured
     const candidates: Array<{ role: ModelRole; model: string }> = [];
@@ -3126,12 +2765,13 @@ export class Agent {
     }
 
     // ── Stats + Memory ──
-    const totalMs = Date.now() - this._councilStats.startMs;
+    const councilStats = this.councilManager.stats;
+    const totalMs = Date.now() - councilStats.startMs;
     yield {
       type: "content",
       content:
         `\n---\n` +
-        `> Council stats: ${this._councilStats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
+        `> Council stats: ${councilStats.calls} API calls, ${(totalMs / 1000).toFixed(1)}s total, ` +
         `${active.length} participants, synthesis ${((Date.now() - p3Start) / 1000).toFixed(1)}s\n`,
     };
 
@@ -3143,7 +2783,7 @@ export class Agent {
         finalPositions: active.map((a) => ({ role: a.role, position: a.position.slice(0, 1000) })),
         synthesis: synthesisText.slice(0, 2000),
         convergedPairs: [...pairConverged.entries()].filter(([, v]) => v).map(([k]) => k),
-        stats: { calls: this._councilStats.calls, durationMs: totalMs },
+        stats: { calls: councilStats.calls, durationMs: totalMs },
         timestamp: new Date().toISOString(),
       };
       try {
@@ -3159,7 +2799,7 @@ export class Agent {
     if (userModelMessage) {
       this.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: councilResponse }]);
     }
-    this._lastCouncilSynthesis = councilResponse;
+    this.councilManager.setLastSynthesis(councilResponse);
 
     yield { type: "done" };
   }
@@ -4020,7 +3660,7 @@ export class Agent {
     //   (a) PIL classified taskType=plan|analyze with high confidence, OR
     //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
     // After the debate finishes, runCouncilV2 records synthesis on
-    // `_lastCouncilSynthesis`; we then re-enter processMessage with the synthesis
+    // councilManager.lastSynthesis; we then re-enter processMessage with the synthesis
     // as the next user turn so the main loop continues with full debate context.
     // Skip if this is already a council continuation turn (prevent infinite recursion).
     const autoCouncilTypes = new Set(["plan", "analyze"]);
@@ -4032,7 +3672,7 @@ export class Agent {
     const taskTypeMatch =
       pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= autoCouncilConfidence;
     const shouldAutoCouncil =
-      !this._isCouncilContinuation &&
+      !this.councilManager.isContinuation &&
       isAutoCouncilEnabled() &&
       configuredRoleCount >= autoCouncilMinRoles &&
       (taskTypeMatch || heavyTier);
@@ -4041,7 +3681,7 @@ export class Agent {
     // values that decided it. Lets reports answer "why did this turn cost
     // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
     const autoCouncilSkipReason = (() => {
-      if (this._isCouncilContinuation) return "continuation-turn";
+      if (this.councilManager.isContinuation) return "continuation-turn";
       if (!isAutoCouncilEnabled()) return "feature-disabled";
       if (configuredRoleCount < autoCouncilMinRoles)
         return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
@@ -4068,7 +3708,7 @@ export class Agent {
         autoCouncilConfidence,
         autoCouncilMinRoles,
         heavyTier,
-        isContinuation: this._isCouncilContinuation,
+        isContinuation: this.councilManager.isContinuation,
       },
     }).catch(() => undefined);
 
@@ -4078,18 +3718,18 @@ export class Agent {
         : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
       yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
       yield* this.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
-      const synthesis = this._lastCouncilSynthesis;
-      this._lastCouncilSynthesis = null;
+      const synthesis = this.councilManager.lastSynthesis;
+      this.councilManager.setLastSynthesis(null);
       if (synthesis) {
         yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
-        this._isCouncilContinuation = true;
+        this.councilManager.setContinuation(true);
         try {
           yield* this.processMessage(
             `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`,
             observer,
           );
         } finally {
-          this._isCouncilContinuation = false;
+          this.councilManager.setContinuation(false);
         }
       }
       return;
