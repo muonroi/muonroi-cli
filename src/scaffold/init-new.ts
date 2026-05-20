@@ -1238,9 +1238,14 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
     opts.onLog?.(line);
   };
 
-  // Helper to write and track.
+  // Helper to write and track. Ensures parent dir exists so nested paths
+  // (client/src/api/, client/src/components/, client/src/styles/,
+  // client/src/environments/) don't ENOENT when the step-4 mkdir list misses
+  // them. fsOps.mkdir defaults to recursive; idempotent on existing dirs.
   async function write(relPath: string, content: string) {
-    await fsOps.writeFile(path.join(projectDir, relPath), content);
+    const full = path.join(projectDir, relPath);
+    await fsOps.mkdir(path.dirname(full));
+    await fsOps.writeFile(full, content);
     filesWritten.push(relPath);
   }
 

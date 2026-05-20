@@ -109,6 +109,9 @@ export function useAgentInputBridge(agentRuntime: AgentModeRuntime | undefined):
 
   useEffect(() => {
     if (!agentRuntime || !keyHandler) return;
+    // Toast-only stub in normal interactive mode provides emitEvent but not
+    // onCommand. Guard so the bridge no-ops cleanly instead of crashing the TUI.
+    if (typeof agentRuntime.onCommand !== "function") return;
     agentRuntime.onCommand((cmd: unknown) => {
       if (!cmd || typeof cmd !== "object") return;
       const c = cmd as Cmd;

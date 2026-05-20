@@ -509,6 +509,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // biome-ignore lint/correctness/useExhaustiveDependencies: agentRuntime is a process-lifetime stable ref from globalThis; it never changes after App mounts
   useEffect(() => {
     if (!agentRuntime) return;
+    // Toast-only stub in normal interactive mode provides emitEvent but not
+    // capture/onCommand. Skip the post-process hook so renderer doesn't throw
+    // each frame (the resulting unhandledRejection kills the TUI).
+    if (typeof agentRuntime.capture !== "function") return;
     const captureFrame = () => {
       agentRuntime.capture();
     };
