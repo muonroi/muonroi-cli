@@ -253,6 +253,15 @@ export interface UserSettings {
    * Default: true.
    */
   eeBBContext?: boolean;
+  /**
+   * Ecosystem-aware bias for /ideal discovery + council + research prompts.
+   * When true, leader recommendations, debate stances, and research lenses all
+   * frame the answer around Muonroi ecosystem packages (BB, templates,
+   * agent-harness-*) instead of generic options like "Node.js + Express".
+   * Set to false to use muonroi-cli for projects outside the Muonroi ecosystem.
+   * Default: true.
+   */
+  discoveryEcosystemBias?: boolean;
   /** Step-aware model routing: downgrade to cheaper model for tool-execution steps. */
   stepRouter?: {
     /** Enable step-aware routing. Default: true. */

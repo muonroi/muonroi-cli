@@ -1,5 +1,6 @@
 // src/product-loop/discovery-recommender.ts
 
+import { buildEcosystemPreamble, isEcosystemBiasEnabled } from "./discovery-ecosystem.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { type DiscoveryQuestion, getSchemaHintForLeader } from "./discovery-schema.js";
 import type { DiscoveryContext, ExistingProjectSignals, RecommendationEntry } from "./types.js";
@@ -155,16 +156,19 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
 
 function buildLeaderPrompt(input: RecommendInput): string {
   const constraint = getSchemaHintForLeader(input.question.id);
-  return [
+  const parts: string[] = [];
+  if (isEcosystemBiasEnabled()) {
+    parts.push(buildEcosystemPreamble(), "");
+  }
+  parts.push(
     `Question: ${input.question.prompt}`,
     `Field id: ${input.question.id}`,
     constraint ? `Constraint: ${constraint}` : "",
     `Detected project: ${input.detection.classification} (${input.detection.languages?.join(", ") || "no languages"})`,
     `Context so far: ${JSON.stringify(input.context)}`,
     input.priorRunsDigest ? `Prior similar runs: ${input.priorRunsDigest}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  );
+  return parts.filter(Boolean).join("\n");
 }
 
 export function toEntry(out: RecommendOutput): RecommendationEntry {

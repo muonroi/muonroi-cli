@@ -401,12 +401,30 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           conversationContext += "\n\nProject Context:\n" + formatProjectContextForPrompt(projectCtx);
         }
 
-        const stances = [
+        // Build stances. When ecosystem bias is enabled (default), augment the
+        // Researcher/Architect/Skeptic lenses so the debate prioritizes
+        // muonroi-docs MCP queries + existing BB package composition over
+        // greenfield reasoning.
+        let stances: Array<{ name: string; lens: string }> = [
           { name: "Researcher", lens: "Focus on technical implementation details and codebase constraints" },
           { name: "Cost-Controller", lens: "Focus on budget, resources, and complexity trade-offs" },
           { name: "Skeptic", lens: "Focus on identifying risks, edge cases, and potential points of failure" },
           { name: "Architect", lens: "Focus on high-level structure, scalability, and long-term maintainability" },
         ];
+        try {
+          const { isEcosystemBiasEnabled, buildEcosystemResearchSeed } = await import("./discovery-ecosystem.js");
+          if (isEcosystemBiasEnabled()) {
+            const seed = buildEcosystemResearchSeed();
+            stances = stances.map((s) => {
+              if (s.name === "Researcher") return { ...s, lens: seed.researcherLens };
+              if (s.name === "Architect") return { ...s, lens: seed.architectLens };
+              if (s.name === "Skeptic") return { ...s, lens: seed.skepticLens };
+              return s;
+            });
+          }
+        } catch {
+          /* graceful — fallback to generic stances */
+        }
 
         // Map 4 stances onto resolved council participants. If we have fewer
         // resolved participants than stances, repeat the leader model so every
