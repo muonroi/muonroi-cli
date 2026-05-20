@@ -4269,18 +4269,12 @@ export class Agent {
             providerOptsAnyView.anthropic.thinking = { type: "adaptive" as unknown as "enabled" };
           }
 
-          // Default OpenAI api-key path to store:true (Codex/ChatGPT backend
-          // sets store:false via OAuth registry defaults — respected here).
-          // This is orchestrator policy, not a provider quirk, so it stays
-          // outside the capability layer.
-          const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
-          if (turnProvider === "openai") {
-            const existing = (providerOpts.openai ?? {}) as { store?: boolean; promptCacheKey?: string };
-            providerOpts.openai = {
-              ...existing,
-              store: existing.store ?? true,
-            };
-          }
+          // OpenAI api-key path: `store: true` is seeded by OpenAIStrategy
+          // via factory.defaultProviderOptions (Phase 12.2-G4 migration).
+          // OAuth backend (ChatGPT Codex) overrides with `store: false` via
+          // the auth registry. Both flow through resolveModelRuntime →
+          // runtime.providerOptions → buildTurnProviderOptions and arrive
+          // here merged into providerOpts.openai.
           // Top-level dropParam — shared with sub-agent path via shouldDropParam.
           // See src/providers/runtime.ts for the central rule.
           const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
