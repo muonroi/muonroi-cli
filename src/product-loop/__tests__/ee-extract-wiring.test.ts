@@ -23,6 +23,7 @@ vi.mock("../loop-driver.js", () => ({
 // Mock storage to prevent DB writes in tests and capture logInteraction calls
 vi.mock("../../storage/index.js", () => ({
   logInteraction: vi.fn(),
+  logUIInteraction: vi.fn(),
   appendSystemMessage: vi.fn(),
 }));
 
