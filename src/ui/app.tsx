@@ -185,6 +185,26 @@ import {
   MODELS,
   normalizeModelId,
 } from "../models/registry.js";
+import { withAlpha } from "./utils/color.js";
+import {
+  buildAssistantEntry,
+  buildPreflightQuestion,
+  buildToolResultEntry,
+  buildUserEntry,
+  formatAnswerForLog,
+  formatScheduleDetails,
+  mapCouncilCardKey,
+} from "./utils/format.js";
+import { bottomAlignedModalTop, isEscapeKey } from "./utils/modal.js";
+import {
+  compactTaskLabel,
+  formatTokenCount,
+  sanitizeContent,
+  trunc,
+  truncateBlock,
+  truncateLine,
+} from "./utils/text.js";
+import { describeMcpFsTool, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
@@ -281,61 +301,6 @@ function _formatStructuredResponse(sr: StructuredResponse): string {
   }
 }
 
-function buildAssistantEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
-  return { type: "assistant", content, timestamp: new Date(), ...extra };
-}
-function buildToolResultEntry(toolCall: ToolCall, toolResult: ToolResult, extra?: Partial<ChatEntry>): ChatEntry {
-  const output = toolResult.output ?? (toolResult.error ? `Error: ${toolResult.error}` : "");
-  return {
-    type: "tool_result",
-    content: typeof output === "string" ? output : String(output),
-    timestamp: new Date(),
-    toolCall,
-    toolResult,
-    ...extra,
-  };
-}
-function buildPreflightQuestion(pf: {
-  preflightId: string;
-  problemStatement: string;
-  participants: Array<{ role: string; model: string }>;
-}): CouncilQuestionData {
-  return {
-    questionId: pf.preflightId,
-    phase: "preflight",
-    question: `Approve discussion plan for: ${pf.problemStatement}`,
-    context: pf.participants.length > 0 ? `Participants: ${pf.participants.map((p) => p.role).join(", ")}` : undefined,
-    options: [
-      { label: "Approve", value: "approve", kind: "choice", description: "Start the debate now" },
-      { label: "Reject", value: "reject", kind: "choice", description: "Cancel and rewrite the topic" },
-    ],
-    isRequired: true,
-    defaultIndex: 0,
-  };
-}
-
-function mapCouncilCardKey(key: KeyEvent): CouncilCardKey | null {
-  if (key.name === "up") return { kind: "up" };
-  if (key.name === "down") return { kind: "down" };
-  if (key.name === "return") return { kind: "enter" };
-  if (key.name === "escape") return { kind: "escape" };
-  if (key.name === "backspace" || key.name === "delete") return { kind: "backspace" };
-  // Printable single character (letters, digits, space, etc.).
-  if (typeof key.sequence === "string" && key.sequence.length === 1 && key.sequence >= " " && key.sequence !== "\x7f") {
-    return { kind: "char", ch: key.sequence };
-  }
-  return null;
-}
-
-function formatAnswerForLog(ans: { kind: string; text: string }): string {
-  if (ans.kind === "freetext") return ans.text || "(empty)";
-  if (ans.kind === "chat") return "[Chat about this]";
-  return ans.text;
-}
-
-function buildUserEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
-  return { type: "user", content, timestamp: new Date(), ...extra };
-}
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function decorateTelegramEntries(_entries: any[], _userId: number, _remoteKey: string): any[] {
   return [];
@@ -6263,12 +6228,6 @@ const TEXTAREA_KEYBINDINGS: KeyBinding[] = [
   { name: "return", shift: true, action: "newline" },
 ];
 
-function formatTokenCount(tokens: number): string {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-  return String(tokens);
-}
-
 function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
   // Show USED, not remaining — "93% 119K" is universally read as "used", and
   // showing remaining caused users to mistake low usage for impending overflow.
@@ -6620,26 +6579,6 @@ function promptLoadingCellColor(color: string, index: number, active: number, fo
   if (distance === 0) return color;
   if (distance === 1) return withAlpha(color, 0.72);
   return withAlpha(color, 0.22);
-}
-
-function withAlpha(color: string, alpha: number): string {
-  const normalized = color.trim();
-  const hex = normalized.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
-  if (!hex) return color;
-
-  const body = hex[1];
-  const expanded =
-    body.length === 3
-      ? body
-          .split("")
-          .map((ch) => ch + ch)
-          .join("")
-      : body;
-
-  const alphaHex = Math.round(Math.max(0, Math.min(1, alpha)) * 255)
-    .toString(16)
-    .padStart(2, "0");
-  return `#${expanded}${alphaHex}`;
 }
 
 function CopyFlashBanner({ t, width }: { t: Theme; width: number }) {
@@ -7764,26 +7703,6 @@ function BackgroundProcessLine({ t, id, pid, command }: { t: Theme; id: number; 
   );
 }
 
-function formatScheduleDetails(schedule: StoredSchedule, daemonStatus: ScheduleDaemonStatus): string {
-  const daemonText = daemonStatus.running
-    ? `running${daemonStatus.pid ? ` (pid ${daemonStatus.pid})` : ""}`
-    : "not running";
-  return [
-    `Schedule: ${schedule.name}`,
-    `ID: ${schedule.id}`,
-    `Type: ${schedule.cron ? "recurring" : "one-time"}`,
-    `Cron: ${schedule.cron ?? "runs once immediately"}`,
-    `Enabled: ${schedule.enabled ? "yes" : "no"}`,
-    `Model: ${schedule.model}`,
-    `Directory: ${schedule.directory}`,
-    `Last run: ${schedule.lastRunAt ?? "never"}`,
-    `Daemon: ${daemonText}`,
-    "",
-    "Instruction:",
-    schedule.instruction,
-  ].join("\n");
-}
-
 function ProcessLogsView({ t, content }: { t: Theme; content: string }) {
   const lines = content.split("\n");
   const header = lines[0] || "";
@@ -7804,12 +7723,6 @@ function ProcessLogsView({ t, content }: { t: Theme; content: string }) {
       ) : null}
     </box>
   );
-}
-
-function truncateBlock(text: string, maxLines: number): string {
-  const lines = text.split("\n");
-  if (lines.length <= maxLines) return text;
-  return [...lines.slice(0, maxLines), `… ${lines.length - maxLines} more lines`].join("\n");
 }
 
 function ToolTextOutputView({ t, label, content }: { t: Theme; label: string; content: string }) {
@@ -7887,10 +7800,6 @@ function MediaToolResultView({ t, label, toolResult }: { t: Theme; label: string
 }
 
 /* ── Slash Menu ──────────────────────────────────────────────── */
-
-function bottomAlignedModalTop(height: number, panelHeight: number): number {
-  return Math.max(2, Math.floor((height - panelHeight) / 2));
-}
 
 /* ── Update Modal ────────────────────────────────────────────── */
 
@@ -8741,116 +8650,6 @@ function WalletPickerModal({
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
-function isEscapeKey(key: KeyEvent): boolean {
-  return (
-    key.name === "escape" ||
-    key.code === "Escape" ||
-    key.baseCode === 27 ||
-    key.sequence === "\u001b" ||
-    key.raw === "\u001b"
-  );
-}
-
-/**
- * Maps MCP tool names like `mcp_filesystem__read_text_file` to a short verb
- * + namespace pair we can render in a compact line. Returns null when the
- * tool is not an MCP filesystem call we have a friendly label for.
- */
-function describeMcpFsTool(name: string): { verb: string; ns: string } | null {
-  if (!name.startsWith("mcp_filesystem__") && !name.startsWith("mcp__filesystem__")) return null;
-  const op = name.replace(/^mcp_+filesystem__/, "");
-  const verbMap: Record<string, string> = {
-    read_text_file: "read",
-    read_file: "read",
-    read_media_file: "read media",
-    read_multiple_files: "read multi",
-    write_file: "write",
-    edit_file: "edit",
-    create_directory: "mkdir",
-    list_directory: "ls",
-    list_directory_with_sizes: "ls -s",
-    directory_tree: "tree",
-    move_file: "mv",
-    search_files: "search",
-    get_file_info: "stat",
-    list_allowed_directories: "list-allowed",
-  };
-  return { verb: verbMap[op] ?? op.replace(/_/g, " "), ns: "fs" };
-}
-
-function toolArgs(tc?: ToolCall): string {
-  if (!tc) return "";
-  try {
-    const a = JSON.parse(tc.function.arguments);
-    if (tc.function.name === "bash") return (a.command || "").replace(/\n/g, " ").trim();
-    if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
-      return a.file_path || a.path || "";
-    if (describeMcpFsTool(tc.function.name)) {
-      // Most MCP fs tools take `path`; some take `paths` (read_multiple_files) or `source`/`destination` (move_file).
-      if (Array.isArray(a.paths)) return a.paths.join(", ");
-      if (a.source && a.destination) return `${a.source} → ${a.destination}`;
-      return a.path || a.pattern || "";
-    }
-    if (tc.function.name === "grep") {
-      const path = a.path ? ` in ${a.path}` : "";
-      return `"${a.pattern || ""}"${path}`;
-    }
-    if (tc.function.name === "generate_image" || tc.function.name === "generate_video") return a.prompt || "";
-    if (tc.function.name === "task") return a.description || "";
-    if (tc.function.name === "lsp") return `${a.operation || "query"} ${a.filePath || ""}`.trim();
-    if (tc.function.name === "delegate") return a.description || "";
-    if (tc.function.name === "delegation_read") return a.id || "";
-    if (tc.function.name === "process_logs" || tc.function.name === "process_stop")
-      return a.id != null ? String(a.id) : "";
-    return a.query || "";
-  } catch {
-    return "";
-  }
-}
-function tryParseArg(tc: ToolCall | undefined, key: string): string {
-  if (!tc) return "";
-  try {
-    return JSON.parse(tc.function.arguments)[key] || "";
-  } catch {
-    return "";
-  }
-}
-function toolLabel(tc: ToolCall): string {
-  const args = toolArgs(tc);
-  if (tc.function.name === "bash") {
-    try {
-      const parsed = JSON.parse(tc.function.arguments);
-      if (parsed.background) return `Background: ${trunc(args || "Starting process...", 70)}`;
-    } catch {
-      /* */
-    }
-    return trunc(args || "Running command...", 80);
-  }
-  if (tc.function.name === "read_file") return `Read ${trunc(args, 60)}`;
-  if (tc.function.name === "write_file") return `Write ${trunc(args, 60)}`;
-  if (tc.function.name === "edit_file") return `Edit ${trunc(args, 60)}`;
-  if (tc.function.name === "grep") return `Grep ${trunc(args, 60)}`;
-  if (tc.function.name === "search_web") return `Web Search "${trunc(args, 60)}"`;
-  if (tc.function.name === "search_x") return `X Search "${trunc(args, 60)}"`;
-  if (tc.function.name === "generate_image") return `Generate image "${trunc(args, 60)}"`;
-  if (tc.function.name === "generate_video") return `Generate video "${trunc(args, 60)}"`;
-  if (tc.function.name === "task") return `Task ${trunc(args, 60)}`;
-  if (tc.function.name === "delegate") return `Background ${trunc(args, 60)}`;
-  if (tc.function.name === "delegation_read") return `Read delegation ${trunc(args, 60)}`;
-  if (tc.function.name === "delegation_list") return "List delegations";
-  if (tc.function.name === "process_logs") return `Logs for process ${args}`;
-  if (tc.function.name === "process_stop") return `Stop process ${args}`;
-  if (tc.function.name === "process_list") return "List processes";
-  if (tc.function.name === "generate_plan") return "Generating plan...";
-  const mcp = describeMcpFsTool(tc.function.name);
-  if (mcp) return `MCP ${mcp.ns} ${mcp.verb}${args ? ` ${trunc(args, 60)}` : ""}`;
-  return trunc(`${tc.function.name} ${args}`, 80);
-}
-function sanitizeContent(raw: string): string {
-  let s = raw.replace(/^[\s\n]*assistant:\s*/gi, "");
-  s = s.replace(/\{"success"\s*:\s*(true|false)\s*,\s*"output"\s*:\s*"[\s\S]*$/m, "");
-  return s.trim();
-}
 function shouldOpenApiKeyModalForKey(key: {
   name?: string;
   sequence?: string;
@@ -8860,15 +8659,4 @@ function shouldOpenApiKeyModalForKey(key: {
   if (key.ctrl || key.meta) return false;
   if (key.name === "return" || key.name === "backspace") return true;
   return !!(key.sequence && key.sequence.length === 1);
-}
-function compactTaskLabel(label: string): string {
-  const words = label.trim().split(/\s+/).filter(Boolean);
-  if (words.length <= 3) return label.trim() || "Working";
-  return `${words.slice(0, 3).join(" ")}...`;
-}
-function trunc(s: string, n: number): string {
-  return s.length <= n ? s : `${s.slice(0, n)}…`;
-}
-function truncateLine(s: string, n: number): string {
-  return trunc(s.replace(/\s+/g, " ").trim(), n);
 }
