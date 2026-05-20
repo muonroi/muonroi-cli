@@ -1,0 +1,73 @@
+{
+  "___note": "Fixture for the sufficiency-gate flow: a vague brief ('todo app') forces Council, which runs the Gather phase AskCard discovery interview over the 6 SEED_DIMENSIONS (persona / core-features / non-functional / tech-constraints / success-metric / cost-tolerance). Each response below seeds one dimension answer so the interview converges to <= 1 unresolved dimension and the FSM advances to 'research'.",
+  "sequence": [
+    {
+      "text": "{\"persona\":\"developers using this codebase\",\"coreFeatures\":\"core logic only\",\"nonFunctional\":\"no specific targets\",\"techConstraints\":\"TypeScript / Node.js\",\"successMetric\":\"100% test pass with >80% coverage\",\"costTolerance\":\"$50 soft target\"}",
+      "match": "parsePromptForContext",
+      "___comment": "parsePromptForContext: pre-fill from prompt — establish baseline dimensions"
+    },
+    {
+      "text": "persona=developers, scope=core",
+      "match": "persona",
+      "___comment": "Gather phase — persona discovery answer"
+    },
+    {
+      "text": "MVP features: add-todo, list-todos, mark-done",
+      "match": "core-features",
+      "___comment": "Gather phase — core features"
+    },
+    {
+      "text": "No strict NFR — best effort latency",
+      "match": "non-functional",
+      "___comment": "Gather phase — non-functional"
+    },
+    {
+      "text": "Match existing stack: TypeScript + Node",
+      "match": "tech-constraints",
+      "___comment": "Gather phase — tech constraints"
+    },
+    {
+      "text": "All acceptance tests green + dotnet build exit 0",
+      "match": "success-metric",
+      "___comment": "Gather phase — success metric"
+    },
+    {
+      "text": "$50 soft target",
+      "match": "cost-tolerance",
+      "___comment": "Gather phase — cost cap"
+    },
+    {
+      "text": "[]",
+      "match": "AMBIGUITIES",
+      "___comment": "Clarifier: no remaining clarification questions once dimensions answered"
+    },
+    {
+      "text": "{\"problemStatement\":\"Build a minimal todo app — developers tracking their own tasks.\",\"constraints\":[\"TypeScript + Node.js stack\",\"$50 cost cap\"],\"successCriteria\":[\"add/list/mark-done flows pass tests\",\"build exits 0\"],\"scope\":\"in-scope: CRUD-on-todos. out-of-scope: multi-user auth, real-time sync.\"}",
+      "___comment": "Spec synthesis with discovered dimensions"
+    },
+    {
+      "text": "no",
+      "___comment": "Research-need eval: skip"
+    },
+    {
+      "text": "{\"intentSummary\":\"Minimal todo CRUD with single-user scope\",\"stances\":[{\"name\":\"Architect\",\"lens\":\"Define data model + service boundaries\"},{\"name\":\"Quality Lens\",\"lens\":\"Surface validation gaps before they ship\"}],\"outputShape\":{\"kind\":\"design\",\"sections\":[{\"key\":\"plan\",\"heading\":\"Sprint Plan\",\"prompt\":\"steps to ship\",\"shape\":\"list\"}],\"guardrails\":[]}}",
+      "___comment": "Debate planner output"
+    },
+    {
+      "text": "Sprint plan: 1) define Todo model 2) write add/list/mark-done endpoints 3) tests covering all three. Acceptance: dotnet build exits 0, tests green.",
+      "___comment": "Debate synthesis → sprint plan"
+    },
+    {
+      "text": "Implementation complete. Todo CRUD shipped, tests green.",
+      "___comment": "Sprint executor"
+    },
+    {
+      "text": "{\"score\":0.95,\"passed\":true,\"reason\":\"All acceptance criteria met.\"}",
+      "___comment": "Done-gate"
+    },
+    {
+      "text": "Sufficiency-discovery fallback for any remaining calls.",
+      "___comment": "Fallback"
+    }
+  ]
+}

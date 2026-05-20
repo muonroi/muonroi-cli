@@ -2676,8 +2676,9 @@ export class Agent {
     // P2.7: compute complexity from the idea using PIL Layer 1 heuristics (cheap,
     // no LLM calls). Only meaningful for "start"; other subcommands ignore it.
     let complexity: "low" | "medium" | "high" | undefined;
+    let sufficiencyMissing: readonly import("../pil/layer1-intent.js").SufficiencyMissing[] | undefined;
     if (payload.subcommand === "start" && payload.idea) {
-      const { scoreComplexity } = await import("../pil/layer1-intent.js");
+      const { scoreComplexity, scoreSufficiency } = await import("../pil/layer1-intent.js");
       const result = scoreComplexity({
         rawText: payload.idea,
         taskType: null,
@@ -2685,6 +2686,11 @@ export class Agent {
         hasMaxSprintsOne: payload.flags.maxSprints === 1,
       });
       complexity = result.complexity;
+      // Sufficiency gate — vague briefs ("todo app") force Council so the
+      // discovery AskCard can fill in persona/MVP/architecture/verify before
+      // any code is scaffolded.
+      const suff = scoreSufficiency({ rawText: payload.idea });
+      sufficiencyMissing = suff.sufficient ? undefined : suff.missing;
     }
 
     const gen = runProductLoop({
@@ -2707,6 +2713,7 @@ export class Agent {
       processMessageFn,
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
+      sufficiencyMissing,
       // Chat session id — used as the FK key for interaction_logs telemetry.
       // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
       sessionId: this.session?.id,

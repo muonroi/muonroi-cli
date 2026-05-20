@@ -10,6 +10,7 @@ import { createRun, loadRun } from "../flow/run-manager.js";
 import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
@@ -61,6 +62,13 @@ export interface ProductLoopOptions {
    */
   complexity?: "low" | "medium" | "high";
   /**
+   * Sufficiency gaps from PIL Layer 1. When non-empty, the dispatcher forces
+   * the Council path regardless of complexity — vague prompts MUST go through
+   * AskCard discovery before any scaffolding. Each entry seeds a discovery
+   * question category (scope/target/intent).
+   */
+  sufficiencyMissing?: readonly import("../pil/layer1-intent.js").SufficiencyMissing[];
+  /**
    * Chat session id (sessions.id) — required for interaction_logs telemetry
    * inserts to satisfy the FK constraint. The /ideal runId is NOT a valid
    * sessions.id; passing runId there silently fails FK on STRICT bun:sqlite.
@@ -99,11 +107,25 @@ export async function* runProductLoop(
       return yield* runAbort(opts);
     case "ship":
       return yield* runShip(opts);
-    default:
+    default: {
+      // Sufficiency gate: if Layer 1 flagged missing context dimensions
+      // (scope/target/intent), Council MUST run so AskCard can fill them
+      // in before any scaffolding. Hot-path is for context-complete prompts
+      // only (e.g. "fix typo in foo.ts:42"), not for vague briefs like
+      // "todo app" — those are exactly when an Agile team would discover.
+      const hasGaps = !!(opts.sufficiencyMissing && opts.sufficiencyMissing.length > 0);
+      if (hasGaps) {
+        const forcedOpts: ProductLoopOptions = {
+          ...opts,
+          flags: { ...opts.flags, forceCouncil: true },
+        };
+        return yield* runStart(forcedOpts);
+      }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
         return yield* runHotPath(opts);
       }
       return yield* runStart(opts);
+    }
   }
 }
 
@@ -215,6 +237,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
+    sufficiencyMissing: opts.sufficiencyMissing,
   };
 
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
@@ -374,6 +397,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       path: "council",
       complexity: opts.complexity ?? "unknown",
       forceCouncil: !!opts.flags.forceCouncil,
+      sufficiencyMissing: opts.sufficiencyMissing ?? [],
       runId,
     });
   } catch {
@@ -385,6 +409,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
       path: "council",
       complexity: opts.complexity ?? "unknown",
       forceCouncil: !!opts.flags.forceCouncil,
+      sufficiencyMissing: opts.sufficiencyMissing ?? [],
       runId,
     },
   });
@@ -403,6 +428,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     processMessageFn: opts.processMessageFn,
     detectVerifyRecipe: opts.detectVerifyRecipe,
     skipPriorContext: opts.skipPriorContext,
+    sufficiencyMissing: opts.sufficiencyMissing,
   };
 
   // Phase 1: outer FSM (gather → research → scoping → approved | halted).
@@ -1130,7 +1156,10 @@ async function resolveRoleAssignments(
   sessionModelId: string,
 ): Promise<Map<RoleSlot, { modelId: string; provider: string; tier?: string }>> {
   const out = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
-  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "ollama"];
+  // Role-assignment inventory scan: intentionally excludes xai for legacy
+  // resolveRoles ranking. Derived from ALL_PROVIDER_IDS so future additions
+  // are picked up automatically.
+  const order: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "xai");
   const inventory: ModelInfo[] = [];
   for (const p of order) {
     try {

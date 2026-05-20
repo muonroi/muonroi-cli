@@ -33,6 +33,8 @@ interface RouteDecisionPayload {
   path: "hot-path" | "council";
   complexity: string;
   forceCouncil: boolean;
+  /** PIL sufficiency gaps that forced the Council path (empty when complete). */
+  sufficiencyMissing?: readonly string[];
   runId: string;
 }
 
