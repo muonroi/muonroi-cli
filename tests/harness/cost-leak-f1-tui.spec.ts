@@ -26,26 +26,18 @@ describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", 
   let handle: CostLeakHarness;
 
   beforeAll(async () => {
-    handle = await spawnCostLeakHarness({
-      stream: makeTextStream("ok"),
-    });
+    // Route through the openai provider so OpenAIProviderCapabilities.buildProviderOptions
+    // is invoked and promptCacheKey is injected. The mock model still intercepts the
+    // real network call — `resolveModelRuntime` sees __muonroiMockModel installed and
+    // returns it instead of the real OpenAI client.
+    handle = await spawnCostLeakHarness({ stream: makeTextStream("ok") }, { modelId: "gpt-5.4-mini" });
   }, 30_000);
 
   afterAll(() => {
     handle?.cleanup();
   });
 
-  // Skipped: the orchestrator only sets promptCacheKey when running against
-  // an OpenAI-family provider. Our mock model is routed via the
-  // "deepseek-ai/DeepSeek-V4-Flash" model id (siliconflow provider), so the
-  // openai.promptCacheKey branch in src/orchestrator/orchestrator.ts is not
-  // exercised. Switching the spawn model to a gpt-* id triggers the
-  // provider-resolution / API-key path before the mock can intercept.
-  // Follow-up: thread provider-id override through --mock-llm fixture so the
-  // mock claims to be the openai provider while still being routed through
-  // resolveModelRuntime.
-  // SKIP: openai.promptCacheKey branch not exercised under deepseek model — blocker: src/agent-harness/mock-llm.ts needs provider-id override threaded through --mock-llm so mock claims openai provider; track in CLAUDE.md known caveats
-  it.skip("every recorded call exposes the same providerOptions.openai.promptCacheKey", async () => {
+  it("every recorded call exposes the same providerOptions.openai.promptCacheKey", async () => {
     handle.driver.type("hello");
     handle.driver.press("Enter");
 
@@ -65,19 +57,5 @@ describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", 
       keys.add(k ?? "");
     }
     expect(keys.size).toBe(1);
-  }, 60_000);
-
-  it("dump round-trip works (control)", async () => {
-    handle.driver.type("hello");
-    handle.driver.press("Enter");
-
-    await handle.driver.wait_for({ selector: "role=log", timeoutMs: 15_000 });
-    await handle.driver.wait_for({ idle: true, timeoutMs: 10_000 });
-    await new Promise((r) => setTimeout(r, 2000));
-
-    await exitTuiAndWaitForDump(handle);
-
-    const calls = loadDumpedRecordings(handle.dumpPath);
-    expect(calls.length).toBeGreaterThanOrEqual(1);
   }, 60_000);
 });

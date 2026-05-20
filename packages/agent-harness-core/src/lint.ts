@@ -144,7 +144,6 @@ function buildReturnWrapperRe(wrapperNames: string[]): RegExp {
 
 function checkFile(filePath: string, wrapperNames: string[]): { line: number; rootElement?: string } | null {
   const src = readFileSync(filePath, "utf-8");
-  const lines = src.split("\n");
 
   // Quick bail: no JSX at all
   if (!RETURN_JSX_RE.test(src)) return null;
@@ -154,13 +153,19 @@ function checkFile(filePath: string, wrapperNames: string[]): { line: number; ro
   const wrapperRe = buildReturnWrapperRe(wrapperNames);
   if (wrapperRe.test(src)) return null;
 
-  // Find the first `return (` or `return <UpperCase` line — report it.
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(/\breturn\s*\(?\s*<([A-Z][A-Za-z0-9.]*)/);
-    if (m) {
-      return { line: i + 1, rootElement: m[1] };
-    }
+  // Match across lines (\s spans newlines) so multi-line returns are caught:
+  //   return (
+  //     <Box>
+  // The 1-based line number is derived from the match offset.
+  const multilineRe = /\breturn\s*\(?\s*<([A-Z][A-Za-z0-9.]*)/m;
+  const m = src.match(multilineRe);
+  if (m && m.index !== undefined) {
+    const offset = m.index;
+    // The flagged tag itself may be on a later line than `return`. Report the
+    // line containing the `<UpperCase` opening so navigators land on the JSX.
+    const tagStart = src.indexOf("<", offset);
+    const tagLine = src.slice(0, tagStart === -1 ? offset : tagStart).split("\n").length;
+    return { line: tagLine, rootElement: m[1] };
   }
 
   return null;
