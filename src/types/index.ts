@@ -420,7 +420,7 @@ export interface ModelInfo {
 
 export type AgentMode = "agent" | "plan" | "ask";
 export type SessionStatus = "active" | "completed" | "archived";
-export type UsageSource = "message" | "title" | "task" | "delegation" | "other";
+export type UsageSource = "message" | "title" | "task" | "delegation" | "council" | "other";
 
 export interface WorkspaceInfo {
   id: string;

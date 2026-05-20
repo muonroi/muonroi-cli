@@ -18,11 +18,12 @@ vi.mock("../../flow/artifact-io.js", () => ({
 }));
 vi.mock("../../storage/index.js", () => ({
   logInteraction: vi.fn(),
+  recordUsageEvent: vi.fn(),
 }));
 
 import { runDebate } from "../../council/debate.js";
 import { runPreflight } from "../../council/preflight.js";
-import { logInteraction } from "../../storage/index.js";
+import { logInteraction, recordUsageEvent } from "../../storage/index.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "../gather.js";
 import { runLoopDriver } from "../loop-driver.js";
 
@@ -132,6 +133,73 @@ describe("loop-driver audit logging", () => {
     expect(data.researchFindingsExcerpt).toContain("multi-tenant");
   });
 
+  // Persist each speaker turn so forensics replay doesn't depend on TUI
+  // scrollback (the only copy today — messages/usage_events stay empty
+  // for the debate path).
+  it("writes a council_message row for each speaker turn", async () => {
+    const debateState = {
+      spec: mockSpec,
+      exchangeLogs: new Map(),
+      runningSummary: "summary",
+      roundCount: 1,
+      researchFindings: "",
+      active: [],
+    };
+    // biome-ignore lint/correctness/useYield: explicit yield via control flow
+    (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
+      yield {
+        type: "council_message",
+        councilMessage: {
+          kind: "debate",
+          speaker: { role: "research", model: "deepseek-flash" },
+          partner: { role: "verify" },
+          round: 1,
+          text: "Researcher position text".repeat(300), // ~7KB to test cap
+          attempts: 2,
+          toolCalls: [{ name: "tavily_search" }],
+        },
+      };
+      yield {
+        type: "council_message",
+        councilMessage: {
+          kind: "debate",
+          speaker: { role: "verify", model: "deepseek-pro" },
+          partner: { role: "research" },
+          round: 1,
+          text: "Cost-Controller response",
+          attempts: 1,
+          failureReason: null,
+        },
+      };
+      return debateState;
+    });
+
+    await drain(runLoopDriver(buildCtx()));
+
+    const calls = (logInteraction as ReturnType<typeof vi.fn>).mock.calls;
+    const messageRows = calls.filter(
+      (args) =>
+        args[1] === "council" && (args[2] as { eventSubtype?: string } | undefined)?.eventSubtype === "council_message",
+    );
+    expect(messageRows).toHaveLength(2);
+
+    const first = (messageRows[0]![2] as { data: Record<string, unknown> }).data;
+    expect(first.phase).toBe("research");
+    expect(first.kind).toBe("debate");
+    expect(first.speakerRole).toBe("research");
+    expect(first.speakerModel).toBe("deepseek-flash");
+    expect(first.partnerRole).toBe("verify");
+    expect(first.round).toBe(1);
+    expect(first.attempts).toBe(2);
+    expect(first.toolCalls).toEqual(["tavily_search"]);
+    expect((first.textExcerpt as string).length).toBeLessThanOrEqual(4000);
+    expect(first.textLength).toBeGreaterThan(4000);
+
+    const second = (messageRows[1]![2] as { data: Record<string, unknown> }).data;
+    expect(second.speakerRole).toBe("verify");
+    expect(second.attempts).toBe(1);
+  });
+
   // Without this row, a runDebate exception unwinds silently and the session
   // looks like "research = 0 word" in the DB — exactly the symptom that
   // motivated this audit pass.
@@ -157,6 +225,75 @@ describe("loop-driver audit logging", () => {
     expect(data.phase).toBe("research");
     expect(data.error).toContain("provider 502");
     expect(typeof data.elapsedMs).toBe("number");
+  });
+
+  // Wrapped CouncilLLM must record usage_events when the underlying debate
+  // implementation invokes its onUsage callback. Without this, /ideal runs
+  // ship with zero token accounting (the exact symptom we hit in 8a35be).
+  it("records a usage_events row for each council LLM call", async () => {
+    const debateState = {
+      spec: mockSpec,
+      exchangeLogs: new Map(),
+      runningSummary: "x",
+      roundCount: 1,
+      researchFindings: "",
+      active: [],
+    };
+    // Simulate the actual CouncilLLM by capturing the wrapped onUsage callback
+    // and firing it with a usage payload. We need to access ctx.llm AFTER it's
+    // been wrapped by wrapLLMForUsageTracking, so we drive runDebate through
+    // its mocked generator.
+    const ctx = buildCtx();
+    const innerDebate = vi
+      .fn()
+      .mockImplementation(
+        (
+          _model: string,
+          _system: string,
+          _prompt: string,
+          _signal: unknown,
+          _trace: unknown,
+          _opts: unknown,
+          onUsage: ((u: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => void) | undefined,
+        ) => {
+          onUsage?.({ inputTokens: 1200, outputTokens: 800, cachedInputTokens: 400 });
+          return Promise.resolve({ text: "response", toolCalls: [] });
+        },
+      );
+    // biome-ignore lint/suspicious/noExplicitAny: assigning to mock llm
+    (ctx.llm as any).debate = innerDebate;
+
+    // biome-ignore lint/correctness/useYield: mock generator returns immediately
+    (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
+      _spec: unknown,
+      runOpts: { topic: string; conversationContext: string; leaderModelId: string; participants: unknown[] },
+      llm: {
+        debate: (
+          m: string,
+          s: string,
+          p: string,
+          sig?: unknown,
+          tr?: unknown,
+          o?: unknown,
+          onUsage?: (u: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => void,
+        ) => Promise<{ text: string }>;
+      },
+    ) {
+      // Drive ONE debate call through the wrapped llm to trigger the recorder.
+      await llm.debate("deepseek-flash", "sys", "prompt", undefined, undefined, undefined);
+      void runOpts;
+      return debateState;
+    });
+
+    await drain(runLoopDriver(ctx));
+
+    const calls = (recordUsageEvent as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const first = calls[0]!;
+    expect(first[0]).toBe("audit-session"); // sessionId
+    expect(first[1]).toBe("council"); // source
+    expect(first[2]).toBe("deepseek-flash"); // modelId
+    expect(first[3]).toEqual({ inputTokens: 1200, outputTokens: 800, cacheReadTokens: 400 });
   });
 
   // logInteraction throwing must never blow up the driver — audit is best-effort.
