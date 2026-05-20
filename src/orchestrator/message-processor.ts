@@ -104,16 +104,7 @@ import {
 } from "../storage/index";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
-import type {
-  AgentMode,
-  SessionInfo,
-  StreamChunk,
-  SubagentStatus,
-  TaskRequest,
-  ToolCall,
-  ToolResult,
-  UsageSource,
-} from "../types/index";
+import type { AgentMode, SessionInfo, StreamChunk, SubagentStatus, ToolCall, ToolResult } from "../types/index";
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
@@ -132,7 +123,6 @@ import {
 } from "../utils/settings";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
-import type { CompactionSettings } from "./compaction";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -158,6 +148,7 @@ import {
   toToolCall,
   toToolResult,
 } from "./tool-utils";
+import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
  * Dependency surface the MessageProcessor needs to reach back into Agent
@@ -165,24 +156,18 @@ import {
  * references (mutating push() must affect the same array the Agent reads on
  * subsequent turns). Method callbacks delegate to Agent private methods.
  */
-export interface MessageProcessorDeps {
+export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   // ---- Read/write state references --------------------------------------
-  /** Live messages array (mutated by push). */
-  readonly messages: ModelMessage[];
+  // (messages, bash, mode, maxToolRounds, schedules, sendTelegramFile inherited)
   /** Live messageSeqs array (mutated by push; parallel to messages). */
   readonly messageSeqs: Array<number | null>;
   /** Session bookkeeping. */
   readonly session: SessionInfo | null;
   readonly sessionStore: SessionStore | null;
-  readonly bash: BashTool;
-  readonly mode: AgentMode;
   readonly modelId: string;
   readonly providerId: ProviderId;
-  readonly maxToolRounds: number;
   readonly batchApi: boolean;
   readonly permissionMode: PermissionMode;
-  readonly schedules: import("../tools/schedule").ScheduleManager;
-  readonly sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null;
   readonly externalAbortContext: AbortContext | null;
   readonly pendingCalls: PendingCallsLog | null;
   readonly councilManager: CouncilManager;
@@ -207,7 +192,6 @@ export interface MessageProcessorDeps {
   setPilActive(v: boolean): void;
   setPilEnrichmentDelta(n: number): void;
   setCurrentCallId(id: string): void;
-  setLastProviderOptionsShape(shape: string | null): void;
   setLastPromptBreakdown(
     b: {
       systemChars: number;
@@ -220,12 +204,10 @@ export interface MessageProcessorDeps {
       toolsCount: number;
     } | null,
   ): void;
-  setCompactedThisTurn(v: boolean): void;
   setTurnUserGoalExcerpt(v: string): void;
   setTurnAssistantReasoning(v: string): void;
   appendTurnAssistantReasoning(delta: string): void;
   getTurnAssistantReasoning(): string;
-  getCompactedThisTurn(): boolean;
   setPriorWarningIdsInSession(s: Set<string>): void;
   setMessages(messages: ModelMessage[]): void;
 
@@ -248,35 +230,6 @@ export interface MessageProcessorDeps {
   buildRecentTurnsSummary(): string | null;
   estimateProjectSize(): "small" | "medium" | "large" | null;
   countFilesTouched(): number;
-  getCompactionSettings(contextWindow?: number): CompactionSettings;
-  compactForContext(
-    provider: LegacyProvider,
-    system: string,
-    contextWindow: number,
-    signal: AbortSignal,
-    settings?: CompactionSettings,
-    overflow?: boolean,
-  ): Promise<boolean>;
-  postTurnCompact(provider: LegacyProvider, system: string, contextWindow: number, signal: AbortSignal): Promise<void>;
-  runTask(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
-  runDelegation(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
-  readDelegation(id: string): Promise<ToolResult>;
-  listDelegations(): Promise<ToolResult>;
-  appendCompletedTurn(userMessage: ModelMessage, assistantMessages: ModelMessage[]): void;
-  discardAbortedTurn(userMessage: ModelMessage): void;
-  recordUsage(
-    usage:
-      | {
-          totalTokens?: number;
-          inputTokens?: number;
-          outputTokens?: number;
-          cacheReadTokens?: number;
-          cacheCreationTokens?: number;
-        }
-      | undefined,
-    source?: UsageSource,
-    model?: string,
-  ): void;
   respondToToolApproval(approvalId: string, approved: boolean): void;
   runCouncilV2(
     userMessage: string,

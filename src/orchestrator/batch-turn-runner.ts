@@ -32,7 +32,7 @@ import type { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { resolveModelRuntime } from "../providers/runtime.js";
 import type { BashTool } from "../tools/bash";
-import type { AgentMode, StreamChunk, TaskRequest, ToolCall, ToolResult, UsageSource } from "../types/index";
+import type { AgentMode, StreamChunk, TaskRequest, ToolCall, ToolResult } from "../types/index";
 import { loadMcpServers } from "../utils/settings";
 import type {
   BatchClientOptions,
@@ -53,11 +53,12 @@ import {
   hasUsage,
   toLocalToolCall,
 } from "./batch-utils";
-import { type CompactionSettings, relaxCompactionSettings } from "./compaction";
+import { relaxCompactionSettings } from "./compaction";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import { combineAbortSignals, notifyObserver } from "./tool-utils";
+import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 // ---------------------------------------------------------------------------
 // Batch-API stubs (Phase 0 — these throw; real impl lands in Phase 1).
@@ -94,34 +95,20 @@ function getBatchChatCompletion(_result: unknown): import("./agent-options").Bat
  * `MessageProcessorDeps` where the signature matches, so a future
  * `TurnRunnerDepsBase` hoist is mechanical.
  */
-export interface BatchTurnRunnerDeps {
-  // ---- Read-only state references ---------------------------------------
-  readonly messages: ModelMessage[];
-  readonly bash: BashTool;
-  readonly mode: AgentMode;
-  readonly maxToolRounds: number;
+export interface BatchTurnRunnerDeps extends TurnRunnerDepsBase {
+  // ---- Batch-specific read-only state references ------------------------
+  // (messages, bash, mode, maxToolRounds, schedules, sendTelegramFile inherited)
   readonly maxTokens: number;
-  readonly schedules: import("../tools/schedule").ScheduleManager;
-  readonly sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null;
 
-  // ---- Scalar getters / setters -----------------------------------------
+  // ---- Batch-specific scalar getters / setters --------------------------
+  // (getCompactedThisTurn, setCompactedThisTurn, setLastProviderOptionsShape inherited)
   getSessionId(): string | null;
-  getCompactedThisTurn(): boolean;
-  setCompactedThisTurn(v: boolean): void;
-  setLastProviderOptionsShape(shape: string | null): void;
   getBatchClientOptions(signal?: AbortSignal): BatchClientOptions;
 
-  // ---- Behavior delegators ----------------------------------------------
-  getCompactionSettings(contextWindow?: number): CompactionSettings;
-  compactForContext(
-    provider: LegacyProvider,
-    system: string,
-    contextWindow: number,
-    signal: AbortSignal,
-    settings?: CompactionSettings,
-    overflow?: boolean,
-  ): Promise<boolean>;
-  postTurnCompact(provider: LegacyProvider, system: string, contextWindow: number, signal: AbortSignal): Promise<void>;
+  // ---- Batch-specific behavior delegators -------------------------------
+  // (getCompactionSettings, compactForContext, postTurnCompact, runTask,
+  // runDelegation, readDelegation, listDelegations, appendCompletedTurn,
+  // discardAbortedTurn, recordUsage inherited)
   createTools(
     bash: BashTool,
     provider: LegacyProvider,
@@ -137,31 +124,12 @@ export interface BatchTurnRunnerDeps {
       sessionId?: string;
     },
   ): ToolSet;
-  runTask(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
-  runDelegation(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
-  readDelegation(id: string): Promise<ToolResult>;
-  listDelegations(): Promise<ToolResult>;
   executeBatchToolCall(
     tools: ToolSet,
     toolCall: ToolCall,
     messages: ModelMessage[],
     signal?: AbortSignal,
   ): Promise<{ input: unknown; result: ToolResult }>;
-  appendCompletedTurn(userMessage: ModelMessage, assistantMessages: ModelMessage[]): void;
-  discardAbortedTurn(userMessage: ModelMessage): void;
-  recordUsage(
-    usage:
-      | {
-          totalTokens?: number;
-          inputTokens?: number;
-          outputTokens?: number;
-          cacheReadTokens?: number;
-          cacheCreationTokens?: number;
-        }
-      | undefined,
-    source?: UsageSource,
-    model?: string,
-  ): void;
 }
 
 /**
