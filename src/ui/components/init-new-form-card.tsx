@@ -44,7 +44,17 @@ export const BB_TEMPLATE_OPTIONS: ReadonlyArray<{ label: string; desc: string; i
 ];
 
 export interface InitNewFormState {
-  step: "name" | "fe-stack" | "designing" | "design-preview" | "bb-template" | "running" | "done" | "error";
+  step:
+    | "name"
+    | "fe-stack"
+    | "designing"
+    | "design-preview"
+    | "bb-template"
+    | "template-prompt"
+    | "template-installing"
+    | "running"
+    | "done"
+    | "error";
   /** Current text in the project name input. */
   nameInput: string;
   /** Validation error for name input. */
@@ -78,6 +88,21 @@ export interface InitNewFormState {
   designError: string | null;
   /** Progress line shown during `step: "running"` so the user knows the CLI is still working. */
   progressMessage?: string | null;
+  /**
+   * Plan 23-fix — when scaffold detects a missing BB template, the prompt step
+   * shows this info and waits for user choice (install / manual / cancel).
+   * The selectedIndex tracks ↑↓ cursor within the prompt's option list.
+   */
+  templatePromptInfo?: { shortName: string; nugetId: string; version: string } | null;
+  templatePromptIndex?: number;
+  /** Plan 23-fix — progress text for `step: "template-installing"` spinner. */
+  templateInstallProgress?: string | null;
+  /**
+   * Plan 23-fix — when true, the `error` step shows a Retry option that
+   * re-runs the scaffold with the previously-submitted inputs (no debate
+   * re-run). Set when scaffold inputs are persisted in the parent ref.
+   */
+  errorRetryable?: boolean;
 }
 
 export const FE_STACK_OPTIONS: { label: string; value: FeStack; desc: string }[] = [
@@ -316,6 +341,54 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
             </box>
           )}
 
+          {/* Plan 23-fix — Template-missing prompt */}
+          {state.step === "template-prompt" && state.templatePromptInfo && (
+            // biome-ignore lint/a11y/useValidAriaRole: harness Role union, not a DOM element
+            <Semantic id="init-template-prompt" role="dialog" name="Template install prompt" isModal>
+              <box flexDirection="column" marginTop={1}>
+                <text fg={t.initFormLabel} attributes={1}>
+                  ⚠ Backend template chưa cài
+                </text>
+                <text fg={t.initFormHint} marginTop={0}>
+                  {state.templatePromptInfo.nugetId}@{state.templatePromptInfo.version}
+                </text>
+                {(["install", "manual", "cancel"] as const).map((id, i) => {
+                  const labels = {
+                    install: "Cài tự động (dotnet new install)",
+                    manual: "Tôi sẽ tự cài — Continue sau khi xong",
+                    cancel: "Huỷ scaffold",
+                  } as const;
+                  const isSelected = i === (state.templatePromptIndex ?? 0);
+                  return (
+                    <Semantic
+                      key={id}
+                      id={`init-template-option-${id}`}
+                      role="listitem"
+                      name={labels[id]}
+                      selected={isSelected || undefined}
+                    >
+                      <text fg={isSelected ? t.initFormOptionSelected : t.initFormOptionDefault}>
+                        {isSelected ? "▶ " : "  "}
+                        {labels[id]}
+                      </text>
+                    </Semantic>
+                  );
+                })}
+              </box>
+            </Semantic>
+          )}
+
+          {/* Plan 23-fix — Template installing spinner */}
+          {state.step === "template-installing" && (
+            // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid harness Role; not a DOM element
+            <Semantic id="init-template-installing" role="statusbar" name="Installing template">
+              <box flexDirection="column" marginTop={1}>
+                <text fg={t.initFormLabel}>Installing template…</text>
+                <text fg={t.initFormHint}>{state.templateInstallProgress ?? "dotnet new install in progress"}</text>
+              </box>
+            </Semantic>
+          )}
+
           {/* Running state */}
           {state.step === "running" && (
             <box flexDirection="column" marginTop={1}>
@@ -352,6 +425,13 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
                   ✗ Scaffold failed
                 </text>
                 {state.resultMessage && <text fg={t.initFormError}>{state.resultMessage}</text>}
+                {state.errorRetryable && (
+                  <Semantic id="init-error-retry-hint" role="listitem" name="Retry available">
+                    <text fg={t.initFormSuccess} marginTop={1}>
+                      ↻ Press R to retry (inputs preserved — không debate lại)
+                    </text>
+                  </Semantic>
+                )}
               </box>
             </Semantic>
           )}
@@ -363,8 +443,11 @@ export function InitNewFormCard({ state, terminalCols, theme: t }: InitNewFormCa
             {state.step === "bb-template" && "↑↓ select · Enter confirm · Esc back"}
             {state.step === "designing" && "EE designing… · Esc skip to manual"}
             {state.step === "design-preview" && "Space toggle · c allow-commercial · Enter confirm · Esc manual"}
+            {state.step === "template-prompt" && "↑↓ select · Enter confirm · Esc cancel"}
+            {state.step === "template-installing" && "Please wait…"}
             {state.step === "running" && "Please wait…"}
-            {(state.step === "done" || state.step === "error") && "Esc / Enter dismiss"}
+            {state.step === "done" && "Esc / Enter dismiss"}
+            {state.step === "error" && (state.errorRetryable ? "R retry · Esc / Enter dismiss" : "Esc / Enter dismiss")}
           </text>
         </box>
       </box>
