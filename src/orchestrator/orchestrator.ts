@@ -155,7 +155,6 @@ import {
   COUNCIL_COLOR_BG,
   COUNCIL_COLOR_RESET,
   COUNCIL_ROLE_COLORS,
-  type CouncilOutcome,
   type LegacyProvider,
   type ModelInfoStub,
   type ProcessMessageError,
@@ -2135,94 +2134,6 @@ export class Agent {
     return this.councilManager.createPreflightResponder();
   }
 
-  /**
-   * @deprecated Internal — kept to satisfy lingering references to the old
-   * provider-fallback resolver. Returns a fresh model id chosen from non-
-   * disabled providers; falls back to the session model when nothing is
-   * reachable. Will be removed once dispatch is fully migrated.
-   */
-  private async _resolveNonDisabledFallback(): Promise<{ modelId: string }> {
-    return this.councilManager.resolveNonDisabledFallback();
-  }
-
-  // ========================================================================
-  // Legacy council generator stubs (call CouncilManager helpers inline)
-  // ========================================================================
-
-  /** Wrapper: delegates to CouncilManager.generate so legacy runCouncilRound keeps its old call shape. */
-  private async _councilGenerate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
-    return this.councilManager.generate(modelId, system, prompt, maxTokens);
-  }
-
-  /** Wrapper: delegates to CouncilManager.research. */
-  private async _councilResearch(
-    modelId: string,
-    topic: string,
-    conversationContext: string,
-    signal?: AbortSignal,
-  ): Promise<string> {
-    return this.councilManager.research(modelId, topic, conversationContext, signal);
-  }
-
-  /** Wrapper: delegates to CouncilManager.buildDiscussPrompt. */
-  private _buildDiscussPrompt(
-    phase: "open" | "respond" | "followup" | "convergence-check",
-    ctx: {
-      speakerRole: string;
-      partnerRole: string;
-      topic: string;
-      speakerPosition?: string;
-      partnerPosition?: string;
-      exchangeHistory?: string;
-      round?: number;
-      conversationContext?: string;
-      runningSummary?: string;
-    },
-  ): { system: string; prompt: string } {
-    return this.councilManager.buildDiscussPrompt(phase, ctx);
-  }
-
-  /** Wrapper: delegates to CouncilManager.generateRoundSummary. */
-  private async _generateRoundSummary(
-    exchangeLogs: Map<string, string[]>,
-    topic: string,
-    round: number,
-    modelId: string,
-  ): Promise<string> {
-    return this.councilManager.generateRoundSummary(exchangeLogs, topic, round, modelId);
-  }
-
-  /** Wrapper: delegates to CouncilManager.buildContext. */
-  private _buildCouncilContext(): string {
-    return this.councilManager.buildContext();
-  }
-
-  /** Wrapper: delegates to CouncilManager.parseOutcome. */
-  private _parseCouncilOutcome(synthesisText: string, topic: string): CouncilOutcome | null {
-    return this.councilManager.parseOutcome(synthesisText, topic);
-  }
-
-  /** Wrapper: delegates to CouncilManager.executeOutcome. */
-  private async *_executeCouncilOutcome(
-    outcome: CouncilOutcome,
-    topic: string,
-  ): AsyncGenerator<StreamChunk, void, unknown> {
-    yield* this.councilManager.executeOutcome(outcome, topic);
-  }
-
-  /** Wrapper: delegates to CouncilManager.hasMultiProviderConfig. */
-  private _hasMultiProviderConfig(roleModels: Partial<Record<ModelRole, string>>): boolean {
-    return this.councilManager.hasMultiProviderConfig(roleModels);
-  }
-
-  /** Wrapper: delegates to CouncilManager.resolveSameProviderCandidates. */
-  private async _resolveSameProviderCandidates(
-    providerId: ProviderId,
-    roles: ModelRole[],
-  ): Promise<Array<{ role: ModelRole; model: string }>> {
-    return this.councilManager.resolveSameProviderCandidates(providerId, roles);
-  }
-
   // ========================================================================
   // Council v2 — Clarify → Confirm → Debate → Plan → Execute
   // ========================================================================
@@ -2248,8 +2159,8 @@ export class Agent {
       this.messages as Array<{ role: string; content: string | unknown }>,
       this.session?.id,
       llm,
-      this._createQuestionResponder(),
-      this._createPreflightResponder(),
+      this.councilManager.createQuestionResponder(),
+      this.councilManager.createPreflightResponder(),
       processMessageFn,
       {
         skipClarification: options?.skipClarification,
@@ -2346,8 +2257,8 @@ export class Agent {
         stack: payload.flags.stack,
         forceCouncil: payload.flags.forceCouncil,
       },
-      respondToQuestion: this._createQuestionResponder(),
-      respondToPreflight: this._createPreflightResponder(),
+      respondToQuestion: this.councilManager.createQuestionResponder(),
+      respondToPreflight: this.councilManager.createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
       skipPriorContext: payload.flags.noPriorContext === true,
@@ -2380,7 +2291,7 @@ export class Agent {
     // Resolve council participants: same-provider by default, multi-provider only when configured
     const candidates: Array<{ role: ModelRole; model: string }> = [];
     const configuredRoleModels = getRoleModels();
-    const hasExplicitMultiProvider = this._hasMultiProviderConfig(configuredRoleModels);
+    const hasExplicitMultiProvider = this.councilManager.hasMultiProviderConfig(configuredRoleModels);
 
     if (hasExplicitMultiProvider && isCouncilMultiProviderPreferred()) {
       // Multi-provider path: use explicitly configured role models across providers
@@ -2408,7 +2319,7 @@ export class Agent {
       const mainProviderId = detectProviderForModel(this.modelId);
       // Skip same-provider resolution if the session's provider is disabled
       if (!isProviderDisabled(mainProviderId as ProviderId)) {
-        const sameCandidates = await this._resolveSameProviderCandidates(mainProviderId, ALL_ROLES);
+        const sameCandidates = await this.councilManager.resolveSameProviderCandidates(mainProviderId, ALL_ROLES);
         if (sameCandidates.length >= 2) {
           candidates.length = 0;
           candidates.push(...sameCandidates);
@@ -2452,7 +2363,7 @@ export class Agent {
     }
 
     // Build conversation context for all participants
-    const conversationContext = this._buildCouncilContext();
+    const conversationContext = this.councilManager.buildContext();
 
     // ── Phase 0: Research — gather facts from codebase before discussion ──
     const p0Start = Date.now();
@@ -2462,7 +2373,7 @@ export class Agent {
     const researchCandidate = candidates.find((c) => c.role === "research") ?? candidates[0];
     yield { type: "content", content: `\n### \x1b[35m[research]\x1b[0m ${researchCandidate.model}\n` };
 
-    const researchFindings = await this._councilResearch(researchCandidate.model, topic, conversationContext);
+    const researchFindings = await this.councilManager.research(researchCandidate.model, topic, conversationContext);
     yield { type: "content", content: `${researchFindings}\n` };
     yield { type: "content", content: `\n> Phase 0: ${((Date.now() - p0Start) / 1000).toFixed(1)}s\n` };
 
@@ -2476,13 +2387,14 @@ export class Agent {
     yield { type: "content", content: "\n## Phase 1 — Opening Analysis\n" };
 
     const openingPromises = candidates.map(({ role, model }) => {
-      const { system, prompt } = this._buildDiscussPrompt("open", {
+      const { system, prompt } = this.councilManager.buildDiscussPrompt("open", {
         speakerRole: role,
         partnerRole: candidates.find((c) => c.role !== role)?.role ?? "colleague",
         topic,
         conversationContext: enrichedContext,
       });
-      return this._councilGenerate(model, system, prompt)
+      return this.councilManager
+        .generate(model, system, prompt)
         .then((text) => ({ role, model, position: text, error: null as string | null }))
         .catch((err: unknown) => ({
           role,
@@ -2551,7 +2463,7 @@ export class Agent {
             let bResponse: string;
 
             if (round === 1) {
-              const aPrompt = this._buildDiscussPrompt("respond", {
+              const aPrompt = this.councilManager.buildDiscussPrompt("respond", {
                 speakerRole: a.role,
                 partnerRole: b.role,
                 topic,
@@ -2559,11 +2471,11 @@ export class Agent {
                 partnerPosition: b.position,
                 conversationContext: enrichedContext,
               });
-              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt);
+              aResponse = await this.councilManager.generate(a.model, aPrompt.system, aPrompt.prompt);
               log.push(`[${a.role}]: ${aResponse}`);
               chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
 
-              const bPrompt = this._buildDiscussPrompt("respond", {
+              const bPrompt = this.councilManager.buildDiscussPrompt("respond", {
                 speakerRole: b.role,
                 partnerRole: a.role,
                 topic,
@@ -2571,12 +2483,12 @@ export class Agent {
                 partnerPosition: aResponse,
                 conversationContext: enrichedContext,
               });
-              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt);
+              bResponse = await this.councilManager.generate(b.model, bPrompt.system, bPrompt.prompt);
               log.push(`[${b.role}]: ${bResponse}`);
               chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
             } else {
               const historyText = log.join("\n\n");
-              const aPrompt = this._buildDiscussPrompt("followup", {
+              const aPrompt = this.councilManager.buildDiscussPrompt("followup", {
                 speakerRole: a.role,
                 partnerRole: b.role,
                 topic,
@@ -2586,11 +2498,11 @@ export class Agent {
                 conversationContext: enrichedContext,
                 runningSummary,
               });
-              aResponse = await this._councilGenerate(a.model, aPrompt.system, aPrompt.prompt, 1024);
+              aResponse = await this.councilManager.generate(a.model, aPrompt.system, aPrompt.prompt, 1024);
               log.push(`[${a.role}] (round ${round}): ${aResponse}`);
               chunks.push({ label: `[${a.role}] → [${b.role}]`, text: aResponse });
 
-              const bPrompt = this._buildDiscussPrompt("followup", {
+              const bPrompt = this.councilManager.buildDiscussPrompt("followup", {
                 speakerRole: b.role,
                 partnerRole: a.role,
                 topic,
@@ -2600,7 +2512,7 @@ export class Agent {
                 conversationContext: enrichedContext,
                 runningSummary,
               });
-              bResponse = await this._councilGenerate(b.model, bPrompt.system, bPrompt.prompt, 1024);
+              bResponse = await this.councilManager.generate(b.model, bPrompt.system, bPrompt.prompt, 1024);
               log.push(`[${b.role}] (round ${round}): ${bResponse}`);
               chunks.push({ label: `[${b.role}] → [${a.role}]`, text: bResponse });
             }
@@ -2609,7 +2521,7 @@ export class Agent {
             a.position = aResponse;
 
             // Convergence check
-            const convPrompt = this._buildDiscussPrompt("convergence-check", {
+            const convPrompt = this.councilManager.buildDiscussPrompt("convergence-check", {
               speakerRole: a.role,
               partnerRole: b.role,
               topic,
@@ -2619,7 +2531,7 @@ export class Agent {
             let converged = false;
             let convReason = "";
             try {
-              const raw = await this._councilGenerate(a.model, convPrompt.system, convPrompt.prompt, 256);
+              const raw = await this.councilManager.generate(a.model, convPrompt.system, convPrompt.prompt, 256);
               const match = raw.match(/\{[\s\S]*\}/);
               if (match) {
                 const parsed = JSON.parse(match[0]) as { converged?: boolean; reason?: string };
@@ -2680,7 +2592,7 @@ export class Agent {
       // Generate inter-round summary for next round's focus
       if (round < maxRounds) {
         try {
-          runningSummary = await this._generateRoundSummary(exchangeLogs, topic, round, active[0].model);
+          runningSummary = await this.councilManager.generateRoundSummary(exchangeLogs, topic, round, active[0].model);
           yield {
             type: "content",
             content: `\n> **Discussion state:** ${runningSummary
@@ -2710,7 +2622,7 @@ export class Agent {
 
     let synthesisText = "";
     try {
-      synthesisText = await this._councilGenerate(
+      synthesisText = await this.councilManager.generate(
         leaderModelId,
         "You are the team lead. Multiple specialists just had a structured discussion about a topic.\n\n" +
           "Output TWO parts separated by the exact line `---READABLE---`:\n\n" +
@@ -2740,9 +2652,9 @@ export class Agent {
       yield { type: "content", content: (readablePart || synthesisText) + "\n" };
 
       // Parse structured outcome and execute actions
-      const structuredOutcome = this._parseCouncilOutcome(synthesisText, topic);
+      const structuredOutcome = this.councilManager.parseOutcome(synthesisText, topic);
       if (structuredOutcome) {
-        yield* this._executeCouncilOutcome(structuredOutcome, topic);
+        yield* this.councilManager.executeOutcome(structuredOutcome, topic);
         if (this.session) {
           try {
             appendSystemMessage(this.session.id, `[Council Outcome]\n${JSON.stringify(structuredOutcome)}`);
@@ -3482,13 +3394,13 @@ export class Agent {
         turnProvider = createProvider(turnProviderId, turnKey);
       } else {
         // Router's provider unreachable or disabled — fall back to a non-disabled provider
-        const fallback = await this._resolveNonDisabledFallback();
+        const fallback = await this.councilManager.resolveNonDisabledFallback();
         turnModelId = fallback.modelId;
         turnProvider = this.requireProvider();
       }
     } else if (isProviderDisabled(this.providerId as ProviderId)) {
       // Session provider is disabled — find a non-disabled alternative
-      const fallback = await this._resolveNonDisabledFallback();
+      const fallback = await this.councilManager.resolveNonDisabledFallback();
       turnModelId = fallback.modelId;
       turnProvider = this.requireProvider();
     } else {
