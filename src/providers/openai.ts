@@ -15,21 +15,18 @@ import { redactor } from "../utils/redactor.js";
 import { streamFromFullStream } from "./stream-loop.js";
 import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./types.js";
 
-export interface OpenAIAdapterConfig extends ProviderConfig {
-  /**
-   * OAuth Bearer headers to use instead of apiKey.
-   * When set, `apiKey` in ProviderConfig is ignored for auth.
-   * Shape: { Authorization: "Bearer ey...", "ChatGPT-Account-ID": "..." }
-   */
-  oauthHeaders?: Record<string, string>;
-}
+/**
+ * @deprecated Use `ProviderConfig` directly — `oauthHeaders` is now a base field.
+ * Kept as an alias for source compatibility.
+ */
+export type OpenAIAdapterConfig = ProviderConfig;
 
 /**
  * Create an OpenAI adapter.
  * Pass `oauthHeaders` for subscription-backed (Bearer) auth.
  * Pass `apiKey` for the traditional sk-... API key path.
  */
-export function createOpenAIAdapter(config: OpenAIAdapterConfig): Adapter {
+export function createOpenAIAdapter(config: ProviderConfig): Adapter {
   if (config.apiKey && !config.oauthHeaders) {
     redactor.enrollSecret(config.apiKey);
   }

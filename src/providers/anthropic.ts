@@ -132,11 +132,16 @@ export async function loadAnthropicKey(): Promise<string> {
  * Enrolls the API key with the redactor before any potential log.
  */
 export function createAnthropicAdapter(config: ProviderConfig): Adapter {
-  if (config.apiKey) {
+  if (config.apiKey && !config.oauthHeaders) {
     redactor.enrollSecret(config.apiKey);
   }
 
-  const provider = createAnthropic({ apiKey: config.apiKey });
+  // When OAuth headers are present, hand auth off to extraHeaders. Anthropic SDK
+  // requires an apiKey field for config validation, so we pass a placeholder
+  // that the OAuth `Authorization` header overrides at request time.
+  const provider = config.oauthHeaders
+    ? createAnthropic({ apiKey: "oauth", headers: config.oauthHeaders })
+    : createAnthropic({ apiKey: config.apiKey });
 
   return {
     id: "anthropic",

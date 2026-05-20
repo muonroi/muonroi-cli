@@ -20,6 +20,7 @@ export type VerifyAppKind =
   | "rust"
   | "maven"
   | "gradle"
+  | "dotnet"
   | "make"
   | "unknown";
 
@@ -154,6 +155,7 @@ export function normalizeVerifyAppKind(value: string): VerifyAppKind {
       "rust",
       "maven",
       "gradle",
+      "dotnet",
       "make",
       "unknown",
     ] as const
@@ -415,6 +417,75 @@ function detectJavaRecipe(cwd: string): VerifyRecipe | null {
   return null;
 }
 
+// Scan cwd (one level deep) for .csproj/.sln/Directory.Build.props — covers
+// both root-level and src/-nested layouts produced by Muonroi.BaseTemplate /
+// Muonroi.Microservices.Template / Muonroi.Modular.Template.
+function findDotnetMarkers(cwd: string): { sln: string | null; csproj: string | null; bbProps: boolean } {
+  let sln: string | null = null;
+  let csproj: string | null = null;
+  let bbProps = false;
+  try {
+    const visit = (dir: string, depth: number): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name.startsWith(".") || entry.name === "node_modules" || entry.name === "bin" || entry.name === "obj")
+          continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isFile()) {
+          if (!sln && entry.name.endsWith(".sln")) sln = path.relative(cwd, full) || entry.name;
+          if (!csproj && entry.name.endsWith(".csproj")) csproj = path.relative(cwd, full) || entry.name;
+          if (entry.name === "Directory.Build.props") bbProps = true;
+        } else if (entry.isDirectory() && depth < 2) {
+          visit(full, depth + 1);
+        }
+      }
+    };
+    visit(cwd, 0);
+  } catch {
+    /* fail-open */
+  }
+  return { sln, csproj, bbProps };
+}
+
+function detectDotnetRecipe(cwd: string): VerifyRecipe | null {
+  const { sln, csproj, bbProps } = findDotnetMarkers(cwd);
+  if (!sln && !csproj) return null;
+
+  // Target the .sln when present (covers the whole solution); fall back to the
+  // single .csproj when only one project exists.
+  const target = sln ? `"${sln}"` : csproj ? `"${csproj}"` : "";
+  const evidence: string[] = [];
+  if (sln) evidence.push(`Detected .NET solution: ${sln}`);
+  if (csproj) evidence.push(`Detected .NET project: ${csproj}`);
+  if (bbProps) evidence.push("Detected Directory.Build.props (Muonroi BB ecosystem marker)");
+
+  const notes: string[] = [];
+  if (bbProps) {
+    notes.push(
+      "Muonroi BB project — run `pwsh scripts/check-modular-boundaries.ps1` after build if the script is present.",
+    );
+  }
+
+  return {
+    ecosystem: "dotnet",
+    appKind: "dotnet",
+    appLabel: bbProps ? ".NET (Muonroi BB)" : ".NET project",
+    shellInitCommands: defaultShellInit(),
+    bootstrapCommands: [],
+    installCommands: [`dotnet restore ${target}`.trim()],
+    buildCommands: [`dotnet build ${target} --no-restore`.trim()],
+    testCommands: [`dotnet test ${target} --no-build --nologo`.trim()],
+    smokeKind: "none",
+    evidence,
+    notes,
+  };
+}
+
 function detectFallbackRecipe(cwd: string): VerifyRecipe {
   const makeRecipe = detectMakeRecipe(cwd);
   if (makeRecipe) return makeRecipe;
@@ -440,6 +511,7 @@ function inferFallbackRecipe(cwd: string, pkg: PackageJsonLike | null, packageMa
     detectGoRecipe(cwd) ??
     detectRustRecipe(cwd) ??
     detectJavaRecipe(cwd) ??
+    detectDotnetRecipe(cwd) ??
     detectFallbackRecipe(cwd)
   );
 }

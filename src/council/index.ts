@@ -569,6 +569,7 @@ export async function* runCouncil(
           debatePlan,
           pilCtx?.outputStyle ?? undefined,
         );
+        // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanning generator
         let refineResult;
         do {
           refineResult = await refineGen.next();
@@ -592,6 +593,7 @@ export async function* runCouncil(
           pilCtx?.outputStyle ?? undefined,
           followupCtx,
         );
+        // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanning generator
         let refineResult;
         do {
           refineResult = await refineGen.next();
@@ -641,6 +643,7 @@ export async function* runCouncil(
             undefined,
             true,
           );
+          // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanning generator
           let refineResult;
           do {
             refineResult = await refineGen.next();
@@ -697,6 +700,7 @@ export async function* runCouncil(
           pilCtx?.outputStyle ?? undefined,
           refineCtx,
         );
+        // biome-ignore lint/suspicious/noImplicitAnyLet: shape inferred from runPlanning generator
         let refineResult;
         do {
           refineResult = await refineGen.next();
@@ -745,6 +749,33 @@ export async function* runCouncil(
         timestamp: new Date().toISOString(),
       };
       appendSystemMessage(sessionId, `[Council Memory] ${JSON.stringify(councilRecord)}`);
+
+      // Forensics-friendly summary row in interaction_logs. The full
+      // [Council Memory] system message above is great for context replay but
+      // can't be queried — `usage forensics` reads interaction_logs only.
+      // Excerpts are capped to keep metadata_json small (~2-4KB per run).
+      const stancesForLog = debateState.active.slice(0, 8).map((a) => ({
+        role: a.role,
+        model: a.model,
+        stanceName: a.stance?.name,
+        finalPositionExcerpt: (a.position ?? "").slice(0, 400),
+      }));
+      logInteraction(sessionId, "council", {
+        eventSubtype: "council_summary",
+        model: leaderModelId,
+        durationMs: Date.now() - stats.startMs,
+        data: {
+          topic,
+          roundCount: debateState.roundCount,
+          participantCount: debateState.active.length,
+          stances: stancesForLog,
+          synthesisExcerpt: synthesisText.slice(0, 1500),
+          evidenceDensity: evidenceDensityPersist,
+          confidenceLevel: confidenceLevelPersist,
+          recommendation: outcome?.recommendation?.slice(0, 400) ?? null,
+          agreedCount: outcome?.agreed?.length ?? 0,
+        },
+      });
     } catch {
       /* non-critical */
     }

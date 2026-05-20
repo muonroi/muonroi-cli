@@ -26,10 +26,18 @@ const STRATEGIES: Record<ProviderId, ProviderStrategy> = {
 };
 
 /**
- * Returns the strategy singleton for a given provider id. Falls back to the
- * Anthropic strategy when the id is unknown — keeps the dispatcher
- * exhaustive without a thrown error path.
+ * Returns the strategy singleton for a given provider id. Throws on unknown
+ * ids — silent fallback can mask a desynced registry (e.g. a new ProviderId
+ * added to `types.ts` without a matching strategy entry here).
  */
 export function getProviderStrategy(id: ProviderId | string): ProviderStrategy {
-  return STRATEGIES[id as ProviderId] ?? STRATEGIES.anthropic;
+  const strategy = STRATEGIES[id as ProviderId];
+  if (!strategy) {
+    throw new Error(
+      `No provider strategy registered for '${id}'. ` +
+        `Add an entry to src/providers/strategies/registry.ts (STRATEGIES record). ` +
+        `Known providers: ${Object.keys(STRATEGIES).join(", ")}.`,
+    );
+  }
+  return strategy;
 }

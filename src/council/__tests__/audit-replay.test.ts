@@ -8,7 +8,7 @@
  * 4. synthesis contains evidence signals from research output
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { appendSystemMessage } from "../../storage/index.js";
+import { appendSystemMessage, logInteraction } from "../../storage/index.js";
 
 // ── Module-level mocks — declared before any dynamic import ─────────────────
 
@@ -49,6 +49,7 @@ vi.mock("../leader.js", () => ({
 }));
 
 vi.mock("../debate-planner.js", () => ({
+  // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
   planDebate: vi.fn().mockImplementation(async function* () {
     return {
       intentSummary: "Test debate intent",
@@ -144,6 +145,7 @@ describe("audit-replay", () => {
     (appendSystemMessage as ReturnType<typeof vi.fn>).mockImplementation((sessionId: string, content: string) => {
       capturedMessages.push({ sessionId, content });
     });
+    (logInteraction as ReturnType<typeof vi.fn>).mockClear();
   });
 
   it("persists [Council Memory] after a full run", async () => {
@@ -293,5 +295,50 @@ describe("audit-replay", () => {
     expect(synthesis).toContain("docs/");
     expect(synthesis).toContain("tavily");
     expect(synthesis).toContain("snapshot");
+  });
+
+  // Issue #4: council_summary row in interaction_logs lets `usage forensics`
+  // surface debate outcomes without parsing the [Council Memory] system
+  // message. The summary must contain enough structure to triage runs.
+  it("persists a council_summary row to interaction_logs (Issue #4)", async () => {
+    const { runCouncil } = await import("../index.js");
+
+    const mockLLM = buildMockLLM();
+    const respondToQuestion = vi.fn().mockResolvedValue("skip");
+    const respondToPreflight = vi.fn().mockResolvedValue(true);
+    const processMessageFn = vi.fn().mockImplementation(async function* () {
+      yield { type: "done" };
+    });
+
+    const gen = runCouncil(
+      "Should we use gRPC internally?",
+      "mock-model",
+      [],
+      "test-session-summary",
+      mockLLM,
+      respondToQuestion,
+      respondToPreflight,
+      processMessageFn,
+      { skipClarification: true },
+    );
+
+    await drainCouncil(gen);
+
+    const calls = (logInteraction as ReturnType<typeof vi.fn>).mock.calls;
+    const summaryCall = calls.find(
+      (args) =>
+        args[1] === "council" && (args[2] as { eventSubtype?: string } | undefined)?.eventSubtype === "council_summary",
+    );
+    expect(summaryCall).toBeDefined();
+    expect(summaryCall![0]).toBe("test-session-summary");
+
+    const data = (summaryCall![2] as { data: Record<string, unknown> }).data;
+    expect(data.topic).toBe("Should we use gRPC internally?");
+    expect(data.roundCount).toBeGreaterThanOrEqual(0);
+    expect(data.participantCount).toBeGreaterThanOrEqual(2);
+    expect(Array.isArray(data.stances)).toBe(true);
+    expect(typeof data.synthesisExcerpt).toBe("string");
+    expect((data.synthesisExcerpt as string).length).toBeLessThanOrEqual(1500);
+    expect(["high", "medium", "low"]).toContain(data.confidenceLevel);
   });
 });

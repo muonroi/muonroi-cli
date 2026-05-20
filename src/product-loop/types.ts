@@ -228,9 +228,12 @@ export interface DbStrategyCtx {
   notes?: string;
 }
 
+export type AgentHarnessT = "core" | "react" | "angular" | "opentui" | "none";
+
 export interface FrontendApproachCtx {
   library: FeLibraryT;
   framework: "next" | "vite-react" | "svelte" | "none";
+  agentHarness?: AgentHarnessT;
 }
 
 export interface DeploymentCtx {

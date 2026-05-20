@@ -15,11 +15,16 @@ import type { Adapter, AdapterRequest, ProviderConfig, ProviderStream } from "./
  * Create a Gemini (Google) adapter.
  */
 export function createGeminiAdapter(config: ProviderConfig): Adapter {
-  if (config.apiKey) {
+  if (config.apiKey && !config.oauthHeaders) {
     redactor.enrollSecret(config.apiKey);
   }
 
-  const provider = createGoogleGenerativeAI({ apiKey: config.apiKey });
+  // When OAuth headers are present, route auth through extraHeaders. The Gemini
+  // SDK still wants a non-empty apiKey for config validation; the Authorization
+  // header takes precedence on the wire.
+  const provider = config.oauthHeaders
+    ? createGoogleGenerativeAI({ apiKey: "oauth", headers: config.oauthHeaders })
+    : createGoogleGenerativeAI({ apiKey: config.apiKey });
 
   return {
     id: "google",

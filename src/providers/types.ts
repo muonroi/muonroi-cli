@@ -100,6 +100,18 @@ export interface ProviderConfig {
   baseURL?: string;
   /** AI model identifier, e.g. "claude-3-5-haiku-latest". */
   model: string;
+  /**
+   * OAuth Bearer / subscription auth headers injected by `createAdapterAsync`
+   * via the OAuth registry. When present, the adapter MUST use these headers
+   * for authentication instead of `apiKey`. Common shape:
+   *   { Authorization: "Bearer ey...", "ChatGPT-Account-ID": "..." }
+   *
+   * Adding OAuth for a new provider:
+   *   1. Add an entry to `providers/auth/registry.ts` (login flow + token store).
+   *   2. Ensure that provider's adapter honors `oauthHeaders` (see openai.ts/anthropic.ts/gemini.ts).
+   *   3. Done — `createAdapterAsync` dispatches via the registry; no other code edits required.
+   */
+  oauthHeaders?: Record<string, string>;
 }
 
 /**
