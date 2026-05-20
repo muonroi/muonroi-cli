@@ -27,7 +27,8 @@ export type UIInteractionSubtype =
   | "init_new_step"
   | "init_new_submitted"
   | "init_new_result"
-  | "init_new_resume";
+  | "init_new_resume"
+  | "init_new_retry";
 
 interface RouteDecisionPayload {
   path: "hot-path" | "council";
@@ -104,12 +105,26 @@ interface InitNewResultPayload {
   outcome: "done" | "error";
   message: string;
   usedDotnetTemplate?: boolean;
+  /**
+   * Plan 23-fix — true when this result came from a manual retry in the
+   * error state (no re-running of council debate). Lets forensics see
+   * how often the retry path fires vs first-attempt success.
+   */
+  viaRetry?: boolean;
 }
 
 interface InitNewResumePayload {
   projectDir: string;
   templateName: string;
   originalPrompt: string;
+  /** Plan 23-fix — set when resume followed a retry rather than first scaffold. */
+  viaRetry?: boolean;
+}
+
+interface InitNewRetryPayload {
+  projectName: string;
+  feStack: string;
+  bbTemplate: string | null;
 }
 
 type Payload =
@@ -124,7 +139,8 @@ type Payload =
   | { subtype: "init_new_step"; data: InitNewStepPayload }
   | { subtype: "init_new_submitted"; data: InitNewSubmittedPayload }
   | { subtype: "init_new_result"; data: InitNewResultPayload }
-  | { subtype: "init_new_resume"; data: InitNewResumePayload };
+  | { subtype: "init_new_resume"; data: InitNewResumePayload }
+  | { subtype: "init_new_retry"; data: InitNewRetryPayload };
 
 /**
  * Persist a UI lifecycle event. Caller passes a discriminated payload so

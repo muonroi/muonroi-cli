@@ -428,8 +428,21 @@ export function installBBTemplates(nugetIds?: string[]): boolean {
       timeout: 60000,
       shell: dotnetSpawnShell(),
     });
-    const alreadyInstalled = result.status === 106 || (result.stdout ?? "").includes("is already installed");
-    if (result.status !== 0 && !alreadyInstalled) {
+    // Plan 23-fix: `dotnet new install` can print warnings about stale template
+    // paths (e.g. `Failed to scan D:\Personal\Project\Foo`) and STILL succeed,
+    // yet exit non-zero on some SDK builds. Treat any of the following as success:
+    //   - status === 0
+    //   - status === 106 (legacy "already installed" code)
+    //   - stdout contains "is already installed"
+    //   - stdout contains "Success:" (canonical success marker emitted before
+    //     the per-template summary table — present even when scan warnings fire)
+    const stdout = result.stdout ?? "";
+    const success =
+      result.status === 0 ||
+      result.status === 106 ||
+      stdout.includes("is already installed") ||
+      stdout.includes("Success:");
+    if (!success) {
       process.stderr.write(`[init-new] dotnet new install failed (${ref}): ${result.stderr ?? "unknown error"}\n`);
       allOk = false;
     }
@@ -490,6 +503,26 @@ export interface InitNewOptions {
     status: "start" | "ok" | "fail";
     error?: string;
   }) => void;
+  /**
+   * Plan 23-fix — Template-missing hook. Called BEFORE auto-installing a missing
+   * BB template. Lets the TUI ask the user: install automatically, wait for
+   * manual install + retry detection, or cancel. When omitted, auto-install
+   * fires immediately (legacy behaviour).
+   *
+   * Return values:
+   *   "install" — run `dotnet new install <pkg>@<version>` then re-check
+   *   "wait-manual" — pause; caller re-checks `detectInstalledBBTemplates()`
+   *                   and re-invokes the hook until it returns "install" or
+   *                   "cancel". The hook implementation owns the wait loop.
+   *   "cancel" — abort scaffold; throw a clear "template not installed" error.
+   */
+  onTemplateMissing?: (info: {
+    shortName: string;
+    nugetId: string;
+    version: string;
+  }) => Promise<"install" | "wait-manual" | "cancel">;
+  /** Plan 23-fix — Progress callback during `dotnet new install`. */
+  onTemplateInstallProgress?: (info: { status: "start" | "ok" | "fail"; message?: string }) => void;
 }
 
 export interface InitNewResult {
@@ -1258,13 +1291,63 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
       );
     }
     // Plan 23-01b — auto-install the chosen BB template from NuGet if missing.
+    // Plan 23-fix — when `onTemplateMissing` hook is provided, prompt the user
+    // before running `dotnet new install`. Hook can also signal that the user
+    // will install manually (we re-poll detection) or cancel outright.
     {
-      const installed = detectInstalledBBTemplates();
+      let installed = detectInstalledBBTemplates();
       if (!installed.has(opts.bbTemplate.nugetId)) {
-        const ok = installBBTemplates([opts.bbTemplate.nugetId]);
-        if (!ok) {
-          logWarn(`[init-new] failed to install ${opts.bbTemplate.nugetId} from NuGet`);
-          // fall through to throw below (no clone fallback)
+        let decision: "install" | "wait-manual" | "cancel" = "install";
+        if (opts.onTemplateMissing) {
+          decision = await opts.onTemplateMissing({
+            shortName: opts.bbTemplate.shortName,
+            nugetId: opts.bbTemplate.nugetId,
+            version: opts.bbTemplate.version,
+          });
+        }
+        if (decision === "cancel") {
+          throw new Error(
+            `Scaffold cancelled: template ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version} is not installed.\n` +
+              `→ Install manually then retry:\n` +
+              `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`,
+          );
+        }
+        if (decision === "wait-manual") {
+          // The UI is responsible for re-invoking init-new once the user
+          // signals install complete. Re-check detection one more time in case
+          // the hook implementation already waited; if still missing, bail out
+          // with the manual-install hint.
+          installed = detectInstalledBBTemplates();
+          if (!installed.has(opts.bbTemplate.nugetId)) {
+            throw new Error(
+              `Scaffold paused: template ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version} still not installed after manual wait.\n` +
+                `→ Run:\n` +
+                `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}\n` +
+                `  then press Retry.`,
+            );
+          }
+        } else {
+          // decision === "install" — run auto-install.
+          opts.onTemplateInstallProgress?.({
+            status: "start",
+            message: `dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`,
+          });
+          const ok = installBBTemplates([opts.bbTemplate.nugetId]);
+          if (!ok) {
+            opts.onTemplateInstallProgress?.({ status: "fail", message: "dotnet new install returned an error" });
+            logWarn(`[init-new] failed to install ${opts.bbTemplate.nugetId} from NuGet`);
+            // fall through to throw below (no clone fallback)
+          } else {
+            opts.onTemplateInstallProgress?.({ status: "ok" });
+            // Re-check after install. Some `dotnet new install` runs print
+            // warnings and return non-zero even though the template registered
+            // successfully — `installBBTemplates` would have reported false but
+            // the post-install detection is the source of truth.
+            installed = detectInstalledBBTemplates();
+            if (installed.has(opts.bbTemplate.nugetId)) {
+              logWarn(`[init-new] template ${opts.bbTemplate.nugetId} now installed (post-install detection)`);
+            }
+          }
         }
       }
 
@@ -1392,14 +1475,37 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
   if (!usedDotnetTemplate) {
     if (opts.bbTemplate) {
       const dotnetVersion = detectDotnet() ?? "(not detected)";
+      const sdkMajor = parseDotnetMajor(dotnetVersion);
       const required = getMinSdkMajor(opts.bbTemplate.nugetId);
-      const hint =
-        required !== null
-          ? `→ Template ${opts.bbTemplate.shortName} requires SDK ${required}.0+; you have ${dotnetVersion}.\n` +
-            `  If NuGet feed is configured (run \`dotnet nuget list source\`), retry; otherwise:\n` +
-            `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`
-          : `→ Try installing the template manually:\n` +
-            `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}`;
+      const installed = detectInstalledBBTemplates();
+      const templateInstalled = installed.has(opts.bbTemplate.nugetId);
+      const sdkTooOld = sdkMajor !== null && required !== null && sdkMajor < required;
+      // Plan 23-fix — distinguish the three real failure modes instead of
+      // unconditionally claiming the SDK is too old. The original bug surfaced
+      // on a machine running SDK 9.0.313 against a template requiring 9.0:
+      // the message said "requires SDK 9.0+; you have 9.0.313" which is
+      // self-contradictory.
+      let hint: string;
+      if (sdkTooOld) {
+        hint =
+          `→ Template ${opts.bbTemplate.shortName} requires .NET SDK ${required}.0+; you have ${dotnetVersion}.\n` +
+          `  Install SDK ${required}.0 from https://dotnet.microsoft.com/download/dotnet/${required}.0`;
+      } else if (!templateInstalled) {
+        hint =
+          `→ Template ${opts.bbTemplate.shortName} (${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}) is not installed.\n` +
+          `  Install it manually then press Retry:\n` +
+          `    dotnet new install ${opts.bbTemplate.nugetId}@${opts.bbTemplate.version}\n` +
+          `  Verify NuGet feeds with: dotnet nuget list source`;
+      } else {
+        // Template is installed and SDK is new enough — the `dotnet new`
+        // invocation itself failed for another reason. Most common causes:
+        // restore conflict, locked output dir, project name collision.
+        hint =
+          `→ Template ${opts.bbTemplate.shortName} is installed but \`dotnet new\` failed.\n` +
+          `  Common causes: existing files in target dir, restore conflict, or assembly-name collision.\n` +
+          `  Run manually to see the underlying error:\n` +
+          `    dotnet new ${opts.bbTemplate.shortName} -n <Name> -o <dir>`;
+      }
       throw new Error(`Scaffold failed: dotnet template ${opts.bbTemplate.shortName} could not be applied.\n${hint}`);
     }
     // No bbTemplate provided → FE-only project, skip BE scaffold entirely.
