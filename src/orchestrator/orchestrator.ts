@@ -44,6 +44,7 @@ import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
@@ -1122,12 +1123,14 @@ export class Agent {
       signal,
     } = args;
 
-    if (childRuntime.modelInfo?.responsesOnly) {
+    const childCaps = getProviderCapabilities(childRuntime.modelInfo?.provider ?? "anthropic");
+    if (childCaps.usesResponsesAPI(childRuntime.modelInfo)) {
       throw new Error("Batch mode currently supports chat-completions models only.");
     }
 
-    const batchTools =
-      childRuntime.modelInfo?.supportsClientTools === false ? [] : await toolSetToBatchTools(childTools);
+    const batchTools = !childCaps.supportsClientTools(childRuntime.modelInfo)
+      ? []
+      : await toolSetToBatchTools(childTools);
     const batch = await createBatch({
       ...this.getBatchClientOptions(signal),
       name: buildBatchName(`task-${request.agent}`, request.description),
@@ -1152,10 +1155,9 @@ export class Agent {
                 system: childSystem,
                 messages: [...childMessages, ...turnMessages],
                 temperature: request.agent === "explore" ? 0.2 : 0.5,
-                maxOutputTokens:
-                  childRuntime.modelInfo?.supportsMaxOutputTokens === false
-                    ? undefined
-                    : Math.min(this.maxTokens, 8_192),
+                maxOutputTokens: !childCaps.acceptsParam("maxOutputTokens", childRuntime.modelInfo)
+                  ? undefined
+                  : Math.min(this.maxTokens, 8_192),
                 reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
                 tools: batchTools,
               }),
@@ -1357,7 +1359,8 @@ export class Agent {
           model: provider.responses?.(childModelId) ?? provider(childModelId),
         }
       : resolveModelRuntime(provider, childModelId);
-    if (isComputer && childRuntime.modelInfo?.supportsClientTools === false) {
+    const taskCaps = getProviderCapabilities(childRuntime.modelInfo?.provider ?? "anthropic");
+    if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {
         success: false,
         output:
@@ -1385,7 +1388,7 @@ export class Agent {
     onActivity?.(initialDetail);
 
     try {
-      if (childMode === "agent" && childRuntime.modelInfo?.supportsClientTools !== false) {
+      if (childMode === "agent" && taskCaps.supportsClientTools(childRuntime.modelInfo)) {
         const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
           onOAuthRequired: (_serverId, url) => {
             const urlStr = url.toString();
@@ -1496,7 +1499,7 @@ export class Agent {
         model: childRuntime.model,
         system: childSystem,
         messages: _subMessagesForCall,
-        tools: childRuntime.modelInfo?.supportsClientTools === false ? {} : childTools,
+        tools: !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
         stopWhen: stepCountIs(Math.min(this.maxToolRounds, isExplore ? 60 : 120)),
         maxRetries: 0,
         abortSignal: signal,
@@ -3202,7 +3205,8 @@ export class Agent {
           );
         }
 
-        if (runtime.modelInfo?.responsesOnly) {
+        const batchCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+        if (batchCaps.usesResponsesAPI(runtime.modelInfo)) {
           throw new Error("Batch mode currently supports chat-completions models only.");
         }
 
@@ -3217,8 +3221,8 @@ export class Agent {
           sendTelegramFile: this.sendTelegramFile ?? undefined,
           sessionId: this.session?.id ?? undefined,
         });
-        let tools: ToolSet = runtime.modelInfo?.supportsClientTools === false ? {} : baseTools;
-        if (this.mode === "agent" && runtime.modelInfo?.supportsClientTools !== false) {
+        let tools: ToolSet = !batchCaps.supportsClientTools(runtime.modelInfo) ? {} : baseTools;
+        if (this.mode === "agent" && batchCaps.supportsClientTools(runtime.modelInfo)) {
           const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
             onOAuthRequired: (_serverId, url) => {
               const urlStr = url.toString();
@@ -3240,7 +3244,7 @@ export class Agent {
           }
         }
 
-        const batchTools = runtime.modelInfo?.supportsClientTools === false ? [] : await toolSetToBatchTools(tools);
+        const batchTools = !batchCaps.supportsClientTools(runtime.modelInfo) ? [] : await toolSetToBatchTools(tools);
         const batch = await createBatch({
           ...this.getBatchClientOptions(signal),
           name: buildBatchName("session", this.getSessionId() || runtime.modelId),
@@ -3268,7 +3272,9 @@ export class Agent {
                     system,
                     messages: [...this.messages, ...turnMessages],
                     temperature: 0.7,
-                    maxOutputTokens: runtime.modelInfo?.supportsMaxOutputTokens === false ? undefined : this.maxTokens,
+                    maxOutputTokens: !batchCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
+                      ? undefined
+                      : this.maxTokens,
                     reasoningEffort: runtime.providerOptions?.xai.reasoningEffort,
                     tools: batchTools,
                   }),
@@ -4165,12 +4171,16 @@ export class Agent {
           // never needs bash/read_file/edit_file/grep — those schemas alone
           // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
           // every non-chitchat turn (PIL gates conservatively).
-          let rawToolSet: ToolSet =
-            runtime.modelInfo?.supportsClientTools === false ? {} : isChitchat ? {} : baseToolsRaw;
+          const turnCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+          let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
+            ? {}
+            : isChitchat
+              ? {}
+              : baseToolsRaw;
           // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
           // worth of tool schemas (~20K input tokens). PIL Layer 1 already
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
-          if (this.mode === "agent" && !isChitchat && runtime.modelInfo?.supportsClientTools !== false) {
+          if (this.mode === "agent" && !isChitchat && turnCaps.supportsClientTools(runtime.modelInfo)) {
             // Smart MCP filter: skip browser/vision MCP servers unless the
             // user's current message has a URL or explicitly invokes the
             // browser/screenshot/design vocabulary. Local code work — which
@@ -4208,7 +4218,7 @@ export class Agent {
           }
 
           // PIL response tools: inject structured output tool when taskType detected
-          if (_hasResponseTools && runtime.modelInfo?.supportsClientTools !== false) {
+          if (_hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo)) {
             rawToolSet = { ...rawToolSet, ..._pilResponseTools };
             captureToolSchemas(_pilResponseTools);
           }
@@ -4364,7 +4374,7 @@ export class Agent {
             system: systemForModel,
             messages: _topMessagesForCall,
             tools,
-            toolChoice: _hasResponseTools && runtime.modelInfo?.supportsClientTools !== false ? "auto" : undefined,
+            toolChoice: _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : undefined,
             stopWhen:
               stepRouterPhase === "phase1"
                 ? stepCountIs(1) // SAMR Phase 1: stop after reasoning step

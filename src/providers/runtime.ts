@@ -7,6 +7,7 @@ import { createOllama } from "ollama-ai-provider-v2";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
+import { getProviderCapabilities } from "./capabilities.js";
 import { OPENAI_COMPATIBLE_BASE_URLS } from "./endpoints.js";
 import type { ProviderId } from "./types.js";
 
@@ -272,15 +273,14 @@ export function shouldDropParam(
   runtime: ResolvedModelRuntime,
   param: "maxOutputTokens" | "temperature" | "topP",
 ): boolean {
-  if (param === "maxOutputTokens" && runtime.modelInfo?.supportsMaxOutputTokens === false) {
-    return true;
-  }
-  // Reasoning models (gpt-5.x, o1/o3/o4, deepseek-r1, claude reasoning, etc.)
-  // reject `temperature` and `topP` at the provider — OpenAI Responses API
-  // emits an AI SDK warning and the param is silently ignored. Drop them at
-  // the source so the warning stops and no future strict-mode provider
-  // surfaces a hard error. G2 — sibling of G1 (maxOutputTokens drop).
-  if ((param === "temperature" || param === "topP") && runtime.modelInfo?.reasoning === true) {
+  // Delegate the model-side rule to the provider capability layer:
+  //   - acceptsParam("maxOutputTokens") mirrors supportsMaxOutputTokens.
+  //   - acceptsParam("temperature"/"topP") returns false for reasoning models
+  //     (OpenAI Responses API emits a warning and silently ignores them; we
+  //     drop at the source so no future strict-mode provider hard-errors).
+  // See ProviderCapabilities in src/providers/capabilities.ts.
+  const caps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+  if (!caps.acceptsParam(param, runtime.modelInfo)) {
     return true;
   }
   return runtime.unsupportedParams?.includes(param) ?? false;
