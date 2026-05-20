@@ -222,6 +222,7 @@ import {
   VISION_MODEL,
 } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
+import { getReadPathBudgetCap, ReadPathBudget, wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
 import { withStreamRetry } from "./retry-stream.js";
@@ -446,6 +447,13 @@ export class Agent {
   // Phase C3: cross-turn tool-output dedup. One instance per session; bumped
   // on each user turn. Lazily initialized so disabled-via-env path stays cheap.
   private _crossTurnDedup: CrossTurnDedup | null = isCrossTurnDedupEnabled() ? new CrossTurnDedup() : null;
+  // Phase C4 — input-keyed read-path budget. Complements C3 (output hash) by
+  // catching re-reads of files the agent edited between rounds. Disabled
+  // when MUONROI_MAX_READS_PER_PATH=0.
+  private _readBudget: ReadPathBudget | null = (() => {
+    const cap = getReadPathBudgetCap();
+    return cap > 0 ? new ReadPathBudget(cap) : null;
+  })();
 
   constructor(
     apiKey: string | undefined,
@@ -1312,7 +1320,10 @@ export class Agent {
     // Phase C3: layer cross-turn dedup ON TOP of the per-invocation cap. The
     // cap sees raw output (for accurate cumulative accounting); dedup sees
     // the already-trimmed output that will actually reach the model.
-    const childBaseTools = wrapToolSetWithDedup(subAgentCap.tools, this._crossTurnDedup);
+    const childBaseTools = wrapToolSetWithReadBudget(
+      wrapToolSetWithDedup(subAgentCap.tools, this._crossTurnDedup),
+      this._readBudget,
+    );
     const initialDetail = isExplore
       ? "Scanning the codebase"
       : isVerifyDetect
@@ -1491,16 +1502,19 @@ export class Agent {
         abortSignal: signal,
         prepareStep: ({ messages, stepNumber }) => {
           if (stepNumber < 1) return undefined;
-          const compacted = compactSubAgentMessages(messages, {
+          // SiliconFlow internal multi-step loop: AI-SDK accumulates streamed
+          // reasoning parts into in-flight assistant history and re-POSTs them
+          // on the next step within the same streamText call — orchestrator-
+          // level strip at call setup never sees this. Strip per step too.
+          const stripped =
+            childRuntime.modelInfo?.provider === "siliconflow"
+              ? (stripReasoningForSiliconflow(messages) as typeof messages)
+              : messages;
+          const compacted = compactSubAgentMessages(stripped, {
             thresholdChars: compactThreshold,
             keepLastTurns: compactKeepLast,
           });
-          if (compacted === messages || compacted.length === messages.length) {
-            // Identity / length match — no rewrites happened.
-            // (compactSubAgentMessages returns a new array but length === input
-            // when below threshold; cheap heuristic to skip the override.)
-            if (compacted === messages) return undefined;
-          }
+          if (compacted === stripped && stripped === messages) return undefined;
           return { messages: compacted };
         },
         ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
@@ -4208,7 +4222,10 @@ export class Agent {
             label: "top-level",
           });
           // Phase C3: layer cross-turn dedup on top of the top-level cap.
-          const tools: ToolSet = wrapToolSetWithDedup(topLevelCap.tools, this._crossTurnDedup);
+          const tools: ToolSet = wrapToolSetWithReadBudget(
+            wrapToolSetWithDedup(topLevelCap.tools, this._crossTurnDedup),
+            this._readBudget,
+          );
           captureToolSchemas(tools);
           let responseToolCalled = false;
 
@@ -4356,12 +4373,17 @@ export class Agent {
             abortSignal: signal,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
-              const compacted = compactSubAgentMessages(stepMessages, {
+              const stripped =
+                runtime.modelInfo?.provider === "siliconflow"
+                  ? (stripReasoningForSiliconflow(stepMessages) as typeof stepMessages)
+                  : stepMessages;
+              const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
                 keepLastTurns: topLevelCompactKeepLast,
                 label: "top-level",
               });
-              return compacted === stepMessages ? {} : { messages: compacted };
+              if (compacted === stripped && stripped === stepMessages) return {};
+              return { messages: compacted };
             },
             ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
             ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
