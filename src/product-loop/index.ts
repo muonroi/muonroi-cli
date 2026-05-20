@@ -445,6 +445,24 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Persist the halt/crash so forensics can surface it via `usage forensics`.
+    // Circuit-breaker rejections (CB-1 cost-projection in sprint-runner) are
+    // the common case — they previously vanished into the TUI scrollback only.
+    try {
+      const sid = opts.sessionId ?? runId;
+      const isCB = msg.startsWith("Halted by circuit breaker");
+      logInteraction(sid, "council", {
+        eventSubtype: isCB ? "sprint_halt" : "loop_error",
+        data: {
+          runId,
+          stage: "driver",
+          reason: msg.slice(0, 2000),
+          isCircuitBreaker: isCB,
+        },
+      });
+    } catch {
+      /* best-effort */
+    }
     yield { type: "error", error: true, content: msg } as any;
     return { runId, stage: "error", success: false, reason: msg };
   }
@@ -549,6 +567,26 @@ async function* drainSprints(args: {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       yield { type: "content", content: `\n> Sprint ${sprintN} halted: ${msg}\n` } as StreamChunk;
+      // Persist the sprint halt so forensics replay surfaces it. CB-1 cost
+      // projection breaches (`Halted by circuit breaker: …`) are by far the
+      // common case and they previously vanished into TUI scrollback only.
+      try {
+        const sid = ctx.sessionId ?? ctx.runId;
+        const isCB = msg.startsWith("Halted by circuit breaker");
+        logInteraction(sid, "council", {
+          eventSubtype: "sprint_halt",
+          data: {
+            runId: ctx.runId,
+            sprintN,
+            stage: "sprint",
+            reason: msg.slice(0, 2000),
+            isCircuitBreaker: isCB,
+            sprintsRun,
+          },
+        });
+      } catch {
+        /* best-effort */
+      }
       // Mark manifest as halted (not aborted) so resume can pick up.
       const manifest = await readManifest(ctx.flowDir, ctx.runId);
       if (manifest) {
