@@ -120,11 +120,12 @@ import {
   SubagentTaskLine,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
+import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
 import { useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
-import { createEmptyMcpEditorDraft, type McpEditorDraft, type McpEditorField } from "./mcp-modal-types";
+import { createEmptyMcpEditorDraft, type McpEditorDraft } from "./mcp-modal-types";
 import { ApiKeyModal } from "./modals/api-key-modal.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
@@ -911,16 +912,28 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const showConnectModalRef = useRef(false);
   const showTelegramTokenModalRef = useRef(false);
   const showTelegramPairModalRef = useRef(false);
-  const [showMcpModal, setShowMcpModal] = useState(false);
-  const [showMcpEditor, setShowMcpEditor] = useState(false);
-  const [mcpSearchQuery, setMcpSearchQuery] = useState("");
-  const [mcpModalIndex, setMcpModalIndex] = useState(0);
-  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() => loadMcpServers());
-  const [mcpEditorDraft, setMcpEditorDraft] = useState<McpEditorDraft>(createEmptyMcpEditorDraft());
-  const [mcpEditorField, setMcpEditorField] = useState<McpEditorField>("transport");
-  const [mcpEditorSyncKey, setMcpEditorSyncKey] = useState(0);
-  const [mcpEditorError, setMcpEditorError] = useState<string | null>(null);
-  const [editingMcpId, setEditingMcpId] = useState<string | null>(null);
+  const {
+    showMcpModal,
+    setShowMcpModal,
+    showMcpEditor,
+    setShowMcpEditor,
+    mcpSearchQuery,
+    setMcpSearchQuery,
+    mcpModalIndex,
+    setMcpModalIndex,
+    mcpServers,
+    setMcpServers,
+    mcpEditorDraft,
+    setMcpEditorDraft,
+    mcpEditorField,
+    setMcpEditorField,
+    mcpEditorSyncKey,
+    setMcpEditorSyncKey,
+    mcpEditorError,
+    setMcpEditorError,
+    editingMcpId,
+    setEditingMcpId,
+  } = useMcpEditor();
   const showMcpModalRef = useRef(false);
   const showMcpEditorRef = useRef(false);
   const mcpLabelRef = useRef<TextareaRenderable>(null);
@@ -1067,6 +1080,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [schedules, scheduleSearchQuery],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setMcpServers is a stable useState setter from useMcpEditor hook
   const syncStoredMcpServers = useCallback((servers: McpServerConfig[]) => {
     setMcpServers(servers);
     saveMcpServers(servers);
@@ -1200,6 +1214,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     };
   }, [mcpEditorDraft]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useMcpEditor hook
   const openMcpModal = useCallback(() => {
     const latest = loadMcpServers();
     setMcpServers(latest);
@@ -1211,6 +1226,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setMcpEditorError(null);
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useMcpEditor hook
   const openMcpEditor = useCallback((draft: McpEditorDraft, editingId: string | null = null) => {
     setMcpEditorDraft(draft);
     setEditingMcpId(editingId);
@@ -1285,6 +1301,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     [mcpServers, syncStoredMcpServers],
   );
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setMcpModalIndex is a stable useState setter from useMcpEditor hook
   const deleteSavedMcp = useCallback(
     (server: McpServerConfig) => {
       syncStoredMcpServers(mcpServers.filter((item) => item.id !== server.id));
@@ -1442,6 +1459,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setAgentsModalIndex(0);
   }, [editingSubagent, subAgents]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor are stable useState setters
   const submitMcpEditor = useCallback(() => {
     const draft: McpEditorDraft = {
       label: mcpLabelRef.current?.plainText || "",
@@ -1514,6 +1532,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     );
   }, [editingMcpId, mcpEditorDraft.transport]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor are stable useState setters
   const cycleMcpEditorTransport = useCallback(
     (direction: 1 | -1 = 1) => {
       const draft = snapshotMcpEditorDraft();
@@ -1597,6 +1616,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     syncStoredMcpServers(mcpServers.map((server) => (server.id === editingMcpId ? syncedServer : server)));
   }, [editingMcpId, mcpEditorDraft, mcpServers, showMcpEditor, syncStoredMcpServers]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setMcpModalIndex is a stable useState setter from useMcpEditor hook
   useEffect(() => {
     setMcpModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, mcpRows.length - 1))));
   }, [mcpRows.length]);
@@ -3814,6 +3834,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setBtwState(null);
   }, []);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor/useModelPicker hooks are stable useState setters (stable identity across renders)
   const handleKey = useCallback(
     (key: KeyEvent) => {
       // Point-to-existing form intercepts all input while open.
