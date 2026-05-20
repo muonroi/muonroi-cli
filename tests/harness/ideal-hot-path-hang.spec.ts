@@ -68,7 +68,11 @@ describe("ideal hot-path hang diagnostic", () => {
 
     // slowType — char-by-char so the slash menu's filter sees each char
     // commit through React state before the next arrives.
-    for (const ch of "/ideal build a counter") {
+    // Prompt must pass PIL Layer 1 sufficiency gate (target + intent) to route
+    // to hot-path; "build a counter" is too vague and now forces council.
+    // "fix typo in counter.ts" has concrete verb + file ref → sufficient,
+    // and short length keeps complexity=low.
+    for (const ch of "/ideal fix typo in counter.ts") {
       driver.type(ch);
       await new Promise((r) => setTimeout(r, 25));
     }

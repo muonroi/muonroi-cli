@@ -185,7 +185,11 @@ describe.skipIf(!HAS_EE_DESIGN)("init-new EE-driven design preview", () => {
       })().catch(() => undefined);
 
       // 1. Dispatch /ideal — short route timeout forces CB-3 halt fast.
-      await slowType(driver, "/ideal build a todo app rest api with auth");
+      // Prompt must pass PIL Layer 1 sufficiency gate to route to hot-path
+      // (which triggers CB-3 halt). "build a todo app" is vague → forces
+      // council. "add auth endpoint to api.ts" has concrete verb + file ref
+      // + scope noun → sufficient; short length keeps complexity=low.
+      await slowType(driver, "/ideal add auth endpoint to api.ts");
       await driver.wait_for({ idle: true, timeoutMs: 3_000 }).catch(() => undefined);
       driver.press("Enter");
 
@@ -290,7 +294,11 @@ describe.skipIf(!HAS_EE_DESIGN)("init-new EE-driven design preview", () => {
     });
 
     it("EE down → falls back to manual template menu", async () => {
-      await slowType(driver, "/ideal build a todo app rest api with auth");
+      // Prompt must pass PIL Layer 1 sufficiency gate to route to hot-path
+      // (which triggers CB-3 halt). "build a todo app" is vague → forces
+      // council. "add auth endpoint to api.ts" has concrete verb + file ref
+      // + scope noun → sufficient; short length keeps complexity=low.
+      await slowType(driver, "/ideal add auth endpoint to api.ts");
       await driver.wait_for({ idle: true, timeoutMs: 3_000 }).catch(() => undefined);
       driver.press("Enter");
 

@@ -47,7 +47,7 @@ async function initialize(proc: ChildProcessWithoutNullStreams): Promise<void> {
 }
 
 describe("MCP integration", () => {
-  it("capabilities returns protocol version 0.3.0", async () => {
+  it("capabilities returns protocol version 0.4.0", async () => {
     const p = spawn("bun", ["run", resolve("src/index.ts"), "mcp-driver"], {
       stdio: ["pipe", "pipe", "pipe"],
     }) as ChildProcessWithoutNullStreams;
@@ -56,7 +56,7 @@ describe("MCP integration", () => {
       const { result } = await call(p, 1, "tools/call", { name: "tui.capabilities", arguments: {} });
       const content = (result as { content: Array<{ text: string }> }).content;
       const payload = JSON.parse(content[0].text) as { protocol: string };
-      expect(payload.protocol).toBe("0.3.0");
+      expect(payload.protocol).toBe("0.4.0");
     } finally {
       p.kill();
     }

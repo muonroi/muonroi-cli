@@ -35,15 +35,13 @@ vi.mock("node:child_process", async (importOriginal) => {
 function makeMockFs(opts?: { existsReturns?: boolean; restoreFails?: boolean }) {
   const mkdir = vi.fn(async (_p: string) => {});
   const writeFile = vi.fn(async (_p: string, _content: string) => {});
-  const exec = vi.fn(
-    async (cmd: string, _cwd: string): Promise<{ stdout: string; stderr: string }> => {
-      // dotnet restore failure simulation
-      if (cmd.includes("dotnet restore") && opts?.restoreFails) {
-        return { stdout: "", stderr: "error NU1301: feed unreachable" };
-      }
-      return { stdout: "", stderr: "" };
-    },
-  );
+  const exec = vi.fn(async (cmd: string, _cwd: string): Promise<{ stdout: string; stderr: string }> => {
+    // dotnet restore failure simulation
+    if (cmd.includes("dotnet restore") && opts?.restoreFails) {
+      return { stdout: "", stderr: "error NU1301: feed unreachable" };
+    }
+    return { stdout: "", stderr: "" };
+  });
   const exists = vi.fn((_p: string) => opts?.existsReturns ?? false);
   return { mkdir, writeFile, exec, exists };
 }
@@ -57,10 +55,10 @@ describe("initNewProject — bb-template path", () => {
     const { spawnSync } = await import("node:child_process");
     const mockSpawn = vi.mocked(spawnSync);
 
-    // dotnet --version → returns 8.0.0
+    // dotnet --version → returns 9.0.100 (BaseTemplate requires SDK 9+)
     mockSpawn.mockImplementation((cmd: string, args?: readonly string[]) => {
       if (cmd === "dotnet" && args?.[0] === "--version") {
-        return { status: 0, stdout: "8.0.100\n", stderr: "", pid: 1, signal: null, output: [] };
+        return { status: 0, stdout: "9.0.100\n", stderr: "", pid: 1, signal: null, output: [] };
       }
       return { status: 1, stdout: "", stderr: "not found", pid: 1, signal: null, output: [] };
     });
@@ -101,7 +99,7 @@ describe("initNewProject — bb-template path", () => {
     expect(cloneCall).toBeFalsy();
   });
 
-  it("falls back to git clone when dotnet is absent", async () => {
+  it("throws actionable error when dotnet is absent (Plan 23-01b retired git-clone fallback)", async () => {
     const { spawnSync } = await import("node:child_process");
     const mockSpawn = vi.mocked(spawnSync);
 
@@ -129,21 +127,14 @@ describe("initNewProject — bb-template path", () => {
       fs,
     };
 
-    const result = await initNewProject(opts);
-
-    expect(result.usedDotnetTemplate).toBe(false);
-
-    // git clone MUST have been called as fallback
-    const execCalls = fs.exec.mock.calls;
-    const cloneCall = execCalls.find((c) => (c[0] as string).includes("git clone"));
-    expect(cloneCall).toBeTruthy();
+    await expect(initNewProject(opts)).rejects.toThrow(/\.NET SDK not found/);
   });
 
-  it("uses legacy clone path when no bbTemplate provided", async () => {
+  it("skips BE scaffold when no bbTemplate provided (FE-only project)", async () => {
     const { spawnSync } = await import("node:child_process");
     vi.mocked(spawnSync).mockImplementation(() => ({
       status: 0,
-      stdout: "8.0.100\n",
+      stdout: "9.0.100\n",
       stderr: "",
       pid: 1,
       signal: null,
@@ -155,34 +146,38 @@ describe("initNewProject — bb-template path", () => {
     const fs = makeMockFs({ existsReturns: false });
 
     const opts: InitNewOptions = {
-      projectName: "legacy-app",
+      projectName: "fe-only-app",
       beSource: "/path/to/bb",
       feStack: "react",
       projectsRoot: "/tmp/projects",
-      // No bbTemplate — legacy path
+      // No bbTemplate — FE-only path
       fs,
     };
 
     const result = await initNewProject(opts);
 
     expect(result.usedDotnetTemplate).toBeFalsy();
+    expect(result.projectDir).toContain("fe-only-app");
 
+    // Legacy git-clone fallback retired (Plan 23-01b) — no clone call expected.
     const execCalls = fs.exec.mock.calls;
     const cloneCall = execCalls.find((c) => (c[0] as string).includes("git clone"));
-    expect(cloneCall).toBeTruthy();
+    expect(cloneCall).toBeFalsy();
   });
 
   it("filters commercial packages when commercial flag is false", async () => {
     const { spawnSync } = await import("node:child_process");
     vi.mocked(spawnSync).mockImplementation((cmd: string, args?: readonly string[]) => {
       if (cmd === "dotnet" && args?.[0] === "--version") {
-        return { status: 0, stdout: "8.0.100\n", stderr: "", pid: 1, signal: null, output: [] };
+        return { status: 0, stdout: "9.0.100\n", stderr: "", pid: 1, signal: null, output: [] };
       }
       return { status: 1, stdout: "", stderr: "", pid: 1, signal: null, output: [] };
     });
 
     vi.resetModules();
-    const { isCommercialPackage: _ } = await import("../../src/scaffold/init-new.js").catch(() => ({ isCommercialPackage: undefined }));
+    const { isCommercialPackage: _ } = await import("../../src/scaffold/init-new.js").catch(() => ({
+      isCommercialPackage: undefined,
+    }));
     // isCommercialPackage is not exported — test via eePackages injection behavior
     // The test verifies that commercial packages are not injected into props
 

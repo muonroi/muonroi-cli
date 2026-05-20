@@ -347,6 +347,7 @@ describe("initNewProject — bbTemplate + EE packages (Plan 23-01b)", () => {
 // and mr-mod-sln@1.10.0 (verified 2026-05-19 in /tmp/muonroi-scaffold-test).
 // ---------------------------------------------------------------------------
 
+import path from "node:path";
 import { type FindCsprojFs, findPrimaryCsproj } from "../init-new.js";
 
 function makeFsTree(files: Record<string, string>): FindCsprojFs {
@@ -413,7 +414,9 @@ describe("findPrimaryCsproj — BB template heuristic", () => {
       "C:/app/src/Services/App.Core/App.Core.csproj": libSdk,
       "C:/app/src/Services/App.Data/App.Data.csproj": libSdk,
     });
-    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(String.raw`C:\app\src\Gateways\App.Gateway\App.Gateway.csproj`);
+    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(
+      path.join("C:/app", "src", "Gateways", "App.Gateway", "App.Gateway.csproj"),
+    );
   });
 
   it("picks the Host Web SDK csproj for mr-mod-sln shape", () => {
@@ -422,7 +425,7 @@ describe("findPrimaryCsproj — BB template heuristic", () => {
       "C:/app/src/Modules/Catalog/App.Modules.Catalog.csproj": libSdk,
       "C:/app/src/Shared/App.Kernel/App.Kernel.csproj": libSdk,
     });
-    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(String.raw`C:\app\src\Host\App.Host\App.Host.csproj`);
+    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(path.join("C:/app", "src", "Host", "App.Host", "App.Host.csproj"));
   });
 
   it("excludes test projects when picking primary", () => {
@@ -430,7 +433,7 @@ describe("findPrimaryCsproj — BB template heuristic", () => {
       "C:/app/App.Tests/App.Tests.csproj": webSdk, // would otherwise win on depth
       "C:/app/src/App.Api/App.Api.csproj": webSdk,
     });
-    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(String.raw`C:\app\src\App.Api\App.Api.csproj`);
+    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(path.join("C:/app", "src", "App.Api", "App.Api.csproj"));
   });
 
   it("returns null when no .csproj is found", () => {
@@ -442,6 +445,6 @@ describe("findPrimaryCsproj — BB template heuristic", () => {
     const fs = makeFsTree({
       "C:/app/src/App.Lib/App.Lib.csproj": libSdk,
     });
-    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(String.raw`C:\app\src\App.Lib\App.Lib.csproj`);
+    expect(findPrimaryCsproj("C:/app", 6, fs)).toBe(path.join("C:/app", "src", "App.Lib", "App.Lib.csproj"));
   });
 });
