@@ -4669,6 +4669,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (result.emit?.type === "answer") {
             const qid = pendingQuestion.questionId;
             const ans = result.emit.answer;
+            // Resolve the label of the option that was selected. For "choice"
+            // and "freetext" the option index lives on the card state; for
+            // "chat" the user typed a free reply and there is no option to
+            // reference. The label gives forensics tooling the recommendation
+            // value next to the bare answerText (e.g. "accept" vs. the actual
+            // recommendation string "Recommended: 'saas' — …").
+            const cardOptions = pendingQuestion.options ?? [];
+            const cardIdx = councilCardStateRef.current?.idx ?? -1;
+            const selectedOptionLabel =
+              ans.kind === "choice" || ans.kind === "freetext" ? cardOptions[cardIdx]?.label : undefined;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text);
@@ -4687,7 +4697,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             }
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "askcard_answered",
-              data: { questionId: qid, answerKind: ans.kind ?? "choice", answerText: ans.text },
+              data: {
+                questionId: qid,
+                answerKind: ans.kind ?? "choice",
+                answerText: ans.text,
+                ...(selectedOptionLabel ? { selectedOptionLabel } : {}),
+              },
             });
           } else if (result.emit?.type === "cancel") {
             const qid = pendingQuestion.questionId;
@@ -6035,36 +6050,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                     </Semantic>
                   )}
                   {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-                  {activeHaltCard && (
-                    <HaltRecoveryCard
-                      halt={activeHaltCard}
-                      selectedIndex={haltSelectedIndex}
-                      terminalCols={width}
-                      theme={t}
-                    />
-                  )}
-                  {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
-                  {pointToExistingForm && (
-                    <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
-                  )}
-                  {councilProgress && (
-                    <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
-                      <box
-                        flexDirection="column"
-                        borderStyle="single"
-                        borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
-                        padding={1}
-                        marginTop={1}
-                      >
-                        <text fg={t.text}>
-                          {councilProgress.status === "running" && "Council brainstorming — writing spec.md..."}
-                          {councilProgress.status === "done" &&
-                            `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content — production council wiring deferred)"}`}
-                          {councilProgress.status === "error" && `Council brainstorm failed: ${councilProgress.error}`}
-                        </text>
-                      </box>
-                    </Semantic>
-                  )}
+                  {/* Halt/init-new/point-to-existing/council-progress cards moved
+                      to render AFTER councilMessages below so the scrollbox's
+                      sticky-bottom auto-scroll reveals them — when council
+                      debate produces many tall bubbles they used to render
+                      above the viewport. */}
                   {councilStatuses.length > 0 && (
                     <Semantic id="council-status" role="listbox" name="Council Status">
                       <CouncilStatusList statuses={councilStatuses} theme={t} />
@@ -6159,6 +6149,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   {/* Plan questions panel — inline, OpenCode-style */}
                   {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
                   {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+                  {/* Modals/wizards anchored to the bottom so sticky-bottom
+                      auto-scroll keeps them in view even when councilMessages
+                      fill the scrollbox. */}
+                  {activeHaltCard && (
+                    <HaltRecoveryCard
+                      halt={activeHaltCard}
+                      selectedIndex={haltSelectedIndex}
+                      terminalCols={width}
+                      theme={t}
+                    />
+                  )}
+                  {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                  {pointToExistingForm && (
+                    <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                  )}
+                  {councilProgress && (
+                    <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
+                      <box
+                        flexDirection="column"
+                        borderStyle="single"
+                        borderColor={councilProgress.status === "error" ? t.initFormError : t.text}
+                        padding={1}
+                        marginTop={1}
+                      >
+                        <text fg={t.text}>
+                          {councilProgress.status === "running" && "Council brainstorming — writing spec.md..."}
+                          {councilProgress.status === "done" &&
+                            `Council brainstorm complete: ${councilProgress.specPath}${councilProgress.hasContent ? "" : " (no content — production council wiring deferred)"}`}
+                          {councilProgress.status === "error" && `Council brainstorm failed: ${councilProgress.error}`}
+                        </text>
+                      </box>
+                    </Semantic>
+                  )}
                 </scrollbox>
               </Semantic>
               {btwState && <BtwOverlay state={btwState} theme={t} />}

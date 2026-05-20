@@ -184,6 +184,13 @@ export interface ProviderKeyConfig {
 export interface UserSettings {
   apiKey?: string;
   defaultModel?: string;
+  /**
+   * Preferred provider. When set, the splash/config UI hides the model
+   * picker and the router picks the model from this provider's catalog
+   * (first balanced model, falling back to fast/premium). The legacy
+   * defaultModel field stays as the hard pin for legacy paths.
+   */
+  defaultProvider?: ProviderId;
   sandboxMode?: SandboxMode;
   sandbox?: SandboxSettings;
   /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
@@ -1070,4 +1077,20 @@ export function setModelDisabled(modelId: string, disabled: boolean): string[] {
   const next = [...current];
   saveUserSettings({ disabledModels: next });
   return next;
+}
+
+/**
+ * Preferred provider. The splash UI persists this when the user picks a
+ * provider as default; the router then auto-selects a model from this
+ * provider's catalog. Returns null when nothing is pinned.
+ */
+export function getDefaultProvider(): ProviderId | null {
+  const raw = loadUserSettings().defaultProvider;
+  if (typeof raw !== "string") return null;
+  if (!(ALL_PROVIDER_IDS as readonly string[]).includes(raw)) return null;
+  return raw as ProviderId;
+}
+
+export function setDefaultProvider(provider: ProviderId): void {
+  saveUserSettings({ defaultProvider: provider });
 }

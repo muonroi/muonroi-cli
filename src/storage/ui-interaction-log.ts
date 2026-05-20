@@ -62,6 +62,14 @@ interface AskcardAnsweredPayload {
   questionId: string;
   answerKind: string;
   answerText: string;
+  /**
+   * The label of the chosen option as rendered to the user. Lets `usage
+   * forensics` and the export timeline answer "what was actually selected"
+   * without cross-referencing the matching askcard_open row — e.g. when
+   * answerText is "accept" the label still carries the underlying
+   * recommendation value ("Recommended: 'saas' — …").
+   */
+  selectedOptionLabel?: string;
 }
 
 interface AskcardCancelPayload {

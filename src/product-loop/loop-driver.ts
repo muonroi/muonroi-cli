@@ -68,7 +68,11 @@ function wrapLLMForUsageTracking(llm: CouncilLLM, ctx: DriverContext): CouncilLL
 function logLoopEvent(ctx: DriverContext, subtype: string, data: Record<string, unknown>): void {
   try {
     const sid = ctx.sessionId ?? ctx.runId;
-    logInteraction(sid, "council", { eventSubtype: subtype, data });
+    // Stamp runId on every row so multi-run sessions can be demuxed during
+    // forensics — previously only route_decision carried this field. Caller
+    // overrides win if the payload already contained a runId.
+    const enriched = "runId" in data ? data : { ...data, runId: ctx.runId };
+    logInteraction(sid, "council", { eventSubtype: subtype, data: enriched });
   } catch {
     /* non-critical — audit trail only */
   }
@@ -615,8 +619,10 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // Forensics row mirrors the council/index.ts council_summary record
         // (which only fires for sprint planning via runCouncil). The /ideal
         // initial debate goes through runDebate here and was previously
-        // invisible to `usage forensics`. Excerpts are capped to keep
-        // metadata_json bounded (~2-4KB per debate).
+        // invisible to `usage forensics`. Excerpts are capped at 4000 chars
+        // to match council_message rows so the summary captures the full
+        // final stance, not just the first paragraph. metadata_json stays
+        // bounded (~16-20KB per debate with 4 stances).
         if (debateState) {
           const stancesForLog = participants.slice(0, 8).map((p, i) => {
             const finalPosition = debateState!.active?.[i]?.position ?? "";
@@ -624,7 +630,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
               role: p.role,
               model: p.model,
               stanceName: p.stance?.name,
-              finalPositionExcerpt: finalPosition.slice(0, 400),
+              finalPositionExcerpt: finalPosition.slice(0, 4000),
             };
           });
           logLoopEvent(ctx, "council_summary", {
@@ -633,8 +639,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             roundCount: debateState.roundCount ?? 0,
             participantCount: participants.length,
             stances: stancesForLog,
-            summaryExcerpt: (debateState.runningSummary ?? "").slice(0, 1500),
-            researchFindingsExcerpt: (debateState.researchFindings ?? "").slice(0, 1500),
+            summaryExcerpt: (debateState.runningSummary ?? "").slice(0, 4000),
+            researchFindingsExcerpt: (debateState.researchFindings ?? "").slice(0, 4000),
             durationMs: Date.now() - researchPhaseStartMs,
           });
         }
@@ -726,6 +732,21 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         stateMap.sections.set("Resume Digest", "Stage: Scoping - Synthesizing product roadmap");
         await writeArtifact(runDir, "state.md", stateMap);
 
+        // Visible progress indicator — without this the TUI sits silent for
+        // 30-60s while ctx.llm.generate runs the synthesis call. Users read
+        // that as "đơ". The status chunk renders in CouncilStatusList; the
+        // tick interval keeps a heartbeat going until the call returns.
+        yield {
+          type: "council_status",
+          councilStatus: {
+            statusId: `scoping-${ctx.runId}`,
+            state: "start",
+            phase: "synthesis",
+            label: "Synthesizing product spec",
+            detail: "Drafting roadmap from clarified spec + debate summary…",
+          },
+        } as StreamChunk;
+
         // Synthesize ProductSpec
         const synthesisPrompt = `Synthesize a ProductSpec JSON based on the following:
 Idea: ${ctx.idea}
@@ -756,7 +777,28 @@ interface ProductSpec {
             "You are a Product Owner synthesizing a technical specification.",
             synthesisPrompt,
           );
+          yield {
+            type: "council_status",
+            councilStatus: {
+              statusId: `scoping-${ctx.runId}`,
+              state: "done",
+              phase: "synthesis",
+              label: "Spec synthesized",
+              elapsedMs: Date.now() - scopingPhaseStartMs,
+            },
+          } as StreamChunk;
         } catch (err) {
+          yield {
+            type: "council_status",
+            councilStatus: {
+              statusId: `scoping-${ctx.runId}`,
+              state: "error",
+              phase: "synthesis",
+              label: "Spec synthesis failed",
+              elapsedMs: Date.now() - scopingPhaseStartMs,
+              errorMessage: err instanceof Error ? err.message : String(err),
+            },
+          } as StreamChunk;
           logLoopEvent(ctx, "council_error", {
             phase: "scoping",
             stage: "synthesis-llm",

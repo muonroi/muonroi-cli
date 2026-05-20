@@ -100,15 +100,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
   const cwd = ctx.cwd ?? runDir;
 
-  // ── Step 1: Cost projection (CB-1) BEFORE incurring sprint cost ───────────
-  const spentUsd = history.reduce((s, h) => s + (h.actualCost ?? h.costUsd ?? 0), 0);
-  const cb1History = history.map((h) => ({ actualCost: h.actualCost ?? h.costUsd ?? 0 }));
-  const cb1 = CB1_costProjection(cb1History, ctx.flags.maxCost, spentUsd, productSpec.costEstimate);
-  if (cb1.halt) {
-    throw new Error(
-      `Halted by circuit breaker: cost projection ${cb1.projection.toFixed(4)} exceeds headroom ${cb1.headroom.toFixed(4)}`,
-    );
-  }
+  // ── Step 1: Cost projection (CB-1) DISABLED ───────────────────────────────
+  // Provider pricing is missing for several models (e.g. siliconflow/deepseek),
+  // so the EWMA projection becomes meaningless and halts sprints with bogus
+  // numbers like "projection $13200 exceeds headroom $50" when the real cap is
+  // $50 and nothing has actually been spent. Re-enable once per-provider price
+  // discovery + reliable usage→cost normalisation lands. The CB1_costProjection
+  // function and its unit tests are kept intact for that future re-wire.
+  void CB1_costProjection;
 
   // ── Step 2: Detect verify recipe BEFORE the planner spends any token ──────
   // CB-3 fires deterministically on sprint 1 if recipe is null or coverage === 0.
