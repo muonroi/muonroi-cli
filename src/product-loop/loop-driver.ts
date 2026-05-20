@@ -3,10 +3,10 @@ import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
-import type { ClarifiedSpec, CouncilParticipant, DebateState } from "../council/types.js";
+import type { ClarifiedSpec, CouncilCallUsage, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { logInteraction } from "../storage/index.js";
+import { logInteraction, recordUsageEvent } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
@@ -20,6 +20,45 @@ import { additionalPrefills, auditAsContextBlock, auditRepo, type RepoAudit } fr
 import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
+
+/**
+ * Wraps a CouncilLLM so every debate/research/generate call records a
+ * usage_events row with source="council". debate.ts callers don't pass an
+ * onUsage callback today, so the only place we can intercept is here, by
+ * injecting our recorder into each method invocation before forwarding.
+ * The original onUsage (if any) is still called.
+ */
+function wrapLLMForUsageTracking(llm: CouncilLLM, ctx: DriverContext): CouncilLLM {
+  const sid = ctx.sessionId ?? ctx.runId;
+  const recorder = (modelId: string) => (usage: CouncilCallUsage) => {
+    try {
+      recordUsageEvent(sid, "council", modelId, {
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+        cacheReadTokens: usage.cachedInputTokens,
+      });
+    } catch {
+      /* best-effort — never block the debate */
+    }
+  };
+  return {
+    generate: (modelId, system, prompt, maxTokens, onUsage) =>
+      llm.generate(modelId, system, prompt, maxTokens, (u) => {
+        recorder(modelId)(u);
+        onUsage?.(u);
+      }),
+    debate: (modelId, system, prompt, signal, persistTrace, options, onUsage) =>
+      llm.debate(modelId, system, prompt, signal, persistTrace, options, (u) => {
+        recorder(modelId)(u);
+        onUsage?.(u);
+      }),
+    research: (modelId, topic, conversationContext, signal, persistTrace, options, onUsage) =>
+      llm.research(modelId, topic, conversationContext, signal, persistTrace, options, (u) => {
+        recorder(modelId)(u);
+        onUsage?.(u);
+      }),
+  };
+}
 
 /**
  * Best-effort interaction_logs writer for the loop-driver. Swallows failures
@@ -516,7 +555,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             leaderModelId,
             participants,
           },
-          ctx.llm,
+          wrapLLMForUsageTracking(ctx.llm, ctx),
         );
 
         // Suppress raw debate content so the user is not confused by inter-role
@@ -533,6 +572,28 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             }
             const chunk = value as StreamChunk;
             if (chunk.type === "content") continue;
+            // Persist debate speaker turns to interaction_logs so forensics
+            // can replay the debate text without relying on TUI scrollback
+            // (which currently holds the only copy — messages/usage_events
+            // tables stay empty for the debate path).
+            if (chunk.type === "council_message" && chunk.councilMessage) {
+              const cm = chunk.councilMessage;
+              logLoopEvent(ctx, "council_message", {
+                phase: "research",
+                kind: cm.kind,
+                speakerRole: cm.speaker.role,
+                speakerModel: cm.speaker.model,
+                partnerRole: cm.partner?.role ?? null,
+                round: cm.round ?? null,
+                attempts: cm.attempts ?? 1,
+                failureReason: cm.failureReason ?? null,
+                toolCalls: cm.toolCalls?.map((tc) => tc.name) ?? [],
+                // Cap at 4000 chars so a single row stays well under SQLite
+                // text limits even for the most verbose speaker turn.
+                textExcerpt: cm.text.slice(0, 4000),
+                textLength: cm.text.length,
+              });
+            }
             yield chunk;
           }
         } catch (err) {

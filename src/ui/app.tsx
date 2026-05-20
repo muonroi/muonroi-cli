@@ -6498,10 +6498,15 @@ function formatTokenCount(tokens: number): string {
 }
 
 function ContextMeter({ t, stats }: { t: Theme; stats: ContextStats }) {
+  // Show USED, not remaining — "93% 119K" is universally read as "used", and
+  // showing remaining caused users to mistake low usage for impending overflow.
+  // Color thresholds match common context-window UX (yellow ≥70%, red ≥90%).
+  const pct = Math.round(stats.ratioUsed * 100);
+  const color = stats.ratioUsed >= 0.9 ? "red" : stats.ratioUsed >= 0.7 ? "yellow" : t.textMuted;
   return (
     <text>
-      <span style={{ fg: t.textMuted }}>{`${Math.round(stats.ratioRemaining * 100)}%`}</span>
-      <span style={{ fg: t.textDim }}>{` ${formatTokenCount(stats.remainingTokens)}`}</span>
+      <span style={{ fg: color }}>{`${pct}%`}</span>
+      <span style={{ fg: t.textDim }}>{` ${formatTokenCount(stats.usedTokens)}`}</span>
     </text>
   );
 }
