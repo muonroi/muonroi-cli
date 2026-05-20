@@ -1,0 +1,2032 @@
+// MessageProcessor — extracted from orchestrator.ts as part of Phase 12.4.
+//
+// Owns the main streaming turn loop that lives in `Agent.processMessage`:
+//   - Abort wiring (external AbortContext + per-turn AbortController)
+//   - Trajectory + phase tracker observations on user_turn / abort
+//   - PIL enrichment pipeline (layers 1/3/6 — fail-open with logging)
+//   - ROUTE-11 per-turn model routing (decide + fallback to non-disabled
+//     provider via CouncilManager)
+//   - Vision proxy (history + current turn)
+//   - Auto-council gate (PIL taskType + heavy tier + role count) — routes
+//     into runCouncilV2 and re-enters processMessage with synthesis
+//   - System prompt assembly (chitchat / playwright gating + PIL suffix +
+//     model constraints)
+//   - SAMR step-aware routing (phase1 reasoning → phase2 execution)
+//   - Tool roundtrip loop:
+//       - Compaction (relax on overflow recovery, B4 top-level prepareStep)
+//       - Tool set assembly: builtin + MCP (smart filter for chitchat /
+//         browser-vocab) + PIL response tools, all wrapped with top-level
+//         cumulative cap (F1), cross-turn dedup (C3), read-path budget
+//       - ProviderOptions composition (buildTurnProviderOptions +
+//         taskTypeToReasoningEffort budget + thinkingType adaptive override
+//         + O1 shape capture)
+//       - streamText({...}) with prepareStep (top-level compactor +
+//         capability sanitizeHistory), onStepStart/Finish, onFinish
+//         (correlation cleanup)
+//       - fullStream consumer (text-delta / reasoning-delta / tool-call
+//         with EE PreToolUse intercept / tool-result with EE PostToolUse
+//         and vision-bridge / tool-error / tool-approval-request /
+//         error / abort)
+//   - Write-ahead persistence (Phase A4 tool_calls, A5 message_seq)
+//   - Context-overflow recovery + transient retry with exponential backoff
+//   - Post-turn compact + Stop / StopFailure hooks
+//   - Debug pipeline trace
+//
+// Zero behavioral changes — every method body mirrors the original
+// `processMessage` (see commit history). The DI surface (`MessageProcessorDeps`)
+// is the minimum proxy onto Agent state needed to reach back into Agent
+// without holding a circular reference. Public `Agent.processMessage`
+// signature is unchanged and continues to be the entrypoint; internally it
+// constructs a `MessageProcessor` per call.
+//
+// Cost-leak code paths preserved here:
+//   - F1 (top-level cumulative cap)         — wrapToolSetWithCap (top-level)
+//   - F1 (openai.promptCacheKey)            — buildTurnProviderOptions
+//   - G1 (OAuth `maxOutputTokens` drop)     — shouldDropParam(runtime, ...)
+//   - B4 (top-level prepareStep compaction) — compactSubAgentMessages
+//   - C3 (cross-turn dedup wrap)            — wrapToolSetWithDedup
+//   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
+//   - A5 (message_seq write-ahead)          — persistMessageWriteAhead
+//   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
+//   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
+
+import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
+import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { getMistakeDetector } from "../ee/mistake-detector.js";
+import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
+import * as phaseTracker from "../ee/phase-tracker.js";
+import { buildScope as buildScopeForVeto } from "../ee/scope.js";
+import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
+import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import type {
+  PostToolUseFailureHookInput,
+  PostToolUseHookInput,
+  PreToolUseHookInput,
+  SessionStartHookInput,
+  StopFailureHookInput,
+  StopHookInput,
+  UserPromptSubmitHookInput,
+} from "../hooks/types";
+import { buildMcpToolSet } from "../mcp/runtime";
+import { getModelInfo } from "../models/registry.js";
+import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
+import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import { loadKeyForProvider } from "../providers/keychain.js";
+import {
+  bridgeMcpToolResult,
+  getVisionGuidanceForTextOnly,
+  scrubImagePayloadsInMessages,
+} from "../providers/mcp-vision-bridge.js";
+import { captureToolSchemas } from "../providers/patch-zod-schema.js";
+import {
+  buildTurnProviderOptions,
+  detectProviderForModel,
+  type ResolvedModelRuntime,
+  resolveModelRuntime,
+  shouldDropParam,
+} from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
+import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
+import { wireDebug } from "../providers/wire-debug.js";
+import { reportRouteOutcome } from "../router/decide.js";
+import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
+import { routerStore } from "../router/store.js";
+import {
+  getNextMessageSequence,
+  logInteraction,
+  markMessageErrored,
+  markToolCallErrored,
+  persistMessageWriteAhead,
+  persistToolCallWriteAhead,
+  type SessionStore,
+} from "../storage/index";
+import type { BashTool } from "../tools/bash";
+import { createBuiltinTools } from "../tools/registry.js";
+import type {
+  AgentMode,
+  SessionInfo,
+  StreamChunk,
+  SubagentStatus,
+  TaskRequest,
+  ToolCall,
+  ToolResult,
+  UsageSource,
+} from "../types/index";
+import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
+import { statusBarStore } from "../ui/status-bar/store.js";
+import { appendDecisionLog } from "../usage/decision-log.js";
+import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
+import {
+  getAutoCouncilConfidence,
+  getAutoCouncilMinRoles,
+  getRoleModels,
+  getTopLevelCompactKeepLast,
+  getTopLevelCompactThresholdChars,
+  getTopLevelToolBudgetChars,
+  isAutoCouncilEnabled,
+  isProviderDisabled,
+  loadMcpServers,
+  loadValidSubAgents,
+} from "../utils/settings";
+import type { AbortContext } from "./abort.js";
+import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
+import type { CompactionSettings } from "./compaction";
+import { relaxCompactionSettings } from "./compaction";
+import type { CouncilManager } from "./council-manager.js";
+import type { CrossTurnDedup } from "./cross-turn-dedup.js";
+import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
+import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
+import { lastPersistedSeq } from "./message-seq.js";
+import type { PendingCallsLog } from "./pending-calls.js";
+import { stableCallId } from "./pending-calls.js";
+import { applyModelConstraints, buildSystemPromptParts } from "./prompts";
+import { extractProviderOptionsShape } from "./provider-options-shape.js";
+import type { ReadPathBudget } from "./read-path-budget.js";
+import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
+import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { classifyStreamError } from "./retry-classifier.js";
+import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { compactSubAgentMessages } from "./subagent-compactor.js";
+import {
+  combineAbortSignals,
+  getFinishReason,
+  getStepNumber,
+  getUsage,
+  notifyObserver,
+  toToolCall,
+  toToolResult,
+} from "./tool-utils";
+
+/**
+ * Dependency surface the MessageProcessor needs to reach back into Agent
+ * state without holding a circular reference. Properties expose array
+ * references (mutating push() must affect the same array the Agent reads on
+ * subsequent turns). Method callbacks delegate to Agent private methods.
+ */
+export interface MessageProcessorDeps {
+  // ---- Read/write state references --------------------------------------
+  /** Live messages array (mutated by push). */
+  readonly messages: ModelMessage[];
+  /** Live messageSeqs array (mutated by push; parallel to messages). */
+  readonly messageSeqs: Array<number | null>;
+  /** Session bookkeeping. */
+  readonly session: SessionInfo | null;
+  readonly sessionStore: SessionStore | null;
+  readonly bash: BashTool;
+  readonly mode: AgentMode;
+  readonly modelId: string;
+  readonly providerId: ProviderId;
+  readonly maxToolRounds: number;
+  readonly batchApi: boolean;
+  readonly permissionMode: PermissionMode;
+  readonly schedules: import("../tools/schedule").ScheduleManager;
+  readonly sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null;
+  readonly externalAbortContext: AbortContext | null;
+  readonly pendingCalls: PendingCallsLog | null;
+  readonly councilManager: CouncilManager;
+  readonly crossTurnDedup: CrossTurnDedup | null;
+  readonly readBudget: ReadPathBudget | null;
+  readonly priorWarningIdsInSession: Set<string>;
+  readonly sessionEEGuidance: Map<string, { toolName: string; message: string; why: string; confidence: number }>;
+  readonly flowReady: Promise<void> | null;
+
+  // ---- Scalar getters / setters -----------------------------------------
+  getAbortController(): AbortController | null;
+  setAbortController(ctrl: AbortController | null): void;
+  getSessionStartHookFired(): boolean;
+  setSessionStartHookFired(v: boolean): void;
+  getPlanContext(): string | null;
+  setPlanContext(v: string | null): void;
+  getResumeDigest(): string | null;
+  setResumeDigest(v: string | null): void;
+  getActiveRunId(): string | null;
+  getPendingCwdNote(): string | null;
+  setPendingCwdNote(v: string | null): void;
+  setPilActive(v: boolean): void;
+  setPilEnrichmentDelta(n: number): void;
+  setCurrentCallId(id: string): void;
+  setLastProviderOptionsShape(shape: string | null): void;
+  setLastPromptBreakdown(
+    b: {
+      systemChars: number;
+      staticPrefixChars: number;
+      dynamicSuffixChars: number;
+      playwrightGuidanceChars: number;
+      messagesChars: number;
+      messagesCount: number;
+      toolsChars: number;
+      toolsCount: number;
+    } | null,
+  ): void;
+  setCompactedThisTurn(v: boolean): void;
+  setTurnUserGoalExcerpt(v: string): void;
+  setTurnAssistantReasoning(v: string): void;
+  appendTurnAssistantReasoning(delta: string): void;
+  getTurnAssistantReasoning(): string;
+  getCompactedThisTurn(): boolean;
+  setPriorWarningIdsInSession(s: Set<string>): void;
+  setMessages(messages: ModelMessage[]): void;
+
+  // ---- Behavior delegators ----------------------------------------------
+  requireProvider(): LegacyProvider;
+  emitSubagentStatus(status: SubagentStatus | null): void;
+  fireHook(
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<{
+    blocked: boolean;
+    blockingErrors: Array<{ command: string; stderr: string }>;
+    preventContinuation: boolean;
+    additionalContexts: string[];
+    results: import("../hooks/types.js").HookResult[];
+    eeMatches: import("../hooks/types.js").EEMatchEntry[];
+  }>;
+  consumeBackgroundNotifications(): Promise<string[]>;
+  initOAuthProvider(): Promise<void>;
+  buildRecentTurnsSummary(): string | null;
+  estimateProjectSize(): "small" | "medium" | "large" | null;
+  countFilesTouched(): number;
+  getCompactionSettings(contextWindow?: number): CompactionSettings;
+  compactForContext(
+    provider: LegacyProvider,
+    system: string,
+    contextWindow: number,
+    signal: AbortSignal,
+    settings?: CompactionSettings,
+    overflow?: boolean,
+  ): Promise<boolean>;
+  postTurnCompact(provider: LegacyProvider, system: string, contextWindow: number, signal: AbortSignal): Promise<void>;
+  runTask(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
+  runDelegation(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
+  readDelegation(id: string): Promise<ToolResult>;
+  listDelegations(): Promise<ToolResult>;
+  appendCompletedTurn(userMessage: ModelMessage, assistantMessages: ModelMessage[]): void;
+  discardAbortedTurn(userMessage: ModelMessage): void;
+  recordUsage(
+    usage:
+      | {
+          totalTokens?: number;
+          inputTokens?: number;
+          outputTokens?: number;
+          cacheReadTokens?: number;
+          cacheCreationTokens?: number;
+        }
+      | undefined,
+    source?: UsageSource,
+    model?: string,
+  ): void;
+  respondToToolApproval(approvalId: string, approved: boolean): void;
+  runCouncilV2(
+    userMessage: string,
+    opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
+  ): AsyncGenerator<StreamChunk, void, unknown>;
+  processMessage(
+    userMessage: string,
+    observer?: ProcessMessageObserver,
+    images?: Array<{ path: string; mediaType: string; base64: string }>,
+  ): AsyncGenerator<StreamChunk, void, unknown>;
+  processMessageBatchTurn(args: {
+    userModelMessage: ModelMessage;
+    observer?: ProcessMessageObserver;
+    provider: LegacyProvider;
+    subagents: ReturnType<typeof loadValidSubAgents>;
+    system: string;
+    runtime: ResolvedModelRuntime;
+    modelInfo: ResolvedModelRuntime["modelInfo"];
+    signal: AbortSignal;
+  }): AsyncGenerator<StreamChunk, void, unknown>;
+}
+
+/**
+ * MessageProcessor — extracted streaming turn loop.
+ *
+ * Lifecycle:
+ *   const processor = new MessageProcessor(deps);
+ *   yield* processor.run(userMessage, observer, images);
+ *
+ * Constructed per call (heap allocation is negligible against the streamText
+ * cost), matching the StreamRunner / CouncilManager pattern.
+ */
+export class MessageProcessor {
+  constructor(private deps: MessageProcessorDeps) {}
+
+  async *run(
+    userMessage: string,
+    observer?: ProcessMessageObserver,
+    images?: Array<{ path: string; mediaType: string; base64: string }>,
+  ): AsyncGenerator<StreamChunk, void, unknown> {
+    const deps = this.deps;
+    // TUI-04: prefer the external AbortContext (from SIGINT handler) so that
+    // Ctrl+C mid-tool-call triggers a single, unified abort across all I/O.
+    // If no external context, fall back to creating a local AbortController.
+    if (deps.externalAbortContext) {
+      // Wrap the external signal in a local controller so existing cleanup
+      // paths (setAbortController(null)) still work without side-effects.
+      const ctrl = new AbortController();
+      deps.setAbortController(ctrl);
+      // Forward external abort to the local controller.
+      deps.externalAbortContext.signal.addEventListener(
+        "abort",
+        () => {
+          deps.getAbortController()?.abort(deps.externalAbortContext?.reason());
+        },
+        { once: true },
+      );
+    } else {
+      deps.setAbortController(new AbortController());
+    }
+    const signal = deps.getAbortController()!.signal;
+    deps.emitSubagentStatus(null);
+
+    // Phase C3: advance the cross-turn dedup turn counter so stubs can point
+    // back to the correct prior turn.
+    deps.crossTurnDedup?.beginTurn();
+
+    // P0 native observation: turn boundary. Capture the prior batch via
+    // resetBatch — file-revert detection (in the hook layer) reads it on
+    // the first edit of the new turn. No language-based veto matching.
+    try {
+      getMistakeDetector().resetBatch();
+      if (deps.session?.id) {
+        fireTrajectoryEvent({
+          ts: new Date().toISOString(),
+          sessionId: deps.session.id,
+          kind: "user_turn",
+          excerpt: userMessage.slice(0, 200),
+          vetoDetected: false,
+        });
+      }
+    } catch {
+      /* fail-open: detector state must never block the turn */
+    }
+
+    // P0 native observation: AbortSignal → fire user-veto for any in-flight
+    // batch tools that had warnings. Listener attaches here and self-removes
+    // after fire so it can't double-fire on later aborts in the same turn.
+    {
+      const aborter = () => {
+        try {
+          // P1 Item 3 wiring: mark current phase aborted so the next setPhase
+          // call drains an "abandoned" outcome.
+          phaseTracker.markAborted(
+            deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
+          );
+        } catch {
+          /* fail-open */
+        }
+        try {
+          const det = getMistakeDetector();
+          const events = det.detectAbort(
+            deps.getAbortController()?.signal.reason ? String(deps.getAbortController()!.signal.reason) : undefined,
+          );
+          if (events.length === 0) return;
+          const cwd = deps.bash.getCwd();
+          const tenantId = getTenantIdForVeto();
+          void buildScopeForVeto({ cwd })
+            .then(async (scope) => {
+              const { getDefaultEEClient } = await import("../ee/intercept.js");
+              for (const ev of events) {
+                void getDefaultEEClient()
+                  .posttool({
+                    toolName: ev.toolName,
+                    toolInput: ev.toolInput,
+                    outcome: { success: false, mistakeKind: ev.kind, evidence: ev.evidence },
+                    cwd,
+                    tenantId,
+                    scope,
+                  })
+                  .catch(() => {
+                    /* fire-and-forget */
+                  });
+              }
+            })
+            .catch(() => {
+              /* fire-and-forget */
+            });
+        } catch {
+          /* fail-open */
+        }
+      };
+      signal.addEventListener("abort", aborter, { once: true });
+    }
+
+    // P0 native observation: cache turn-level intent fields for PreToolUse.
+    deps.setTurnUserGoalExcerpt(userMessage.slice(0, 200));
+    deps.setTurnAssistantReasoning("");
+
+    // Ensure flow run is ready before processing (fail-open).
+    await deps.flowReady?.catch(() => {});
+
+    // Upgrade to OAuth-backed provider on first turn if tokens are available.
+    await deps.initOAuthProvider().catch(() => {});
+
+    if (!deps.getSessionStartHookFired()) {
+      deps.setSessionStartHookFired(true);
+      const isResume = deps.messages.length > 0;
+      const sessionStartInput: SessionStartHookInput = {
+        hook_event_name: "SessionStart",
+        source: isResume ? "resume" : "startup",
+        session_id: deps.session?.id,
+        cwd: deps.bash.getCwd(),
+      };
+      await deps.fireHook(sessionStartInput, signal).catch(() => {});
+    }
+
+    const promptInput: UserPromptSubmitHookInput = {
+      hook_event_name: "UserPromptSubmit",
+      user_prompt: userMessage,
+      session_id: deps.session?.id,
+      cwd: deps.bash.getCwd(),
+    };
+    await deps.fireHook(promptInput, signal).catch(() => {});
+
+    await deps.consumeBackgroundNotifications();
+
+    const _debugOn = isDebugEnabled();
+    const _debugSteps: PipelineStep[] = [];
+    const _debugTurnId = deps.messages.filter((m) => m.role === "user").length + 1;
+
+    // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
+    // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
+    const _pilStart = Date.now();
+    const pilCtx = await runPipeline(userMessage, {
+      resumeDigest: deps.getResumeDigest(),
+      activeRunId: deps.getActiveRunId(),
+      sessionId: deps.session?.id ?? null,
+    }).catch((err) => ({
+      raw: userMessage,
+      enriched: userMessage,
+      taskType: null,
+      domain: null,
+      confidence: 0,
+      outputStyle: null,
+      tokenBudget: 500,
+      metrics: null,
+      layers: [],
+      gsdPhase: null,
+      activeRunId: null,
+      intentKind: null as "task" | "chitchat" | null,
+      fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
+    }));
+    // Cheap signal forwarded from PIL Layer 1 — true when input is greeting /
+    // small-talk (≤10 chars + ≤2 words OR brain-classified "none"). Used to
+    // skip the MCP tool catalog, which dominates input tokens (~20K) and is
+    // useless for "hi" / "ok" / "thanks".
+    const isChitchat = pilCtx.intentKind === "chitchat";
+    const enrichedMessage = pilCtx.enriched;
+    deps.setPilActive(pilCtx.taskType !== null);
+    deps.setPilEnrichmentDelta(
+      pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4),
+    );
+    const _pilEnrichmentDeltaSnapshot =
+      pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
+
+    // P1 Item 3 wiring: phase-boundary detection. setPhase returns a snapshot
+    // of the prior phase iff the phase NAME just changed. We classify the
+    // outcome (pass/fail/abandoned/null) and fire phase-outcome to the EE
+    // server when there is a high-SNR verdict. Endpoint is feature-flagged
+    // server-side; 404 is silently swallowed by the client wrapper.
+    try {
+      const drained = phaseTracker.setPhase(pilCtx.gsdPhase ?? null);
+      if (drained && drained.principleRefs.length > 0 && deps.session?.id) {
+        const outcome = phaseTracker.classifyOutcome(drained);
+        if (outcome) {
+          fireAndForgetPhaseOutcome(
+            {
+              sessionId: deps.session.id,
+              phaseName: drained.phaseName,
+              outcome,
+              toolEventIds: drained.principleRefs,
+              evidence: {
+                durationMs: drained.endedAt - drained.startedAt,
+                toolCount: drained.toolCount,
+                cwd: deps.bash.getCwd(),
+                ...(drained.verifyResult ? { verifyResult: drained.verifyResult } : {}),
+                ...(drained.aborted ? { aborted: true } : {}),
+                ...(drained.abortReason ? { abortReason: drained.abortReason } : {}),
+              },
+            },
+            {
+              ...(getCachedServerBaseUrl() ? { baseUrl: getCachedServerBaseUrl()! } : {}),
+              ...(getCachedAuthToken() ? { authToken: getCachedAuthToken()! } : {}),
+            },
+          );
+        }
+      }
+    } catch {
+      /* fail-open: phase-outcome must never block a turn */
+    }
+
+    if (_debugOn) {
+      const appliedLayers = pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [];
+      _debugSteps.push({
+        name: "PIL Pipeline",
+        duration_ms: Date.now() - _pilStart,
+        input_summary: `"${userMessage.slice(0, 60)}${userMessage.length > 60 ? "..." : ""}"`,
+        output_summary: `task=${pilCtx.taskType ?? "none"} domain=${pilCtx.domain ?? "none"} layers=[${appliedLayers.join(",")}]`,
+        tokens_saved: _pilEnrichmentDeltaSnapshot > 0 ? _pilEnrichmentDeltaSnapshot : undefined,
+      });
+    }
+
+    // Interaction log: PIL classification
+    try {
+      if (deps.session) {
+        const pilDurationMs = Date.now() - _pilStart;
+        logInteraction(deps.session.id, "pil", {
+          eventSubtype: pilCtx.taskType ?? "none",
+          durationMs: pilDurationMs,
+          data: {
+            layers: pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [],
+            fullLayers: pilCtx.layers?.map((l) => ({ name: l.name, applied: l.applied, delta: l.delta })) ?? [],
+            layerCount: pilCtx.layers?.length ?? 0,
+            layerTimings: pilCtx.metrics?.layerTimings ?? null,
+            domain: pilCtx.domain,
+            confidence: pilCtx.confidence,
+            outputStyle: pilCtx.outputStyle,
+            intentKind: pilCtx.intentKind ?? null,
+            mcpSkipped: isChitchat,
+            fallbackReason: pilCtx.fallbackReason ?? null,
+            eeMode: (await import("../ee/client-mode.js")).getCachedEEClientMode()?.mode ?? "unknown",
+          },
+        });
+        logInteraction(deps.session.id, "user_message", {
+          data: {
+            raw_length: userMessage.length,
+            enriched_length: enrichedMessage.length,
+            taskType: pilCtx.taskType,
+            intentKind: pilCtx.intentKind ?? null,
+            confidence: pilCtx.confidence,
+            pilActive: pilCtx.taskType !== null,
+          },
+        });
+      }
+    } catch {
+      /* fail-open */
+    }
+
+    // ROUTE-11: Per-turn model routing via decide() — picks cheapest capable model
+    const turnStartMs = Date.now();
+    let turnModelId = deps.modelId;
+    let taskHash: string | null = null;
+    const _routeStart = Date.now();
+    try {
+      const { decide } = await import("../router/decide.js");
+      const routeDecision = await decide(userMessage, {
+        tenantId: "local",
+        cwd: deps.bash.getCwd(),
+        defaultModel: deps.modelId,
+        defaultProvider: deps.providerId,
+        pil: {
+          domain: pilCtx.domain,
+          taskType: pilCtx.taskType,
+          confidence: pilCtx.confidence,
+          gsdPhase: pilCtx.gsdPhase ?? null,
+          activeRunId: pilCtx.activeRunId ?? null,
+          recentTurnsSummary: deps.buildRecentTurnsSummary(),
+          projectSize: deps.estimateProjectSize(),
+          filesTouched: deps.countFilesTouched(),
+          mode: deps.mode,
+        },
+      });
+      if (routeDecision.model && routeDecision.model !== "HALT") {
+        // Respect user's default model when it has a vision proxy and the
+        // current turn (or history) has images — the proxy will convert
+        // images to text, so there's no need to switch to a vision-capable
+        // (and usually pricier / rate-limited) model.
+        const defaultHasVisionProxy = needsVisionProxy(deps.modelId);
+        const historyHasImages = deps.messages.some(
+          (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
+        );
+        const turnHasImages = (images?.length ?? 0) > 0;
+        const skipVisionRoute = defaultHasVisionProxy && (turnHasImages || historyHasImages);
+        if (!skipVisionRoute) {
+          turnModelId = routeDecision.model;
+        }
+      }
+      taskHash = routeDecision.taskHash ?? null;
+      // Update status bar with router switch info. Also reset back to the
+      // session default when the router does NOT switch on this turn —
+      // otherwise the bar stays "stuck" showing the previously-routed model
+      // (e.g. claude-sonnet-4-6) on later turns that actually run on the
+      // user's chosen default (e.g. deepseek-v4-flash).
+      if (turnModelId !== deps.modelId) {
+        statusBarStore.setState({ routed_from: deps.modelId, model: turnModelId });
+      } else {
+        const prev = statusBarStore.getState();
+        if (prev.routed_from || prev.model !== deps.modelId) {
+          statusBarStore.setState({ routed_from: null, model: deps.modelId });
+        }
+      }
+      if (_debugOn) {
+        _debugSteps.push({
+          name: "Router",
+          duration_ms: Date.now() - _routeStart,
+          input_summary: `default=${deps.modelId}`,
+          output_summary: turnModelId !== deps.modelId ? `routed→${turnModelId}` : `kept ${turnModelId}`,
+        });
+      }
+    } catch {
+      // Router unavailable — use session default model (skip if provider is disabled)
+      if (!isProviderDisabled(deps.providerId as ProviderId)) {
+        const eeRoute = await routeModel(userMessage, {}, deps.providerId).catch(() => null);
+        taskHash = eeRoute?.taskHash ?? null;
+      }
+    }
+
+    // Interaction log: model routing
+    try {
+      if (deps.session) {
+        logInteraction(deps.session.id, "routing", {
+          model: turnModelId,
+          data: { defaultModel: deps.modelId, routedModel: turnModelId, taskHash },
+        });
+      }
+    } catch {
+      /* fail-open */
+    }
+
+    // Re-detect provider if router picked a model from a different provider
+    const turnProviderId = detectProviderForModel(turnModelId);
+    let turnProvider: LegacyProvider;
+    if (turnProviderId !== deps.providerId) {
+      // Even if the key is reachable, skip disabled providers
+      const turnKey = !isProviderDisabled(turnProviderId as ProviderId)
+        ? await loadKeyForProvider(turnProviderId).catch(() => null)
+        : null;
+      if (turnKey) {
+        const { createProviderFactory } = await import("../providers/runtime.js");
+        turnProvider = createProviderFactory(turnProviderId, { apiKey: turnKey }).factory;
+      } else {
+        // Router's provider unreachable or disabled — fall back to a non-disabled provider
+        const fallback = await deps.councilManager.resolveNonDisabledFallback();
+        turnModelId = fallback.modelId;
+        turnProvider = deps.requireProvider();
+      }
+    } else if (isProviderDisabled(deps.providerId as ProviderId)) {
+      // Session provider is disabled — find a non-disabled alternative
+      const fallback = await deps.councilManager.resolveNonDisabledFallback();
+      turnModelId = fallback.modelId;
+      turnProvider = deps.requireProvider();
+    } else {
+      turnProvider = deps.requireProvider();
+    }
+
+    // E4: prepend one-shot cwd note when setCwd() changed the working directory
+    // mid-session. Clears after injection so only the first subsequent turn sees it.
+    const cwdNote = deps.getPendingCwdNote();
+    deps.setPendingCwdNote(null);
+    const messageForModel = cwdNote ? `${cwdNote}\n\n${enrichedMessage}` : enrichedMessage;
+
+    let userModelMessage: ModelMessage;
+    if (images?.length) {
+      const parts: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
+        { type: "text", text: messageForModel },
+      ];
+      for (const img of images) {
+        parts.push({ type: "image", image: img.base64, mediaType: img.mediaType });
+      }
+      userModelMessage = { role: "user", content: parts };
+    } else {
+      userModelMessage = { role: "user", content: messageForModel };
+    }
+
+    // Vision proxy: convert images to text for models that don't support vision.
+    // Process BOTH the current user message and any historical messages that
+    // still carry image parts — otherwise sending the conversation back to a
+    // text-only provider (e.g. DeepSeek) fails with "unknown variant
+    // `image_url`" once history contains an image from a prior turn.
+    if (needsVisionProxy(turnModelId)) {
+      const historyHasImages = deps.messages.some(
+        (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
+      );
+      const turnHasImages = (images?.length ?? 0) > 0;
+      if (turnHasImages || historyHasImages) {
+        try {
+          if (historyHasImages) {
+            const historyResult = await proxyVision(deps.messages, turnModelId, signal);
+            if (historyResult.proxied) {
+              deps.setMessages(historyResult.messages);
+              yield {
+                type: "content",
+                content: `[Vision proxy: ${historyResult.imageCount} historical image(s) → text]\n`,
+              };
+            }
+          }
+          if (turnHasImages) {
+            const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
+            if (proxyResult.proxied) {
+              userModelMessage = proxyResult.messages[0];
+              yield {
+                type: "content",
+                content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n`,
+              };
+            }
+          }
+        } catch {
+          yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
+          if (turnHasImages) {
+            userModelMessage = { role: "user", content: enrichedMessage };
+          }
+          // Strip image parts from history as a last-resort fallback so the
+          // request doesn't blow up at the provider serialization layer.
+          deps.setMessages(
+            deps.messages.map((m) => {
+              if (!Array.isArray(m.content)) return m;
+              const filtered = (m.content as Array<{ type: string }>).filter((p) => p.type !== "image");
+              return { ...m, content: filtered } as typeof m;
+            }),
+          );
+        }
+      }
+    }
+
+    deps.messages.push(userModelMessage);
+    // Phase A5 — write-ahead the user row so `recordUsage` mid-stream can
+    // attribute usage to a real `message_seq` instead of falling back to
+    // NULL (or to the previous turn's assistant seq for a session that has
+    // multi-turn history). The post-stream `appendCompletedTurn(...)` path
+    // upserts the same row to `status='completed'` via the
+    // `ON CONFLICT(session_id, seq) DO UPDATE` clause in `appendMessages`.
+    let userWriteAheadSeq: number | null = null;
+    if (deps.session) {
+      try {
+        userWriteAheadSeq = getNextMessageSequence(deps.session.id);
+        persistMessageWriteAhead(deps.session.id, userWriteAheadSeq, "user", JSON.stringify(userModelMessage));
+      } catch {
+        // Fail-open: if seq lookup throws, fall back to the legacy NULL
+        // path. The forensics anomaly returns but the turn proceeds.
+        userWriteAheadSeq = null;
+      }
+    }
+    deps.messageSeqs.push(userWriteAheadSeq);
+
+    // Inject accumulated EE session guidance as a system message so the model
+    // is informed of past warnings before making tool decisions this turn.
+    if (deps.sessionEEGuidance.size > 0) {
+      const lines = Array.from(deps.sessionEEGuidance.entries()).map(([, g]) => {
+        const pct = Math.round(g.confidence * 100);
+        return `- [${g.toolName}] ${g.message} (Why: ${g.why}) [${pct}%]`;
+      });
+      deps.messages.push({
+        role: "system",
+        content: `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`,
+      });
+      deps.messageSeqs.push(null);
+    }
+
+    const provider = turnProvider;
+    const subagents = loadValidSubAgents();
+    const _pilResponseTools = getResponseToolSet(pilCtx, deps.providerId);
+    const _hasResponseTools = Object.keys(_pilResponseTools).length > 0;
+    const systemParts = buildSystemPromptParts(
+      deps.bash.getCwd(),
+      deps.mode,
+      deps.bash.getSandboxMode(),
+      deps.getPlanContext(),
+      subagents,
+      deps.bash.getSandboxSettings(),
+      deps.providerId,
+      deps.getResumeDigest(),
+      { chitchat: isChitchat },
+    );
+    if (deps.getResumeDigest()) deps.setResumeDigest(null);
+    // Skip vision/playwright guidance unless the user's message has a URL
+    // or browser/screenshot vocabulary. ~400 tokens of routing hints
+    // the model only needs when it might call a browser MCP.
+    const _browserGuidanceNeeded =
+      /https?:\/\/\S+|\b(screenshot|browser|playwright|chrome|figma|canva|render|webpage|website|url|hyperlink|navigate|click|scrape)\b/i.test(
+        userMessage,
+      );
+    const playwrightGuidance = isChitchat || !_browserGuidanceNeeded ? "" : getVisionGuidanceForTextOnly(turnModelId);
+    const system = applyModelConstraints(
+      applyPilSuffix(
+        `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
+        pilCtx,
+        _hasResponseTools,
+      ),
+      turnModelId,
+    );
+    let runtime = resolveModelRuntime(provider, turnModelId);
+    let modelInfo = runtime.modelInfo;
+
+    // SAMR: Step-Aware Model Routing — downgrade to fast model for tool-execution
+    // steps after the initial reasoning step. The premium model decides WHAT to do;
+    // a cheaper model handles the mechanical "read results, call more tools" loop.
+    const stepRouterCfg = getStepRouterConfig();
+    const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg);
+    let stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
+    const phase2Runtime = stepRouterDecision.phase2ModelId
+      ? resolveModelRuntime(provider, stepRouterDecision.phase2ModelId)
+      : null;
+    if (stepRouterDecision.phase2ModelId && _debugOn) {
+      _debugSteps.push({
+        name: "StepRouter",
+        duration_ms: 0,
+        input_summary: `phase1=${turnModelId}`,
+        output_summary: stepRouterDecision.reason,
+      });
+    }
+
+    deps.setPlanContext(null);
+    let attemptedOverflowRecovery = false;
+    // Stream-retry state: track how many transient retries have been attempted
+    // for the current turn. Reset to 0 on each new user turn (we're in processMessage).
+    let streamRetryCount = 0;
+    const MAX_STREAM_RETRIES = 2; // 3 total attempts = 1 first try + 2 retries
+
+    // Auto-council: route to multi-model debate when EITHER
+    //   (a) PIL classified taskType=plan|analyze with high confidence, OR
+    //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
+    // After the debate finishes, runCouncilV2 records synthesis on
+    // councilManager.lastSynthesis; we then re-enter processMessage with the synthesis
+    // as the next user turn so the main loop continues with full debate context.
+    // Skip if this is already a council continuation turn (prevent infinite recursion).
+    const autoCouncilTypes = new Set(["plan", "analyze"]);
+    const councilRoles = getRoleModels();
+    const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
+    const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
+    const autoCouncilConfidence = getAutoCouncilConfidence();
+    const autoCouncilMinRoles = getAutoCouncilMinRoles();
+    const taskTypeMatch =
+      pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= autoCouncilConfidence;
+    const shouldAutoCouncil =
+      !deps.councilManager.isContinuation &&
+      isAutoCouncilEnabled() &&
+      configuredRoleCount >= autoCouncilMinRoles &&
+      (taskTypeMatch || heavyTier);
+
+    // Always log the auto-council decision (taken or skipped) with the gate
+    // values that decided it. Lets reports answer "why did this turn cost
+    // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
+    const autoCouncilSkipReason = (() => {
+      if (deps.councilManager.isContinuation) return "continuation-turn";
+      if (!isAutoCouncilEnabled()) return "feature-disabled";
+      if (configuredRoleCount < autoCouncilMinRoles)
+        return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
+      if (!taskTypeMatch && !heavyTier) {
+        if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
+          return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
+        if (pilCtx.confidence < autoCouncilConfidence)
+          return `confidence<${autoCouncilConfidence} (got ${pilCtx.confidence.toFixed(2)})`;
+        return "no-trigger";
+      }
+      return "taken";
+    })();
+    appendDecisionLog({
+      ts: Date.now(),
+      sessionId: deps.session?.id ?? null,
+      kind: "auto-council",
+      taken: shouldAutoCouncil,
+      reason: autoCouncilSkipReason,
+      meta: {
+        taskType: pilCtx.taskType ?? null,
+        confidence: pilCtx.confidence,
+        complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
+        configuredRoleCount,
+        autoCouncilConfidence,
+        autoCouncilMinRoles,
+        heavyTier,
+        isContinuation: deps.councilManager.isContinuation,
+      },
+    }).catch(() => undefined);
+
+    if (shouldAutoCouncil) {
+      const reason = heavyTier
+        ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
+        : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
+      yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
+      yield* deps.runCouncilV2(userMessage, { skipClarification: true, observer, userModelMessage });
+      const synthesis = deps.councilManager.lastSynthesis;
+      deps.councilManager.setLastSynthesis(null);
+      if (synthesis) {
+        yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
+        deps.councilManager.setContinuation(true);
+        try {
+          yield* deps.processMessage(
+            `Council debate completed. Synthesis:\n\n${synthesis}\n\nProceed with the recommended action items.`,
+            observer,
+          );
+        } finally {
+          deps.councilManager.setContinuation(false);
+        }
+      }
+      return;
+    }
+
+    if (deps.batchApi) {
+      try {
+        yield* deps.processMessageBatchTurn({
+          userModelMessage,
+          observer,
+          provider,
+          subagents,
+          system,
+          runtime,
+          modelInfo,
+          signal,
+        });
+      } finally {
+        if (deps.getAbortController()?.signal === signal) {
+          deps.setAbortController(null);
+        }
+      }
+      return;
+    }
+
+    try {
+      while (true) {
+        // SAMR Phase 2: switch to fast model for tool-execution steps
+        if (stepRouterPhase === "phase2" && phase2Runtime) {
+          runtime = phase2Runtime;
+          modelInfo = runtime.modelInfo;
+        }
+
+        deps.setCompactedThisTurn(false);
+        let assistantText = "";
+        let reasoningPreview = "";
+        let encryptedReasoningHidden = false;
+        let streamOk = false;
+        let closeMcp: (() => Promise<void>) | undefined;
+        let stepNumber = -1;
+        const activeToolCalls: ToolCall[] = [];
+        // SAMR: track whether Phase 1 produced tool calls
+        let phase1HadToolCalls = false;
+
+        try {
+          const settings = attemptedOverflowRecovery
+            ? relaxCompactionSettings(deps.getCompactionSettings(modelInfo?.contextWindow))
+            : deps.getCompactionSettings(modelInfo?.contextWindow);
+          if (modelInfo?.contextWindow) {
+            await deps.compactForContext(
+              provider,
+              system,
+              modelInfo.contextWindow,
+              signal,
+              settings,
+              attemptedOverflowRecovery,
+            );
+          }
+
+          const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
+            runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
+            runDelegation: (request, abortSignal) =>
+              deps.runDelegation(request, combineAbortSignals(signal, abortSignal)),
+            readDelegation: (id) => deps.readDelegation(id),
+            listDelegations: () => deps.listDelegations(),
+            modelId: turnModelId,
+          });
+          // Top-level cumulative cap state. We accumulate the raw tool set
+          // (base + MCP + PIL response tools) across the assembly below,
+          // then apply the cap once. Tier ratios are looser than the
+          // sub-agent cap (50%/80%) so casual single-tool turns are not
+          // trimmed. See sub-agent-cap.ts.
+          // Chitchat: drop builtin tools too (not just MCP). A 1-word greeting
+          // never needs bash/read_file/edit_file/grep — those schemas alone
+          // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
+          // every non-chitchat turn (PIL gates conservatively).
+          const turnCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+          let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
+            ? {}
+            : isChitchat
+              ? {}
+              : baseToolsRaw;
+          // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
+          // worth of tool schemas (~20K input tokens). PIL Layer 1 already
+          // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
+          if (deps.mode === "agent" && !isChitchat && turnCaps.supportsClientTools(runtime.modelInfo)) {
+            // Smart MCP filter: skip browser/vision MCP servers unless the
+            // user's current message has a URL or explicitly invokes the
+            // browser/screenshot/design vocabulary. Local code work — which
+            // is the majority of turns — does not need Playwright/Figma/Canva
+            // tool schemas (each MCP contributes 8-15 tools at ~150 tok each).
+            // Override with MUONROI_DISABLE_SMART_MCP=1.
+            const smartMcp = process.env.MUONROI_DISABLE_SMART_MCP !== "1";
+            const browserSignal =
+              /https?:\/\/\S+|\b(screenshot|browser|playwright|chrome|figma|canva|render|webpage|website|url|hyperlink|navigate|click|scrape)\b/i.test(
+                userMessage,
+              );
+            const SKIP_WHEN_NO_BROWSER = /playwright|chrome|browser|devtools|vision|figma|canva/i;
+            const allServers = loadMcpServers();
+            const filteredServers =
+              smartMcp && !browserSignal ? allServers.filter((s) => !SKIP_WHEN_NO_BROWSER.test(s.id)) : allServers;
+            const mcpBundle = await buildMcpToolSet(filteredServers, {
+              onOAuthRequired: (_serverId, url) => {
+                const urlStr = url.toString();
+                import("child_process").then(({ exec }) => {
+                  const cmd =
+                    process.platform === "win32"
+                      ? `start "" "${urlStr}"`
+                      : process.platform === "darwin"
+                        ? `open "${urlStr}"`
+                        : `xdg-open "${urlStr}"`;
+                  exec(cmd);
+                });
+              },
+            });
+            closeMcp = mcpBundle.close;
+            rawToolSet = { ...rawToolSet, ...mcpBundle.tools };
+            if (mcpBundle.errors.length > 0) {
+              yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
+            }
+          }
+
+          // PIL response tools: inject structured output tool when taskType detected
+          if (_hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo)) {
+            rawToolSet = { ...rawToolSet, ..._pilResponseTools };
+            captureToolSchemas(_pilResponseTools);
+          }
+
+          // Apply the top-level cumulative cap once over the fully-assembled
+          // raw tool set. State is per-turn; each turn gets a fresh budget.
+          const topLevelCap = wrapToolSetWithCap(rawToolSet, {
+            maxCumulativeChars: getTopLevelToolBudgetChars(),
+            midTierRatio: 0.5,
+            highTierRatio: 0.8,
+            label: "top-level",
+          });
+          // Phase C3: layer cross-turn dedup on top of the top-level cap.
+          const tools: ToolSet = wrapToolSetWithReadBudget(
+            wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
+            deps.readBudget,
+          );
+          captureToolSchemas(tools);
+          let responseToolCalled = false;
+
+          // G3: providerOptions assembly is owned by the capability layer
+          // (src/providers/capabilities.ts). buildTurnProviderOptions feeds
+          // sessionId in so openai.promptCacheKey is derived per turn.
+          // The task-type-driven anthropic.thinking budget override stays
+          // here because it depends on PIL task context, not provider quirks.
+          // biome-ignore lint/suspicious/noExplicitAny: matches RuntimeResult.providerOptions shape (any) used downstream
+          const baseProviderOpts: any = buildTurnProviderOptions(runtime, { sessionId: deps.session?.id }) ?? {};
+          const providerOpts = runtime.modelInfo?.reasoning
+            ? {
+                ...baseProviderOpts,
+                anthropic: {
+                  ...(baseProviderOpts.anthropic ?? {}),
+                  thinking: {
+                    type: "enabled" as const,
+                    budgetTokens:
+                      taskTypeToReasoningEffort(pilCtx.taskType) === "high"
+                        ? 32_768
+                        : taskTypeToReasoningEffort(pilCtx.taskType) === "medium"
+                          ? 8_192
+                          : 2_048,
+                  },
+                },
+              }
+            : baseProviderOpts;
+          // Use catalog's thinkingType field instead of regex matching.
+          // providerOpts is loosely typed (Record<string, unknown>) after the
+          // g1 capability refactor — narrow with a local typed view.
+          const thinkingModelInfo = getModelInfo(runtime.modelId);
+          const providerOptsAnyView = providerOpts as {
+            anthropic?: { thinking?: { type?: string } };
+          };
+          if (
+            providerOptsAnyView.anthropic?.thinking?.type === "enabled" &&
+            thinkingModelInfo?.thinkingType === "adaptive"
+          ) {
+            providerOptsAnyView.anthropic.thinking = { type: "adaptive" as unknown as "enabled" };
+          }
+
+          // OpenAI api-key path: `store: true` is seeded by OpenAIStrategy
+          // via factory.defaultProviderOptions (Phase 12.2-G4 migration).
+          // OAuth backend (ChatGPT Codex) overrides with `store: false` via
+          // the auth registry. Both flow through resolveModelRuntime →
+          // runtime.providerOptions → buildTurnProviderOptions and arrive
+          // here merged into providerOpts.openai.
+          // Top-level dropParam — shared with sub-agent path via shouldDropParam.
+          // See src/providers/runtime.ts for the central rule.
+          const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
+
+          const systemForModel = runtime.modelId.startsWith("claude")
+            ? [
+                {
+                  role: "system" as const,
+                  content: systemParts.staticPrefix,
+                  providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
+                },
+                { role: "system" as const, content: system.slice(systemParts.staticPrefix.length) },
+              ]
+            : system;
+
+          // Capture prompt-size breakdown so recordUsage can attach it to the
+          // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
+          // chars/4 ≈ tokens for English; reported as chars to keep math obvious.
+          const messagesChars = deps.messages.reduce((s, m) => {
+            const c = m.content;
+            if (typeof c === "string") return s + c.length;
+            if (Array.isArray(c)) {
+              for (const part of c) {
+                if (typeof (part as { text?: unknown }).text === "string") {
+                  s += (part as { text: string }).text.length;
+                }
+              }
+            }
+            return s;
+          }, 0);
+          let toolsChars = 0;
+          let toolsCount = 0;
+          for (const [name, t] of Object.entries(tools)) {
+            toolsCount += 1;
+            toolsChars += name.length;
+            const desc = (t as { description?: string }).description;
+            if (typeof desc === "string") toolsChars += desc.length;
+            try {
+              // Schemas often dominate tool size on non-Anthropic providers
+              // (Zod-derived JSON schemas can be 2-5K chars per tool).
+              const params =
+                (t as { parameters?: unknown; inputSchema?: unknown }).parameters ??
+                (t as { inputSchema?: unknown }).inputSchema;
+              if (params) toolsChars += JSON.stringify(params).length;
+            } catch {
+              /* best-effort */
+            }
+          }
+          deps.setLastPromptBreakdown({
+            systemChars: system.length,
+            staticPrefixChars: systemParts.staticPrefix.length,
+            dynamicSuffixChars: systemParts.dynamicSuffix.length,
+            playwrightGuidanceChars: playwrightGuidance.length,
+            messagesChars,
+            messagesCount: deps.messages.length,
+            toolsChars,
+            toolsCount,
+          });
+
+          // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
+          const _topCallId = crypto.randomUUID();
+          deps.setCurrentCallId(_topCallId);
+          // Phase B4: compact older tool_result parts before each top-level
+          // step once cumulative message chars exceed the configured threshold.
+          // The compactor preserves system + first user verbatim and keeps the
+          // last N tool turns intact; older results are rewritten into short
+          // stubs. Symmetric to the B3 sub-agent path; reuses the same module
+          // with `label: "top-level"` so the stub text reflects which loop
+          // elided the content.
+          const topLevelCompactThreshold = getTopLevelCompactThresholdChars();
+          const topLevelCompactKeepLast = getTopLevelCompactKeepLast();
+          // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
+          deps.setLastProviderOptionsShape(
+            Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
+          );
+          if (wireDebug.enabled) {
+            wireDebug.logRequest({
+              providerId: runtime.modelInfo?.provider ?? "unknown",
+              modelId: runtime.modelId,
+              messages: deps.messages as readonly unknown[],
+              systemChars: (systemForModel as unknown as { length?: number })?.length ?? 0,
+              toolNames: tools ? Object.keys(tools as Record<string, unknown>) : undefined,
+              providerOptions: providerOpts,
+            });
+          }
+          // SiliconFlow DeepSeek thinking-mode reasoning_content workaround
+          // (see siliconflow-history.ts). Sub-agent path applies the same strip
+          // via the capability hook; identity for every other provider.
+          const _topMessagesForCall = turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages;
+          const result = streamText({
+            model: runtime.model,
+            system: systemForModel,
+            messages: _topMessagesForCall,
+            tools,
+            toolChoice: _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : undefined,
+            stopWhen:
+              stepRouterPhase === "phase1"
+                ? stepCountIs(1) // SAMR Phase 1: stop after reasoning step
+                : stepCountIs(deps.maxToolRounds),
+            maxRetries: 0,
+            abortSignal: signal,
+            prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
+              if (sn < 1) return {};
+              const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
+              const compacted = compactSubAgentMessages(stripped, {
+                thresholdChars: topLevelCompactThreshold,
+                keepLastTurns: topLevelCompactKeepLast,
+                label: "top-level",
+              });
+              if (compacted === stripped && stripped === stepMessages) return {};
+              return { messages: compacted };
+            },
+            ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
+            ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
+            ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
+            experimental_onStepStart: (event: unknown) => {
+              stepNumber = getStepNumber(event, stepNumber + 1);
+              notifyObserver(observer?.onStepStart, {
+                stepNumber,
+                timestamp: Date.now(),
+              });
+            },
+            onStepFinish: (event: unknown) => {
+              const currentStep = getStepNumber(event, Math.max(stepNumber, 0));
+              stepNumber = Math.max(stepNumber, currentStep);
+              const stepUsage = getUsage(event);
+              notifyObserver(observer?.onStepFinish, {
+                stepNumber: currentStep,
+                timestamp: Date.now(),
+                finishReason: getFinishReason(event),
+                usage: stepUsage,
+              });
+              // Realtime status bar update per step
+              if (stepUsage.inputTokens || stepUsage.outputTokens) {
+                deps.recordUsage(stepUsage, "message", runtime.modelId);
+              }
+            },
+            onFinish: ({ finishReason }) => {
+              // Task 2.6b — emit llm-done (agent-mode only).
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "llm-done",
+                  correlationId: _topCallId,
+                  totalChars: assistantText.length,
+                  finishReason: finishReason ?? "stop",
+                });
+              } catch {
+                /* best-effort */
+              }
+              deps.setCurrentCallId("");
+            },
+          });
+
+          let _topTokenIndex = 0;
+          const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
+          for await (const part of result.fullStream) {
+            if (signal.aborted) {
+              yield { type: "content", content: "\n\n[Cancelled]" };
+              break;
+            }
+
+            if (wireDebug.enabled) {
+              wireDebug.logChunk(_wireProviderIdTop, String(part.type ?? "unknown"), {
+                hasText:
+                  typeof (part as { text?: string }).text === "string"
+                    ? (part as { text: string }).text.length
+                    : undefined,
+                hasReasoning:
+                  typeof (part as unknown as { reasoning?: string }).reasoning === "string"
+                    ? (part as unknown as { reasoning: string }).reasoning.length
+                    : undefined,
+              });
+              if (part.type === "error") {
+                wireDebug.logError(_wireProviderIdTop, (part as { error?: unknown }).error);
+              }
+            }
+
+            switch (part.type) {
+              case "text-delta":
+                assistantText += part.text;
+                // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+                try {
+                  const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                    | { emitEvent: (e: unknown) => void }
+                    | undefined;
+                  _ar?.emitEvent({
+                    t: "event",
+                    kind: "llm-token",
+                    correlationId: _topCallId,
+                    delta: part.text,
+                    tokenIndex: _topTokenIndex++,
+                  });
+                } catch {
+                  /* best-effort */
+                }
+                yield { type: "content", content: part.text };
+                break;
+
+              case "reasoning-delta":
+                reasoningPreview = `${reasoningPreview}${part.text}`.slice(-256);
+                if (containsEncryptedReasoning(reasoningPreview)) {
+                  if (!encryptedReasoningHidden) {
+                    encryptedReasoningHidden = true;
+                    yield { type: "reasoning", content: "[Encrypted reasoning hidden]" };
+                  }
+                  break;
+                }
+                // P0 native observation: accumulate reasoning for intent context.
+                deps.appendTurnAssistantReasoning(part.text);
+                yield { type: "reasoning", content: part.text };
+                break;
+
+              case "tool-call": {
+                const tc = toToolCall(part);
+                activeToolCalls.push(tc);
+                // SAMR: track that Phase 1 produced tool calls → transition to Phase 2
+                if (stepRouterPhase === "phase1") phase1HadToolCalls = true;
+
+                // EE PreToolUse hook: fire intercept before tool execution.
+                {
+                  const turnAssistantReasoning = deps.getTurnAssistantReasoning();
+                  const intentContext: import("../hooks/types.js").PreToolIntentContext = {
+                    ...(turnAssistantReasoning
+                      ? { assistantReasoningExcerpt: turnAssistantReasoning.slice(-200) }
+                      : {}),
+                    ...(deps.priorWarningIdsInSession.size > 0
+                      ? {
+                          priorWarningIdsInSession: Array.from(deps.priorWarningIdsInSession).slice(-20),
+                        }
+                      : {}),
+                    ...(pilCtx.gsdPhase ? { gsdPhase: pilCtx.gsdPhase } : {}),
+                    ...(userMessage.slice(0, 200) ? { userGoalExcerpt: userMessage.slice(0, 200) } : {}),
+                  };
+                  const preInput: PreToolUseHookInput = {
+                    hook_event_name: "PreToolUse",
+                    tool_name: tc.function.name,
+                    tool_input: JSON.parse(tc.function.arguments || "{}"),
+                    session_id: deps.session?.id,
+                    cwd: deps.bash.getCwd(),
+                    ...(Object.keys(intentContext).length > 0 ? { intent_context: intentContext } : {}),
+                  };
+                  const preResult = await deps.fireHook(preInput, signal).catch(() => ({
+                    blocked: false,
+                    blockingErrors: [] as Array<{ command: string; stderr: string }>,
+                    preventContinuation: false,
+                    additionalContexts: [] as string[],
+                    results: [] as import("../hooks/types.js").HookResult[],
+                    eeMatches: [] as import("../hooks/types.js").EEMatchEntry[],
+                  }));
+                  for (const ctx of preResult.additionalContexts ?? []) {
+                    yield { type: "content", content: `${ctx}\n` };
+                  }
+                  // Store structured EE matches for session guidance injection on next turn.
+                  for (const m of preResult.eeMatches ?? []) {
+                    deps.sessionEEGuidance.set(m.id, {
+                      toolName: m.toolName,
+                      message: m.message,
+                      why: m.why,
+                      confidence: m.confidence,
+                    });
+                    // Cap at 30 entries — oldest first, trim when exceeded.
+                    if (deps.sessionEEGuidance.size > 30) {
+                      const firstKey = deps.sessionEEGuidance.keys().next().value;
+                      if (firstKey !== undefined) deps.sessionEEGuidance.delete(firstKey);
+                    }
+                  }
+                  // P0 native observation: track which principle IDs surfaced
+                  // this turn so the next intercept can dedup server-side.
+                  try {
+                    const { getLastSurfacedState } = await import("../ee/intercept.js");
+                    const { surfacedIds } = getLastSurfacedState();
+                    for (const id of surfacedIds) deps.priorWarningIdsInSession.add(id);
+                    // Cap memory: keep only most-recent 100 IDs.
+                    if (deps.priorWarningIdsInSession.size > 100) {
+                      const arr = Array.from(deps.priorWarningIdsInSession);
+                      deps.setPriorWarningIdsInSession(new Set(arr.slice(-100)));
+                    }
+                  } catch {
+                    /* fail-open */
+                  }
+                }
+
+                // Pitfall 9: log the pending call so reconcile() can recover any
+                // staged .tmp files if the process is killed before tool-result.
+                if (deps.pendingCalls) {
+                  const turnId = deps.session?.id ?? "anon";
+                  const callId = stableCallId(turnId, tc.function.name, tc.function.arguments);
+                  // Phase 0: predictStagedPaths = [] for all tools (refined in Phase 1).
+                  void deps.pendingCalls.begin({ call_id: callId, tool_name: tc.function.name }).catch(() => {});
+                  // Attach callId to the ToolCall so tool-result can end it.
+                  (tc as ToolCall & { _pendingCallId?: string })._pendingCallId = callId;
+                }
+
+                // Phase A4: write-ahead persistence — insert a pending row into
+                // tool_calls BEFORE executing the tool. If the stream throws
+                // mid-call (e.g. provider 5xx, abort, network drop), this row
+                // remains as `pending` so `usage forensics` can show the args
+                // the model passed. The post-stream appendMessages() path
+                // (INSERT OR IGNORE + UPDATE) will finalize this row to
+                // `completed` once the turn settles normally.
+                if (deps.sessionStore && deps.session) {
+                  // Predicted assistant seq: user message + assistant message
+                  // are appended atomically by appendCompletedTurn().
+                  // getNextMessageSequence() returns the seq the user message
+                  // will get; the assistant message is the next one after.
+                  let predictedSeq = -1;
+                  try {
+                    predictedSeq = getNextMessageSequence(deps.session.id) + 1;
+                  } catch {
+                    /* fail-open — leave predictedSeq=-1; post-stream UPDATE corrects it */
+                  }
+                  persistToolCallWriteAhead(
+                    deps.session.id,
+                    predictedSeq,
+                    tc.id,
+                    tc.function.name,
+                    tc.function.arguments || "{}",
+                  );
+                }
+                notifyObserver(observer?.onToolStart, {
+                  toolCall: tc,
+                  timestamp: Date.now(),
+                });
+                // Interaction log: tool call start
+                try {
+                  if (deps.session) {
+                    logInteraction(deps.session.id, "tool_call", {
+                      eventSubtype: tc.function.name,
+                      data: {
+                        toolCallId: tc.id,
+                        argsPreview: tc.function.arguments.slice(0, 200),
+                      },
+                    });
+                  }
+                } catch {
+                  /* fail-open */
+                }
+                yield { type: "tool_calls", toolCalls: [tc] };
+                break;
+              }
+
+              case "tool-result": {
+                const tc: ToolCall = {
+                  id: part.toolCallId,
+                  type: "function",
+                  function: { name: part.toolName, arguments: JSON.stringify(part.input ?? {}) },
+                };
+                let tr = toToolResult(part.output);
+
+                // Vision Bridge: proxy image-bearing tool results for text-only models (any tool, not just MCP)
+                try {
+                  const bridgeResult = await bridgeMcpToolResult(
+                    part.toolName,
+                    tr.output,
+                    turnModelId,
+                    signal,
+                    part.toolCallId,
+                  );
+                  if (bridgeResult.proxied) {
+                    tr = {
+                      ...tr,
+                      output:
+                        typeof bridgeResult.output === "string"
+                          ? bridgeResult.output
+                          : JSON.stringify(bridgeResult.output),
+                    };
+                    yield { type: "content", content: `[Vision Bridge: image → text for ${turnModelId}]\n` };
+                  }
+                } catch {
+                  /* fail-open */
+                }
+
+                // Pitfall 9: settle the pending call log entry.
+                if (deps.pendingCalls) {
+                  const pending = activeToolCalls.find((t) => t.id === part.toolCallId);
+                  const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
+                  if (callId) {
+                    const endStatus = signal.aborted ? "aborted" : "settled";
+                    void deps.pendingCalls.end(callId, endStatus).catch(() => {});
+                  }
+                }
+                // EE PostToolUse hook: fire-and-forget after tool execution.
+                {
+                  const postInput: PostToolUseHookInput = {
+                    hook_event_name: "PostToolUse",
+                    tool_name: part.toolName,
+                    tool_input: (part.input as Record<string, unknown>) ?? {},
+                    tool_output:
+                      typeof tr.output === "string"
+                        ? { text: tr.output }
+                        : ((tr.output as unknown as Record<string, unknown>) ?? {}),
+                    session_id: deps.session?.id,
+                    cwd: deps.bash.getCwd(),
+                  };
+                  await deps.fireHook(postInput, signal).catch(() => {});
+                }
+
+                // Response tool: yield as structured_response instead of tool_result.
+                // AI SDK v5 wraps tool outputs as `{type:"json", value:{...}}`; unwrap
+                // to expose the schema-shaped payload to the UI renderer.
+                if (isResponseTool(part.toolName)) {
+                  responseToolCalled = true;
+                  const taskType = getResponseTaskType(part.toolName);
+                  const rawOutput = part.output as unknown;
+                  const unwrapped =
+                    rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+                      ? ((rawOutput as { value?: unknown }).value ?? {})
+                      : (rawOutput ?? {});
+                  yield {
+                    type: "structured_response" as StreamChunk["type"],
+                    structuredResponse: {
+                      taskType: taskType ?? part.toolName,
+                      data: unwrapped as Record<string, unknown>,
+                    },
+                  };
+                  notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
+                  break;
+                }
+
+                notifyObserver(observer?.onToolFinish, {
+                  toolCall: tc,
+                  toolResult: tr,
+                  timestamp: Date.now(),
+                });
+                // Interaction log: tool result
+                try {
+                  if (deps.session) {
+                    const outputPreview =
+                      typeof tr.output === "string" ? tr.output.slice(0, 200) : JSON.stringify(tr.output).slice(0, 200);
+                    logInteraction(deps.session.id, "tool_result", {
+                      eventSubtype: tc.function.name,
+                      data: { success: tr.success, outputPreview },
+                    });
+                  }
+                } catch {
+                  /* fail-open */
+                }
+                yield { type: "tool_result", toolCall: tc, toolResult: tr };
+                break;
+              }
+
+              case "tool-error": {
+                // AI SDK emits this when tool execution throws/aborts before
+                // producing a tool-result. Without this branch, the tool_call
+                // log row has no matching tool_result and the EE judge never
+                // sees the failure → silent ~1.6% pairing leak in prod DB.
+                const errPart = part as {
+                  type: "tool-error";
+                  toolCallId: string;
+                  toolName: string;
+                  input?: unknown;
+                  error: unknown;
+                };
+                const tc: ToolCall = {
+                  id: errPart.toolCallId,
+                  type: "function",
+                  function: { name: errPart.toolName, arguments: JSON.stringify(errPart.input ?? {}) },
+                };
+                const errMsg =
+                  errPart.error instanceof Error
+                    ? errPart.error.message
+                    : typeof errPart.error === "string"
+                      ? errPart.error
+                      : JSON.stringify(errPart.error);
+                const tr = { success: false, output: `[tool-error] ${errMsg}` };
+
+                // Settle pending-call ledger so we don't leak stale .tmp files.
+                if (deps.pendingCalls) {
+                  const pending = activeToolCalls.find((t) => t.id === errPart.toolCallId);
+                  const callId = (pending as ToolCall & { _pendingCallId?: string })?._pendingCallId;
+                  if (callId) void deps.pendingCalls.end(callId, "settled").catch(() => {});
+                }
+
+                // Phase A4: mark the write-ahead tool_calls row as `errored`.
+                // The post-stream appendMessages() path does NOT see tool-error
+                // parts in the assistant message content (the SDK doesn't emit
+                // them there), so without this explicit update the row would
+                // remain `pending` after a clean tool failure.
+                if (deps.session) {
+                  markToolCallErrored(deps.session.id, errPart.toolCallId, errMsg);
+                }
+
+                // Fire PostToolUseFailure so EE judge can record IGNORED outcome.
+                {
+                  const failInput: PostToolUseFailureHookInput = {
+                    hook_event_name: "PostToolUseFailure",
+                    tool_name: errPart.toolName,
+                    tool_input: (errPart.input as Record<string, unknown>) ?? {},
+                    error: errMsg,
+                    session_id: deps.session?.id,
+                    cwd: deps.bash.getCwd(),
+                  };
+                  await deps.fireHook(failInput, signal).catch(() => {});
+                }
+
+                try {
+                  if (deps.session) {
+                    logInteraction(deps.session.id, "tool_result", {
+                      eventSubtype: errPart.toolName,
+                      data: { success: false, error: errMsg.slice(0, 500), reason: "tool-error" },
+                    });
+                  }
+                } catch {
+                  /* fail-open */
+                }
+
+                notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
+                yield { type: "tool_result", toolCall: tc, toolResult: tr };
+                break;
+              }
+
+              case "tool-approval-request": {
+                const approvalPart = part as unknown as {
+                  approvalId: string;
+                  toolCall: { toolCallId: string; toolName: string; input: unknown };
+                };
+                const toolCallId = approvalPart.toolCall?.toolCallId ?? "";
+                const pendingTc = activeToolCalls.find((tc) => tc.id === toolCallId);
+                const tcForChunk = pendingTc ?? {
+                  id: toolCallId,
+                  type: "function" as const,
+                  function: {
+                    name: approvalPart.toolCall?.toolName ?? "paid_request",
+                    arguments: JSON.stringify(approvalPart.toolCall?.input ?? {}),
+                  },
+                };
+
+                // Payment pre-check disabled — Stripe billing pending.
+                const paymentPrecheck: import("../types/index").PaymentPrecheck | undefined = undefined;
+
+                // Plan 03-01: check permission mode before yielding approval request to UI.
+                // auto-edit auto-approves file ops; yolo auto-approves everything.
+                const toolName = approvalPart.toolCall?.toolName ?? "";
+                if (!toolNeedsApproval(toolName, deps.permissionMode)) {
+                  // Auto-approve: respond directly without surfacing to UI.
+                  deps.respondToToolApproval(approvalPart.approvalId, true);
+                  break;
+                }
+
+                yield {
+                  type: "tool_approval_request",
+                  approvalId: approvalPart.approvalId,
+                  toolCall: tcForChunk,
+                  paymentPrecheck,
+                };
+                break;
+              }
+
+              case "error": {
+                const authError = isAuthenticationError(part.error);
+                const friendly = humanizeApiError(part.error);
+                notifyObserver(observer?.onError, {
+                  message: friendly,
+                  timestamp: Date.now(),
+                });
+                // Interaction log: error
+                try {
+                  if (deps.session) {
+                    logInteraction(deps.session.id, "error", {
+                      eventSubtype: authError ? "auth" : "api",
+                      data: { message: friendly.slice(0, 200) },
+                    });
+                  }
+                } catch {
+                  /* fail-open */
+                }
+                yield {
+                  type: "error",
+                  content: friendly,
+                  isAuthError: authError,
+                };
+                break;
+              }
+
+              case "abort":
+                yield { type: "content", content: "\n\n[Cancelled]" };
+                break;
+            }
+          }
+
+          // ─── SAMR Phase 1 → Phase 2 transition ─────────────────────────
+          // Phase 1 (premium model) produced tool calls but the SDK stopped
+          // before executing them (stopWhen: stepCountIs(1)). Append the
+          // assistant message to deps.messages and restart the loop with
+          // the fast execution model. Phase 2's streamText call will see
+          // the pending tool calls and execute them automatically.
+          if (stepRouterPhase === "phase1" && phase1HadToolCalls) {
+            try {
+              const phase1Response = await result.response;
+              // Append only new messages (assistant message with tool calls)
+              const newMsgs = phase1Response.messages.slice(deps.messages.length);
+              for (const msg of newMsgs) {
+                if (msg.role === "assistant") {
+                  deps.messages.push(msg);
+                }
+              }
+            } catch {
+              // If response extraction fails, fall through to normal completion
+            }
+            stepRouterPhase = "phase2";
+            continue; // Re-enter while loop with Phase 2 (fast) model
+          }
+
+          if (signal.aborted) {
+            deps.discardAbortedTurn(userModelMessage);
+            yield { type: "done" };
+            return;
+          }
+
+          try {
+            const response = await result.response;
+            if (!signal.aborted) {
+              // Scrub oversized base64 image payloads from tool-result parts
+              // BEFORE persisting. The vision bridge above only modified the
+              // transient `tr` shown to the user — `response.messages` from
+              // the AI SDK still carries the full base64 (e.g. Playwright
+              // screenshot, ~1.5MB). Persisting that lets it accumulate and
+              // overflow the model's context on subsequent turns.
+              const scrubbed = scrubImagePayloadsInMessages(response.messages);
+              deps.appendCompletedTurn(userModelMessage, sanitizeModelMessages(scrubbed));
+              streamOk = true;
+            }
+          } catch (responseError: unknown) {
+            if (
+              !attemptedOverflowRecovery &&
+              !assistantText.trim() &&
+              modelInfo &&
+              isContextLimitError(responseError)
+            ) {
+              attemptedOverflowRecovery = true;
+              continue;
+            }
+          }
+
+          if (signal.aborted) {
+            deps.discardAbortedTurn(userModelMessage);
+            yield { type: "done" };
+            return;
+          }
+
+          if (!streamOk && assistantText.trim()) {
+            deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+          }
+
+          // Fallback: model responded in text despite tool_choice=required
+          // Attempt JSON extraction from assistant text → yield as structured_response
+          if (_hasResponseTools && !responseToolCalled && pilCtx.taskType && assistantText.trim()) {
+            try {
+              const jsonMatch = assistantText.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+                if (Object.keys(parsed).length > 0) {
+                  responseToolCalled = true;
+                  yield {
+                    type: "structured_response" as StreamChunk["type"],
+                    structuredResponse: {
+                      taskType: pilCtx.taskType,
+                      data: parsed,
+                    },
+                  };
+                }
+              }
+            } catch {
+              // JSON parse failed — leave as text-fallback
+            }
+          }
+
+          // Track PIL output mode for /optimize metrics
+          {
+            const { setLastOutputMode } = await import("../pil/store.js");
+            if (!_hasResponseTools) setLastOutputMode("conversational");
+            else if (responseToolCalled) setLastOutputMode("structured");
+            else setLastOutputMode("text-fallback");
+          }
+
+          // ROUTE-11: Fire routeFeedback after turn completes (success path).
+          // Must come AFTER posttool calls (posttool fires during tool-result processing above).
+          // Fire-and-forget — no await. Skipped when taskHash is null (bridge absent).
+          {
+            const turnDuration = Date.now() - turnStartMs;
+            if (taskHash) {
+              const tier = taskTypeToTier(pilCtx.taskType);
+              void routeFeedback(
+                taskHash,
+                tier,
+                runtime.modelId,
+                "success", // Phase 6: all normal completions = 'success'
+                0, // retryCount: 0 for first attempt
+                turnDuration,
+              );
+            }
+            // HTTP path: also report via router store taskHash (covers warm/cold EE routes)
+            const storeHash = routerStore.getState().taskHash;
+            if (storeHash) {
+              reportRouteOutcome(storeHash, "success", turnDuration);
+            }
+          }
+
+          // Interaction log: agent response complete
+          try {
+            if (deps.session) {
+              const sb = statusBarStore.getState();
+              const turnDurationMs = Date.now() - turnStartMs;
+              logInteraction(deps.session.id, "agent_response", {
+                model: turnModelId,
+                inputTokens: sb.in_tokens,
+                outputTokens: sb.out_tokens,
+                durationMs: turnDurationMs,
+                data: {
+                  textLength: assistantText.length,
+                  toolCallCount: activeToolCalls.length,
+                  compacted: deps.getCompactedThisTurn(),
+                },
+              });
+            }
+          } catch {
+            /* fail-open */
+          }
+
+          const stopInput: StopHookInput = {
+            hook_event_name: "Stop",
+            session_id: deps.session?.id,
+            cwd: deps.bash.getCwd(),
+          };
+          await deps.fireHook(stopInput, signal).catch(() => {});
+
+          // Debug trace: emit pipeline summary
+          if (_debugOn) {
+            const sb = statusBarStore.getState();
+            const defaultInfo = getModelInfo(deps.modelId);
+            const usedInfo = getModelInfo(turnModelId);
+            const routerSaved =
+              defaultInfo && usedInfo && defaultInfo.outputPrice > usedInfo.outputPrice
+                ? (sb.out_tokens * (defaultInfo.outputPrice - usedInfo.outputPrice)) / 1_000_000
+                : 0;
+            const cacheSaved =
+              sb.cache_read_tokens > 0 && defaultInfo
+                ? (sb.cache_read_tokens *
+                    (defaultInfo.inputPrice - (defaultInfo.cachedInputPrice ?? defaultInfo.inputPrice * 0.1))) /
+                  1_000_000
+                : 0;
+            const trace: TurnTrace = {
+              turn_id: _debugTurnId,
+              timestamp: turnStartMs,
+              raw_prompt: userMessage,
+              steps: _debugSteps,
+              model_requested: deps.modelId,
+              model_used: turnModelId,
+              routed: turnModelId !== deps.modelId,
+              input_tokens: sb.in_tokens,
+              output_tokens: sb.out_tokens,
+              cache_read_tokens: sb.cache_read_tokens,
+              cost_usd: sb.session_usd,
+              estimated_savings: {
+                pil_tokens_saved: _pilEnrichmentDeltaSnapshot > 0 ? _pilEnrichmentDeltaSnapshot : 0,
+                cache_tokens_saved: sb.cache_read_tokens,
+                router_cost_saved_usd: routerSaved,
+                total_tokens_saved:
+                  (_pilEnrichmentDeltaSnapshot > 0 ? _pilEnrichmentDeltaSnapshot : 0) + sb.cache_read_tokens,
+                total_cost_saved_usd: routerSaved + cacheSaved,
+              },
+            };
+            recordTurnTrace(trace);
+
+            const traceLines: string[] = [];
+            traceLines.push("\n┌─ Pipeline Trace ─────────────────────────");
+            for (const step of _debugSteps) {
+              const dur = step.duration_ms < 1 ? "<1ms" : `${step.duration_ms}ms`;
+              const saved = step.tokens_saved ? ` (saved ~${step.tokens_saved} tok)` : "";
+              traceLines.push(`│ ▸ ${step.name} [${dur}]${saved}`);
+              traceLines.push(`│   ${step.output_summary}`);
+            }
+            const routeLabel = trace.routed ? `${trace.model_requested}→${trace.model_used}` : trace.model_used;
+            traceLines.push(
+              `│ Model: ${routeLabel} | ↑${sb.in_tokens} ↓${sb.out_tokens} | $${sb.session_usd.toFixed(4)}`,
+            );
+            if (trace.estimated_savings.total_cost_saved_usd > 0) {
+              traceLines.push(
+                `│ Savings: ~${trace.estimated_savings.total_tokens_saved} tok, ~$${trace.estimated_savings.total_cost_saved_usd.toFixed(4)}`,
+              );
+            }
+            traceLines.push("└──────────────────────────────────────────\n");
+            yield { type: "content", content: traceLines.join("\n") };
+          }
+
+          if (modelInfo?.contextWindow) {
+            await deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal);
+          }
+          yield { type: "done" };
+          return;
+        } catch (err: unknown) {
+          if (signal.aborted) {
+            deps.discardAbortedTurn(userModelMessage);
+            // ROUTE-11: Fire routeFeedback for cancelled turns (abort path).
+            // Fire-and-forget — no await. Skipped when taskHash is null.
+            {
+              const turnDuration = Date.now() - turnStartMs;
+              if (taskHash) {
+                const tier = taskTypeToTier(pilCtx.taskType);
+                void routeFeedback(taskHash, tier, runtime.modelId, "cancelled", 0, turnDuration);
+              }
+              const storeHash = routerStore.getState().taskHash;
+              if (storeHash) {
+                reportRouteOutcome(storeHash, "cancelled", turnDuration);
+              }
+            }
+            yield { type: "content", content: "\n\n[Cancelled]" };
+            yield { type: "done" };
+            return;
+          }
+
+          if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(err)) {
+            attemptedOverflowRecovery = true;
+            continue;
+          }
+
+          // Transient network/server error retry — up to MAX_STREAM_RETRIES extra attempts.
+          // Only retry when no content has flowed yet (assistantText empty) to avoid
+          // partial-output corruption. Honour the abort signal between retries.
+          if (!assistantText.trim() && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted) {
+            const { transient } = classifyStreamError(err);
+            if (transient) {
+              streamRetryCount++;
+              // Exponential backoff: 500 → 2000 ms with ±25% jitter
+              const baseMs = 500;
+              const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
+              const spread = expMs * 0.25;
+              const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+              const errorName = err instanceof Error ? err.name : "Error";
+              const errorMessage = err instanceof Error ? err.message : String(err);
+              // Emit harness telemetry event
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "stream-retry",
+                  attempt: streamRetryCount,
+                  maxAttempts: MAX_STREAM_RETRIES + 1,
+                  errorName,
+                  errorMessage,
+                  nextDelayMs,
+                });
+              } catch {
+                /* best-effort */
+              }
+              try {
+                if (deps.session) {
+                  logInteraction(deps.session.id, "stream_retry", {
+                    data: {
+                      attempt: streamRetryCount,
+                      maxAttempts: MAX_STREAM_RETRIES + 1,
+                      errorName,
+                      errorMessage: errorMessage.slice(0, 200),
+                      nextDelayMs,
+                    },
+                  });
+                }
+              } catch {
+                /* fail-open */
+              }
+              await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+              if (!signal.aborted) {
+                continue;
+              }
+            }
+          }
+
+          const authError = isAuthenticationError(err);
+          const friendly = humanizeApiError(err);
+          notifyObserver(observer?.onError, {
+            message: friendly,
+            timestamp: Date.now(),
+          });
+          yield {
+            type: "error",
+            content: friendly,
+            isAuthError: authError,
+          };
+          if (assistantText.trim()) {
+            deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+          } else if (deps.session && userWriteAheadSeq != null) {
+            // Phase A5 — Stream threw before producing assistant text. The
+            // write-ahead user row is stuck at `status='pending'`. Mark it
+            // errored so forensics + recovery can distinguish "in-flight"
+            // from "crashed mid-flight".
+            markMessageErrored(deps.session.id, userWriteAheadSeq);
+          }
+
+          // ROUTE-11: Fire routeFeedback for failed turns (error path).
+          // Must come AFTER posttool calls. Fire-and-forget — no await.
+          {
+            const turnDuration = Date.now() - turnStartMs;
+            if (taskHash) {
+              const tier = taskTypeToTier(pilCtx.taskType);
+              void routeFeedback(taskHash, tier, runtime.modelId, "fail", 0, turnDuration);
+            }
+            const storeHash = routerStore.getState().taskHash;
+            if (storeHash) {
+              reportRouteOutcome(storeHash, "fail", turnDuration);
+            }
+          }
+
+          const stopFailureInput: StopFailureHookInput = {
+            hook_event_name: "StopFailure",
+            error: friendly,
+            session_id: deps.session?.id,
+            cwd: deps.bash.getCwd(),
+          };
+          await deps.fireHook(stopFailureInput, signal).catch(() => {});
+
+          if (modelInfo?.contextWindow) {
+            await deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal);
+          }
+          yield { type: "done" };
+          return;
+        } finally {
+          await closeMcp?.().catch(() => {});
+        }
+      }
+    } finally {
+      if (deps.getAbortController()?.signal === signal) {
+        deps.setAbortController(null);
+      }
+    }
+  }
+}
