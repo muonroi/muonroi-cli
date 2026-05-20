@@ -15,7 +15,12 @@ export function formatProjectContextForPrompt(ctx: ProjectContext): string {
   );
   lines.push(`Database: ${ctx.context.dbStrategy.mode} ${ctx.context.dbStrategy.engine}`);
   if (ctx.context.frontendApproach) {
-    lines.push(`Frontend: ${ctx.context.frontendApproach.library} + ${ctx.context.frontendApproach.framework}`);
+    const harness = ctx.context.frontendApproach.agentHarness
+      ? ` (harness: @muonroi/agent-harness-${ctx.context.frontendApproach.agentHarness})`
+      : "";
+    lines.push(
+      `Frontend: ${ctx.context.frontendApproach.library} + ${ctx.context.frontendApproach.framework}${harness}`,
+    );
   }
   if (ctx.context.deployment) {
     lines.push(

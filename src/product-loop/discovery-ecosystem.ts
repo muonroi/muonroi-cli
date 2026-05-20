@@ -60,6 +60,7 @@ export function buildEcosystemPreamble(): string {
     "Frontend default:",
     "- React with @muonroi/agent-harness-react wrapper, or",
     "- Angular with @muonroi/agent-harness-angular directive.",
+    'When recommending `frontendApproach`, ALWAYS fill the optional `agentHarness` slot — pick "react" for React/Next, "angular" for Angular, "opentui" for terminal UI, "core" for non-DOM integration. Only use "none" when the project has no UI at all.',
     "",
     "Recommend non-ecosystem options ONLY when the user's prompt explicitly opts out (e.g. mentions Node.js/Express/Django by name).",
   ].join("\n");

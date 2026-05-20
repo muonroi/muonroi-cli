@@ -38,9 +38,11 @@ describe("strategy registry", () => {
     }
   });
 
-  test("unknown provider id falls back to anthropic strategy", () => {
-    const fallback = getProviderStrategy("unknown-provider" as ProviderId);
-    expect(fallback).toBe(getProviderStrategy("anthropic"));
+  test("unknown provider id throws — no silent fallback", () => {
+    // Silent fallback used to mask registry desync. Now throws loudly so
+    // adding a new ProviderId to types.ts without registering a strategy
+    // fails fast at the first dispatch instead of silently using anthropic.
+    expect(() => getProviderStrategy("unknown-provider" as ProviderId)).toThrow(/No provider strategy registered/);
   });
 
   test("createFactory does not throw for any provider with a stub api key", () => {

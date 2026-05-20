@@ -48,9 +48,14 @@ export const OPTIONAL_QUESTION_IDS = DISCOVERY_QUESTIONS.filter((q) => !q.requir
 export const BIG_4_QUESTION_IDS = DISCOVERY_QUESTIONS.filter((q) => q.recommendMode === "council").map((q) => q.id);
 
 const ACCEPTED_FE_LIBRARIES = new Set(["shadcn", "radix", "headlessui", "none"]);
+const ACCEPTED_AGENT_HARNESS = new Set(["core", "react", "angular", "opentui", "none"]);
 
 export function isFePolicyAccepted(library: string): boolean {
   return ACCEPTED_FE_LIBRARIES.has(library);
+}
+
+export function isAgentHarnessAccepted(value: string): boolean {
+  return ACCEPTED_AGENT_HARNESS.has(value);
 }
 
 const WEB_PLATFORMS = new Set<PlatformT>(["web"]);
@@ -92,7 +97,11 @@ export function getSchemaHintForLeader(questionId: string): string {
     case "frontendApproach":
       return `value MUST be an object {"library": one of ${Array.from(ACCEPTED_FE_LIBRARIES)
         .map((l) => JSON.stringify(l))
-        .join("|")}, "framework": string}`;
+        .join("|")}, "framework": string, "agentHarness"?: one of ${Array.from(ACCEPTED_AGENT_HARNESS)
+        .map((h) => JSON.stringify(h))
+        .join(
+          "|",
+        )} — pick the @muonroi/agent-harness-* wrapper matching the framework ("react" for React/Next, "angular" for Angular, "opentui" for terminal UI, "core" for headless integration, "none" only if not building UI)}`;
     default:
       return "";
   }
@@ -116,9 +125,15 @@ export function validateAnswer(questionId: string, value: unknown): ValidationRe
       return { ok: true };
     }
     case "frontendApproach": {
-      const v = value as { library?: string };
+      const v = value as { library?: string; agentHarness?: string };
       if (!v?.library || !isFePolicyAccepted(v.library)) {
         return { ok: false, reason: "FE policy: library must be one of shadcn/radix/headlessui/none" };
+      }
+      if (v.agentHarness !== undefined && !isAgentHarnessAccepted(v.agentHarness)) {
+        return {
+          ok: false,
+          reason: "FE policy: agentHarness must be one of core/react/angular/opentui/none when provided",
+        };
       }
       return { ok: true };
     }

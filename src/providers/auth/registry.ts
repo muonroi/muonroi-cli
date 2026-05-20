@@ -33,6 +33,12 @@ export type AISdkUnsupportedParam = "maxOutputTokens" | "temperature" | "topP";
 
 export interface OAuthProviderConfig {
   provider: ProviderOAuth;
+  /**
+   * Human-friendly name shown in CLI prompts ("Logging in to <displayName>…").
+   * Keep short — the registry is the single source of truth so the CLI layer
+   * never needs a parallel display-name map.
+   */
+  displayName: string;
   baseURL?: string;
   useResponsesApi?: boolean;
   loadTokensWithRefresh: () => Promise<OAuthTokens | null>;
@@ -64,6 +70,7 @@ export async function loadOAuthRegistry(): Promise<Partial<Record<ProviderId, OA
     const { openAIOAuth, loadTokensWithRefresh } = await import("./openai-oauth.js");
     r.openai = {
       provider: openAIOAuth,
+      displayName: "OpenAI (ChatGPT)",
       baseURL: "https://chatgpt.com/backend-api/codex",
       useResponsesApi: true,
       loadTokensWithRefresh: () => loadTokensWithRefresh("openai"),
@@ -84,6 +91,7 @@ export async function loadOAuthRegistry(): Promise<Partial<Record<ProviderId, OA
     const { geminiOAuth, loadGeminiTokensWithRefresh } = await import("./gemini-oauth.js");
     r.google = {
       provider: geminiOAuth,
+      displayName: "Google",
       // Gemini OAuth tokens hit the same Generative Language API as API-key auth.
       loadTokensWithRefresh: () => loadGeminiTokensWithRefresh(),
     };

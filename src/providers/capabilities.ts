@@ -71,8 +71,8 @@ export interface ProviderCapabilities {
   /**
    * True when the model can only be invoked via the provider's "responses"
    * endpoint (vs chat-completions). Mirrors `ModelInfo.responsesOnly`.
-   * G1 NOTE: OpenAI reasoning routing (provider === "openai" && reasoning)
-   * lives in runtime.ts for now and is migrated in a later phase.
+   * OpenAI reasoning routing is fully handled by `OpenAIProviderCapabilities`
+   * — `runtime.ts` is a thin dispatcher that delegates here.
    */
   usesResponsesAPI(model: ModelInfo | undefined): boolean;
   /**
