@@ -97,7 +97,7 @@ export async function runQualityGate(opts: BBQualityGateOptions): Promise<GateRe
 
   // Step 3: pwsh check-modular-boundaries.ps1 (timeout 30s)
   const scriptPath = path.join(serverDir, "scripts", "check-modular-boundaries.ps1");
-  if ((opts.exec ? true : existsSync(scriptPath))) {
+  if (opts.exec ? true : existsSync(scriptPath)) {
     const boundary = exec("pwsh", [scriptPath, "-RepoRoot", "."], serverDir, 30_000);
     if (boundary.status !== 0) {
       failures.push({ step: "check-modular-boundaries", output: `${boundary.stdout}\n${boundary.stderr}`.trim() });
@@ -117,6 +117,38 @@ export async function runQualityGate(opts: BBQualityGateOptions): Promise<GateRe
       failures.push({
         step: "sentinel-check",
         output: `BB ecosystem sentinel block not found in Program.cs. Expected: ${SENTINEL_OPEN}`,
+      });
+    }
+  }
+
+  // Step 5: Leftover template sentinel — fail when sample-only names linger.
+  // BB template ships `BaseTemplate`, `DocTemplate`, `TemplateSample` strings
+  // as placeholder identifiers. Agent is expected to rename/delete these
+  // during scaffold; if any survive, treat it as a gate failure and let the
+  // retry-via-council path feed the list back to the LLM.
+  const templateSentinels = ["BaseTemplate", "DocTemplate", "TemplateSample"];
+  if (opts.exec ? true : existsSync(serverDir)) {
+    const pattern = templateSentinels.join("|");
+    const grep = exec(
+      "pwsh",
+      [
+        "-Command",
+        `Get-ChildItem -Path '${serverDir}' -Recurse -Include *.cs,*.csproj | Select-String -Pattern '${pattern}' -List | ForEach-Object { $_.Path }`,
+      ],
+      serverDir,
+      15_000,
+    );
+    const hits = grep.stdout
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    if (hits.length > 0) {
+      failures.push({
+        step: "template-leftover",
+        output:
+          `Template sample identifiers still present in ${hits.length} file(s) — rename or delete before shipping.\n` +
+          `Tokens: ${templateSentinels.join(", ")}\n` +
+          `Files:\n${hits.slice(0, 20).join("\n")}`,
       });
     }
   }
@@ -196,7 +228,10 @@ export async function emitGateFailuresFallback(opts: {
     if (opts.fetchBBContext) {
       try {
         // Extract key error keywords from stderr (first 200 chars of output)
-        const keywords = f.output.slice(0, 200).replace(/[^\w\s]/g, " ").trim();
+        const keywords = f.output
+          .slice(0, 200)
+          .replace(/[^\w\s]/g, " ")
+          .trim();
         const ctx = await opts.fetchBBContext(keywords);
         if (ctx.behavioralRules.length > 0) {
           lines.push("**Remediation hints from EE:**");

@@ -520,6 +520,23 @@ function validateProjectName(name: string): void {
   }
 }
 
+/**
+ * Convert a kebab-case (or snake_case) project name to a .NET-style
+ * PascalCase assembly/namespace prefix. Used for `dotnet new -n` so the
+ * generated .csproj, .sln, and `namespace` declarations follow .NET
+ * conventions, while the outer workspace folder + package.json keep the
+ * user's kebab name.
+ *
+ * Example: "todo-app" → "TodoApp", "my_cool-svc" → "MyCoolSvc"
+ */
+export function toDotNetAssemblyName(kebab: string): string {
+  return kebab
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((part) => part[0]!.toUpperCase() + part.slice(1).toLowerCase())
+    .join("");
+}
+
 // ---------------------------------------------------------------------------
 // File templates
 // ---------------------------------------------------------------------------
@@ -801,8 +818,12 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         // breaking the scaffold. We do an explicit `dotnet restore` below
         // anyway, so the template's auto-restore is harmless duplication.
         const dotnetCmd = getDotnetCommand() === "dotnet" ? "dotnet" : JSON.stringify(getDotnetCommand());
+        // .NET assembly + namespace name must be PascalCase. Outer folder /
+        // package.json keep the kebab project name. C# cannot have dashes in
+        // namespaces, so a kebab here produces snake_case namespaces (bug).
+        const dotnetAssemblyName = toDotNetAssemblyName(projectName);
         await fsOps.exec(
-          `${dotnetCmd} new ${opts.bbTemplate.shortName} -n ${projectName} -o ${JSON.stringify(serverDir)}`,
+          `${dotnetCmd} new ${opts.bbTemplate.shortName} -n ${dotnetAssemblyName} -o ${JSON.stringify(serverDir)}`,
           root,
         );
 

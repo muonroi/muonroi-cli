@@ -31,9 +31,18 @@ Execute these steps in order:
    - Identify: project name, main entry point (Program.cs / Gateway), modular boundaries, where to add new domain code.
 
 IMPORTANT — Template sample files are REFERENCE ONLY:
-   - The BB template ships example code (e.g. \`todo-app.Catalog\`, sample \`TodoRepository\`, \`Catalog\` controller, \`DocTemplateDbContext\`) named after the template/demo, NOT after the user's project.
+   - The BB template ships example code (e.g. \`todo-app.Catalog\`, sample \`TodoRepository\`, \`Catalog\` controller, \`DocTemplateDbContext\`, \`BaseTemplateDbContext\`) named after the template/demo, NOT after the user's project.
    - Read AT MOST ONE such sample file to learn the convention, then DELETE all template sample directories before generating your real domain code. They are reference, not the user's feature.
    - Do not re-read the same sample file repeatedly. If you need its pattern again, recall from memory or rely on \`docs.search\`.
+   - RENAME every file/class/namespace that still contains the literal token \`BaseTemplate\`, \`DocTemplate\`, or \`TemplateSample\` to a project-appropriate name BEFORE writing domain code. After cleanup, \`git grep -i basetemplate\` MUST return zero hits — the post-scaffold quality gate fails if any survive.
+   - DELETE any stub \`<projectName>.Catalog/\` directory that lives at server root next to \`server/src/Services/\` — \`dotnet new\` may emit a duplicate empty stub.
+
+.NET / C# conventions to follow:
+   - Async methods MUST accept and forward \`CancellationToken\` to every downstream await; suffix names with \`Async\`.
+   - Prefer singular folder names that already exist in the template; if you add new folders, use \`Infrastructure\` (singular), \`Enums\` (plural), \`Authorization\` instead of "Permissioning".
+   - Namespace MUST mirror the folder path under the project, in PascalCase.
+   - DTO ≠ Entity. Don't return EF entities from controllers — always project to a DTO.
+   - DI registration uses \`AddX*\` extension methods in a static class under \`Extensions/\` or \`DependencyInjection/\`; wire them from \`Program.cs\`. Do not register services inline in \`Program.cs\`.
 
 2. Design the feature
    - List the domain entity(ies), DTOs, endpoints, persistence model.
