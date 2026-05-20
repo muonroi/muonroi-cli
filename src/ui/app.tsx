@@ -4465,6 +4465,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       data: { projectDir: result.projectDir, templateName, originalPrompt },
                     });
                     originalIdealPromptRef.current = null;
+                    // Clear the init-new form BEFORE handing off to the
+                    // continuation prompt. Otherwise the `if (initNewForm)`
+                    // intercept above (~line 4234) keeps swallowing every
+                    // keystroke once the continuation reaches an interactive
+                    // gate (council preflight card, AskCard discovery, etc.)
+                    // because step="done" has no handler match and falls
+                    // through to the bare `return;` that ends the block.
+                    setInitNewForm(null);
                     void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
                   }, 500);
                 }
