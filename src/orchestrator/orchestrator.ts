@@ -19,7 +19,6 @@ import type {
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
-import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelByTier, getModelInfo, normalizeModelId } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
@@ -79,7 +78,6 @@ import {
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
-  loadMcpServers,
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
@@ -125,24 +123,20 @@ import {
   generateCompactionSummary,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
-  relaxCompactionSettings,
   shouldCompactContext,
 } from "./compaction";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
 import { DelegationManager } from "./delegations";
-import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
-import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
-import { classifyStreamError } from "./retry-classifier.js";
 import { withStreamRetry } from "./retry-stream.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { setProviderHint } from "./token-counter.js";
-import { combineAbortSignals, firstLine, formatSubagentActivity, notifyObserver, toToolResult } from "./tool-utils";
+import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
