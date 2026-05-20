@@ -897,7 +897,13 @@ export function getSubAgentCompactThresholdChars(): number {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 20_000 && n <= 500_000) return Math.floor(n);
   }
-  return 80_000;
+  // Phase C5 — lowered from 80_000 to 40_000 chars. Evidence from session
+  // bcf1f0951567: 88 prepareStep iterations grew billed input to 68K *tokens*
+  // (~273K char-equivalent), but the chars-based threshold never fired
+  // because each tool result is already capped to 32K chars. Lowering the
+  // trigger to 40K chars makes compaction fire ~step 30 instead of never —
+  // projected peak ~35K tokens, ~$0.085 saved per equivalent session.
+  return 40_000;
 }
 
 /**
@@ -927,7 +933,10 @@ export function getTopLevelCompactThresholdChars(): number {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
   }
-  return 200_000;
+  // Phase C5 — lowered from 200_000 to 100_000 chars (symmetric with the
+  // sub-agent 80→40K reduction). Same evidence applies: tool results are
+  // capped, so the chars threshold rarely trips while token billing climbs.
+  return 100_000;
 }
 
 /**
