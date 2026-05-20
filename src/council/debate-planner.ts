@@ -104,6 +104,18 @@ export async function* planDebate(
   if (eeSnippets.length > 0) {
     system += `\n\n## Experience Warnings (from brain)\nNote these past mistakes when designing debate stances:\n${eeSnippets.map((s) => `- ${s}`).join("\n")}`;
   }
+  // Ecosystem framing — stances + output sections should center on optimal
+  // use of existing BB / Muonroi.* packages, not greenfield analysis.
+  try {
+    const { isEcosystemBiasEnabled, buildEcosystemDebateContext } = await import(
+      "../product-loop/discovery-ecosystem.js"
+    );
+    if (isEcosystemBiasEnabled()) {
+      system += `\n\n${buildEcosystemDebateContext()}`;
+    }
+  } catch {
+    /* graceful — never block debate planning */
+  }
 
   // Attempt 1: generateObject with Zod schema
   try {
