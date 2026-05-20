@@ -69,6 +69,28 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
 export type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "xai" | "ollama";
 
 /**
+ * Single source of truth for the canonical ordering of all provider IDs.
+ * Phase 12.2-G5: every site that needs to iterate providers (config screens,
+ * keychain priority order, router fallback, adapter registry) MUST import
+ * this constant instead of duplicating the literal array. Filter/slice
+ * variations are allowed (e.g. `ALL_PROVIDER_IDS.filter(p => p !== "xai")`).
+ */
+export const ALL_PROVIDER_IDS = [
+  "anthropic",
+  "openai",
+  "google",
+  "deepseek",
+  "siliconflow",
+  "xai",
+  "ollama",
+] as const satisfies readonly ProviderId[];
+
+/** Convenience iterator over the canonical provider list. */
+export function iterProviders(): readonly ProviderId[] {
+  return ALL_PROVIDER_IDS;
+}
+
+/**
  * Per-provider configuration passed to adapter factories.
  */
 export interface ProviderConfig {

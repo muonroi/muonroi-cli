@@ -27,6 +27,7 @@
 
 import { createHash } from "node:crypto";
 import type { ModelInfo } from "../types/index.js";
+import { consoleUrlFor } from "./endpoints.js";
 import { stripReasoningForSiliconflow } from "./siliconflow-history.js";
 import type { ProviderId } from "./types.js";
 
@@ -106,6 +107,28 @@ export interface ProviderCapabilities {
    *      openai.promptCacheKey on top of the resolve-time bits.
    */
   buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined;
+  /**
+   * URL to the provider's signup / console page where the user can issue an
+   * API key. Shown by the wizard and by the no-key error messages in
+   * src/index.ts. Phase 12.2-G5: replaces inlined `consoleUrlFor("anthropic")`
+   * literals.
+   */
+  consoleSignupURL(): string;
+  /**
+   * Describes how this provider reports prompt-cache reads in the AI SDK
+   * `usage` object. `readField` is the property name (`cachedInputTokens` for
+   * most providers, `promptCacheHitTokens` for DeepSeek-shaped APIs).
+   * `creationSupported` is true only when the provider also emits cache
+   * creation tokens (currently anthropic only — see C1 in cost-forensics).
+   */
+  cacheMetricLayout(): { readField: string; creationSupported: boolean };
+  /**
+   * Style of the system-prompt the orchestrator builds for this provider.
+   * `"anthropic"` keeps the native tools section; `"openai"` and `"generic"`
+   * strip the tools section and append the NON_ANTHROPIC_TOOL_PREAMBLE so
+   * non-Anthropic tokenizers handle tool routing the same way.
+   */
+  systemPromptStyle(): "anthropic" | "openai" | "generic";
 }
 
 /**
@@ -136,6 +159,15 @@ class ReliableProviderCapabilities implements ProviderCapabilities {
   }
   buildProviderOptions(_ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
     return undefined;
+  }
+  consoleSignupURL(): string {
+    return "https://console.anthropic.com/settings/keys";
+  }
+  cacheMetricLayout(): { readField: string; creationSupported: boolean } {
+    return { readField: "cachedInputTokens", creationSupported: false };
+  }
+  systemPromptStyle(): "anthropic" | "openai" | "generic" {
+    return "generic";
   }
 }
 
@@ -168,6 +200,15 @@ class AnthropicProviderCapabilities extends ReliableProviderCapabilities {
     }
     return undefined;
   }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("anthropic");
+  }
+  override cacheMetricLayout(): { readField: string; creationSupported: boolean } {
+    return { readField: "cachedInputTokens", creationSupported: true };
+  }
+  override systemPromptStyle(): "anthropic" | "openai" | "generic" {
+    return "anthropic";
+  }
 }
 
 /**
@@ -192,6 +233,12 @@ class OpenAIProviderCapabilities extends ReliableProviderCapabilities {
     }
     return Object.keys(openai).length > 0 ? { openai } : undefined;
   }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("openai");
+  }
+  override systemPromptStyle(): "anthropic" | "openai" | "generic" {
+    return "openai";
+  }
 }
 
 /**
@@ -204,6 +251,9 @@ class XAIProviderCapabilities extends ReliableProviderCapabilities {
       return { xai: { reasoningEffort: ctx.reasoningEffort ?? m.defaultReasoningEffort ?? "medium" } };
     }
     return undefined;
+  }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("xai");
   }
 }
 
@@ -224,6 +274,14 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
     if (taskType === "general") return false;
     return true;
   }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("deepseek");
+  }
+  override cacheMetricLayout(): { readField: string; creationSupported: boolean } {
+    // DeepSeek emits cache reads only — never cache_creation_tokens (see C1
+    // in src/cli/cost-forensics.ts).
+    return { readField: "promptCacheHitTokens", creationSupported: false };
+  }
 }
 
 /**
@@ -237,6 +295,11 @@ class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
   override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
     return stripReasoningForSiliconflow(messages);
   }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("siliconflow");
+  }
+  // cacheMetricLayout inherits from DeepSeek (promptCacheHitTokens) — SF
+  // routes share the OpenAI-compatible SDK with deepseek's cache shape.
 }
 
 /**
@@ -249,12 +312,24 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
     if (taskType === "general") return false;
     return true;
   }
+  override consoleSignupURL(): string {
+    return consoleUrlFor("ollama");
+  }
+}
+
+/**
+ * Google Gemini — defaults are reliable; only the console URL differs.
+ */
+class GoogleProviderCapabilities extends ReliableProviderCapabilities {
+  override consoleSignupURL(): string {
+    return consoleUrlFor("google");
+  }
 }
 
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   anthropic: new AnthropicProviderCapabilities(),
   openai: new OpenAIProviderCapabilities(),
-  google: new ReliableProviderCapabilities(),
+  google: new GoogleProviderCapabilities(),
   xai: new XAIProviderCapabilities(),
   deepseek: new DeepSeekProviderCapabilities(),
   siliconflow: new SiliconflowProviderCapabilities(),

@@ -1,4 +1,6 @@
 import { getModelInfo } from "../models/registry";
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
 import { loadCustomInstructions } from "../utils/instructions";
 import {
@@ -249,7 +251,11 @@ export function buildSystemPromptParts(
   const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
 
   let modePrompt = MODE_PROMPTS[mode];
-  if (providerId && providerId !== "anthropic") {
+  // Phase 12.2-G5: defer the "is this an anthropic-style prompt or not?"
+  // decision to the provider capability. Default (no providerId) keeps the
+  // pre-G5 behaviour by treating the prompt as anthropic-native.
+  const promptStyle = providerId ? getProviderCapabilities(providerId as ProviderId).systemPromptStyle() : "anthropic";
+  if (promptStyle !== "anthropic") {
     modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
   }
 

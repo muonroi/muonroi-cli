@@ -1,5 +1,6 @@
 import { getModelsForProvider } from "../../models/registry.js";
 import type { ProviderId } from "../../providers/types.js";
+import { ALL_PROVIDER_IDS } from "../../providers/types.js";
 import { isModelDisabled, setModelDisabled } from "../../utils/settings.js";
 import { A, captureKey, divider, enterRawMode } from "./tui.js";
 
@@ -11,7 +12,7 @@ interface ModelRow {
   enabled: boolean;
 }
 
-const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"];
+const ALL_PROVIDERS: readonly ProviderId[] = ALL_PROVIDER_IDS;
 
 function loadRows(): ModelRow[] {
   const rows: ModelRow[] = [];

@@ -9,6 +9,8 @@
  * after the cumulative cap kicks in.
  */
 
+import { getProviderCapabilities } from "../providers/capabilities.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import { getDatabase } from "../storage/db.js";
 
 export interface CostForensicsRow {
@@ -219,16 +221,22 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
       `some 'message' events have NULL message_seq — Phase A5 message write-ahead bypassed (check persistMessageWriteAhead wiring)`,
     );
   }
-  // C1 acceptance check: only count DeepSeek-route events. Earlier versions
-  // fired whenever ANY event in the session was deepseek (council/compaction
-  // side-calls could trigger the warning on otherwise-pure OAuth sessions).
-  // Now we scope the check to deepseek events only and require both:
-  //   - at least 50k input tokens went through the deepseek route, AND
-  //   - those deepseek events sum to zero cache_creation_tokens.
-  const deepseekEvents = summary.events.filter((e) => e.model.startsWith("deepseek"));
-  if (deepseekEvents.length > 0) {
-    const deepseekInput = deepseekEvents.reduce((acc, e) => acc + (e.inputTokens ?? 0), 0);
-    const deepseekCacheCreate = deepseekEvents.reduce((acc, e) => acc + (e.cacheCreationTokens ?? 0), 0);
+  // C1 acceptance check: only count DeepSeek-cache-layout events. Earlier
+  // versions fired whenever ANY event in the session was deepseek
+  // (council/compaction side-calls could trigger the warning on otherwise-pure
+  // OAuth sessions). Now we scope the check to providers whose cache metric
+  // layout matches DeepSeek's (`promptCacheHitTokens` read field, no
+  // creation_tokens emitted) — currently deepseek + siliconflow.
+  // Phase 12.2-G5: replaces literal `model.startsWith("deepseek")` with
+  // capability-driven detection so adding a new DeepSeek-shaped provider
+  // wires through automatically.
+  const deepseekCacheLayoutEvents = summary.events.filter((e) => {
+    const provider = detectProviderForModel(e.model);
+    return getProviderCapabilities(provider).cacheMetricLayout().readField === "promptCacheHitTokens";
+  });
+  if (deepseekCacheLayoutEvents.length > 0) {
+    const deepseekInput = deepseekCacheLayoutEvents.reduce((acc, e) => acc + (e.inputTokens ?? 0), 0);
+    const deepseekCacheCreate = deepseekCacheLayoutEvents.reduce((acc, e) => acc + (e.cacheCreationTokens ?? 0), 0);
     if (deepseekInput > 50_000 && deepseekCacheCreate === 0) {
       anomalies.push(
         `deepseek route has zero cache_creation_tokens across ${formatNum(deepseekInput)} deepseek input tokens — DeepSeek does not emit cache_creation (cache reads only); if this fires on a non-deepseek-dominant session, ignore`,
