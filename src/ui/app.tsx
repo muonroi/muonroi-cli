@@ -7,6 +7,7 @@ import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deliberateCompact } from "../flow/compaction/index.js";
+import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -571,14 +572,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return;
       }
 
-      if (e.kind === "ee-timeout") {
-        const source = typeof e.source === "string" ? e.source : "";
-        if (source.startsWith("bb-retrieval")) {
-          const sessionKey = lastBootSessionIdRef.current ?? "__no_session__";
-          if (!eeToastSeenSessionsRef.current.has(sessionKey)) {
-            eeToastSeenSessionsRef.current.add(sessionKey);
-            pushToast("warn", "running without BB context (EE slow or down)");
-          }
+      if (e.kind === "ee-timeout" || e.kind === "ee-error") {
+        const source = typeof e.source === "string" ? e.source : "unknown";
+        const kind = e.kind === "ee-timeout" ? "timeout" : "error";
+        const sessionKey = lastBootSessionIdRef.current ?? "__no_session__";
+        const dedupKey = `${sessionKey}::${source}::${kind}`;
+        if (!eeToastSeenSessionsRef.current.has(dedupKey)) {
+          eeToastSeenSessionsRef.current.add(dedupKey);
+          const text = source.startsWith("bb-retrieval")
+            ? "running without BB context (EE slow or down)"
+            : `EE ${kind}: ${source}`;
+          pushToast("warn", text);
         }
       }
     },
@@ -607,10 +611,24 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
       };
     }
-    // Tap point 2 (no agent-mode): subscribe to a global bus so EE failures
-    // still surface a toast in normal user sessions. logEeFailure reads
-    // __muonroiAgentRuntime — when undefined, no event flows; the warn line
-    // still appears on stderr. No bus to wire here.
+    // Tap point 2 (no agent-mode): install a fallback __muonroiAgentRuntime
+    // stub so logEeFailure (src/utils/ee-logger.ts) can deliver ee-timeout /
+    // ee-error events to the toast subscriber in normal interactive sessions.
+    // Without this stub, EE failures only emit to stderr — the user never
+    // sees a toast.
+    const globals = globalThis as Record<string, unknown>;
+    const existing = globals.__muonroiAgentRuntime;
+    if (existing === undefined) {
+      globals.__muonroiAgentRuntime = { emitEvent: handleHarnessEvent };
+      return () => {
+        if (
+          globals.__muonroiAgentRuntime &&
+          (globals.__muonroiAgentRuntime as { emitEvent?: unknown }).emitEvent === handleHarnessEvent
+        ) {
+          delete globals.__muonroiAgentRuntime;
+        }
+      };
+    }
     return undefined;
   }, [handleHarnessEvent]);
 
@@ -2716,6 +2734,138 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   useEffect(() => {
     processMessageRef.current = processMessage;
   }, [processMessage]);
+
+  // Scaffold-checkpoint integration — wraps initNewProject() so a single helper
+  // serves both submit branches (design-preview + bb-template) and the R-key
+  // retry on the error step. Persists a checkpoint at submitted/done/error to
+  // .muonroi-flow/runs/<runId>/scaffold-checkpoint.json so future restarts can
+  // (eventually) auto-resume. The error catch stamps the form with
+  // errorRetryable=true + replayInputs so R-retry can re-run with no debate.
+  const runScaffoldAttempt = useCallback(
+    async (replayInputs: NonNullable<InitNewFormState["replayInputs"]>) => {
+      const sessionId = agent.getSessionId() ?? undefined;
+      const runId = sessionId ?? `manual-${Date.now()}`;
+      const cwd = process.cwd();
+      setInitNewForm((s) =>
+        s
+          ? {
+              ...s,
+              step: "running",
+              progressMessage: "dotnet new — scaffolding template…",
+              replayInputs,
+              checkpointRunId: runId,
+              errorRetryable: false,
+              resultMessage: null,
+            }
+          : s,
+      );
+      logUIInteraction(sessionId, {
+        subtype: "init_new_submitted",
+        data: {
+          projectName: replayInputs.projectName,
+          feStack: replayInputs.feStack,
+          bbTemplate: replayInputs.bbTemplate?.shortName ?? replayInputs.bbTemplate?.nugetId ?? null,
+          packageCount: replayInputs.eePackages?.length ?? 0,
+        },
+      });
+      await writeScaffoldCheckpoint(cwd, runId, {
+        status: "submitted",
+        inputs: replayInputs,
+        originalPrompt: originalIdealPromptRef.current ?? null,
+      }).catch(() => {});
+
+      try {
+        const result = await initNewProject({
+          projectName: replayInputs.projectName,
+          feStack: replayInputs.feStack,
+          bbTemplate: replayInputs.bbTemplate,
+          eePackages: replayInputs.eePackages,
+          commercial: replayInputs.commercial,
+          onPackageProgress: (info) => {
+            const verb = info.status === "start" ? "Adding" : info.status === "ok" ? "Added" : "Failed";
+            setInitNewForm((s) =>
+              s ? { ...s, progressMessage: `[${info.index}/${info.total}] ${verb} package ${info.pkgId}…` } : s,
+            );
+          },
+        });
+        logUIInteraction(sessionId, {
+          subtype: "init_new_result",
+          data: {
+            outcome: "done",
+            message: `Created: ${result.projectDir}`,
+            usedDotnetTemplate: result.usedDotnetTemplate,
+          },
+        });
+        await writeScaffoldCheckpoint(cwd, runId, {
+          status: "done",
+          inputs: replayInputs,
+          projectDir: result.projectDir,
+          originalPrompt: originalIdealPromptRef.current ?? null,
+        }).catch(() => {});
+
+        const templateName = replayInputs.bbTemplate?.nugetId ?? null;
+        const originalPrompt = originalIdealPromptRef.current;
+        setInitNewForm((s) =>
+          s
+            ? {
+                ...s,
+                step: "done",
+                resultMessage: originalPrompt
+                  ? `Created: ${result.projectDir}`
+                  : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
+                scaffoldedTemplate: templateName ?? undefined,
+                scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
+              }
+            : s,
+        );
+        if (originalPrompt) {
+          setTimeout(() => {
+            try {
+              agent.setCwd(result.projectDir);
+            } catch (_) {}
+            const tplLabel = templateName ?? "bb-template";
+            const continuationPrompt = buildIdealContinuationPrompt({
+              originalPrompt,
+              projectDir: result.projectDir,
+              templateName: tplLabel,
+            });
+            logUIInteraction(sessionId, {
+              subtype: "init_new_resume",
+              data: { projectDir: result.projectDir, templateName: tplLabel, originalPrompt },
+            });
+            originalIdealPromptRef.current = null;
+            setInitNewForm(null);
+            void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
+          }, 500);
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logUIInteraction(sessionId, {
+          subtype: "init_new_result",
+          data: { outcome: "error", message: msg },
+        });
+        await writeScaffoldCheckpoint(cwd, runId, {
+          status: "error",
+          inputs: replayInputs,
+          errorMessage: msg,
+          originalPrompt: originalIdealPromptRef.current ?? null,
+        }).catch(() => {});
+        setInitNewForm((s) =>
+          s
+            ? {
+                ...s,
+                step: "error",
+                resultMessage: msg,
+                errorRetryable: true,
+                replayInputs,
+                checkpointRunId: runId,
+              }
+            : s,
+        );
+      }
+    },
+    [agent],
+  );
   useEffect(
     () =>
       agent.onSubagentStatus((status) => {
@@ -4099,95 +4249,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const projectName = initNewForm.nameInput.trim();
             const commercial = initNewForm.allowCommercial;
-            setInitNewForm((s) =>
-              s ? { ...s, step: "running", progressMessage: "dotnet new — scaffolding template…" } : s,
-            );
-            logUIInteraction(agent.getSessionId() ?? undefined, {
-              subtype: "init_new_submitted",
-              data: {
-                projectName,
-                feStack,
-                bbTemplate: design.template.shortName ?? design.template.nugetId,
-                packageCount: selectedPackages.length,
-              },
-            });
-            initNewProject({
+            const replayInputs = {
               projectName,
               feStack,
               bbTemplate: design.template,
               eePackages: selectedPackages,
               commercial,
-              onPackageProgress: (info) => {
-                const verb = info.status === "start" ? "Adding" : info.status === "ok" ? "Added" : "Failed";
-                setInitNewForm((s) =>
-                  s
-                    ? {
-                        ...s,
-                        progressMessage: `[${info.index}/${info.total}] ${verb} package ${info.pkgId}…`,
-                      }
-                    : s,
-                );
-              },
-            })
-              .then((result) => {
-                logUIInteraction(agent.getSessionId() ?? undefined, {
-                  subtype: "init_new_result",
-                  data: {
-                    outcome: "done",
-                    message: `Created: ${result.projectDir}`,
-                    usedDotnetTemplate: result.usedDotnetTemplate,
-                  },
-                });
-                const templateName = design.template.nugetId;
-                const originalPrompt = originalIdealPromptRef.current;
-                setInitNewForm((s) =>
-                  s
-                    ? {
-                        ...s,
-                        step: "done",
-                        resultMessage: originalPrompt
-                          ? `Created: ${result.projectDir}`
-                          : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
-                        scaffoldedTemplate: templateName,
-                        scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
-                      }
-                    : s,
-                );
-                if (originalPrompt) {
-                  setTimeout(() => {
-                    try {
-                      agent.setCwd(result.projectDir);
-                    } catch (_) {}
-                    const continuationPrompt = buildIdealContinuationPrompt({
-                      originalPrompt,
-                      projectDir: result.projectDir,
-                      templateName,
-                    });
-                    logUIInteraction(agent.getSessionId() ?? undefined, {
-                      subtype: "init_new_resume",
-                      data: { projectDir: result.projectDir, templateName, originalPrompt },
-                    });
-                    originalIdealPromptRef.current = null;
-                    // Clear the init-new form BEFORE handing off to the
-                    // continuation prompt. Otherwise the `if (initNewForm)`
-                    // intercept above (~line 4234) keeps swallowing every
-                    // keystroke once the continuation reaches an interactive
-                    // gate (council preflight card, AskCard discovery, etc.)
-                    // because step="done" has no handler match and falls
-                    // through to the bare `return;` that ends the block.
-                    setInitNewForm(null);
-                    void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
-                  }, 500);
-                }
-              })
-              .catch((err) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                logUIInteraction(agent.getSessionId() ?? undefined, {
-                  subtype: "init_new_result",
-                  data: { outcome: "error", message: msg },
-                });
-                setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
-              });
+            };
+            void runScaffoldAttempt(replayInputs);
             return;
           }
           return;
@@ -4212,78 +4281,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
             const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
             const projectName = initNewForm.nameInput.trim();
-            setInitNewForm((s) =>
-              s ? { ...s, step: "running", progressMessage: "dotnet new — scaffolding template…" } : s,
-            );
-            logUIInteraction(agent.getSessionId() ?? undefined, {
-              subtype: "init_new_submitted",
-              data: {
-                projectName,
-                feStack,
-                bbTemplate: bbTemplate?.shortName ?? bbTemplate?.nugetId ?? null,
-                packageCount: 0,
-              },
-            });
-            initNewProject({ projectName, feStack, bbTemplate })
-              .then((result) => {
-                logUIInteraction(agent.getSessionId() ?? undefined, {
-                  subtype: "init_new_result",
-                  data: {
-                    outcome: "done",
-                    message: `Created: ${result.projectDir}`,
-                    usedDotnetTemplate: result.usedDotnetTemplate,
-                  },
-                });
-                const templateName = bbTemplate?.nugetId ?? null;
-                const originalPrompt = originalIdealPromptRef.current;
-                setInitNewForm((s) =>
-                  s
-                    ? {
-                        ...s,
-                        step: "done",
-                        resultMessage: originalPrompt
-                          ? `Created: ${result.projectDir}`
-                          : `Created: ${result.projectDir}\n(project scaffolded — start a new prompt to continue)`,
-                        scaffoldedTemplate: templateName ?? undefined,
-                        // Coverage derived from usedDotnetTemplate flag
-                        scaffoldedCoverage: result.usedDotnetTemplate ? "full" : "partial",
-                      }
-                    : s,
-                );
-                if (originalPrompt) {
-                  setTimeout(() => {
-                    try {
-                      agent.setCwd(result.projectDir);
-                    } catch (_) {}
-                    const tplLabel = templateName ?? "bb-template";
-                    const continuationPrompt = buildIdealContinuationPrompt({
-                      originalPrompt,
-                      projectDir: result.projectDir,
-                      templateName: tplLabel,
-                    });
-                    logUIInteraction(agent.getSessionId() ?? undefined, {
-                      subtype: "init_new_resume",
-                      data: { projectDir: result.projectDir, templateName: tplLabel, originalPrompt },
-                    });
-                    originalIdealPromptRef.current = null;
-                    void processMessageRef.current(continuationPrompt, "(resuming /ideal in scaffolded project)");
-                  }, 500);
-                }
-              })
-              .catch((err) => {
-                const msg = err instanceof Error ? err.message : String(err);
-                logUIInteraction(agent.getSessionId() ?? undefined, {
-                  subtype: "init_new_result",
-                  data: { outcome: "error", message: msg },
-                });
-                setInitNewForm((s) => (s ? { ...s, step: "error", resultMessage: msg } : s));
-              });
+            const replayInputs = { projectName, feStack, bbTemplate };
+            void runScaffoldAttempt(replayInputs);
             return;
           }
           return;
         }
-        // done / error — any key dismisses. running ignores keys.
-        if (initNewForm.step === "done" || initNewForm.step === "error") {
+        // Error step — R retries with stored inputs (no debate re-run); any
+        // other key dismisses. running ignores keys; done dismisses too.
+        if (initNewForm.step === "error") {
+          if (
+            initNewForm.errorRetryable &&
+            initNewForm.replayInputs &&
+            (key.name === "r" || key.sequence === "r" || key.sequence === "R")
+          ) {
+            void runScaffoldAttempt(initNewForm.replayInputs);
+            return;
+          }
+          setInitNewForm(null);
+          return;
+        }
+        if (initNewForm.step === "done") {
           setInitNewForm(null);
           return;
         }
