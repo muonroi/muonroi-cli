@@ -1,8 +1,6 @@
 // Multi-provider wired — runtime dispatch via providers/runtime.ts.
 
-import { APICallError } from "@ai-sdk/provider";
-import { convertToBase64 } from "@ai-sdk/provider-utils";
-import { generateText, type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { extractSession } from "../ee/extract-session.js";
@@ -41,7 +39,7 @@ import type {
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
 import { buildMcpToolSet } from "../mcp/runtime";
-import { getModelByTier, getModelInfo, getModelsForProvider, normalizeModelId } from "../models/registry.js";
+import { getModelByTier, getModelInfo, normalizeModelId } from "../models/registry.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -58,8 +56,6 @@ import {
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
-  type ProviderFactory,
-  type ResolvedModelRuntime as RuntimeResult,
   resolveModelRuntime as resolveRuntime,
   shouldDropParam,
 } from "../providers/runtime.js";
@@ -93,8 +89,6 @@ import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from 
 import type {
   AgentMode,
   ChatEntry,
-  ModelInfo,
-  Plan,
   SessionInfo,
   SessionSnapshot,
   StreamChunk,
@@ -111,7 +105,6 @@ import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
-import { loadCustomInstructions } from "../utils/instructions";
 import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
@@ -124,9 +117,6 @@ import {
   getModeSpecificModel,
   getRoleModel,
   getRoleModels,
-  getSubAgentBudgetChars,
-  getSubAgentCompactKeepLast,
-  getSubAgentCompactThresholdChars,
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
@@ -141,35 +131,23 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { runSideQuestion, type SideQuestionResult } from "../utils/side-question";
-import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
-import { buildVerifyDetectPrompt, normalizeVerifyRecipe, prepareVerifySandbox } from "../verify/entrypoint";
+import { buildVerifyDetectPrompt, normalizeVerifyRecipe } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
 import {
   type AgentOptions,
-  type BatchChatCompletionRequest,
   type BatchChatCompletionResponse,
-  type BatchChatMessage,
   type BatchClientOptions,
   type BatchFunctionTool,
-  type BatchToolCall,
   COUNCIL_COLOR_BG,
   COUNCIL_COLOR_RESET,
   COUNCIL_ROLE_COLORS,
   type LegacyProvider,
-  type ModelInfoStub,
-  type ProcessMessageError,
-  type ProcessMessageFinishReason,
   type ProcessMessageObserver,
-  type ProcessMessageStepFinish,
-  type ProcessMessageStepStart,
-  type ProcessMessageToolFinish,
-  type ProcessMessageToolStart,
   type ProcessMessageUsage,
   type ResolvedModelRuntime,
 } from "./agent-options";
 import {
   accumulateUsage,
-  asNumber,
   buildAssistantBatchMessage,
   buildBatchChatCompletionRequest,
   buildBatchName,
@@ -180,12 +158,7 @@ import {
   getBatchUsage,
   hasUsage,
   parseToolArgumentsOrRaw,
-  sumDefined,
-  toBase64DataContent,
-  toBatchChatMessages,
   toLocalToolCall,
-  toolOutputToText,
-  toSerializableValue,
 } from "./batch-utils";
 import {
   type CompactionSettings,
@@ -207,18 +180,7 @@ import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { stableCallId } from "./pending-calls.js";
-import {
-  applyModelConstraints,
-  buildSubagentPrompt,
-  buildSystemPrompt,
-  buildSystemPromptParts,
-  COMPUTER_MODEL,
-  findCustomSubagent,
-  formatCustomSubagentsPromptSection,
-  MAX_TOOL_ROUNDS,
-  type SystemPromptParts,
-  VISION_MODEL,
-} from "./prompts";
+import { applyModelConstraints, buildSystemPrompt, buildSystemPromptParts, MAX_TOOL_ROUNDS } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { getReadPathBudgetCap, ReadPathBudget, wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
@@ -236,10 +198,8 @@ import {
   getStepNumber,
   getUsage,
   notifyObserver,
-  parseToolArgs,
   toToolCall,
   toToolResult,
-  truncate,
 } from "./tool-utils";
 
 // ---------------------------------------------------------------------------
@@ -327,13 +287,10 @@ function createTools(
   });
 }
 
-async function buildVisionUserMessages(_prompt: string, _cwd: string, _signal?: AbortSignal): Promise<ModelMessage[]> {
-  // Vision input is an anti-feature per PROJECT.md Out-of-Scope. Always throws.
-  throw new Error("Vision input is not supported in muonroi-cli (anti-feature per PROJECT.md).");
-}
-
 // ---------------------------------------------------------------------------
 // END Plan 00-05 provider implementations
+// (Phase 12.3 — `buildVisionUserMessages` was inlined into StreamRunner;
+// vision is an anti-feature per PROJECT.md Out-of-Scope so the helper is gone.)
 // ---------------------------------------------------------------------------
 
 // ============================================================================
