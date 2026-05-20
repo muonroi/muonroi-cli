@@ -54,7 +54,7 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
-  computePromptCacheKey,
+  buildTurnProviderOptions,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
@@ -4231,8 +4231,13 @@ export class Agent {
           captureToolSchemas(tools);
           let responseToolCalled = false;
 
-          // Build provider options, optionally adding reasoning budget for capable models
-          const baseProviderOpts = runtime.providerOptions ?? {};
+          // G3: providerOptions assembly is owned by the capability layer
+          // (src/providers/capabilities.ts). buildTurnProviderOptions feeds
+          // sessionId in so openai.promptCacheKey is derived per turn.
+          // The task-type-driven anthropic.thinking budget override stays
+          // here because it depends on PIL task context, not provider quirks.
+          // biome-ignore lint/suspicious/noExplicitAny: matches RuntimeResult.providerOptions shape (any) used downstream
+          const baseProviderOpts: any = buildTurnProviderOptions(runtime, { sessionId: this.session?.id }) ?? {};
           const providerOpts = runtime.modelInfo?.reasoning
             ? {
                 ...baseProviderOpts,
@@ -4250,25 +4255,30 @@ export class Agent {
                 },
               }
             : baseProviderOpts;
-          // Use catalog's thinkingType field instead of regex matching
+          // Use catalog's thinkingType field instead of regex matching.
+          // providerOpts is loosely typed (Record<string, unknown>) after the
+          // g1 capability refactor — narrow with a local typed view.
           const thinkingModelInfo = getModelInfo(runtime.modelId);
-          if (providerOpts.anthropic?.thinking?.type === "enabled" && thinkingModelInfo?.thinkingType === "adaptive") {
-            providerOpts.anthropic.thinking = { type: "adaptive" as any };
+          const providerOptsAnyView = providerOpts as {
+            anthropic?: { thinking?: { type?: string } };
+          };
+          if (
+            providerOptsAnyView.anthropic?.thinking?.type === "enabled" &&
+            thinkingModelInfo?.thinkingType === "adaptive"
+          ) {
+            providerOptsAnyView.anthropic.thinking = { type: "adaptive" as unknown as "enabled" };
           }
 
-          // Multi-provider caching: OpenAI stored completions, DeepSeek prefix cache.
-          // Respect an already-set `store` (Codex/ChatGPT backend sets store:false via
-          // OAuth registry defaults); only default to true for api.openai.com path.
+          // Default OpenAI api-key path to store:true (Codex/ChatGPT backend
+          // sets store:false via OAuth registry defaults — respected here).
+          // This is orchestrator policy, not a provider quirk, so it stays
+          // outside the capability layer.
           const turnProvider = runtime.modelInfo?.provider ?? this.providerId;
           if (turnProvider === "openai") {
             const existing = (providerOpts.openai ?? {}) as { store?: boolean; promptCacheKey?: string };
-            // Stable prompt-cache key per session — see computePromptCacheKey
-            // doc in src/providers/runtime.ts for the rationale.
-            const promptCacheKey = existing.promptCacheKey ?? computePromptCacheKey(this.session?.id);
             providerOpts.openai = {
               ...existing,
               store: existing.store ?? true,
-              ...(promptCacheKey ? { promptCacheKey } : {}),
             };
           }
           // Top-level dropParam — shared with sub-agent path via shouldDropParam.

@@ -175,54 +175,27 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
     unsupportedParams = mockGlobals.__muonroiMockUnsupportedParams;
     providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
   } else {
-    // G1 fix: OpenAI reasoning models (gpt-5.x, o1, o3, o4) require the
-    // Responses API even on the API-key path. The chat-completions endpoint
-    // accepts the request but returns an empty assistant message, which AI
-    // SDK then surfaces as "AI_NoOutputGeneratedError" → "Task failed: No
-    // output generated". The OAuth path already routes through .responses()
-    // when the factory is constructed (see createProviderFactory), but the
-    // API-key path used plain chat completions.
-    const needsResponsesApi =
-      modelInfo?.responsesOnly === true || (modelInfo?.provider === "openai" && modelInfo?.reasoning === true);
+    // G3: Responses-API routing is now a capability decision. OpenAI reasoning
+    // models (gpt-5.x, o1, o3, o4) return false from `usesResponsesAPI` until
+    // OpenAIProviderCapabilities promotes both responsesOnly=true AND
+    // reasoning=true. Other providers fall through to factory(canonicalId).
+    const caps = getProviderCapabilities((modelInfo?.provider ?? "anthropic") as ProviderId);
+    const needsResponsesApi = caps.usesResponsesAPI(modelInfo);
     model = needsResponsesApi && factory.responses ? factory.responses(canonicalId) : factory(canonicalId);
     unsupportedParams = factory.unsupportedParams;
     providerLevelDefaults = factory.defaultProviderOptions;
   }
 
-  let providerOptions: Record<string, unknown> | undefined;
-
-  // `thinking` is an Anthropic-specific provider option. Setting it on
-  // non-Anthropic models was dead-code (AI SDK silently strips wrong-provider
-  // keys) but masked the actual issue when debugging.
-  if (modelInfo?.provider === "anthropic") {
-    if (modelInfo.thinkingType === "adaptive") {
-      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
-    } else if (modelInfo.thinkingType === "enabled") {
-      providerOptions = { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
-    }
-  }
-
+  // G3: assemble providerOptions via the capability layer. No sessionId at
+  // resolve time — only the stable bits (anthropic.thinking, openai/xai
+  // reasoningEffort) come from here. Per-turn fields like
+  // openai.promptCacheKey are layered in by `buildTurnProviderOptions`.
+  const caps = getProviderCapabilities((modelInfo?.provider ?? "anthropic") as ProviderId);
   const userEffort = getReasoningEffortForModel(modelId);
-
-  if (modelInfo?.provider === "xai" && modelInfo.supportsReasoningEffort) {
-    providerOptions = {
-      ...providerOptions,
-      xai: { reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium" },
-    };
-  }
-
-  // Forward reasoning effort generically for any provider whose catalog entry
-  // declares `supportsReasoningEffort`. AI SDK accepts "low"|"medium"|"high"|"xhigh"
-  // for openai (matching Codex CLI's UI labels) and similar for other providers.
-  if (modelInfo?.provider === "openai" && modelInfo.supportsReasoningEffort) {
-    providerOptions = {
-      ...providerOptions,
-      openai: {
-        ...(providerOptions?.openai as Record<string, unknown> | undefined),
-        reasoningEffort: userEffort ?? modelInfo.defaultReasoningEffort ?? "medium",
-      },
-    };
-  }
+  let providerOptions: Record<string, unknown> | undefined = caps.buildProviderOptions({
+    model: modelInfo,
+    reasoningEffort: userEffort,
+  });
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject
   // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
@@ -258,6 +231,61 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
 export function computePromptCacheKey(sessionId: string | undefined): string | undefined {
   if (!sessionId) return undefined;
   return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/**
+ * G3: Build providerOptions with full per-turn context (e.g. sessionId for
+ * openai.promptCacheKey). Called by orchestrator per-turn instead of at
+ * resolve time, because sessionId isn't known when the model is first
+ * resolved. Merges:
+ *   1. Capability output (anthropic.thinking, openai/xai reasoningEffort,
+ *      openai.promptCacheKey) — driven by `caps.buildProviderOptions`.
+ *   2. Factory-level provider defaults (e.g. OAuth `store: false` for
+ *      ChatGPT Codex backend) — same merge precedence as resolveModelRuntime.
+ *
+ * The merge order mirrors resolveModelRuntime: provider-level defaults are
+ * applied UNDER capability output (`...defaults, ...capabilityKeys`) so
+ * capability values win on conflict.
+ *
+ * Returns undefined when neither source produced options.
+ */
+export function buildTurnProviderOptions(
+  runtime: ResolvedModelRuntime,
+  ctx: { sessionId?: string },
+): Record<string, unknown> | undefined {
+  const provider = runtime.modelInfo?.provider as ProviderId | undefined;
+  const caps = getProviderCapabilities(provider ?? "anthropic");
+  const userEffort = getReasoningEffortForModel(runtime.modelId);
+  const fromCaps = caps.buildProviderOptions({
+    model: runtime.modelInfo,
+    sessionId: ctx.sessionId,
+    reasoningEffort: userEffort,
+  });
+
+  // No factory-level defaults captured on ResolvedModelRuntime — at resolve
+  // time those were already merged into `runtime.providerOptions`. To preserve
+  // them per-turn we re-merge over the capability output using the resolved
+  // values as the baseline for the same provider key.
+  let merged: Record<string, unknown> | undefined = fromCaps;
+  if (provider && runtime.providerOptions) {
+    const resolved = runtime.providerOptions as Record<string, unknown>;
+    const resolvedForProvider = resolved[provider] as Record<string, unknown> | undefined;
+    const capsForProvider = (fromCaps?.[provider] as Record<string, unknown> | undefined) ?? undefined;
+    if (resolvedForProvider || capsForProvider) {
+      merged = {
+        ...resolved,
+        ...fromCaps,
+        [provider]: {
+          ...(resolvedForProvider ?? {}),
+          ...(capsForProvider ?? {}),
+        },
+      };
+    } else {
+      merged = { ...resolved, ...fromCaps };
+    }
+  }
+
+  return merged;
 }
 
 /**

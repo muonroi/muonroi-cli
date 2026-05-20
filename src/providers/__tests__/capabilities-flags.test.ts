@@ -89,13 +89,13 @@ describe("ProviderCapabilities — G1 flag methods", () => {
       expect(caps.usesResponsesAPI(undefined)).toBe(false);
     });
 
-    it("G1 NOTE: reasoning-only openai model returns false (logic lives in runtime.ts until G3/G4)", () => {
-      // OpenAI reasoning routing (`provider === "openai" && reasoning === true`)
-      // is handled in src/providers/runtime.ts:185 and is NOT migrated to
-      // capabilities in G1. This test pins the current contract.
+    it("G3 promotion: reasoning-only openai model returns true (migrated from runtime.ts)", () => {
+      // G3: OpenAIProviderCapabilities.usesResponsesAPI now returns true when
+      // `responsesOnly === true` OR `reasoning === true`. Prior to G3 the
+      // `reasoning === true` branch lived inline in runtime.ts:185.
       const caps = getProviderCapabilities("openai");
       const model = baseModel({ id: "gpt-5", reasoning: true /* no responsesOnly */ });
-      expect(caps.usesResponsesAPI(model)).toBe(false);
+      expect(caps.usesResponsesAPI(model)).toBe(true);
     });
   });
 

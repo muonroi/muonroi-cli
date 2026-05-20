@@ -25,9 +25,27 @@
  *   3. Add the ProviderId to src/providers/types.ts if not already present.
  */
 
+import { createHash } from "node:crypto";
 import type { ModelInfo } from "../types/index.js";
 import { stripReasoningForSiliconflow } from "./siliconflow-history.js";
 import type { ProviderId } from "./types.js";
+
+/**
+ * Context passed to `buildProviderOptions`. Each provider picks the fields it
+ * needs (anthropic.thinking budget is model-only; openai.promptCacheKey wants
+ * `sessionId`; reasoningEffort is the user-resolved value or undefined).
+ */
+export interface BuildProviderOptionsCtx {
+  model: ModelInfo | undefined;
+  /**
+   * Session id used to derive a stable OpenAI promptCacheKey. Omitted at
+   * `resolveModelRuntime` time (no session known yet) and supplied later by
+   * `buildTurnProviderOptions` in runtime.ts.
+   */
+  sessionId?: string;
+  /** Resolved reasoning effort from user settings (overrides model default). */
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+}
 
 /**
  * The contract every provider exposes for capability queries.
@@ -74,6 +92,20 @@ export interface ProviderCapabilities {
    * `reasoning_content` field SiliconFlow expects.
    */
   sanitizeHistory<T>(messages: readonly T[]): readonly T[];
+  /**
+   * Build provider-specific options object (AI SDK `providerOptions` shape).
+   * Returns undefined when no options needed. Each provider handles its own
+   * keys (anthropic.thinking, openai.promptCacheKey/reasoningEffort,
+   * xai.reasoningEffort, etc.). Centralizes the branch logic that used to
+   * live inline in resolveModelRuntime + orchestrator.processMessage.
+   *
+   * Phase 12.2-G3 — invoked twice:
+   *   1. At resolve time without sessionId → produces stable bits (thinking,
+   *      reasoningEffort) attached to ResolvedModelRuntime.providerOptions.
+   *   2. Per turn via `buildTurnProviderOptions` with sessionId → adds
+   *      openai.promptCacheKey on top of the resolve-time bits.
+   */
+  buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined;
 }
 
 /**
@@ -101,6 +133,77 @@ class ReliableProviderCapabilities implements ProviderCapabilities {
   }
   sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
     return messages;
+  }
+  buildProviderOptions(_ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    return undefined;
+  }
+}
+
+/**
+ * F1: derive a stable OpenAI prompt-cache key from the session id.
+ * Identical hash logic as runtime.ts:computePromptCacheKey — kept here to
+ * avoid a runtime->capabilities import cycle. Both functions MUST stay in
+ * sync (the F1 cost-leak spec is the canary).
+ */
+function computePromptCacheKey(sessionId: string | undefined): string | undefined {
+  if (!sessionId) return undefined;
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/**
+ * Anthropic thinking is a provider-specific option. Budget tokens depend on
+ * the model's catalog flag (`adaptive` → larger budget; `enabled` → smaller).
+ * Note: the orchestrator further mutates this object per task type at the
+ * call site (see processMessage taskType branch); that override remains in
+ * the orchestrator because it depends on PIL task-type context.
+ */
+class AnthropicProviderCapabilities extends ReliableProviderCapabilities {
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    const m = ctx.model;
+    if (m?.thinkingType === "adaptive") {
+      return { anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } };
+    }
+    if (m?.thinkingType === "enabled") {
+      return { anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } };
+    }
+    return undefined;
+  }
+}
+
+/**
+ * OpenAI: reasoning models require the Responses API (was hardcoded in
+ * runtime.ts:185 — now centralized). Provider options merge reasoningEffort
+ * (resolve-time, no session needed) with promptCacheKey (per-turn, derived
+ * from sessionId — see F1 in src/providers/runtime.ts).
+ */
+class OpenAIProviderCapabilities extends ReliableProviderCapabilities {
+  override usesResponsesAPI(model: ModelInfo | undefined): boolean {
+    return model?.responsesOnly === true || model?.reasoning === true;
+  }
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    const m = ctx.model;
+    const openai: Record<string, unknown> = {};
+    if (m?.supportsReasoningEffort) {
+      openai.reasoningEffort = ctx.reasoningEffort ?? m.defaultReasoningEffort ?? "medium";
+    }
+    if (ctx.sessionId) {
+      const key = computePromptCacheKey(ctx.sessionId);
+      if (key) openai.promptCacheKey = key;
+    }
+    return Object.keys(openai).length > 0 ? { openai } : undefined;
+  }
+}
+
+/**
+ * xAI Grok supports OpenAI-style reasoning effort via the `xai` namespace.
+ */
+class XAIProviderCapabilities extends ReliableProviderCapabilities {
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    const m = ctx.model;
+    if (m?.supportsReasoningEffort) {
+      return { xai: { reasoningEffort: ctx.reasoningEffort ?? m.defaultReasoningEffort ?? "medium" } };
+    }
+    return undefined;
   }
 }
 
@@ -149,10 +252,10 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
 }
 
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
-  anthropic: new ReliableProviderCapabilities(),
-  openai: new ReliableProviderCapabilities(),
+  anthropic: new AnthropicProviderCapabilities(),
+  openai: new OpenAIProviderCapabilities(),
   google: new ReliableProviderCapabilities(),
-  xai: new ReliableProviderCapabilities(),
+  xai: new XAIProviderCapabilities(),
   deepseek: new DeepSeekProviderCapabilities(),
   siliconflow: new SiliconflowProviderCapabilities(),
   ollama: new OllamaProviderCapabilities(),
