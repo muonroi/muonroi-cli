@@ -13,6 +13,7 @@ import { createOllamaAdapter } from "./ollama.js";
 import { createOpenAIAdapter } from "./openai.js";
 import { createOpenAICompatibleAdapter } from "./openai-compatible.js";
 import type { Adapter, AdapterRequest, ProviderConfig, ProviderId, ProviderStream } from "./types.js";
+import { ALL_PROVIDER_IDS } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Mock-LLM provider hook (Task 3.1)
@@ -104,13 +105,7 @@ export async function createAdapterAsync(id: ProviderId, config: ProviderConfig)
 
 /**
  * All supported provider IDs in priority order.
+ * Phase 12.2-G5: re-export from types.ts (single source of truth) so existing
+ * importers of `./adapter` continue to work unchanged.
  */
-export const ALL_PROVIDER_IDS: ReadonlyArray<ProviderId> = [
-  "anthropic",
-  "openai",
-  "google",
-  "deepseek",
-  "siliconflow",
-  "xai",
-  "ollama",
-];
+export { ALL_PROVIDER_IDS };

@@ -12,6 +12,7 @@ import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/re
 import { taskTypeToRole } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
@@ -114,7 +115,7 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
 
 // ─── Disabled-provider guard: fallback providers ────────────────────────────
 
-const FALLBACK_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"];
+const FALLBACK_PROVIDERS: readonly ProviderId[] = ALL_PROVIDER_IDS;
 
 /**
  * When the configured default provider is disabled by user settings, find

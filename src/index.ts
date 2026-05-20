@@ -34,7 +34,7 @@ import { createAbortContext } from "./orchestrator/abort.js";
 import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
-import { consoleUrlFor } from "./providers/endpoints.js";
+import { getProviderCapabilities } from "./providers/capabilities.js";
 import {
   KEYCHAIN_PROVIDER_IDS,
   listStoredProviders,
@@ -120,7 +120,7 @@ setRenderSink((lineOrChunk) => {
  * Output goes to stderr so it doesn't pollute piped stdout.
  * Returns the trimmed key or null if user cancels / stdin is not a TTY.
  */
-// Provider console URLs are sourced from providers/endpoints.ts via consoleUrlFor().
+// Provider console URLs are sourced from providers/capabilities.ts via ProviderCapabilities.consoleSignupURL().
 
 /**
  * Try to find an API key for the model the CLI is about to run with.
@@ -198,7 +198,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
     const providers = KEYCHAIN_PROVIDER_IDS;
     process.stderr.write("Pick a provider to set up first (more can be added later via 'muonroi-cli keys set'):\n\n");
     providers.forEach((p, i) => {
-      process.stderr.write(`  ${i + 1}. ${p.padEnd(12)}  ${consoleUrlFor(p)}\n`);
+      process.stderr.write(`  ${i + 1}. ${p.padEnd(12)}  ${getProviderCapabilities(p).consoleSignupURL()}\n`);
     });
     process.stderr.write("\n");
 
@@ -216,7 +216,7 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
       return null;
     }
 
-    process.stderr.write(`\nGet a key here: ${consoleUrlFor(provider)}\n`);
+    process.stderr.write(`\nGet a key here: ${getProviderCapabilities(provider).consoleSignupURL()}\n`);
     const raw = await ask(`Paste your ${provider} API key: `);
 
     const trimmed = raw.trim();
@@ -1006,7 +1006,7 @@ program
             "Update your key:\n" +
             "  muonroi-cli -k YOUR_NEW_KEY\n" +
             "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
-            `\nGet a key at: ${consoleUrlFor("anthropic")}`,
+            `\nGet a key at: ${getProviderCapabilities("anthropic").consoleSignupURL()}`,
         );
       } else {
         console.error(
@@ -1014,7 +1014,7 @@ program
             "Set your key:\n" +
             "  muonroi-cli -k YOUR_API_KEY\n" +
             "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
-            `\nGet a key at: ${consoleUrlFor("anthropic")}`,
+            `\nGet a key at: ${getProviderCapabilities("anthropic").consoleSignupURL()}`,
         );
       }
       process.exit(1);

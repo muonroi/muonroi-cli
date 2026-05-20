@@ -18,6 +18,7 @@ import {
 } from "../models/registry.js";
 import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
+import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
@@ -1024,9 +1025,7 @@ export function getDisabledProviders(): ProviderId[] {
   const raw = loadUserSettings().disabledProviders;
   if (!Array.isArray(raw)) return [];
   return raw.filter(
-    (p): p is ProviderId =>
-      typeof p === "string" &&
-      ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"].includes(p),
+    (p): p is ProviderId => typeof p === "string" && (ALL_PROVIDER_IDS as readonly string[]).includes(p),
   );
 }
 

@@ -11,6 +11,7 @@
 
 import { redactor } from "../utils/redactor.js";
 import type { ProviderId } from "./types.js";
+import { ALL_PROVIDER_IDS } from "./types.js";
 
 const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
   anthropic: "anthropic",
@@ -72,7 +73,12 @@ async function loadKeytar(): Promise<KeytarLike | null> {
   }
 }
 
-export const KEYCHAIN_PROVIDER_IDS: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai"];
+/**
+ * Providers that store an API key in the OS keychain.
+ * Phase 12.2-G5: derived from `ALL_PROVIDER_IDS` by excluding ollama
+ * (keyless local server). Preserves the original ordering.
+ */
+export const KEYCHAIN_PROVIDER_IDS: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "ollama");
 
 /**
  * Store a provider API key in the OS keychain. Returns true on success.
@@ -170,7 +176,7 @@ export async function loadKeyForProvider(provider: ProviderId): Promise<string> 
  * because it is keyless. Order is stable for UI rendering.
  */
 export async function getConfiguredProviders(): Promise<ProviderId[]> {
-  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"];
+  const order: readonly ProviderId[] = ALL_PROVIDER_IDS;
   const stored = new Set(await listStoredProviders());
 
   let settingsProviders: Record<string, { apiKey?: string }> = {};
@@ -245,7 +251,10 @@ export async function getOAuthTokens(provider: ProviderId): Promise<import("./au
  * Returns null if no provider has a key (unlikely — ollama is keyless fallback).
  */
 export async function firstAvailableProvider(): Promise<ProviderId | null> {
-  const order: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "ollama"];
+  // firstAvailableProvider intentionally excludes xai: priority list for legacy
+  // fallback paths that pre-date xai integration. Derived from ALL_PROVIDER_IDS
+  // to keep ordering in sync if new providers are added.
+  const order: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "xai");
   for (const p of order) {
     try {
       await loadKeyForProvider(p);
