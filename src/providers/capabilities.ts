@@ -25,6 +25,7 @@
  *   3. Add the ProviderId to src/providers/types.ts if not already present.
  */
 
+import type { ModelInfo } from "../types/index.js";
 import type { ProviderId } from "./types.js";
 
 /**
@@ -40,6 +41,29 @@ export interface ProviderCapabilities {
    * tool and rely on plain-text output rules instead.
    */
   supportsResponseTool(taskType: string): boolean;
+  /**
+   * True when the model accepts client-supplied tool schemas in the request.
+   * False forces the orchestrator to drop tools (empty ToolSet) and rely on
+   * plain-text output for that model. Mirrors the catalog flag
+   * `ModelInfo.supportsClientTools` (default true unless explicitly false).
+   */
+  supportsClientTools(model: ModelInfo | undefined): boolean;
+  /**
+   * True when the model can only be invoked via the provider's "responses"
+   * endpoint (vs chat-completions). Mirrors `ModelInfo.responsesOnly`.
+   * G1 NOTE: OpenAI reasoning routing (provider === "openai" && reasoning)
+   * lives in runtime.ts for now and is migrated in a later phase.
+   */
+  usesResponsesAPI(model: ModelInfo | undefined): boolean;
+  /**
+   * True when the provider accepts the given top-level streamText param for
+   * this model. False signals the orchestrator (and `shouldDropParam`) to
+   * omit the field from the request body.
+   *   - "maxOutputTokens" mirrors `ModelInfo.supportsMaxOutputTokens`.
+   *   - "temperature" / "topP" return false for reasoning models, which
+   *     silently ignore them on the provider side.
+   */
+  acceptsParam(param: "maxOutputTokens" | "temperature" | "topP", model: ModelInfo | undefined): boolean;
 }
 
 /**
@@ -48,6 +72,21 @@ export interface ProviderCapabilities {
  */
 class ReliableProviderCapabilities implements ProviderCapabilities {
   supportsResponseTool(_taskType: string): boolean {
+    return true;
+  }
+  supportsClientTools(model: ModelInfo | undefined): boolean {
+    return model?.supportsClientTools !== false;
+  }
+  usesResponsesAPI(model: ModelInfo | undefined): boolean {
+    return model?.responsesOnly === true;
+  }
+  acceptsParam(param: "maxOutputTokens" | "temperature" | "topP", model: ModelInfo | undefined): boolean {
+    if (param === "maxOutputTokens") {
+      return model?.supportsMaxOutputTokens !== false;
+    }
+    if (param === "temperature" || param === "topP") {
+      return model?.reasoning !== true;
+    }
     return true;
   }
 }

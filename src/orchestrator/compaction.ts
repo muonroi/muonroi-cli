@@ -1,4 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
+import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
 import { containsEncryptedReasoning } from "./reasoning";
@@ -529,6 +530,7 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(provider, modelId);
+  const compactCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
   const result = await generateText({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
@@ -536,7 +538,7 @@ async function summarizeConversation(
     abortSignal: signal,
     maxRetries: 0,
     temperature: 0.2,
-    ...(runtime.modelInfo?.supportsMaxOutputTokens === false
+    ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
       ? {}
       : { maxOutputTokens: Math.min(COMPACTION_MAX_OUTPUT_TOKENS, Math.max(512, Math.floor(reserveTokens * 0.8))) }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
