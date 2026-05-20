@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { AgentModeRuntime } from "@muonroi/agent-harness-opentui";
 import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-harness-opentui";
-import type { KeyBinding, KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
+import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
@@ -20,7 +20,7 @@ import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
 import { logUIInteraction } from "../storage/index.js";
-import type { ScheduleDaemonStatus, StoredSchedule } from "../tools/schedule";
+import type { StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
   ChatEntry,
@@ -29,8 +29,6 @@ import type {
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilStatusData,
-  FileDiff,
-  ModelInfo,
   Plan,
   PlanQuestion,
   ReasoningEffort,
@@ -47,8 +45,6 @@ import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/hos
 import {
   type CustomSubagentConfig,
   getApiKey,
-  getDisabledModels,
-  getDisabledProviders,
   getTelegramBotToken,
   isModelDisabled,
   isReservedSubagentName,
@@ -58,7 +54,6 @@ import {
   loadValidSubAgents,
   type McpRemoteTransport,
   type McpServerConfig,
-  type PaymentChain,
   type PaymentSettings,
   type SandboxMode,
   type SandboxSettings,
@@ -91,7 +86,6 @@ import { CouncilMessageBubble } from "./components/council-message-bubble.js";
 import { CouncilPhaseTimeline, upsertPhase } from "./components/council-phase-timeline.js";
 import { CouncilPlaceholderBubble } from "./components/council-placeholder-bubble.js";
 import {
-  type CouncilCardKey,
   type CouncilCardState,
   CouncilQuestionCard,
   initialCardState,
@@ -99,7 +93,6 @@ import {
 } from "./components/council-question-card.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
-import { type DiffRow, DiffView, parsePatch, ReadFilePreviewView, renderHighlighted } from "./components/diff-view.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
 import { HeroLogo } from "./components/hero-logo.js";
 import {
@@ -109,8 +102,6 @@ import {
   type InitNewFormState,
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
-import { formatLspSeverity, LspDiagnosticsView, LspResultView } from "./components/lsp-views.js";
-import { MediaAutoOpenView, MediaToolResultView, openMediaFile } from "./components/media-views.js";
 import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
 import {
   initialPointToExistingFormState,
@@ -119,26 +110,18 @@ import {
 } from "./components/point-to-existing-form-card.js";
 import { PromptBox } from "./components/prompt-box.js";
 import { useRolePalette } from "./components/role-palette.js";
-import { SuggestionOverlay } from "./components/SuggestionOverlay.js";
 import { SessionHeader } from "./components/session-header.js";
 import { Toast, type ToastLevel } from "./components/Toast.js";
 import {
-  BackgroundProcessLine,
-  DelegationListView,
-  DelegationResultView,
   DelegationTaskLine,
   InlineTool,
-  LoadingSpinner,
-  ProcessLogsView,
-  parseDelegationList,
   ShimmerText,
   SubagentActivity,
   SubagentTaskLine,
-  TaskResultView,
-  ToolTextOutputView,
 } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
-import { type TypeaheadState, useTypeahead } from "./hooks/useTypeahead.js";
+import { useModelPicker } from "./hooks/use-model-picker.js";
+import { useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
 import { createEmptyMcpEditorDraft, type McpEditorDraft, type McpEditorField } from "./mcp-modal-types";
@@ -148,21 +131,14 @@ import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
 import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
-import {
-  formatPlanAnswers,
-  initialPlanQuestionsState,
-  PlanQuestionsPanel,
-  type PlanQuestionsState,
-  PlanView,
-} from "./plan";
+import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { SLASH_MENU_ITEMS, type SlashMenuItem } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
-import { detectLang } from "./syntax-highlight.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
-import { dark, type Theme } from "./theme";
+import { dark } from "./theme";
 import "./slash/route.js";
 import "./slash/optimize.js";
 import "./slash/discuss.js";
@@ -178,29 +154,20 @@ import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
 import "./slash/export.js";
-import type { Row, Star } from "./constants.js";
 import {
   CONNECT_CHANNELS,
   getSandboxVisibleRows,
-  HERO_ROWS,
-  LOADING_SPINNER_FRAMES,
   MCP_REMOTE_FIELDS,
   MCP_STDIO_FIELDS,
-  PROMPT_LOADING_FRAMES,
-  SANDBOX_ROWS,
-  STAR_PALETTE,
   WALLET_ROWS,
 } from "./constants.js";
 import type {
   ActiveTurnState,
   AppProps,
-  ContextStats,
   FileMentionBlock,
   PasteBlock,
   QueuedMessage,
-  SandboxRow,
   WalletDisplayInfo,
-  WalletRow,
 } from "./types.js";
 
 export type { AppStartupConfig } from "./types.js";
@@ -214,7 +181,6 @@ import {
   MODELS,
   normalizeModelId,
 } from "../models/registry.js";
-import { withAlpha } from "./utils/color.js";
 import {
   buildAssistantEntry,
   buildPreflightQuestion,
@@ -224,16 +190,9 @@ import {
   formatScheduleDetails,
   mapCouncilCardKey,
 } from "./utils/format.js";
-import { bottomAlignedModalTop, isEscapeKey } from "./utils/modal.js";
-import {
-  compactTaskLabel,
-  formatTokenCount,
-  sanitizeContent,
-  trunc,
-  truncateBlock,
-  truncateLine,
-} from "./utils/text.js";
-import { describeMcpFsTool, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+import { isEscapeKey } from "./utils/modal.js";
+import { sanitizeContent } from "./utils/text.js";
+import { toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
@@ -656,6 +615,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const dismissToast = useCallback(() => setActiveToast(null), []);
   // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
 
+  const {
+    model,
+    setModel,
+    showModelPicker,
+    setShowModelPicker,
+    modelPickerIndex,
+    setModelPickerIndex,
+    modelSearchQuery,
+    setModelSearchQuery,
+    configuredProviders,
+    setConfiguredProviders,
+    disabledProviders,
+    setDisabledProvidersState,
+    disabledModels,
+    setDisabledModelsState,
+    modelPickerFocus,
+    setModelPickerFocus,
+    providerChipIndex,
+    setProviderChipIndex,
+    reasoningEffortByModel,
+    setReasoningEffortByModel,
+  } = useModelPicker(agent.getModel());
+  const modelRef = useRef(model);
+
   useEffect(() => {
     let cancelled = false;
     getConfiguredProviders()
@@ -668,14 +651,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [setConfiguredProviders]);
   // Sync React model state with status bar store so chat input reflects
   // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
   useEffect(() => {
     return statusBarStore.subscribe((s) => {
       if (s.model) setModel(s.model);
     });
-  }, []);
+  }, [setModel]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
@@ -683,19 +666,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [_streamReasoning, setStreamReasoning] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [liveTurnSourceLabel, setLiveTurnSourceLabel] = useState<string | null>(null);
-  const [model, setModel] = useState(agent.getModel());
-  const modelRef = useRef(model);
   modelRef.current = model;
   const [sandboxMode, setSandboxModeState] = useState<SandboxMode>(agent.getSandboxMode());
   const [mode, setModeState] = useState<AgentMode>(agent.getMode());
-  const [showModelPicker, setShowModelPicker] = useState(false);
-  const [modelPickerIndex, setModelPickerIndex] = useState(0);
-  const [modelSearchQuery, setModelSearchQuery] = useState("");
-  const [configuredProviders, setConfiguredProviders] = useState<ProviderId[]>([]);
-  const [disabledProviders, setDisabledProvidersState] = useState<ProviderId[]>(() => getDisabledProviders());
-  const [disabledModels, setDisabledModelsState] = useState<string[]>(() => getDisabledModels());
-  const [modelPickerFocus, setModelPickerFocus] = useState<"models" | "providers">("models");
-  const [providerChipIndex, setProviderChipIndex] = useState(0);
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
   const [sandboxSettings, setSandboxSettingsState] = useState<SandboxSettings>(() => agent.getSandboxSettings());
   const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex] = useState(0);
@@ -885,14 +858,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [btwState, setBtwState] = useState<BtwState | null>(null);
   const btwAbortRef = useRef<AbortController | null>(null);
   const btwStateRef = useRef<BtwState | null>(null);
-  const [reasoningEffortByModel, setReasoningEffortByModel] = useState<Record<string, ReasoningEffort>>(() =>
-    Object.fromEntries(
-      Object.entries(loadUserSettings().reasoningEffortByModel ?? {}).map(([modelId, effort]) => [
-        normalizeModelId(modelId),
-        effort,
-      ]),
-    ),
-  );
   const [pasteBlocks, setPasteBlocks] = useState<PasteBlock[]>([]);
   const [activePlan, setActivePlan] = useState<Plan | null>(null);
   /** Incremented on each successful TUI copy; drives a brief "Copied" banner. */
@@ -1043,7 +1008,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setModeState(m);
       setModel(agent.getModel());
     },
-    [agent, mode, activePlan],
+    [agent, mode, activePlan, setModel],
   );
   const cycleMode = useCallback(() => {
     const idx = MODES.findIndex((m) => m.id === mode);
@@ -1153,25 +1118,34 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
   }, []);
 
-  const toggleProviderEnabled = useCallback((provider: ProviderId) => {
-    setDisabledProvidersState((prev) => {
-      const isDisabled = prev.includes(provider);
-      const next = setProviderDisabled(provider, !isDisabled);
-      return next;
-    });
-    setModelPickerIndex(0);
-  }, []);
+  const toggleProviderEnabled = useCallback(
+    (provider: ProviderId) => {
+      setDisabledProvidersState((prev) => {
+        const isDisabled = prev.includes(provider);
+        const next = setProviderDisabled(provider, !isDisabled);
+        return next;
+      });
+      setModelPickerIndex(0);
+    },
+    [setModelPickerIndex, setDisabledProvidersState],
+  );
 
-  const toggleModelDisabled = useCallback((modelId: string) => {
-    const disabled = isModelDisabled(modelId);
-    const next = setModelDisabled(modelId, !disabled);
-    setDisabledModelsState(next);
-  }, []);
+  const toggleModelDisabled = useCallback(
+    (modelId: string) => {
+      const disabled = isModelDisabled(modelId);
+      const next = setModelDisabled(modelId, !disabled);
+      setDisabledModelsState(next);
+    },
+    [setDisabledModelsState],
+  );
 
-  const setReasoningEfforts = useCallback((next: Record<string, ReasoningEffort>) => {
-    setReasoningEffortByModel(next);
-    saveUserSettings({ reasoningEffortByModel: next });
-  }, []);
+  const setReasoningEfforts = useCallback(
+    (next: Record<string, ReasoningEffort>) => {
+      setReasoningEffortByModel(next);
+      saveUserSettings({ reasoningEffortByModel: next });
+    },
+    [setReasoningEffortByModel],
+  );
 
   const replacePasteBlocks = useCallback((next: PasteBlock[]) => {
     pasteBlocksRef.current = next;
@@ -3745,6 +3719,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       resetToNewSession,
       startupConfig.version,
       setShowSlashMenuSync,
+      setModelPickerIndex,
+      setModelSearchQuery,
+      setShowModelPicker,
     ],
   );
 
@@ -4027,7 +4004,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           }
           if (key.name === "space" || key.sequence === " ") {
             setInitNewForm((s) => {
-              if (!s || !s.bbDesign) return s;
+              if (!s?.bbDesign) return s;
               const toggles = [...s.packageToggles];
               toggles[s.designCursor] = !(toggles[s.designCursor] ?? true);
               return { ...s, packageToggles: toggles };
@@ -5452,6 +5429,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setPendingCouncilQuestionSync,
       setShowSlashMenuSync,
       setPreflightCardStateSync,
+      setModelSearchQuery,
+      setProviderChipIndex,
+      setModelPickerFocus,
+      setShowModelPicker,
+      setModelPickerIndex,
+      setModel,
     ],
   );
   useKeyboard(handleKey);
