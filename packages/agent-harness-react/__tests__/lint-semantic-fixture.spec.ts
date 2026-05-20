@@ -145,11 +145,10 @@ console.log(JSON.stringify(fixture));
     }
   });
 
-  // TODO Task 6.3 — debug glob pattern mismatch on Windows path separators.
-  // findUnwrappedComponents() returns 0 fixtures even when the fixture file is
-  // confirmed written. The other 4 tests in this file all pass, so the lint
-  // tooling itself works. Re-enable after investigating the runner's globbing.
-  it.skip("flags a component whose root JSX is not <Semantic>", () => {
+  // Fixed: the original failure was not glob-related — `checkFile` ran a
+  // line-by-line regex that could not match multi-line `return (\n  <Box>`.
+  // Replaced with a multiline match that spans newlines. See lint.ts checkFile.
+  it("flags a component whose root JSX is not <Semantic>", () => {
     const raw = execFileSync("bun", ["run", RUNNER], {
       cwd: REPO_ROOT,
       encoding: "utf-8",

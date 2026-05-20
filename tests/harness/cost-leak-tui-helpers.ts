@@ -66,6 +66,22 @@ export function makeTextStream(text: string, inputTokens = 10, outputTokens = 5)
   ];
 }
 
+export interface SpawnCostLeakOptions {
+  /**
+   * Override the model id passed to the spawned TUI. Defaults to a SiliconFlow
+   * model id (no real network call because `__muonroiMockModel` intercepts).
+   * Set to e.g. "gpt-5.4-mini" to route capability dispatch through the OpenAI
+   * provider — required for specs that assert openai-specific providerOptions
+   * such as `promptCacheKey` (F1) which only `OpenAIProviderCapabilities` sets.
+   */
+  modelId?: string;
+  /**
+   * Override the API key passed via `-k`. Defaults to a stub — the mock
+   * intercepts before any auth happens, so any non-empty value works.
+   */
+  apiKey?: string;
+}
+
 /**
  * Spawn the TUI with the given fixture installed and a dump path wired up.
  * Caller should:
@@ -73,15 +89,21 @@ export function makeTextStream(text: string, inputTokens = 10, outputTokens = 5)
  *   2. wait for the LLM round-trip via wait_for + a small sleep
  *   3. call exitTuiAndLoadDump(handle) to get InspectedCall[]
  */
-export async function spawnCostLeakHarness(fixture: ModelFixture): Promise<CostLeakHarness> {
+export async function spawnCostLeakHarness(
+  fixture: ModelFixture,
+  opts: SpawnCostLeakOptions = {},
+): Promise<CostLeakHarness> {
   const workDir = mkdtempSync(join(tmpdir(), "muonroi-cl-tui-"));
   const fixDir = join(workDir, "fix");
   mkdirSync(fixDir);
   writeFileSync(join(fixDir, "fixture.json"), JSON.stringify({ model: fixture }), "utf8");
   const dumpPath = join(workDir, "calls.json");
 
+  const modelId = opts.modelId ?? "deepseek-ai/DeepSeek-V4-Flash";
+  const apiKey = opts.apiKey ?? "FAKE_KEY_FOR_TESTS";
+
   const ctx = await spawnHarness({
-    extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash", "--mock-llm", fixDir],
+    extraArgs: ["-k", apiKey, "-m", modelId, "--mock-llm", fixDir],
     env: {
       MUONROI_MOCK_MODEL_DUMP: dumpPath,
       MUONROI_NO_SHELL_HOLD: "1",
