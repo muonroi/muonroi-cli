@@ -189,6 +189,25 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   const maxTokens = opts.maxTokens ?? 1024;
   const retryOnEmpty = opts.retryOnEmpty !== false;
 
+  // DeepSeek / SiliconFlow require explicit `structuredOutputs: true` to honour
+  // a JSON schema — otherwise the AI SDK warns "responseFormat not supported"
+  // and silently falls back to text mode. Merge it into provider options for
+  // any provider that uses the deepseek/siliconflow chat dialect.
+  const mergedProviderOptions: Record<string, Record<string, unknown>> = {
+    ...((runtime.providerOptions ?? {}) as Record<string, Record<string, unknown>>),
+  };
+  if (provider === "deepseek") {
+    mergedProviderOptions["deepseek"] = {
+      ...(mergedProviderOptions["deepseek"] ?? {}),
+      structuredOutputs: true,
+    };
+  } else if (provider === "siliconflow") {
+    mergedProviderOptions["siliconflow"] = {
+      ...(mergedProviderOptions["siliconflow"] ?? {}),
+      structuredOutputs: true,
+    };
+  }
+
   async function callStructured(userPrompt: string): Promise<AgenticDecision | null> {
     try {
       const res = await generateObject({
@@ -197,7 +216,8 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
         system: systemPrompt,
         prompt: userPrompt,
         maxOutputTokens: maxTokens,
-        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        // biome-ignore lint/suspicious/noExplicitAny: AI SDK ProviderOptions type is too narrow for dynamic builds
+        providerOptions: mergedProviderOptions as any,
       });
       return res.object as AgenticDecision;
     } catch {
@@ -211,7 +231,8 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
       system: `${systemPrompt}\n\nReply with ONE LINE of JSON only. No prose, no markdown fences, no <think> blocks.`,
       prompt: userPrompt,
       maxOutputTokens: maxTokens,
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+      // biome-ignore lint/suspicious/noExplicitAny: AI SDK ProviderOptions type is too narrow for dynamic builds
+      providerOptions: mergedProviderOptions as any,
     });
     const text = extractBrainText(res);
     return { text, decision: parseDecision(text) };
@@ -260,14 +281,44 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
 export function parseDecision(raw: string): AgenticDecision | null {
   // Strip ```json fences if any LLM ignores instructions.
   const trimmed = raw
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/```\s*$/i, "")
+    .replace(/```(?:json)?\s*/gi, "")
+    .replace(/```/g, "")
     .trim();
-  // Find the first {...} block.
+  // Scan for every {...} candidate (brace-balanced) and try each, biggest first.
+  const candidates = extractJsonCandidates(trimmed);
+  for (const slice of candidates) {
+    const parsed = tryParseDecisionSlice(slice);
+    if (parsed) return parsed;
+  }
+  // Last-resort: span from first { to last } as a single attempt.
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
   if (start < 0 || end <= start) return null;
-  const slice = trimmed.slice(start, end + 1);
+  return tryParseDecisionSlice(trimmed.slice(start, end + 1));
+}
+
+function extractJsonCandidates(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "{") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        out.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  // Try longest first — usually the most complete object.
+  return out.sort((a, b) => b.length - a.length);
+}
+
+function tryParseDecisionSlice(slice: string): AgenticDecision | null {
   try {
     const obj = JSON.parse(slice) as Record<string, unknown>;
     if (typeof obj["action"] !== "string") return null;
