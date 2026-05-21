@@ -1,6 +1,6 @@
 // src/product-loop/discovery-recommender.ts
 
-import { buildEcosystemPreamble, isEcosystemBiasEnabled } from "./discovery-ecosystem.js";
+import { buildEcosystemPreamble, shouldApplyEcosystemBias } from "./discovery-ecosystem.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { type DiscoveryQuestion, getSchemaHintForLeader } from "./discovery-schema.js";
 import type { DiscoveryContext, ExistingProjectSignals, RecommendationEntry } from "./types.js";
@@ -256,7 +256,7 @@ function buildLeaderPrompt(input: RecommendInput): string {
   const constraint = getSchemaHintForLeader(input.question.id);
   const specificity = computePromptSpecificity(input.userIdea);
   const parts: string[] = [];
-  if (isEcosystemBiasEnabled()) {
+  if (shouldApplyEcosystemBias({ detection: input.detection })) {
     parts.push(buildEcosystemPreamble(), "");
   }
   parts.push(
