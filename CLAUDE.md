@@ -10,6 +10,55 @@
 bunx vitest -c vitest.harness.config.ts run tests/harness/
 ```
 
+## Self-QA workflow (UI / harness changes — IMPORTANT)
+
+> Unit tests cover function-level logic. They DO NOT cover modal lifecycle,
+> slash-menu navigation, askcard flow, focus chain, or toast levels. When you
+> modify any of these surfaces you MUST also run `self-verify`.
+
+**Watched surfaces** (pre-push hook auto-triggers Tier 1 on these):
+- `src/ui/**/*.tsx`, `src/ui/**/*.ts`
+- `src/self-qa/**/*.ts`
+- `src/agent-harness/**/*.ts`
+- `packages/agent-harness-opentui/**/*.ts`
+
+**Tier 1 — heuristic, free, fast (~30s)**:
+```powershell
+bun run src/index.ts self-verify --since HEAD~1 --max 4
+```
+Reads git diff, finds touched Semantic IDs, drives the inner CLI through
+template scenarios (textbox/button/dialog/menu/list), judges pass/fail with
+rules. Emits `tests/harness/auto/*.spec.ts` for every passing scenario —
+those become permanent regression specs.
+
+**Tier 2 — LLM-in-the-loop, ~$0.01, ~30s-2min**:
+```powershell
+bun run src/index.ts self-verify --agentic `
+  --goal "<narrate the user-visible flow you just changed>" `
+  --llm "deepseek-v4-flash" --turns 8
+```
+Outer LLM reads the semantic tree + event tail every turn, decides next
+action (type / press / wait_for / done), observes outcome. Catches
+intent-vs-reality mismatches that scripted tests cannot express.
+
+**Pre-push gate**: `.husky/pre-push` runs Tier 1 automatically when a
+push touches watched surfaces. Skip with `git push --no-verify` or
+`SELF_VERIFY_PRE_PUSH=0 git push`.
+
+**Parallel with TUI**: self-verify spawns its own child via unique
+named-pipe per pid+uuid — no conflict with a live TUI session. Run it
+in a second terminal while you develop.
+
+**EE behavioral rule**: `docs/self-qa/ee-rule-seed.json` — ingest into
+`muonroi-cli-behavioral` collection so every agent (Claude / Codex /
+Gemini) gets a high-confidence reminder when they touch a watched
+surface.
+
+When in doubt: if your change affects what a user SEES or CLICKS,
+self-verify covers blind spots vitest cannot reach.
+
+---
+
 ```bash
 # Fallback / CI verification — run from WSL (POSIX fd 3/4 path):
 wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest -c vitest.harness.config.ts run tests/harness/'

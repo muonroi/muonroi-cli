@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Self-verify pre-push gate.
+# Only fires when the push includes changes under src/ui/, src/self-qa/, or
+# src/agent-harness/ — these are the surfaces unit tests can't fully cover.
+#
+# Skip with: git push --no-verify
+node scripts/self-verify-pre-push.cjs

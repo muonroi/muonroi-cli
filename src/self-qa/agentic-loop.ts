@@ -179,6 +179,18 @@ function extractBrainText(res: unknown): string {
 }
 
 export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrain> {
+  // 1) Silence the cosmetic "responseFormat schema only supported with
+  //    structuredOutputs" warning — we know DeepSeek only supports
+  //    response_format={type:"json_object"} and the strategy sets
+  //    supportsStructuredOutputs=false; the warning is informational.
+  // 2) Default-on thinking disable for DeepSeek so JSON-only output
+  //    flows without reasoning prose leaking through.
+  // biome-ignore lint/suspicious/noExplicitAny: global flag is AI SDK's docs convention
+  (globalThis as any).AI_SDK_LOG_WARNINGS = false;
+  if (process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] === undefined) {
+    process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] = "1";
+  }
+
   const provider = detectProviderForModel(opts.modelId);
   if (!provider) throw new Error(`No provider detected for model '${opts.modelId}'`);
   const apiKey = await loadKeyForProvider(provider);
