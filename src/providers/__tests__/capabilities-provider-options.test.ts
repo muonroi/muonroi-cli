@@ -181,7 +181,7 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
   });
 
   describe("Providers without buildProviderOptions overrides — return undefined", () => {
-    for (const id of ["google", "deepseek", "siliconflow", "ollama"] as const) {
+    for (const id of ["google", "ollama"] as const) {
       it(`${id}: returns undefined for any context`, () => {
         const caps = getProviderCapabilities(id);
         const model = baseModel({ provider: id, supportsReasoningEffort: true, thinkingType: "enabled" });
@@ -190,6 +190,47 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
         expect(caps.buildProviderOptions({ model: undefined })).toBeUndefined();
       });
     }
+  });
+
+  // RC#1 — DeepSeek/SiliconFlow disable thinking when models have it enabled.
+  // Required because @ai-sdk/openai-compatible can't round-trip reasoning_content
+  // and DeepSeek API rejects tool-using turns without it (HTTP 400 code 20015).
+  describe("DeepSeek / SiliconFlow — RC#1 thinking disable", () => {
+    it("deepseek: emits {deepseek:{thinking:{type:disabled}}} when thinkingType=enabled", () => {
+      const caps = getProviderCapabilities("deepseek");
+      const model = baseModel({ provider: "deepseek", thinkingType: "enabled" });
+      expect(caps.buildProviderOptions({ model })).toEqual({
+        deepseek: { thinking: { type: "disabled" } },
+      });
+    });
+    it("deepseek: emits {deepseek:{thinking:{type:disabled}}} when thinkingType=adaptive", () => {
+      const caps = getProviderCapabilities("deepseek");
+      const model = baseModel({ provider: "deepseek", thinkingType: "adaptive" });
+      expect(caps.buildProviderOptions({ model })).toEqual({
+        deepseek: { thinking: { type: "disabled" } },
+      });
+    });
+    it("siliconflow: emits {siliconflow:{thinking:{type:disabled}}} when thinkingType=enabled", () => {
+      const caps = getProviderCapabilities("siliconflow");
+      const model = baseModel({ provider: "siliconflow", thinkingType: "enabled" });
+      expect(caps.buildProviderOptions({ model })).toEqual({
+        siliconflow: { thinking: { type: "disabled" } },
+      });
+    });
+    it("deepseek: returns undefined when thinkingType is absent", () => {
+      const caps = getProviderCapabilities("deepseek");
+      const model = baseModel({ provider: "deepseek" });
+      expect(caps.buildProviderOptions({ model })).toBeUndefined();
+    });
+    it("siliconflow: returns undefined when thinkingType is absent", () => {
+      const caps = getProviderCapabilities("siliconflow");
+      const model = baseModel({ provider: "siliconflow" });
+      expect(caps.buildProviderOptions({ model })).toBeUndefined();
+    });
+    it("deepseek: returns undefined when model is undefined", () => {
+      const caps = getProviderCapabilities("deepseek");
+      expect(caps.buildProviderOptions({ model: undefined })).toBeUndefined();
+    });
   });
 
   describe("Unknown provider id falls back to default (undefined)", () => {
