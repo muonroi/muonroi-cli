@@ -99,7 +99,13 @@ process.on("unhandledRejection", (reason) => {
       `[${new Date().toISOString()}] REJECTION: ${msg}\n`,
     );
   } catch {}
-  console.error("Unhandled rejection:", reason);
+  if (reason instanceof Error) {
+    console.error("Unhandled rejection:", reason.stack || reason.message);
+  } else if (reason && typeof reason === "object") {
+    console.error("Unhandled rejection:", JSON.stringify(reason, Object.getOwnPropertyNames(reason)));
+  } else {
+    console.error("Unhandled rejection:", String(reason));
+  }
   process.exit(1);
 });
 

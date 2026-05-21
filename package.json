@@ -3,7 +3,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "BYOK AI coding agent with multi-model council debate, role-based routing, and auto-compact.",
   "repository": {
     "type": "git",
@@ -47,7 +47,7 @@
     "lint:harness-skips:strict": "bun run scripts/check-harness-skips.ts --strict",
     "pre-commit": "lint-staged",
     "prepare": "husky",
-    "postinstall": "node scripts/postinstall.cjs",
+    "postinstall": "node scripts/postinstall.cjs || exit 0",
     "ee:ingest-bb": "bun run scripts/ingest-bb-to-ee.mts"
   },
   "lint-staged": {
@@ -55,7 +55,8 @@
   },
   "files": [
     "src/",
-    "dist/"
+    "dist/",
+    "scripts/postinstall.cjs"
   ],
   "keywords": [
     "cli",
