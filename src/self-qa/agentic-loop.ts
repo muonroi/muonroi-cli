@@ -22,11 +22,33 @@ import { resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
-import { generateText } from "ai";
+import { generateObject, generateText } from "ai";
+import { z } from "zod";
 import { spawnAgentTui } from "../agent-harness/test-spawn.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { type AgenticContextBlock, buildAgenticContext } from "./agentic-context.js";
+
+// ── Zod schema for the decision union — used with generateObject to force
+// structured output instead of free-text JSON (which reasoning models
+// frequently corrupt with thinking prose). ────────────────────────────────
+const DecisionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("type"), text: z.string(), reason: z.string() }),
+  z.object({ action: z.literal("press"), key: z.string(), reason: z.string() }),
+  z.object({
+    action: z.literal("wait_for"),
+    selector: z.string().optional(),
+    event: z.string().optional(),
+    idle: z.boolean().optional(),
+    timeoutMs: z.number().optional(),
+    reason: z.string(),
+  }),
+  z.object({
+    action: z.literal("done"),
+    verdict: z.enum(["pass", "fail", "inconclusive"]),
+    reason: z.string(),
+  }),
+]);
 
 // ---------------------------------------------------------------------------
 // Brain interface — pluggable decision maker
@@ -167,10 +189,26 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   const maxTokens = opts.maxTokens ?? 1024;
   const retryOnEmpty = opts.retryOnEmpty !== false;
 
-  async function callOnce(userPrompt: string): Promise<{ text: string; decision: AgenticDecision | null }> {
+  async function callStructured(userPrompt: string): Promise<AgenticDecision | null> {
+    try {
+      const res = await generateObject({
+        model: runtime.model,
+        schema: DecisionSchema,
+        system: systemPrompt,
+        prompt: userPrompt,
+        maxOutputTokens: maxTokens,
+        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+      });
+      return res.object as AgenticDecision;
+    } catch {
+      return null;
+    }
+  }
+
+  async function callFreeText(userPrompt: string): Promise<{ text: string; decision: AgenticDecision | null }> {
     const res = await generateText({
       model: runtime.model,
-      system: systemPrompt.replace("${maxTurns}", "<see prompt>"),
+      system: `${systemPrompt}\n\nReply with ONE LINE of JSON only. No prose, no markdown fences, no <think> blocks.`,
       prompt: userPrompt,
       maxOutputTokens: maxTokens,
       ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
@@ -193,22 +231,27 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
         `## TUI state`,
         context.prompt,
         ``,
-        `## Your reply (single JSON object, no prose, no markdown fences)`,
+        `## Your reply — emit a single structured decision now.`,
       ].join("\n");
 
-      let { text, decision } = await callOnce(userPrompt);
-      if (!decision && retryOnEmpty) {
-        // Retry with a stricter nudge — append a one-line reminder.
-        const stricter = `${userPrompt}\n\nReminder: reply with ONE LINE of JSON only, e.g. {"action":"press","key":"Enter","reason":"..."}. No <think> blocks.`;
-        const second = await callOnce(stricter);
-        text = second.text || text;
-        decision = second.decision;
+      // Primary path: structured output (forces schema-conformant JSON).
+      const structured = await callStructured(userPrompt);
+      if (structured) return structured;
+
+      // Fallback: free-text generateText + parseDecision, with one retry.
+      const first = await callFreeText(userPrompt);
+      if (first.decision) return first.decision;
+      let lastText = first.text;
+      if (retryOnEmpty) {
+        const stricter = `${userPrompt}\n\nReminder: emit exactly one JSON object such as {"action":"press","key":"Enter","reason":"..."}. Nothing else.`;
+        const second = await callFreeText(stricter);
+        if (second.decision) return second.decision;
+        lastText = second.text || lastText;
       }
-      if (decision) return decision;
       return {
         action: "done",
         verdict: "inconclusive",
-        reason: `Brain emitted unparseable output: ${text.slice(0, 200) || "(empty)"}`,
+        reason: `Brain emitted unparseable output: ${lastText.slice(0, 200) || "(empty)"}`,
       };
     },
   };
@@ -351,8 +394,15 @@ export async function runAgenticLoop(opts: AgenticLoopOptions): Promise<AgenticR
         pinIds: opts.pinIds ?? ["askcard"],
       });
       const historyExcerpt = turns
-        .slice(-3)
-        .map((t) => `T${t.turn}: ${t.decision.action} — ${truncate(t.decision.reason, 80)}`)
+        .slice(-5)
+        .map((t) => {
+          const d = t.decision;
+          let detail = "";
+          if (d.action === "type") detail = ` text=${JSON.stringify(d.text)}`;
+          else if (d.action === "press") detail = ` key=${d.key}`;
+          else if (d.action === "wait_for") detail = ` ${d.idle ? "idle" : (d.selector ?? d.event ?? "")}`;
+          return `T${t.turn}: ${d.action}${detail} — ${truncate(d.reason, 60)}`;
+        })
         .join("\n");
 
       log(`[agentic] T${turn}/${maxTurns} — context ~${context.estimatedTokens} tokens`);
