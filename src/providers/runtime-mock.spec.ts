@@ -37,11 +37,16 @@ describe("resolveModelRuntime mock hook", () => {
     uninstall = null;
   });
 
+  // Use deepseek-v4-pro — catalog scope is currently deepseek + siliconflow.
+  // See src/models/catalog.README.md for why other providers were removed.
+  const MODEL_ID = "deepseek-v4-pro";
+  const PROVIDER_KEY = "deepseek";
+
   it("returns the installed mock model without invoking the factory", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("hi") } });
     uninstall = handle.uninstall;
 
-    const runtime = resolveModelRuntime(makeStubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime(makeStubFactory(), MODEL_ID);
     expect(runtime.model).toBe(handle.model);
   });
 
@@ -52,7 +57,7 @@ describe("resolveModelRuntime mock hook", () => {
     });
     uninstall = handle.uninstall;
 
-    const runtime = resolveModelRuntime(makeStubFactory(), "gpt-5.4");
+    const runtime = resolveModelRuntime(makeStubFactory(), MODEL_ID);
     expect(runtime.unsupportedParams).toEqual(["maxOutputTokens"]);
   });
 
@@ -63,9 +68,8 @@ describe("resolveModelRuntime mock hook", () => {
     });
     uninstall = handle.uninstall;
 
-    const runtime = resolveModelRuntime(makeStubFactory(), "gpt-5.4");
-    // gpt-5.4 is an OpenAI reasoning model in the catalog → provider=openai.
-    expect(runtime.providerOptions?.openai).toMatchObject({
+    const runtime = resolveModelRuntime(makeStubFactory(), MODEL_ID);
+    expect(runtime.providerOptions?.[PROVIDER_KEY]).toMatchObject({
       store: false,
       instructions: "test-system",
     });
@@ -75,7 +79,7 @@ describe("resolveModelRuntime mock hook", () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("hi") } });
     handle.uninstall();
 
-    expect(() => resolveModelRuntime(makeStubFactory(), "gpt-5.4")).toThrow(
+    expect(() => resolveModelRuntime(makeStubFactory(), MODEL_ID)).toThrow(
       /real factory should not be invoked|real factory\.responses/,
     );
   });

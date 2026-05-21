@@ -115,3 +115,70 @@ export async function writeBwSecureNote(
   run("bw", ["sync", "--session", session]);
   return { ok: true, action: "created" };
 }
+
+// ─── Interactive helpers used by the TUI (no env-var, no shell ceremony) ────
+
+export interface BwUnlockResult {
+  ok: boolean;
+  session?: string;
+  error?: string;
+}
+
+/**
+ * Unlock the BW vault with a master password and return the session token
+ * in-memory only. Caller passes the returned session to subsequent calls;
+ * we never write to BW_SESSION env or persist it to disk.
+ */
+export async function unlockWithPassword(password: string, options: { runner?: Runner } = {}): Promise<BwUnlockResult> {
+  const run = options.runner ?? defaultRunner;
+  const which = run("bw", ["--version"]);
+  if (which.status !== 0) {
+    return { ok: false, error: "Bitwarden CLI ('bw') not found in PATH. Install: https://bitwarden.com/help/cli/" };
+  }
+  // `bw unlock --raw` reads the password from stdin and prints the session
+  // token to stdout. Exit code != 0 on wrong password.
+  const res = run("bw", ["unlock", "--raw", "--passwordenv", "BW_PASSWORD_PIPE"]);
+  // Fallback to stdin if --passwordenv isn't supported by this bw version.
+  if (res.status !== 0) {
+    const r2 = spawnSync("bw", ["unlock", "--raw"], { encoding: "utf8", input: `${password}\n` });
+    if (r2.status !== 0) {
+      const msg = (r2.stderr || r2.stdout || "").trim();
+      return { ok: false, error: `bw unlock failed: ${msg || "wrong master password?"}` };
+    }
+    return { ok: true, session: r2.stdout.trim() };
+  }
+  return { ok: true, session: res.stdout.trim() };
+}
+
+export interface BwListedNote {
+  name: string;
+  notes: string;
+}
+
+/**
+ * List Secure Notes whose name starts with `prefix`. Used by the in-TUI
+ * sync flow to discover which providers have keys stored in the vault.
+ */
+export async function listSecureNotesByPrefix(
+  session: string,
+  prefix: string,
+  options: { runner?: Runner } = {},
+): Promise<{ ok: true; items: BwListedNote[] } | { ok: false; error: string }> {
+  const run = options.runner ?? defaultRunner;
+  const unlock = ensureUnlocked(session, run);
+  if (!unlock.ok) return { ok: false, error: unlock.error };
+  const list = run("bw", ["list", "items", "--search", prefix, "--session", session]);
+  if (list.status !== 0) {
+    return { ok: false, error: `bw list failed: ${list.stderr || list.stdout}` };
+  }
+  let items: BwListItem[];
+  try {
+    items = JSON.parse(list.stdout) as BwListItem[];
+  } catch {
+    return { ok: false, error: "bw list returned non-JSON output" };
+  }
+  const matched = items
+    .filter((it) => it.type === 2 && it.name.startsWith(prefix) && typeof it.notes === "string")
+    .map((it) => ({ name: it.name, notes: it.notes as string }));
+  return { ok: true, items: matched };
+}

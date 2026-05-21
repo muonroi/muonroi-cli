@@ -282,24 +282,29 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
     // in src/cli/cost-forensics.ts).
     return { readField: "promptCacheHitTokens", creationSupported: false };
   }
-}
-
-/**
- * SiliconFlow shares DeepSeek's tool-call quirk but additionally rejects
- * assistant history with `reasoning` parts on its DeepSeek thinking-mode
- * endpoint (HTTP 400 code 20015). See siliconflow-history.ts for the wire
- * evidence. DeepSeek's native api.deepseek.com endpoint handles reasoning
- * differently and MUST NOT be touched, so this override is siliconflow-only.
- */
-class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
+  // DeepSeek docs (Reasoning Model guide): "Previous reasoning content is
+  // deliberately excluded from subsequent message contexts — only final
+  // answers (content) are retained in conversation history." Stripping
+  // reasoning parts on the way out matches the documented expectation and
+  // also no-ops on non-reasoning turns (identity returned by reference).
   override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
     return stripReasoningForSiliconflow(messages);
   }
+}
+
+/**
+ * SiliconFlow shares DeepSeek's tool-call quirk and inherits the
+ * reasoning-strip from DeepSeek. The strip was originally added here when
+ * SiliconFlow returned HTTP 400 code 20015 ("reasoning_content must be
+ * passed back") — see siliconflow-history.ts for wire evidence — but the
+ * DeepSeek native endpoint behaves the same way per docs, so the override
+ * now lives on the DeepSeek base class.
+ */
+class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("siliconflow");
   }
-  // cacheMetricLayout inherits from DeepSeek (promptCacheHitTokens) — SF
-  // routes share the OpenAI-compatible SDK with deepseek's cache shape.
+  // sanitizeHistory + cacheMetricLayout inherit from DeepSeek.
 }
 
 /**

@@ -14,7 +14,7 @@ import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
 import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
-import { getConfiguredProviders } from "../providers/keychain.js";
+import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
@@ -63,6 +63,7 @@ import {
   savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
+  setDefaultProvider,
   setModelDisabled,
   setProviderDisabled,
 } from "../utils/settings";
@@ -136,7 +137,7 @@ import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
-import { SLASH_MENU_ITEMS, type SlashMenuItem } from "./slash/menu-items.js";
+import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
@@ -177,8 +178,10 @@ export type { AppStartupConfig } from "./types.js";
 
 import {
   getEffectiveReasoningEffort,
+  getModelByTier,
   getModelIds,
   getModelInfo,
+  getModelsForProvider,
   getSupportedReasoningEfforts,
   isLoading,
   MODELS,
@@ -403,6 +406,7 @@ Follow the repository's commit and pull request workflows. Inspect the current c
 
 const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/clear",
+  "/providers",
   "/model",
   "/models",
   "/sandbox",
@@ -652,6 +656,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setConfiguredProviders,
     disabledProviders,
     setDisabledProvidersState,
+    defaultProvider,
+    setDefaultProviderState,
     disabledModels,
     setDisabledModelsState,
     modelPickerFocus,
@@ -663,19 +669,157 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   } = useModelPicker(agent.getModel());
   const modelRef = useRef(model);
 
+  // Splash UX: only DeepSeek + SiliconFlow are surfaced. Other providers
+  // (openai/anthropic/google/xai/ollama) keep working programmatically when
+  // the router picks them, but the user-facing picker hides them so the
+  // user cannot enable a provider we are not actively maintaining UX for.
+  const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow"];
+
+  const [providersWithKey, setProvidersWithKey] = useState<ReadonlySet<ProviderId>>(() => new Set());
+  const refreshProvidersWithKey = useCallback(async () => {
+    try {
+      // Use the broader check: keychain + env vars + settings.json + OAuth.
+      // listStoredProviders only sees keychain, which falsely shows "no key"
+      // for users who set keys via env/settings.
+      const configured = await getConfiguredProviders();
+      setProvidersWithKey(new Set(configured.filter((p) => SPLASH_PROVIDERS.includes(p))));
+    } catch {
+      setProvidersWithKey(new Set());
+    }
+  }, [SPLASH_PROVIDERS]);
+
   useEffect(() => {
     let cancelled = false;
+    // Always list the curated splash providers, even when no key is stored —
+    // the modal shows a "(no key)" badge and lets the user press `k` to set
+    // one without leaving the TUI.
+    setConfiguredProviders([...SPLASH_PROVIDERS]);
     getConfiguredProviders()
-      .then((list) => {
-        if (!cancelled) setConfiguredProviders(list);
+      .then(() => {
+        if (!cancelled) refreshProvidersWithKey();
       })
       .catch(() => {
-        if (!cancelled) setConfiguredProviders([]);
+        if (!cancelled) setProvidersWithKey(new Set());
       });
     return () => {
       cancelled = true;
     };
-  }, [setConfiguredProviders]);
+  }, [setConfiguredProviders, refreshProvidersWithKey, SPLASH_PROVIDERS]);
+
+  const [apiKeyPrompt, setApiKeyPrompt] = useState<{
+    provider: ProviderId;
+    value: string;
+    error: string | null;
+  } | null>(null);
+  const submitProviderKey = useCallback(async () => {
+    if (!apiKeyPrompt) return;
+    const key = apiKeyPrompt.value.trim();
+    if (!key) {
+      setApiKeyPrompt({ ...apiKeyPrompt, error: "Key cannot be empty" });
+      return;
+    }
+    try {
+      const ok = await setKeyForProvider(apiKeyPrompt.provider, key);
+      if (!ok) {
+        setApiKeyPrompt({ ...apiKeyPrompt, error: "Keychain unavailable — set env var instead" });
+        return;
+      }
+      await refreshProvidersWithKey();
+      setApiKeyPrompt(null);
+    } catch (e) {
+      setApiKeyPrompt({ ...apiKeyPrompt, error: (e as Error).message });
+    }
+  }, [apiKeyPrompt, refreshProvidersWithKey]);
+
+  // ── BW sync flow (Option A) ────────────────────────────────────────────
+  // Two phases: password → picker. Lives entirely in TUI memory; we never
+  // export BW_SESSION or persist the master password.
+  type BwSyncState =
+    | { phase: "password"; value: string; error: string | null; loading: boolean }
+    | {
+        phase: "picker";
+        session: string;
+        items: Array<{ provider: ProviderId; key: string }>;
+        selected: Set<ProviderId>;
+        focusIndex: number;
+        loading: boolean;
+        error: string | null;
+      };
+  const [bwSync, setBwSync] = useState<BwSyncState | null>(null);
+
+  const submitBwPassword = useCallback(async () => {
+    if (!bwSync || bwSync.phase !== "password") return;
+    const password = bwSync.value;
+    if (password.length < 4) {
+      setBwSync({ ...bwSync, error: "Master password too short" });
+      return;
+    }
+    setBwSync({ ...bwSync, loading: true, error: null });
+    try {
+      const { unlockWithPassword, listSecureNotesByPrefix } = await import("../cli/bw-vault.js");
+      const unlock = await unlockWithPassword(password);
+      if (!unlock.ok || !unlock.session) {
+        setBwSync({ ...bwSync, loading: false, error: unlock.error ?? "bw unlock failed" });
+        return;
+      }
+      const prefix = "muonroi-cli/";
+      const list = await listSecureNotesByPrefix(unlock.session, prefix);
+      if (!list.ok) {
+        setBwSync({ ...bwSync, loading: false, error: list.error });
+        return;
+      }
+      const matched: Array<{ provider: ProviderId; key: string }> = [];
+      for (const it of list.items) {
+        const providerName = it.name.slice(prefix.length);
+        if ((SPLASH_PROVIDERS as readonly string[]).includes(providerName) && it.notes.length >= 20) {
+          matched.push({ provider: providerName as ProviderId, key: it.notes });
+        }
+      }
+      if (matched.length === 0) {
+        setBwSync({
+          ...bwSync,
+          loading: false,
+          error: `No items found in vault with prefix '${prefix}<provider>'`,
+        });
+        return;
+      }
+      setBwSync({
+        phase: "picker",
+        session: unlock.session,
+        items: matched,
+        selected: new Set(matched.map((m) => m.provider)),
+        focusIndex: 0,
+        loading: false,
+        error: null,
+      });
+    } catch (e) {
+      setBwSync({ ...bwSync, loading: false, error: (e as Error).message });
+    }
+  }, [bwSync, SPLASH_PROVIDERS]);
+
+  const commitBwImport = useCallback(async () => {
+    if (!bwSync || bwSync.phase !== "picker") return;
+    setBwSync({ ...bwSync, loading: true, error: null });
+    let imported = 0;
+    let failed = 0;
+    for (const item of bwSync.items) {
+      if (!bwSync.selected.has(item.provider)) continue;
+      try {
+        const ok = await setKeyForProvider(item.provider, item.key);
+        if (ok) imported++;
+        else failed++;
+      } catch {
+        failed++;
+      }
+    }
+    await refreshProvidersWithKey();
+    if (failed > 0 && imported === 0) {
+      setBwSync({ ...bwSync, loading: false, error: `Imported 0; ${failed} failed (keychain unavailable?)` });
+      return;
+    }
+    setBwSync(null);
+  }, [bwSync, refreshProvidersWithKey]);
+
   // Sync React model state with status bar store so chat input reflects
   // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
   useEffect(() => {
@@ -1091,13 +1235,16 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     : [...modelList];
 
   const filteredModelIds = filteredModels.map((m) => m.id);
+  // Autocomplete shows the curated primary surface. When the user types a
+  // query we widen the search to ALL items (including hidden ones) so power
+  // users can still discover commands that were intentionally dehoisted.
   const filteredSlashItems = slashSearchQuery
     ? SLASH_MENU_ITEMS.filter(
         (item) =>
           item.label.toLowerCase().includes(slashSearchQuery.toLowerCase()) ||
           item.description.toLowerCase().includes(slashSearchQuery.toLowerCase()),
       )
-    : SLASH_MENU_ITEMS;
+    : VISIBLE_SLASH_MENU_ITEMS;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
     const typed = slashSearchQuery.toLowerCase();
@@ -1177,6 +1324,31 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setModelPickerIndex(0);
     },
     [setModelPickerIndex, setDisabledProvidersState],
+  );
+
+  const setAsDefaultProvider = useCallback(
+    (provider: ProviderId) => {
+      // Disabled providers cannot be default — router would just skip them.
+      if (disabledProviders.includes(provider)) return;
+      const pickModel = (id: ProviderId): string | null => {
+        for (const tier of ["balanced", "fast", "premium"] as const) {
+          const m = getModelByTier(tier, id);
+          if (m && m.provider === id) return m.id;
+        }
+        const fallback = getModelsForProvider(id);
+        return fallback[0]?.id ?? null;
+      };
+      const modelId = pickModel(provider);
+      if (!modelId) return;
+      setDefaultProvider(provider);
+      setDefaultProviderState(provider);
+      agent.setModel(modelId);
+      setModel(modelId);
+      statusBarStore.setState({ model: modelId, provider });
+      saveProjectSettings({ model: modelId });
+      saveUserSettings({ defaultModel: modelId, defaultProvider: provider });
+    },
+    [agent, disabledProviders, setDefaultProviderState, setModel],
   );
 
   const toggleModelDisabled = useCallback(
@@ -2209,9 +2381,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   useEffect(() => {
     let cancelled = false;
-    checkForUpdate(startupConfig.version).then((result) => {
-      if (cancelled || !result?.hasUpdate) return;
+    // Throttle the npm-registry check to once per day so we don't hammer it
+    // every launch (and stay nice to free-tier registries / corporate proxies).
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+    const settings = loadUserSettings();
+    const lastCheck = settings.lastUpdateCheck ?? 0;
+    if (Date.now() - lastCheck < ONE_DAY_MS) return;
+
+    checkForUpdate(startupConfig.version).then(async (result) => {
+      if (cancelled) return;
+      // Persist the attempt timestamp regardless of outcome (don't retry a
+      // failed fetch dozens of times in one day).
+      saveUserSettings({ lastUpdateCheck: Date.now() });
+      if (!result?.hasUpdate) return;
       setUpdateInfo(result);
+      // autoUpdate: skip the modal and just run the update silently.
+      if (settings.autoUpdate === true) {
+        try {
+          await runUpdate(startupConfig.version);
+        } catch {
+          // Silent — surface in the modal as fallback.
+          setShowUpdateModal(true);
+        }
+        return;
+      }
       setShowUpdateModal(true);
     });
     return () => {
@@ -2921,7 +3114,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         resetToNewSession();
         return true;
       }
-      if (c === "/model" || c === "/models") {
+      if (c === "/providers" || c === "/model" || c === "/models") {
         setShowModelPicker(true);
         setModelPickerIndex(0);
         setModelSearchQuery("");
@@ -3598,6 +3791,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         case "new":
           resetToNewSession();
           break;
+        case "providers":
         case "models":
           setShowModelPicker(true);
           setModelPickerIndex(0);
@@ -3621,7 +3815,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             ...p,
             {
               type: "assistant",
-              content: SLASH_MENU_ITEMS.map((i) => `/${i.label} — ${i.description}`).join("\n"),
+              content: VISIBLE_SLASH_MENU_ITEMS.map((i) => `/${i.label} — ${i.description}`).join("\n"),
               timestamp: new Date(),
             },
           ]);
@@ -4951,76 +5145,118 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return;
       }
       if (showModelPicker) {
+        // Sub-modal: BW sync (password + provider picker phases).
+        if (bwSync) {
+          if (isEscapeKey(key)) {
+            setBwSync(null);
+            return;
+          }
+          if (bwSync.phase === "password") {
+            if (bwSync.loading) return;
+            if (key.name === "return") {
+              void submitBwPassword();
+              return;
+            }
+            if (key.name === "backspace") {
+              setBwSync({ ...bwSync, value: bwSync.value.slice(0, -1), error: null });
+              return;
+            }
+            if (key.sequence && !key.ctrl && !key.meta) {
+              const cleaned = key.sequence
+                .replace(/\[200~|\[201~/g, "")
+                // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal control bytes
+                .replace(/[ -]/g, "");
+              if (cleaned.length === 0) return;
+              setBwSync({ ...bwSync, value: bwSync.value + cleaned, error: null });
+              return;
+            }
+            return;
+          }
+          if (bwSync.phase === "picker") {
+            if (bwSync.loading) return;
+            if (key.name === "up") {
+              setBwSync({ ...bwSync, focusIndex: Math.max(0, bwSync.focusIndex - 1) });
+              return;
+            }
+            if (key.name === "down") {
+              setBwSync({ ...bwSync, focusIndex: Math.min(bwSync.items.length - 1, bwSync.focusIndex + 1) });
+              return;
+            }
+            if (key.name === "space" || key.sequence === " ") {
+              const item = bwSync.items[bwSync.focusIndex];
+              if (item) {
+                const next = new Set(bwSync.selected);
+                if (next.has(item.provider)) next.delete(item.provider);
+                else next.add(item.provider);
+                setBwSync({ ...bwSync, selected: next });
+              }
+              return;
+            }
+            if (key.name === "return") {
+              void commitBwImport();
+              return;
+            }
+            return;
+          }
+          return;
+        }
+        // Sub-modal: API key prompt for the focused provider.
+        if (apiKeyPrompt) {
+          if (isEscapeKey(key)) {
+            setApiKeyPrompt(null);
+            return;
+          }
+          if (key.name === "return") {
+            void submitProviderKey();
+            return;
+          }
+          if (key.name === "backspace") {
+            setApiKeyPrompt({ ...apiKeyPrompt, value: apiKeyPrompt.value.slice(0, -1), error: null });
+            return;
+          }
+          if (key.sequence && !key.ctrl && !key.meta) {
+            // Accept multi-char sequences too — terminal paste arrives as one
+            // chunk (often 40-100 chars for an API key). Strip control bytes
+            // and the bracketed-paste guards just in case.
+            const cleaned = key.sequence.replace(/\[200~|\[201~/g, "").replace(/[ -]/g, "");
+            if (cleaned.length === 0) return;
+            setApiKeyPrompt({ ...apiKeyPrompt, value: apiKeyPrompt.value + cleaned, error: null });
+            return;
+          }
+          return;
+        }
         if (isEscapeKey(key)) {
           setShowModelPicker(false);
           setModelSearchQuery("");
-          setModelPickerFocus("models");
+          setModelPickerFocus("providers");
           return;
         }
-        if (key.name === "tab") {
-          if (configuredProviders.length > 0) {
-            setModelPickerFocus((f) => (f === "models" ? "providers" : "models"));
-          }
-          return;
-        }
-        if (modelPickerFocus === "providers") {
-          if (key.name === "left") {
-            setProviderChipIndex((i) => Math.max(0, i - 1));
-            return;
-          }
-          if (key.name === "right") {
-            setProviderChipIndex((i) => Math.min(configuredProviders.length - 1, i + 1));
-            return;
-          }
-          if (key.name === "space" || key.sequence === " " || key.name === "return") {
-            const p = configuredProviders[providerChipIndex];
-            if (p) toggleProviderEnabled(p);
-            return;
-          }
-          return;
-        }
+        if (configuredProviders.length === 0) return;
         if (key.name === "up") {
-          setModelPickerIndex((i) => Math.max(0, i - 1));
+          setProviderChipIndex((i) => Math.max(0, i - 1));
           return;
         }
         if (key.name === "down") {
-          setModelPickerIndex((i) => Math.min(filteredModelIds.length - 1, i + 1));
+          setProviderChipIndex((i) => Math.min(configuredProviders.length - 1, i + 1));
           return;
         }
-        if ((key.name === "space" || key.sequence === " ") && modelPickerFocus === "models") {
-          const sel = filteredModelIds[modelPickerIndex];
-          if (sel) toggleModelDisabled(sel);
+        if (key.name === "k") {
+          const p = configuredProviders[providerChipIndex];
+          if (p) setApiKeyPrompt({ provider: p, value: "", error: null });
           return;
         }
-        if (key.name === "left" || key.name === "right") {
-          const sel = filteredModelIds[modelPickerIndex];
-          if (sel) {
-            adjustModelReasoningEffort(sel, key.name === "left" ? -1 : 1);
-          }
+        if (key.name === "b") {
+          setBwSync({ phase: "password", value: "", error: null, loading: false });
           return;
         }
-        if (key.name === "return") {
-          const sel = filteredModelIds[modelPickerIndex];
-          if (sel) {
-            agent.setModel(sel);
-            setModel(sel);
-            statusBarStore.setState({ model: sel, provider: agent.getProviderId() });
-            saveProjectSettings({ model: sel });
-            saveUserSettings({ defaultModel: sel });
-          }
-          setShowModelPicker(false);
-          setModelSearchQuery("");
-          setModelPickerFocus("models");
+        if (key.name === "space" || key.sequence === " ") {
+          const p = configuredProviders[providerChipIndex];
+          if (p && providersWithKey.has(p)) toggleProviderEnabled(p);
           return;
         }
-        if (key.name === "backspace") {
-          setModelSearchQuery((q) => q.slice(0, -1));
-          setModelPickerIndex(0);
-          return;
-        }
-        if (key.sequence && key.sequence.length === 1 && !key.ctrl && !key.meta) {
-          setModelSearchQuery((q) => q + key.sequence);
-          setModelPickerIndex(0);
+        if (key.name === "d" || key.name === "return") {
+          const p = configuredProviders[providerChipIndex];
+          if (p && providersWithKey.has(p)) setAsDefaultProvider(p);
           return;
         }
         return;
@@ -6128,8 +6364,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             configuredProviders={configuredProviders}
             disabledProviders={disabledProviders}
             disabledModels={disabledModels}
+            defaultProvider={defaultProvider}
             focus={modelPickerFocus}
             providerChipIndex={providerChipIndex}
+            providersWithKey={providersWithKey}
+            apiKeyPrompt={apiKeyPrompt}
+            bwSync={bwSync}
           />
         )}
         {showWalletPicker && (

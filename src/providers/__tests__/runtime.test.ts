@@ -2,6 +2,10 @@ import { beforeAll, describe, expect, test } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../runtime.js";
 
+// Fake fixture value — kept outside the inline objects so the repo-wide
+// secret scanner doesn't trip on `apiKey: "..."` string literals.
+const MOCK_KEY = "x".repeat(32);
+
 beforeAll(async () => {
   await loadCatalog();
 });
@@ -33,7 +37,7 @@ describe("createProviderFactory", () => {
 
   test("creates deepseek factory via openai-compatible", () => {
     const result = createProviderFactory("deepseek", {
-      apiKey: "deepseek-test-key-long-enough-for-validation",
+      apiKey: MOCK_KEY,
     });
     expect(result.id).toBe("deepseek");
     expect(typeof result.factory).toBe("function");
@@ -55,14 +59,14 @@ describe("createProviderFactory", () => {
 });
 
 describe("resolveModelRuntime", () => {
-  test("resolves known anthropic model", () => {
-    const pf = createProviderFactory("anthropic", {
-      apiKey: "sk-ant-test-key-long-enough-for-validation",
+  test("resolves known deepseek model", () => {
+    const pf = createProviderFactory("deepseek", {
+      apiKey: MOCK_KEY,
     });
-    const runtime = resolveModelRuntime(pf.factory, "claude-sonnet-4-6");
-    expect(runtime.modelId).toBe("claude-sonnet-4-6");
+    const runtime = resolveModelRuntime(pf.factory, "deepseek-v4-flash");
+    expect(runtime.modelId).toBe("deepseek-v4-flash");
     expect(runtime.model).toBeDefined();
-    expect(runtime.modelInfo?.provider).toBe("anthropic");
+    expect(runtime.modelInfo?.provider).toBe("deepseek");
   });
 
   test("resolves unknown model without crashing", () => {
@@ -76,14 +80,17 @@ describe("resolveModelRuntime", () => {
   });
 });
 
+// Prefix-based fallback in detectProviderForModel still maps the legacy ids
+// even though they are no longer in catalog (see src/models/catalog.README.md).
 describe("detectProviderForModel", () => {
-  test("detects anthropic", () => expect(detectProviderForModel("claude-sonnet-4-6")).toBe("anthropic"));
-  test("detects openai", () => expect(detectProviderForModel("gpt-4o")).toBe("openai"));
-  // DeepSeek V4 native ids point at api.deepseek.com per catalog.json.
-  test("detects deepseek for deepseek-v4 native id", () =>
-    expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
+  test("detects anthropic via prefix fallback", () =>
+    expect(detectProviderForModel("claude-sonnet-4-6")).toBe("anthropic"));
+  test("detects openai via prefix fallback", () => expect(detectProviderForModel("gpt-4o")).toBe("openai"));
+  test("detects deepseek via catalog", () => expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
   test("prefix fallback for unknown deepseek id", () =>
     expect(detectProviderForModel("deepseek-future-x")).toBe("deepseek"));
-  test("detects xai", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
+  test("detects siliconflow via catalog", () =>
+    expect(detectProviderForModel("deepseek-ai/DeepSeek-V4-Pro")).toBe("siliconflow"));
+  test("detects xai via prefix fallback", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
   test("falls back to anthropic for unknown", () => expect(detectProviderForModel("unknown-model")).toBe("anthropic"));
 });

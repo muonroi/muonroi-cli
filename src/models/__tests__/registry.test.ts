@@ -40,22 +40,22 @@ describe("getModelIds", () => {
   test("returns array of all model IDs", () => {
     const ids = getModelIds();
     expect(ids.length).toBe(MODELS.length);
-    expect(ids).toContain("claude-sonnet-4-6");
+    expect(ids).toContain("deepseek-v4-flash");
   });
 });
 
 describe("getModelInfo", () => {
   test("returns info for known model", () => {
-    const info = getModelInfo("claude-sonnet-4-6");
+    const info = getModelInfo("deepseek-v4-flash");
     expect(info).toBeDefined();
-    expect(info!.name).toBe("Claude Sonnet 4.6");
-    expect(info!.contextWindow).toBe(1_000_000);
+    expect(info!.name).toBe("DeepSeek V4 Flash (native)");
+    expect(info!.contextWindow).toBe(128_000);
   });
 
   test("returns info via alias", () => {
-    const info = getModelInfo("claude-sonnet-4-6-latest");
+    const info = getModelInfo("deepseek-flash-native");
     expect(info).toBeDefined();
-    expect(info!.id).toBe("claude-sonnet-4-6");
+    expect(info!.id).toBe("deepseek-v4-flash");
   });
 
   test("returns undefined for unknown model", () => {
@@ -65,7 +65,7 @@ describe("getModelInfo", () => {
 
 describe("normalizeModelId", () => {
   test("resolves alias to canonical ID", () => {
-    expect(normalizeModelId("claude-sonnet-4-6-latest")).toBe("claude-sonnet-4-6");
+    expect(normalizeModelId("deepseek-flash-native")).toBe("deepseek-v4-flash");
   });
 
   test("passes through unknown IDs unchanged", () => {
@@ -73,23 +73,23 @@ describe("normalizeModelId", () => {
   });
 
   test("passes through canonical IDs unchanged", () => {
-    expect(normalizeModelId("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+    expect(normalizeModelId("deepseek-v4-flash")).toBe("deepseek-v4-flash");
   });
 });
 
 describe("getEffectiveReasoningEffort", () => {
   test("returns provided effort for reasoning model", () => {
-    expect(getEffectiveReasoningEffort("claude-sonnet-4-6", "high")).toBe("high");
+    expect(getEffectiveReasoningEffort("deepseek-v4-flash", "high")).toBe("high");
   });
 
   test("returns undefined when no effort provided", () => {
-    expect(getEffectiveReasoningEffort("claude-sonnet-4-6", undefined)).toBeUndefined();
+    expect(getEffectiveReasoningEffort("deepseek-v4-flash", undefined)).toBeUndefined();
   });
 });
 
 describe("getSupportedReasoningEfforts", () => {
   test("returns efforts for reasoning-capable model", () => {
-    const efforts = getSupportedReasoningEfforts("claude-sonnet-4-6");
+    const efforts = getSupportedReasoningEfforts("deepseek-v4-flash");
     expect(efforts.length).toBeGreaterThan(0);
   });
 });

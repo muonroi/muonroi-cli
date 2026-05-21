@@ -2,7 +2,7 @@ import { useState } from "react";
 import { normalizeModelId } from "../../models/registry.js";
 import type { ProviderId } from "../../providers/types.js";
 import type { ReasoningEffort } from "../../types/index.js";
-import { getDisabledModels, getDisabledProviders, loadUserSettings } from "../../utils/settings.js";
+import { getDefaultProvider, getDisabledModels, getDisabledProviders, loadUserSettings } from "../../utils/settings.js";
 
 export function useModelPicker(initialModel: string) {
   const [model, setModel] = useState(initialModel);
@@ -11,6 +11,7 @@ export function useModelPicker(initialModel: string) {
   const [modelSearchQuery, setModelSearchQuery] = useState("");
   const [configuredProviders, setConfiguredProviders] = useState<ProviderId[]>([]);
   const [disabledProviders, setDisabledProvidersState] = useState<ProviderId[]>(() => getDisabledProviders());
+  const [defaultProvider, setDefaultProviderState] = useState<ProviderId | null>(() => getDefaultProvider());
   const [disabledModels, setDisabledModelsState] = useState<string[]>(() => getDisabledModels());
   const [modelPickerFocus, setModelPickerFocus] = useState<"models" | "providers">("models");
   const [providerChipIndex, setProviderChipIndex] = useState(0);
@@ -35,6 +36,8 @@ export function useModelPicker(initialModel: string) {
     setConfiguredProviders,
     disabledProviders,
     setDisabledProvidersState,
+    defaultProvider,
+    setDefaultProviderState,
     disabledModels,
     setDisabledModelsState,
     modelPickerFocus,

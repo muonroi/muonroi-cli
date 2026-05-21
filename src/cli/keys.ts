@@ -31,9 +31,11 @@ import {
   deleteKeyForProvider,
   KEYCHAIN_PROVIDER_IDS,
   listStoredProviders,
+  loadKeyForProvider,
   setKeyForProvider,
 } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
+import { decryptBundle, encryptBundle, type KeyBundleV1 } from "./keys-bundle.js";
 
 /**
  * Providers that support OAuth login. Derived asynchronously from the OAuth
@@ -282,6 +284,98 @@ export async function runKeysDelete(provider: string): Promise<void> {
   }
   const ok = await deleteKeyForProvider(provider);
   console.log(ok ? `Deleted ${provider} key from keychain.` : `No ${provider} key was stored.`);
+}
+
+export async function runKeysExport(filePath: string): Promise<void> {
+  const providers: Record<string, string> = {};
+  for (const p of KEYCHAIN_PROVIDER_IDS) {
+    try {
+      const k = await loadKeyForProvider(p);
+      if (k && k.length >= 20) providers[p] = k;
+    } catch {
+      /* no key for this provider — skip */
+    }
+  }
+  const found = Object.keys(providers);
+  if (found.length === 0) {
+    console.error("No provider keys found to export.");
+    process.exit(1);
+  }
+
+  console.log(`Exporting ${found.length} key(s): ${found.join(", ")}`);
+  const pass1 = await promptHidden("Choose a passphrase (min 8 chars, hidden): ");
+  if (pass1.length < 8) {
+    console.error("Passphrase too short (min 8 chars). Aborted.");
+    process.exit(1);
+  }
+  const pass2 = await promptHidden("Confirm passphrase: ");
+  if (pass1 !== pass2) {
+    console.error("Passphrases do not match. Aborted.");
+    process.exit(1);
+  }
+
+  const bundle = encryptBundle({ providers }, pass1);
+  const abs = path.resolve(filePath);
+  await fs.writeFile(abs, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
+  console.log(`Wrote encrypted bundle → ${abs}`);
+  console.log("Move this file to the target device, then run: muonroi-cli keys import <file>");
+}
+
+export async function runKeysImport(filePath: string): Promise<void> {
+  const abs = path.resolve(filePath);
+  let raw: string;
+  try {
+    raw = await fs.readFile(abs, "utf8");
+  } catch (e) {
+    console.error(`Cannot read bundle file '${abs}': ${(e as Error).message}`);
+    process.exit(1);
+  }
+  let bundle: KeyBundleV1;
+  try {
+    bundle = JSON.parse(raw) as KeyBundleV1;
+  } catch (e) {
+    console.error(`Bundle file is not valid JSON: ${(e as Error).message}`);
+    process.exit(1);
+  }
+
+  const pass = await promptHidden("Bundle passphrase (hidden): ");
+  let payload: { providers: Record<string, string> };
+  try {
+    payload = decryptBundle(bundle, pass);
+  } catch (e) {
+    console.error((e as Error).message);
+    process.exit(1);
+  }
+
+  const entries = Object.entries(payload.providers);
+  if (entries.length === 0) {
+    console.error("Bundle decrypted but contains no provider keys.");
+    process.exit(1);
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  for (const [provider, key] of entries) {
+    if (!isValidProvider(provider)) {
+      console.warn(`Skipping unknown provider '${provider}' in bundle.`);
+      skipped++;
+      continue;
+    }
+    try {
+      const ok = await setKeyForProvider(provider, key);
+      if (ok) {
+        imported++;
+        console.log(`✓ ${provider} → keychain (${maskKey(key)})`);
+      } else {
+        console.warn(`! ${provider} — keychain unavailable, key not stored`);
+        skipped++;
+      }
+    } catch (e) {
+      console.warn(`! ${provider} — ${(e as Error).message}`);
+      skipped++;
+    }
+  }
+  console.log(`\nImported ${imported} key(s); ${skipped} skipped.`);
 }
 
 interface BwImportOptions {
