@@ -241,6 +241,18 @@ export interface UserSettings {
   councilCostAware?: boolean;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
+  /**
+   * Unix ms timestamp of the last npm-registry update check. Used to throttle
+   * checkForUpdate to once per day so the CLI never spams the registry on
+   * every launch.
+   */
+  lastUpdateCheck?: number;
+  /**
+   * When true, the TUI skips the "Update available — install now?" modal and
+   * runs the update silently when a newer version is detected. Defaults to
+   * false (interactive prompt).
+   */
+  autoUpdate?: boolean;
   providers?: {
     anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;

@@ -1,16 +1,15 @@
 /**
- * G2 sanitizeHistory coverage — verifies the capability hook added in Phase
- * 12.2 group 2 strips assistant `reasoning` parts only on the SiliconFlow
- * capability. Every other provider's capability returns input by reference.
- *
- * Backs commit isolating the inline `provider === "siliconflow"` check that
- * previously lived in src/orchestrator/orchestrator.ts at two call sites.
+ * G2 sanitizeHistory coverage — verifies which capabilities strip assistant
+ * `reasoning` parts. Per DeepSeek docs, reasoning_content must not round-trip
+ * in subsequent turns, so both `deepseek` and `siliconflow` strip. Other
+ * providers' capabilities return the input by reference.
  */
 import { describe, expect, it } from "vitest";
 import { getProviderCapabilities } from "../capabilities.js";
 import type { ProviderId } from "../types.js";
 
-const IDENTITY_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "xai", "deepseek", "ollama"];
+const IDENTITY_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "xai", "ollama"];
+const STRIPPING_PROVIDERS: ProviderId[] = ["deepseek", "siliconflow"];
 
 describe("ProviderCapabilities.sanitizeHistory — G2", () => {
   describe("identity providers", () => {
@@ -44,38 +43,40 @@ describe("ProviderCapabilities.sanitizeHistory — G2", () => {
     });
   });
 
-  describe("siliconflow", () => {
-    const caps = getProviderCapabilities("siliconflow");
+  describe("stripping providers", () => {
+    for (const p of STRIPPING_PROVIDERS) {
+      const caps = getProviderCapabilities(p);
 
-    it("strips assistant reasoning parts from history", () => {
-      const messages = [
-        { role: "user", content: "hi" },
-        {
-          role: "assistant",
-          content: [
-            { type: "reasoning", text: "think" },
-            { type: "text", text: "Hello!" },
-          ],
-        },
-      ];
-      const out = caps.sanitizeHistory(messages);
-      expect(out).not.toBe(messages);
-      expect(out).toHaveLength(2);
-      expect((out[1] as { content: unknown[] }).content).toEqual([{ type: "text", text: "Hello!" }]);
-    });
+      it(`${p} strips assistant reasoning parts from history`, () => {
+        const messages = [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: [
+              { type: "reasoning", text: "think" },
+              { type: "text", text: "Hello!" },
+            ],
+          },
+        ];
+        const out = caps.sanitizeHistory(messages);
+        expect(out).not.toBe(messages);
+        expect(out).toHaveLength(2);
+        expect((out[1] as { content: unknown[] }).content).toEqual([{ type: "text", text: "Hello!" }]);
+      });
 
-    it("returns input by reference when no reasoning parts present", () => {
-      const messages = [
-        { role: "user", content: "hi" },
-        { role: "assistant", content: [{ type: "text", text: "hello" }] },
-      ];
-      const out = caps.sanitizeHistory(messages);
-      expect(out).toBe(messages);
-    });
+      it(`${p} returns input by reference when no reasoning parts present`, () => {
+        const messages = [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: [{ type: "text", text: "hello" }] },
+        ];
+        const out = caps.sanitizeHistory(messages);
+        expect(out).toBe(messages);
+      });
 
-    it("still satisfies the deepseek supportsResponseTool override (inheritance)", () => {
-      expect(caps.supportsResponseTool("general")).toBe(false);
-      expect(caps.supportsResponseTool("plan")).toBe(true);
-    });
+      it(`${p} still satisfies the deepseek supportsResponseTool override`, () => {
+        expect(caps.supportsResponseTool("general")).toBe(false);
+        expect(caps.supportsResponseTool("plan")).toBe(true);
+      });
+    }
   });
 });

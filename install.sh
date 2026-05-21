@@ -20,8 +20,8 @@ usage() {
 Install muonroi-cli from GitHub Releases.
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash
-  curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/main/install.sh | bash -s -- --version 1.1.4
+  curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.sh | bash -s -- --version 1.1.4
   bash install.sh --binary /path/to/muonroi-cli
 
 Options:

@@ -128,8 +128,8 @@ describe("parseSubAgentsRawList", () => {
     const { parseSubAgentsRawList } = await import("./settings");
     const result = parseSubAgentsRawList([
       null,
-      { name: "", model: "claude-sonnet-4-6", instruction: "test" },
-      { name: "explore", model: "claude-sonnet-4-6", instruction: "reserved" },
+      { name: "", model: "deepseek-v4-flash", instruction: "test" },
+      { name: "explore", model: "deepseek-v4-flash", instruction: "reserved" },
     ]);
     expect(result).toEqual([]);
   });
@@ -137,8 +137,8 @@ describe("parseSubAgentsRawList", () => {
   it("deduplicates by lowercase name", async () => {
     const { parseSubAgentsRawList } = await import("./settings");
     const result = parseSubAgentsRawList([
-      { name: "MyAgent", model: "claude-sonnet-4-6", instruction: "first" },
-      { name: "myagent", model: "claude-sonnet-4-6", instruction: "dupe" },
+      { name: "MyAgent", model: "deepseek-v4-flash", instruction: "first" },
+      { name: "myagent", model: "deepseek-v4-flash", instruction: "dupe" },
     ]);
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe("MyAgent");

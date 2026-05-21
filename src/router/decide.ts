@@ -354,7 +354,18 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   if (pilTier && pilConf >= 0.6) {
     // Use effective (non-disabled) provider when default is disabled
     const effective = resolveTierModel(pilTier, opts.defaultProvider);
-    const tierModel = effective ?? getModelByTier(pilTier, opts.defaultProvider);
+    let tierModel = effective ?? getModelByTier(pilTier, opts.defaultProvider);
+    // Guard: getModelByTier may cross to another provider when defaultProvider
+    // has no model for the requested tier. If that cross-provider is disabled,
+    // pin to the default model on the default provider instead.
+    if (
+      !effective &&
+      tierModel &&
+      tierModel.provider !== opts.defaultProvider &&
+      isProviderDisabled(tierModel.provider as ProviderId)
+    ) {
+      tierModel = undefined;
+    }
     const d: RouteDecision = {
       tier: "hot",
       model: tierModel?.id ?? opts.defaultModel,
@@ -381,7 +392,18 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   if (c.tier === "hot") {
     // Use effective (non-disabled) provider when default is disabled
     const effective = c.tierHint ? resolveTierModel(c.tierHint, opts.defaultProvider) : undefined;
-    const tierModel = effective ?? (c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined);
+    let tierModel = effective ?? (c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined);
+    // Same guard as the PIL branch above: drop cross-provider fallback when
+    // the cross-provider is disabled, so we don't switch to a provider the
+    // user has turned off in the splash modal.
+    if (
+      !effective &&
+      tierModel &&
+      tierModel.provider !== opts.defaultProvider &&
+      isProviderDisabled(tierModel.provider as ProviderId)
+    ) {
+      tierModel = undefined;
+    }
     const d: RouteDecision = {
       tier: "hot",
       model: tierModel?.id ?? opts.defaultModel,
