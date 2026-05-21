@@ -143,24 +143,65 @@ export async function* runProductLoop(
         }
       }
 
-      // Sufficiency gate: if Layer 1 flagged missing context dimensions
-      // (scope/target/intent), Council MUST run so AskCard can fill them
-      // in before any scaffolding. Hot-path is for context-complete prompts
-      // only (e.g. "fix typo in foo.ts:42"), not for vague briefs like
-      // "todo app" — those are exactly when an Agile team would discover.
+      // C1 — Existing-repo bypass. The sufficiency gate below was tuned for
+      // greenfield: a vague "todo app" prompt with no folder MUST go to
+      // Council so AskCard can pin productType / audience / stack before
+      // any scaffolding. But when /ideal runs inside a non-empty folder,
+      // those answers are derivable from the source (manifests, dirs, deps)
+      // — forcing the user through 6 AskCards is the regression session
+      // e2660a052918 demonstrated. Skip the sufficiency gate (and prefer
+      // hot-path over full Council for medium complexity) when the cwd is
+      // an existing project AND the caller hasn't explicitly forced council.
+      //
+      // forceCouncil=true still wins — user can opt back into the full
+      // Council pipeline when they actually want it (e.g. architectural
+      // change to an existing repo).
+      const existingRepoBypass = await detectExistingRepoBypass(opts);
       const hasGaps = !!(opts.sufficiencyMissing && opts.sufficiencyMissing.length > 0);
-      if (hasGaps) {
+      if (hasGaps && !existingRepoBypass) {
         const forcedOpts: ProductLoopOptions = {
           ...opts,
           flags: { ...opts.flags, forceCouncil: true },
         };
         return yield* runStart(forcedOpts);
       }
+      // Existing repo + complexity≠high → hot-path. The leader can grep
+      // the source instead of interviewing the user. Only architectural
+      // changes (complexity=high) still warrant the full Council debate.
+      if (existingRepoBypass && opts.complexity !== "high" && !opts.flags.forceCouncil) {
+        return yield* runHotPath(opts);
+      }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
         return yield* runHotPath(opts);
       }
       return yield* runStart(opts);
     }
+  }
+}
+
+/**
+ * C1 — Decide whether the existing-repo bypass should fire for THIS run.
+ *
+ * Returns true when `cwd` contains source code or a manifest (any of:
+ * package.json, Cargo.toml, go.mod, pyproject.toml, *.csproj, *.sln,
+ * Directory.Build.props, or a top-level source file). False when the
+ * folder is empty / probe fails — in which case the original gating
+ * (Council for vague greenfield prompts) takes over.
+ *
+ * Sync probe, no I/O retry. `forceCouncil` overrides this gate at the
+ * call site — when the user explicitly asks for Council we honor it
+ * even on an existing repo (e.g. "rearchitect this codebase").
+ */
+async function detectExistingRepoBypass(opts: ProductLoopOptions): Promise<boolean> {
+  if (opts.flags?.forceCouncil) return false;
+  const cwd = opts.cwd ?? process.cwd();
+  try {
+    const { detectExistingProject } = await import("./discovery-detection.js");
+    const det = await detectExistingProject(cwd);
+    return det.classification !== "greenfield";
+  } catch {
+    // Detection failure is non-fatal — fall back to the original gating.
+    return false;
   }
 }
 
