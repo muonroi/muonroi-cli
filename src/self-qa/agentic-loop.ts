@@ -120,9 +120,41 @@ export type LLMBrainOptions = {
   modelId: string;
   /** System prompt override. */
   systemPrompt?: string;
-  /** Max tokens per LLM call. Default 256. */
+  /** Max tokens per LLM call. Default 1024 (room for thinking models). */
   maxTokens?: number;
+  /** Retry once on unparseable empty output. Default true. */
+  retryOnEmpty?: boolean;
 };
+
+/**
+ * Pull a usable text body out of an AI SDK generateText result.
+ *
+ * Reasoning models (DeepSeek-V4-Flash, SiliconFlow R1, etc.) sometimes
+ * route the visible output to `result.reasoning` instead of `result.text`,
+ * or embed thinking inside `<think>…</think>` blocks. This walker tries:
+ *
+ *   1. `result.text` (canonical)
+ *   2. `result.reasoning` (some providers expose only this)
+ *   3. Concatenation of `parts[].text` (AI SDK v5+ shape)
+ *
+ * Then strips `<think>…</think>` so the JSON object emerges cleanly.
+ */
+function extractBrainText(res: unknown): string {
+  // biome-ignore lint/suspicious/noExplicitAny: heterogeneous SDK result
+  const r = res as any;
+  const candidates: string[] = [];
+  if (typeof r?.text === "string") candidates.push(r.text);
+  if (typeof r?.reasoning === "string") candidates.push(r.reasoning);
+  if (Array.isArray(r?.content)) {
+    for (const p of r.content) if (typeof p?.text === "string") candidates.push(p.text);
+  }
+  for (const c of candidates) {
+    const stripped = c.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    if (stripped.length > 0) return stripped;
+  }
+  // Last resort: return whatever was longest, even if it's just thinking text.
+  return (candidates.sort((a, b) => b.length - a.length)[0] ?? "").trim();
+}
 
 export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrain> {
   const provider = detectProviderForModel(opts.modelId);
@@ -132,7 +164,20 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   const { factory } = createProviderFactory(provider, { apiKey });
   const runtime = resolveModelRuntime(factory, opts.modelId);
   const systemPrompt = opts.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-  const maxTokens = opts.maxTokens ?? 256;
+  const maxTokens = opts.maxTokens ?? 1024;
+  const retryOnEmpty = opts.retryOnEmpty !== false;
+
+  async function callOnce(userPrompt: string): Promise<{ text: string; decision: AgenticDecision | null }> {
+    const res = await generateText({
+      model: runtime.model,
+      system: systemPrompt.replace("${maxTurns}", "<see prompt>"),
+      prompt: userPrompt,
+      maxOutputTokens: maxTokens,
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    });
+    const text = extractBrainText(res);
+    return { text, decision: parseDecision(text) };
+  }
 
   return {
     async decide({ goal, context, historyExcerpt, turn, maxTurns }) {
@@ -148,23 +193,22 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
         `## TUI state`,
         context.prompt,
         ``,
-        `## Your reply (single JSON object)`,
+        `## Your reply (single JSON object, no prose, no markdown fences)`,
       ].join("\n");
 
-      const res = await generateText({
-        model: runtime.model,
-        system: systemPrompt.replace("${maxTurns}", String(maxTurns)),
-        prompt: userPrompt,
-        maxOutputTokens: maxTokens,
-      });
-
-      const text = res.text.trim();
-      const decision = parseDecision(text);
+      let { text, decision } = await callOnce(userPrompt);
+      if (!decision && retryOnEmpty) {
+        // Retry with a stricter nudge — append a one-line reminder.
+        const stricter = `${userPrompt}\n\nReminder: reply with ONE LINE of JSON only, e.g. {"action":"press","key":"Enter","reason":"..."}. No <think> blocks.`;
+        const second = await callOnce(stricter);
+        text = second.text || text;
+        decision = second.decision;
+      }
       if (decision) return decision;
       return {
         action: "done",
         verdict: "inconclusive",
-        reason: `Brain emitted unparseable output: ${text.slice(0, 200)}`,
+        reason: `Brain emitted unparseable output: ${text.slice(0, 200) || "(empty)"}`,
       };
     },
   };
