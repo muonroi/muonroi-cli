@@ -91,6 +91,17 @@ export async function runSelfVerify(opts: SelfVerifyOptions = {}): Promise<SelfV
   };
 }
 
+export type { AgenticContextBlock, AgenticContextOptions } from "./agentic-context.js";
+export { buildAgenticContext } from "./agentic-context.js";
+export type {
+  AgenticBrain,
+  AgenticDecision,
+  AgenticLoopOptions,
+  AgenticReport,
+  AgenticTurn,
+  LLMBrainOptions,
+} from "./agentic-loop.js";
+export { createLLMBrain, createMockBrain, parseDecision, runAgenticLoop } from "./agentic-loop.js";
 export { applyDelta, compressionRatio, encodeDelta } from "./delta-encoder.js";
 export type {
   CheckResult,

@@ -1522,30 +1522,74 @@ program
   .option("--no-emit", "Do not write tests/harness/auto/*.spec.ts on pass")
   .option("--out <dir>", "Override the emitted-spec directory")
   .option("--json", "Print machine-readable JSON report to stdout")
-  .action(async (opts: { since: string; max: string; emit?: boolean; out?: string; json?: boolean }) => {
-    const { runSelfVerify } = await import("./self-qa/index.js");
-    const log = opts.json ? () => {} : (m: string) => console.log(m);
-    const report = await runSelfVerify({
-      baseRef: opts.since,
-      maxScenarios: Number.parseInt(opts.max, 10) || 8,
-      emitSpecs: opts.emit !== false,
-      specOutDir: opts.out,
-      log,
-    });
-    if (opts.json) {
-      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-    } else {
-      const s = report.summary;
-      console.log(
-        `\n[self-verify] ${s.passed}/${s.total} passed | ${s.failed} failed | ${s.inconclusive} inconclusive | ${report.durationMs}ms`,
-      );
-      if (report.emittedSpecs.length > 0) {
-        console.log(`[self-verify] Emitted ${report.emittedSpecs.length} regression spec(s):`);
-        for (const path of report.emittedSpecs) console.log(`  ${path}`);
+  .option(
+    "--agentic",
+    "Tier 2: outer LLM drives the child interactively (reads frame deltas + events, decides next step). Requires --goal and --model.",
+  )
+  .option("--goal <text>", "Free-form goal for agentic mode (e.g. 'open agents modal and add a researcher')")
+  .option("--model <id>", "Model id for agentic mode (e.g. 'deepseek-v4-flash')")
+  .option("--turns <n>", "Max agentic turns", "20")
+  .action(
+    async (opts: {
+      since: string;
+      max: string;
+      emit?: boolean;
+      out?: string;
+      json?: boolean;
+      agentic?: boolean;
+      goal?: string;
+      model?: string;
+      turns: string;
+    }) => {
+      const log = opts.json ? () => {} : (m: string) => console.log(m);
+
+      if (opts.agentic) {
+        if (!opts.goal || !opts.model) {
+          console.error("--agentic requires both --goal and --model");
+          process.exit(2);
+        }
+        const { runAgenticLoop, createLLMBrain } = await import("./self-qa/agentic-loop.js");
+        const brain = await createLLMBrain({ modelId: opts.model });
+        const report = await runAgenticLoop({
+          goal: opts.goal,
+          brain,
+          maxTurns: Number.parseInt(opts.turns, 10) || 20,
+          log,
+        });
+        if (opts.json) {
+          process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        } else {
+          console.log(
+            `\n[self-verify agentic] verdict=${report.verdict} | ${report.turns.length} turns | ${report.totalDurationMs}ms`,
+          );
+          console.log(`  reason: ${report.reason}`);
+        }
+        process.exit(report.verdict === "fail" ? 1 : 0);
       }
-    }
-    process.exit(report.summary.failed > 0 ? 1 : 0);
-  });
+
+      const { runSelfVerify } = await import("./self-qa/index.js");
+      const report = await runSelfVerify({
+        baseRef: opts.since,
+        maxScenarios: Number.parseInt(opts.max, 10) || 8,
+        emitSpecs: opts.emit !== false,
+        specOutDir: opts.out,
+        log,
+      });
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        const s = report.summary;
+        console.log(
+          `\n[self-verify] ${s.passed}/${s.total} passed | ${s.failed} failed | ${s.inconclusive} inconclusive | ${report.durationMs}ms`,
+        );
+        if (report.emittedSpecs.length > 0) {
+          console.log(`[self-verify] Emitted ${report.emittedSpecs.length} regression spec(s):`);
+          for (const path of report.emittedSpecs) console.log(`  ${path}`);
+        }
+      }
+      process.exit(report.summary.failed > 0 ? 1 : 0);
+    },
+  );
 
 program
   .command("export-transcripts")
