@@ -89,7 +89,7 @@ function buildLiveTuiAsk(
   };
 }
 
-function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Promise<string>): UserPromptFn {
+export function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Promise<string>): UserPromptFn {
   return async (args: UserPromptArgs): Promise<UserPromptResult> => {
     if (args.questionId === "__user_gate__") {
       const choice = await tuiAsk("All required questions answered. Proceed to research or ask more?", [
@@ -115,19 +115,44 @@ function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Pr
         lines.push(`  alt ${i + 1}: ${JSON.stringify(alt.value)} — ${alt.rationale}`);
       });
     }
-    // When the leader returns null (source="user-only"), "accept" would feed null
-    // into validateAnswer and silently loop on the same askcard. Hide it so the
-    // user must override / skip / abort.
+    // D — selectable alternatives.
+    //
+    // Old behaviour: options were 5 hardcoded verbs (accept/override/
+    // more-options/skip/abort). Alternatives appeared in the question
+    // preamble but to pick one the user had to choose `override` then
+    // retype the JSON value — equivalent to a free-text answer, even
+    // though the leader had already proposed concrete options.
+    //
+    // New behaviour: every concrete option from the leader becomes its
+    // own clickable card row. `more-options` is dropped (was a re-prompt
+    // no-op). `override` is renamed `custom value` for clarity.
+    //
+    // When the leader returns null (source="user-only"), `accept` would
+    // feed null into validateAnswer and silently loop on the same askcard.
+    // Hide accept + the alt rows in that case so the user MUST type or skip.
     const hasRecommendation = args.recommendation?.primary?.value != null;
+    const ALT_PREFIX = "use alt "; // must match parse below
+    const ALT_OPT = (i: number, v: unknown): string => `${ALT_PREFIX}${i + 1}: ${JSON.stringify(v)}`;
+    const altLabels = hasRecommendation
+      ? (args.recommendation?.alternatives ?? []).map((alt, i) => ALT_OPT(i, alt.value))
+      : [];
     const options = hasRecommendation
-      ? ["accept", "override", "more-options", "skip", "abort"]
-      : ["override", "skip", "abort"];
+      ? ["accept", ...altLabels, "custom value", "skip", "abort"]
+      : ["custom value", "skip", "abort"];
     const choice = await tuiAsk(lines.join("\n"), options);
     if (choice === "accept") return { action: "accept" };
     if (choice === "skip") return { action: "skip" };
-    if (choice === "more-options") return { action: "more-options" };
     if (choice === "abort") return { action: "abort" };
-    // override
+    if (choice.startsWith(ALT_PREFIX)) {
+      const m = choice.match(/^use alt (\d+):/);
+      const idx = m ? Number.parseInt(m[1], 10) - 1 : -1;
+      const alt = args.recommendation?.alternatives?.[idx];
+      if (alt) {
+        return { action: "override", value: alt.value, reason: `selected alt ${idx + 1} from AskCard` };
+      }
+      // Fallthrough to manual entry if parse fails (defensive).
+    }
+    // custom value
     const value = await tuiAsk("Enter override value (JSON):", []);
     const reason = await tuiAsk("Why override?", []);
     try {
