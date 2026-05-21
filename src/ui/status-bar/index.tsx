@@ -9,7 +9,7 @@
 
 import { Semantic } from "@muonroi/agent-harness-opentui";
 import * as React from "react";
-import { type StatusBarState, statusBarStore } from "./store.js";
+import { type SprintProgressSegment, type StatusBarState, statusBarStore } from "./store.js";
 import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";
 
@@ -38,6 +38,14 @@ function fmtCost(usd: number): string {
   return `$${usd.toFixed(4)}`;
 }
 
+/**
+ * Format a SprintProgressSegment into the StatusBar display string.
+ * Format: Sprint N/M · X/Y stories · Z%
+ */
+export function renderSprintSegment(s: SprintProgressSegment): string {
+  return `Sprint ${s.activeSprintNumber}/${s.totalSprints} · ${s.completedStories}/${s.totalStories} stories · ${s.overallPct}%`;
+}
+
 /** Pure render function -- testable without React hooks context. */
 export function renderStatusBar(s: StatusBarState): React.ReactElement {
   const modelLabel =
@@ -64,6 +72,17 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
     }),
     React.createElement("text", { key: "ee", fg: ee.color, "data-testid": "slot-ee" }, ee.symbol),
   ];
+
+  // Sprint progress segment (B1) — only shown when an /ideal run is active.
+  if (s.sprint) {
+    slots.push(
+      React.createElement(
+        "text",
+        { key: "sprint", fg: "#a0e0a0", "data-testid": "slot-sprint" },
+        renderSprintSegment(s.sprint),
+      ),
+    );
+  }
 
   if (s.degraded) {
     slots.push(

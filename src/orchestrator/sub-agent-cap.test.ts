@@ -129,7 +129,7 @@ describe("wrapToolSetWithCap", () => {
     let counter = 0;
     const innerExec = async (): Promise<string> => {
       counter++;
-      return `${counter}-` + "Z".repeat(20_000);
+      return `${counter}-${"Z".repeat(20_000)}`;
     };
     const tools: ToolSet = {
       sample: {

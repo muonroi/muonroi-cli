@@ -42,12 +42,7 @@ import { completeDelegation, failDelegation, loadDelegation } from "./orchestrat
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
 import { getProviderCapabilities } from "./providers/capabilities.js";
-import {
-  KEYCHAIN_PROVIDER_IDS,
-  listStoredProviders,
-  loadKeyForProvider,
-  setKeyForProvider,
-} from "./providers/keychain.js";
+import { listStoredProviders, loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
 import { detectProviderForModel } from "./providers/runtime.js";
 import type { ProviderId } from "./providers/types.js";
 import { loadConfig } from "./storage/config.js";
@@ -145,7 +140,7 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
   // appearance (api-key.spec.ts) set MUONROI_TEST_NO_KEYCHAIN=1 to suppress
   // the dev machine's real keychain entry from masking the unauthenticated
   // boot path. Honoured ONLY in tests — never read in production flows.
-  if (process.env["MUONROI_TEST_NO_KEYCHAIN"] === "1") return null;
+  if (process.env.MUONROI_TEST_NO_KEYCHAIN === "1") return null;
   const provider = detectProviderForModel(modelId);
   try {
     const k = await loadKeyForProvider(provider);
@@ -163,7 +158,7 @@ async function resolveKeyForModel(modelId: string): Promise<string | null> {
  * subscription.
  */
 async function hasOAuthForModel(modelId: string): Promise<boolean> {
-  if (process.env["MUONROI_TEST_NO_KEYCHAIN"] === "1") return false;
+  if (process.env.MUONROI_TEST_NO_KEYCHAIN === "1") return false;
   const provider = detectProviderForModel(modelId);
   try {
     const { getOAuthProviderConfig } = await import("./providers/auth/registry.js");
@@ -838,7 +833,7 @@ function resolveConfig(options: CliOptions) {
   }
   const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), cliOverrides);
 
-  if (typeof options.apiKey === "string" && process.env["MUONROI_TEST_NO_PERSIST"] !== "1") {
+  if (typeof options.apiKey === "string" && process.env.MUONROI_TEST_NO_PERSIST !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.
     // Fire-and-forget: keychain write is async; if it fails (no keytar), the key still
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
@@ -1518,6 +1513,30 @@ program
   });
 
 program
+  .command("export-transcripts")
+  .description("One-shot dump of SQLite session history → ~/.experience/muonroi-cli-sessions/ for EE backfill")
+  .option("--days <n>", "Only export sessions updated within N days (default 30)", "30")
+  .option("--min-messages <n>", "Skip sessions with fewer than N messages (default 4)", "4")
+  .option("--dry-run", "List sessions that would be exported without writing files")
+  .action(async (opts: { days: string; minMessages: string; dryRun?: boolean }) => {
+    const { exportTranscripts } = await import("./ee/export-transcripts.js");
+    try {
+      const res = await exportTranscripts({
+        maxAgeDays: Number.parseInt(opts.days, 10),
+        minMessages: Number.parseInt(opts.minMessages, 10),
+        dryRun: !!opts.dryRun,
+      });
+      console.log(
+        `[export-transcripts] sessions=${res.totalSessions}  written=${res.written}  skipped_empty=${res.skippedEmpty}  skipped_small=${res.skippedTooSmall}\n  output: ${res.outputRoot}`,
+      );
+      process.exit(0);
+    } catch (e) {
+      console.error(`[export-transcripts] failed: ${(e as Error).message}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command("share <user>")
   .description("Add a stakeholder to the current product's Discord channel")
   .option("--product <slug>", "Override product slug (default: most recent run)")
@@ -1559,6 +1578,23 @@ program
         console.error(`muonroi share: ${result.message}`);
         process.exit(1);
         break;
+    }
+  });
+
+program
+  .command("reporter")
+  .description("Run the P8 reporter agent — polls Discord and serves progress queries")
+  .requiredOption("--run <runId>", "Run ID to observe")
+  .option("--product-slug <slug>", "Product slug (inferred from run manifest if omitted)")
+  .option("--daily-budget <usd>", "Daily LLM budget in USD (default 0.50)", "0.50")
+  .action(async (opts: { run: string; productSlug?: string; dailyBudget?: string }) => {
+    const { runReporterCmd } = await import("./cli/reporter-cmd.js");
+    try {
+      await runReporterCmd({ run: opts.run, productSlug: opts.productSlug, dailyBudget: opts.dailyBudget });
+      process.exit(0);
+    } catch (e) {
+      console.error(`muonroi reporter: ${(e as Error).message}`);
+      process.exit(1);
     }
   });
 

@@ -189,10 +189,10 @@ describe("drainQueueAsync()", () => {
   it("stops on 2nd entry failure and leaves 2nd + 3rd entries on disk", async () => {
     await populateQueue(3, 1000);
 
-    let callCount = 0;
+    let _callCount = 0;
     const stub = await startStubEEServer({
       feedback: () => {
-        callCount++;
+        _callCount++;
       },
     });
 

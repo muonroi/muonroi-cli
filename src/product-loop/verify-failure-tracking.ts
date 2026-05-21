@@ -92,7 +92,7 @@ export async function loadVerifyFailureSignatures(flowDir: string, runId: string
     if (!stateMap) return {};
 
     const raw = stateMap.sections.get(SECTION_NAME);
-    if (!raw || !raw.trim()) return {};
+    if (!raw?.trim()) return {};
 
     const parsed = JSON.parse(raw.trim());
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};

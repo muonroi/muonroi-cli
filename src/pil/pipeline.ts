@@ -43,7 +43,7 @@ function pipelineTimeoutMs(): number {
   const envOverride = process.env.MUONROI_TEST_PIPELINE_TIMEOUT_MS;
   if (envOverride) {
     const parsed = parseInt(envOverride, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
   }
   const mode = getCachedEEClientMode();
   if (mode && (mode.mode === "thin" || mode.mode === "thin-degraded" || mode.mode === "fat")) {

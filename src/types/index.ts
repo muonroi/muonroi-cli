@@ -279,7 +279,13 @@ export type CouncilPhaseKind =
   | "mid_research"
   | "summary"
   | "synthesis"
-  | "action_plan";
+  | "action_plan"
+  /**
+   * Sprint stage emitted by sprint-runner — one of planning/implementation/
+   * verification/judgment. label distinguishes the stage. Used so the user
+   * can see what sprint-runner is doing instead of a silent "## Sprint N" header.
+   */
+  | "sprint_stage";
 
 export type CouncilPhaseState = "active" | "done" | "error";
 
@@ -294,6 +300,13 @@ export interface CouncilPhaseEvent {
   errorMessage?: string;
   /** Monotonic ordering hint; ties broken by insertion order. */
   sequence?: number;
+  /**
+   * Epoch-ms timestamp when the phase entered "active". When set on an
+   * "active" event, the timeline UI computes a live-ticking elapsed display
+   * (no need to keep sending elapsedMs updates from the emitter). Set
+   * automatically by `phaseStart` in council/phase-events.ts.
+   */
+  startedAt?: number;
 }
 
 export interface CouncilPreflightData {

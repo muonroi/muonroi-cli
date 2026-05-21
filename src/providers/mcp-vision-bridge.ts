@@ -666,7 +666,7 @@ function buildContextualPrompt(imageCount: number, context: ImageContext): strin
       return (
         base +
         [
-          "Provide a comprehensive analysis:" + hint,
+          `Provide a comprehensive analysis:${hint}`,
           "- Describe what the image shows overall",
           "- Transcribe any visible text exactly",
           "- Note colors, layout, and important visual details",

@@ -18,9 +18,7 @@ import { continueAsCouncil } from "../continue-as-council.js";
 // ---------------------------------------------------------------------------
 
 /** Build an async iterable that emits delta chunks then done. */
-async function* makeCouncilStream(
-  chunks: string[],
-): AsyncIterable<{ type: "delta" | "done"; content?: string }> {
+async function* makeCouncilStream(chunks: string[]): AsyncIterable<{ type: "delta" | "done"; content?: string }> {
   for (const c of chunks) {
     yield { type: "delta", content: c };
   }

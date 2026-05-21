@@ -64,7 +64,7 @@ describe("scoreComplexity — signal isolation", () => {
 
     // 250-char version: length +2 + FORCE_HIGH_RE +3 = 5 → medium; still not low.
     const medOut = scoreComplexity({
-      rawText: "Architecture migration plan for multi-tenant SaaS " + "a".repeat(200),
+      rawText: `Architecture migration plan for multi-tenant SaaS ${"a".repeat(200)}`,
       taskType: null,
       t0HitCount: 0,
       hasMaxSprintsOne: false,
@@ -74,7 +74,7 @@ describe("scoreComplexity — signal isolation", () => {
 
     // 600-char version: length +3 + FORCE_HIGH_RE +3 = 6 → high.
     const highOut = scoreComplexity({
-      rawText: "Architecture migration plan for multi-tenant SaaS " + "a".repeat(560),
+      rawText: `Architecture migration plan for multi-tenant SaaS ${"a".repeat(560)}`,
       taskType: null,
       t0HitCount: 0,
       hasMaxSprintsOne: false,

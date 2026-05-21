@@ -9,7 +9,7 @@
  * to validate the full HTTP pipeline without needing a real Agent instance.
  */
 import type { ModelMessage } from "ai";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { extractSession } from "../ee/extract-session.js";

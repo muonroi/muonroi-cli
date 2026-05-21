@@ -34,7 +34,7 @@ function renderScreen(rows: ModelRow[], cursor: number, statusMsg: string, width
   const lines: string[] = [];
   lines.push(`${A.BOLD}Models${A.RESET}`);
   lines.push(divider(width));
-  lines.push("    " + "Model".padEnd(36) + "Provider".padEnd(14) + "Tier".padEnd(8) + "Status");
+  lines.push(`    ${"Model".padEnd(36)}${"Provider".padEnd(14)}${"Tier".padEnd(8)}Status`);
   lines.push(divider(width));
 
   if (rows.length === 0) {
@@ -47,7 +47,7 @@ function renderScreen(rows: ModelRow[], cursor: number, statusMsg: string, width
     const prefix = selected ? `${A.REVERSE}► ` : "  ";
     const suffix = selected ? A.RESET : "";
     const mark = row.enabled ? "✓" : "✗";
-    const nameDisplay = row.name.length > 34 ? row.name.slice(0, 33) + "…" : row.name;
+    const nameDisplay = row.name.length > 34 ? `${row.name.slice(0, 33)}…` : row.name;
     const statusDisplay = row.enabled ? "ENABLED " : "disabled";
     lines.push(
       `${prefix}${mark} ${nameDisplay.padEnd(34)} ${row.provider.padEnd(12)} ${(row.tier ?? "-").padEnd(6)} ${statusDisplay}${suffix}`,

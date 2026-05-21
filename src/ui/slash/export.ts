@@ -147,7 +147,7 @@ function formatExport(
   const header: string[] = [
     "=".repeat(72),
     "  muonroi-cli — Chat Export",
-    "  Exported: " + formatTimestamp(new Date()),
+    `  Exported: ${formatTimestamp(new Date())}`,
     `  DB entries:    ${dbEntries.length}`,
     `  Live entries:  ${liveEntries.length}`,
     `  Timeline rows: ${timeline.length}`,

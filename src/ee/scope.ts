@@ -60,7 +60,7 @@ export async function buildScope(opts: { cwd: string }): Promise<Scope> {
   // Ecosystem detection — check if remote matches any configured pattern
   if (remote) {
     const eco = loadUserSettings().ecosystem;
-    if (eco && eco.patterns.some((p) => remote.includes(p))) {
+    if (eco?.patterns.some((p) => remote.includes(p))) {
       cached = { kind: "ecosystem", name: eco.name };
       cachedFor = opts.cwd;
       return cached;

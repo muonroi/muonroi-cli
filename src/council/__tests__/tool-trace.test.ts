@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { CouncilLLM, ToolTraceEmitter } from "../types.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -73,7 +73,7 @@ describe("[Council Tool Trace] — llm.debate() (CQ-22)", () => {
     const llm = makeLLM({
       async debate(_m, _s, _p, _sig, pt) {
         // Simulate what emitToolTrace does with 2048 truncation
-        const truncated = longArgs.length > 2048 ? longArgs.slice(0, 2048) + "…[truncated]" : longArgs;
+        const truncated = longArgs.length > 2048 ? `${longArgs.slice(0, 2048)}…[truncated]` : longArgs;
         pt?.(`[Council Tool Trace] tool=bash args=${truncated} result=ok`);
         return { text: "", toolCalls: [{ toolName: "bash" }] };
       },
@@ -93,7 +93,7 @@ describe("[Council Tool Trace] — llm.debate() (CQ-22)", () => {
 
     const llm = makeLLM({
       async debate(_m, _s, _p, _sig, pt) {
-        const truncated = longResult.length > 2048 ? longResult.slice(0, 2048) + "…[truncated]" : longResult;
+        const truncated = longResult.length > 2048 ? `${longResult.slice(0, 2048)}…[truncated]` : longResult;
         pt?.(`[Council Tool Trace] tool=bash args={} result=${truncated}`);
         return { text: "", toolCalls: [{ toolName: "bash", result: longResult }] };
       },

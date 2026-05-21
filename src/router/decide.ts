@@ -328,7 +328,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   if (role) {
     const roleModelId = getRoleModel(role);
     if (roleModelId) {
-      const info = getModelInfo(roleModelId);
+      const _info = getModelInfo(roleModelId);
       const provider = detectProviderForModel(roleModelId);
       if (!isProviderDisabled(provider)) {
         const d: RouteDecision = {

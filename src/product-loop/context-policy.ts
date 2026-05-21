@@ -55,7 +55,7 @@ function bytes(s: string): number {
 function truncTail(s: string, budget: number): string {
   if (bytes(s) <= budget) return s;
   const trimmed = s.slice(0, Math.max(0, budget - 32));
-  return trimmed + `\n[…truncated ${bytes(s) - bytes(trimmed)} bytes]`;
+  return `${trimmed}\n[…truncated ${bytes(s) - bytes(trimmed)} bytes]`;
 }
 
 function truncOldestFirst(lines: string[], header: string, budget: number): string {

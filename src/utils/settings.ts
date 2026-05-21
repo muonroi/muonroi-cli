@@ -291,6 +291,18 @@ export interface UserSettings {
     premiumSynthesis?: boolean;
   };
   /**
+   * Reporter auto-fire settings (B2).
+   * Controls whether the reporter posts to Discord automatically on sprint
+   * lifecycle events (sprint done, plan committed, halt).
+   */
+  reporter?: {
+    /**
+     * Enable automatic Discord posts on sprint lifecycle events.
+     * Default: false (opt-in, to avoid accidental Discord spam on first ship).
+     */
+    autoFire?: boolean;
+  };
+  /**
    * Maximum cumulative chars of tool output a `task` sub-agent may receive
    * before its tool results get progressively trimmed (then stubbed out).
    * Prevents one sub-agent from accumulating 500k+ billed input tokens via

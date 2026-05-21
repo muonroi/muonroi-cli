@@ -77,7 +77,7 @@ export async function appendProductLedger(
   });
 
   try {
-    const line = JSON.stringify(entry) + "\n";
+    const line = `${JSON.stringify(entry)}\n`;
     await fs.appendFile(filePath, line);
   } finally {
     await releaseLock();

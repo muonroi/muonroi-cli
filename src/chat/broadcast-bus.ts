@@ -24,8 +24,8 @@ function splitContent(content: string): string[] {
   if (remaining) parts.push(remaining);
   return parts.map((p, i) => {
     let s = p;
-    if (i > 0) s = "(continued) … " + s;
-    if (i < parts.length - 1) s = s + " … (continued)";
+    if (i > 0) s = `(continued) … ${s}`;
+    if (i < parts.length - 1) s = `${s} … (continued)`;
     return s;
   });
 }

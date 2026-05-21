@@ -3,8 +3,61 @@ import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
-import { buildClarificationPrompt, buildSpecSynthesisPrompt } from "./prompts.js";
+import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
+
+/** P5: Hard cap on clarification rounds regardless of judge verdict. */
+export const MAX_CLARIFY_ROUNDS = 12;
+
+/**
+ * P5: Call the readiness judge to determine whether the current spec + Q&A is
+ * sufficient to start a productive debate, or whether critical gaps remain.
+ *
+ * Model selection goes through `pickCouncilTaskModel("readiness_judge", ...)` —
+ * never a hardcoded model id or provider name.
+ */
+export async function judgeReadiness(
+  spec: ClarifiedSpec,
+  topic: string,
+  qa: Array<{ question: string; answer: string }>,
+  llm: CouncilLLM,
+  leaderModelId: string,
+  costAware: boolean,
+): Promise<{ ready: boolean; confidence: number; gaps: string[] }> {
+  const judgeModel = pickCouncilTaskModel("readiness_judge", leaderModelId, costAware);
+  const { system, prompt } = buildReadinessJudgePrompt(topic, qa, spec);
+
+  let raw: string;
+  try {
+    raw = await llm.generate(judgeModel, system, prompt, 512);
+  } catch {
+    // On LLM failure, default to "not ready" with an empty gaps list so the
+    // loop continues rather than breaking on transient errors. Worst case it
+    // runs up to MAX_CLARIFY_ROUNDS and exits with ready=false.
+    return { ready: false, confidence: 0, gaps: [] };
+  }
+
+  try {
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]) as {
+        ready?: boolean;
+        confidence?: number;
+        gaps?: unknown;
+      };
+      const ready = parsed.ready === true;
+      const confidence = typeof parsed.confidence === "number" ? Math.max(0, Math.min(1, parsed.confidence)) : 0.5;
+      const gaps = Array.isArray(parsed.gaps)
+        ? (parsed.gaps as unknown[]).filter((g): g is string => typeof g === "string")
+        : [];
+      return { ready, confidence, gaps: ready ? [] : gaps };
+    }
+  } catch {
+    // JSON parse failed — fall through
+  }
+
+  return { ready: false, confidence: 0, gaps: [] };
+}
 
 /**
  * Convert a PIL gray-area question into the clarifier's round-question shape.
@@ -87,7 +140,7 @@ export async function* runClarification(
   conversationContext: string,
   respondToQuestion: QuestionResponder,
   llm: CouncilLLM,
-  signal?: AbortSignal,
+  _signal?: AbortSignal,
   seedQuestions?: GrayAreaQuestion[],
   maxRounds?: number,
   /**
@@ -105,13 +158,24 @@ export async function* runClarification(
    */
   costAware = false,
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
-  const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : 3;
+  // P5: use MAX_CLARIFY_ROUNDS (12) as the hard cap; respect explicit override
+  // from callers that pass maxRounds (e.g. tests that want old 3-round behavior).
+  const max = typeof maxRounds === "number" && maxRounds > 0 ? maxRounds : MAX_CLARIFY_ROUNDS;
   const allQA: Array<{ id?: string; question: string; answer: string }> = [];
+  // P5: full Q&A history with timestamps for clarifyHistory field
+  const clarifyHistory: Array<{ question: string; answer: string; ts: string }> = [];
 
   const phaseStartedAt = Date.now();
   yield phaseStart({ phaseId: "phase:clarification", kind: "clarification", label: "Clarification" });
 
   const seeded = (seedQuestions ?? []).map(grayAreaToRoundQuestion);
+
+  // P5: track ready-gate state across rounds
+  let gateReady = false;
+  let gateConfidence = 0;
+  let gateGaps: string[] = [];
+  // gaps from the previous readiness verdict, passed to the next question-generator
+  let pendingGaps: string[] = [];
 
   for (let round = 0; round < max; round++) {
     const useSeed = round === 0 && seeded.length > 0;
@@ -138,6 +202,13 @@ export async function* runClarification(
         ...grayAreaToRoundQuestion(g),
       }));
     } else {
+      // P5: inject pending gaps from previous readiness verdict into the
+      // clarification prompt so the question-generator targets them directly.
+      const gapHint =
+        pendingGaps.length > 0
+          ? `\n\n## Known Gaps (target these with follow-up questions)\n${pendingGaps.map((g) => `- ${g}`).join("\n")}`
+          : "";
+
       const { system, prompt } = buildClarificationPrompt(
         topic,
         conversationContext,
@@ -152,7 +223,7 @@ export async function* runClarification(
           label: `Generating clarification questions (round ${round + 1})`,
           modelId: clarifyModel,
           system,
-          prompt,
+          prompt: prompt + gapHint,
           maxTokens: 2048,
         });
       } catch (err) {
@@ -202,6 +273,7 @@ export async function* runClarification(
       if (q.id && prefillAnswers?.has(q.id)) {
         const answer = prefillAnswers.get(q.id)!;
         allQA.push({ id: q.id, question: q.question, answer });
+        clarifyHistory.push({ question: q.question, answer, ts: new Date().toISOString() });
         yield {
           type: "content",
           content: `\n**${q.question}**\n  ↳ _${answer}_ (auto-filled from project)\n`,
@@ -229,7 +301,27 @@ export async function* runClarification(
 
       const answer = await respondToQuestion(questionId);
       allQA.push({ id: q.id, question: q.question, answer });
+      clarifyHistory.push({ question: q.question, answer, ts: new Date().toISOString() });
       yield { type: "content", content: `\n  ↳ ${answer}\n` };
+    }
+
+    // P5: after each round's Q&A batch, call the ready-gate judge.
+    // We build a partial spec from what we have so far to give the judge context.
+    const partialSpec: ClarifiedSpec = {
+      problemStatement: topic,
+      constraints: [],
+      successCriteria: [],
+      scope: "",
+      rawQA: allQA,
+    };
+    const verdict = await judgeReadiness(partialSpec, topic, allQA, llm, leaderModelId, costAware);
+    gateReady = verdict.ready;
+    gateConfidence = verdict.confidence;
+    gateGaps = verdict.gaps;
+    pendingGaps = verdict.gaps; // feed gaps into next round's question prompt
+
+    if (verdict.ready) {
+      break;
     }
   }
 
@@ -242,6 +334,12 @@ export async function* runClarification(
   });
 
   const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm, costAware);
+
+  // P5: attach ready-gate metadata to the returned spec
+  spec.confidenceScore = gateConfidence;
+  spec.remainingGaps = gateGaps;
+  spec.ready = gateReady && gateGaps.length === 0;
+  spec.clarifyHistory = clarifyHistory;
 
   yield {
     type: "council_info_card",
@@ -265,7 +363,7 @@ export async function* runClarification(
   return spec;
 }
 
-export function buildSpecFromTopic(topic: string, conversationContext: string): ClarifiedSpec {
+export function buildSpecFromTopic(topic: string, _conversationContext: string): ClarifiedSpec {
   return {
     problemStatement: topic,
     constraints: [],
@@ -312,7 +410,7 @@ async function* inferSpecFromTopicOnly(
     `offline" for a desktop app topic, "Must respect Manifest V3" for a Chrome extension).\n` +
     `- scope should name 1 thing in-scope and 1 thing OUT-of-scope.\n` +
     `- Write all fields in the user's language (detected from the topic).`;
-  const prompt = `## Topic\n${topic}\n\n` + (conversationContext ? `## Context\n${conversationContext}\n` : "");
+  const prompt = `## Topic\n${topic}\n\n${conversationContext ? `## Context\n${conversationContext}\n` : ""}`;
 
   try {
     const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);

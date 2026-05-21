@@ -11,11 +11,9 @@ import {
   parseRisksJson,
   type RiskArtifact,
   readCriteriaSnapshot,
-  readDecisions,
   readRisks,
   readTasks,
   syncCriteriaSnapshot,
-  type TaskArtifact,
   updateTaskStatus,
   writeTasks,
 } from "../typed-artifacts.js";

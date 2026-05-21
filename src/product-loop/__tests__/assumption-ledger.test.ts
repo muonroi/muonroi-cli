@@ -21,7 +21,7 @@ function makeAssumption(claim: string, confidence: "high" | "medium" | "low" = "
   for (let i = 0; i < normalized.length; i++) {
     hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0;
   }
-  const id = "a_" + Math.abs(hash).toString(36).padStart(6, "0");
+  const id = `a_${Math.abs(hash).toString(36).padStart(6, "0")}`;
   return {
     id,
     claim,

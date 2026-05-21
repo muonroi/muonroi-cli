@@ -50,14 +50,10 @@ export function buildDiscoveryDebateRunner(deps: RealCouncilDeps): CouncilDebate
         costAware: true,
       };
       return (async function* () {
-        try {
-          for await (const chunk of deps.runDebate(spec, config, deps.llm)) {
-            // map StreamChunk → DebateChunk
-            const mapped = mapStreamChunkToDebateChunk(chunk);
-            if (mapped) yield mapped;
-          }
-        } catch (err) {
-          throw err;
+        for await (const chunk of deps.runDebate(spec, config, deps.llm)) {
+          // map StreamChunk → DebateChunk
+          const mapped = mapStreamChunkToDebateChunk(chunk);
+          if (mapped) yield mapped;
         }
       })();
     },

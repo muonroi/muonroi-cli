@@ -39,7 +39,7 @@ function ensureDirAndRotate(): void {
     if (!_rotateChecked && existsSync(LOG_FILE)) {
       const size = statSync(LOG_FILE).size;
       if (size > MAX_LOG_BYTES) {
-        const rotated = LOG_FILE + ".1";
+        const rotated = `${LOG_FILE}.1`;
         if (existsSync(rotated)) {
           try {
             unlinkSync(rotated);
@@ -61,7 +61,7 @@ function append(label: string, data: unknown): void {
   try {
     ensureDirAndRotate();
     const line = JSON.stringify({ t: new Date().toISOString(), label, data });
-    appendFileSync(LOG_FILE, line + "\n", "utf8");
+    appendFileSync(LOG_FILE, `${line}\n`, "utf8");
   } catch {
     /* fail-open */
   }

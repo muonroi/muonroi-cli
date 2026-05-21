@@ -63,7 +63,7 @@ export async function queryExperience(
       text: extractText(p),
       id: String(p.id),
       score: p.score ?? 0,
-      collection: (p.payload?.["collection"] as string) ?? "experience-behavioral",
+      collection: (p.payload?.collection as string) ?? "experience-behavioral",
     }));
 
     return { warnings };
@@ -74,10 +74,10 @@ export async function queryExperience(
 
 function extractText(p: EEPoint): string {
   const payload = p.payload ?? {};
-  const direct = payload["text"] as string | undefined;
+  const direct = payload.text as string | undefined;
   if (direct) return direct;
   try {
-    const parsed = JSON.parse((payload["json"] as string) || "{}") as {
+    const parsed = JSON.parse((payload.json as string) || "{}") as {
       solution?: string;
       principle?: string;
       judgment?: string;

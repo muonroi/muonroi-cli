@@ -1,6 +1,4 @@
-import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import {
   sanitizeEnv,
   validateCwd,

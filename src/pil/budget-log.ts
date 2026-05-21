@@ -48,7 +48,7 @@ function logPath(date: string): string {
 export async function appendPilLog(entry: Record<string, unknown>): Promise<void> {
   try {
     await fs.mkdir(logDir(), { recursive: true });
-    await fs.appendFile(logPath(todayUtc()), JSON.stringify(entry) + "\n", "utf8");
+    await fs.appendFile(logPath(todayUtc()), `${JSON.stringify(entry)}\n`, "utf8");
   } catch {
     // best-effort, never throw
   }

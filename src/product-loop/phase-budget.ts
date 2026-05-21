@@ -171,10 +171,10 @@ export async function renderBudgetSummary(flowDir: string, runId: string): Promi
   const state = await readBudgetState(flowDir, runId);
   if (!state || state.records.length === 0) return "_(no phase budget data)_";
   const lines: string[] = [];
-  lines.push("Cap: $" + state.capUsd.toFixed(2));
+  lines.push(`Cap: $${state.capUsd.toFixed(2)}`);
   for (const r of state.records) {
     const flag = r.warnedOverBudget ? "  [OVER]" : "";
-    lines.push("- " + r.phase + ": $" + r.spentUsd.toFixed(3) + " (hint $" + r.hintUsd.toFixed(3) + ")" + flag);
+    lines.push(`- ${r.phase}: $${r.spentUsd.toFixed(3)} (hint $${r.hintUsd.toFixed(3)})${flag}`);
   }
   return lines.join("\n");
 }

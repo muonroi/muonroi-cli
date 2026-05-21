@@ -10,7 +10,12 @@ import {
   saveDiscoveryAnswer,
   writeProjectContext,
 } from "./discovery-persistence.js";
-import { type RecommendInput, type RecommendOutput, toEntry } from "./discovery-recommender.js";
+import {
+  computePromptSpecificity,
+  type RecommendInput,
+  type RecommendOutput,
+  toEntry,
+} from "./discovery-recommender.js";
 import {
   DISCOVERY_QUESTIONS,
   isFePolicyAccepted,
@@ -63,6 +68,15 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   const state0 = await readDiscoveryState(flowDir, runId);
   if (!state0) throw new Error("discovery state not initialized — call initDiscoveryState first");
 
+  // P2-4: when user's prompt is minimal (<=10 words, no qualifiers), skip
+  // optional questions. Asking 8 cards for a 5-word prompt cascades user
+  // accept-spam into a locked-in spec the council debates against. The required
+  // questions still run — they're needed to pin productType/audience/stack —
+  // but optional ones (baStatus, designStatus, deployment, frontendApproach when
+  // not web) are deferred unless the user explicitly re-runs with more context.
+  const specificity = computePromptSpecificity(opts.idea);
+  const skipOptionalForMinimal = specificity === "minimal";
+
   for (const question of DISCOVERY_QUESTIONS) {
     if (_itvDbg) {
       process.stderr.write(`[interview-entry] outer-for itvId=${_itvId} questionId=${question.id}\n`);
@@ -73,15 +87,26 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       state.prefillSource.fromDetection.includes(question.id) || state.prefillSource.fromPrompt.includes(question.id);
     if (state.questionsAnswered.includes(question.id) || isPrefilled) continue;
 
-    const isOptional = !question.required;
+    const _isOptional = !question.required;
     const platforms = (state.answers.targetPlatform ?? []) as PlatformT[];
     const platformRequires = isRequiredForPlatform(question.id, platforms);
     const effectivelyRequired = question.required || platformRequires;
+
+    // P2-4: skip non-effectively-required questions when prompt is minimal.
+    if (skipOptionalForMinimal && !effectivelyRequired) {
+      if (_itvDbg) {
+        process.stderr.write(
+          `[interview-entry] skip-optional itvId=${_itvId} questionId=${question.id} reason=minimal-prompt\n`,
+        );
+      }
+      continue;
+    }
 
     const recInput: RecommendInput = {
       question,
       context: state.answers,
       detection,
+      userIdea: opts.idea,
     };
 
     let recommendation: RecommendOutput;

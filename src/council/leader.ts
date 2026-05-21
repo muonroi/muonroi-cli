@@ -26,7 +26,14 @@ export type CouncilSubTask =
   | "evaluate_round" // JSON criteria status; needs decent judgement
   | "round_summary" // summarize 6 exchanges
   | "clarify_questions" // generate 3-5 questions
-  | "spec_synthesis"; // merge Q&A into ClarifiedSpec
+  | "spec_synthesis" // merge Q&A into ClarifiedSpec
+  | "readiness_judge" // self-judge whether clarification is sufficient to debate
+  | "effort_estimate" // batch story-point estimation for BacklogItems (P6)
+  | "sprint_goal" // batch sprint goal generation for SprintPlan (P7)
+  | "reporter_qa" // free-form Q&A from Discord reporter (P8)
+  | "maintain_design" // P15 Mode C — single LLM design plan for maintenance task
+  | "maintain_review" // P15 Mode C — single LLM review agent after edit
+  | "pr_body"; // P16 Mode C — generate PR body from diff + task context (fast tier)
 
 const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced"> = {
   research_need: "fast",
@@ -34,6 +41,13 @@ const SUB_TASK_TIER: Record<CouncilSubTask, "fast" | "balanced"> = {
   round_summary: "fast",
   clarify_questions: "balanced",
   spec_synthesis: "balanced",
+  readiness_judge: "balanced",
+  effort_estimate: "fast",
+  sprint_goal: "fast",
+  reporter_qa: "fast",
+  maintain_design: "balanced",
+  maintain_review: "fast",
+  pr_body: "fast",
 };
 
 /**

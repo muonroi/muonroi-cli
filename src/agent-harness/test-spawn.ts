@@ -79,7 +79,7 @@ async function waitForHandshake(socket: Socket, timeoutMs: number): Promise<void
       socket.off("data", onData);
       try {
         const msg = JSON.parse(line) as Record<string, unknown>;
-        if (msg["t"] === "handshake" && msg["ok"] === true) {
+        if (msg.t === "handshake" && msg.ok === true) {
           resolve();
         } else {
           reject(new Error(`Unexpected handshake payload: ${line}`));
@@ -121,8 +121,8 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
   });
 
   const baseEnv = { ...(opts.spawnOpts?.env ?? process.env) } as Record<string, string>;
-  baseEnv["MUONROI_HARNESS_IN_PIPE"] = inPipeName;
-  baseEnv["MUONROI_HARNESS_OUT_PIPE"] = outPipeName;
+  baseEnv.MUONROI_HARNESS_IN_PIPE = inPipeName;
+  baseEnv.MUONROI_HARNESS_OUT_PIPE = outPipeName;
 
   const mergedOpts = {
     ...opts.spawnOpts,

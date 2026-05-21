@@ -86,7 +86,7 @@ describe("openAIOAuth.authHeaders — header shape", () => {
     const oauthProvider = new OpenAIOAuthProvider();
     const headers = oauthProvider.authHeaders(MOCK_TOKENS);
 
-    expect(headers["Authorization"]).toBe(`Bearer ${MOCK_TOKENS.accessToken}`);
+    expect(headers.Authorization).toBe(`Bearer ${MOCK_TOKENS.accessToken}`);
     expect(headers["ChatGPT-Account-ID"]).toBe(MOCK_TOKENS.accountId);
   });
 
@@ -95,7 +95,7 @@ describe("openAIOAuth.authHeaders — header shape", () => {
     const tokensNoAccount = { ...MOCK_TOKENS, accountId: undefined };
     const headers = oauthProvider.authHeaders(tokensNoAccount);
 
-    expect(headers["Authorization"]).toBe(`Bearer ${MOCK_TOKENS.accessToken}`);
+    expect(headers.Authorization).toBe(`Bearer ${MOCK_TOKENS.accessToken}`);
     expect(headers["ChatGPT-Account-ID"]).toBeUndefined();
   });
 });

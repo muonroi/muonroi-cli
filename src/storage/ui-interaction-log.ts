@@ -31,7 +31,7 @@ export type UIInteractionSubtype =
   | "init_new_retry";
 
 interface RouteDecisionPayload {
-  path: "hot-path" | "council";
+  path: "hot-path" | "council" | "maintain";
   complexity: string;
   forceCouncil: boolean;
   /** PIL sufficiency gaps that forced the Council path (empty when complete). */

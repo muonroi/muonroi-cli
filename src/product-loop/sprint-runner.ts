@@ -23,7 +23,9 @@
  */
 
 import * as path from "node:path";
+import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lock.js";
 import { runCouncil } from "../council/index.js";
+import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
 import type { CouncilLLM } from "../council/types.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -35,6 +37,7 @@ import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
 import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
+import { readBacklog } from "./backlog-store.js";
 import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
 import { reserveForProduct } from "./cost-scoper.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
@@ -43,6 +46,7 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
+import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
@@ -168,6 +172,19 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 3: Plan stage (council, skipClarification=true) ──────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Planning\n` };
+  // P4-C: emit council_phase so the TUI's CouncilPhaseTimeline shows a live
+  // spinner row "Sprint N — Planning" with ticking elapsed time. Without this
+  // the timeline goes silent for the duration of the planning council, which
+  // is how session f1cec5324716 felt "đơ" for 9+ minutes.
+  const planPhaseId = `sprint-${sprintN}-planning`;
+  const planStartedAt = Date.now();
+  yield phaseStart({
+    phaseId: planPhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Planning`,
+    detail: "Council debate to draft sprint plan",
+    startedAt: planStartedAt,
+  });
   // 2.5a — planning stage entry
   try {
     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -199,13 +216,40 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   try {
     const ledger = await readLedger(ctx.flowDir, ctx.runId);
     const formatted = formatUnverifiedForSprintContext(ledger);
-    if (formatted) assumptionContext = "\n" + formatted;
+    if (formatted) assumptionContext = `\n${formatted}`;
   } catch {
     /* non-critical */
   }
 
   const projectCtx = await readProjectContext(ctx.flowDir, ctx.runId);
-  const projectContextStr = projectCtx ? "\nProject Context:\n" + formatProjectContextForPrompt(projectCtx) : "";
+  const projectContextStr = projectCtx ? `\nProject Context:\n${formatProjectContextForPrompt(projectCtx)}` : "";
+
+  // P6: Anchor council debate to persisted BacklogItems so scope doesn't drift.
+  // Read backlog.json; if it exists, prepend active items for this sprint to
+  // the councilTopic so the council debate cannot introduce out-of-scope features.
+  let backlogAnchor = "";
+  try {
+    const backlog = await readBacklog(ctx.flowDir, ctx.runId);
+    if (backlog) {
+      const sprintKey = `sprint-${sprintN}`;
+      // Active items: status "in_sprint" assigned to this sprint.
+      let activeItems = backlog.items.filter(
+        (item) => item.status === "in_sprint" && item.assigned_sprint === sprintKey,
+      );
+      // Fallback: first v1 item still in backlog status.
+      if (activeItems.length === 0) {
+        const firstV1 = backlog.items.find((item) => item.mvp_priority === "v1" && item.status === "backlog");
+        if (firstV1) activeItems = [firstV1];
+      }
+      if (activeItems.length > 0) {
+        backlogAnchor =
+          `\n## Active Backlog Item\n${JSON.stringify(activeItems, null, 2)}\n\n` +
+          `The debate MUST address these acceptance criteria. Do NOT introduce features outside this scope.\n`;
+      }
+    }
+  } catch {
+    // Non-critical — proceed without backlog anchor if read fails.
+  }
 
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
@@ -214,7 +258,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `Architecture: ${productSpec.architecture}\n` +
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
-    `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}\n` +
+    `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}${backlogAnchor}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
   const productLlm = createProductLlm(ctx.llm, ctx.runId, ctx.flags.maxCost);
@@ -234,7 +278,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     ctx.respondToQuestion,
     ctx.respondToPreflight,
     ctx.processMessageFn ?? noopProcess,
-    { skipClarification: true, cwd },
+    { skipClarification: true, cwd, runDir },
   );
 
   let planSynthesis = "";
@@ -247,8 +291,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     yield step.value as StreamChunk;
   }
 
+  // P4-C: close the planning phase row before opening implementation.
+  yield phaseDone({
+    phaseId: planPhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Planning`,
+    startedAt: planStartedAt,
+  });
+
   // ── Step 4: Implement stage — pipe plan through host process loop ─────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Implementation\n` };
+  const implPhaseId = `sprint-${sprintN}-implementation`;
+  const implStartedAt = Date.now();
+  yield phaseStart({
+    phaseId: implPhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Implementation`,
+    detail: planSynthesis.trim() ? "Orchestrator executing sprint plan" : "Skipped — no plan synthesis",
+    startedAt: implStartedAt,
+  });
   // 2.5b — implementation stage entry
   try {
     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -268,20 +329,80 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     subtype: "sprint_stage",
     data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
   });
-  if (ctx.processMessageFn && planSynthesis.trim()) {
-    const implGen = ctx.processMessageFn(planSynthesis);
-    for await (const chunk of implGen) {
-      yield chunk as StreamChunk;
+  // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
+  // When lock file is missing (greenfield / no council with runDir), pass-through unchanged.
+  let implPrompt = planSynthesis;
+  try {
+    const lockContent = await readDecisionsLock(runDir);
+    if (lockContent) {
+      implPrompt = prependDecisionsLock(planSynthesis, lockContent);
+      yield {
+        type: "content",
+        content: "\n> [decisions.lock.md] Locked decisions prepended to implementation prompt.\n",
+      };
+    }
+  } catch {
+    /* fail-open — lock read failure must not block implementation */
+  }
+
+  let implError: string | null = null;
+  if (ctx.processMessageFn && implPrompt.trim()) {
+    try {
+      const implGen = ctx.processMessageFn(implPrompt);
+      for await (const chunk of implGen) {
+        yield chunk as StreamChunk;
+      }
+    } catch (e) {
+      implError = e instanceof Error ? e.message : String(e);
+    } finally {
+      // A3 FIX: phaseDone for implementation MUST always fire, even when
+      // processMessageFn throws mid-stream (e.g. /gsd executor fails after
+      // writing some files). Without the finally guard the TUI phase timeline
+      // shows "Implementation" stuck in "active" state forever.
+      if (implError) {
+        yield phaseError({
+          phaseId: implPhaseId,
+          kind: "sprint_stage",
+          label: `Sprint ${sprintN} — Implementation`,
+          startedAt: implStartedAt,
+          errorMessage: implError,
+        });
+      } else {
+        yield phaseDone({
+          phaseId: implPhaseId,
+          kind: "sprint_stage",
+          label: `Sprint ${sprintN} — Implementation`,
+          startedAt: implStartedAt,
+        });
+      }
     }
   } else {
     yield {
       type: "content",
       content: "\n> Implementation step skipped (no processMessageFn or empty plan).\n",
     };
+    yield phaseDone({
+      phaseId: implPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Implementation`,
+      startedAt: implStartedAt,
+    });
+  }
+  if (implError) {
+    throw new Error(implError);
   }
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
+  const verifyPhaseId = `sprint-${sprintN}-verification`;
+  const verifyStartedAt = Date.now();
+  yield phaseStart({
+    phaseId: verifyPhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Verification`,
+    detail: "Running verify recipe",
+    startedAt: verifyStartedAt,
+  });
   // 2.5c — verification stage entry
   try {
     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -296,6 +417,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
   });
   const verifyResult: ToolResult = await runVerifyOrchestration(verifyAgent);
+  yield phaseDone({
+    phaseId: verifyPhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Verification`,
+    startedAt: verifyStartedAt,
+  });
   const verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
     (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
@@ -322,6 +449,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   // ── Step 6: Read current criteria + judge stage ──────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Judgment\n` };
+  const judgePhaseId = `sprint-${sprintN}-judgment`;
+  const judgeStartedAt = Date.now();
+  yield phaseStart({
+    phaseId: judgePhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Judgment`,
+    detail: "Done-gate evaluation",
+    startedAt: judgeStartedAt,
+  });
   // 2.5d — judgment stage entry
   try {
     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -366,6 +502,15 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // remain unverified.
     flowDir: ctx.flowDir,
     runId: ctx.runId,
+  });
+
+  // P4-C: judgment phase complete — closing this row keeps the timeline tidy
+  // even if CB-2 halts below (the halt is a separate event).
+  yield phaseDone({
+    phaseId: judgePhaseId,
+    kind: "sprint_stage",
+    label: `Sprint ${sprintN} — Judgment`,
+    startedAt: judgeStartedAt,
   });
 
   // ── Step 7: CB-2 oscillation check (now we know this sprint's score) ─────
@@ -431,6 +576,22 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `Sprint: ${sprintN} | Stage: ${iter.stage} | Score: ${verdict.score.toFixed(2)} | Verify: ${verifyVerdict}`,
   );
   await writeArtifact(runDir, "state.md", stateMap);
+
+  // Emit ProgressSnapshot on sprint boundary so the user sees rolling progress.
+  // Wrapped in try/catch — never crash sprint-runner because the snapshot failed.
+  try {
+    const backlogForSnap = await readBacklog(ctx.flowDir, ctx.runId);
+    const productSlug = backlogForSnap?.productSlug ?? ctx.runId;
+    const snapshot = await computeProgressSnapshot({
+      flowDir: ctx.flowDir,
+      runId: ctx.runId,
+      productSlug,
+    });
+    const snapshotMd = renderSnapshotMarkdown(snapshot);
+    yield { type: "content", content: `\n---\n${snapshotMd}\n` };
+  } catch {
+    /* snapshot failure must never crash sprint-runner */
+  }
 
   // Per-role rolling memory (2KB hard cap, oldest-first truncation handled by helper)
   for (const [slot] of roleAssignments.entries()) {

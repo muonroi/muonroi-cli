@@ -26,7 +26,7 @@ const SRC_EXT_TO_LANG: Record<string, string> = {
   ".kt": "Kotlin",
 };
 
-const DOC_FILES = new Set(["README.md", "LICENSE", "LICENSE.md", "CONTRIBUTING.md", "CHANGELOG.md", ".gitignore"]);
+const _DOC_FILES = new Set(["README.md", "LICENSE", "LICENSE.md", "CONTRIBUTING.md", "CHANGELOG.md", ".gitignore"]);
 
 async function pathExists(p: string): Promise<boolean> {
   try {
@@ -63,11 +63,11 @@ function inferFrameworks(raw: string, type: ManifestDetection["type"]): string[]
     }
   } else if (type === "Cargo.toml") {
     for (const fw of ["actix", "axum", "rocket", "tokio"]) {
-      if (text.includes(fw + " =") || text.includes(fw + "=")) fws.push(fw);
+      if (text.includes(`${fw} =`) || text.includes(`${fw}=`)) fws.push(fw);
     }
   } else if (type === "go.mod") {
     for (const fw of ["gin", "echo", "fiber", "chi"]) {
-      if (text.includes("/" + fw)) fws.push(fw);
+      if (text.includes(`/${fw}`)) fws.push(fw);
     }
   } else if (type === "pyproject.toml") {
     for (const fw of ["django", "fastapi", "flask", "pydantic"]) {

@@ -52,7 +52,7 @@ export const opentuiSpawn: HarnessSpawn = async (req): Promise<HarnessSpawnResul
     proc,
     sendLine: (line: string) => {
       // Ensure the line is newline-terminated when written to the child.
-      const payload = line.endsWith("\n") ? line : line + "\n";
+      const payload = line.endsWith("\n") ? line : `${line}\n`;
       inWrite.write(payload);
     },
     onLine: (cb: (line: string) => void) => {

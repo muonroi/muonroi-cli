@@ -110,7 +110,7 @@ export function decideStepRouting(
   config?: StepRouterConfig,
 ): StepRouterDecision {
   const cfg = config ?? getStepRouterConfig();
-  const phase1Provider = detectProviderForModel(phase1ModelId);
+  const _phase1Provider = detectProviderForModel(phase1ModelId);
 
   if (!cfg.enabled) {
     return {

@@ -1,4 +1,3 @@
-import type { ProviderFactory, ResolvedModelRuntime } from "../providers/runtime.js";
 import type { ModelInfo, ToolCall, ToolResult } from "../types/index";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";

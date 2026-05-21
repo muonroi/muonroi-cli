@@ -134,7 +134,7 @@ export function detectGrayAreas(prompt: string): GrayAreaResult {
 
   const questions: GrayAreaQuestion[] = [];
   for (const rule of RULES) {
-    const specified = (rule.present && rule.present.test(prompt)) || (rule.missing && !rule.missing.test(prompt));
+    const specified = rule.present?.test(prompt) || (rule.missing && !rule.missing.test(prompt));
     if (!specified) {
       questions.push(rule.build(prompt));
       if (questions.length >= MAX_QUESTIONS) break;

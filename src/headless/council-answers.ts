@@ -18,8 +18,8 @@ export interface CouncilAnswersFile {
   /** FIFO queues keyed by phase. Strings are option `value`s or freetext. */
   clarify?: string[];
   preflight?: string[];
-  ["plan-confirm"]?: string[];
-  ["post-debate"]?: string[];
+  "plan-confirm"?: string[];
+  "post-debate"?: string[];
   /** Default approval for every council_preflight chunk. Omitted → true. */
   preflightApprove?: boolean;
 }

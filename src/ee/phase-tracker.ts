@@ -92,7 +92,7 @@ export function recordIntercept(refs: PrincipleRef[]): void {
   if (!Array.isArray(refs) || refs.length === 0) return;
   _state.toolCount++;
   for (const ref of refs) {
-    if (!ref || !ref.pointId || !ref.collection) continue;
+    if (!ref?.pointId || !ref.collection) continue;
     if (_state.seenPrincipleIds.has(ref.pointId)) continue;
     _state.seenPrincipleIds.add(ref.pointId);
     _state.principleRefs.push(ref);

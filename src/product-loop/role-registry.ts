@@ -145,7 +145,7 @@ export async function resolveRoles(opts: {
         // Only apply if it's in inventory AND doesn't cause PO/Customer collision if slot is PO/Customer
         const inInventory = inventory.find((m) => m.id === override.model);
         if (inInventory) {
-          const currentAssignment = assignments[slot]!;
+          const _currentAssignment = assignments[slot]!;
 
           // If we are overriding PO or Customer, we MUST ensure they remain different
           if (slot === "PO") {

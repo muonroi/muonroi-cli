@@ -148,7 +148,7 @@ export async function discoverPriorRuns(
   for (const runId of runIds) {
     if (runId === currentRunId) continue;
     const manifest = await readManifest(flowDir, runId).catch(() => null);
-    if (!manifest || !manifest.idea) continue;
+    if (!manifest?.idea) continue;
 
     const sim = jaccard(currentTokens, tokenize(manifest.idea));
     if (sim < MIN_KEYWORD_OVERLAP) continue;
@@ -187,7 +187,7 @@ function buildCondensationInput(runs: PriorRunSummary[]): string {
     if (r.verdictPass) {
       status = "SHIPPED";
     } else if (r.failedCondition) {
-      status = "HALTED (" + r.failedCondition + ")";
+      status = `HALTED (${r.failedCondition})`;
     } else {
       status = "INCOMPLETE";
     }
@@ -195,21 +195,21 @@ function buildCondensationInput(runs: PriorRunSummary[]): string {
     const memSnippets: string[] = [];
     for (const [slot, text] of r.memories) {
       const head = text.trim().slice(0, 400);
-      memSnippets.push("  [" + slot + "] " + head);
+      memSnippets.push(`  [${slot}] ${head}`);
     }
 
     const lines: string[] = [];
-    lines.push("## Run " + r.runId + " - " + status);
-    lines.push("Idea: " + r.idea);
+    lines.push(`## Run ${r.runId} - ${status}`);
+    lines.push(`Idea: ${r.idea}`);
     const created = r.createdAt.toISOString().slice(0, 10);
     const simStr = r.similarity.toFixed(2);
     const recStr = r.recency.toFixed(2);
-    lines.push("Created: " + created + " | similarity=" + simStr + " | recency=" + recStr);
+    lines.push(`Created: ${created} | similarity=${simStr} | recency=${recStr}`);
     if (memSnippets.length > 0) {
       lines.push("Roles:");
       lines.push(memSnippets.join("\n"));
     }
-    const block = lines.join("\n") + "\n";
+    const block = `${lines.join("\n")}\n`;
 
     const blockBytes = Buffer.byteLength(block);
     if (bytes + blockBytes > MAX_INPUT_BYTES) break;
@@ -239,14 +239,14 @@ export async function condensePriorRuns(
     "why and what to avoid. Plain markdown, no preamble.";
 
   const ideaLine = runs.length > 0 ? "Current idea: (see runs below for context)" : "Current idea:";
-  const prompt = ideaLine + "\n\n" + buildCondensationInput(runs);
+  const prompt = `${ideaLine}\n\n${buildCondensationInput(runs)}`;
 
   try {
     const raw = await llm.generate(leaderModelId, system, prompt, 1024);
     const trimmed = (raw ?? "").trim();
     if (!trimmed) return "";
     if (Buffer.byteLength(trimmed) <= MAX_DIGEST_BYTES) return trimmed;
-    return trimmed.slice(0, MAX_DIGEST_BYTES).trim() + "...";
+    return `${trimmed.slice(0, MAX_DIGEST_BYTES).trim()}...`;
   } catch {
     return "";
   }
@@ -389,7 +389,7 @@ export async function composeRunTranscript(flowDir: string, runId: string): Prom
   const result = parts.join("");
   if (Buffer.byteLength(result) > MAX_TRANSCRIPT_BYTES) {
     // Truncate to exactly MAX_TRANSCRIPT_BYTES characters and append marker.
-    return result.slice(0, MAX_TRANSCRIPT_BYTES) + "\n\n[...truncated]";
+    return `${result.slice(0, MAX_TRANSCRIPT_BYTES)}\n\n[...truncated]`;
   }
   return result;
 }
@@ -446,5 +446,5 @@ export function formatPriorContextForPrompt(digest: string): string {
   const header = "\n## Prior Decisions Context (from earlier /ideal runs on this workspace)\n";
   const intro =
     "These are reusable lessons - treat as defaults you may override with explicit reason, not as hard requirements.\n\n";
-  return header + intro + trimmed + "\n";
+  return `${header + intro + trimmed}\n`;
 }

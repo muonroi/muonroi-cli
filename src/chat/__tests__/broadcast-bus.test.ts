@@ -31,7 +31,7 @@ describe("publish", () => {
   });
 
   it("splits content over budget at newline boundary", async () => {
-    const long = "para1\n\n" + "x".repeat(DISCORD_CONTENT_BUDGET) + "\n\npara3";
+    const long = `para1\n\n${"x".repeat(DISCORD_CONTENT_BUDGET)}\n\npara3`;
     const client = makeClient({
       postMessage: vi
         .fn()
@@ -42,7 +42,7 @@ describe("publish", () => {
     const out = await publish({ client, channelId: "c1", type: "phase-event", content: long });
     const calls = (client.postMessage as any).mock.calls;
     expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(out?.messageId).toBe("m" + calls.length);
+    expect(out?.messageId).toBe(`m${calls.length}`);
     for (const [, msg] of calls) {
       expect(msg.length).toBeLessThanOrEqual(DISCORD_CONTENT_BUDGET + 30);
     }

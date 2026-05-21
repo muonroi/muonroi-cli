@@ -11,7 +11,7 @@ export function formatProjectContextForPrompt(ctx: ProjectContext): string {
   );
   lines.push(`Backend arch: ${ctx.context.backendArchitecture}`);
   lines.push(
-    `Backend stack: ${ctx.context.backendStack.language} / ${ctx.context.backendStack.framework}${ctx.context.backendStack.runtime ? " on " + ctx.context.backendStack.runtime : ""}`,
+    `Backend stack: ${ctx.context.backendStack.language} / ${ctx.context.backendStack.framework}${ctx.context.backendStack.runtime ? ` on ${ctx.context.backendStack.runtime}` : ""}`,
   );
   lines.push(`Database: ${ctx.context.dbStrategy.mode} ${ctx.context.dbStrategy.engine}`);
   if (ctx.context.frontendApproach) {
@@ -24,7 +24,7 @@ export function formatProjectContextForPrompt(ctx: ProjectContext): string {
   }
   if (ctx.context.deployment) {
     lines.push(
-      `Deployment: ${ctx.context.deployment.target}${ctx.context.deployment.provider ? " on " + ctx.context.deployment.provider : ""}`,
+      `Deployment: ${ctx.context.deployment.target}${ctx.context.deployment.provider ? ` on ${ctx.context.deployment.provider}` : ""}`,
     );
   }
   lines.push(`Constraints: fePolicy=${ctx.recommendations.constraints.fePolicy}`);

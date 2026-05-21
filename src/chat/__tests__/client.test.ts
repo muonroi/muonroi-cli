@@ -17,7 +17,7 @@ describe("DiscordChatProvider", () => {
     const fetch = mockFetch(async (url, init) => {
       expect(url).toBe("https://discord.com/api/v10/guilds/g1/channels");
       expect(init.method).toBe("POST");
-      expect(init.headers["Authorization"]).toBe("Bot tok");
+      expect(init.headers.Authorization).toBe("Bot tok");
       const body = JSON.parse(init.body);
       expect(body.name).toBe("muonroi-test");
       return jsonResponse({ id: "c1" });

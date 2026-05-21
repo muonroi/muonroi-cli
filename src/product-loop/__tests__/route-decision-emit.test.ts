@@ -30,6 +30,48 @@ vi.mock("../loop-driver.js", () => ({
   runLoopDriver: vi.fn(),
 }));
 
+// A2: mock backlog/sprint-plan I/O so buildBacklogAndSprintPlan returns quickly.
+vi.mock("../backlog-store.js", () => ({
+  readBacklog: vi.fn(async () => null),
+  writeBacklog: vi.fn(async () => undefined),
+}));
+vi.mock("../sprint-store.js", () => ({
+  readSprintPlan: vi.fn(async () => null),
+  writeSprintPlan: vi.fn(async () => undefined),
+  setActiveSprint: vi.fn(async () => undefined),
+}));
+vi.mock("../backlog-builder.js", () => ({
+  buildBacklog: vi.fn(async () => ({
+    runId: "test-run",
+    productSlug: "test",
+    items: [],
+    derivedFromClarifyId: "abc123",
+    createdAtUtc: new Date().toISOString(),
+  })),
+}));
+vi.mock("../sprint-planner.js", () => ({
+  planSprints: vi.fn(async () => ({
+    runId: "test-run",
+    sprints: [{ id: "sprint-1", number: 1, goal: "go", itemIds: [], status: "planned" }],
+    createdAtUtc: new Date().toISOString(),
+  })),
+  applySprintAssignments: vi.fn(async () => undefined),
+}));
+// Dynamic imports inside buildBacklogAndSprintPlan
+vi.mock("../discovery-persistence.js", () => ({
+  readProjectContext: vi.fn(async () => null),
+}));
+vi.mock("../gather.js", () => ({
+  clarifiedSpecFromContext: vi.fn(() => ({
+    problemStatement: "test",
+    constraints: [],
+    successCriteria: [],
+    scope: "test",
+    rawQA: [],
+    resolved: {},
+  })),
+}));
+
 import { runProductLoop } from "../index.js";
 import { runLoopDriver } from "../loop-driver.js";
 import { runSprint } from "../sprint-runner.js";
@@ -81,6 +123,9 @@ function makeOpts(flowDir: string, overrides: Record<string, unknown> = {}): unk
       yield { type: "content", content: "ok" };
     }),
     detectVerifyRecipe: vi.fn(async () => ({ testCommands: ["npm test"], coverage: 80, shellInitCommands: [] })),
+    // mode="new" bypasses Mode C auto-detection so runHotPath / runStart are exercised
+    // (Mode C would dispatch to runMaintain and emit path="maintain" instead).
+    mode: "new",
     ...overrides,
   };
 }

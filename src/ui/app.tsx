@@ -6,6 +6,7 @@ import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
 import { setActiveEeYield } from "../index.js";
@@ -74,7 +75,6 @@ import { buildVerifyPrompt } from "../verify/entrypoint";
 import {
   buildSubagentBrowseRows,
   SUBAGENT_EDITOR_FIELDS,
-  type SubagentEditorField,
   SubagentEditorModal,
   SubagentsBrowserModal,
 } from "./agents-modal";
@@ -158,6 +158,7 @@ import "./slash/debug.js";
 import "./slash/council.js";
 import "./slash/ideal.js";
 import "./slash/export.js";
+import "./slash/status.js";
 import {
   CONNECT_CHANNELS,
   getSandboxVisibleRows,
@@ -4206,6 +4207,35 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor/useModelPicker hooks are stable useState setters (stable identity across renders)
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // Ctrl+G — mark the most-recent surfaced experience hints as noise.
+      // Sends IRRELEVANT verdict with reason='wrong_task' for every match
+      // in the last intercept batch. Default to wrong_task because we can't
+      // detect lang/repo mismatch from a keypress; user can use the
+      // exp-feedback CLI for more precise narrowing.
+      if (key.name === "g" && key.ctrl && !key.meta) {
+        const matches = getLastSurfacedMatches();
+        if (matches.length > 0) {
+          const client = getDefaultEEClient();
+          for (const m of matches) {
+            try {
+              client.noiseFeedback({
+                pointId: m.principleUuid,
+                collection: m.collection,
+                reason: "wrong_task",
+              });
+            } catch {
+              /* fail-open */
+            }
+          }
+          clearLastSurfacedMatches();
+          setMessages((prev) => [
+            ...prev,
+            buildAssistantEntry(`🚫 [Experience] Marked ${matches.length} hint(s) as noise (wrong_task).`),
+          ]);
+        }
+        return;
+      }
+
       // Point-to-existing form intercepts all input while open.
       if (pointToExistingForm) {
         if (pointToExistingForm.step === "input") {
@@ -5218,6 +5248,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             // Accept multi-char sequences too — terminal paste arrives as one
             // chunk (often 40-100 chars for an API key). Strip control bytes
             // and the bracketed-paste guards just in case.
+            // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ESC + control-byte stripping for terminal-pasted API keys
             const cleaned = key.sequence.replace(/\[200~|\[201~/g, "").replace(/[ -]/g, "");
             if (cleaned.length === 0) return;
             setApiKeyPrompt({ ...apiKeyPrompt, value: apiKeyPrompt.value + cleaned, error: null });

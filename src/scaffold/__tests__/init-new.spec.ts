@@ -366,10 +366,10 @@ function makeFsTree(files: Record<string, string>): FindCsprojFs {
     readdir: (p: string) => {
       const entries: Array<{ name: string; isDir: boolean; isFile: boolean }> = [];
       const seen = new Set<string>();
-      const prefix = p.replace(/[/\\]$/, "") + "/";
+      const _prefix = `${p.replace(/[/\\]$/, "")}/`;
       for (const f of Object.keys(files)) {
         const norm = f.replace(/\\/g, "/");
-        const np = p.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+        const np = `${p.replace(/\\/g, "/").replace(/\/$/, "")}/`;
         if (!norm.startsWith(np)) continue;
         const rest = norm.slice(np.length);
         const seg = rest.split("/")[0];
@@ -380,7 +380,7 @@ function makeFsTree(files: Record<string, string>): FindCsprojFs {
       }
       for (const d of dirs) {
         const norm = d.replace(/\\/g, "/");
-        const np = p.replace(/\\/g, "/").replace(/\/$/, "") + "/";
+        const np = `${p.replace(/\\/g, "/").replace(/\/$/, "")}/`;
         if (!norm.startsWith(np)) continue;
         const rest = norm.slice(np.length);
         const seg = rest.split("/")[0];

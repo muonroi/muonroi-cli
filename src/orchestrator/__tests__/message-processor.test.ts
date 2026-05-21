@@ -7,7 +7,6 @@
 
 import type { ModelMessage } from "ai";
 import { describe, expect, it } from "vitest";
-import type { ResolvedModelRuntime } from "../../providers/runtime.js";
 import type { BashTool } from "../../tools/bash";
 import type { ProcessMessageObserver } from "../agent-options";
 import type { CompactionSettings } from "../compaction";

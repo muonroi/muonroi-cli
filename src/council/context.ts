@@ -1,6 +1,5 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import type { ModelMessage } from "ai";
 import type { CouncilMemoryRecord } from "./types.js";
 
 interface MessageLike {
@@ -23,7 +22,7 @@ async function readSafe(filePath: string, maxBytes = 2000): Promise<string | nul
   try {
     const buf = await fs.readFile(filePath, { encoding: "utf8" });
     if (buf.length <= maxBytes) return buf;
-    return buf.slice(0, maxBytes) + "\n[... truncated]";
+    return `${buf.slice(0, maxBytes)}\n[... truncated]`;
   } catch {
     return null;
   }
@@ -168,7 +167,7 @@ export function buildCouncilContext(messages: MessageLike[]): string {
 
   const combined = parts.join("\n\n---\n\n");
   if (combined.length > 12000) {
-    return combined.slice(0, 12000) + "\n\n[... context truncated to fit token budget]";
+    return `${combined.slice(0, 12000)}\n\n[... context truncated to fit token budget]`;
   }
   return combined;
 }
@@ -229,7 +228,7 @@ function formatCouncilMemoryDigest(raw: string): string {
       // entries used `position` — keep that fallback so historical records
       // still render correctly when reloaded.
       const rawText = String((e as { excerpt?: unknown }).excerpt ?? (e as { position?: unknown }).position ?? "");
-      const text = rawText.length > 400 ? rawText.slice(0, 400) + "…" : rawText;
+      const text = rawText.length > 400 ? `${rawText.slice(0, 400)}…` : rawText;
       const lengthHint =
         typeof (e as { length?: unknown }).length === "number" && (e as { length: number }).length > rawText.length
           ? ` _(orig ${(e as { length: number }).length} chars)_`
