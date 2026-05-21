@@ -270,6 +270,10 @@ class XAIProviderCapabilities extends ReliableProviderCapabilities {
  * malformed bodies before the model fell back to free-form text.
  */
 class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
+  /** Namespace used for openai-compatible providerOptions merge. Overridden by SiliconFlow. */
+  protected providerNamespace(): string {
+    return "deepseek";
+  }
   override supportsResponseTool(taskType: string): boolean {
     if (taskType === "general") return false;
     return true;
@@ -282,11 +286,22 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
     // in src/cli/cost-forensics.ts).
     return { readField: "promptCacheHitTokens", creationSupported: false };
   }
-  // DeepSeek docs (Reasoning Model guide): "Previous reasoning content is
-  // deliberately excluded from subsequent message contexts — only final
-  // answers (content) are retained in conversation history." Stripping
-  // reasoning parts on the way out matches the documented expectation and
-  // also no-ops on non-reasoning turns (identity returned by reference).
+  // RC#1 root cause: DeepSeek docs (thinking_mode guide) state that when tool
+  // calls occur, `reasoning_content` MUST be passed back to the API in every
+  // subsequent turn. `@ai-sdk/openai-compatible` does not serialize reasoning
+  // parts as `reasoning_content`, so the API rejects with HTTP 400 code 20015.
+  // Council research/debate both use tools, so the only safe fix is to disable
+  // thinking mode entirely — research needs tool-use, not chain-of-thought.
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    const m = ctx.model;
+    if (m?.thinkingType === "enabled" || m?.thinkingType === "adaptive") {
+      return { [this.providerNamespace()]: { thinking: { type: "disabled" } } };
+    }
+    return undefined;
+  }
+  // Defense-in-depth: keep stripping any reasoning parts that may still appear
+  // in history (e.g. on models where thinking can't be server-disabled). No-op
+  // on non-reasoning turns (identity returned by reference).
   override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
     return stripReasoningForSiliconflow(messages);
   }
@@ -301,10 +316,13 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
  * now lives on the DeepSeek base class.
  */
 class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
+  protected override providerNamespace(): string {
+    return "siliconflow";
+  }
   override consoleSignupURL(): string {
     return consoleUrlFor("siliconflow");
   }
-  // sanitizeHistory + cacheMetricLayout inherit from DeepSeek.
+  // sanitizeHistory + cacheMetricLayout + buildProviderOptions inherit from DeepSeek.
 }
 
 /**
