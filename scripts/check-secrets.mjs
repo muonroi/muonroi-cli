@@ -14,6 +14,13 @@ import { execSync } from "node:child_process";
 
 const BLOCKED_PATHS = [/^\.claude\//, /^\.env(\.|$)/, /(^|\/)user-settings\.json$/];
 
+// Project-level Claude Code config that IS safe to check in (no secrets) —
+// settings.json wires hooks/tool-permissions for the whole team, and the
+// hooks/ scripts must be versioned so every contributor's session fires the
+// same automation (self-verify post-edit, etc.). Everything ELSE under
+// .claude/ stays blocked (e.g. settings.local.json with personal allowlists).
+const ALLOWED_CLAUDE_PATHS = [/^\.claude\/settings\.json$/, /^\.claude\/hooks\/[\w.-]+\.(c?js|mjs)$/];
+
 const SECRET_PATTERNS = [
   { name: "Anthropic API key", re: /sk-ant-[A-Za-z0-9_-]{20,}/ },
   { name: "OpenAI/DeepSeek/SiliconFlow key", re: /sk-(proj-)?[A-Za-z0-9]{32,}/ },
@@ -37,6 +44,7 @@ const files = staged();
 const violations = [];
 
 for (const f of files) {
+  if (ALLOWED_CLAUDE_PATHS.some((re) => re.test(f))) continue;
   for (const re of BLOCKED_PATHS) {
     if (re.test(f)) {
       violations.push(`  blocked path: ${f}`);

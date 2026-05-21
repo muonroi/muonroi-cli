@@ -45,6 +45,26 @@ intent-vs-reality mismatches that scripted tests cannot express.
 push touches watched surfaces. Skip with `git push --no-verify` or
 `SELF_VERIFY_PRE_PUSH=0 git push`.
 
+**PostToolUse hook (Claude Code only)**: `.claude/settings.json` wires
+`.claude/hooks/self-qa-post-edit.cjs` to fire AFTER every Edit/Write/MultiEdit
+on a watched surface — even during an interactive Claude session, before any
+commit. The hook spawns Tier 1 detached so the agent doesn't block; result
+lands at `.claude/self-qa-last.json` (~30s later). 60s throttle prevents
+spam during rapid edits. Disable: `$env:SELF_QA_POST_EDIT="0"` or delete the
+hook file. The agent can read the result file at any time to see whether its
+recent edit broke a scenario.
+
+**Tier 3 — sprint pipeline gate (default ON in local dev)**: when `/ideal`
+runs, after the verification recipe PASSES, sprint-runner auto-fires Tier 1
+self-verify against UI/harness surfaces touched in this sprint. A
+self-verify failure downgrades the sprint verdict to FAIL so the loop
+iterates again with the failure context in `verifyResult.error`.
+Auto-disabled when `CI=true` or `NODE_ENV=ci`. Disable locally with
+`$env:MUONROI_SPRINT_SELF_VERIFY="0"` (PowerShell) or
+`MUONROI_SPRINT_SELF_VERIFY=0 bun run src/index.ts ...` (POSIX).
+Module: `src/product-loop/sprint-self-verify.ts`. Hook point:
+`src/product-loop/sprint-runner.ts` (after `parseVerifyResult`).
+
 **Parallel with TUI**: self-verify spawns its own child via unique
 named-pipe per pid+uuid — no conflict with a live TUI session. Run it
 in a second terminal while you develop.

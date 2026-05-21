@@ -423,9 +423,39 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     label: `Sprint ${sprintN} — Verification`,
     startedAt: verifyStartedAt,
   });
-  const verifyVerdict = parseVerifyResult(verifyResult);
+  let verifyVerdict = parseVerifyResult(verifyResult);
   const recipeFromVerify =
     (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
+
+  // Tier 3 — opt-in self-verify gate. Only fires when recipe PASSED and the
+  // sprint touched UI / harness watched surfaces. Failure downgrades the
+  // sprint verdict to FAIL so the loop iterates again with feedback.
+  // Default OFF; opt-in via MUONROI_SPRINT_SELF_VERIFY=1.
+  if (verifyVerdict === "PASS") {
+    try {
+      const { runSprintSelfVerify } = await import("./sprint-self-verify.js");
+      const sv = await runSprintSelfVerify({
+        repoRoot: cwd,
+        baseRef: "HEAD~1",
+      });
+      if (sv.ran && sv.verdict === "fail") {
+        verifyVerdict = "FAIL";
+        const tail = sv.detail ? `\n\n[self-verify] ${sv.detail}` : "";
+        verifyResult.error = (verifyResult.error ?? "") + tail;
+        yield {
+          type: "content",
+          content: `\n> [self-verify] Sprint ${sprintN} verdict downgraded to FAIL by Tier 1 self-QA (${sv.elapsedMs}ms).\n`,
+        };
+      } else if (sv.ran && sv.verdict === "pass") {
+        yield {
+          type: "content",
+          content: `\n> [self-verify] Tier 1 PASS (${sv.elapsedMs}ms) — UI/harness regressions checked.\n`,
+        };
+      }
+    } catch {
+      /* self-verify must NEVER block the sprint pipeline */
+    }
+  }
 
   // P3.3: Track repeating failures; push to EE judge-worker when count hits 3.
   if (verifyVerdict === "FAIL" || verifyVerdict === "ERROR") {

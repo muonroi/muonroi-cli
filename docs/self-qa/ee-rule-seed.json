@@ -42,8 +42,8 @@
     }
   ],
   "ingestion": {
-    "tool": "experience-engine/scripts/ingest-behavioral.mts",
-    "command": "node experience-engine/scripts/ingest-behavioral.mts --file docs/self-qa/ee-rule-seed.json --collection muonroi-cli-behavioral",
-    "notes": "Run from the experience-engine repo root with EE_SERVER_URL pointing at the live brain. The ingestor de-dupes by entries[].id and reconciles confidence/scope on re-ingest."
+    "tool": "scripts/ingest-self-qa-rule.mts",
+    "command": "bun run scripts/ingest-self-qa-rule.mts",
+    "notes": "Run from muonroi-cli root. Auth via EE_AUTH_TOKEN env or ~/.experience/config.json:serverAuthToken. Ingests into experience-behavioral collection (muonroi-cli-behavioral is not in EE's KNOWN_COLLECTIONS yet; scope_project_slug=muonroi-cli narrows it correctly). Payload contains both the nested experience-core schema (payload.json with scope+solution+confidence) AND flat scope_* keys required by the Qdrant index-level pre-filter. Verify with `curl /api/search`. Surfacing via /api/intercept also depends on EE's brain-relevance LLM gate at runtime — direct search proves the entry exists; intercept surfacing varies with edit semantics. Local PostToolUse hook in .claude/hooks/self-qa-post-edit.cjs fires independently of EE."
   }
 }
