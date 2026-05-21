@@ -42,9 +42,32 @@ async function tmpFlowDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "routing-"));
 }
 
+/** Empty directory — passes the existing-repo-bypass check (greenfield). */
+async function tmpEmptyCwd(): Promise<string> {
+  return fs.mkdtemp(path.join(os.tmpdir(), "routing-cwd-"));
+}
+
+/** Existing-project directory — has a package.json so detection classifies it. */
+async function tmpExistingCwd(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "routing-existing-"));
+  await fs.writeFile(
+    path.join(dir, "package.json"),
+    JSON.stringify({
+      name: "fake-existing",
+      dependencies: { react: "1", vite: "1", ai: "1", vitest: "1", lodash: "1", zod: "1" },
+    }),
+  );
+  // Need >5 source files for classify() to mark as "existing" (else "ambiguous").
+  for (let i = 0; i < 10; i++) {
+    await fs.writeFile(path.join(dir, `src${i}.ts`), "export {};");
+  }
+  return dir;
+}
+
 function makeOpts(overrides: Record<string, unknown> = {}): any {
   return {
     flowDir: overrides.flowDir as string,
+    cwd: overrides.cwd, // when undefined, dispatcher falls back to process.cwd()
     idea: overrides.idea ?? "build a counter",
     subcommand: "start",
     sessionModelId: "claude-sonnet-4-6",
@@ -91,13 +114,14 @@ describe("complexity routing — P2.6", () => {
 
   it("complexity=low, no forceCouncil → hot-path: runLoopDriver NOT called", async () => {
     const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
 
     // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       return shippedIter();
     });
 
-    const { result } = await drain(runProductLoop(makeOpts({ flowDir, complexity: "low" })));
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "low" })));
 
     expect(result.success).toBe(true);
     expect(runLoopDriver).not.toHaveBeenCalled();
@@ -105,6 +129,7 @@ describe("complexity routing — P2.6", () => {
 
   it("complexity=low + forceCouncil=true → full path: runLoopDriver called", async () => {
     const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
 
     // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
@@ -115,6 +140,7 @@ describe("complexity routing — P2.6", () => {
       runProductLoop(
         makeOpts({
           flowDir,
+          cwd,
           complexity: "low",
           flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9, forceCouncil: true },
         }),
@@ -125,43 +151,163 @@ describe("complexity routing — P2.6", () => {
     expect(runLoopDriver).toHaveBeenCalled();
   });
 
-  it("complexity=medium → full path: runLoopDriver called", async () => {
+  it("greenfield complexity=medium → full path: runLoopDriver called", async () => {
     const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
 
     // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       return shippedIter();
     });
 
-    const { result } = await drain(runProductLoop(makeOpts({ flowDir, complexity: "medium" })));
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "medium" })));
 
     expect(result.success).toBe(true);
     expect(runLoopDriver).toHaveBeenCalled();
   });
 
-  it("complexity=high → full path: runLoopDriver called", async () => {
+  it("greenfield complexity=high → full path: runLoopDriver called", async () => {
     const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
 
     // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       return shippedIter();
     });
 
-    const { result } = await drain(runProductLoop(makeOpts({ flowDir, complexity: "high" })));
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "high" })));
 
     expect(result.success).toBe(true);
     expect(runLoopDriver).toHaveBeenCalled();
   });
 
-  it("complexity=undefined (not provided) → full path: runLoopDriver called", async () => {
+  it("greenfield complexity=undefined → full path: runLoopDriver called", async () => {
     const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
 
     // biome-ignore lint/correctness/useYield: intentional mock generator
     (runSprint as any).mockImplementationOnce(async function* () {
       return shippedIter();
     });
 
-    const { result } = await drain(runProductLoop(makeOpts({ flowDir }))); // no complexity field
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd })));
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C1 — existing-repo bypass
+// ---------------------------------------------------------------------------
+
+describe("C1 existing-repo bypass — Sprint C", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.MUONROI_PHASE_MODE = "0";
+  });
+
+  afterEach(() => {
+    delete process.env.MUONROI_PHASE_MODE;
+  });
+
+  it("existing repo + complexity=medium → hot-path (no full Council)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "medium" })));
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
+  it("existing repo + sufficiency gaps → hot-path (gaps no longer force Council)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(
+        makeOpts({
+          flowDir,
+          cwd,
+          complexity: "medium",
+          sufficiencyMissing: ["scope", "target"],
+        }),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).not.toHaveBeenCalled();
+  });
+
+  it("existing repo + complexity=high → still full Council (architectural change)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(runProductLoop(makeOpts({ flowDir, cwd, complexity: "high" })));
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("existing repo + forceCouncil=true → full Council (explicit opt-in wins)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpExistingCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(
+        makeOpts({
+          flowDir,
+          cwd,
+          complexity: "medium",
+          flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9, forceCouncil: true },
+        }),
+      ),
+    );
+
+    expect(result.success).toBe(true);
+    expect(runLoopDriver).toHaveBeenCalled();
+  });
+
+  it("greenfield + sufficiency gaps → STILL forces Council (no bypass)", async () => {
+    const flowDir = await tmpFlowDir();
+    const cwd = await tmpEmptyCwd();
+
+    // biome-ignore lint/correctness/useYield: intentional mock generator
+    (runSprint as any).mockImplementationOnce(async function* () {
+      return shippedIter();
+    });
+
+    const { result } = await drain(
+      runProductLoop(
+        makeOpts({
+          flowDir,
+          cwd,
+          complexity: "low", // would normally hot-path
+          sufficiencyMissing: ["scope"],
+        }),
+      ),
+    );
 
     expect(result.success).toBe(true);
     expect(runLoopDriver).toHaveBeenCalled();
