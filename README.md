@@ -22,17 +22,9 @@
 
 ## Quick Start
 
-### Prerequisites
-
-- **Node.js ≥ 20** (the CLI ships an ESM bundle and runs on bare Node — Bun is optional).
-- Optional native toolchain for `keytar` OS-keychain storage. If missing, the CLI still works — keys fall back to environment variables.
-  - **Windows**: [Visual Studio Build Tools](https://visualstudio.microsoft.com/downloads/) (C++ workload)
-  - **macOS**: `xcode-select --install`
-  - **Linux**: `sudo apt-get install libsecret-1-dev`
-
 ### Install
 
-**Recommended — prebuilt standalone binary (zero runtime deps):**
+**Recommended — prebuilt standalone binary (zero runtime deps, no prereqs):**
 
 Linux / macOS:
 ```bash
@@ -44,26 +36,15 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.ps1 | iex
 ```
 
-The installers download a `bun --compile` binary from GitHub Releases. No Node, no Bun, no native build tools required.
+The installers download a `bun --compile` binary from GitHub Releases — single executable, all native deps bundled, no Node/Bun/build tools required.
 
-**Bun runtime:**
+**Bun runtime (requires Bun ≥ 1.x):**
 ```bash
 bun add -g muonroi-cli
 muonroi-cli
 ```
 
-**Node runtime (npm):**
-```bash
-npm install -g muonroi-cli
-muonroi-cli
-```
-
-The package now ships a Node-compatible bundle (all relative imports include `.js`, SQLite picks `better-sqlite3` on Node and `bun:sqlite` on Bun automatically). `better-sqlite3` has prebuilt binaries for most platforms so the install rarely needs a local C++ toolchain.
-
-**No global install (try it without committing):**
-```bash
-npx muonroi-cli
-```
+> **⚠ Why no `npm install -g`?** The TUI engine (`@opentui/core`) uses Bun-only `import ... with { type: "file" }` for Tree-sitter syntax highlight queries (`.scm` files). Node ESM cannot load these, so running under bare Node throws `ERR_UNKNOWN_FILE_EXTENSION`. Use the standalone installer (above) or `bun add -g`.
 
 ### First run
 

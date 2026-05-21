@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 // SECURITY: Redactor must be the FIRST import. installGlobalPatches() wraps
 // console.* before any subsequent import side-effect or log can emit an API key.
 // See: PROV-07, Pitfall 2 (HIGH severity API key leakage).
