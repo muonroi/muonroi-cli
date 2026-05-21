@@ -3347,7 +3347,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               ...prev,
               buildUserEntry(heading),
               buildAssistantEntry(
-                warningPrefix ? `${warningPrefix}\nProduct loop starting…\n` : "Product loop starting…\n",
+                warningPrefix
+                  ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
+                  : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
               ),
             ]);
             // Fresh product-loop run — clear any persisted phase/status so old
@@ -3355,9 +3357,50 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setCouncilPhases([]);
             setCouncilStatuses([]);
             councilDoneAtRef.current.clear();
+            // Liveness heartbeat — between "Product loop starting…" and the
+            // first phase event (CB-1 + discovery + leader call can take
+            // 5-60s), the UI used to look frozen with no indication of
+            // activity. We append a single-line elapsed counter every second
+            // that is REPLACED in place (not appended) until the first real
+            // chunk arrives. The counter is then cleared so the normal phase
+            // flow takes over.
+            const heartbeatStartedAt = Date.now();
+            let firstChunkSeen = false;
+            const heartbeatLineMarker = "\n⏳ Initializing… elapsed ";
+            const writeHeartbeat = () => {
+              if (firstChunkSeen) return;
+              const elapsed = Math.floor((Date.now() - heartbeatStartedAt) / 1000);
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (!last || last.type !== "assistant") return prev;
+                const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, content: `${base}${heartbeatLineMarker}${elapsed}s\n` },
+                ];
+              });
+            };
+            const heartbeatInterval = setInterval(writeHeartbeat, 1_000);
+            const clearHeartbeat = () => {
+              if (firstChunkSeen) return;
+              firstChunkSeen = true;
+              clearInterval(heartbeatInterval);
+              // Strip the heartbeat line from the assistant message so the
+              // normal phase output starts on a clean slate.
+              setMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (!last || last.type !== "assistant") return prev;
+                const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, content: base.endsWith("\n") ? base : `${base}\n` },
+                ];
+              });
+            };
             try {
               const gen = (agent as any).runProductLoopV1(payload);
               for await (const chunk of gen) {
+                clearHeartbeat();
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   const cq = chunk.councilQuestion;
                   process.stderr.write(`[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
@@ -3559,11 +3602,13 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 process.stderr.write(`[ideal-loop-exit] for-await ended cleanly\n`);
               }
             } catch (e: unknown) {
+              clearHeartbeat();
               if (process.env.MUONROI_DEBUG_LEADER === "1") {
                 process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
               }
               setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
             } finally {
+              if (!firstChunkSeen) clearHeartbeat();
               setCouncilPhases([]);
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
@@ -5082,6 +5127,23 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           return;
         }
         if (key.name === "return") {
+          // Safety: when the user has already typed args after the slash
+          // command (e.g. "/ideal --force-council <topic>"), pressing Enter
+          // must dispatch the composer text — NOT trigger the currently
+          // selected menu item. Previously this defaulted to "/exit" and
+          // killed the CLI on power-user enter-after-args flows.
+          // Detect args: any non-leading whitespace in the composer text
+          // means the user has moved past the bare command.
+          const composerText = inputRef.current?.plainText ?? "";
+          const hasArgsAfterSlashCommand = /^\s*\/\S+\s+\S/.test(composerText);
+          if (hasArgsAfterSlashCommand) {
+            setShowSlashMenuSync(false);
+            setSlashSearchQuery("");
+            // Do NOT call key.preventDefault() — textarea must receive Enter
+            // so the typed command (with args) is submitted normally.
+            return;
+          }
+
           const item = filteredSlashItems[slashMenuIndex];
           if (item) {
             handleSlashMenuSelect(item);
