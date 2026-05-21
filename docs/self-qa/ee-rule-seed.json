@@ -1,0 +1,49 @@
+{
+  "$schema": "https://experience-engine.muonroi.com/schemas/behavioral-entry-v1.json",
+  "collection": "muonroi-cli-behavioral",
+  "version": "2026-05-21",
+  "entries": [
+    {
+      "id": "self-qa-after-ui-change",
+      "title": "Run self-verify after modifying UI surfaces",
+      "confidence": "high",
+      "kind": "behavioral",
+      "trigger": {
+        "tool": ["Edit", "Write", "Bash"],
+        "fileGlobs": [
+          "src/ui/**/*.tsx",
+          "src/ui/**/*.ts",
+          "src/self-qa/**/*.ts",
+          "src/agent-harness/**/*.ts",
+          "packages/agent-harness-opentui/**/*.ts",
+          "packages/agent-harness-react/**/*.tsx"
+        ]
+      },
+      "scope": {
+        "project_include": ["muonroi-cli"],
+        "lang_include": ["typescript", "tsx"]
+      },
+      "message": "You modified a UI / harness surface. Unit tests cover function-level logic but NOT the rendered lifecycle (modal mount/unmount, slash-menu navigation, askcard flow, focus chain, toast levels). Before claiming done, run:\n\n  bun run src/index.ts self-verify --agentic \\\n    --goal \"<describe the user-visible flow you just modified>\" \\\n    --llm \"deepseek-v4-flash\" --turns 8\n\nThis catches integration bugs no vitest test can see — for example the 2026-05-21 session where typing /agents opened the slash-menu instead of the subagents-modal directly. The harness reports the actual semantic state so the LLM observes the divergence and flags it.\n\nCost: ~$0.005-0.01 per run, ~30s wall-clock. Pre-push hook auto-runs Tier 1 (heuristic) on these surfaces.",
+      "why": "2026-05-21 incident: composer/modal/slash-menu interactions caused user-visible regressions that passed all unit tests because the harness lifecycle (focus restore, isModal flag, askcard children) is not reachable from jest/vitest renders. Tier 2 (LLM-in-the-loop) found a goal-vs-reality mismatch that no scripted test could express.",
+      "how_to_apply": "When the warning fires: pause before the next Edit. Either (a) run self-verify with a goal narrating the user flow you just changed, OR (b) acknowledge that the change is internal-only (e.g., refactor with no UI behavior change) and proceed. Do NOT skip silently if the change touches user-visible surfaces.",
+      "evidence": [
+        {
+          "kind": "session",
+          "ref": "2026-05-21-tier2-agentic-verify",
+          "summary": "DeepSeek-v4-flash drove inner CLI, detected slash-menu id=slash-menu opened instead of expected id=subagents-modal after typing /agents + Enter. verdict=fail with actionable reason."
+        }
+      ],
+      "links": {
+        "self_verify_module": "src/self-qa/",
+        "cli_entry": "muonroi-cli self-verify --help",
+        "pre_push_hook": ".husky/pre-push",
+        "vision_doc": "docs/self-qa/README.md"
+      }
+    }
+  ],
+  "ingestion": {
+    "tool": "experience-engine/scripts/ingest-behavioral.mts",
+    "command": "node experience-engine/scripts/ingest-behavioral.mts --file docs/self-qa/ee-rule-seed.json --collection muonroi-cli-behavioral",
+    "notes": "Run from the experience-engine repo root with EE_SERVER_URL pointing at the live brain. The ingestor de-dupes by entries[].id and reconciles confidence/scope on re-ingest."
+  }
+}
