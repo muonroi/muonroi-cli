@@ -25,7 +25,38 @@ import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { parsePromptForContext } from "./discovery-prompt-parser.js";
 import type { CouncilDebateRunner } from "./discovery-recommender.js";
 import { councilRecommend, leaderRecommend, shouldFallbackToLeader } from "./discovery-recommender.js";
-import type { DiscoveryContext, ProjectContext } from "./types.js";
+import type { BackendStackCtx, DiscoveryContext, ExistingProjectSignals, ProjectContext } from "./types.js";
+
+/**
+ * Decide whether detection signals are STRONG enough to synthesize a
+ * backendStack answer (skipping the interview question). Returns null when
+ * the signal is ambiguous — in that case the interview asks the user.
+ *
+ * Exported for unit testing; consumers should prefer this over reaching
+ * into the detection shape directly.
+ */
+export function pickBackendStackFromDetection(detection: ExistingProjectSignals): BackendStackCtx | null {
+  // Path 1 — single dominant manifest. classify() guarantees weight > 0 +
+  // srcFileCount > 5 for "existing", so this is the highest-confidence case.
+  if (detection.classification === "existing" && detection.manifests.length === 1) {
+    const m = detection.manifests[0];
+    return {
+      language: m.inferredLang,
+      framework: m.inferredFrameworks[0] ?? "(none detected)",
+    };
+  }
+  // Path 2 — ambiguous classification but exactly one language detected
+  // (e.g. a folder of .ts files with no package.json, or a single manifest
+  // with weight=0). Lang is high signal; framework unknown.
+  if (detection.classification === "ambiguous" && detection.languages.length === 1) {
+    return {
+      language: detection.languages[0],
+      framework: "(none detected)",
+    };
+  }
+  // Path 3 — polyglot OR no signal. Bail out and let the interview ask.
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // Forward-reference stubs (replaced in Tasks 16 and 17)
@@ -221,25 +252,38 @@ export async function runGatherPhase(
 
     const { partial: prompted } = await parsePromptForContext(idea, leader);
 
-    // When detection knows the language, also synthesize a `backendStack`
-    // answer from it so the interview can SKIP the question AND downstream
-    // consumers (formatProjectContextForPrompt at discovery-context-format.ts)
-    // find a real value at `ctx.context.backendStack.language`. Previously
-    // the prefillSource flag claimed backendStack was answered but the
-    // prefillAnswers map didn't actually contain it — session e2660a052918
-    // crashed at the first prompt that accessed `.language` of an undefined.
+    // Synthesize a `backendStack` answer from detection so the interview can
+    // SKIP the question AND downstream consumers
+    // (formatProjectContextForPrompt) find a real value. Session e2660a052918
+    // crashed because the prefillSource flag claimed backendStack was
+    // answered but no actual value lived in prefillAnswers.
+    //
+    // Selection rule (NOT just languages[0] — polyglot would pick arbitrarily):
+    //   1. classification === "existing" → use the single dominant manifest's
+    //      inferredLang + first framework. Deterministic + weight-grounded
+    //      since classify() requires manifest.weight > 0 + srcFileCount > 5.
+    //   2. classification === "ambiguous" with EXACTLY ONE detected language
+    //      → use it (no framework signal in this case).
+    //   3. classification === "ambiguous" with multiple detected languages
+    //      (polyglot, e.g. ["TypeScript", "Python"]) → DO NOT synthesize.
+    //      The interview SHOULD ask the user which stack the change targets.
+    //   4. greenfield → not in this path (no languages detected).
+    //
+    // When we don't synthesize, we also don't flag fromDetection — so the
+    // interview asks the question normally rather than skipping a question
+    // whose answer never materialized.
+    const backendStackFromDetection = pickBackendStackFromDetection(detection);
+    const fromDetectionIds: string[] = [];
     const prefillFromDetection: Partial<DiscoveryContext> = {};
-    if (detection.languages.length > 0) {
-      prefillFromDetection.backendStack = {
-        language: detection.languages[0] ?? "(detected)",
-        framework: detection.frameworks[0] ?? "(none detected)",
-      };
+    if (backendStackFromDetection) {
+      prefillFromDetection.backendStack = backendStackFromDetection;
+      fromDetectionIds.push("backendStack");
     }
 
     await initDiscoveryState(flowDir, runId, {
       classification: detection.classification,
       prefillSource: {
-        fromDetection: detection.languages.length ? ["backendStack"] : [],
+        fromDetection: fromDetectionIds,
         fromPrompt: Object.keys(prompted),
       },
       prefillAnswers: { ...prefillFromDetection, ...prompted },
