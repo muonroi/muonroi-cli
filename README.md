@@ -17,7 +17,7 @@
 > Routes each task to the optimal model, runs adversarial multi-model debates for high-stakes decisions, and persists behavioral memory across sessions. Bring your own API keys. Total cost: ~$5/month.
 
 <p align="center">
-  <img src="docs/demo.gif" alt="Council debate — REST vs gRPC decision" width="840" />
+  <img src="https://raw.githubusercontent.com/muonroi/muonroi-cli/master/docs/demo.gif" alt="Council debate — REST vs gRPC decision" width="840" />
 </p>
 
 ## Quick Start
