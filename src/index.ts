@@ -1513,6 +1513,41 @@ program
   });
 
 program
+  .command("self-verify")
+  .description(
+    "Harness-Verified Self-QA: spawn a child muonroi-cli, drive it through scenarios derived from git diff, and emit regression specs for every passing run",
+  )
+  .option("--since <ref>", "Git base ref for the diff window", "HEAD~1")
+  .option("--max <n>", "Maximum number of scenarios to run", "8")
+  .option("--no-emit", "Do not write tests/harness/auto/*.spec.ts on pass")
+  .option("--out <dir>", "Override the emitted-spec directory")
+  .option("--json", "Print machine-readable JSON report to stdout")
+  .action(async (opts: { since: string; max: string; emit?: boolean; out?: string; json?: boolean }) => {
+    const { runSelfVerify } = await import("./self-qa/index.js");
+    const log = opts.json ? () => {} : (m: string) => console.log(m);
+    const report = await runSelfVerify({
+      baseRef: opts.since,
+      maxScenarios: Number.parseInt(opts.max, 10) || 8,
+      emitSpecs: opts.emit !== false,
+      specOutDir: opts.out,
+      log,
+    });
+    if (opts.json) {
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    } else {
+      const s = report.summary;
+      console.log(
+        `\n[self-verify] ${s.passed}/${s.total} passed | ${s.failed} failed | ${s.inconclusive} inconclusive | ${report.durationMs}ms`,
+      );
+      if (report.emittedSpecs.length > 0) {
+        console.log(`[self-verify] Emitted ${report.emittedSpecs.length} regression spec(s):`);
+        for (const path of report.emittedSpecs) console.log(`  ${path}`);
+      }
+    }
+    process.exit(report.summary.failed > 0 ? 1 : 0);
+  });
+
+program
   .command("export-transcripts")
   .description("One-shot dump of SQLite session history → ~/.experience/muonroi-cli-sessions/ for EE backfill")
   .option("--days <n>", "Only export sessions updated within N days (default 30)", "30")
