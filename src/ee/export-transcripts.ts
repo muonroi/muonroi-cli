@@ -24,7 +24,11 @@ async function openDb(dbPath: string): Promise<{
   close: () => void;
 }> {
   // Prefer better-sqlite3 (sync), fall back to bun:sqlite when running under Bun.
+  // better-sqlite3 is an OPTIONAL runtime dep — not in package.json (we ship via
+  // bun:sqlite under Bun). Suppress the TS lookup; the try/catch below handles
+  // the runtime ENOENT when the module is genuinely missing.
   try {
+    // @ts-expect-error optional peer module — see comment above
     const mod = await import("better-sqlite3");
     const Better = (mod as { default?: unknown }).default ?? mod;
     const db = new (Better as new (p: string, o?: unknown) => unknown)(dbPath, { readonly: true }) as {
