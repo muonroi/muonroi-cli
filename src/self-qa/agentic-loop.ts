@@ -189,22 +189,25 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   const maxTokens = opts.maxTokens ?? 1024;
   const retryOnEmpty = opts.retryOnEmpty !== false;
 
-  // DeepSeek / SiliconFlow require explicit `structuredOutputs: true` to honour
-  // a JSON schema — otherwise the AI SDK warns "responseFormat not supported"
-  // and silently falls back to text mode. Merge it into provider options for
-  // any provider that uses the deepseek/siliconflow chat dialect.
+  // @ai-sdk/openai-compatible's chat schema exposes `strictJsonSchema: false`
+  // for providers that don't honour OpenAI's strict JSON schema mode.
+  // DeepSeek (and DeepSeek-compatible providers like SiliconFlow) only
+  // support `response_format: {type: "json_object"}` — they reject the full
+  // schema response_format. Setting strictJsonSchema=false makes AI SDK fall
+  // back to lenient json_object mode silently (no "responseFormat not
+  // supported" warning) while still steering the model toward JSON output.
+  //
+  // Disabling DeepSeek thinking mode would require `extra_body.thinking
+  // .type=disabled` per https://api-docs.deepseek.com/guides/thinking_mode
+  // — but openai-compatible v2.0.42 does not expose a generic extraBody
+  // knob, so that's left to a future provider patch.
   const mergedProviderOptions: Record<string, Record<string, unknown>> = {
     ...((runtime.providerOptions ?? {}) as Record<string, Record<string, unknown>>),
   };
-  if (provider === "deepseek") {
-    mergedProviderOptions["deepseek"] = {
-      ...(mergedProviderOptions["deepseek"] ?? {}),
-      structuredOutputs: true,
-    };
-  } else if (provider === "siliconflow") {
-    mergedProviderOptions["siliconflow"] = {
-      ...(mergedProviderOptions["siliconflow"] ?? {}),
-      structuredOutputs: true,
+  if (provider === "deepseek" || provider === "siliconflow") {
+    mergedProviderOptions[provider] = {
+      ...(mergedProviderOptions[provider] ?? {}),
+      strictJsonSchema: false,
     };
   }
 
