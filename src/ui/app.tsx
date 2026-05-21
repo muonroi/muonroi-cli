@@ -871,6 +871,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const pendingCouncilQuestionRef = useRef<CouncilQuestionData | null>(null);
   const councilCardStateRef = useRef<CouncilCardState | null>(null);
   const preflightCardStateRef = useRef<CouncilCardState | null>(null);
+  // E2 — post-action heartbeat shown while waiting for the NEXT chunk after the
+  // user answers an AskCard. Avoids the silent gap between accept-N and the
+  // arrival of chunk-(N+1) (next AskCard, council phase chunk, sprint stage).
+  // The chunk loop in /ideal calls clearInterCardHeartbeat() on every chunk.
+  const interCardHeartbeatRef = useRef<{ interval: ReturnType<typeof setInterval>; marker: string } | null>(null);
   const setPendingCouncilQuestionSync = useCallback((v: CouncilQuestionData | null) => {
     pendingCouncilQuestionRef.current = v;
     setPendingCouncilQuestion(v);
@@ -930,6 +935,46 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
+
+  // E2 — start/clear post-answer heartbeat. Renders "⏳ Waiting for next phase…
+  // elapsed Ns" as a fresh assistant entry that updates in place every second
+  // until the next chunk arrives. clearInterCardHeartbeat is idempotent and is
+  // also called from the chunk-loop (line ~3402) and on AskCard cancel.
+  const clearInterCardHeartbeat = useCallback(() => {
+    const h = interCardHeartbeatRef.current;
+    if (!h) return;
+    clearInterval(h.interval);
+    interCardHeartbeatRef.current = null;
+    // Strip the heartbeat assistant entry so the next chunk starts clean.
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const last = prev[prev.length - 1];
+      if (!last || last.type !== "assistant") return prev;
+      if (!last.content?.includes(h.marker)) return prev;
+      return prev.slice(0, -1);
+    });
+  }, []);
+
+  const startInterCardHeartbeat = useCallback(
+    (label: string) => {
+      clearInterCardHeartbeat();
+      const startedAt = Date.now();
+      const marker = "⏳ ";
+      setMessages((prev) => [...prev, buildAssistantEntry(`${marker}${label}… elapsed 0s\n`)]);
+      const interval = setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        setMessages((prev) => {
+          if (prev.length === 0) return prev;
+          const last = prev[prev.length - 1];
+          if (!last || last.type !== "assistant" || !last.content?.includes(marker)) return prev;
+          return [...prev.slice(0, -1), { ...last, content: `${marker}${label}… elapsed ${elapsed}s\n` }];
+        });
+      }, 1_000);
+      interCardHeartbeatRef.current = { interval, marker };
+    },
+    [clearInterCardHeartbeat],
+  );
+
   useEffect(() => {
     const cur = initNewForm?.step ?? null;
     const prev = lastInitNewStepRef.current;
@@ -3401,6 +3446,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               const gen = (agent as any).runProductLoopV1(payload);
               for await (const chunk of gen) {
                 clearHeartbeat();
+                clearInterCardHeartbeat();
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
                   const cq = chunk.councilQuestion;
                   process.stderr.write(`[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
@@ -4676,7 +4722,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             agent.respondToCouncilQuestion(qid, ans.text);
-            setMessages((prev) => [...prev, buildUserEntry(formatAnswerForLog(ans))]);
+            setMessages((prev) => [
+              ...prev,
+              buildUserEntry(
+                formatAnswerForLog(ans, {
+                  selectedOptionLabel,
+                  questionId: pendingQuestion.question?.match(/^Question:\s*(\w+)/)?.[1],
+                }),
+              ),
+            ]);
+            // E2 — start a heartbeat while we wait for the NEXT chunk from
+            // /ideal (next AskCard, council phase tick, or sprint stage event).
+            // chunk loop clears it on first arrival.
+            startInterCardHeartbeat("Waiting for next phase");
             // Task 2.4 — emit askcard-answered harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -4702,6 +4760,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             const qid = pendingQuestion.questionId;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
+            clearInterCardHeartbeat();
             agent.respondToCouncilQuestion(qid, "");
             // Task 2.4 — emit askcard-cancel harness event (agent-mode only).
             try {
