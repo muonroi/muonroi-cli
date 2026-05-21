@@ -98,10 +98,18 @@ export async function executeEventHooks(
 
       // Capture EE render output so warnings surface in the agent content stream
       // (yielded as content above the tool action) rather than going to console.warn.
+      // Also fan out to the previous sink so the active TUI render path (activeEeYield)
+      // receives the experience_warning chunks and renders the full [conf%] message + Why
+      // inline — without this fan-out the user only sees the count, not the detail.
       const capturedWarnings: string[] = [];
       const originalSink = getRenderSink();
       setRenderSink((chunk) => {
         capturedWarnings.push(typeof chunk === "string" ? chunk : ((chunk as { content?: string }).content ?? ""));
+        try {
+          originalSink(chunk);
+        } catch {
+          /* TUI sink fail-open — never block intercept */
+        }
       });
       let r: Awaited<ReturnType<typeof interceptWithDefaults>>;
       try {

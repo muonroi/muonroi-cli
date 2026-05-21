@@ -360,6 +360,11 @@ export interface EEClient {
   routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null>;
   coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null>;
   feedback(payload: FeedbackPayload): void;
+  noiseFeedback(payload: {
+    pointId: string;
+    collection: string;
+    reason: "wrong_repo" | "wrong_language" | "wrong_task" | "stale_rule";
+  }): void;
   touch(principle_uuid: string, tenantId: string): void;
   // P0: Route feedback
   routeFeedback(payload: RouteFeedbackPayload): void;

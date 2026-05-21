@@ -16,6 +16,23 @@ import type { InterceptRequest, InterceptResponse, Scope } from "./types.js";
 let _lastSurfacedIds: string[] = [];
 let _lastSurfacedTimestamp: string | null = null;
 
+// Most-recent match batch with collection info — drives Ctrl+N user feedback.
+// Separate from _lastSurfacedIds (which may include IDs from PIL Layer 3
+// injection where we don't have the collection).
+let _lastSurfacedMatches: Array<{ principleUuid: string; collection: string }> = [];
+
+export function getLastSurfacedMatches(): Array<{ principleUuid: string; collection: string }> {
+  return _lastSurfacedMatches.map((m) => ({ ...m }));
+}
+
+export function setLastSurfacedMatches(matches: Array<{ principleUuid: string; collection: string }>): void {
+  _lastSurfacedMatches = matches.filter((m) => m.principleUuid && m.collection).map((m) => ({ ...m }));
+}
+
+export function clearLastSurfacedMatches(): void {
+  _lastSurfacedMatches = [];
+}
+
 /**
  * Returns the last surfaced suggestion IDs and timestamp from the most recent
  * intercept call that returned matches. Used by prompt-stale reconciliation
@@ -103,6 +120,14 @@ export async function intercept(req: InterceptRequest, opts?: CreateEEClientOpts
   } else if (resp.matches && resp.matches.length > 0) {
     _lastSurfacedIds = resp.matches.map((m) => m.principle_uuid);
     _lastSurfacedTimestamp = new Date().toISOString();
+  }
+  // Track matches with collection for user feedback (Ctrl+N noise).
+  if (resp.matches && resp.matches.length > 0) {
+    setLastSurfacedMatches(
+      resp.matches
+        .filter((m) => m.collection)
+        .map((m) => ({ principleUuid: m.principle_uuid, collection: m.collection as string })),
+    );
   }
 
   return resp;

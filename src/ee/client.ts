@@ -354,6 +354,28 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       });
     },
 
+    /**
+     * User-driven noise feedback — matches the `exp-feedback` helper payload
+     * shape (pointId + collection + verdict='IRRELEVANT' + reason). Surfaces
+     * the EE scope-narrowing path (wrong_language / wrong_repo / wrong_task /
+     * stale_rule). Fire-and-forget; queued offline like standard feedback.
+     */
+    noiseFeedback(payload: {
+      pointId: string;
+      collection: string;
+      reason: "wrong_repo" | "wrong_language" | "wrong_task" | "stale_rule";
+    }): void {
+      const body = { ...payload, verdict: "IRRELEVANT" as const };
+      f(`${baseUrl}/api/feedback`, {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify(body),
+      }).catch((err) => {
+        logEeFailure("client.noiseFeedback", classifyEeError(err), err);
+        void enqueue({ endpoint: "/api/feedback", body, enqueuedAt: Date.now() });
+      });
+    },
+
     touch(principle_uuid: string, tenantId: string): void {
       f(`${baseUrl}/api/principle/touch?id=${encodeURIComponent(principle_uuid)}`, {
         method: "POST",
