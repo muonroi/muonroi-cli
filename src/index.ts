@@ -1527,7 +1527,7 @@ program
     "Tier 2: outer LLM drives the child interactively (reads frame deltas + events, decides next step). Requires --goal and --model.",
   )
   .option("--goal <text>", "Free-form goal for agentic mode (e.g. 'open agents modal and add a researcher')")
-  .option("--model <id>", "Model id for agentic mode (e.g. 'deepseek-v4-flash')")
+  .option("--llm <id>", "LLM model id for agentic mode (e.g. 'deepseek-v4-flash')")
   .option("--turns <n>", "Max agentic turns", "20")
   .action(
     async (opts: {
@@ -1538,18 +1538,18 @@ program
       json?: boolean;
       agentic?: boolean;
       goal?: string;
-      model?: string;
+      llm?: string;
       turns: string;
     }) => {
       const log = opts.json ? () => {} : (m: string) => console.log(m);
 
       if (opts.agentic) {
-        if (!opts.goal || !opts.model) {
-          console.error("--agentic requires both --goal and --model");
+        if (!opts.goal || !opts.llm) {
+          console.error("--agentic requires both --goal and --llm");
           process.exit(2);
         }
         const { runAgenticLoop, createLLMBrain } = await import("./self-qa/agentic-loop.js");
-        const brain = await createLLMBrain({ modelId: opts.model });
+        const brain = await createLLMBrain({ modelId: opts.llm });
         const report = await runAgenticLoop({
           goal: opts.goal,
           brain,
