@@ -6,12 +6,16 @@
  * default. Opt-out toggles ALL paths off in one switch.
  */
 
+import * as fsMod from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildEcosystemDebateContext,
   buildEcosystemPreamble,
   buildEcosystemResearchSeed,
   isEcosystemBiasEnabled,
+  shouldApplyEcosystemBias,
 } from "../discovery-ecosystem.js";
 
 // Stub the user-settings reader so tests don't depend on a live config file.
@@ -128,5 +132,115 @@ describe("isEcosystemBiasEnabled", () => {
       throw new Error("disk error");
     });
     expect(isEcosystemBiasEnabled()).toBe(true);
+  });
+});
+
+describe("shouldApplyEcosystemBias", () => {
+  const setSetting = (value: unknown) =>
+    (loadUserSettings as unknown as ReturnType<typeof vi.fn>).mockReturnValueOnce(value as Record<string, unknown>);
+
+  it("explicit opt-out short-circuits regardless of classification", () => {
+    setSetting({ discoveryEcosystemBias: false });
+    expect(shouldApplyEcosystemBias({ detection: { classification: "greenfield" } })).toBe(false);
+  });
+
+  it("greenfield classification → bias ON (scaffold into ecosystem)", () => {
+    setSetting({});
+    expect(shouldApplyEcosystemBias({ detection: { classification: "greenfield" } })).toBe(true);
+  });
+
+  it("existing classification → bias OFF (don't push vendor defaults — regression cfc711c57df0)", () => {
+    setSetting({});
+    expect(
+      shouldApplyEcosystemBias({
+        detection: { classification: "existing", languages: ["TypeScript"], manifests: [{ type: "package.json" }] },
+      }),
+    ).toBe(false);
+  });
+
+  it("existing .NET classification → also bias OFF (rule is folder-state, not stack)", () => {
+    setSetting({});
+    expect(
+      shouldApplyEcosystemBias({
+        detection: { classification: "existing", languages: ["C#"], manifests: [{ type: "MyApp.csproj" }] },
+      }),
+    ).toBe(false);
+  });
+
+  it("ambiguous classification → bias OFF (folder has code, treat like existing)", () => {
+    setSetting({});
+    expect(shouldApplyEcosystemBias({ detection: { classification: "ambiguous", languages: ["TypeScript"] } })).toBe(
+      false,
+    );
+  });
+
+  it("cwd-probe: empty directory → bias ON", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-empty-"));
+    try {
+      expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(true);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("cwd-probe: directory with package.json → bias OFF", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-pkg-"));
+    try {
+      fsMod.writeFileSync(path.join(tmp, "package.json"), "{}");
+      expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("cwd-probe: directory with a .csproj → bias OFF", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-cs-"));
+    try {
+      fsMod.writeFileSync(path.join(tmp, "MyApp.csproj"), "<Project/>");
+      expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("cwd-probe: directory with only a stray source file (no manifest) → bias OFF", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-src-"));
+    try {
+      fsMod.writeFileSync(path.join(tmp, "stray.ts"), "export {};");
+      expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("cwd-probe: directory with only dotfiles (e.g. .git) → still greenfield", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-git-"));
+    try {
+      fsMod.mkdirSync(path.join(tmp, ".git"));
+      fsMod.writeFileSync(path.join(tmp, ".gitignore"), "node_modules\n");
+      expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(true);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("detection wins over cwd: existing classification suppresses even when cwd is empty", () => {
+    setSetting({});
+    const tmp = fsMod.mkdtempSync(path.join(os.tmpdir(), "muonroi-eco-mixed-"));
+    try {
+      expect(shouldApplyEcosystemBias({ detection: { classification: "existing" }, cwd: tmp })).toBe(false);
+    } finally {
+      fsMod.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("no detection, no cwd → defaults to ON (legacy callers)", () => {
+    setSetting({});
+    expect(shouldApplyEcosystemBias()).toBe(true);
   });
 });

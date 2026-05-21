@@ -471,8 +471,8 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           { name: "Architect", lens: "Focus on high-level structure, scalability, and long-term maintainability" },
         ];
         try {
-          const { isEcosystemBiasEnabled, buildEcosystemResearchSeed } = await import("./discovery-ecosystem.js");
-          if (isEcosystemBiasEnabled()) {
+          const { shouldApplyEcosystemBias, buildEcosystemResearchSeed } = await import("./discovery-ecosystem.js");
+          if (shouldApplyEcosystemBias({ cwd: process.cwd() })) {
             const seed = buildEcosystemResearchSeed();
             stances = stances.map((s) => {
               if (s.name === "Researcher") return { ...s, lens: seed.researcherLens };

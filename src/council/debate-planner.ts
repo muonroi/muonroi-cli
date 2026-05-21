@@ -135,10 +135,10 @@ export async function* planDebate(
   // Ecosystem framing — stances + output sections should center on optimal
   // use of existing BB / Muonroi.* packages, not greenfield analysis.
   try {
-    const { isEcosystemBiasEnabled, buildEcosystemDebateContext } = await import(
+    const { shouldApplyEcosystemBias, buildEcosystemDebateContext } = await import(
       "../product-loop/discovery-ecosystem.js"
     );
-    if (isEcosystemBiasEnabled()) {
+    if (shouldApplyEcosystemBias({ cwd: process.cwd() })) {
       system += `\n\n${buildEcosystemDebateContext()}`;
     }
   } catch {
