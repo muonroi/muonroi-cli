@@ -102,9 +102,8 @@ import {
   persistToolCallWriteAhead,
   type SessionStore,
 } from "../storage/index";
-import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
-import type { AgentMode, SessionInfo, StreamChunk, SubagentStatus, ToolCall, ToolResult } from "../types/index";
+import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
@@ -128,7 +127,6 @@ import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
-import { lastPersistedSeq } from "./message-seq.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { applyModelConstraints, buildSystemPromptParts } from "./prompts";

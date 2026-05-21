@@ -54,6 +54,34 @@ const DebatePlanSchema = z.object({
 
 // ── planDebate ────────────────────────────────────────────────────────────────
 
+/**
+ * Helper: for implementation_plan debates, guarantee at least one Product/User-side
+ * voice in the roster. Engineering-only rosters (Architect/Cost/Skeptic/Researcher)
+ * historically inflate scope — see session f1cec5324716 where "tạo todo app"
+ * became a multi-tenant SaaS plan. The system prompt already asks the planner to
+ * include such a stance, but we still post-check in case the planner ignored it.
+ */
+const PRODUCT_VOICE_PATTERNS = /(product\s*owner|user\s*advocate|customer|mvp\s*skeptic|user\s*proxy)/i;
+const PRODUCT_LENS_PATTERNS = /(user\s+need|scope|v1|over[-\s]?build|day\s*1|would.*pay|ship.*tomorrow)/i;
+
+function hasProductStance(stances: readonly DebateStance[]): boolean {
+  return stances.some((s) => PRODUCT_VOICE_PATTERNS.test(s.name) || PRODUCT_LENS_PATTERNS.test(s.lens));
+}
+
+function ensureProductStance(plan: DebatePlan): DebatePlan {
+  if (plan.outputShape.kind !== "implementation_plan") return plan;
+  if (hasProductStance(plan.stances)) return plan;
+  const productStance: DebateStance = {
+    name: "Product Owner",
+    lens:
+      "What does the user actually need on day 1, and what are we over-building? " +
+      "Challenge every actionItem that doesn't directly serve the user's stated prompt; " +
+      "push enterprise/multi-tenant/scalability work to v2 unless the prompt explicitly requires it.",
+    focus: "scope discipline & MVP cut-line",
+  };
+  return { ...plan, stances: [...plan.stances, productStance] };
+}
+
 /** Helper: inject Experience Auditor stance into a plan, depending on mode. */
 function injectAuditorStance(
   plan: DebatePlan,
@@ -147,7 +175,7 @@ export async function* planDebate(
         outputShape,
         plannedRounds,
       };
-      return injectAuditorStance(plan, eeWarnings, experienceMode);
+      return ensureProductStance(injectAuditorStance(plan, eeWarnings, experienceMode));
     }
     // Invalid even with schema — fall through to retry with a sanitize-failure message
     throw new Error("Sanitize check failed: stances.length < 2 or outputShape is null");
@@ -169,7 +197,7 @@ export async function* planDebate(
         maxTokens: 1500,
       });
       const retryParsed = parsePlan(retryRaw);
-      if (retryParsed) return injectAuditorStance(retryParsed, eeWarnings, experienceMode);
+      if (retryParsed) return ensureProductStance(injectAuditorStance(retryParsed, eeWarnings, experienceMode));
     } catch (retryErr) {
       yield {
         type: "content",
@@ -179,7 +207,7 @@ export async function* planDebate(
   }
 
   // All attempts exhausted — return fallback
-  return injectAuditorStance(FALLBACK_PLAN, eeWarnings, experienceMode);
+  return ensureProductStance(injectAuditorStance(FALLBACK_PLAN, eeWarnings, experienceMode));
 }
 
 function parsePlan(raw: string): DebatePlan | null {

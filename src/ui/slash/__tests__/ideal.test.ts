@@ -131,4 +131,52 @@ describe("/ideal slash handler dispatch", () => {
     expect(out).toContain("clamped");
     expect(out).toContain("__PRODUCT_LOOP__");
   });
+
+  // Mode C — explicit flag wiring (see .planning/MAINTAIN-MODE.md)
+  describe("Mode C flags", () => {
+    it("--maintain sets flags.mode=maintain", () => {
+      const r = parseIdealArgs(["--maintain", "fix login bug"]);
+      expect(r.subcommand).toBe("start");
+      expect(r.flags.mode).toBe("maintain");
+      expect(r.flags.ghPr).toBeUndefined();
+    });
+
+    it("--new sets flags.mode=new", () => {
+      const r = parseIdealArgs(["--new", "scaffold microservice"]);
+      expect(r.subcommand).toBe("start");
+      expect(r.flags.mode).toBe("new");
+    });
+
+    it("--maintain + --gh-pr sets both flags", () => {
+      const r = parseIdealArgs(["--maintain", "--gh-pr", "fix bug"]);
+      expect(r.flags.mode).toBe("maintain");
+      expect(r.flags.ghPr).toBe(true);
+    });
+
+    it("--gh-pr without --maintain emits warning + drops ghPr semantics", () => {
+      const r = parseIdealArgs(["--gh-pr", "build dashboard"]);
+      expect(r.flags.mode).toBeUndefined();
+      expect(r.flags.ghPr).toBe(true); // parsed, but warning surfaced
+      expect(r.warnings.join(" ")).toMatch(/--gh-pr.*Mode C only/);
+    });
+
+    it("--maintain + --new are mutually exclusive — maintain wins with a warning", () => {
+      const r = parseIdealArgs(["--maintain", "--new", "anything"]);
+      expect(r.flags.mode).toBe("maintain");
+      expect(r.warnings.join(" ")).toMatch(/--maintain and --new are mutually exclusive/);
+    });
+
+    it("no Mode C flags = mode undefined (auto-detect path)", () => {
+      const r = parseIdealArgs(["build app"]);
+      expect(r.flags.mode).toBeUndefined();
+      expect(r.flags.ghPr).toBeUndefined();
+    });
+
+    it("help text mentions --maintain / --new / --gh-pr", () => {
+      const text = getIdealHelpText();
+      expect(text).toContain("--maintain");
+      expect(text).toContain("--new");
+      expect(text).toContain("--gh-pr");
+    });
+  });
 });

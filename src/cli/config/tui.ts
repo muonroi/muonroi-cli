@@ -53,7 +53,7 @@ export function captureKey(): Promise<KeyEvent> {
         if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
           process.stdin.setRawMode(false);
         }
-        process.stdout.write(A.SHOW_CURSOR + "\n");
+        process.stdout.write(`${A.SHOW_CURSOR}\n`);
         process.exit(130);
       }
 

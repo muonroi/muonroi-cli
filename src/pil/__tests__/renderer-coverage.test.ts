@@ -26,7 +26,7 @@ describe("StructuredResponseView renderer coverage", () => {
     // structured-response-view.tsx — scan both files.
     const appSrc = readFileSync(resolve("src/ui/app.tsx"), "utf8");
     const rendererSrc = readFileSync(resolve("src/ui/components/structured-response-view.tsx"), "utf8");
-    const combinedSrc = appSrc + "\n" + rendererSrc;
+    const combinedSrc = `${appSrc}\n${rendererSrc}`;
 
     const switchOffsets: number[] = [];
     let idx = 0;

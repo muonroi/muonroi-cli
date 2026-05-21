@@ -441,3 +441,129 @@ export interface RunPhasesOptions {
   suppressPush?: boolean;
   backoffDelays?: number[];
 }
+
+// ── P6: Backlog types ────────────────────────────────────────────────────────
+
+export type BacklogItemStatus = "backlog" | "in_sprint" | "in_progress" | "done" | "blocked";
+export type MvpPriority = "v1" | "v2" | "later";
+export type EffortPoints = 1 | 3 | 5;
+
+export interface BacklogItemEntity {
+  name: string;
+  /** CSV: "id:uuid, title:string" */
+  fields: string;
+  relationships?: string;
+}
+
+export interface BacklogItemEndpoint {
+  method: string;
+  path: string;
+  request_body?: string;
+  response_body?: string;
+  auth_required: boolean;
+}
+
+export interface BacklogItem {
+  id: string;
+  title: string;
+  description: string;
+  acceptance_criteria: string[];
+  entities: BacklogItemEntity[];
+  endpoints: BacklogItemEndpoint[];
+  mvp_priority: MvpPriority;
+  deferral_reason?: string;
+  status: BacklogItemStatus;
+  assigned_sprint?: string;
+  blockers?: string[];
+  effortPoints: EffortPoints;
+  createdAtUtc: string;
+  updatedAtUtc: string;
+}
+
+export interface Backlog {
+  runId: string;
+  productSlug: string;
+  items: BacklogItem[];
+  /** SHA-256 (first 16 hex chars) of the ClarifiedSpec used to derive this backlog. */
+  derivedFromClarifyId: string;
+  createdAtUtc: string;
+}
+
+// ── P7: Sprint management types ─────────────────────────────────────────────
+
+export type SprintStatus = "planned" | "active" | "done" | "abandoned";
+
+export interface Sprint {
+  id: string; // "sprint-1", "sprint-2", ...
+  number: number; // 1, 2, 3
+  goal: string; // 1-line — what this sprint delivers
+  itemIds: string[]; // BacklogItem.id refs
+  status: SprintStatus;
+  startedAtUtc?: string;
+  endedAtUtc?: string;
+}
+
+export interface SprintPlan {
+  runId: string;
+  sprints: Sprint[];
+  activeSprintId?: string;
+  createdAtUtc: string;
+}
+
+export interface ProgressSnapshotItem {
+  id: string;
+  title: string;
+  status: BacklogItemStatus;
+  criteriaMet: number;
+  criteriaTotal: number;
+}
+
+export interface ProgressSnapshotBlocker {
+  itemId: string;
+  title: string;
+  reason: string;
+}
+
+export interface ProgressSnapshot {
+  runId: string;
+  productSlug: string;
+  capturedAtUtc: string;
+  // Clarify
+  clarifyReady: boolean;
+  clarifyGaps: string[];
+  // Backlog
+  backlogTotal: number;
+  backlogV1Count: number;
+  backlogDeferredCount: number;
+  // Sprint
+  sprintTotal: number;
+  activeSprintNumber: number | null;
+  activeSprintGoal: string | null;
+  activeSprintPercentDone: number; // 0-100, rounded to 1 decimal
+  activeSprintItems: ProgressSnapshotItem[];
+  blockers: ProgressSnapshotBlocker[];
+  // Worker liveness
+  workerLastEventUtc: string | null;
+  workerCurrentStage: string | null; // e.g. "Sprint 1 — Planning"
+}
+
+/**
+ * Minimal shape of the implementation_plan artifact produced by council synthesis.
+ * Mirrors the actual sections emitted by the Phase 1 debate under outputShape.kind === "implementation_plan".
+ */
+export interface ImplementationPlanArtifact {
+  entities?: Array<{ name: string; fields?: string; relationships?: string }>;
+  endpoints?: Array<{
+    method: string;
+    path: string;
+    request_body?: string;
+    response_body?: string;
+    auth_required?: boolean;
+  }>;
+  acceptance_criteria?: string[];
+  mvp_definition?: Array<{
+    feature: string;
+    included_in_v1: "yes" | "no";
+    reason?: string;
+  }>;
+}

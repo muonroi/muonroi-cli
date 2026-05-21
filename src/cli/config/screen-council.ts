@@ -14,7 +14,7 @@ import {
 import { openModelPicker } from "./model-picker.js";
 import { A, captureKey, divider, enterRawMode } from "./tui.js";
 
-const ROLES: ModelRole[] = ["leader", "implement", "verify", "research"];
+const _ROLES: ModelRole[] = ["leader", "implement", "verify", "research"];
 const EXP_MODES: CouncilExperienceMode[] = ["off", "advisory", "enforcing"];
 
 type RowKind =

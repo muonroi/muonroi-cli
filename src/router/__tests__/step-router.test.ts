@@ -32,7 +32,7 @@ describe("decideStepRouting", () => {
 
   it("returns phase2ModelId=null when phase 1 model is already fast tier", () => {
     const fastModel = MODELS.find((m) => m.tier === "fast" && m.provider);
-    if (!fastModel || !fastModel.provider) return;
+    if (!fastModel?.provider) return;
 
     const decision = decideStepRouting(fastModel.id, fastModel.provider, mockConfig({ toolExecutionTier: "fast" }));
     expect(decision.phase1ModelId).toBe(fastModel.id);
@@ -40,7 +40,7 @@ describe("decideStepRouting", () => {
 
   it("returns a fast execution model for premium phase 1", () => {
     const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
-    if (!premiumModel || !premiumModel.provider) return;
+    if (!premiumModel?.provider) return;
 
     const decision = decideStepRouting(premiumModel.id, premiumModel.provider, mockConfig());
 
@@ -52,7 +52,7 @@ describe("decideStepRouting", () => {
 
   it("respects toolExecutionTier setting", () => {
     const premiumModel = MODELS.find((m) => m.tier === "premium" && m.provider);
-    if (!premiumModel || !premiumModel.provider) return;
+    if (!premiumModel?.provider) return;
 
     const balancedCfg = mockConfig({ toolExecutionTier: "balanced" });
     const decision = decideStepRouting(premiumModel.id, premiumModel.provider, balancedCfg);

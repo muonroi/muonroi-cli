@@ -87,7 +87,6 @@ export function buildDirective(input: DirectiveInput): DirectiveOutput {
       return { text: buildHeavy(input), tier: "heavy", blocking: true };
     case "standard":
       return { text: buildStandard(input), tier: "standard", blocking: false };
-    case "quick":
     default:
       return { text: buildQuick(input), tier: "quick", blocking: false };
   }

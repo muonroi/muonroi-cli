@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";

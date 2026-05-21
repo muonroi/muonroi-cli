@@ -1,4 +1,3 @@
-import React from "react";
 import type { Theme } from "../theme.js";
 import { computeBubbleLayout } from "./bubble-layout.js";
 

@@ -336,7 +336,7 @@ describe("GeminiOAuthProvider.authHeaders", () => {
     });
 
     // Authorization should carry the access token as a bearer scheme
-    const authValue = headers["Authorization"] ?? "";
+    const authValue = headers.Authorization ?? "";
     expect(authValue.startsWith("Bearer ")).toBe(true);
     expect(authValue.endsWith(tok)).toBe(true);
     // Confirm no extra keys (Google OAuth needs only Authorization, no account header)

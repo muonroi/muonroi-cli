@@ -104,7 +104,7 @@ describe("withVisibleRetry", () => {
     const fn = vi.fn().mockRejectedValueOnce(error).mockRejectedValueOnce(error).mockResolvedValueOnce("success");
 
     const delays: number[] = [];
-    const onRetry = (attempt: number, _total: number, delayMs: number) => {
+    const onRetry = (_attempt: number, _total: number, delayMs: number) => {
       delays.push(delayMs);
     };
 

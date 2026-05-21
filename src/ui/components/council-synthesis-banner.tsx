@@ -1,4 +1,3 @@
-import React from "react";
 import type { CouncilMessage } from "../../types/index.js";
 import { dark } from "../theme.js";
 import { truncateCodeBlocks } from "./code-block-truncate.js";

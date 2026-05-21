@@ -10,6 +10,95 @@ export interface RecommendInput {
   context: Partial<DiscoveryContext>;
   detection: ExistingProjectSignals;
   priorRunsDigest?: string;
+  /**
+   * User's original prompt verbatim (e.g. "tôi muốn tạo todo app"). Threaded
+   * through so the leader can size defaults against the user's stated scope —
+   * a 5-word prompt should NOT yield "saas/SMB 100-1k" defaults. See
+   * computePromptSpecificity() for the scoring rule. Optional for back-compat
+   * with callers that don't have the original prompt at hand.
+   */
+  userIdea?: string;
+}
+
+/**
+ * Prompt-specificity buckets used to drive default scope sizing.
+ * - "minimal":  Short prompt with no qualifiers (e.g. "tạo todo app", "build a wiki").
+ *               Leader MUST pick the smallest-scope primary (personal, single-user,
+ *               simplest stack) so 5-word prompts don't get multi-tenant SaaS plans.
+ * - "moderate": Some specifics provided (1-2 of: team/scale/platform/timeline).
+ *               Leader picks pragmatic defaults; alternatives include richer scope.
+ * - "detailed": Multiple specifics or > ~40 words. Leader respects stated context.
+ */
+export type PromptSpecificity = "minimal" | "moderate" | "detailed";
+
+const QUALIFIER_KEYWORDS = [
+  // Scale / multi-user signals
+  "team",
+  "teams",
+  "org",
+  "organization",
+  "tenant",
+  "tenants",
+  "multi-tenant",
+  "multitenant",
+  "saas",
+  "enterprise",
+  "b2b",
+  "marketplace",
+  "users",
+  "scale",
+  "100k",
+  "million",
+  // Stack specifics
+  "react",
+  "vue",
+  "angular",
+  "next",
+  "nuxt",
+  "rails",
+  "django",
+  "spring",
+  "dotnet",
+  ".net",
+  "postgres",
+  "mysql",
+  "mongodb",
+  "redis",
+  // Domain specifics
+  "auth",
+  "oauth",
+  "sso",
+  "payment",
+  "stripe",
+  "billing",
+  "subscription",
+  "realtime",
+  "websocket",
+];
+
+function countQualifiers(prompt: string): number {
+  const lower = prompt.toLowerCase();
+  let hits = 0;
+  for (const kw of QUALIFIER_KEYWORDS) {
+    if (lower.includes(kw)) hits++;
+  }
+  return hits;
+}
+
+export function computePromptSpecificity(userIdea: string | undefined): PromptSpecificity {
+  if (!userIdea) return "minimal";
+  const trimmed = userIdea.trim();
+  if (trimmed.length === 0) return "minimal";
+  const words = trimmed.split(/\s+/).filter((w) => w.length > 0);
+  const wordCount = words.length;
+  const qualifiers = countQualifiers(trimmed);
+
+  // Detailed: >40 words OR >=3 qualifiers
+  if (wordCount > 40 || qualifiers >= 3) return "detailed";
+  // Moderate: 10-40 words with some context, OR 1-2 qualifiers
+  if (wordCount > 10 || qualifiers >= 1) return "moderate";
+  // Minimal: <=10 words and no qualifiers (e.g. "tạo todo app", "build a wiki")
+  return "minimal";
 }
 
 export interface RecommendOutput {
@@ -25,7 +114,16 @@ export interface RecommendOutput {
 const LEADER_SYSTEM =
   "You are a product context recommender. Output ONE JSON object with shape: " +
   '{"primary":{"value":<any>,"rationale":"<short>"},"alternatives":[{"value":<any>,"rationale":"<short>"}]} ' +
-  "with up to 2 alternatives. No prose, no fences.";
+  "with up to 2 alternatives. No prose, no fences.\n\n" +
+  "## Scope-sizing discipline\n" +
+  "You will be told the user's original prompt and its specificity bucket (minimal/moderate/detailed).\n" +
+  '- When specificity is "minimal" (e.g. user typed "build a todo app" or "tạo wiki"), pick the SMALLEST-SCOPE primary that still works: ' +
+  'productType="other" or "consumer-app" (NOT "saas"), audience scale="1-100" (NOT "100-1k" or above), ' +
+  "single-user / no auth / web-only / simplest stack. Put richer multi-tenant/team-scale alternatives in `alternatives`, NOT primary. " +
+  "Rationale: short prompts mean the user has NOT asked for enterprise complexity. Inflating scope here cascades into wasted debate and over-built code.\n" +
+  '- When specificity is "moderate", pick pragmatic defaults grounded in any stated context; surface ONE richer alternative.\n' +
+  '- When specificity is "detailed", respect the stated context fully; alternatives explore adjacent design choices.\n' +
+  "This rule applies to EVERY question (productType, audience, backendStack, etc.). The user accepts defaults by reflex — wrong defaults become locked-in spec.";
 
 function stripFences(s: string): string {
   return s
@@ -57,12 +155,12 @@ interface LeaderTimingPayload {
 
 function emitLeaderDebug(payload: LeaderDebugPayload): void {
   if (process.env.MUONROI_DEBUG_LEADER !== "1") return;
-  process.stderr.write("[leader-debug] " + JSON.stringify(payload) + "\n");
+  process.stderr.write(`[leader-debug] ${JSON.stringify(payload)}\n`);
 }
 
 function emitLeaderTiming(payload: LeaderTimingPayload): void {
   if (process.env.MUONROI_DEBUG_LEADER !== "1") return;
-  process.stderr.write("[leader-timing] " + JSON.stringify(payload) + "\n");
+  process.stderr.write(`[leader-timing] ${JSON.stringify(payload)}\n`);
 }
 
 /**
@@ -156,11 +254,14 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
 
 function buildLeaderPrompt(input: RecommendInput): string {
   const constraint = getSchemaHintForLeader(input.question.id);
+  const specificity = computePromptSpecificity(input.userIdea);
   const parts: string[] = [];
   if (isEcosystemBiasEnabled()) {
     parts.push(buildEcosystemPreamble(), "");
   }
   parts.push(
+    input.userIdea ? `User's original prompt: ${JSON.stringify(input.userIdea)}` : "",
+    `Prompt specificity: ${specificity}`,
     `Question: ${input.question.prompt}`,
     `Field id: ${input.question.id}`,
     constraint ? `Constraint: ${constraint}` : "",

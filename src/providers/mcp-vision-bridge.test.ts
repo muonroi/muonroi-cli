@@ -49,7 +49,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("proxies screenshot results for text-only models", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -69,7 +69,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("intercepts ANY MCP tool with image data, not just Playwright", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -84,7 +84,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("intercepts non-MCP tools with image data", async () => {
-    const fakeBase64 = "/9j/" + "A".repeat(600);
+    const fakeBase64 = `/9j/${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -127,7 +127,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("falls back gracefully when vision API fails — but still strips base64", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValue({ ok: false, status: 500 });
 
     const result = await bridgeMcpToolResult(
@@ -145,7 +145,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("strips base64 data from output when proxied", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -165,7 +165,7 @@ describe("bridgeMcpToolResult", () => {
   });
 
   it("caches images for follow-up queries", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -192,7 +192,7 @@ describe("design context structured output", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("requests json_object response_format for figma/design tools", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -207,7 +207,7 @@ describe("design context structured output", () => {
   });
 
   it("does NOT set response_format for non-design contexts", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "A".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({ choices: [{ message: { content: "ok" } }] }),
@@ -249,7 +249,7 @@ describe("askVisionProxy", () => {
 
   it("answers follow-up questions about cached images", async () => {
     // Cache an image first
-    const fakeBase64 = "/9j/" + "B".repeat(600);
+    const fakeBase64 = `/9j/${"B".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -296,7 +296,7 @@ describe("analyzeImageFromSource", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("analyzes inline base64 images", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "C".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"C".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -328,7 +328,7 @@ describe("analyzeImageFromSource", () => {
   });
 
   it("focuses analysis with a question", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "D".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"D".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -377,7 +377,7 @@ describe("scrubImagePayloadsInMessages — vision description injection", () => 
   beforeEach(() => vi.clearAllMocks());
 
   it("injects bridged vision description into AI-SDK tool-result content", async () => {
-    const fakeBase64 = "iVBORw0KGgo" + "Z".repeat(600);
+    const fakeBase64 = `iVBORw0KGgo${"Z".repeat(600)}`;
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({

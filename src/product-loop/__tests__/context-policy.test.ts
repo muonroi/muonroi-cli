@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildSprintContext, CONTEXT_CAPS, digestSprintIntoPhase, handoffPhaseToNext } from "../context-policy.js";
 
-const fakeProject = "## Project (permanent)\n" + "x".repeat(200);
+const fakeProject = `## Project (permanent)\n${"x".repeat(200)}`;
 
 describe("buildSprintContext (subsystem E)", () => {
   it("renders all blocks in order under cap", () => {
@@ -78,7 +78,7 @@ describe("buildSprintContext (subsystem E)", () => {
   });
 
   it("project alone over cap → oversize marker", () => {
-    const huge = "## Project\n" + "x".repeat(9000);
+    const huge = `## Project\n${"x".repeat(9000)}`;
     const out = buildSprintContext({
       projectContextFormatted: huge,
       customerDecisions: [],
@@ -101,7 +101,7 @@ describe("buildSprintContext (subsystem E)", () => {
   });
 
   it("project + customer decisions together over cap → both intact + oversize marker", () => {
-    const proj = "## Project\n" + "x".repeat(5000);
+    const proj = `## Project\n${"x".repeat(5000)}`;
     const decisions = Array.from({ length: 50 }, (_, i) => ({
       seq: i + 1,
       timestampUtc: "2026-05-13T00:00:00Z",

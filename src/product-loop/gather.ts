@@ -52,9 +52,7 @@ function buildLiveTuiAsk(
     const _dbg = process.env.MUONROI_DEBUG_LEADER === "1";
     if (!options || options.length === 0) {
       if (_dbg) {
-        process.stderr.write(
-          `[tuiask] info-emit: ${JSON.stringify({ labelPreview: label.slice(0, 80) })}\n`,
-        );
+        process.stderr.write(`[tuiask] info-emit: ${JSON.stringify({ labelPreview: label.slice(0, 80) })}\n`);
       }
       emit({ type: "content", content: `\n> ${label}\n` } as StreamChunk);
       return "";
@@ -177,7 +175,7 @@ export async function runGatherPhase(
           leaderModelId +
           " sessionModelId=" +
           sessionModelId +
-          (leaderResolution.promotedFrom ? " promotedFrom=" + leaderResolution.promotedFrom.modelId : "") +
+          (leaderResolution.promotedFrom ? ` promotedFrom=${leaderResolution.promotedFrom.modelId}` : "") +
           (leaderResolution.defaulted ? " defaulted=true" : "") +
           "\n",
       );

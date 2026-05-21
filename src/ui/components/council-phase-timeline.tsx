@@ -28,7 +28,24 @@ function formatElapsed(ms?: number): string {
   return `${m}m${s.toString().padStart(2, "0")}s`;
 }
 
+/**
+ * P4-D: heartbeat hook — re-renders consumers every `tickMs` so any phase whose
+ * state is "active" and has a `startedAt` displays a live-ticking elapsed
+ * counter. Without this, the timeline freezes at the last `elapsedMs` value
+ * the emitter sent (only on state transitions) — which is exactly the "im lìm"
+ * symptom the user reported.
+ */
+function useHeartbeat(tickMs = 1000): number {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => force((n) => n + 1), tickMs);
+    return () => clearInterval(id);
+  }, [tickMs]);
+  return Date.now();
+}
+
 export function CouncilPhaseTimeline({ phases, theme: t }: CouncilPhaseTimelineProps) {
+  const now = useHeartbeat(1000);
   if (phases.length === 0) return null;
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
@@ -38,7 +55,11 @@ export function CouncilPhaseTimeline({ phases, theme: t }: CouncilPhaseTimelineP
         const marker = isError ? "✗" : isDone ? "✓" : <Spinner />;
         const markerColor = isError ? t.diffRemovedFg : isDone ? t.planOptionCheck : t.accent;
         const labelColor = isError ? t.diffRemovedFg : isDone ? t.textMuted : t.text;
-        const elapsed = formatElapsed(p.elapsedMs);
+        // For active phases with a startedAt, derive elapsed from wall-clock
+        // so the displayed time keeps counting up between emitter updates.
+        const liveElapsedMs =
+          p.state === "active" && typeof p.startedAt === "number" ? Math.max(0, now - p.startedAt) : p.elapsedMs;
+        const elapsed = formatElapsed(liveElapsedMs);
         const meta = elapsed ? ` (${elapsed})` : isDone ? "" : " …";
         return (
           <box key={p.phaseId} flexDirection="column">

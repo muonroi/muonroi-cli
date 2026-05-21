@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 
 function bigText(label: string, kb: number): string {
-  const block = `${label}:` + "x".repeat(kb * 1000);
+  const block = `${label}:${"x".repeat(kb * 1000)}`;
   return block;
 }
 

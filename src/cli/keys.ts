@@ -19,13 +19,7 @@ import { spawnSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  type ChatSecretId,
-  deleteChatSecret,
-  getChatSecret,
-  listChatSecrets,
-  setChatSecret,
-} from "../chat/chat-keychain.js";
+import { type ChatSecretId, getChatSecret, listChatSecrets, setChatSecret } from "../chat/chat-keychain.js";
 import { type McpKeyId, setMcpKey } from "../mcp/mcp-keychain.js";
 import {
   deleteKeyForProvider,

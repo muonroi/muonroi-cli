@@ -9,7 +9,6 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type CostLogEntry, readCostLog } from "../usage/cost-log.js";
-import { projectCostUSD } from "../usage/estimator.js";
 import { readProductLedger } from "../usage/product-ledger.js";
 
 type GroupBy = "callsite" | "role" | "phase" | "model" | "provider";

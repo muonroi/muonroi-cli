@@ -38,7 +38,7 @@ const GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userin
  * Source: https://github.com/google-gemini/gemini-cli packages/core/src/code_assist/oauth2.ts
  */
 const GEMINI_CLIENT_ID =
-  process.env["MUONROI_GOOGLE_CLIENT_ID"] ?? "681255809395-oo8fr2k1dtg2iit6co82gjpglm9et5lp.apps.googleusercontent.com";
+  process.env.MUONROI_GOOGLE_CLIENT_ID ?? "681255809395-oo8fr2k1dtg2iit6co82gjpglm9et5lp.apps.googleusercontent.com";
 
 /**
  * Public client credential from the gemini-cli OSS repository (MIT license).
@@ -47,7 +47,7 @@ const GEMINI_CLIENT_ID =
  * Override via MUONROI_GOOGLE_CLIENT_SECRET environment variable.
  */
 const GEMINI_CLIENT_SECRET =
-  process.env["MUONROI_GOOGLE_CLIENT_SECRET"] ??
+  process.env.MUONROI_GOOGLE_CLIENT_SECRET ??
   // biome-ignore lint/style/noRestrictedGlobals: public RFC 8252 credential from MIT OSS (gemini-cli)
   Buffer.from("R09DU1BYLUk4bGZMZERSdVpzck5PSDlxbExHVlNickJC", "base64").toString();
 

@@ -8,13 +8,8 @@
 
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { buildAuthorizeUrl, exchangeBrowserCode, generatePKCE, refreshBrowserTokens } from "../browser-flow.js";
 import type { FetchFn } from "../device-flow.js";
-import {
-  buildAuthorizeUrl,
-  exchangeBrowserCode,
-  generatePKCE,
-  refreshBrowserTokens,
-} from "../browser-flow.js";
 
 // ---------------------------------------------------------------------------
 // Mock fetch factory

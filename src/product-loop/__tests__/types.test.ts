@@ -19,12 +19,12 @@ describe("product-loop types", () => {
   });
 
   it("should have correct RoleSlot values", () => {
-    const roles: RoleSlot[] = ["PO", "Architect", "Implementer", "Tester", "Reviewer", "Customer"];
+    const _roles: RoleSlot[] = ["PO", "Architect", "Implementer", "Tester", "Reviewer", "Customer"];
     expectTypeOf<RoleSlot>().toMatchTypeOf<"PO" | "Architect" | "Implementer" | "Tester" | "Reviewer" | "Customer">();
   });
 
   it("should have correct DoneCondition values", () => {
-    const conditions: DoneCondition[] = [
+    const _conditions: DoneCondition[] = [
       "engineering_floor",
       "evidence_regex",
       "weighted_score",
@@ -43,7 +43,7 @@ describe("product-loop types", () => {
   });
 
   it("should have correct ProductSpec shape", () => {
-    const spec: ProductSpec = {
+    const _spec: ProductSpec = {
       idea: "test",
       persona: "test",
       mvp: ["feat1"],
@@ -58,7 +58,7 @@ describe("product-loop types", () => {
   });
 
   it("should have correct IterationState shape", () => {
-    const state: IterationState = {
+    const _state: IterationState = {
       sprintN: 1,
       stage: "judge",
       scoreBefore: 0.1,
@@ -72,14 +72,14 @@ describe("product-loop types", () => {
   });
 
   it("should have correct DoneVerdict shape", () => {
-    const verdict: DoneVerdict = {
+    const _verdict: DoneVerdict = {
       pass: true,
       score: 0.95,
     };
   });
 
   it("should have correct ProductRunManifest shape", () => {
-    const manifest: ProductRunManifest = {
+    const _manifest: ProductRunManifest = {
       idea: "test",
       capUsd: 50,
       maxSprints: 8,
@@ -89,7 +89,7 @@ describe("product-loop types", () => {
   });
 
   it("should have correct ProductStatusCardData shape", () => {
-    const data: ProductStatusCardData = {
+    const _data: ProductStatusCardData = {
       sprintN: 1,
       totalSprints: 8,
       costSpent: 5,

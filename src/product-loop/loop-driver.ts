@@ -133,7 +133,7 @@ function buildGatherCompleteCard(fieldCount: number, unresolvedCount: number): C
 
 function buildResearchSummaryCard(summaryText: string, findings?: string): CouncilInfoCard {
   const sections: CouncilInfoCard["sections"] = [{ heading: "Summary", body: summaryText }];
-  if (findings && findings.trim()) {
+  if (findings?.trim()) {
     sections.push({ heading: "Findings", body: findings.trim() });
   }
   return { title: "Research Summary", sections };
@@ -259,7 +259,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           marker: phaseMarker_discover,
         });
         if (discoverWarn) {
-          yield { type: "content", content: "\n> [budget] " + discoverWarn + "\n" } as StreamChunk;
+          yield { type: "content", content: `\n> [budget] ${discoverWarn}\n` } as StreamChunk;
         }
 
         // Emit an initial product_status_card so the UI shows the status panel
@@ -412,7 +412,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             marker: phaseMarker_gather,
           });
           if (gatherWarn) {
-            yield { type: "content", content: "\n> [budget] " + gatherWarn + "\n" } as StreamChunk;
+            yield { type: "content", content: `\n> [budget] ${gatherWarn}\n` } as StreamChunk;
           }
 
           state = "research";
@@ -457,7 +457,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         // inside research phase, before building councilTopic:
         const projectCtx = await readProjectContext(ctx.flowDir, ctx.runId);
         if (projectCtx) {
-          conversationContext += "\n\nProject Context:\n" + formatProjectContextForPrompt(projectCtx);
+          conversationContext += `\n\nProject Context:\n${formatProjectContextForPrompt(projectCtx)}`;
         }
 
         // Build stances. When ecosystem bias is enabled (default), augment the
@@ -646,8 +646,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
         }
 
         const summaryText =
-          (debateState?.runningSummary && debateState.runningSummary.trim()) ||
-          "(debate produced no summary — using empty research findings)";
+          debateState?.runningSummary?.trim() || "(debate produced no summary — using empty research findings)";
         yield {
           type: "council_info_card",
           councilInfoCard: buildResearchSummaryCard(summaryText, debateState?.researchFindings),
@@ -698,7 +697,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
           marker: phaseMarker_research,
         });
         if (researchWarn) {
-          yield { type: "content", content: "\n> [budget] " + researchWarn + "\n" } as StreamChunk;
+          yield { type: "content", content: `\n> [budget] ${researchWarn}\n` } as StreamChunk;
         }
 
         state = "scoping";
@@ -868,7 +867,7 @@ interface ProductSpec {
           marker: phaseMarker_scoping,
         });
         if (scopingWarn) {
-          yield { type: "content", content: "\n> [budget] " + scopingWarn + "\n" } as StreamChunk;
+          yield { type: "content", content: `\n> [budget] ${scopingWarn}\n` } as StreamChunk;
         }
 
         if (approved) {

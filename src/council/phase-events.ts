@@ -13,6 +13,11 @@ export function phaseStart(opts: {
   kind: CouncilPhaseKind;
   label: string;
   detail?: string;
+  /**
+   * Override for the start timestamp. Defaults to Date.now(). Tests pass an
+   * explicit value to keep the chunk deterministic; production callers omit.
+   */
+  startedAt?: number;
 }): StreamChunk {
   return phaseChunk({
     phaseId: opts.phaseId,
@@ -20,6 +25,7 @@ export function phaseStart(opts: {
     state: "active",
     label: opts.label,
     detail: opts.detail,
+    startedAt: opts.startedAt ?? Date.now(),
   });
 }
 

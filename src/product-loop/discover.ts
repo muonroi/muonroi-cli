@@ -111,13 +111,13 @@ async function fillFromPackageJson(content: string, probe: ManifestProbe, out: D
 function detectNodeFrameworks(pkg: any): string[] {
   const out: string[] = [];
   const deps: Record<string, string> = { ...(pkg?.dependencies ?? {}), ...(pkg?.devDependencies ?? {}) };
-  if (deps["react"] || deps["next"]) out.push("React/Next.js");
-  if (deps["vue"] || deps["nuxt"]) out.push("Vue/Nuxt");
+  if (deps.react || deps.next) out.push("React/Next.js");
+  if (deps.vue || deps.nuxt) out.push("Vue/Nuxt");
   if (deps["@angular/core"]) out.push("Angular");
-  if (deps["express"] || deps["fastify"] || deps["koa"]) out.push("Node.js HTTP");
-  if (deps["nestjs"] || deps["@nestjs/core"]) out.push("NestJS");
-  if (deps["vitest"]) out.push("Vitest");
-  else if (deps["jest"]) out.push("Jest");
+  if (deps.express || deps.fastify || deps.koa) out.push("Node.js HTTP");
+  if (deps.nestjs || deps["@nestjs/core"]) out.push("NestJS");
+  if (deps.vitest) out.push("Vitest");
+  else if (deps.jest) out.push("Jest");
   return out;
 }
 

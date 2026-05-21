@@ -69,7 +69,7 @@ const ARCHIVE_EXCERPT_CHARS = 400;
 function makeExcerpt(text: string): { excerpt: string; length: number } {
   const trimmed = text.trim();
   return {
-    excerpt: trimmed.length > ARCHIVE_EXCERPT_CHARS ? trimmed.slice(0, ARCHIVE_EXCERPT_CHARS) + "…" : trimmed,
+    excerpt: trimmed.length > ARCHIVE_EXCERPT_CHARS ? `${trimmed.slice(0, ARCHIVE_EXCERPT_CHARS)}…` : trimmed,
     length: trimmed.length,
   };
 }

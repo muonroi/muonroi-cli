@@ -74,7 +74,7 @@ describe("CQ-10: planDebate uses generateObject as first attempt", () => {
   it("retries once with schema error feedback when generateObject fails", async () => {
     const mockGenerateObject = vi.fn().mockRejectedValue(new Error("Schema validation failed: missing stances"));
 
-    const mockTracedGenerateLlm = {
+    const _mockTracedGenerateLlm = {
       generate: vi.fn().mockResolvedValue(""),
     };
 
@@ -223,7 +223,7 @@ describe("CQ-10: planDebate uses generateObject as first attempt", () => {
     }
 
     // The injected error feedback must not exceed 200 chars (T-15-07)
-    const errorInPrompt = capturedPrompt.slice(
+    const _errorInPrompt = capturedPrompt.slice(
       capturedPrompt.indexOf("Schema validation failed:") + "Schema validation failed: ".length,
     );
     // First token after "Schema validation failed: " must be at most 200 chars before next period/sentence

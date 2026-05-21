@@ -41,6 +41,14 @@ export interface IdealFlags {
   noPriorContext?: boolean;
   /** P2.7: --force-council always runs full council debate even for low-complexity ideas. */
   forceCouncil?: boolean;
+  /**
+   * Mode C — explicit override. `"maintain"` forces single-task PR flow even when cwd
+   * has no verify recipe. `"new"` forces Mode A (greenfield) even when cwd has a recipe.
+   * Undefined = auto-detect via verify recipe presence. See `.planning/MAINTAIN-MODE.md`.
+   */
+  mode?: "maintain" | "new";
+  /** Mode C only — opt-in: run `gh pr create` after PR is built. Default false. */
+  ghPr?: boolean;
 }
 
 export type IdealSubcommand = "start" | "status" | "resume" | "abort" | "ship" | "help";
@@ -76,6 +84,9 @@ const HELP_TEXT = [
   "  --stack          <hint>  free-form stack description",
   "  --no-prior-context       skip cross-run workspace memory (greenfield)",
   "  --force-council          always run full council debate even for low-complexity ideas",
+  "  --maintain               force Mode C (existing project → single PR) regardless of recipe detection",
+  "  --new                    force Mode A (greenfield) even if cwd has a verify recipe",
+  "  --gh-pr                  Mode C only — run `gh pr create` after building the PR artifact",
 ].join("\n");
 
 function parseIntInRange(min: number, max: number) {
@@ -88,7 +99,7 @@ function parseIntInRange(min: number, max: number) {
   };
 }
 
-function parseFloatInRange(min: number, max: number) {
+function _parseFloatInRange(min: number, max: number) {
   return (raw: string): number => {
     const n = Number.parseFloat(raw);
     if (!Number.isFinite(n) || n < min || n > max) {
@@ -164,6 +175,9 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .option("--stack <text>", "tech stack hint")
     .option("--no-prior-context", "skip cross-run workspace memory (greenfield start)")
     .option("--force-council", "always run full council debate even for low-complexity ideas")
+    .option("--maintain", "force Mode C (existing project → single PR)")
+    .option("--new", "force Mode A (greenfield) — overrides verify-recipe auto-detect")
+    .option("--gh-pr", "Mode C only — run gh pr create after building the PR artifact")
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
@@ -188,6 +202,9 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     /** Commander emits priorContext=false when user passes --no-prior-context. */
     priorContext?: boolean;
     forceCouncil?: boolean;
+    maintain?: boolean;
+    new?: boolean;
+    ghPr?: boolean;
   };
   const ideaParts = (parsed.args as string[]) ?? [];
   const idea = ideaParts
@@ -203,6 +220,21 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     };
   }
 
+  // --maintain and --new are mutually exclusive — surface as a warning + prefer --maintain.
+  let mode: "maintain" | "new" | undefined;
+  if (opts.maintain === true && opts.new === true) {
+    warnings.push("--maintain and --new are mutually exclusive; --maintain takes precedence");
+    mode = "maintain";
+  } else if (opts.maintain === true) {
+    mode = "maintain";
+  } else if (opts.new === true) {
+    mode = "new";
+  }
+  // --gh-pr only makes sense for Mode C — warn if used outside maintain.
+  if (opts.ghPr === true && mode !== "maintain") {
+    warnings.push("--gh-pr is Mode C only and is ignored without --maintain (or auto-detected recipe)");
+  }
+
   return {
     subcommand: "start",
     idea,
@@ -214,6 +246,8 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
       noCustomerDebate,
       noPriorContext: opts.priorContext === false ? true : undefined,
       forceCouncil: opts.forceCouncil === true ? true : undefined,
+      mode,
+      ghPr: opts.ghPr === true ? true : undefined,
     },
     warnings,
   };

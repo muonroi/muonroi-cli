@@ -26,7 +26,7 @@ function oauthAccount(provider: string): string {
  * Override for tests — set process.env.MUONROI_AUTH_DIR to point at a temp dir.
  */
 function fallbackDir(): string {
-  return process.env["MUONROI_AUTH_DIR"] ?? path.join(os.homedir(), ".muonroi-cli", "auth");
+  return process.env.MUONROI_AUTH_DIR ?? path.join(os.homedir(), ".muonroi-cli", "auth");
 }
 
 function fallbackPath(provider: string): string {

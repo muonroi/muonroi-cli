@@ -4,6 +4,7 @@ import type { ModelMessage, ToolSet } from "ai";
 import { extractSession } from "../ee/extract-session.js";
 import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
+import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
 import { executeEventHooks } from "../hooks/index";
@@ -107,7 +108,6 @@ import {
   buildToolBatchMessage,
   type ExecutedBatchTool,
   extractJsonObject,
-  getBatchFinishReason,
   getBatchUsage,
   hasUsage,
   parseToolArgumentsOrRaw,
@@ -622,6 +622,13 @@ export class Agent {
   }
 
   async cleanup(): Promise<void> {
+    // Slow-path sidecar — write transcript to disk SYNCHRONOUSLY before
+    // racing the async HTTP extract. Survives X-close + EE-offline.
+    try {
+      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-exit");
+    } catch {
+      /* fail-open */
+    }
     await Promise.allSettled([
       this.bash.cleanup(),
       shutdownWorkspaceLspManager(this.bash.getCwd()),
@@ -646,6 +653,11 @@ export class Agent {
 
   async clearHistory(): Promise<void> {
     // D-09: Extract messages accumulated since last clear BEFORE reset
+    try {
+      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-clear");
+    } catch {
+      /* fail-open */
+    }
     await extractSession(this.messages, this.bash.getCwd(), "cli-clear", this.getSessionId()).catch(() => {}); // D-05: redundant safety — extractSession already swallows
     this.startNewSession();
   }
@@ -1401,6 +1413,13 @@ export class Agent {
         .catch(() => {});
     }
 
+    // Emit pre-compact transcript snapshot so lessons survive the rewrite.
+    try {
+      emitTranscriptToDisk(this.messages, this.session?.id ?? null, "cli-compact");
+    } catch {
+      /* fail-open */
+    }
+
     const preCompactInput: PreCompactHookInput = {
       hook_event_name: "PreCompact",
       trigger,
@@ -1580,17 +1599,6 @@ export class Agent {
     this.councilManager.respondToPreflight(preflightId, approved);
   }
 
-  // Internal hooks used by orchestrator.agent.test.ts to exercise buffered
-  // question / preflight delivery through CouncilManager. They are reached
-  // through `as unknown as` casts in the test; keep them private but stable.
-  private _createQuestionResponder(): (questionId: string) => Promise<string> {
-    return this.councilManager.createQuestionResponder();
-  }
-
-  private _createPreflightResponder(): (preflightId: string) => Promise<boolean> {
-    return this.councilManager.createPreflightResponder();
-  }
-
   // ========================================================================
   // Council v2 — Clarify → Confirm → Debate → Plan → Execute
   // ========================================================================
@@ -1660,6 +1668,8 @@ export class Agent {
         noCustomerDebate?: boolean;
         noPriorContext?: boolean;
         forceCouncil?: boolean;
+        mode?: "maintain" | "new";
+        ghPr?: boolean;
       };
     },
     options?: {
@@ -1718,9 +1728,14 @@ export class Agent {
       respondToPreflight: this.councilManager.createPreflightResponder(),
       cwd: this.bash.getCwd(),
       processMessageFn,
+      // Mode C — wire verify-recipe detector so runProductLoop auto-detect can probe cwd.
+      detectVerifyRecipe: () => this.detectVerifyRecipe(),
       skipPriorContext: payload.flags.noPriorContext === true,
       complexity,
       sufficiencyMissing,
+      // Mode C explicit override + gh pr create opt-in (see .planning/MAINTAIN-MODE.md).
+      mode: payload.flags.mode,
+      ghPr: payload.flags.ghPr === true,
       // Chat session id — used as the FK key for interaction_logs telemetry.
       // The /ideal runId is NOT a sessions.id and would silently fail FK insert.
       sessionId: this.session?.id,

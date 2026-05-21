@@ -5,6 +5,7 @@ import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
+import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { BashTool } from "../tools/bash.js";
@@ -55,7 +56,7 @@ function writeDebugRecord(rec: DebugCallRecord): void {
   const path = getDebugLogPath();
   if (!path) return;
   try {
-    fs.appendFileSync(path, JSON.stringify(rec) + "\n", "utf-8");
+    fs.appendFileSync(path, `${JSON.stringify(rec)}\n`, "utf-8");
   } catch {
     // Logging must never break the council run.
   }
@@ -63,7 +64,7 @@ function writeDebugRecord(rec: DebugCallRecord): void {
 
 function head(s: unknown, n = 300): string {
   const str = typeof s === "string" ? s : s == null ? "" : String(s);
-  return str.length > n ? str.slice(0, n) + "…" : str;
+  return str.length > n ? `${str.slice(0, n)}…` : str;
 }
 
 // ── Tool trace helpers (CQ-22) ────────────────────────────────────────────────
@@ -72,7 +73,7 @@ const TRACE_ARG_LIMIT = 2048;
 
 function truncate(value: unknown): string {
   const s = typeof value === "string" ? value : (JSON.stringify(value) ?? "");
-  return s.length > TRACE_ARG_LIMIT ? s.slice(0, TRACE_ARG_LIMIT) + "…[truncated]" : s;
+  return s.length > TRACE_ARG_LIMIT ? `${s.slice(0, TRACE_ARG_LIMIT)}…[truncated]` : s;
 }
 
 function emitToolTrace(toolName: string, args: unknown, result: unknown, persistTrace?: ToolTraceEmitter): void {
@@ -111,7 +112,7 @@ function capToolResult(result: unknown): unknown {
     return {
       _truncated: true,
       _originalSize: serialized.length,
-      preview: serialized.slice(0, TOOL_RESULT_CAP_CHARS) + "…",
+      preview: `${serialized.slice(0, TOOL_RESULT_CAP_CHARS)}…`,
     };
   } catch {
     return result;
@@ -458,6 +459,12 @@ export function createCouncilLLM(
         }
       }
 
+      // RC#1: SiliconFlow/DeepSeek thinking-mode rejects multi-step tool flows
+      // when the SDK re-sends the assistant's `reasoning` content on step 2+.
+      // Mirror the orchestrator's prepareStep strip (see message-processor.ts
+      // ~line 1155) so debate() with tools doesn't fail HTTP 400 code 20015.
+      const debateCaps = getProviderCapabilities(providerId);
+
       const t0 = Date.now();
       const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
       try {
@@ -470,7 +477,15 @@ export function createCouncilLLM(
                   system,
                   prompt,
                   ...(verificationTools && Object.keys(verificationTools).length > 0
-                    ? { tools: verificationTools, stopWhen: stepCountIs(2) }
+                    ? {
+                        tools: verificationTools,
+                        stopWhen: stepCountIs(2),
+                        prepareStep: ({ stepNumber, messages }) => {
+                          if (stepNumber < 1) return {};
+                          const stripped = debateCaps.sanitizeHistory(messages) as typeof messages;
+                          return stripped === messages ? {} : { messages: stripped };
+                        },
+                      }
                     : {}),
                   // Reasoning models (deepseek-v4-*, anthropic thinking) consume part
                   // of this budget on reasoning_tokens before producing user-visible
@@ -618,6 +633,11 @@ export function createCouncilLLM(
         ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate and report findings.`
         : `## Research Topic\n${topic}\n\nInvestigate and report findings.`;
 
+      // RC#1: same reasoning-strip as debate() — research() is the WORST offender
+      // because stepCountIs(15) lets the SDK chain up to 15 internal tool steps,
+      // each one re-sending the previous assistant reasoning content.
+      const researchCaps = getProviderCapabilities(providerId);
+
       const t0 = Date.now();
       // Research is multi-step tool-using so give it 2x the standard deadline.
       const researchTimeoutMs = Math.min(COUNCIL_LLM_TIMEOUT_MS * 2, 1_800_000);
@@ -633,6 +653,11 @@ export function createCouncilLLM(
                   prompt: userPrompt,
                   tools: allTools,
                   stopWhen: stepCountIs(15),
+                  prepareStep: ({ stepNumber, messages }) => {
+                    if (stepNumber < 1) return {};
+                    const stripped = researchCaps.sanitizeHistory(messages) as typeof messages;
+                    return stripped === messages ? {} : { messages: stripped };
+                  },
                   maxOutputTokens: 4096,
                   temperature: 0.3,
                   // Visible retry (src/utils/visible-retry.ts) replaces SDK's silent

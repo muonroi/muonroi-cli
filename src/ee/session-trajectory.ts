@@ -118,7 +118,7 @@ export async function appendTrajectoryEvent(event: TrajectoryEvent): Promise<voi
 
     await fs.mkdir(_sessionsDir, { recursive: true });
     const file = sessionFilePath(event.sessionId);
-    const line = JSON.stringify(event) + "\n";
+    const line = `${JSON.stringify(event)}\n`;
     await fs.appendFile(file, line, "utf8");
   } catch (err) {
     if (!_warnedOnce) {

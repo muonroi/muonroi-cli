@@ -1,4 +1,3 @@
-import React from "react";
 import type { CouncilMessage } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 import { computeBubbleLayout } from "./bubble-layout.js";

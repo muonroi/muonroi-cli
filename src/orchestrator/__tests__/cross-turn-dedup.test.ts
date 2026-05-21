@@ -1,5 +1,5 @@
 import type { ToolSet } from "ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "../cross-turn-dedup.js";
 
@@ -32,7 +32,7 @@ describe("CrossTurnDedup", () => {
       const dedup = new CrossTurnDedup({ minChars: 100 });
       dedup.beginTurn();
       const a = "A".repeat(2_000);
-      const b = "A".repeat(1_999) + "B";
+      const b = `${"A".repeat(1_999)}B`;
 
       expect(dedup.maybeDedup("read_file", a)).toBeNull();
       // Distinct content must NOT hit the cache.

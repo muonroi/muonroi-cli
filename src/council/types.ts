@@ -1,6 +1,5 @@
 import type { ModelMessage } from "ai";
 import type { ProcessMessageObserver } from "../orchestrator/agent-options.js";
-import type { StreamChunk } from "../types/index.js";
 import type { ModelRole } from "../utils/settings.js";
 
 // ── Clarification Phase ─────────────────────────────────────────────────────
@@ -21,6 +20,25 @@ export interface ClarifiedSpec {
   rawQA: Array<{ question: string; answer: string }>;
   /** Maps dimension IDs to their resolution status. Used by Product Loop. */
   resolved?: Record<string, "answered" | "unspecified" | "skipped">;
+  // ── P5: Ready-gate additions (all optional — backward compat) ────────────
+  /** Self-judged confidence score (0–1) that the spec is ready for debate. */
+  confidenceScore?: number;
+  /** Outstanding gaps the agent identified; empty when ready === true. */
+  remainingGaps?: string[];
+  /**
+   * True when the ready-gate judge decided the spec is sufficient.
+   * Invariant: ready === (remainingGaps?.length ?? 1) === 0
+   */
+  ready?: boolean;
+  /** Full Q&A history including gap-driven follow-up rounds. */
+  clarifyHistory?: Array<{
+    question: string;
+    answer: string;
+    /** ISO timestamp of when the answer was recorded. */
+    ts: string;
+  }>;
+  /** Populated by P6 when the spec is converted to a Backlog. */
+  backlogId?: string;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────

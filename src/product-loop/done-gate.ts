@@ -1,7 +1,7 @@
 import { runPreflight } from "../council/preflight.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
-import type { Criterion, DoneCondition, DoneGateContext, DoneVerdict } from "./types.js";
+import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
 
 /**
@@ -65,11 +65,11 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
       const ledger = await readLedger(ctx.flowDir, ctx.runId);
       const blockers = blockingAssumptions(ledger);
       if (blockers.length > 0) {
-        const blockerList = blockers.map((a) => a.id + " (" + a.claim.slice(0, 60) + "...)").join("; ");
+        const blockerList = blockers.map((a) => `${a.id} (${a.claim.slice(0, 60)}...)`).join("; ");
         return {
           pass: false,
           failedCondition: "assumption_ledger",
-          reason: "unverified_critical_assumptions: " + blockerList,
+          reason: `unverified_critical_assumptions: ${blockerList}`,
           score,
         };
       }

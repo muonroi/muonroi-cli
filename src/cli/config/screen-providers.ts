@@ -76,7 +76,7 @@ function renderScreen(rows: ProviderRow[], cursor: number, statusMsg: string, wi
   const lines: string[] = [];
   lines.push(`${A.BOLD}Providers${A.RESET}`);
   lines.push(divider(width));
-  lines.push(" Provider".padEnd(14) + "Key".padEnd(20) + "Status".padEnd(10) + "Default");
+  lines.push(`${" Provider".padEnd(14) + "Key".padEnd(20) + "Status".padEnd(10)}Default`);
   lines.push(divider(width));
 
   for (let i = 0; i < rows.length; i++) {
@@ -89,7 +89,7 @@ function renderScreen(rows: ProviderRow[], cursor: number, statusMsg: string, wi
     const statusDisplay = row.enabled ? "ENABLED " : "disabled";
     const defaultDisplay = row.isDefault ? "★" : "";
 
-    lines.push(prefix + row.id.padEnd(12) + keyDisplay.padEnd(18) + statusDisplay + "  " + defaultDisplay + suffix);
+    lines.push(`${prefix + row.id.padEnd(12) + keyDisplay.padEnd(18) + statusDisplay}  ${defaultDisplay}${suffix}`);
   }
 
   lines.push(divider(width));

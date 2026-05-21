@@ -23,7 +23,7 @@ export class DiscordChatProvider implements ChatClient {
   private cachedUserId?: string;
 
   constructor(
-    private readonly token: string,
+    readonly token: string,
     private readonly fetchImpl: typeof fetch = fetch,
   ) {
     this.headers = {
@@ -62,7 +62,7 @@ export class DiscordChatProvider implements ChatClient {
     if (opts.afterId) params.set("after", opts.afterId);
     if (opts.limit !== undefined) params.set("limit", String(opts.limit));
     const qs = params.toString();
-    return this.call("GET", `/channels/${channelId}/messages${qs ? "?" + qs : ""}`);
+    return this.call("GET", `/channels/${channelId}/messages${qs ? `?${qs}` : ""}`);
   }
 
   async postMessage(channelId: string, content: string): Promise<{ id: string }> {

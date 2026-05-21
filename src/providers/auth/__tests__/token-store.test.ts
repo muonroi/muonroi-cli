@@ -64,7 +64,7 @@ describe("token-store — keychain path", () => {
     // Isolate file fallback path — without this, deleteTokens() at the end
     // of the test would unlink() the real user's ~/.muonroi-cli/auth/openai.json.
     const tmp = path.join(os.tmpdir(), `muonroi-test-token-store-keychain-${Date.now()}`);
-    process.env["MUONROI_AUTH_DIR"] = tmp;
+    process.env.MUONROI_AUTH_DIR = tmp;
 
     try {
       const { saveTokens, loadTokens, deleteTokens } = await import("../token-store.js");
@@ -80,7 +80,7 @@ describe("token-store — keychain path", () => {
       await deleteTokens("openai");
       expect(kt.deletePassword).toHaveBeenCalledOnce();
     } finally {
-      delete process.env["MUONROI_AUTH_DIR"];
+      delete process.env.MUONROI_AUTH_DIR;
       vi.doUnmock("keytar");
     }
   });
@@ -97,11 +97,11 @@ describe("token-store — file fallback", () => {
     tempDir = path.join(os.tmpdir(), `muonroi-test-token-store-${Date.now()}`);
     await mkdir(tempDir, { recursive: true });
     // Override auth dir via env var (token-store reads MUONROI_AUTH_DIR)
-    process.env["MUONROI_AUTH_DIR"] = tempDir;
+    process.env.MUONROI_AUTH_DIR = tempDir;
   });
 
   afterEach(async () => {
-    delete process.env["MUONROI_AUTH_DIR"];
+    delete process.env.MUONROI_AUTH_DIR;
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -135,7 +135,7 @@ describe("token-store — file fallback", () => {
 describe("token-store — deleteTokens no-op", () => {
   it("does not throw when nothing is stored", async () => {
     // Point at a non-existent dir so file fallback also has nothing
-    process.env["MUONROI_AUTH_DIR"] = path.join(os.tmpdir(), `muonroi-nonexistent-${Date.now()}`);
+    process.env.MUONROI_AUTH_DIR = path.join(os.tmpdir(), `muonroi-nonexistent-${Date.now()}`);
 
     vi.doMock("keytar", () => ({
       getPassword: vi.fn(async () => null),
@@ -146,7 +146,7 @@ describe("token-store — deleteTokens no-op", () => {
     const { deleteTokens } = await import("../token-store.js");
     await expect(deleteTokens("openai")).resolves.not.toThrow();
 
-    delete process.env["MUONROI_AUTH_DIR"];
+    delete process.env.MUONROI_AUTH_DIR;
     vi.doUnmock("keytar");
   });
 });

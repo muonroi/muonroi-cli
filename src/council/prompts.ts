@@ -1,3 +1,4 @@
+import { buildStackLockSection } from "./decisions-lock.js";
 import type { ClarifiedSpec, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 
 // ── Clarification prompts ────────────────────────────────────────────────────
@@ -76,6 +77,58 @@ export function buildSpecSynthesisPrompt(
       `## Original Topic\n${topic}\n\n` +
       (conversationContext ? `## Context\n${conversationContext}\n\n` : "") +
       `## Clarification Q&A\n${qa.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")}`,
+  };
+}
+
+// ── P5: Readiness judge prompt ───────────────────────────────────────────────
+
+/**
+ * Build system + prompt for the ready-gate judge.
+ *
+ * The judge receives the topic, all Q&A so far, and the current partial spec,
+ * then decides whether enough context exists to start a productive debate or
+ * whether there are still critical gaps.
+ *
+ * Output shape: { ready: boolean, confidence: number, gaps: string[] }
+ *   - ready: true when a debate can start without blind spots
+ *   - confidence: 0.0–1.0 (1.0 = judge is certain, 0.0 = major unknowns)
+ *   - gaps: 1-line descriptions of WHAT is still missing (empty when ready)
+ */
+export function buildReadinessJudgePrompt(
+  topic: string,
+  qa: Array<{ question: string; answer: string }>,
+  spec: { problemStatement: string; constraints: string[]; successCriteria: string[]; scope: string },
+): { system: string; prompt: string } {
+  return {
+    system:
+      `You are a senior debate facilitator deciding whether a clarification session has collected ` +
+      `enough context for a productive multi-expert debate.\n\n` +
+      `A debate can start when ALL of the following are true:\n` +
+      `1. The problem statement is specific enough that experts won't derail into "what are we solving?"\n` +
+      `2. At least one success criterion is measurable/observable.\n` +
+      `3. Any hard constraints (platform, budget, tech stack) are either stated or provably irrelevant.\n` +
+      `4. Scope boundaries are clear enough that debate stays focused.\n\n` +
+      `Output ONLY a JSON object (no markdown, no preamble):\n` +
+      `{ "ready": true|false, "confidence": 0.0-1.0, "gaps": ["gap 1", "gap 2"] }\n\n` +
+      `Rules:\n` +
+      `- "gaps" MUST be empty when "ready" is true.\n` +
+      `- Each gap is a single sentence starting with a noun: what info is missing (not a question).\n` +
+      `  Example: "Target platform (web, mobile, or both) not specified."\n` +
+      `- "confidence" reflects how sure you are; a ready=true with confidence=0.6 means "probably " +\n` +
+      `  "ready but some ambiguity remains". confidence=1.0 means zero remaining blind spots.\n` +
+      `- When the topic is a simple one-answer technical question (no design/scope), set ready=true, ` +
+      `  confidence=1.0, gaps=[].`,
+    prompt:
+      `## Topic\n${topic}\n\n` +
+      `## Current Spec\n` +
+      `Problem: ${spec.problemStatement}\n` +
+      `Constraints: ${spec.constraints.length > 0 ? spec.constraints.join("; ") : "(none)"}\n` +
+      `Success Criteria: ${spec.successCriteria.join("; ")}\n` +
+      `Scope: ${spec.scope || "(unspecified)"}\n\n` +
+      (qa.length > 0
+        ? `## Clarification Q&A So Far\n${qa.map((item) => `Q: ${item.question}\nA: ${item.answer}`).join("\n\n")}\n\n`
+        : "## Clarification Q&A So Far\n(none — topic only)\n\n") +
+      `Is this sufficient to start a focused, productive debate? Respond with JSON only.`,
   };
 }
 
@@ -162,6 +215,7 @@ export function buildOpeningPrompt(ctx: {
     ? `\nGuardrails for this discussion:\n${ctx.outputShape.guardrails.map((g) => `- ${g}`).join("\n")}\n`
     : "";
   const focusLine = me.focus ? `\nYour specific focus: ${me.focus}\n` : "";
+  const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
       `You are the "${me.label}". Your lens: ${me.lens}.\n` +
@@ -169,6 +223,7 @@ export function buildOpeningPrompt(ctx: {
       focusLine +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_OPENING +
+      (stackLock ? `\n${stackLock}\n` : "") +
       guardrails +
       (ctx.conversationContext ? `\n## Conversation Context\n${ctx.conversationContext}\n\n---\n\n` : "\n") +
       `## Discussion Brief\n` +
@@ -193,11 +248,13 @@ export function buildResponsePrompt(ctx: {
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
+  const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
       `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_RESPONSE +
+      (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n\n` +
@@ -229,11 +286,13 @@ export function buildFollowupPrompt(ctx: {
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
+  const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
       `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_FOLLOWUP +
+      (stackLock ? `\n${stackLock}\n` : "") +
       `\n` +
       (ctx.runningSummary
         ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
@@ -262,10 +321,19 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
   system: string;
   prompt: string;
 } {
+  const stackLock = buildStackLockSection(ctx.spec);
+  const outOfStackCheck = stackLock
+    ? `\n## Out-of-stack enforcement\n` +
+      `Scan the final positions for proposals that cite frameworks or technologies NOT in the STACK LOCK above.\n` +
+      `If any participant's final position cites an out-of-stack technology (e.g. Next.js, shadcn, NestJS), ` +
+      `set "outOfStackViolations" to the list of offending tech names and set "consensusQuality" to "partial". ` +
+      `When all positions stay within the locked stack, set "consensusQuality" to "full".\n\n`
+    : "";
   return {
     system:
       `You are the discussion moderator evaluating whether a multi-expert debate has produced sufficient results.\n` +
       ENGLISH_ONLY_RULE +
+      (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Success Criteria to Evaluate\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
       `\n\n` +
@@ -279,6 +347,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       `- The remaining disagreements are minor wording, not substantive trade-offs\n` +
       `- The next round would mostly repeat already-stated positions\n` +
       `Continuing past convergence wastes ~120-150s per round and adds no new content. Prefer to stop early — the user can always /ask-followup to clarify a specific point.\n\n` +
+      outOfStackCheck +
       `Output ONLY a JSON object (no markdown):\n` +
       `{\n` +
       `  "allCriteriaMet": true/false,\n` +
@@ -291,6 +360,10 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       `  "evidenceDensity": 0.0,  // citations / total claims ratio (0.0–1.0)\n` +
       `  "disagreementResolved": 0,  // count of [REFUTED] + [CONFIRMED] tags and explicit concessions\n` +
       `  "extendRounds": 0  // set to 1-3 ONLY when this is the last planned round AND one critical point is genuinely close to resolving but not yet there. 0 otherwise.\n` +
+      (stackLock
+        ? `  ,\n  "consensusQuality": "full",  // "full" when all positions stay within locked stack; "partial" when out-of-stack violations found\n` +
+          `  "outOfStackViolations": []  // list of out-of-stack tech names cited by participants (empty when none)\n`
+        : "") +
       `}`,
     prompt: `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
   };
@@ -342,6 +415,11 @@ export function buildDebatePlanPrompt(spec: ClarifiedSpec): { system: string; pr
       `1. \`stances\`: 2-3 specialists tailored to THIS topic. Each has a distinct lens that produces ` +
       `productive disagreement. Avoid overlap. Stances should fit the topic, NOT generic ` +
       `"implement/verify/research" labels.\n` +
+      `   **When \`outputShape.kind === "implementation_plan"\`, AT LEAST ONE stance MUST be a Product/User-side voice** — ` +
+      `e.g. "Product Owner", "User Advocate", "Customer Proxy", "MVP Skeptic". Its lens MUST challenge scope: ` +
+      `"what does the user actually need on day 1?", "what are we over-building?", "would the user pay for this if it shipped tomorrow?". ` +
+      `This counter-balances engineering stances (Architect/Cost/Skeptic) that historically inflate scope ` +
+      `(e.g. proposing multi-tenant SaaS for a 5-word "todo app" prompt). Engineering-only rosters are REJECTED.\n` +
       `2. \`outputShape\`: the JSON sections the synthesis should produce. ` +
       `Pick keys/headings that match what the user actually wants to receive. ` +
       `Be specific to the topic.\n` +
@@ -353,11 +431,23 @@ export function buildDebatePlanPrompt(spec: ClarifiedSpec): { system: string; pr
       `  - recommendation: text — decisive verdict\n` +
       `\n**implementation_plan** — building/changing something:\n` +
       `  - agreed_architecture: text — what the design IS, in prose\n` +
+      `  - entities: objectList of {name, fields, relationships} — the domain model. ` +
+      `\`fields\` is a CSV of \`name:type[?]\` (e.g. "id:uuid, title:string, completed:bool, createdAt:timestamp"). ` +
+      `\`relationships\` lists FK/nav properties (e.g. "userId → User(id)"). REQUIRED for any topic that involves persistence; ` +
+      `omit only when the change is pure-refactor with zero schema impact.\n` +
+      `  - endpoints: objectList of {method, path, request_body, response_body, auth_required} — the HTTP/RPC surface. ` +
+      `Use concrete names (e.g. \`POST /todos\` not "create endpoint"). REQUIRED for any topic that exposes an API.\n` +
+      `  - acceptance_criteria: list of Gherkin-style "Given X / When Y / Then Z" assertions OR ` +
+      `concrete pass/fail predicates ("User can create a todo and see it in the list within 1s"). ` +
+      `These are what the verify step uses to score Done. REQUIRED — at least 3.\n` +
       `  - tradeoffs: objectList of {decision, option_a, option_b, chosen, why}\n` +
       `  - risks: objectList of {description, severity: "High"|"Medium"|"Low", mitigation}\n` +
       `  - actionItems: objectList of {step, owner_lens, time_estimate, depends_on, acceptance_criteria}\n` +
       `  - dissenting_notes: list — minority opinions NOT to lose in synthesis (e.g. "X argued for B over A; if assumption Y fails, revisit")\n` +
-      `  - mvp_definition: text — explicit v1 cut-line\n` +
+      `  - mvp_definition: objectList of {feature, included_in_v1: "yes"|"no", reason} — ` +
+      `EVERY major feature must appear here with an explicit v1-include decision and a one-line reason. ` +
+      `This forces the council to make scope decisions instead of writing fluff like "lean MVP". ` +
+      `Features marked "no" must still appear, with the deferral reason.\n` +
       `  Order actionItems by dependency — predecessors before dependents.\n` +
       `\n**decision** — choose between options:\n` +
       `  - options: objectList of {name, pros, cons, cost_estimate}\n` +
@@ -375,7 +465,13 @@ export function buildDebatePlanPrompt(spec: ClarifiedSpec): { system: string; pr
       `  - kill_criteria: list — conditions under which the idea is NOT worth pursuing\n` +
       `  - recommendation: text — go / no-go / scoped pilot\n` +
       `3. \`guardrails\`: behavioral rules participants must obey. ` +
-      `Examples: "cite sources for numbers", "do not propose code changes", "stay within YYYY constraint".\n\n` +
+      `Examples: "cite sources for numbers", "do not propose code changes", "stay within YYYY constraint".\n` +
+      `   For \`implementation_plan\` debates, ALWAYS include this scope-drift guardrail verbatim: ` +
+      `"If any actionItem, entity, or endpoint requires multi-tenancy, enterprise auth-as-a-service, ` +
+      `org/team hierarchy, or other enterprise infrastructure when the user's original prompt is < 25 words ` +
+      `AND mentions none of those words explicitly, move it to \`dissenting_notes\` with reason 'scope inflation beyond user prompt'. ` +
+      `Default to single-user / personal scope unless the prompt says otherwise." ` +
+      `This counters the historical pattern where a 5-word prompt like 'tạo todo app' produced a multi-tenant SaaS plan.\n\n` +
       `4. \`plannedRounds\`: 1-5. How many discussion rounds you expect this topic to need. ` +
       `Simple yes/no decisions: 1-2. Multi-faceted design or trade-off analysis: 3. ` +
       `Deep architecture / multi-system debate: 4-5. The leader can extend this ` +
@@ -480,6 +576,7 @@ export function buildSynthesisPrompt(ctx: {
           : "Balance clarity with completeness.") // balanced (default)
     : "";
 
+  const stackLockForSynth = buildStackLockSection(ctx.spec);
   let system =
     `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
     `## Original Brief\n` +
@@ -487,6 +584,7 @@ export function buildSynthesisPrompt(ctx: {
     `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
     `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
     intent +
+    (stackLockForSynth ? `\n${stackLockForSynth}\n` : "") +
     guardrailBlock +
     `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
     `unless the output shape explicitly asks for actionItems/plan. ` +

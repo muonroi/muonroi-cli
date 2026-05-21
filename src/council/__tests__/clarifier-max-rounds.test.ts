@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { StreamChunk } from "../../types/index.js";
-import { runClarification } from "../clarifier.js";
+import { MAX_CLARIFY_ROUNDS, runClarification } from "../clarifier.js";
 import type { CouncilLLM, QuestionResponder } from "../types.js";
 
 describe("runClarification maxRounds parameterization", () => {
@@ -37,7 +36,7 @@ describe("runClarification maxRounds parameterization", () => {
     expect(rounds.length).toBe(6);
   });
 
-  it("defaults to 3 rounds when maxRounds is not provided", async () => {
+  it("defaults to MAX_CLARIFY_ROUNDS when maxRounds is not provided", async () => {
     const rounds: string[] = [];
     const gen = runClarification(
       "topic",
@@ -47,7 +46,7 @@ describe("runClarification maxRounds parameterization", () => {
       mockLLM,
       undefined,
       undefined,
-      // maxRounds omitted
+      // maxRounds omitted — P5: default is MAX_CLARIFY_ROUNDS (12)
     );
 
     for await (const chunk of gen) {
@@ -60,10 +59,10 @@ describe("runClarification maxRounds parameterization", () => {
       }
     }
 
-    expect(rounds.length).toBe(3);
+    expect(rounds.length).toBe(MAX_CLARIFY_ROUNDS);
   });
 
-  it("falls back to 3 rounds when maxRounds is non-positive", async () => {
+  it("falls back to MAX_CLARIFY_ROUNDS when maxRounds is non-positive", async () => {
     const rounds: string[] = [];
     const gen = runClarification(
       "topic",
@@ -86,6 +85,6 @@ describe("runClarification maxRounds parameterization", () => {
       }
     }
 
-    expect(rounds.length).toBe(3);
+    expect(rounds.length).toBe(MAX_CLARIFY_ROUNDS);
   });
 });

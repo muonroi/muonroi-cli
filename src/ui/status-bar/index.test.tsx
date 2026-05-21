@@ -18,9 +18,16 @@ vi.mock("../../usage/thresholds.js", () => ({
 vi.mock("../../usage/downgrade.js", () => ({
   subscribeDowngrade: () => () => {},
 }));
+vi.mock("../state/active-run.js", () => ({
+  activeRunStore: {
+    getState: () => ({ runId: null, flowDir: null, productSlug: null }),
+    subscribe: () => () => {},
+    clearActiveRun: () => {},
+  },
+}));
 
-import { renderStatusBar } from "./index.js";
-import type { StatusBarState } from "./store.js";
+import { renderSprintSegment, renderStatusBar } from "./index.js";
+import type { SprintProgressSegment, StatusBarState } from "./store.js";
 
 function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
   return {
@@ -86,5 +93,62 @@ describe("StatusBar (renderStatusBar)", () => {
     const json = JSON.stringify(el);
     // Should have ' | ' separators
     expect(json).toContain(" | ");
+  });
+
+  // B1: sprint progress segment tests
+  it("hides sprint segment when sprint is undefined", () => {
+    const el = renderStatusBar(makeState({ sprint: undefined }));
+    expect(JSON.stringify(el)).not.toContain("slot-sprint");
+  });
+
+  it("shows sprint segment with correct text when sprint is present", () => {
+    const sprint: SprintProgressSegment = {
+      activeSprintNumber: 2,
+      totalSprints: 5,
+      completedStories: 3,
+      totalStories: 8,
+      overallPct: 37.5,
+    };
+    const el = renderStatusBar(makeState({ sprint }));
+    const json = JSON.stringify(el);
+    expect(json).toContain("slot-sprint");
+    expect(json).toContain("Sprint 2/5");
+    expect(json).toContain("3/8 stories");
+    expect(json).toContain("37.5%");
+  });
+});
+
+describe("renderSprintSegment", () => {
+  it("formats the segment correctly", () => {
+    const seg: SprintProgressSegment = {
+      activeSprintNumber: 1,
+      totalSprints: 3,
+      completedStories: 0,
+      totalStories: 4,
+      overallPct: 0,
+    };
+    expect(renderSprintSegment(seg)).toBe("Sprint 1/3 · 0/4 stories · 0%");
+  });
+
+  it("formats with non-zero values", () => {
+    const seg: SprintProgressSegment = {
+      activeSprintNumber: 3,
+      totalSprints: 3,
+      completedStories: 4,
+      totalStories: 4,
+      overallPct: 100,
+    };
+    expect(renderSprintSegment(seg)).toBe("Sprint 3/3 · 4/4 stories · 100%");
+  });
+
+  it("handles decimal overallPct", () => {
+    const seg: SprintProgressSegment = {
+      activeSprintNumber: 2,
+      totalSprints: 4,
+      completedStories: 2,
+      totalStories: 5,
+      overallPct: 33.3,
+    };
+    expect(renderSprintSegment(seg)).toBe("Sprint 2/4 · 2/5 stories · 33.3%");
   });
 });

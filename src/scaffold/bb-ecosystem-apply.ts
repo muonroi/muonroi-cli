@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdir, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import * as path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ export async function copyBoundaryScript(
         run: pwsh ./scripts/${BOUNDARIES_SCRIPT_NAME} -RepoRoot .
 `;
       // Append before the last line or after the last job step
-      const updated = ciContent.trimEnd() + "\n" + boundaryStep + "\n";
+      const updated = `${ciContent.trimEnd()}\n${boundaryStep}\n`;
       await fsOps.writeFile(ciYmlPath, updated);
       ciWired = true;
     }
@@ -422,9 +422,12 @@ export async function applyBBEcosystem(opts: BBEcosystemApplyOptions): Promise<B
 
   // Tasks 6.9 + 6.10 — Sample rule + test (for rule-engine intents)
   if (hasIntent(intents, "rule", "rule-engine", "fraud", "loan", "approval", "decision")) {
-    const primaryIntent = intents.find((i) =>
-      ["rule-engine", "fraud", "loan", "approval", "decision"].some((kw) => i.toLowerCase().includes(kw)),
-    ) ?? intents[0] ?? "sample";
+    const primaryIntent =
+      intents.find((i) =>
+        ["rule-engine", "fraud", "loan", "approval", "decision"].some((kw) => i.toLowerCase().includes(kw)),
+      ) ??
+      intents[0] ??
+      "sample";
 
     const rulePath = await generateSampleRule(serverDir, projectName, primaryIntent, fsOps);
     if (rulePath) filesCreated.push(path.relative(serverDir, rulePath));

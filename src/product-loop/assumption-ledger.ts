@@ -89,7 +89,7 @@ function makeAssumptionId(claim: string): string {
   for (let i = 0; i < normalized.length; i++) {
     hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0;
   }
-  return "a_" + Math.abs(hash).toString(36).padStart(6, "0");
+  return `a_${Math.abs(hash).toString(36).padStart(6, "0")}`;
 }
 
 /**
@@ -108,7 +108,7 @@ export async function extractAssumptionsFromDebate(opts: {
   phase: "research" | "scoping";
 }): Promise<Assumption[]> {
   const archiveText = (opts.debateState.archive ?? [])
-    .map((a) => "[" + (a.stanceName ?? a.role) + "] " + (a.excerpt ?? ""))
+    .map((a) => `[${a.stanceName ?? a.role}] ${a.excerpt ?? ""}`)
     .join("\n\n")
     .slice(0, 8192);
   const summary = (opts.debateState.runningSummary ?? "").slice(0, 2048);
@@ -126,7 +126,7 @@ export async function extractAssumptionsFromDebate(opts: {
     "Skip opinions, preferences, and trivially-true statements. " +
     "Return [] when no unverified claims appear in the debate.";
 
-  const prompt = "## Debate Summary\n" + summary + "\n\n## Stance Excerpts\n" + archiveText;
+  const prompt = `## Debate Summary\n${summary}\n\n## Stance Excerpts\n${archiveText}`;
 
   let raw: string;
   try {
@@ -242,10 +242,10 @@ export function formatUnverifiedForSprintContext(ledger: AssumptionLedger): stri
   lines.push("## Unverified Assumptions (validate before adding features)");
   for (const a of unverified) {
     const tag = a.confidence === "high" ? "[CRITICAL]" : a.confidence === "medium" ? "[IMPORTANT]" : "[MINOR]";
-    lines.push("- " + tag + " " + a.claim);
-    lines.push("  validation: " + a.validationMethod);
+    lines.push(`- ${tag} ${a.claim}`);
+    lines.push(`  validation: ${a.validationMethod}`);
   }
-  return lines.join("\n") + "\n";
+  return `${lines.join("\n")}\n`;
 }
 
 /**

@@ -128,10 +128,10 @@ export function deriveTasksFromSpec(spec: ProductSpec): TaskArtifact[] {
   const tasks: TaskArtifact[] = [];
   spec.mvp.forEach((feature, i) => {
     tasks.push({
-      id: "t_mvp_" + (i + 1).toString().padStart(2, "0"),
+      id: `t_mvp_${(i + 1).toString().padStart(2, "0")}`,
       title: feature,
       owner: "Implementer",
-      dependencies: i === 0 ? [] : ["t_mvp_" + i.toString().padStart(2, "0")],
+      dependencies: i === 0 ? [] : [`t_mvp_${i.toString().padStart(2, "0")}`],
       estimate: { sprint: 1 },
       acceptanceCriteria: [],
       status: "pending",
@@ -140,10 +140,10 @@ export function deriveTasksFromSpec(spec: ProductSpec): TaskArtifact[] {
   });
   spec.phase2.forEach((feature, i) => {
     tasks.push({
-      id: "t_p2_" + (i + 1).toString().padStart(2, "0"),
+      id: `t_p2_${(i + 1).toString().padStart(2, "0")}`,
       title: feature,
       owner: "Implementer",
-      dependencies: spec.mvp.length > 0 ? ["t_mvp_" + spec.mvp.length.toString().padStart(2, "0")] : [],
+      dependencies: spec.mvp.length > 0 ? [`t_mvp_${spec.mvp.length.toString().padStart(2, "0")}`] : [],
       estimate: { sprint: 2 },
       acceptanceCriteria: [],
       status: "pending",
@@ -257,7 +257,7 @@ function shortIdFrom(prefix: string, text: string): string {
   for (let i = 0; i < normalized.length; i++) {
     hash = ((hash << 5) - hash + normalized.charCodeAt(i)) | 0;
   }
-  return prefix + "_" + Math.abs(hash).toString(36).padStart(6, "0");
+  return `${prefix}_${Math.abs(hash).toString(36).padStart(6, "0")}`;
 }
 
 /**

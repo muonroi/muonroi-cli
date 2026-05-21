@@ -43,7 +43,9 @@ function makeStubDriver(opts: StubOpts = {}): Driver {
     count: () => 0,
     expect: () => opts.expectResult ?? true,
     last_event: (() => opts.lastEvent ?? null) as Driver["last_event"],
-    events: () => ({ [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined as any, done: true as const }) }) }),
+    events: () => ({
+      [Symbol.asyncIterator]: () => ({ next: async () => ({ value: undefined as any, done: true as const }) }),
+    }),
     render_text: () => "",
     _ingest: () => {},
     _closeAllSubscribers: () => {},

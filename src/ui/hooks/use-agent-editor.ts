@@ -4,7 +4,6 @@ import type { StoredSchedule } from "../../tools/schedule.js";
 import type { CustomSubagentConfig } from "../../utils/settings.js";
 import { loadValidSubAgents } from "../../utils/settings.js";
 import type { SubagentEditorField } from "../agents-modal.js";
-import { SUBAGENT_EDITOR_FIELDS } from "../agents-modal.js";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 

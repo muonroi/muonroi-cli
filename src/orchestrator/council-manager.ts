@@ -383,7 +383,7 @@ export class CouncilManager {
     const combined = parts.join("\n\n---\n\n");
     // Rough token estimate: char/4
     if (combined.length > 12000) {
-      return combined.slice(0, 12000) + "\n\n[... context truncated to fit token budget]";
+      return `${combined.slice(0, 12000)}\n\n[... context truncated to fit token budget]`;
     }
     return combined;
   }

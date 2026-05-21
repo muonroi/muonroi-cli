@@ -1386,7 +1386,7 @@ export async function initNewProject(opts: InitNewOptions): Promise<InitNewResul
         const restoreResult = await fsOps
           .exec(`${dotnetCmd} restore --nologo`, serverDir)
           .catch((e: unknown) => ({ stdout: "", stderr: String(e) }));
-        if (restoreResult.stderr && restoreResult.stderr.includes("error")) {
+        if (restoreResult.stderr?.includes("error")) {
           logWarn(`[init-new] dotnet restore reported errors; continuing best-effort`);
         } else {
           usedDotnetTemplate = true;

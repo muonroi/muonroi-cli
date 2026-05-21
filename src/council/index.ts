@@ -13,6 +13,7 @@ import { buildSpecFromTopic, runClarification } from "./clarifier.js";
 import { buildCouncilContext, buildProjectSnapshot } from "./context.js";
 import { evaluateResearchNeed, runDebate } from "./debate.js";
 import { planDebate } from "./debate-planner.js";
+import { detectOutOfStackProposals, writeDecisionsLock } from "./decisions-lock.js";
 import { runExecution } from "./executor.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "./leader.js";
 import { phaseDone, phaseStart } from "./phase-events.js";
@@ -37,6 +38,11 @@ export interface RunCouncilOptions {
   cwd?: string;
   /** Shared stats object from orchestrator — when provided, runCouncil uses it instead of a local one so stats.calls is accurate (Phase 14 CQ-01). */
   councilStats?: CouncilStats;
+  /**
+   * C2: Run directory for writing decisions.lock.md after synthesis.
+   * Typically <flowDir>/runs/<runId>. When absent the lock file is skipped.
+   */
+  runDir?: string;
 }
 
 export async function* runCouncil(
@@ -477,8 +483,9 @@ export async function* runCouncil(
 
       if (!hasPlan && !synthesisFailed) {
         baseOptions.push({
-          label: "Generate Action Plan",
-          description: "Create a detailed implementation plan from the debate outcome",
+          label: "Lock plan and execute Sprint 1",
+          description:
+            "Commit the council outcome as the sprint plan and hand control to the sprint runner (planning → implementation → verification → judgment). Does NOT exit to /gsd.",
           value: "generate_plan",
           kind: "choice",
         });
@@ -603,14 +610,15 @@ export async function* runCouncil(
         plan = refineResult.value.plan;
         synthesisText = refineResult.value.synthesisText;
       } else if (answer === "generate_plan") {
-        // P7: skip re-synthesis when the first synthesis already produced
-        // structured action items. Session 1a8fb4be3bc3 showed the first
-        // synthesis under implementation_plan shape emits a full
-        // sections.actionItems objectList (11 entries with owner / time /
-        // depends_on), but clicking generate_plan still re-ran the entire
-        // synthesizer to produce a near-identical second copy — ~128s
-        // wasted. If actionItems already exist with ≥3 entries, lift them
-        // into plan.steps directly and skip the re-run.
+        // A1 FIX: "Lock plan and execute Sprint 1" — stay within sprint-runner.
+        //
+        // Previously this branch called runExecution(plan, processMessageFn) which
+        // bypassed sprint-runner's verification/judgment/done-gate stages entirely.
+        // The correct behavior: synthesize the plan (if not already done), then
+        // return synthesisText to the sprint-runner caller so it can proceed with
+        // Step 4 (implementation), Step 5 (verification), Step 6 (judgment), etc.
+        //
+        // P7 optimization: skip re-synthesis when action items already exist.
         const existingActionItems = pickActionItemsFromOutcome(outcome);
         if (existingActionItems.length >= 3) {
           const synthesizedPlan = synthesizePlanFromActionItems(existingActionItems);
@@ -622,15 +630,16 @@ export async function* runCouncil(
           yield {
             type: "content",
             content:
-              `\n> Plan reused: ${existingActionItems.length} action items already present in the synthesis above — ` +
-              `lifted into the executable plan without re-running the synthesizer (~${SYNTH_RERUN_COST_SECONDS}s saved).\n`,
+              `\n> Plan locked: ${existingActionItems.length} action items committed — ` +
+              `sprint runner will execute planning → implementation → verification → judgment.\n`,
           };
-          yield { type: "content", content: "\n### Action Plan (from synthesis)\n" };
-          for (const step of synthesizedPlan.steps) {
-            yield { type: "content", content: `- [${step.priority}] ${step.description}\n` };
-          }
+          // Serialize the plan steps into synthesisText so sprint-runner's
+          // processMessageFn receives a human-readable implementation prompt.
+          synthesisText =
+            `Sprint plan locked (${existingActionItems.length} steps):\n` +
+            synthesizedPlan.steps.map((s) => `- [${s.priority}] ${s.description}`).join("\n");
         } else {
-          yield { type: "content", content: "\n> Re-running planning with action plan focus...\n" };
+          yield { type: "content", content: "\n> Synthesizing sprint plan...\n" };
           const refineGen = runPlanning(
             debateState,
             spec,
@@ -652,7 +661,17 @@ export async function* runCouncil(
           outcome = refineResult.value.outcome;
           plan = refineResult.value.plan;
           synthesisText = refineResult.value.synthesisText;
+          yield {
+            type: "content",
+            content:
+              "\n> Plan locked — sprint runner will execute planning → implementation → verification → judgment.\n",
+          };
         }
+        // Do NOT call runExecution here. Return synthesisText to the sprint-runner
+        // caller so it drives the full sprint lifecycle (Step 4–8 in sprint-runner.ts).
+        // Clear plan so Phase E's runExecution guard below does not fire — the plan
+        // content has already been serialized into synthesisText above.
+        plan = null;
       } else if (answer === "refine" && hasEmptySections) {
         yield { type: "content", content: "\n> Let's clarify the unresolved aspects...\n" };
         const refinedAnswers: Array<{ section: string; answer: string }> = [];
@@ -776,6 +795,27 @@ export async function* runCouncil(
           agreedCount: outcome?.agreed?.length ?? 0,
         },
       });
+
+      // C2: Persist decisions.lock.md to the run directory so sprint-runner
+      // can inject locked decisions into the implementation prompt.
+      if (options?.runDir) {
+        const rejectedProposals = detectOutOfStackProposals(synthesisText, spec);
+        await writeDecisionsLock({
+          runId: sessionId,
+          runDir: options.runDir,
+          spec,
+          timestamp: new Date().toISOString(),
+          participants: debateState.active.map((a) => ({
+            role: a.role,
+            stance: a.stance,
+            position: a.position,
+          })),
+          synthesisExcerpt: synthesisText.slice(0, 2000),
+          rejectedProposals: rejectedProposals.length > 0 ? rejectedProposals : undefined,
+        }).catch(() => {
+          /* non-critical — lock file write failure must never break the council */
+        });
+      }
     } catch {
       /* non-critical */
     }
@@ -849,7 +889,7 @@ export type { ClarifiedSpec, CouncilLLM, CouncilParticipant, CouncilStats } from
 // items into an ActionPlan locally instead of re-running synthesis.
 
 /** Rough cost (seconds) of a re-synthesis call. Used in the UX note. */
-const SYNTH_RERUN_COST_SECONDS = 120;
+const _SYNTH_RERUN_COST_SECONDS = 120;
 
 /**
  * Extract action items from an outcome regardless of which shape produced

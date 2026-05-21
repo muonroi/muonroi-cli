@@ -32,7 +32,7 @@ const PREMIUM_PATTERNS = [
   /large/i,
 ];
 
-export function classifyModelTier(id: string, inputPrice?: number, outputPrice?: number): ModelTier {
+export function classifyModelTier(id: string, inputPrice?: number, _outputPrice?: number): ModelTier {
   const lower = id.toLowerCase();
 
   if (FAST_PATTERNS.some((p) => p.test(lower))) return "fast";
