@@ -33,7 +33,13 @@ export type SpawnResult = {
 type SpawnOptions = {
   /** Extra spawn options forwarded to child_process.spawn (env, etc.). */
   spawnOpts?: Omit<Parameters<typeof spawn>[2], "stdio">;
-  /** Handshake timeout on Windows. Default: 5000 ms. */
+  /**
+   * Handshake timeout on Windows. Default: 15000 ms. Override via
+   * MUONROI_HARNESS_HANDSHAKE_TIMEOUT env var (millis). The default was
+   * bumped from 5s to 15s because cold-start spawns under MCP server load
+   * routinely exceeded 5s and produced confusing `client did not connect`
+   * errors that surfaced as transient flakes in agent-driven E2E flows.
+   */
   handshakeTimeoutMs?: number;
 };
 
@@ -98,8 +104,19 @@ async function waitForHandshake(socket: Socket, timeoutMs: number): Promise<void
   });
 }
 
+function resolveHandshakeTimeoutMs(opts: SpawnOptions): number {
+  if (typeof opts.handshakeTimeoutMs === "number" && opts.handshakeTimeoutMs > 0) {
+    return opts.handshakeTimeoutMs;
+  }
+  const envOverride = Number.parseInt(process.env["MUONROI_HARNESS_HANDSHAKE_TIMEOUT"] ?? "", 10);
+  if (Number.isFinite(envOverride) && envOverride > 0) return envOverride;
+  // Bumped from 5s → 15s. Cold-spawn under MCP server load (e.g. parallel
+  // tui.start retries after a kill) routinely exceeded 5s on Windows.
+  return 15_000;
+}
+
 async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnResult> {
-  const timeoutMs = opts.handshakeTimeoutMs ?? 5_000;
+  const timeoutMs = resolveHandshakeTimeoutMs(opts);
 
   const inPipeName = makePipeName("in");
   const outPipeName = makePipeName("out");
