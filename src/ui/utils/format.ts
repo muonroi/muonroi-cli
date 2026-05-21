@@ -23,10 +23,34 @@ export function formatScheduleDetails(schedule: StoredSchedule, daemonStatus: Sc
   ].join("\n");
 }
 
-export function formatAnswerForLog(ans: { kind: string; text: string }): string {
+/**
+ * Render the user's AskCard answer for inclusion in the chat log.
+ *
+ * For choice-kind answers we used to display the bare verb ("accept",
+ * "override", "skip") which makes the log meaningless when 6 cards in a row
+ * resolve as "accept / accept / accept …" — the user can't tell what they
+ * actually agreed to. Now we append the selected option's label when one is
+ * known, so the entry becomes e.g. `accept · productType="internal-tool"` or
+ * `override · "consumer-app"`.
+ *
+ * The `questionId` (when provided) is normalized to a short prefix so the
+ * entry remains scannable, e.g. `accept · targetPlatform=["cli"]`.
+ */
+export function formatAnswerForLog(
+  ans: { kind: string; text: string },
+  ctx?: { selectedOptionLabel?: string; questionId?: string },
+): string {
   if (ans.kind === "freetext") return ans.text || "(empty)";
   if (ans.kind === "chat") return "[Chat about this]";
-  return ans.text;
+  const verb = ans.text;
+  const label = ctx?.selectedOptionLabel?.trim();
+  if (!label || label === verb) return verb;
+  // Single line — labels carry value + rationale tail; keep echo to the value.
+  const valueOnly = label.split("—")[0].trim().replace(/\s+/g, " ");
+  if (ctx?.questionId) {
+    return `${verb} · ${ctx.questionId}=${valueOnly}`;
+  }
+  return `${verb} · ${valueOnly}`;
 }
 
 export function buildAssistantEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
