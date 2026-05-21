@@ -3,6 +3,7 @@
 import { buildEcosystemPreamble, shouldApplyEcosystemBias } from "./discovery-ecosystem.js";
 import type { LeaderLike } from "./discovery-prompt-parser.js";
 import { type DiscoveryQuestion, getSchemaHintForLeader } from "./discovery-schema.js";
+import { type RepoBrief, rationaleCitesBrief } from "./repo-brief.js";
 import type { DiscoveryContext, ExistingProjectSignals, RecommendationEntry } from "./types.js";
 
 export interface RecommendInput {
@@ -18,6 +19,15 @@ export interface RecommendInput {
    * with callers that don't have the original prompt at hand.
    */
   userIdea?: string;
+  /**
+   * Repo brief built by `buildRepoBrief(cwd, detection)` when the user is
+   * iterating on an EXISTING project. Replaces the Muonroi vendor preamble
+   * (which is greenfield-only) and lets the leader cite real files, deps,
+   * and scripts. When set, rationales are post-validated against the brief's
+   * citable tokens — uncited rationales trigger one retry with a stronger
+   * instruction; persistent miss is recorded via `synthFailed=true`.
+   */
+  repoBrief?: RepoBrief;
 }
 
 /**
@@ -123,7 +133,15 @@ const LEADER_SYSTEM =
   "Rationale: short prompts mean the user has NOT asked for enterprise complexity. Inflating scope here cascades into wasted debate and over-built code.\n" +
   '- When specificity is "moderate", pick pragmatic defaults grounded in any stated context; surface ONE richer alternative.\n' +
   '- When specificity is "detailed", respect the stated context fully; alternatives explore adjacent design choices.\n' +
-  "This rule applies to EVERY question (productType, audience, backendStack, etc.). The user accepts defaults by reflex — wrong defaults become locked-in spec.";
+  "This rule applies to EVERY question (productType, audience, backendStack, etc.). The user accepts defaults by reflex — wrong defaults become locked-in spec.\n\n" +
+  "## Existing-project citation discipline\n" +
+  "If the prompt contains a `## Repo brief` section, you are recommending changes INSIDE an existing project.\n" +
+  "Every `rationale` field MUST cite at least one concrete token from the brief: a file path, directory, dependency, " +
+  "script name, framework, or manifest name. Generic rationales (e.g. 'industry standard', 'simple choice', " +
+  "'good for SaaS') are INVALID when a brief is present — they signal you ignored the repo.\n" +
+  'Format: weave the citation naturally, e.g. "reuses `src/product-loop/discovery-recommender.ts` to avoid a parallel path" ' +
+  'or "extends the existing `bun run build` script". Cite by name in backticks when possible.\n' +
+  "If no token from the brief fits the question, that is a signal you need MORE exploration — say so in the rationale rather than fabricating one.";
 
 function stripFences(s: string): string {
   return s
@@ -187,11 +205,17 @@ function parseLeaderResponse(raw: string): { primary: any; alternatives: any[] }
 }
 
 export async function leaderRecommend(input: RecommendInput, leader: LeaderLike): Promise<RecommendOutput> {
-  const prompt = buildLeaderPrompt(input);
+  const basePrompt = buildLeaderPrompt(input);
   const modelId: string = (leader as any).modelId ?? "unknown";
   let cost = 0;
+  // Track whether we already retried with a stronger citation instruction —
+  // we only do this once to bound cost.
+  let citationRetryDone = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     const t0 = Date.now();
+    const prompt = citationRetryDone
+      ? `${basePrompt}\n\nPREVIOUS ATTEMPT FAILED citation check — your rationale referenced no concrete artifact from the repo brief. RETRY: every rationale field MUST embed at least one backticked token from the brief (file path, dep, script). If you cannot, say so explicitly in the rationale instead of inventing a generic one.`
+      : basePrompt;
     try {
       // 4096 (was 1024) — reasoner models (deepseek-v4-pro, o3) consume the
       // output budget for reasoning_tokens, so 1024 routinely truncates the
@@ -210,6 +234,24 @@ export async function leaderRecommend(input: RecommendInput, leader: LeaderLike)
           outcome: "parse_ok",
         });
         emitLeaderTiming({ attempt, durationMs, outcome: "ok", modelId });
+
+        // Citation validation: only when we sent a repoBrief (existing-project
+        // path). If the primary rationale doesn't cite, retry ONCE with a
+        // stronger instruction. After retry, accept but flag synthFailed so
+        // callers know the rationale is weakly grounded.
+        if (input.repoBrief && !rationaleCitesBrief(String(parsed.primary.rationale), input.repoBrief)) {
+          if (!citationRetryDone) {
+            citationRetryDone = true;
+            continue;
+          }
+          return {
+            primary: parsed.primary,
+            alternatives: parsed.alternatives,
+            source: "leader",
+            costUsd: cost,
+            synthFailed: true,
+          };
+        }
         return {
           primary: parsed.primary,
           alternatives: parsed.alternatives,
@@ -256,8 +298,13 @@ function buildLeaderPrompt(input: RecommendInput): string {
   const constraint = getSchemaHintForLeader(input.question.id);
   const specificity = computePromptSpecificity(input.userIdea);
   const parts: string[] = [];
-  if (shouldApplyEcosystemBias({ detection: input.detection })) {
+  const ecosystemOn = shouldApplyEcosystemBias({ detection: input.detection });
+  if (ecosystemOn) {
     parts.push(buildEcosystemPreamble(), "");
+  } else if (input.repoBrief) {
+    // Existing project: replace vendor preamble with the actual repo brief so
+    // the leader has something concrete to cite (per LEADER_SYSTEM addendum).
+    parts.push(input.repoBrief.markdown, "");
   }
   parts.push(
     input.userIdea ? `User's original prompt: ${JSON.stringify(input.userIdea)}` : "",

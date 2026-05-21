@@ -23,6 +23,7 @@ import {
   REQUIRED_QUESTION_IDS,
   validateAnswer,
 } from "./discovery-schema.js";
+import { buildRepoBrief, type RepoBrief } from "./repo-brief.js";
 import type { ExistingProjectSignals, PlatformT, ProjectContext } from "./types.js";
 
 export type UserPromptResult =
@@ -56,6 +57,12 @@ export interface IterateOpts {
   detection: ExistingProjectSignals;
   userPrompt: UserPromptFn;
   recommender: RecommenderLike;
+  /**
+   * Working directory used to build the repo brief when `detection.classification`
+   * is not `greenfield`. Defaults to `process.cwd()`. Tests can override with a
+   * sandboxed temp dir to exercise existing-project paths deterministically.
+   */
+  cwd?: string;
 }
 
 export async function iterateInterview(opts: IterateOpts): Promise<ProjectContext> {
@@ -76,6 +83,24 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // not web) are deferred unless the user explicitly re-runs with more context.
   const specificity = computePromptSpecificity(opts.idea);
   const skipOptionalForMinimal = specificity === "minimal";
+
+  // Build the repo brief ONCE per interview run for existing projects. The
+  // brief replaces the Muonroi vendor preamble inside leader prompts so
+  // rationales must cite real files, deps, and scripts. Skipped for greenfield —
+  // there's no source tree to summarize.
+  let repoBrief: RepoBrief | undefined;
+  if (detection.classification !== "greenfield") {
+    try {
+      repoBrief = await buildRepoBrief(opts.cwd ?? process.cwd(), detection);
+    } catch (err) {
+      // Brief failure should NEVER block discovery — fall through with no
+      // brief; leader will see no preamble + no brief and still produce
+      // a (less grounded) answer.
+      if (_itvDbg) {
+        process.stderr.write(`[interview-entry] repoBrief-build-failed: ${(err as Error).message}\n`);
+      }
+    }
+  }
 
   for (const question of DISCOVERY_QUESTIONS) {
     if (_itvDbg) {
@@ -107,6 +132,7 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       context: state.answers,
       detection,
       userIdea: opts.idea,
+      repoBrief,
     };
 
     let recommendation: RecommendOutput;
