@@ -221,13 +221,28 @@ export async function runGatherPhase(
 
     const { partial: prompted } = await parsePromptForContext(idea, leader);
 
+    // When detection knows the language, also synthesize a `backendStack`
+    // answer from it so the interview can SKIP the question AND downstream
+    // consumers (formatProjectContextForPrompt at discovery-context-format.ts)
+    // find a real value at `ctx.context.backendStack.language`. Previously
+    // the prefillSource flag claimed backendStack was answered but the
+    // prefillAnswers map didn't actually contain it — session e2660a052918
+    // crashed at the first prompt that accessed `.language` of an undefined.
+    const prefillFromDetection: Partial<DiscoveryContext> = {};
+    if (detection.languages.length > 0) {
+      prefillFromDetection.backendStack = {
+        language: detection.languages[0] ?? "(detected)",
+        framework: detection.frameworks[0] ?? "(none detected)",
+      };
+    }
+
     await initDiscoveryState(flowDir, runId, {
       classification: detection.classification,
       prefillSource: {
         fromDetection: detection.languages.length ? ["backendStack"] : [],
         fromPrompt: Object.keys(prompted),
       },
-      prefillAnswers: prompted,
+      prefillAnswers: { ...prefillFromDetection, ...prompted },
     });
 
     // Recommender: always leader-only. The council debate runner (Task 16) is
