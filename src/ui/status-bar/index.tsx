@@ -53,7 +53,16 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
       ? `${s.provider || "-"}/${s.routed_from}→${s.model}`
       : `${s.provider || "-"}/${s.model || "-"}`;
 
-  const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${s.cache_read_tokens ? ` ⊚${fmtTokens(s.cache_read_tokens)}` : ""}`;
+  // F5 — show context fill % (latest call vs model window) so the user can
+  // see how close they are to hitting the model's context limit, not just
+  // the cumulative billed input.
+  const ctxFill =
+    s.ctx_pct !== undefined
+      ? ` ctx${s.ctx_pct}%`
+      : s.ctx_tokens !== undefined
+        ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]`
+        : "";
+  const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${s.cache_read_tokens ? ` ⊚${fmtTokens(s.cache_read_tokens)}` : ""}${ctxFill}`;
   const ee = EE_DOT[s.ee_status] ?? EE_DOT.unknown;
 
   const slots: React.ReactNode[] = [
@@ -62,7 +71,7 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
     React.createElement(
       "text",
       { key: "tok", fg: "cyan", "data-testid": "slot-tokens" },
-      `${tokenStr}${s.ctx_tokens !== undefined ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]` : ""}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`,
+      `${tokenStr}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`,
     ),
     React.createElement(UsdMeter, {
       key: "usd",

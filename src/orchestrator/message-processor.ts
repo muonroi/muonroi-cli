@@ -139,6 +139,33 @@ import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
+
+/**
+ * F2 — approximate the char cost of the FIXED prompt envelope (system +
+ * tools JSON-Schema) that streamText re-sends on every step. Used to feed
+ * the compactor a realistic total-prompt size so it fires when billed input
+ * is actually large, not when only `messages[]` is.
+ */
+function computeEnvelopeChars(system: unknown, tools: unknown): number {
+  let n = 0;
+  if (typeof system === "string") n += system.length;
+  else if (system && typeof system === "object") {
+    try {
+      n += JSON.stringify(system).length;
+    } catch {
+      /* ignore — best-effort estimate */
+    }
+  }
+  if (tools && typeof tools === "object") {
+    try {
+      n += JSON.stringify(tools).length;
+    } catch {
+      /* ignore */
+    }
+  }
+  return n;
+}
+
 import {
   combineAbortSignals,
   getFinishReason,
@@ -1209,10 +1236,16 @@ export class MessageProcessor {
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
+              // F2 — envelope = system prompt + JSON-Schema of every tool
+              // re-sent on every step. Without this the threshold check
+              // ignored 20-50K of fixed prompt overhead and the compactor
+              // sat dormant just below its limit while billed input climbed.
+              const envelopeChars = computeEnvelopeChars(systemForModel, tools);
               const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
                 keepLastTurns: topLevelCompactKeepLast,
                 label: "top-level",
+                envelopeChars,
               });
               if (compacted === stripped && stripped === stepMessages) return {};
               return { messages: compacted };

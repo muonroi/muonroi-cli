@@ -11,7 +11,17 @@ import {
 } from "../utils/settings";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 
-export const MAX_TOOL_ROUNDS = 75;
+// F3 — hard cap on tool rounds per user turn. Default reduced 75 → 50
+// after session bca83bcbaad1 logged 178 tool calls in a single turn while
+// monotonically growing billed input. Env override allowed range 10..200.
+function readMaxToolRoundsFromEnv(): number {
+  const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
+  if (!raw) return 50;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 50;
+  return Math.max(10, Math.min(200, Math.floor(n)));
+}
+export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
 export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 

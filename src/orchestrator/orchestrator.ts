@@ -870,6 +870,12 @@ export class Agent {
     const nonCachedInput = Math.max(0, totalInput - cacheRead - cacheCreate);
     const turnCostMicros =
       nonCachedInput * priceIn + cacheRead * priceCached + cacheCreate * priceIn + output * priceOut;
+    // F5 — ctx_tokens reflects the CURRENT call's input size (≈ context
+    // window usage), not cumulative. Lets the user see "how full is my
+    // window" instead of "how much have I billed in total this session".
+    // Pair with context-fill % derived from model contextWindow.
+    const ctxWindow = info?.contextWindow ?? 0;
+    const ctxPct = ctxWindow > 0 ? Math.min(100, Math.round((totalInput / ctxWindow) * 100)) : undefined;
     statusBarStore.setState({
       in_tokens: prev.in_tokens + totalInput,
       out_tokens: prev.out_tokens + output,
@@ -878,6 +884,8 @@ export class Agent {
       session_usd: prev.session_usd + turnCostMicros / 1_000_000,
       provider: this.providerId,
       model,
+      ctx_tokens: totalInput,
+      ctx_pct: ctxPct,
     });
 
     // Append to cost-log JSONL so `usage report --by callsite` can surface

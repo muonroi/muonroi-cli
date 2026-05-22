@@ -63,8 +63,8 @@ describe("compressForCap", () => {
     expect(state.dedupHits).toBe(0);
 
     const second = compressForCap(state, payload);
-    expect(second).toContain("duplicate tool output detected");
-    expect(second).toContain("call #1");
+    expect(second).toContain("dup of call");
+    expect(second).toContain("#1");
     expect(state.dedupHits).toBe(1);
     // Cumulative should grow by stub length, NOT full payload length again.
     expect(state.cumulative).toBeLessThan(payload.length * 2);
