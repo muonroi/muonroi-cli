@@ -13,6 +13,7 @@
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
 import { isUnifiedPilEnabled } from "./config.js";
+import type { LlmClassifyFn } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -284,7 +285,12 @@ function detectStyleFromText(raw: string): OutputStyle | null {
   return null;
 }
 
-export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContext> {
+export interface Layer1Options {
+  /** Pass 4 LLM fallback closure — fires when brain returned null or confidence < 0.7. */
+  llmFallback?: LlmClassifyFn;
+}
+
+export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {}): Promise<PipelineContext> {
   try {
     // Pass 1: local classifier.
     const result = classify(ctx.raw);
@@ -373,6 +379,35 @@ export async function layer1Intent(ctx: PipelineContext): Promise<PipelineContex
         pass3UnifiedSucceeded = true;
       } else {
         unifiedFailed = true;
+      }
+    }
+
+    // Pass 4 LLM FALLBACK: fires when brain was attempted but the outcome is
+    // still weak (brain returned null OR final confidence < 0.7 OR taskType
+    // still null). Uses the orchestrator-provided closure so PIL stays
+    // ignorant of provider factories. Cost ~$0.0001 / call.
+    let pass4LlmAttempted = false;
+    let pass4LlmSucceeded = false;
+    const llmFallbackEligible =
+      !!opts.llmFallback &&
+      intentKind !== "chitchat" &&
+      (taskType === null || confidence < HIGH_CONF_THRESHOLD || unifiedFailed);
+    if (llmFallbackEligible) {
+      pass4LlmAttempted = true;
+      try {
+        const llmRes = await opts.llmFallback!(ctx.raw);
+        if (llmRes) {
+          pass4LlmSucceeded = true;
+          taskType = llmRes.taskType === "general" ? "general" : llmRes.taskType;
+          confidence = llmRes.confidence;
+          intentKind = llmRes.taskType === "general" ? "chitchat" : "task";
+          if (llmRes.outputStyle) {
+            outputStyle = llmRes.outputStyle;
+            styleSource = "brain-unified"; // closest existing source — LLM acts in same role
+          }
+        }
+      } catch (err) {
+        console.error(`[pil.layer1] LLM fallback failed: ${(err as Error)?.message}`);
       }
     }
 
@@ -541,6 +576,8 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
       pass3LegacyTaskSucceeded,
       pass3LegacyStyleAttempted,
       pass3LegacyStyleSucceeded,
+      pass4LlmAttempted,
+      pass4LlmSucceeded,
       styleSource,
       finalTaskType: taskType,
       finalConfidence: confidence,
@@ -564,9 +601,9 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
           applied: taskType !== null,
           delta:
             taskType !== null
-              ? `taskType=${taskType},kind=${intentKind ?? "unknown"},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},unified=${brainData ? "ok" : unifiedFailed ? "fail" : "skip"}`
+              ? `taskType=${taskType},kind=${intentKind ?? "unknown"},conf=${confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},unified=${brainData ? "ok" : unifiedFailed ? "fail" : "skip"},llm=${pass4LlmSucceeded ? "ok" : pass4LlmAttempted ? "fail" : "skip"}`
               : unifiedFailed
-                ? `taskType=null,unified=fail`
+                ? `taskType=null,unified=fail,llm=${pass4LlmSucceeded ? "ok" : pass4LlmAttempted ? "fail" : "skip"}`
                 : null,
         },
       ],

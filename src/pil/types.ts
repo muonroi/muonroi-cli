@@ -131,6 +131,10 @@ export interface IntentDetectionTrace {
   pass3LegacyStyleAttempted: boolean;
   /** Legacy style-detection call returned a non-null response. */
   pass3LegacyStyleSucceeded: boolean;
+  /** Pass 4 LLM fallback attempted (brain returned null / low confidence and orchestrator supplied a closure). */
+  pass4LlmAttempted?: boolean;
+  /** Pass 4 LLM fallback returned a parseable result. */
+  pass4LlmSucceeded?: boolean;
   /** How the final outputStyle was resolved. */
   styleSource: "explicit-regex" | "brain-unified" | "brain-legacy" | "chitchat-default" | "classifier-default" | "none";
   /** Final taskType emitted by Layer 1. */

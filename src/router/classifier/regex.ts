@@ -39,7 +39,12 @@ const PATTERNS: Array<{
     confidence: 0.78,
     tierHint: "balanced",
   },
-  { re: /\b(edit|modify|update|change|fix|patch)\s+(the\s+)?\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
+  // PIL-L6 v2 — free-form catch-all: confidence below brain threshold (0.7)
+  // so L1 cascades into the unified pilContext / LLM fallback to disambiguate.
+  // "fix cho tôi" or "fix the bug" would otherwise win at 0.8 and skip brain,
+  // misclassifying CI-debug as taskType=generate. Specific verb+noun rules
+  // (above this one) still score 0.85 and bypass brain when unambiguous.
+  { re: /\b(edit|modify|update|change|fix|patch)\s+(the\s+)?\S+/i, intent: "edit", confidence: 0.55, tierHint: "fast" },
   {
     re: /\b(run|execute|exec)\s+(the\s+)?(command|script|npm|bun|tsc|test|build)\b/i,
     intent: "run-command",
@@ -106,7 +111,9 @@ const PATTERNS: Array<{
     confidence: 0.85,
     tierHint: "balanced",
   },
-  { re: /(sửa|fix|chỉnh|update|cập nhật|patch)\s+\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
+  // PIL-L6 v2 — same brain-trigger reasoning as the EN catch-all above.
+  // VN "fix cho tôi" / "sửa giúp" must NOT skip brain.
+  { re: /(sửa|fix|chỉnh|update|cập nhật|patch)\s+\S+/i, intent: "edit", confidence: 0.55, tierHint: "fast" },
   {
     re: /(chạy|run|thực thi)\s+(lệnh|command|script|test|build)/i,
     intent: "run-command",
