@@ -1,7 +1,12 @@
 import { randomUUID } from "crypto";
 import type { AgentMode, SessionInfo, SessionStatus, WorkspaceInfo } from "../types/index";
 import { getDatabase } from "./db";
+import { sweepStalePendingRows } from "./transcript";
 import { ensureWorkspace } from "./workspaces";
+
+// Best-effort sweep is done once per process — repeated openSession() calls
+// (e.g. user runs /sessions then picks one) do not re-scan the DB.
+let _sweepDone = false;
 
 interface SessionRow {
   id: string;
@@ -28,6 +33,20 @@ export class SessionStore {
   }
 
   openSession(selector: string | undefined, model: string, mode: AgentMode, cwd: string): SessionInfo {
+    // One-shot cleanup of write-ahead rows orphaned by a prior process that
+    // was killed mid-turn (Ctrl+C on `gh run watch`, OOM, taskkill /F).
+    // Without this, tool_calls and messages stay status='pending' forever,
+    // skewing forensics + filling the DB with dead state.
+    if (!_sweepDone) {
+      _sweepDone = true;
+      const swept = sweepStalePendingRows();
+      if (swept.toolCalls > 0 || swept.messages > 0) {
+        console.error(
+          `[muonroi-cli] swept stale write-ahead rows from prior run: ${swept.toolCalls} tool_calls, ${swept.messages} messages`,
+        );
+      }
+    }
+
     if (!selector) {
       return this.createSession(model, mode, cwd);
     }
