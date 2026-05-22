@@ -265,8 +265,9 @@ export function shouldDropParam(
   //     drop at the source so no future strict-mode provider hard-errors).
   // See ProviderCapabilities in src/providers/capabilities.ts.
   const provider = runtime.modelInfo?.provider;
-  if (!provider)
-    throw new Error(`Cannot check param "${param}" — model "${runtime.modelId}" has no provider in catalog.`);
+  if (!provider) {
+    return runtime.unsupportedParams?.includes(param) ?? false;
+  }
   const caps = getProviderCapabilities(provider as ProviderId);
   if (!caps.acceptsParam(param, runtime.modelInfo)) {
     return true;

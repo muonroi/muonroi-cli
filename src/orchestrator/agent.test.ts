@@ -1,10 +1,9 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { loadCatalog } from "../models/registry.js";
-
-beforeAll(async () => { await loadCatalog(); });
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 async function importAgentModule() {
   vi.resetModules();
+  const { loadCatalog } = await import("../models/registry.js");
+  await loadCatalog();
   vi.doMock("../storage/index", () => ({
     appendCompaction: vi.fn(),
     appendMessages: vi.fn(() => []),
