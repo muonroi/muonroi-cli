@@ -9,7 +9,12 @@ import type {
   ProjectContext,
 } from "./discovery-types.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
-import { buildInterviewQuestion, detectClarityGaps, resolveGapsNonInteractive } from "./layer16-clarity.js";
+import {
+  buildInterviewQuestion,
+  detectClarityGaps,
+  getAutofilledOutcome,
+  resolveGapsNonInteractive,
+} from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
 import { buildAcceptanceCard, buildAcceptanceQuestion } from "./layer18-acceptance.js";
 import type { OutputStyle, TaskType } from "./types.js";
@@ -110,6 +115,12 @@ export async function runDiscovery(
     clarifiedIntent = buildClarifiedIntentFromAnswers(answeredGaps, raw, projectContext);
   } else {
     clarifiedIntent = resolveGapsNonInteractive(gaps, projectContext, raw);
+  }
+
+  // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked
+  const autoOutcome = getAutofilledOutcome(l1.taskType);
+  if (autoOutcome && (!clarifiedIntent.outcome || clarifiedIntent.outcome.startsWith("Complete the task"))) {
+    clarifiedIntent = { ...clarifiedIntent, outcome: autoOutcome };
   }
 
   // L1.7: Feasibility Check

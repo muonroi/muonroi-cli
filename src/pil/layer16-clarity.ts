@@ -11,15 +11,20 @@ export function detectClarityGaps(
 ): ClarityGap[] {
   const gaps: ClarityGap[] = [];
 
+  const AUTOFILL_OUTCOME_TYPES: Set<TaskType> = new Set(["analyze", "plan", "documentation"]);
   if (!canInferOutcome(taskType, raw)) {
-    const outcomeOptions = buildOutcomeOptions(taskType, projectContext);
-    gaps.push({
-      dimension: "outcome",
-      description: "Cannot infer the expected outcome from the prompt",
-      suggestedQuestion: `What's the expected outcome? ${taskType === "debug" ? "(e.g., error gone, test passes, behavior fixed)" : "(e.g., feature works, file updated, test passes)"}`,
-      options: outcomeOptions,
-      defaultIndex: 0,
-    });
+    if (taskType && AUTOFILL_OUTCOME_TYPES.has(taskType)) {
+      // These task types have predictable outcomes — auto-fill without asking
+    } else {
+      const outcomeOptions = buildOutcomeOptions(taskType, projectContext);
+      gaps.push({
+        dimension: "outcome",
+        description: "Cannot infer the expected outcome from the prompt",
+        suggestedQuestion: `What's the expected outcome? ${taskType === "debug" ? "(e.g., error gone, test passes, behavior fixed)" : "(e.g., feature works, file updated, test passes)"}`,
+        options: outcomeOptions,
+        defaultIndex: 0,
+      });
+    }
   }
 
   if (countFileReferences(raw) === 0 && !hasExplicitScope(raw)) {
@@ -134,7 +139,7 @@ export function resolveGapsNonInteractive(
     }
   }
 
-  if (!outcome) outcome = `Complete the task described in: "${raw.slice(0, 80)}"`;
+  if (!outcome) outcome = getDefaultOutcome(raw);
   if (scope.length === 0) {
     scope = projectContext.relevantModules.map((m) => m.path);
     if (scope.length === 0) scope = ["project root"];
@@ -146,4 +151,19 @@ export function resolveGapsNonInteractive(
     constraints,
     gaps: gaps.map((g) => ({ ...g, answer: null })),
   };
+}
+
+const DEFAULT_OUTCOMES: Partial<Record<TaskType, string>> = {
+  analyze: "Report generated",
+  plan: "Step-by-step plan",
+  documentation: "Docs updated",
+};
+
+export function getAutofilledOutcome(taskType: TaskType | null): string | null {
+  if (!taskType) return null;
+  return DEFAULT_OUTCOMES[taskType] ?? null;
+}
+
+function getDefaultOutcome(raw: string): string {
+  return `Complete the task described in: "${raw.slice(0, 80)}"`;
 }
