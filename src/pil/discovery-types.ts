@@ -1,4 +1,5 @@
-import type { CouncilQuestionAnswer, CouncilQuestionData } from "../types/index.js";
+import type { CouncilQuestionData } from "../types/index.js";
+import type { CouncilQuestionAnswer } from "../ui/components/council-question-card.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
 export interface ProjectContext {
