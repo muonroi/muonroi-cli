@@ -102,6 +102,9 @@ describe("sufficiency routing — vague briefs force Council", () => {
       runProductLoop(
         makeOpts({
           flowDir,
+          // cwd must point to the empty temp dir so detectExistingRepoBypass
+          // returns false (greenfield) and the sufficiency gate fires.
+          cwd: flowDir,
           complexity: "low",
           sufficiencyMissing: ["scope"],
         }),
@@ -123,6 +126,9 @@ describe("sufficiency routing — vague briefs force Council", () => {
       runProductLoop(
         makeOpts({
           flowDir,
+          // cwd must point to the empty temp dir so detectExistingRepoBypass
+          // returns false (greenfield) and the sufficiency gate fires.
+          cwd: flowDir,
           idea: "todo app",
           complexity: "low",
           sufficiencyMissing: ["scope", "intent"],

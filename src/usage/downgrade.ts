@@ -2,17 +2,34 @@
  * src/usage/downgrade.ts
  *
  * Auto-downgrade chain for USAGE-04.
- * Opus -> Sonnet -> Haiku -> HALT with status-bar transition events.
+ * premium -> balanced -> fast -> HALT with status-bar transition events.
+ * Chain is derived from catalog.json tiers, not hardcoded model IDs.
  *
  * Plan 06 (status bar) subscribes to DowngradeEvent for UI updates.
  */
 
-export const DOWNGRADE_CHAIN: ReadonlyArray<string> = [
-  "claude-3-opus-latest",
-  "claude-3-5-sonnet-latest",
-  "claude-3-5-haiku-latest",
-  "HALT",
-];
+import { getModelByTier } from "../models/registry.js";
+import { getDefaultProvider } from "../utils/settings.js";
+
+function buildDowngradeChain(): ReadonlyArray<string> {
+  const provider = getDefaultProvider() ?? undefined;
+  const tiers: Array<"premium" | "balanced" | "fast"> = ["premium", "balanced", "fast"];
+  const seen = new Set<string>();
+  const chain: string[] = [];
+  for (const tier of tiers) {
+    const m = getModelByTier(tier, provider);
+    if (m && !seen.has(m.id)) {
+      chain.push(m.id);
+      seen.add(m.id);
+    }
+  }
+  chain.push("HALT");
+  return chain;
+}
+
+export function getDowngradeChain(): ReadonlyArray<string> {
+  return buildDowngradeChain();
+}
 
 export interface DowngradeStep {
   next: string;
@@ -32,9 +49,10 @@ export interface DowngradeEvent {
  * Unknown models are treated as top-of-chain (Opus position).
  */
 export function downgradeChain(currentModel: string, capPct = 0): DowngradeStep {
-  const idx = DOWNGRADE_CHAIN.indexOf(currentModel);
+  const chain = getDowngradeChain();
+  const idx = chain.indexOf(currentModel);
   const i = idx === -1 ? 0 : idx; // unknown model treated as top
-  const next = DOWNGRADE_CHAIN[i + 1] ?? "HALT";
+  const next = chain[i + 1] ?? "HALT";
   const isHalt = next === "HALT";
 
   const human = (m: string) =>

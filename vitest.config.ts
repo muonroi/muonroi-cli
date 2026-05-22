@@ -25,6 +25,7 @@ export default defineConfig({
     ],
   },
   test: {
+    fileParallelism: false,
     include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}", "tests/perf/**/*.bench.ts"],
     exclude: [
       "dist/**",

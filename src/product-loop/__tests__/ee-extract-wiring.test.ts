@@ -9,7 +9,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 
 // ── Static mocks (must precede dynamic imports) ───────────────────────────────
 
@@ -49,13 +51,17 @@ import { runProductLoop } from "../index.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState } from "../types.js";
 
+beforeAll(async () => {
+  await loadCatalog();
+});
+
 async function tmpFlowDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "ee-wire-"));
 }
 
 function makeOpts(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    sessionModelId: "claude-sonnet-4-6",
+    sessionModelId: getTestModels().balanced,
     sessionId: "test-session-id",
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9 },

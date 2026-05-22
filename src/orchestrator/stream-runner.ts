@@ -32,7 +32,12 @@ import { buildMcpToolSet } from "../mcp/runtime";
 import { normalizeModelId } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
-import { type ResolvedModelRuntime, resolveModelRuntime, shouldDropParam } from "../providers/runtime.js";
+import {
+  type ResolvedModelRuntime,
+  requireRuntimeProvider,
+  resolveModelRuntime,
+  shouldDropParam,
+} from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { BashTool } from "../tools/bash";
@@ -297,7 +302,7 @@ export class StreamRunner {
           model: provider.responses?.(childModelId) ?? provider(childModelId),
         }
       : resolveModelRuntime(provider, childModelId);
-    const taskCaps = getProviderCapabilities(childRuntime.modelInfo?.provider ?? "anthropic");
+    const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (isComputer && !taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       return {
         kind: "short-circuit",
@@ -403,7 +408,7 @@ export class StreamRunner {
     signal?: AbortSignal,
   ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string }> {
     const { childRuntime, childSystem, childMessages, childTools, maxSteps } = prepared;
-    const taskCaps = getProviderCapabilities(childRuntime.modelInfo?.provider ?? "anthropic");
+    const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     let assistantText = "";
     let lastActivity = prepared.lastActivity;
     const isExplore = prepared.agentKey === "explore";

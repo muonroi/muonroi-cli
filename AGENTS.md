@@ -31,6 +31,10 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 | `src/models/` | Model catalog and pricing registry |
 | `src/ee/` | Experience Engine client and hooks |
 
+## Zero Hardcode Rule — Model & Provider IDs
+
+**NEVER** hardcode model IDs or provider IDs as string literals in production code. All references MUST come from `catalog.json` + user settings + runtime detection. If unresolvable, throw — do NOT `?? "anthropic"` or `?? "deepseek-v4-flash"`. See CLAUDE.md for full details.
+
 ## Architecture notes
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)

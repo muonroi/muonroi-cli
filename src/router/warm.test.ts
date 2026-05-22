@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
@@ -28,6 +28,11 @@ describe("callWarmRoute bridge cascade", () => {
         taskHash: "http-hash",
       }),
     });
+  });
+
+  beforeEach(() => {
+    // Re-pin the global EE client before each test so the second describe
+    // block's beforeAll cannot leave a stale client pointing at a different port.
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
   });
 
@@ -120,6 +125,9 @@ describe("callWarmRoute", () => {
         taskHash: "test-hash",
       }),
     });
+  });
+
+  beforeEach(() => {
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
   });
 

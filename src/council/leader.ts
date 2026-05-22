@@ -75,7 +75,12 @@ export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string
     return leaderModelId;
   }
 
-  const leaderProvider = detectProviderForModel(leaderModelId);
+  let leaderProvider: string;
+  try {
+    leaderProvider = detectProviderForModel(leaderModelId);
+  } catch {
+    return leaderModelId;
+  }
   const candidate = getModelByTier(targetTier, leaderProvider);
 
   // Only accept a candidate that's on the same provider as the leader.

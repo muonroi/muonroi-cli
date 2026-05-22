@@ -222,10 +222,13 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     fallbackReason: null,
   };
   try {
-    const result = await Promise.race([
-      runLayers({ ...fallback }, options),
-      resolveAfter(pipelineTimeoutMs(), { ...fallback, fallbackReason: "pipeline-timeout" } as PipelineContext),
-    ]);
+    const hasInteractiveDiscovery = !!options?.interactionHandler && isDiscoveryEnabled();
+    const result = hasInteractiveDiscovery
+      ? await runLayers({ ...fallback }, options)
+      : await Promise.race([
+          runLayers({ ...fallback }, options),
+          resolveAfter(pipelineTimeoutMs(), { ...fallback, fallbackReason: "pipeline-timeout" } as PipelineContext),
+        ]);
     const parse = PipelineContextSchema.safeParse(result);
     if (!parse.success) {
       const validated: PipelineContext = {

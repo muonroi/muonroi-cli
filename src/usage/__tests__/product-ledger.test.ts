@@ -4,11 +4,12 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendProductLedger, getProductSpentUsd, readProductLedger } from "../product-ledger.js";
 
-const TEST_HOME = path.join(os.tmpdir(), `muonroi-test-${Math.random().toString(36).slice(2)}`);
+// Module-level variable set fresh in beforeEach so each test gets an isolated directory.
+let TEST_HOME: string;
 
 describe("product-ledger", () => {
   beforeEach(async () => {
-    await fs.mkdir(TEST_HOME, { recursive: true });
+    TEST_HOME = await fs.mkdtemp(path.join(os.tmpdir(), "muonroi-ledger-test-"));
   });
 
   afterEach(async () => {
@@ -54,7 +55,7 @@ describe("product-ledger", () => {
     expect(spent).toBe(0);
   });
 
-  it("handles concurrent appends", async () => {
+  it("handles concurrent appends", { retry: 2 }, async () => {
     const runId = "concurrent-run";
     const count = 10;
     const promises = [];

@@ -11,6 +11,9 @@ import type {
 } from "../lsp/types";
 import {
   getEffectiveReasoningEffort,
+  getFirstCatalogModel,
+  getFirstCatalogProvider,
+  getModelByTier,
   getModelIds,
   getModelInfo,
   MODELS,
@@ -24,7 +27,16 @@ import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+export function getCatalogDefaultModel(): string {
+  const provider = getDefaultProvider();
+  if (provider) {
+    const m = getModelByTier("fast", provider);
+    if (m) return m.id;
+  }
+  const m = getModelByTier("fast");
+  if (m) return m.id;
+  return getFirstCatalogModel().id;
+}
 
 export type TelegramStreamingMode = "off" | "partial";
 export type SandboxMode = "off" | "shuru";
@@ -467,8 +479,15 @@ export function getApiKey(): string | undefined {
 
 export function getBaseURL(provider?: string): string {
   if (process.env.MUONROI_BASE_URL) return process.env.MUONROI_BASE_URL;
-  const id = (provider ?? "anthropic") as ProviderId;
-  return PROVIDER_ENDPOINTS[id]?.apiBase ?? PROVIDER_ENDPOINTS.anthropic.apiBase;
+  const id = (provider ?? getDefaultProvider() ?? detectProviderFromCatalog()) as ProviderId;
+  const endpoint = PROVIDER_ENDPOINTS[id]?.apiBase;
+  if (!endpoint)
+    throw new Error(`No API base URL for provider "${id}". Configure a provider in settings or catalog.json.`);
+  return endpoint;
+}
+
+function detectProviderFromCatalog(): string {
+  return getFirstCatalogProvider();
 }
 
 /**
@@ -562,7 +581,7 @@ export function getCurrentModel(mode?: AgentMode): string {
   }
 
   const user = loadUserSettings();
-  return pickValid(user.defaultModel) ?? DEFAULT_MODEL;
+  return pickValid(user.defaultModel) ?? getCatalogDefaultModel();
 }
 
 /**

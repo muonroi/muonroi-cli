@@ -1,5 +1,7 @@
 import * as os from "node:os";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 import { runLoopDriver } from "../loop-driver.js";
 import type { DriverContext } from "../types.js";
 
@@ -25,6 +27,10 @@ import { runDebate } from "../../council/debate.js";
 import { runPreflight } from "../../council/preflight.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "../gather.js";
 
+beforeAll(async () => {
+  await loadCatalog();
+});
+
 describe("runLoopDriver", () => {
   let ctx: DriverContext;
   let mockLLM: any;
@@ -41,7 +47,7 @@ describe("runLoopDriver", () => {
       runId: "test-run",
       flowDir: os.tmpdir(),
       idea: "Test Idea",
-      sessionModelId: "claude-sonnet-4-6",
+      sessionModelId: getTestModels().balanced,
       llm: mockLLM,
       flags: {
         maxCost: 100,

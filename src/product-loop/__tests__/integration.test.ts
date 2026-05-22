@@ -8,7 +8,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 
 vi.mock("../loop-driver.js", () => ({
   runLoopDriver: vi.fn(async function* () {
@@ -31,6 +33,10 @@ import { runProductLoop } from "../index.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState } from "../types.js";
 
+beforeAll(async () => {
+  await loadCatalog();
+});
+
 async function tmpFlowDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "ideal-int-"));
   return dir;
@@ -39,7 +45,7 @@ async function tmpFlowDir(): Promise<string> {
 function makeOpts(overrides: any = {}): any {
   return {
     flowDir: overrides.flowDir,
-    sessionModelId: "claude-sonnet-4-6",
+    sessionModelId: getTestModels().balanced,
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 3, doneThreshold: 0.9 },
     respondToQuestion: vi.fn(async () => "answer"),

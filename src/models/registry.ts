@@ -75,3 +75,13 @@ export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProv
 export function getModelsForProvider(providerId: string): ModelInfo[] {
   return MODELS.filter((m) => m.provider === providerId);
 }
+
+export function getFirstCatalogModel(): ModelInfo {
+  const m = MODELS.find(() => true);
+  if (!m) throw new Error("No models in catalog. Check src/models/catalog.json or catalog endpoint.");
+  return m;
+}
+
+export function getFirstCatalogProvider(): string {
+  return getFirstCatalogModel().provider!;
+}

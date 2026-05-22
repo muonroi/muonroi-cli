@@ -28,6 +28,7 @@ import {
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
+  requireRuntimeProvider,
   resolveModelRuntime as resolveRuntime,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -160,7 +161,7 @@ function genTitle(
   // Phase 0 stub: return a truncated version of the first user message as title.
   // Phase 1 will replace this with a real LLM-based title generation call.
   const title = userMessage.slice(0, 60).trim() || "New session";
-  return Promise.resolve({ title, modelId: DEFAULT_MODEL });
+  return Promise.resolve({ title, modelId: getCurrentModel() });
 }
 
 /**
@@ -170,8 +171,6 @@ function genTitle(
 function resolveModelRuntime(provider: LegacyProvider, modelId: string): ResolvedModelRuntime {
   return resolveRuntime(provider, modelId);
 }
-
-const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 async function toolSetToBatchTools(_tools: ToolSet): Promise<BatchFunctionTool[]> {
   // Batch API not supported with Anthropic in Phase 0. Phase 1 may add this.
@@ -235,7 +234,7 @@ function createTools(
 
 export class Agent {
   private provider: LegacyProvider | null = null;
-  private providerId: ProviderId = "anthropic";
+  private providerId: ProviderId = null!;
   private apiKey: string | null = null;
   private baseURL: string | null = null;
   private bash: BashTool;
@@ -1020,7 +1019,7 @@ export class Agent {
       signal,
     } = args;
 
-    const childCaps = getProviderCapabilities(childRuntime.modelInfo?.provider ?? "anthropic");
+    const childCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     if (childCaps.usesResponsesAPI(childRuntime.modelInfo)) {
       throw new Error("Batch mode currently supports chat-completions models only.");
     }

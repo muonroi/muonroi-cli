@@ -30,7 +30,7 @@ import type { ModelMessage, ToolSet } from "ai";
 import { buildMcpToolSet } from "../mcp/runtime";
 import type { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
-import type { resolveModelRuntime } from "../providers/runtime.js";
+import { requireRuntimeProvider, type resolveModelRuntime } from "../providers/runtime.js";
 import type { BashTool } from "../tools/bash";
 import type { AgentMode, StreamChunk, TaskRequest, ToolCall, ToolResult } from "../types/index";
 import { loadMcpServers } from "../utils/settings";
@@ -183,7 +183,7 @@ export class BatchTurnRunner {
           );
         }
 
-        const batchCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+        const batchCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
         if (batchCaps.usesResponsesAPI(runtime.modelInfo)) {
           throw new Error("Batch mode currently supports chat-completions models only.");
         }

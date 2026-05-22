@@ -7,6 +7,8 @@ const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
   preflight: "Pre-flight",
   "plan-confirm": "Plan",
   "post-debate": "Post-Debate",
+  "pil-interview": "Understanding",
+  "pil-acceptance": "Confirm Intent",
 };
 
 export interface CouncilQuestionAnswer {

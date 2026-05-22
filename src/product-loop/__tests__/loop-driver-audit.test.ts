@@ -1,5 +1,7 @@
 import * as os from "node:os";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 import type { DriverContext } from "../types.js";
 
 vi.mock("../gather.js", () => ({
@@ -26,6 +28,10 @@ import { runPreflight } from "../../council/preflight.js";
 import { logInteraction, recordUsageEvent } from "../../storage/index.js";
 import { clarifiedSpecFromContext, runGatherPhase } from "../gather.js";
 import { runLoopDriver } from "../loop-driver.js";
+
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 const mockSpec = {
   problemStatement: "Test Idea",
@@ -67,7 +73,7 @@ function buildCtx(): DriverContext {
     sessionId: "audit-session",
     flowDir: os.tmpdir(),
     idea: "Build a todo app",
-    sessionModelId: "claude-sonnet-4-6",
+    sessionModelId: getTestModels().balanced,
     // biome-ignore lint/suspicious/noExplicitAny: mock surface
     llm: { generate: vi.fn().mockResolvedValue("{}"), research: vi.fn().mockResolvedValue("findings") } as any,
     flags: { maxCost: 100, maxSprints: 5, doneThreshold: 0.8 },

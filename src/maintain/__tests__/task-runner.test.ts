@@ -9,7 +9,13 @@
  *   5. Edit stage failure: returns status="failed"
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
+
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 // ── Mocks ──────────────────────────────────────────────────────────────────
 
@@ -102,7 +108,7 @@ function makeInput(
     task: makeTask(taskOverrides),
     codebaseIntel: makeIntel(),
     ctx: makeCtx(ctxOverrides),
-    leaderModelId: "deepseek-v4-flash",
+    leaderModelId: getTestModels().fast,
     costAware: true,
   };
 }

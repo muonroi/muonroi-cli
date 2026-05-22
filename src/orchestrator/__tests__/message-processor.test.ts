@@ -6,7 +6,8 @@
 // behaviour is covered by tests/harness/cost-leak-{f1,g1,b4,c3}.spec.ts.
 
 import type { ModelMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { loadCatalog } from "../../models/registry.js";
 import type { BashTool } from "../../tools/bash";
 import type { ProcessMessageObserver } from "../agent-options";
 import type { CompactionSettings } from "../compaction";
@@ -28,6 +29,7 @@ function makeCouncilStub(extra: Partial<CouncilManager> = {}): CouncilManager {
     setContinuation: () => {},
     setLastSynthesis: () => {},
     resolveNonDisabledFallback: async () => ({ modelId: "deepseek-ai/DeepSeek-V4-Flash" }),
+    createQuestionResponder: () => async () => "",
     ...extra,
   } as unknown as CouncilManager;
 }
@@ -124,6 +126,10 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
 }
 
 describe("MessageProcessor — DI surface invariants", () => {
+  beforeAll(async () => {
+    await loadCatalog();
+  });
+
   it("constructs without throwing when given a valid deps bag", () => {
     const processor = new MessageProcessor(makeDeps());
     expect(processor).toBeInstanceOf(MessageProcessor);

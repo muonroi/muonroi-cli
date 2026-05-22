@@ -11,7 +11,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 
 vi.mock("../sprint-runner.js", () => ({
   runSprint: vi.fn(),
@@ -77,6 +79,10 @@ import { runLoopDriver } from "../loop-driver.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState } from "../types.js";
 
+beforeAll(async () => {
+  await loadCatalog();
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -113,7 +119,7 @@ function makeOpts(flowDir: string, overrides: Record<string, unknown> = {}): unk
     flowDir,
     idea: "build something",
     subcommand: "start",
-    sessionModelId: "claude-sonnet-4-6",
+    sessionModelId: getTestModels().balanced,
     sessionId: "test-session-id",
     llm: { generate: vi.fn(async () => ""), research: vi.fn(async () => "") },
     flags: { maxCost: 50, maxSprints: 8, doneThreshold: 0.9 },
