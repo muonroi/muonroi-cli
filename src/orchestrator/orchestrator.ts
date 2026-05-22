@@ -625,7 +625,7 @@ export class Agent {
     // Slow-path sidecar — write transcript to disk SYNCHRONOUSLY before
     // racing the async HTTP extract. Survives X-close + EE-offline.
     try {
-      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-exit");
+      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-exit", this.bash.getCwd());
     } catch {
       /* fail-open */
     }
@@ -654,7 +654,7 @@ export class Agent {
   async clearHistory(): Promise<void> {
     // D-09: Extract messages accumulated since last clear BEFORE reset
     try {
-      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-clear");
+      emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-clear", this.bash.getCwd());
     } catch {
       /* fail-open */
     }
@@ -1415,7 +1415,7 @@ export class Agent {
 
     // Emit pre-compact transcript snapshot so lessons survive the rewrite.
     try {
-      emitTranscriptToDisk(this.messages, this.session?.id ?? null, "cli-compact");
+      emitTranscriptToDisk(this.messages, this.session?.id ?? null, "cli-compact", this.bash.getCwd());
     } catch {
       /* fail-open */
     }

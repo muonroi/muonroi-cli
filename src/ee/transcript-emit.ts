@@ -26,8 +26,26 @@ import path from "node:path";
 
 import type { ModelMessage } from "ai";
 
-const EMIT_ROOT = path.join(os.homedir(), ".experience", "muonroi-cli-sessions");
+const EXPERIENCE_ROOT = path.join(os.homedir(), ".experience");
+const EMIT_ROOT = path.join(EXPERIENCE_ROOT, "muonroi-cli-sessions");
 const MAX_BLOCK_CHARS = 8000;
+
+/**
+ * Gate: only emit when the user has opted into the experience engine by
+ * creating `~/.experience/config.json`. A fresh clone of muonroi-cli on a
+ * machine with no EE installed must NOT create `~/.experience/` — that would
+ * be silent filesystem litter for a feature the user did not install.
+ * Override with `MUONROI_DISABLE_TRANSCRIPT_EMIT=1` to force-disable even when
+ * EE is installed (e.g. for CI runs).
+ */
+function isEnabled(): boolean {
+  if (process.env.MUONROI_DISABLE_TRANSCRIPT_EMIT === "1") return false;
+  try {
+    return fs.existsSync(path.join(EXPERIENCE_ROOT, "config.json"));
+  } catch {
+    return false;
+  }
+}
 
 type ClaudeBlock =
   | { type: "text"; text: string }
@@ -39,6 +57,17 @@ type ClaudeJsonlEntry = {
   ts: string;
   source: "muonroi-cli";
   reason: "cli-exit" | "cli-clear" | "cli-compact" | "cli-signal";
+};
+
+// First line of each emitted JSONL. The EE stop-extractor reads this to
+// resolve the session's true cwd — which feeds detectFrameworkFromProject()
+// for accurate framework + lang scope (otherwise everything falls back to
+// `framework=any` because projectPath is null).
+type SessionMetaLine = {
+  type: "session_meta";
+  cwd: string | null;
+  runtime: "muonroi-cli";
+  ts: string;
 };
 
 function ensureDir(dir: string): void {
@@ -107,8 +136,10 @@ export function emitTranscriptToDisk(
   messages: ModelMessage[],
   sessionId: string | null | undefined,
   reason: ClaudeJsonlEntry["reason"],
+  cwd?: string | null,
 ): string | null {
   try {
+    if (!isEnabled()) return null;
     if (!sessionId) return null;
     if (!Array.isArray(messages) || messages.length === 0) return null;
 
@@ -116,14 +147,18 @@ export function emitTranscriptToDisk(
     if (entries.length === 0) return null;
 
     ensureDir(EMIT_ROOT);
-    // One file per (session × reason) so /clear and /compact mid-session
-    // don't overwrite the pre-clear snapshot — the backfill loop walks them all.
     const reasonSuffix = reason === "cli-exit" ? "" : `.${reason}`;
     const filename = `${sessionId}${reasonSuffix}.jsonl`;
     const target = path.join(EMIT_ROOT, filename);
 
-    const body = `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`;
-    fs.writeFileSync(target, body, "utf8");
+    const meta: SessionMetaLine = {
+      type: "session_meta",
+      cwd: cwd ? cwd.replace(/\\/g, "/") : null,
+      runtime: "muonroi-cli",
+      ts: new Date().toISOString(),
+    };
+    const lines = [JSON.stringify(meta), ...entries.map((e) => JSON.stringify(e))];
+    fs.writeFileSync(target, `${lines.join("\n")}\n`, "utf8");
     return target;
   } catch {
     return null;
