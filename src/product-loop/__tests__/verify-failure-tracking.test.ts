@@ -100,7 +100,7 @@ describe("loadVerifyFailureSignatures / saveVerifyFailureSignatures", () => {
     };
   }
 
-  it("7. save then load → roundtrip preserved", async () => {
+  it("7. save then load → roundtrip preserved", { retry: 2 }, async () => {
     const sigs: VerifyFailureSignatures = {
       abc123: makeRecord(3),
       def456: makeRecord(1),

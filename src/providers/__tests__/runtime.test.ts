@@ -69,14 +69,11 @@ describe("resolveModelRuntime", () => {
     expect(runtime.modelInfo?.provider).toBe("deepseek");
   });
 
-  test("resolves unknown model without crashing", () => {
+  test("throws for unknown model not in catalog", () => {
     const pf = createProviderFactory("openai", {
       apiKey: "sk-openai-test-key-long-enough-for-validation",
     });
-    const runtime = resolveModelRuntime(pf.factory, "custom-model-xyz");
-    expect(runtime.modelId).toBe("custom-model-xyz");
-    expect(runtime.model).toBeDefined();
-    expect(runtime.modelInfo).toBeUndefined();
+    expect(() => resolveModelRuntime(pf.factory, "custom-model-xyz")).toThrow("not found in catalog");
   });
 });
 
@@ -92,5 +89,6 @@ describe("detectProviderForModel", () => {
   test("detects siliconflow via catalog", () =>
     expect(detectProviderForModel("deepseek-ai/DeepSeek-V4-Pro")).toBe("siliconflow"));
   test("detects xai via prefix fallback", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
-  test("falls back to anthropic for unknown", () => expect(detectProviderForModel("unknown-model")).toBe("anthropic"));
+  test("throws for unknown model with no prefix match", () =>
+    expect(() => detectProviderForModel("unknown-model")).toThrow("not in catalog and no prefix match"));
 });

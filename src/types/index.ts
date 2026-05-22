@@ -218,7 +218,13 @@ export interface StructuredResponse {
   data: Record<string, unknown>;
 }
 
-export type CouncilQuestionPhase = "clarify" | "preflight" | "plan-confirm" | "post-debate";
+export type CouncilQuestionPhase =
+  | "clarify"
+  | "preflight"
+  | "plan-confirm"
+  | "post-debate"
+  | "pil-interview"
+  | "pil-acceptance";
 
 export type CouncilOptionKind = "choice" | "freetext" | "chat";
 
@@ -416,6 +422,7 @@ export interface ModelInfo {
   inputPrice: number;
   outputPrice: number;
   cachedInputPrice?: number;
+  cacheWritePrice?: number;
   reasoning: boolean;
   description: string;
   tier?: ModelTier;

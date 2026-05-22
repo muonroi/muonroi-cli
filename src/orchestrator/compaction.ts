@@ -1,7 +1,7 @@
 import { generateText, type ModelMessage } from "ai";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
-import { resolveModelRuntime } from "../providers/runtime.js";
+import { requireRuntimeProvider, resolveModelRuntime } from "../providers/runtime.js";
 import { containsEncryptedReasoning } from "./reasoning";
 import { countTokens } from "./token-counter.js";
 
@@ -530,7 +530,7 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(provider, modelId);
-  const compactCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+  const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
   const result = await generateText({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,

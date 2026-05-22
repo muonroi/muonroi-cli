@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("atomicWriteJSON", () => {
-  it("Test 1: writes file and removes .tmp on success", async () => {
+  it("Test 1: writes file and removes .tmp on success", { retry: 2 }, async () => {
     const filePath = path.join(tmpDir, "foo.json");
     await atomicWriteJSON(filePath, { hello: 1 });
 

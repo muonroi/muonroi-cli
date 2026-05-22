@@ -6,7 +6,9 @@
 // streamText with MockLanguageModelV3.
 
 import type { ModelMessage } from "ai";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 import type { ResolvedModelRuntime } from "../../providers/runtime.js";
 import type { BashTool } from "../../tools/bash";
 import type { TaskRequest, ToolResult } from "../../types/index";
@@ -14,6 +16,10 @@ import type { LegacyProvider } from "../agent-options";
 import type { CrossTurnDedup } from "../cross-turn-dedup.js";
 import type { ReadPathBudget } from "../read-path-budget.js";
 import { StreamRunner, type StreamRunnerDeps } from "../stream-runner.js";
+
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 function makeBashStub(): BashTool {
   return {
@@ -24,11 +30,13 @@ function makeBashStub(): BashTool {
 }
 
 function makeDeps(overrides: Partial<StreamRunnerDeps> = {}): StreamRunnerDeps {
+  const testModels = getTestModels();
+  const testProviders = getTestProviders();
   return {
     getProvider: () => (() => null) as unknown as LegacyProvider,
-    resolveModelForTask: () => "deepseek-ai/DeepSeek-V4-Flash",
-    getModelId: () => "deepseek-ai/DeepSeek-V4-Flash",
-    getProviderId: () => "siliconflow",
+    resolveModelForTask: () => testModels.fast,
+    getModelId: () => testModels.fast,
+    getProviderId: () => testProviders.default as "anthropic",
     getBash: () => makeBashStub(),
     getMaxToolRounds: () => 50,
     getMaxTokens: () => 8192,

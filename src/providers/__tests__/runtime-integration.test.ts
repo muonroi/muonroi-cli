@@ -28,7 +28,6 @@ describe("model → provider detection", () => {
     ["alibaba/Qwen3-8B", "siliconflow"],
     ["grok-3", "xai"],
     ["grok-3-mini", "xai"],
-    ["unknown-custom-model", "anthropic"],
   ];
 
   for (const [modelId, expectedProvider] of cases) {
@@ -36,6 +35,10 @@ describe("model → provider detection", () => {
       expect(detectProviderForModel(modelId)).toBe(expectedProvider);
     });
   }
+
+  test("unknown-custom-model throws instead of defaulting", () => {
+    expect(() => detectProviderForModel("unknown-custom-model")).toThrow("not in catalog and no prefix match");
+  });
 });
 
 describe("end-to-end: create factory + resolve runtime", () => {
@@ -59,26 +62,20 @@ describe("end-to-end: create factory + resolve runtime", () => {
     expect(runtime.modelInfo?.provider).toBe("siliconflow");
   });
 
-  test("openai factory still constructs even though no openai model is in catalog", () => {
+  test("openai model not in catalog throws", () => {
     const pf = createProviderFactory("openai", {
       apiKey: MOCK_KEY,
     });
-    // Unknown id (not in catalog) → modelInfo undefined, no provider-specific opts.
-    const runtime = resolveModelRuntime(pf.factory, "gpt-4o");
-    expect(runtime.modelId).toBe("gpt-4o");
-    expect(runtime.model).toBeDefined();
-    expect(runtime.modelInfo).toBeUndefined();
+    expect(() => resolveModelRuntime(pf.factory, "gpt-4o")).toThrow("not found in catalog");
   });
 
   // Anthropic-thinking and xai reasoning-effort behavior is covered by
   // capabilities-provider-options.test.ts using synthetic ModelInfo fixtures —
   // those tests do not depend on catalog presence.
 
-  test("ollama factory works without API key", () => {
+  test("ollama model not in catalog throws", () => {
     const pf = createProviderFactory("ollama", {});
-    const runtime = resolveModelRuntime(pf.factory, "llama3");
-    expect(runtime.modelId).toBe("llama3");
-    expect(runtime.model).toBeDefined();
+    expect(() => resolveModelRuntime(pf.factory, "llama3")).toThrow("not found in catalog");
   });
 
   test("anthropic factory has responses method", () => {

@@ -2,10 +2,8 @@ import { useState } from "react";
 import { MODELS } from "../../models/registry.js";
 import type { StoredSchedule } from "../../tools/schedule.js";
 import type { CustomSubagentConfig } from "../../utils/settings.js";
-import { loadValidSubAgents } from "../../utils/settings.js";
+import { getCurrentModel, loadValidSubAgents } from "../../utils/settings.js";
 import type { SubagentEditorField } from "../agents-modal.js";
-
-const DEFAULT_MODEL = "claude-sonnet-4-6";
 
 export function useAgentEditor() {
   const [showAgentsModal, setShowAgentsModal] = useState(false);
@@ -19,7 +17,7 @@ export function useAgentEditor() {
   const [agentsEditorModelIndex, setAgentsEditorModelIndex] = useState(() =>
     Math.max(
       0,
-      MODELS.findIndex((model) => model.id === DEFAULT_MODEL),
+      MODELS.findIndex((model) => model.id === getCurrentModel()),
     ),
   );
   const [agentsEditorSyncKey, setAgentsEditorSyncKey] = useState(0);

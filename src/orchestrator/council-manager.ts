@@ -20,7 +20,7 @@ import {
   resolveModelRuntime,
   shouldDropParam,
 } from "../providers/runtime.js";
-import type { ProviderId } from "../providers/types.js";
+import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import { appendSystemMessage } from "../storage/index";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -502,15 +502,7 @@ export class CouncilManager {
    * Falls back to the session model if no alternative is available.
    */
   async resolveNonDisabledFallback(): Promise<{ modelId: string }> {
-    const fallbackProviders: ProviderId[] = [
-      "anthropic",
-      "openai",
-      "google",
-      "deepseek",
-      "siliconflow",
-      "xai",
-      "ollama",
-    ];
+    const fallbackProviders: readonly ProviderId[] = ALL_PROVIDER_IDS;
     for (const p of fallbackProviders) {
       if (!isProviderDisabled(p)) {
         const key = await loadKeyForProvider(p).catch(() => null);

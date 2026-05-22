@@ -7,12 +7,18 @@
 // we want to assert (transient retry + abort + recordUsage guard).
 
 import type { ModelMessage, ToolSet } from "ai";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../../models/registry.js";
 import type { BashTool } from "../../tools/bash";
 import type { ToolCall, ToolResult } from "../../types/index";
 import type { ProcessMessageObserver } from "../agent-options";
 import { BatchTurnRunner, type BatchTurnRunnerDeps } from "../batch-turn-runner.js";
 import type { CompactionSettings } from "../compaction";
+
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 function makeBashStub(): BashTool {
   return {
@@ -89,6 +95,8 @@ function makeDeps(overrides: Partial<BatchTurnRunnerDeps> = {}): {
 }
 
 function makeArgs(signal: AbortSignal, providerStub?: unknown): Parameters<BatchTurnRunner["run"]>[0] {
+  const testModels = getTestModels();
+  const testProviders = getTestProviders();
   return {
     userModelMessage: { role: "user", content: "hello" } as ModelMessage,
     observer: undefined as ProcessMessageObserver | undefined,
@@ -96,8 +104,8 @@ function makeArgs(signal: AbortSignal, providerStub?: unknown): Parameters<Batch
     subagents: [],
     system: "",
     runtime: {
-      modelId: "deepseek-ai/DeepSeek-V4-Flash",
-      modelInfo: { provider: "siliconflow", contextWindow: 131_072 },
+      modelId: testModels.fast,
+      modelInfo: { provider: testProviders.default, contextWindow: 131_072 },
       model: {} as unknown,
       providerOptions: {},
       unsupportedParams: [],

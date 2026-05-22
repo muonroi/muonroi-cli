@@ -102,7 +102,8 @@ export async function runReporterCmd(opts: ReporterCmdOpts): Promise<void> {
 
   // 4. Resolve leader model + CouncilLLM
   const { resolveLeaderModelDetailed } = await import("../council/leader.js");
-  const sessionModelId = process.env.MUONROI_MODEL ?? "deepseek-ai/DeepSeek-V3";
+  const { getCurrentModel } = await import("../utils/settings.js");
+  const sessionModelId = process.env.MUONROI_MODEL ?? getCurrentModel();
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
   const leaderModelId = leaderResolution.modelId;
 

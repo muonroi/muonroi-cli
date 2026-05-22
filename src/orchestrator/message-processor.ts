@@ -85,6 +85,7 @@ import {
   buildTurnProviderOptions,
   detectProviderForModel,
   type ResolvedModelRuntime,
+  requireRuntimeProvider,
   resolveModelRuntime,
   shouldDropParam,
 } from "../providers/runtime.js";
@@ -992,7 +993,7 @@ export class MessageProcessor {
           // never needs bash/read_file/edit_file/grep — those schemas alone
           // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
           // every non-chitchat turn (PIL gates conservatively).
-          const turnCaps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+          const turnCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
           let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
             ? {}
             : isChitchat

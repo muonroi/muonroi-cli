@@ -1,13 +1,16 @@
 /**
  * src/providers/pricing.ts
  *
- * Static pricing map: {provider, model} -> {input_per_million_usd, output_per_million_usd}.
+ * Pricing lookup: catalog-first, then static fallback for providers not in catalog
+ * (anthropic, openai, google — they're not in catalog.json).
  * Phase 1 ships static; Phase 4 (WEB-02) adds remote fetch.
  * PROV-06 requirement.
  *
  * Prices verified 2026-04-29 from official provider pricing pages.
  * Freshness policy: re-verify every 60 days.
  */
+
+import { MODELS } from "../models/registry.js";
 
 export interface PricePerMillion {
   input_per_million_usd: number;
@@ -28,9 +31,10 @@ export interface PricePerMillion {
   cache_write_per_million_usd?: number;
 }
 
+// Static fallback for providers not in catalog (anthropic, openai, google).
 // verified 2026-04-29 from official provider pricing pages; cache prices
 // re-verified 2026-05-08 against deepseek-platform / openai / anthropic docs
-export const PRICING: Record<string, Record<string, PricePerMillion>> = {
+export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMillion>> = {
   anthropic: {
     "claude-3-5-haiku-latest": {
       input_per_million_usd: 0.8,
@@ -101,11 +105,24 @@ export const PRICING: Record<string, Record<string, PricePerMillion>> = {
 
 /**
  * Look up pricing for a (provider, model) pair.
- * Returns undefined if provider or model is not in the static table.
- * Ollama uses a '*' wildcard that matches any model.
+ * Checks catalog first (preferred — single source of truth).
+ * Falls back to static table for models not in catalog (anthropic, openai, google, legacy providers).
+ * Returns undefined if provider or model is not found in either source.
+ * Ollama uses a '*' wildcard in the static table that matches any model.
  */
 export function lookupPricing(provider: string, model: string): PricePerMillion | undefined {
-  const byProvider = PRICING[provider];
+  // 1. Try catalog first
+  const catalogModel = MODELS.find((m) => m.id === model && m.provider === provider);
+  if (catalogModel && catalogModel.inputPrice != null) {
+    return {
+      input_per_million_usd: catalogModel.inputPrice,
+      output_per_million_usd: catalogModel.outputPrice,
+      ...(catalogModel.cachedInputPrice != null ? { cached_input_per_million_usd: catalogModel.cachedInputPrice } : {}),
+      ...(catalogModel.cacheWritePrice != null ? { cache_write_per_million_usd: catalogModel.cacheWritePrice } : {}),
+    };
+  }
+  // 2. Fallback to static table for models not in catalog (legacy providers)
+  const byProvider = STATIC_PRICING_FALLBACK[provider];
   if (!byProvider) return undefined;
   return byProvider[model] ?? byProvider["*"];
 }

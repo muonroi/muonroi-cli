@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { getTestModels, getTestProviders } from "../__test-helpers__/catalog-fixtures.js";
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
+import { loadCatalog } from "../models/registry.js";
 import { type DecideOpts, decide } from "./decide.js";
 import { routerStore } from "./store.js";
 
@@ -14,18 +16,22 @@ vi.mock("../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
 }));
 
-const BASE_OPTS: DecideOpts = {
-  tenantId: "default",
-  cwd: "/tmp",
-  defaultModel: "claude-sonnet-4-20250514",
-  defaultProvider: "anthropic",
-  threshold: 0.55,
-};
+let BASE_OPTS: DecideOpts;
 
 describe("decide()", () => {
   let stub: StubHandle;
 
   beforeAll(async () => {
+    await loadCatalog();
+    const models = getTestModels();
+    const providers = getTestProviders();
+    BASE_OPTS = {
+      tenantId: "default",
+      cwd: "/tmp",
+      defaultModel: models.balanced,
+      defaultProvider: providers.default,
+      threshold: 0.55,
+    };
     stub = await startStubEEServer({
       routeModel: (_req) => ({
         model: "qwen2.5-coder",
@@ -103,7 +109,7 @@ describe("decide()", () => {
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
     );
-    expect(result.model).toBe("claude-sonnet-4-20250514");
+    expect(result.model).toBe(BASE_OPTS.defaultModel);
     expect(result.reason).toBe("fallback:ee-unreachable");
 
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
@@ -124,6 +130,62 @@ describe("decide()", () => {
 
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
     await deadStub.stop();
+  });
+});
+
+describe("provider constraint with PROVIDER_INHERIT", () => {
+  let stub: StubHandle;
+
+  beforeAll(async () => {
+    await loadCatalog();
+  });
+
+  afterAll(async () => {
+    await stub?.stop();
+    vi.restoreAllMocks();
+  });
+
+  beforeEach(() => {
+    routerStore.setState({
+      tier: "hot",
+      degraded: false,
+      lastDecision: null,
+      lastHealthCheckAtMs: 0,
+    });
+  });
+
+  it("constrains warm-path model when its provider is disabled", async () => {
+    stub = await startStubEEServer({
+      routeModel: () => ({
+        model: "claude-sonnet-4-6",
+        tier: "balanced" as const,
+        confidence: 0.8,
+        reason: "ee-warm",
+        source: "brain",
+        taskHash: "test-hash",
+      }),
+    });
+    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
+
+    const settingsMod = await import("../utils/settings.js");
+    vi.spyOn(settingsMod, "isProviderDisabled").mockImplementation((p) => p === "anthropic");
+
+    const fallbackModel = getTestModels().fast;
+    const fallbackProvider = getTestProviders().default;
+
+    const result = await decide(
+      "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
+      {
+        tenantId: "default",
+        cwd: "/tmp",
+        defaultModel: fallbackModel,
+        defaultProvider: fallbackProvider,
+        threshold: 0.55,
+      },
+    );
+
+    expect(result.model).not.toBe("claude-sonnet-4-6");
+    expect(result.reason).toContain("provider-constrained");
   });
 });
 

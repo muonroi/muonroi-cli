@@ -177,6 +177,7 @@ export function SubagentEditorModal({
   showRemoveHint?: boolean;
 }) {
   const model = MODELS[modelIndex] ?? MODELS[0];
+  if (!model) throw new Error("No models in catalog — cannot render agent editor.");
   const panelWidth = Math.min(68, width - 6);
   const panelHeight = Math.min(28, Math.floor(height * 0.75));
   const overlayBg = "#000000cc" as string;

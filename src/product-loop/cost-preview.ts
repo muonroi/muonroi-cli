@@ -57,7 +57,22 @@ export function previewRunCost(args: {
   heuristic?: SprintHeuristic;
 }): CostPreview {
   const h = args.heuristic ?? DEFAULT_HEURISTIC;
-  const provider = detectProviderForModel(args.sessionModelId);
+  let provider: string;
+  try {
+    provider = detectProviderForModel(args.sessionModelId);
+  } catch {
+    return {
+      modelId: args.sessionModelId,
+      provider: "unknown",
+      pricingKnown: false,
+      cachedInputAvailable: false,
+      estPerSprintUsd: 0,
+      estTotalUsd: 0,
+      capUsd: args.capUsd,
+      willExceedCap: false,
+      recommendedMaxSprints: args.maxSprints,
+    };
+  }
   const pricing = lookupPricing(provider, args.sessionModelId);
 
   if (!pricing) {

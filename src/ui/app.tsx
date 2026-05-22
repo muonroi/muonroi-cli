@@ -47,6 +47,8 @@ import { copyTextToHostClipboard, readTextFromHostClipboard } from "../utils/hos
 import {
   type CustomSubagentConfig,
   getApiKey,
+  getCatalogDefaultModel,
+  getCurrentModel,
   getTelegramBotToken,
   isModelDisabled,
   isReservedSubagentName,
@@ -201,7 +203,7 @@ import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
 import { toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MODEL = getCurrentModel();
 
 // ---------------------------------------------------------------------------
 // Telegram stubs — removed feature, compile-only placeholders
@@ -3290,7 +3292,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         dispatchSlash(name, args, {
           cwd: agent.getCwd(),
           tenantId: "local",
-          defaultProvider: "anthropic",
+          defaultProvider: agent.getProviderId(),
           defaultModel: model,
           lastPrompt: messages[messages.length - 1]?.content,
           sessionId: agent.getSessionId() ?? undefined,
@@ -3419,10 +3421,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 const last = prev[prev.length - 1];
                 if (!last || last.type !== "assistant") return prev;
                 const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
-                return [
-                  ...prev.slice(0, -1),
-                  { ...last, content: `${base}${heartbeatLineMarker}${elapsed}s\n` },
-                ];
+                return [...prev.slice(0, -1), { ...last, content: `${base}${heartbeatLineMarker}${elapsed}s\n` }];
               });
             };
             const heartbeatInterval = setInterval(writeHeartbeat, 1_000);
@@ -3436,10 +3435,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 const last = prev[prev.length - 1];
                 if (!last || last.type !== "assistant") return prev;
                 const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
-                return [
-                  ...prev.slice(0, -1),
-                  { ...last, content: base.endsWith("\n") ? base : `${base}\n` },
-                ];
+                return [...prev.slice(0, -1), { ...last, content: base.endsWith("\n") ? base : `${base}\n` }];
               });
             };
             try {
@@ -3969,7 +3965,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           dispatchSlash("debug", [sub], {
             cwd: agent.getCwd(),
             tenantId: "local",
-            defaultProvider: "anthropic",
+            defaultProvider: agent.getProviderId(),
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
@@ -3987,7 +3983,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           dispatchSlash("ee", [sub], {
             cwd: agent.getCwd(),
             tenantId: "local",
-            defaultProvider: "anthropic",
+            defaultProvider: agent.getProviderId(),
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
@@ -4080,7 +4076,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
             tenantId: "local",
-            defaultProvider: "anthropic",
+            defaultProvider: agent.getProviderId(),
             defaultModel: model,
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,

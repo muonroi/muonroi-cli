@@ -1094,7 +1094,7 @@ program
             "Update your key:\n" +
             "  muonroi-cli -k YOUR_NEW_KEY\n" +
             "  # or: export MUONROI_API_KEY=YOUR_NEW_KEY\n" +
-            `\nGet a key at: ${getProviderCapabilities("anthropic").consoleSignupURL()}`,
+            `\nGet a key at: https://docs.muonroi.com/docs/cli/providers`,
         );
       } else {
         console.error(
@@ -1102,7 +1102,7 @@ program
             "Set your key:\n" +
             "  muonroi-cli -k YOUR_API_KEY\n" +
             "  # or: export MUONROI_API_KEY=YOUR_API_KEY\n" +
-            `\nGet a key at: ${getProviderCapabilities("anthropic").consoleSignupURL()}`,
+            `\nGet a key at: https://docs.muonroi.com/docs/cli/providers`,
         );
       }
       process.exit(1);

@@ -254,7 +254,8 @@ export function buildSystemPromptParts(
   // Phase 12.2-G5: defer the "is this an anthropic-style prompt or not?"
   // decision to the provider capability. Default (no providerId) keeps the
   // pre-G5 behaviour by treating the prompt as anthropic-native.
-  const promptStyle = providerId ? getProviderCapabilities(providerId as ProviderId).systemPromptStyle() : "anthropic";
+  if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
+  const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
   if (promptStyle !== "anthropic") {
     modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
   }

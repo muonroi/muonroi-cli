@@ -91,7 +91,7 @@ function makeOpts(flowDir: string) {
       research: vi.fn(async () => ""),
       debate: vi.fn(async () => ""),
     },
-    flags: { maxCost: 50, maxSprints: 2, doneThreshold: 0.9 },
+    flags: { maxCost: 50, maxSprints: 2, doneThreshold: 0.9, forceCouncil: true },
     respondToQuestion: vi.fn(async () => "answer"),
     respondToPreflight: vi.fn(async () => true),
     processMessageFn: vi.fn(async function* () {

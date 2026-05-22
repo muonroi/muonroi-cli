@@ -13,7 +13,7 @@ import { taskTypeToRole } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
-import { DOWNGRADE_CHAIN, downgradeChain, emitDowngrade } from "../usage/downgrade.js";
+import { downgradeChain, emitDowngrade, getDowngradeChain } from "../usage/downgrade.js";
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
 import { CapBreachError } from "../usage/types.js";
@@ -169,8 +169,16 @@ function resolveTierModel(
 
 function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
   // Inherit-sentinel: warm path may emit an empty provider to signal
-  // "trust upstream choice" — see PROVIDER_INHERIT in provider-sentinel.ts.
-  if (isInheritProvider(decision.provider)) return decision;
+  // "trust upstream choice". Resolve the actual provider from the model ID
+  // so disabled-provider checks still apply.
+  if (isInheritProvider(decision.provider)) {
+    const resolved = detectProviderForModel(decision.model);
+    if (resolved && !isProviderDisabled(resolved as ProviderId)) return decision;
+    if (resolved && isProviderDisabled(resolved as ProviderId)) {
+      return constrainToProvider({ ...decision, provider: resolved }, opts);
+    }
+    return decision;
+  }
 
   // Provider-only UX: the user enables N providers and pins one as default.
   // Routing rules:
@@ -242,7 +250,7 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
   let current = { ...dec };
   let attempts = 0;
 
-  while (attempts++ < DOWNGRADE_CHAIN.length) {
+  while (attempts++ < getDowngradeChain().length) {
     // If midstream policy already refuses, halt immediately
     if (midstreamPolicy.refuseNext()) {
       return {

@@ -3,6 +3,21 @@
 > Project context lives in `AGENTS.md`. This file is the **operating manual** for verifying TUI features end-to-end via the agent harness (`packages/agent-harness-core/`, in-repo shim at `src/agent-harness/index.ts`, MCP server at `packages/agent-harness-core/src/mcp-server.ts`).
 > If you are a new agent session starting work on `muonroi-cli`, read this top-to-bottom before writing E2E tests or debugging harness failures.
 
+## Zero Hardcode Rule — Model & Provider IDs
+
+**NEVER** hardcode model IDs (`"claude-sonnet-4-6"`, `"gpt-4o"`, `"deepseek-v4-flash"`) or provider IDs (`"anthropic"`, `"openai"`, `"deepseek"`) as string literals in production code. All model/provider references MUST derive from:
+
+- **`catalog.json`** (`src/models/catalog.json`) — single source of truth for available models
+- **User settings** — `getCurrentModel()`, `getDefaultProvider()` from `src/utils/settings.ts`
+- **Runtime detection** — `detectProviderForModel(modelId)` from `src/providers/runtime.ts`
+- **Catalog lookup** — `getModelByTier()`, `getModelsForProvider()` from `src/models/registry.ts`
+
+If a model/provider cannot be resolved from these sources, **throw an error** — do NOT fall back to a hardcoded string like `?? "anthropic"`. The only acceptable string literals are in:
+- Type union definitions (`type ProviderId = "anthropic" | "openai" | ...`)
+- Test fixtures and test assertions
+- `catalog.json` itself
+- `pricing.ts` static reference pricing table (read-only data, not routing decisions)
+
 ## TL;DR
 
 ```powershell

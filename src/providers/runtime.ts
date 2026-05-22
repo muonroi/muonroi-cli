@@ -107,7 +107,8 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // the alias is not a valid model id on their API.
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
-  const providerId = (modelInfo?.provider ?? "anthropic") as ProviderId;
+  const providerId = modelInfo?.provider as ProviderId | undefined;
+  if (!providerId) throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
   const userEffort = getReasoningEffortForModel(modelId);
 
   const mockGlobals = globalThis as MockRuntimeGlobals;
@@ -206,7 +207,9 @@ export function buildTurnProviderOptions(
   ctx: { sessionId?: string },
 ): Record<string, unknown> | undefined {
   const provider = runtime.modelInfo?.provider as ProviderId | undefined;
-  const caps = getProviderCapabilities(provider ?? "anthropic");
+  if (!provider)
+    throw new Error(`Cannot build provider options — model "${runtime.modelId}" has no provider in catalog.`);
+  const caps = getProviderCapabilities(provider);
   const userEffort = getReasoningEffortForModel(runtime.modelId);
   const fromCaps = caps.buildProviderOptions({
     model: runtime.modelInfo,
@@ -259,7 +262,10 @@ export function shouldDropParam(
   //     (OpenAI Responses API emits a warning and silently ignores them; we
   //     drop at the source so no future strict-mode provider hard-errors).
   // See ProviderCapabilities in src/providers/capabilities.ts.
-  const caps = getProviderCapabilities(runtime.modelInfo?.provider ?? "anthropic");
+  const provider = runtime.modelInfo?.provider;
+  if (!provider)
+    throw new Error(`Cannot check param "${param}" — model "${runtime.modelId}" has no provider in catalog.`);
+  const caps = getProviderCapabilities(provider as ProviderId);
   if (!caps.acceptsParam(param, runtime.modelInfo)) {
     return true;
   }
@@ -279,5 +285,14 @@ export function detectProviderForModel(modelId: string): ProviderId {
   if (id.startsWith("grok")) return "xai";
   if (id.includes("qwen") || id.includes("glm") || id.includes("internlm")) return "siliconflow";
   if (id.startsWith("llama") || id.startsWith("mistral") || id.startsWith("phi-")) return "ollama";
-  return "anthropic";
+  if (id.startsWith("claude")) return "anthropic";
+  throw new Error(
+    `Cannot detect provider for model "${modelId}" — not in catalog and no prefix match. Add it to catalog.json.`,
+  );
+}
+
+export function requireRuntimeProvider(runtime: ResolvedModelRuntime): ProviderId {
+  const p = runtime.modelInfo?.provider;
+  if (!p) throw new Error(`Model "${runtime.modelId}" has no provider in catalog.`);
+  return p as ProviderId;
 }
