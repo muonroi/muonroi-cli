@@ -36,22 +36,29 @@ export function taskTypeToTier(taskType: string | null): EETier {
 
 /**
  * Map a PIL taskType to an appropriate maxOutputTokens budget.
- * Keeps conversational turns short and reserves headroom for generation-heavy tasks.
+ *
+ * PIL-L6 verbosity fix — budgets cut roughly in half from the prior values
+ * (debug 6K→3K, refactor 6K→4K, plan 8K→5K, generate 12K→8K, analyze 4K→2K,
+ * docs 4K→3K, default 4K→2K). Old values let "balanced" / "detailed" styles
+ * pad answers with end-of-turn summaries that users skip. Truncation at the
+ * tighter limit is preferable to bloat — agent will retry if it needs more.
  */
 export function taskTypeToMaxTokens(taskType: string | null): number {
   switch (taskType) {
     case "analyze":
+      return 2_048;
     case "documentation":
-      return 4_096;
+      return 3_072;
     case "debug":
+      return 3_072;
     case "refactor":
-      return 6_144;
+      return 4_096;
     case "plan":
-      return 8_192;
+      return 5_120;
     case "generate":
-      return 12_288;
+      return 8_192;
     default:
-      return 4_096; // conversational — keep short
+      return 2_048; // conversational — keep short
   }
 }
 
