@@ -13,6 +13,32 @@ const PATTERNS: Array<{
     confidence: 0.85,
     tierHint: "fast",
   },
+  // PIL-L6 fix — bug-fix / CI-debug signals MUST land in `debug` not `edit`.
+  // The broader edit regex below catches "fix X" generically and previously
+  // misclassified "fix ci fail" → edit → generate. Order matters: this rule
+  // runs BEFORE the generic edit pattern.
+  {
+    re: /\b(ci|build|test|action|workflow|pipeline|deploy|deployment)\s+(is\s+)?(fail(?:s|ed|ing)?|broken|red)\b/i,
+    intent: "debug",
+    confidence: 0.85,
+    tierHint: "balanced",
+  },
+  {
+    re: /\bfix\s+(the\s+)?(ci|build|test|action|workflow|pipeline|deploy|bug|error|crash|fail(?:ure)?|broken|red)\b/i,
+    intent: "debug",
+    confidence: 0.85,
+    tierHint: "balanced",
+  },
+  // Narrow debug pattern — "error" / "fail" alone is too generic ("error
+  // boundaries", "fail-safe", "failover" are architecture terms, not bugs).
+  // Require a brokenness verb / context word nearby OR a specific signature
+  // (traceback / stack trace / segfault — these are pure bug signals).
+  {
+    re: /\b(traceback|stack\s*trace|segfault|panic|core\s*dump)\b|\b(error|exception|crash|fail(?:s|ed|ing)?|broken|not\s+working)\b\s+(occurred|thrown|raised|happening|coming|appearing)\b|\b(getting|having|seeing|throwing)\b\s+(an?\s+)?(error|exception|crash|fail(?:ure)?)\b/i,
+    intent: "debug",
+    confidence: 0.78,
+    tierHint: "balanced",
+  },
   { re: /\b(edit|modify|update|change|fix|patch)\s+(the\s+)?\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
   {
     re: /\b(run|execute|exec)\s+(the\s+)?(command|script|npm|bun|tsc|test|build)\b/i,
@@ -65,6 +91,20 @@ const PATTERNS: Array<{
     intent: "create-file",
     confidence: 0.85,
     tierHint: "fast",
+  },
+  // PIL-L6 fix — Vietnamese bug-fix / CI-fail signals MUST land in `debug`.
+  // Same ordering rule as the English block: must precede the broad VN edit.
+  {
+    re: /(ci|build|test|action|workflow|pipeline|deploy(?:ment)?)\s*(đang|bị|là)?\s*(fail|fails|failed|failing|hỏng|hong|đỏ|do|broken|báo lỗi|bao loi)/i,
+    intent: "debug",
+    confidence: 0.85,
+    tierHint: "balanced",
+  },
+  {
+    re: /(sửa|fix|chỉnh)\s+(lại\s+)?(ci|build|test|action|workflow|pipeline|deploy|bug|lỗi|loi|crash|fail|broken|hỏng|hong)/i,
+    intent: "debug",
+    confidence: 0.85,
+    tierHint: "balanced",
   },
   { re: /(sửa|fix|chỉnh|update|cập nhật|patch)\s+\S+/i, intent: "edit", confidence: 0.8, tierHint: "fast" },
   {

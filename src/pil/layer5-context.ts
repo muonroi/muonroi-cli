@@ -131,11 +131,22 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
   }
 
   // 4. Recent file index (3% budget)
-  const filesBudget = Math.floor(ctx.tokenBudget * 0.03);
-  const fileIndex = await fetchRecentFiles(cwd, filesBudget);
-  if (fileIndex) {
-    parts.push(fileIndex);
-    deltaSegments.push(`files=${fileIndex.length}ch`);
+  // PIL-L6 fix — skip recent-files for operational tasks (CI/build/deploy).
+  // Session bca83bcbaad1 logged the inject pulling agent into reading
+  // providers/runtime.ts + mock-model.ts when the real task was just
+  // "gh run view --log-failed". Recent-files biases narrow-scope tasks.
+  const skipRecentFiles = /\b(ci|cd|build|deploy(?:ment)?|action(?:s)?|workflow|pipeline|gh\s+(check|run))\b/i.test(
+    ctx.raw,
+  );
+  if (!skipRecentFiles) {
+    const filesBudget = Math.floor(ctx.tokenBudget * 0.03);
+    const fileIndex = await fetchRecentFiles(cwd, filesBudget);
+    if (fileIndex) {
+      parts.push(fileIndex);
+      deltaSegments.push(`files=${fileIndex.length}ch`);
+    }
+  } else {
+    deltaSegments.push("files=skipped-operational");
   }
 
   if (parts.length === 0) {
