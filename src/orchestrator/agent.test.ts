@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { loadCatalog } from "../models/registry.js";
+
+beforeAll(async () => { await loadCatalog(); });
 
 async function importAgentModule() {
   vi.resetModules();

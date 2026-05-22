@@ -105,13 +105,14 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // (e.g. "deepseek-ai/DeepSeek-V4-Flash") BEFORE invoking the factory.
   // Without this, SiliconFlow / DeepSeek / xAI reject the request because
   // the alias is not a valid model id on their API.
+  const mockGlobals = globalThis as MockRuntimeGlobals;
   const modelInfo = getModelInfo(modelId);
   const canonicalId = modelInfo?.id ?? modelId;
   const providerId = modelInfo?.provider as ProviderId | undefined;
-  if (!providerId) throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
+  if (!providerId && !mockGlobals.__muonroiMockModel) {
+    throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
+  }
   const userEffort = getReasoningEffortForModel(modelId);
-
-  const mockGlobals = globalThis as MockRuntimeGlobals;
   const mockModel = mockGlobals.__muonroiMockModel;
 
   // Determine the language model + unsupportedParams + provider-level defaults.
@@ -123,7 +124,8 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   let providerLevelDefaults: Record<string, unknown> | undefined;
 
   if (mockModel) {
-    const caps = getProviderCapabilities(providerId);
+    const mockProviderId = providerId ?? detectProviderForModel(modelId);
+    const caps = getProviderCapabilities(mockProviderId);
     const providerOptions = caps.buildProviderOptions({
       model: modelInfo,
       reasoningEffort: userEffort,
@@ -137,7 +139,7 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
     };
     providerLevelDefaults = mockGlobals.__muonroiMockDefaultProviderOptions;
   } else {
-    const strategy = getProviderStrategy(providerId);
+    const strategy = getProviderStrategy(providerId!);
     resolved = strategy.resolve({
       factory,
       modelId: canonicalId,

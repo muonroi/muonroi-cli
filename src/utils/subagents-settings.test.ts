@@ -1,6 +1,10 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { getTestModels } from "../__test-helpers__/catalog-fixtures.js";
+import { loadCatalog } from "../models/registry.js";
 import type { AgentMode } from "../types/index";
 import { getCurrentModel, parseSubAgentsRawList } from "./settings";
+
+beforeAll(async () => { await loadCatalog(); });
 
 describe("parseSubAgentsRawList", () => {
   it("returns empty for non-array or missing", () => {
@@ -69,9 +73,10 @@ describe("getCurrentModel with modeModels", () => {
   });
 
   it("respects MUONROI_MODEL environment variable over modeModels", () => {
-    process.env.MUONROI_MODEL = "claude-sonnet-4-6-20250514";
+    const catalogModel = getTestModels().premium;
+    process.env.MUONROI_MODEL = catalogModel;
 
     const result = getCurrentModel("agent" as AgentMode);
-    expect(result).toBe("claude-sonnet-4-6-20250514");
+    expect(result).toBe(catalogModel);
   });
 });
