@@ -382,18 +382,23 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       }
     }
 
-    // Pass 4 LLM FALLBACK: true backstop — only fires when brain is missing
-    // an answer or really uncertain. Original threshold 0.7 made Pass 4 fire
-    // on every routine turn (brain returns 0.55–0.65 frequently), adding ~1s
-    // wall time + $0.0001 to confirm an answer the brain already had right.
-    // Threshold 0.5 reserves Pass 4 for genuinely weak signals.
-    const LLM_FALLBACK_CONF_FLOOR = 0.5;
+    // Pass 4 LLM FALLBACK: fires when the brain's confidence is below the
+    // hot-path skip threshold (HIGH_CONF_THRESHOLD = 0.7).
+    //
+    // Earlier iteration tried a tighter floor (0.5) to skip Pass 4 on "good
+    // enough" brain answers, but session eda85985dce9 showed the brain
+    // routinely returns 0.55–0.65 for ambiguous prompts like "fix CI fail"
+    // — and at that confidence band the brain's answer is wrong often
+    // enough that skipping Pass 4 reintroduces the classification leak we
+    // shipped Pass 4 to fix. The ~1s LLM round-trip is the price of
+    // correctness on borderline turns; high-confidence turns (brain ≥ 0.7)
+    // bypass Pass 4 entirely so the cost only hits weak signals.
     let pass4LlmAttempted = false;
     let pass4LlmSucceeded = false;
     const llmFallbackEligible =
       !!opts.llmFallback &&
       intentKind !== "chitchat" &&
-      (taskType === null || unifiedFailed || confidence < LLM_FALLBACK_CONF_FLOOR);
+      (taskType === null || unifiedFailed || confidence < HIGH_CONF_THRESHOLD);
     if (llmFallbackEligible) {
       pass4LlmAttempted = true;
       try {
