@@ -1,5 +1,5 @@
 import type { CouncilQuestionData, CouncilQuestionOption } from "../types/index.js";
-import { canInferOutcome, countFileReferences, hasExplicitScope } from "./clarity-gate.js";
+import { canInferOutcome, countFileReferences, hasExplicitScope, hasOperationalScope } from "./clarity-gate.js";
 import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
 import type { TaskType } from "./types.js";
 
@@ -11,7 +11,10 @@ export function detectClarityGaps(
 ): ClarityGap[] {
   const gaps: ClarityGap[] = [];
 
-  const AUTOFILL_OUTCOME_TYPES: Set<TaskType> = new Set(["analyze", "plan", "documentation"]);
+  // PIL-L6 fix — debug joins the autofill set. For "fix ci fail" the outcome
+  // is trivially "error resolved / pipeline green" and forcing an askcard
+  // there produces noise (the user already said "goal: ci green").
+  const AUTOFILL_OUTCOME_TYPES: Set<TaskType> = new Set(["analyze", "plan", "documentation", "debug"]);
   if (!canInferOutcome(taskType, raw)) {
     if (taskType && AUTOFILL_OUTCOME_TYPES.has(taskType)) {
       // These task types have predictable outcomes — auto-fill without asking
@@ -27,7 +30,9 @@ export function detectClarityGaps(
     }
   }
 
-  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw)) {
+  // PIL-L6 fix — operational scope (CI / build / deploy / lint) is enough
+  // even without a file path. The task's target is the pipeline itself.
+  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw)) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({
       dimension: "scope",
@@ -157,10 +162,16 @@ const DEFAULT_OUTCOMES: Partial<Record<TaskType, string>> = {
   analyze: "Report generated",
   plan: "Step-by-step plan",
   documentation: "Docs updated",
+  debug: "Error resolved, expected behavior restored",
 };
 
-export function getAutofilledOutcome(taskType: TaskType | null): string | null {
+export function getAutofilledOutcome(taskType: TaskType | null, raw?: string): string | null {
   if (!taskType) return null;
+  // PIL-L6 fix — operational debug tasks have a stronger default outcome
+  // ("CI green / pipeline passing") than the generic "error resolved".
+  if (taskType === "debug" && raw && hasOperationalScope(raw)) {
+    return "Pipeline green, all checks passing";
+  }
   return DEFAULT_OUTCOMES[taskType] ?? null;
 }
 

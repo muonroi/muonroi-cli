@@ -18,10 +18,19 @@ const EMPTY_PROJECT: ProjectContext = {
 };
 
 describe("detectClarityGaps()", () => {
-  it("detects outcome gap for vague prompt", () => {
-    const gaps = detectClarityGaps("fix auth", "debug", 0.7, EMPTY_PROJECT);
+  it("detects outcome gap for vague non-debug prompt", () => {
+    // PIL-L6 fix — debug now joins the autofill set, so vague debug prompts
+    // ("fix auth") no longer trigger an outcome question. Use a generate
+    // prompt instead to still cover the gap-detection path.
+    const gaps = detectClarityGaps("build something", "generate", 0.7, EMPTY_PROJECT);
     const outcomeGap = gaps.find((g) => g.dimension === "outcome");
     expect(outcomeGap).toBeDefined();
+  });
+
+  it("does NOT detect outcome gap for vague debug prompt (autofilled)", () => {
+    const gaps = detectClarityGaps("fix auth", "debug", 0.7, EMPTY_PROJECT);
+    const outcomeGap = gaps.find((g) => g.dimension === "outcome");
+    expect(outcomeGap).toBeUndefined();
   });
 
   it("detects scope gap when no file reference", () => {

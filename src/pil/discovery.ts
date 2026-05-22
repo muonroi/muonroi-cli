@@ -118,7 +118,7 @@ export async function runDiscovery(
   }
 
   // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked
-  const autoOutcome = getAutofilledOutcome(l1.taskType);
+  const autoOutcome = getAutofilledOutcome(l1.taskType, raw);
   if (autoOutcome && (!clarifiedIntent.outcome || clarifiedIntent.outcome.startsWith("Complete the task"))) {
     clarifiedIntent = { ...clarifiedIntent, outcome: autoOutcome };
   }
@@ -135,7 +135,7 @@ export async function runDiscovery(
   let accepted = true;
 
   if (handler && interviewed) {
-    const card = buildAcceptanceCard(intentStatement, clarifiedIntent, feasibility);
+    const card = buildAcceptanceCard(intentStatement, clarifiedIntent, feasibility, raw);
     const question = buildAcceptanceQuestion(card, randomUUID());
     const answer = await handler.askQuestion(question);
     const decision = answer.text.toLowerCase();

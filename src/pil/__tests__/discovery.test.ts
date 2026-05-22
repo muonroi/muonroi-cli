@@ -77,10 +77,11 @@ describe("runDiscovery()", () => {
 
   it("sets accepted=false when user cancels", async () => {
     const handler: DiscoveryInteractionHandler = {
+      // PIL-L6 fix — debug now autofills outcome, so only the scope gap is
+      // asked. First call = scope gap, second call = acceptance card.
       askQuestion: vi
         .fn()
         .mockResolvedValueOnce({ questionId: "q1", text: "done", kind: "choice" })
-        .mockResolvedValueOnce({ questionId: "q2", text: "done", kind: "choice" })
         .mockResolvedValue({ questionId: "q-acc", text: "cancel", kind: "choice" }),
       showAcceptance: vi.fn().mockResolvedValue("cancel"),
     };

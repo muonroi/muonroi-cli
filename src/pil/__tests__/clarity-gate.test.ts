@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { canInferOutcome, countFileReferences, hasExplicitScope, shouldAutoPass } from "../clarity-gate.js";
+import {
+  canInferOutcome,
+  countFileReferences,
+  hasExplicitScope,
+  hasOperationalScope,
+  shouldAutoPass,
+} from "../clarity-gate.js";
 
 describe("canInferOutcome()", () => {
   it("returns false for null taskType", () => {
@@ -81,5 +87,35 @@ describe("shouldAutoPass()", () => {
         "refactor src/auth/ module to return Promises",
       ),
     ).toBe(true);
+  });
+
+  // PIL-L6 fix
+  it("auto-passes CI/build debug task even without file path (operational scope)", () => {
+    expect(
+      shouldAutoPass(
+        { confidence: 0.9, taskType: "debug", complexity: "low" },
+        "fix the ci fail — goal: green pipeline",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("hasOperationalScope() — PIL-L6", () => {
+  it("detects ci/build/test/action keywords", () => {
+    expect(hasOperationalScope("fix ci fail")).toBe(true);
+    expect(hasOperationalScope("the build is broken")).toBe(true);
+    expect(hasOperationalScope("workflow keeps failing")).toBe(true);
+    expect(hasOperationalScope("gh check shows red")).toBe(true);
+  });
+  it("returns false for unrelated prompts", () => {
+    expect(hasOperationalScope("refactor login flow")).toBe(false);
+    expect(hasOperationalScope("explain hooks")).toBe(false);
+  });
+});
+
+describe("canInferOutcome() — explicit goal (PIL-L6)", () => {
+  it("returns true when prompt names an explicit goal", () => {
+    expect(canInferOutcome("debug", "goal: pipeline green")).toBe(true);
+    expect(canInferOutcome("debug", "mong muốn: tests passing")).toBe(true);
   });
 });

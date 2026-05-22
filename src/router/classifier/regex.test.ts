@@ -18,7 +18,9 @@ describe("matchRegex", () => {
   describe("seed intents (>= 7 patterns at >= 0.55 confidence)", () => {
     const seeds = [
       { prompt: "create a file called app.ts", intent: "create-file" },
-      { prompt: "edit the main.ts file to fix the bug", intent: "edit" },
+      // PIL-L6 fix — "fix the bug" now correctly routes to debug, not edit.
+      // Use a pure-edit prompt without bug/error/fix-the-X cues here.
+      { prompt: "edit the main.ts file to change the layout", intent: "edit" },
       { prompt: "run the test command", intent: "run-command" },
       { prompt: "explain what this code does", intent: "explain" },
       { prompt: "refactor the auth module", intent: "refactor" },
