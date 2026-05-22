@@ -269,11 +269,19 @@ export function MessageView({
       }
 
       if (name === "read_file") {
+        // PIL-L6 v2 — render only the action line. The file body is for the
+        // model, not the user — showing a 10-line preview per read_file call
+        // crowds the TUI when the agent fans out across many files in a
+        // single debug turn (session 127140a47b56 had 27 read_file calls).
+        // Error strings still surface via ReadFilePreviewView when the read
+        // failed.
         const readPath = tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
+        const body = (entry.content ?? "").trimEnd();
+        const failed = body.startsWith("File not found:") || body.startsWith("Failed to read file:");
         return (
           <box gap={0}>
             <InlineTool t={t} pending={false}>{`Read ${trunc(readPath, 60)}`}</InlineTool>
-            <ReadFilePreviewView t={t} filePath={readPath} content={entry.content} />
+            {failed && <ReadFilePreviewView t={t} filePath={readPath} content={entry.content} />}
           </box>
         );
       }
