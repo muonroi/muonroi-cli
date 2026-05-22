@@ -341,6 +341,60 @@ describe("BashTool sandbox state", () => {
     expect(bash.getCwd()).toBe(root);
   });
 
+  it("splits `cd <dir> && <cmd>` and runs <cmd> in the new cwd (session 127140a47b56 regression)", async () => {
+    // Pre-fix: the cd handler consumed the entire substring after `cd ` as a
+    // directory, so `cd D:\foo && gh run list` was stat()-ed as the literal
+    // string `D:\foo && gh run list`. Agents retried with every shell syntax
+    // imaginable (cmd.exe, powershell, /d/sources, escaped backslashes…) and
+    // burned 248 bash calls before being killed. After the fix the chain is
+    // parsed so the cd succeeds and the remainder executes in the new cwd.
+    const root = makeTempDir("muonroi-bash-cdchain-");
+    const bash = new BashTool(os.tmpdir());
+    const echoCmd = process.platform === "win32" ? "echo split-ok" : "echo split-ok";
+    const quoted = process.platform === "win32" ? `"${root}"` : root;
+    const result = await bash.execute(`cd ${quoted} && ${echoCmd}`);
+    expect(result.success).toBe(true);
+    expect(result.output ?? "").toContain("split-ok");
+    expect(bash.getCwd()).toBe(root);
+  });
+
+  it("respects `&&` short-circuit: failed cd does NOT run the chained command", async () => {
+    const bash = new BashTool(os.tmpdir());
+    const result = await bash.execute(`cd /this/path/does/not/exist && echo should-not-run`);
+    expect(result.success).toBe(false);
+    expect(result.error ?? "").toMatch(/Cannot change directory/);
+    expect(result.output ?? "").not.toContain("should-not-run");
+  });
+
+  it("respects `||` short-circuit: failed cd DOES run the chained command", async () => {
+    const start = os.tmpdir();
+    const bash = new BashTool(start);
+    const result = await bash.execute(`cd /this/path/does/not/exist || echo fallback-ran`);
+    expect(result.success).toBe(true);
+    expect(result.output ?? "").toContain("fallback-ran");
+    expect(bash.getCwd()).toBe(start); // cwd unchanged after failed cd
+  });
+
+  it("strips cmd.exe DOS flag `/d` from `cd /d <path> && <cmd>` (session 7dcf8fd7d6a4 regression)", async () => {
+    const root = makeTempDir("muonroi-bash-cddosflag-");
+    const bash = new BashTool(os.tmpdir());
+    const quoted = process.platform === "win32" ? `"${root}"` : root;
+    const result = await bash.execute(`cd /d ${quoted} && echo dos-flag-ok`);
+    expect(result.success).toBe(true);
+    expect(result.output ?? "").toContain("dos-flag-ok");
+    expect(bash.getCwd()).toBe(root);
+  });
+
+  it("respects `;` separator: runs remainder regardless of cd outcome", async () => {
+    const root = makeTempDir("muonroi-bash-cdsemicolon-");
+    const bash = new BashTool(os.tmpdir());
+    const quoted = process.platform === "win32" ? `"${root}"` : root;
+    const result = await bash.execute(`cd ${quoted} ; echo always-runs`);
+    expect(result.success).toBe(true);
+    expect(result.output ?? "").toContain("always-runs");
+    expect(bash.getCwd()).toBe(root);
+  });
+
   it("includes network status in tool description when allowNet is set", () => {
     const netOn = new BashTool("/repo", {
       sandboxMode: "shuru",

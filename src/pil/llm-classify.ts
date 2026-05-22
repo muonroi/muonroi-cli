@@ -50,7 +50,14 @@ const SYSTEM_PROMPT =
   "- plan — architecture, roadmap, multi-step design, strategy.\n" +
   "- analyze — explain, review, inspect, audit, compare existing code.\n" +
   "- documentation — write docs, comments, JSDoc, README.\n" +
-  "- general — chitchat or unclear intent.\n" +
+  "- general — chitchat or unclear intent.\n\n" +
+  "Style picking — MANDATORY mapping (do NOT deviate):\n" +
+  "- debug, refactor, generate → concise (action tasks; the diff is the answer)\n" +
+  "- analyze → concise (bullet findings, no narrative)\n" +
+  "- plan → balanced (steps need brief rationale)\n" +
+  "- documentation → balanced (examples + explanation)\n" +
+  "- general → concise\n" +
+  "Only output 'detailed' if the user prompt LITERALLY contains words like 'explain in detail', 'thorough analysis', 'walk me through', 'giải thích chi tiết', 'phân tích kỹ'.\n\n" +
   "Prompts may be Vietnamese, English, or mixed. Reply with exactly two words separated by one comma. No other text.";
 
 function parseResponse(raw: string): LlmClassifyResult | null {

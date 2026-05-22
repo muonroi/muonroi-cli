@@ -8,7 +8,8 @@ describe("GSD types", () => {
     expect(GSD_PHASES).toContain("execute");
     expect(GSD_PHASES).toContain("verify");
     expect(GSD_PHASES).toContain("review");
-    expect(GSD_PHASES.length).toBe(5);
+    expect(GSD_PHASES).toContain("debug");
+    expect(GSD_PHASES.length).toBe(6);
   });
 
   it("isGsdPhase returns true for valid phases", () => {
@@ -17,6 +18,19 @@ describe("GSD types", () => {
     expect(isGsdPhase("execute")).toBe(true);
     expect(isGsdPhase("verify")).toBe(true);
     expect(isGsdPhase("review")).toBe(true);
+    expect(isGsdPhase("debug")).toBe(true);
+  });
+
+  it("detectGsdPhase routes fix/debug language to debug phase (session 127140a47b56)", () => {
+    // Position-based detection: when a debug keyword appears first, debug wins.
+    expect(detectGsdPhase("fix CI fail")).toBe("debug");
+    expect(detectGsdPhase("fix lỗi và check lại CI")).toBe("debug");
+    expect(detectGsdPhase("sửa bug này giúp tôi")).toBe("debug");
+    expect(detectGsdPhase("debug this crash")).toBe("debug");
+    // The exact session 127140a47b56 prompt — "fix" beats later "check".
+    expect(detectGsdPhase("action github đang run fail check và fix cho tôi")).toBe("debug");
+    // Without explicit debug keywords, "check" still falls through to verify.
+    expect(detectGsdPhase("check that this works")).toBe("verify");
   });
 
   it("isGsdPhase returns false for invalid strings", () => {

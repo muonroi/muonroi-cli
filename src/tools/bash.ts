@@ -59,14 +59,38 @@ export class BashTool {
   async execute(command: string, timeout = 30_000, abortSignal?: AbortSignal): Promise<ToolResult> {
     try {
       if (command.startsWith("cd ")) {
-        const dir = command
+        // Parse "cd <dir>" with optional "&&|||;" chained remainder.
+        // Without this split, `cd D:\foo && gh run list` was passed wholesale
+        // to stat() → ENOENT → agents retried with different shell syntaxes
+        // and burned hundreds of tool calls (session 127140a47b56: 248 bash
+        // calls all hit this bug).
+        // Path token = quoted string or bare word stopping at first unquoted
+        // shell separator. The regex deliberately excludes `&|;<>` from the
+        // bare-word class so chained commands split correctly.
+        // Strip cmd.exe-style DOS flags (e.g. `cd /d D:\path` — `/d` enables
+        // drive-change, irrelevant in our cwd tracker). Without this, agents
+        // using `cd /d <path>` (session 7dcf8fd7d6a4 caller still does this
+        // habitually) parse as dir="/d" → resolve fails. Drop the flag and
+        // continue parsing.
+        const afterCd = command
           .substring(3)
           .trim()
+          .replace(/^\/[a-zA-Z](?=\s)/, "")
+          .trim();
+        const parsed = afterCd.match(/^("[^"]+"|'[^']+'|[^\s&|;<>]+)(?:\s*(&&|\|\||;)\s*([\s\S]+))?$/);
+
+        const rawDir = parsed?.[1] ?? afterCd;
+        const chainOp = parsed?.[2];
+        const remainder = parsed?.[3]?.trim() || null;
+
+        const dir = rawDir
           .replace(/^["']|["']$/g, "")
           // Strip a trailing backslash that was an escaped quote in the shell
           // parse (e.g. cd "C:\foo\" && cmd → C:\foo). Only strip on Windows
           // because on POSIX a trailing backslash is a valid path continuation.
           .replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
+        let cdSucceeded = false;
+        let cdError: ToolResult | null = null;
         try {
           // Translate POSIX-style absolute paths (e.g. /d/sources/x, ~/foo)
           // when the active shell understands them, so cwd tracking matches
@@ -75,24 +99,42 @@ export class BashTool {
           const nextCwd = path.resolve(this.cwd, translated);
           const info = await stat(nextCwd);
           if (!info.isDirectory()) {
-            return { success: false, error: `Cannot change directory: ${nextCwd} is not a directory` };
+            cdError = { success: false, error: `Cannot change directory: ${nextCwd} is not a directory` };
+          } else {
+            const oldCwd = this.cwd;
+            this.cwd = nextCwd;
+            cdSucceeded = true;
+
+            const cwdInput: CwdChangedHookInput = {
+              hook_event_name: "CwdChanged",
+              old_cwd: oldCwd,
+              new_cwd: nextCwd,
+              cwd: nextCwd,
+            };
+            executeEventHooks(cwdInput, nextCwd).catch(() => {});
           }
-          const oldCwd = this.cwd;
-          this.cwd = nextCwd;
-
-          const cwdInput: CwdChangedHookInput = {
-            hook_event_name: "CwdChanged",
-            old_cwd: oldCwd,
-            new_cwd: nextCwd,
-            cwd: nextCwd,
-          };
-          executeEventHooks(cwdInput, nextCwd).catch(() => {});
-
-          return { success: true, output: `Changed directory to: ${this.cwd}` };
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
-          return { success: false, error: `Cannot change directory: ${msg}` };
+          cdError = { success: false, error: `Cannot change directory: ${msg}` };
         }
+
+        // No chained command — return the cd outcome as before.
+        if (!remainder) {
+          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+        }
+
+        // Chained command — respect shell semantics:
+        //   `&&` runs remainder only if cd succeeded
+        //   `||` runs remainder only if cd failed
+        //   `;`  runs remainder unconditionally
+        const shouldRunRemainder =
+          chainOp === ";" || (chainOp === "&&" && cdSucceeded) || (chainOp === "||" && !cdSucceeded);
+
+        if (!shouldRunRemainder) {
+          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+        }
+
+        return await this.execute(remainder, timeout, abortSignal);
       }
 
       if (abortSignal?.aborted) {

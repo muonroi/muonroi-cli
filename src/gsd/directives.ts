@@ -66,10 +66,29 @@ function buildHeavy(input: DirectiveInput): string {
 
 function buildStandard(input: DirectiveInput): string {
   const phaseHint = input.phase ? ` (detected phase: ${input.phase})` : "";
+  // Debug-phase variant: tighten exploration budget. Session 7d56a049e1e3
+  // ran 109 tool calls (58 bash + 33 read_file + 16 grep + 2 mcp) over 6
+  // minutes WITHOUT a single edit_file / write_file — agent over-researched
+  // the CI failure instead of attempting a fix. Add an explicit exploration
+  // cap and require committing to a hypothesis early.
+  if (input.phase === "debug") {
+    return [
+      `${HEADER} DEBUG task${phaseHint} — apply GSD-quick mindset, FIX-FIRST.`,
+      "Flow:",
+      "  1. State a 2-3 line hypothesis (what is failing, your best guess of why) BEFORE reading more than 3 files.",
+      "  2. Apply the smallest plausible fix with edit_file / write_file. Do NOT keep exploring — commit to a hypothesis, ship the diff, iterate on failure.",
+      "  3. Verify the fix (rerun the failing command / test) and report evidence.",
+      "Hard limits — exceed only if a tool result genuinely contradicts your hypothesis:",
+      "  - ≤ 8 read_file calls before first edit_file",
+      "  - ≤ 5 grep calls before first edit_file",
+      "  - ≤ 10 bash log-fetching calls (gh run view, cat log, etc.) before first edit_file",
+      "If hard limits are blown and you still have no fix, STOP and report what you tried + why you're stuck. Do NOT keep searching.",
+    ].join("\n");
+  }
   return [
     `${HEADER} STANDARD task${phaseHint} — apply GSD-quick mindset.`,
     "Flow:",
-    "  1. State a 2–3 line plan in your reply.",
+    "  1. State a 2-3 line plan in your reply.",
     "  2. Implement directly with the appropriate tools.",
     "  3. Verify (tests / type-check / quick smoke) and report evidence.",
     "Skip the discuss/research subagent dance unless a real ambiguity blocks step 1.",

@@ -1205,6 +1205,11 @@ export class MessageProcessor {
           // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
           const _topCallId = crypto.randomUUID();
           deps.setCurrentCallId(_topCallId);
+          // Capture finishReason so we can surface "round cap hit" as a visible
+          // toast — without this, the agent silently stops mid-flight when
+          // stepCountIs(maxToolRounds) fires and the user sees the TUI freeze
+          // (session 7dcf8fd7d6a4 hit exactly 100 rounds → looked like a crash).
+          let _lastFinishReason: string | null = null;
           // Phase B4: compact older tool_result parts before each top-level
           // step once cumulative message chars exceed the configured threshold.
           // The compactor preserves system + first user verbatim and keeps the
@@ -1292,6 +1297,7 @@ export class MessageProcessor {
               }
             },
             onFinish: ({ finishReason }) => {
+              _lastFinishReason = finishReason ?? null;
               // Task 2.6b — emit llm-done (agent-mode only).
               try {
                 const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -1875,6 +1881,23 @@ export class MessageProcessor {
             }
           } catch {
             /* fail-open */
+          }
+
+          // Surface the round-cap stop so the user knows why the agent halted
+          // (session 7dcf8fd7d6a4 hit stepCountIs(100) silently, looked like a
+          // crash). AI SDK reports finishReason='tool-calls' when the step cap
+          // fires with tool calls still pending — distinct from 'stop' (model
+          // chose to end). We only warn when stepNumber ≥ cap so a model that
+          // legitimately terminates mid-tool-call (rare) doesn't get a false
+          // warning.
+          if (_lastFinishReason === "tool-calls" && stepNumber >= deps.maxToolRounds - 1) {
+            yield {
+              type: "content",
+              content:
+                `\n\n[Stopped: hit max-tool-rounds=${deps.maxToolRounds}. ` +
+                `Re-run with \`--max-tool-rounds ${deps.maxToolRounds * 2}\` to continue, ` +
+                "or accept the partial result above.]\n",
+            };
           }
 
           const stopInput: StopHookInput = {

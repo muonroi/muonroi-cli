@@ -35,6 +35,10 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 
 **NEVER** hardcode model IDs or provider IDs as string literals in production code. All references MUST come from `catalog.json` + user settings + runtime detection. If unresolvable, throw — do NOT `?? "anthropic"` or `?? "deepseek-v4-flash"`. See CLAUDE.md for full details.
 
+## No Silent Catch Rule
+
+Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch { return null; }` is forbidden — it swallows errors and makes debugging impossible. For HTTP calls, also log status code and response body. See `CLAUDE.md` "No Silent Catch Rule" for the full pattern.
+
 ## Architecture notes
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)
