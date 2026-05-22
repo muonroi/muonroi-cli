@@ -29,6 +29,23 @@ describe("buildDirective", () => {
     expect(out.text).toMatch(/GSD-quick/i);
   });
 
+  it("emits a fix-first debug variant when phase is debug (session 7d56a049e1e3 regression)", () => {
+    const complexity = scoreComplexity("fix CI fail");
+    const out = buildDirective({ complexity, phase: "debug", grayAreas: [] });
+    expect(out.tier).toBe("standard");
+    expect(out.text).toMatch(/DEBUG task/);
+    expect(out.text).toMatch(/FIX-FIRST/);
+    expect(out.text).toMatch(/≤ 8 read_file/);
+    expect(out.text).toMatch(/edit_file/);
+  });
+
+  it("standard non-debug phases use the generic GSD-quick directive (regression: don't apply fix-first cap to plan/execute)", () => {
+    const complexity = scoreComplexity("add a counter feature");
+    const out = buildDirective({ complexity, phase: "execute", grayAreas: [] });
+    expect(out.text).not.toMatch(/FIX-FIRST/);
+    expect(out.text).not.toMatch(/read_file calls before/);
+  });
+
   it("emits a minimal quick directive", () => {
     const complexity = scoreComplexity("fix typo");
     const out = buildDirective({ complexity, phase: null, grayAreas: [] });

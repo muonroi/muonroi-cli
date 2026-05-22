@@ -145,7 +145,20 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
     );
   }
 
-  const style: OutputStyle = ctx.outputStyle ?? "concise";
+  // Action tasks (debug/refactor/generate) override "detailed" → "concise" UNLESS
+  // the prompt literally requested detail. Brain/LLM classifiers sometimes
+  // return style=detailed for prompts like "fix CI fail" (Vietnamese: "fix lỗi
+  // CI") just because the prompt looks ambiguous in isolation — session
+  // 127140a47b56 hit this and the model spent 275 LLM calls being "thorough"
+  // about a one-liner CI fix.
+  const ACTION_TASKS = new Set<TaskType>(["debug", "refactor", "generate"]);
+  const DETAIL_KEYWORDS =
+    /\b(explain in detail|thorough analysis|walk me through|in depth|deeply|comprehensive)\b|giải thích chi tiết|phân tích kỹ|cặn kẽ|chi tiết hơn/i;
+  const requestedStyle: OutputStyle = ctx.outputStyle ?? "concise";
+  const style: OutputStyle =
+    requestedStyle === "detailed" && ACTION_TASKS.has(ctx.taskType) && !DETAIL_KEYWORDS.test(ctx.raw)
+      ? "concise"
+      : requestedStyle;
   const baseSuffix = SUFFIXES[ctx.taskType][style];
 
   // PIL-04 Tier 1.2: output-budget hint.

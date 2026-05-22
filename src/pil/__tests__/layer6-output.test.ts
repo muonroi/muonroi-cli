@@ -128,25 +128,54 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
 describe("applyPilSuffix — outputStyle variants", () => {
   const styles: OutputStyle[] = ["concise", "detailed", "balanced"];
 
-  it("each style produces a different suffix for the same taskType", () => {
-    const suffixes = styles.map((s) => applyPilSuffix("", makeCtx("refactor", s)));
+  it("each style produces a different suffix for the same taskType (using non-action task)", () => {
+    // Action tasks (debug/refactor/generate) coerce style=detailed → concise
+    // unless the prompt literally asks for detail, so they only have 2 distinct
+    // suffix shapes from the 3 inputs. Use a non-action task (plan) to verify
+    // style variants are still routed through.
+    const suffixes = styles.map((s) => applyPilSuffix("", makeCtx("plan", s)));
     const unique = new Set(suffixes);
     expect(unique.size).toBe(styles.length);
   });
 
-  it.each(styles)("detailed suffix is longer than concise for taskType=debug (style=%s check)", (style) => {
+  it.each(styles)("debug suffix always present for style=%s", (style) => {
     const result = applyPilSuffix("", makeCtx("debug", style));
     expect(result).toContain("OUTPUT RULES (debug)");
   });
 
-  it("detailed suffix allows explanation", () => {
-    const result = applyPilSuffix("", makeCtx("refactor", "detailed"));
+  it("detailed suffix allows explanation on non-action task (plan)", () => {
+    // Action-task coercion: refactor+detailed → concise (no "full rationale").
+    // The behavior we care about — that "detailed" really carries through to a
+    // longer suffix — is still observable on plan.
+    const result = applyPilSuffix("", makeCtx("plan", "detailed"));
     expect(result).toContain("full rationale");
   });
 
   it("concise suffix restricts prose", () => {
     const result = applyPilSuffix("", makeCtx("refactor", "concise"));
     expect(result).toContain("No prose");
+  });
+
+  it("coerces refactor+detailed → concise when prompt has no detail-request keywords (session 127140a47b56)", () => {
+    const ctx = makeCtx("refactor", "detailed");
+    ctx.raw = "rename foo to bar across the repo";
+    const result = applyPilSuffix("", ctx);
+    expect(result).toContain("No prose");
+    expect(result).not.toContain("full rationale");
+  });
+
+  it("honors refactor+detailed when the prompt explicitly asks for detail", () => {
+    const ctx = makeCtx("refactor", "detailed");
+    ctx.raw = "refactor this module and explain in detail what you changed";
+    const result = applyPilSuffix("", ctx);
+    expect(result).toContain("full rationale");
+  });
+
+  it("honors refactor+detailed when the Vietnamese prompt asks for chi tiết", () => {
+    const ctx = makeCtx("refactor", "detailed");
+    ctx.raw = "refactor module này và giải thích chi tiết cho tôi";
+    const result = applyPilSuffix("", ctx);
+    expect(result).toContain("full rationale");
   });
 });
 

@@ -96,7 +96,11 @@ export async function spawnCostLeakHarness(
   const workDir = mkdtempSync(join(tmpdir(), "muonroi-cl-tui-"));
   const fixDir = join(workDir, "fix");
   mkdirSync(fixDir);
-  writeFileSync(join(fixDir, "fixture.json"), JSON.stringify({ model: fixture }), "utf8");
+  writeFileSync(
+    join(fixDir, "fixture.json"),
+    JSON.stringify({ responses: [{ match: "*", text: "continue. summary: mock succeeding." }], model: fixture }),
+    "utf8",
+  );
   const dumpPath = join(workDir, "calls.json");
 
   const modelId = opts.modelId ?? "deepseek-ai/DeepSeek-V4-Flash";
