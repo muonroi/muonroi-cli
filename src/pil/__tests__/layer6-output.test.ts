@@ -183,10 +183,12 @@ describe("layer6Output — style resolution", () => {
     expect(result.layers[0].delta).toContain("src=brain-rescue");
   });
 
-  it("PIL-03b: uses task-type heuristic when brain returns null (debug→balanced)", async () => {
+  // PIL-L6 verbosity fix — debug default flipped to "concise" to stop the
+  // model from padding root-cause analysis with rationale prose.
+  it("PIL-03b: uses task-type heuristic when brain returns null (debug→concise)", async () => {
     const result = await layer6Output(makeCtx("debug", null));
-    expect(result.outputStyle).toBe("balanced");
-    expect(result.layers[0].delta).toContain("style=balanced");
+    expect(result.outputStyle).toBe("concise");
+    expect(result.layers[0].delta).toContain("style=concise");
     expect(result.layers[0].delta).toContain("src=task-heuristic");
   });
 
@@ -219,9 +221,10 @@ describe("layer6Output — style resolution", () => {
   });
 
   it("PIL-03: resolved outputStyle propagated back onto ctx", async () => {
+    // PIL-L6 verbosity fix — analyze default also flipped to "concise".
     const result = await layer6Output(makeCtx("analyze", null));
     expect(result.outputStyle).not.toBeNull();
-    expect(result.outputStyle).toBe("balanced");
+    expect(result.outputStyle).toBe("concise");
   });
 });
 

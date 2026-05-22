@@ -23,15 +23,19 @@ import type { OutputStyle, PipelineContext, TaskType } from "./types.js";
 const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
 
 // Per-task-type fallback style when brain is unavailable.
-// Reflects the information density each task type genuinely needs.
+//
+// PIL-L6 verbosity fix — debug/analyze flipped from "balanced" → "concise".
+// Users complained about end-of-turn summaries and rambling debug responses.
+// "balanced" pads with rationale prose the user can read from the diff/code
+// already. "detailed" is reserved for explicit user request ("explain").
 const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
-  debug: "balanced", // needs root cause + fix context
-  plan: "balanced", // balanced by default; user requests detail explicitly
-  analyze: "balanced", // findings need brief evidence
+  debug: "concise", // root cause + fix; no padding
+  plan: "balanced", // plans genuinely need a brief rationale per step
+  analyze: "concise", // bullet findings, no narrative
   documentation: "balanced", // examples + explanation
   generate: "concise", // code speaks for itself
   refactor: "concise", // diff is the output
-  general: "balanced",
+  general: "concise", // direct answer, no preamble
 };
 
 // PIL-04 Tier 1.1: response-tool gating.
@@ -77,10 +81,13 @@ const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
   general: 200,
 };
 
-// PIL-04 Tier 1.3: ban preamble openers.
-// Measured ~30 tokens/turn wasted on "I'll help you...", "Sure, let me..." etc.
-// Bilingual EN+VN. Skipped for response-tools path (JSON has no preamble surface).
-const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.`;
+// PIL-04 Tier 1.3 + PIL-L6 verbosity fix: ban preamble AND end-of-turn summary.
+// Old rule only covered openers (~30 tok saved). End-of-turn summaries
+// ("In summary...", "I have completed X, Y, Z", "Tóm tắt: ...") cost
+// 100-300 tokens/turn AND give the user nothing they can't read from the
+// diff. Bilingual EN+VN. Skipped for response-tools path (JSON has no
+// freeform surface).
+const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.\nFORBIDDEN END-OF-TURN SUMMARY: do not append a recap section ("In summary", "To summarize", "Tổng kết", "Tóm tắt", "Tóm lại", "Kết luận", "I have done X, Y, Z", "Now you have…", "Đã hoàn thành…"). The diff and command output already show what changed; the user can read them. End the response when the answer is complete.`;
 
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
