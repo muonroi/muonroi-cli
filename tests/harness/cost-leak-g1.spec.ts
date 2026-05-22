@@ -113,6 +113,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     const handle = installMockModel({
       fixture: { stream: textOnlyStream("done") },
       unsupportedParams: undefined,
+      modelInfo: { id: "gpt-5.4", provider: "openai", reasoning: true },
     });
     cleanup = handle.uninstall;
 
@@ -129,6 +130,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
     const handle = installMockModel({
       fixture: { stream: textOnlyStream("done") },
       unsupportedParams: ["maxOutputTokens", "temperature"],
+      modelInfo: { id: "gpt-5.4", provider: "openai", reasoning: true },
     });
     cleanup = handle.uninstall;
 
@@ -145,6 +147,7 @@ describe("G1: sub-agent drops unsupportedParams from streamText call", () => {
       fixture: { stream: textOnlyStream("done") },
       unsupportedParams: ["maxOutputTokens"],
       defaultProviderOptions: { store: false, instructions: "codex-system" },
+      modelInfo: { id: "gpt-5.4", provider: "openai", reasoning: true },
     });
     cleanup = handle.uninstall;
 

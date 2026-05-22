@@ -98,6 +98,7 @@ interface MockRuntimeGlobals {
   __muonroiMockModel?: unknown;
   __muonroiMockUnsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
   __muonroiMockDefaultProviderOptions?: Record<string, unknown>;
+  __muonroiMockModelInfo?: ModelInfo;
 }
 
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
@@ -125,15 +126,16 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
 
   if (mockModel) {
     const mockProviderId = providerId ?? detectProviderForModel(modelId);
+    const mockModelInfo = modelInfo ?? mockGlobals.__muonroiMockModelInfo ?? { id: canonicalId, provider: mockProviderId } as ModelInfo;
     const caps = getProviderCapabilities(mockProviderId);
     const providerOptions = caps.buildProviderOptions({
-      model: modelInfo,
+      model: mockModelInfo,
       reasoningEffort: userEffort,
     });
     resolved = {
       model: mockModel,
       modelId: canonicalId,
-      modelInfo,
+      modelInfo: mockModelInfo,
       providerOptions,
       unsupportedParams: mockGlobals.__muonroiMockUnsupportedParams,
     };
@@ -155,8 +157,8 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   // In the mock path `providerLevelDefaults` is the test-supplied override.
   // OpenAIStrategy.createFactory also seeds `{ store: true }` here on the
   // API-key path (orchestrator policy migrated in G4).
-  if (providerLevelDefaults && modelInfo?.provider) {
-    const key = modelInfo.provider;
+  if (providerLevelDefaults && resolved.modelInfo?.provider) {
+    const key = resolved.modelInfo.provider;
     const existingForProvider = (resolved.providerOptions?.[key] as Record<string, unknown> | undefined) ?? {};
     resolved.providerOptions = {
       ...resolved.providerOptions,

@@ -296,6 +296,7 @@ interface MockGlobals {
   __muonroiMockModel?: unknown;
   __muonroiMockUnsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
   __muonroiMockDefaultProviderOptions?: Record<string, unknown>;
+  __muonroiMockModelInfo?: unknown;
 }
 
 export interface MockInstallOptions {
@@ -310,6 +311,11 @@ export interface MockInstallOptions {
    * the OpenAI Codex backend injects `{store: false, instructions: ...}`).
    */
   defaultProviderOptions?: Record<string, unknown>;
+  /**
+   * Synthetic ModelInfo for non-catalog models. Set `reasoning: true` for
+   * reasoning models so `shouldDropParam("temperature")` works correctly.
+   */
+  modelInfo?: Record<string, unknown>;
 }
 
 export interface InstalledMockHandle extends MockModelHandle {
@@ -376,6 +382,7 @@ export function installMockModel(opts: MockInstallOptions): InstalledMockHandle 
   g.__muonroiMockModel = handle.model;
   g.__muonroiMockUnsupportedParams = opts.unsupportedParams;
   g.__muonroiMockDefaultProviderOptions = opts.defaultProviderOptions;
+  g.__muonroiMockModelInfo = opts.modelInfo;
   return {
     ...handle,
     get calls() {
@@ -388,6 +395,7 @@ export function installMockModel(opts: MockInstallOptions): InstalledMockHandle 
         delete cur.__muonroiMockModel;
         delete cur.__muonroiMockUnsupportedParams;
         delete cur.__muonroiMockDefaultProviderOptions;
+        delete cur.__muonroiMockModelInfo;
       }
     },
   };
