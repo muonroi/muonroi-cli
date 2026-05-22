@@ -1241,11 +1241,16 @@ export class MessageProcessor {
               // ignored 20-50K of fixed prompt overhead and the compactor
               // sat dormant just below its limit while billed input climbed.
               const envelopeChars = computeEnvelopeChars(systemForModel, tools);
+              // G1 + G2 — feed the model's context window so the compactor
+              // can pick a token-aware threshold and shrink keepLastTurns
+              // when the window is approaching its ceiling.
+              const contextWindowTokens = runtime.modelInfo?.contextWindow ?? 0;
               const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
                 keepLastTurns: topLevelCompactKeepLast,
                 label: "top-level",
                 envelopeChars,
+                contextWindowTokens,
               });
               if (compacted === stripped && stripped === stepMessages) return {};
               return { messages: compacted };

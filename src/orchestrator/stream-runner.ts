@@ -479,9 +479,14 @@ export class StreamRunner {
         // level strip at call setup never sees this. Strip per step too via
         // the capability hook (identity for non-siliconflow providers).
         const stripped = taskCaps.sanitizeHistory(messages) as typeof messages;
+        // G1 + G2 — pass the sub-agent's model context window so the
+        // compactor can use a token-aware threshold and shrink the keep
+        // window when the prompt is near the ceiling.
+        const childCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
         const compacted = compactSubAgentMessages(stripped, {
           thresholdChars: compactThreshold,
           keepLastTurns: compactKeepLast,
+          contextWindowTokens: childCtxWindow,
         });
         if (compacted === stripped && stripped === messages) return undefined;
         return { messages: compacted };

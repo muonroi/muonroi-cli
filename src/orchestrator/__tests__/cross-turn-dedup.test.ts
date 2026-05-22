@@ -18,10 +18,9 @@ describe("CrossTurnDedup", () => {
       dedup.beginTurn();
       const second = dedup.maybeDedup("read_file", payload);
       expect(second).not.toBeNull();
-      expect(second).toContain("identical to earlier turn");
-      expect(second).toContain("tool=read_file");
-      expect(second).toContain("turn=1");
-      expect(second).toContain("sha256=");
+      expect(second).toContain("[dup of");
+      expect(second).toContain("read_file");
+      expect(second).toContain("turn 1");
     });
 
     it("distinct large tool outputs do not collide on sha256-16", () => {
@@ -37,20 +36,16 @@ describe("CrossTurnDedup", () => {
       expect(dedup.maybeDedup("read_file", a)).toBeNull();
       // Distinct content must NOT hit the cache.
       expect(dedup.maybeDedup("read_file", b)).toBeNull();
+      // Two distinct payloads → two distinct cache entries (verified via
+      // cache size since the marker no longer embeds the hash post-G3).
+      expect(dedup.getStats().size).toBe(2);
 
-      // Re-emitting `a` must produce a stub whose hash differs from the one
-      // that would be produced for `b` — i.e. distinct cache entries coexist.
+      // Re-emitting either payload now triggers a dedup hit.
       const stubA = dedup.maybeDedup("read_file", a);
       const stubB = dedup.maybeDedup("read_file", b);
       expect(stubA).not.toBeNull();
       expect(stubB).not.toBeNull();
-      const hashA = /sha256=([0-9a-f]+)/.exec(stubA as string)?.[1];
-      const hashB = /sha256=([0-9a-f]+)/.exec(stubB as string)?.[1];
-      expect(hashA).toBeDefined();
-      expect(hashB).toBeDefined();
-      expect(hashA).toHaveLength(16);
-      expect(hashB).toHaveLength(16);
-      expect(hashA).not.toBe(hashB);
+      expect(dedup.getStats().hits).toBe(2);
     });
 
     it("does not dedup different outputs", () => {
@@ -153,7 +148,7 @@ describe("CrossTurnDedup", () => {
 
       const second = (await exec({})) as string;
       expect(second).not.toBe(payload);
-      expect(second).toContain("identical to earlier turn");
+      expect(second).toContain("[dup of");
     });
 
     it("dedups the .output field on object-shaped results", async () => {
@@ -168,7 +163,7 @@ describe("CrossTurnDedup", () => {
       expect(first.output).toBe(payload);
 
       const second = (await exec({})) as { output: string };
-      expect(second.output).toContain("identical to earlier turn");
+      expect(second.output).toContain("[dup of");
     });
   });
 });

@@ -53,14 +53,8 @@ describe("C3: cross-turn tool-output dedup uses sha256-16 stubs", () => {
     dedup.beginTurn();
     const second = (await exec({})) as string;
     expect(second).not.toBe(payload);
-    expect(second).toContain("[tool_result identical to earlier turn — dedup ref sha256=");
-    expect(second).toContain("tool=fake_read");
-    expect(second).toContain("turn=1");
-
-    // Hash length must be exactly 16 hex chars (the sha256-16 contract).
-    const hash = /sha256=([0-9a-f]+)/.exec(second)?.[1];
-    expect(hash).toBeDefined();
-    expect(hash).toHaveLength(16);
+    // G3 — short marker: "[dup of <tool> from turn <N> — reuse]"
+    expect(second).toContain("[dup of fake_read from turn 1");
   });
 
   it("distinct tool_result payloads do NOT collide on sha256-16", async () => {
@@ -87,14 +81,12 @@ describe("C3: cross-turn tool-output dedup uses sha256-16 stubs", () => {
     dedup.beginTurn();
     const stubA = (await execA({})) as string;
     const stubB = (await execB({})) as string;
-    expect(stubA).toContain("dedup ref sha256=");
-    expect(stubB).toContain("dedup ref sha256=");
-
-    const hashA = /sha256=([0-9a-f]+)/.exec(stubA)?.[1];
-    const hashB = /sha256=([0-9a-f]+)/.exec(stubB)?.[1];
-    expect(hashA).toBeDefined();
-    expect(hashB).toBeDefined();
-    expect(hashA).not.toBe(hashB);
+    // G3 — markers identify the originating tool; A and B must differ so we
+    // know the cache entries are distinct (no sha256 collision elided them
+    // into the same entry).
+    expect(stubA).toContain("[dup of read_a from turn 1");
+    expect(stubB).toContain("[dup of read_b from turn 1");
+    expect(stubA).not.toBe(stubB);
 
     // Stats sanity: 2 distinct inserts, 2 hits.
     const stats = dedup.getStats();
