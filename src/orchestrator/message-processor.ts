@@ -70,6 +70,7 @@ import type {
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo } from "../models/registry.js";
+import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
@@ -401,26 +402,80 @@ export class MessageProcessor {
 
     // PIL: enrich prompt before pushing to messages (D-01, D-03, D-04)
     // Promise.race timeout of 200ms is inside runPipeline — fail-open guaranteed
+    // --- PIL with discovery (interactive path) ---
+    const pilChunkQueue: StreamChunk[] = [];
+    const pilResponder = deps.councilManager.createQuestionResponder();
+
+    const discoveryHandler: DiscoveryInteractionHandler = {
+      askQuestion: async (question) => {
+        pilChunkQueue.push({
+          type: "council_question",
+          content: question.question,
+          councilQuestion: question,
+        } as StreamChunk);
+        const text = await pilResponder(question.questionId);
+        return { questionId: question.questionId, text, kind: "choice" as const };
+      },
+      showAcceptance: async (card) => {
+        const { buildAcceptanceQuestion } = await import("../pil/layer18-acceptance.js");
+        const question = buildAcceptanceQuestion(card, crypto.randomUUID());
+        pilChunkQueue.push({
+          type: "council_question",
+          content: question.question,
+          councilQuestion: question,
+        } as StreamChunk);
+        const text = await pilResponder(question.questionId);
+        return text.toLowerCase() as "accept" | "adjust" | "cancel";
+      },
+    };
+
     const _pilStart = Date.now();
-    const pilCtx = await runPipeline(userMessage, {
-      resumeDigest: deps.getResumeDigest(),
-      activeRunId: deps.getActiveRunId(),
-      sessionId: deps.session?.id ?? null,
-    }).catch((err) => ({
-      raw: userMessage,
-      enriched: userMessage,
-      taskType: null,
-      domain: null,
-      confidence: 0,
-      outputStyle: null,
-      tokenBudget: 500,
-      metrics: null,
-      layers: [],
-      gsdPhase: null,
-      activeRunId: null,
-      intentKind: null as "task" | "chitchat" | null,
-      fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
-    }));
+    let pilCtxResolved: Awaited<ReturnType<typeof runPipeline>> | null = null;
+    let pilDone = false;
+
+    const pilTask = (async () => {
+      try {
+        pilCtxResolved = await runPipeline(userMessage, {
+          resumeDigest: deps.getResumeDigest(),
+          activeRunId: deps.getActiveRunId(),
+          sessionId: deps.session?.id ?? null,
+          interactionHandler: discoveryHandler,
+        });
+      } catch (err) {
+        pilCtxResolved = {
+          raw: userMessage,
+          enriched: userMessage,
+          taskType: null,
+          domain: null,
+          confidence: 0,
+          outputStyle: null,
+          tokenBudget: 500,
+          metrics: null,
+          layers: [],
+          gsdPhase: null,
+          activeRunId: null,
+          intentKind: null as "task" | "chitchat" | null,
+          fallbackReason: err instanceof Error ? `orchestrator-catch:${err.name}` : "orchestrator-catch:unknown",
+        };
+      } finally {
+        pilDone = true;
+      }
+    })();
+
+    while (!pilDone) {
+      while (pilChunkQueue.length > 0) {
+        yield pilChunkQueue.shift()!;
+      }
+      if (!pilDone) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    }
+    while (pilChunkQueue.length > 0) {
+      yield pilChunkQueue.shift()!;
+    }
+    await pilTask;
+
+    const pilCtx = pilCtxResolved!;
     // Cheap signal forwarded from PIL Layer 1 — true when input is greeting /
     // small-talk (≤10 chars + ≤2 words OR brain-classified "none"). Used to
     // skip the MCP tool catalog, which dominates input tokens (~20K) and is
