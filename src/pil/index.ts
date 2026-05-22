@@ -5,6 +5,13 @@
  */
 
 export { DEFAULT_TOKEN_BUDGET, truncateToBudget } from "./budget.js";
+export { isDiscoveryEnabled } from "./config.js";
+export type {
+  AcceptanceCardData,
+  DiscoveryInteractionHandler,
+  DiscoveryResult,
+  ProjectContext,
+} from "./discovery-types.js";
 export { applyPilSuffix, getResponseToolSet } from "./layer6-output.js";
 export { type PipelineOptions, runPipeline } from "./pipeline.js";
 export { getResponseTaskType, isResponseTool } from "./response-tools.js";
