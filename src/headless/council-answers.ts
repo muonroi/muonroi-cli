@@ -39,6 +39,8 @@ export function createCouncilAutoAnswerer(opts: {
     preflight: [...(opts.file?.preflight ?? [])],
     "plan-confirm": [...(opts.file?.["plan-confirm"] ?? [])],
     "post-debate": [...(opts.file?.["post-debate"] ?? [])],
+    "pil-interview": [],
+    "pil-acceptance": [],
   };
   const preflightApprove = opts.file?.preflightApprove ?? true;
 

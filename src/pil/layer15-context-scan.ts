@@ -130,8 +130,8 @@ export async function scanProjectContext(raw: string, cwd: string): Promise<Proj
     const hits = await searchByText(raw, ["experience-behavioral"], 5, ac.signal);
     clearTimeout(timer);
     eePatterns = hits
-      .map((h) => h.payload?.text ?? "")
-      .filter(Boolean)
+      .map((h) => (h.payload?.text as string) ?? "")
+      .filter((s): s is string => typeof s === "string" && s.length > 0)
       .slice(0, 5);
   } catch {
     /* EE unavailable */
