@@ -115,7 +115,8 @@ export class CrossTurnDedup {
       // Refresh LRU position so frequently-reused outputs survive eviction.
       this.cache.delete(hash);
       this.cache.set(hash, existing);
-      return `[tool_result identical to earlier turn — dedup ref sha256=${hash}, originally from tool=${existing.firstSeenToolName} turn=${existing.firstSeenTurn}]`;
+      // G3 — short marker. Old format was ~110 chars; this is ~45.
+      return `[dup of ${existing.firstSeenToolName} from turn ${existing.firstSeenTurn} — reuse]`;
     }
     // Insert new entry, evicting oldest if over cap.
     this.cache.set(hash, {

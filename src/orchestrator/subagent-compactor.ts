@@ -71,7 +71,30 @@ export interface SubAgentCompactorOptions {
    * fires when true prompt size exceeds the limit, not just messages[].
    */
   envelopeChars?: number;
+  /**
+   * G1 — model context window in TOKENS. When provided, the compactor
+   * ignores `thresholdChars` and fires when estimated tokens
+   * (`(messagesChars + envelopeChars) / CHARS_PER_TOKEN`) exceed
+   * `contextWindow * contextFillRatio`. Better than a fixed char threshold
+   * because models with different windows (8K vs 128K vs 1M) need
+   * proportional caps.
+   */
+  contextWindowTokens?: number;
+  /**
+   * G1 — fraction of contextWindow at which compaction kicks in. Default
+   * 0.5 — compact once half the window is consumed by prompt. Ignored if
+   * `contextWindowTokens` is not set.
+   */
+  contextFillRatio?: number;
 }
+
+/**
+ * G1 — coarse char→token conversion. The real ratio is provider/tokenizer
+ * specific (cl100k ≈ 3.5-4 chars/token for English code-heavy content, more
+ * for non-English). 4 is the conservative middle ground; over-estimating
+ * tokens means we compact slightly earlier, which is the safe direction.
+ */
+export const CHARS_PER_TOKEN = 4;
 
 export const SUBAGENT_COMPACT_DEFAULT_THRESHOLD = 80_000;
 export const SUBAGENT_COMPACT_DEFAULT_KEEP_LAST = 3;
@@ -84,6 +107,8 @@ interface ResolvedOpts {
   outputPreviewChars: number;
   label: string;
   envelopeChars: number;
+  contextWindowTokens: number;
+  contextFillRatio: number;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -93,7 +118,47 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     outputPreviewChars: o?.outputPreviewChars ?? DEFAULT_OUTPUT_PREVIEW_CHARS,
     label: o?.label ?? DEFAULT_LABEL,
     envelopeChars: Math.max(0, o?.envelopeChars ?? 0),
+    contextWindowTokens: Math.max(0, o?.contextWindowTokens ?? 0),
+    contextFillRatio: Math.min(0.95, Math.max(0.1, o?.contextFillRatio ?? 0.5)),
   };
+}
+
+/**
+ * G1 + G2 — compute effective threshold (chars) and dynamic keepLastTurns
+ * based on context-window utilization. When the prompt approaches the
+ * window ceiling we want compaction to fire EARLIER and trim the keep
+ * window AGGRESSIVELY so the next round has room to grow.
+ */
+function computeDynamicParams(
+  promptChars: number,
+  opts: ResolvedOpts,
+): { effectiveThresholdChars: number; effectiveKeepLastTurns: number; ctxFill: number } {
+  const { thresholdChars, keepLastTurns, contextWindowTokens, contextFillRatio } = opts;
+
+  if (contextWindowTokens <= 0) {
+    return {
+      effectiveThresholdChars: thresholdChars,
+      effectiveKeepLastTurns: keepLastTurns,
+      ctxFill: 0,
+    };
+  }
+
+  // G1 — token-aware threshold. Convert window×ratio (tokens) to chars
+  // budget, then pick the SMALLER of (env char threshold) and (window
+  // budget) so users opting into a tight env override still wins.
+  const tokenThresholdChars = contextWindowTokens * contextFillRatio * CHARS_PER_TOKEN;
+  const effectiveThresholdChars = Math.min(thresholdChars, tokenThresholdChars);
+
+  // G2 — dynamic keepLastTurns. Below 60% fill, keep default. Between 60-80%
+  // halve it (or floor at 2). Above 80%, drop to 1. Floor never goes to 0
+  // because that would break the assistant↔tool pairing for the live step.
+  const promptTokensEst = promptChars / CHARS_PER_TOKEN;
+  const ctxFill = contextWindowTokens > 0 ? promptTokensEst / contextWindowTokens : 0;
+  let effectiveKeepLastTurns = keepLastTurns;
+  if (ctxFill >= 0.8) effectiveKeepLastTurns = 1;
+  else if (ctxFill >= 0.6) effectiveKeepLastTurns = Math.max(2, Math.floor(keepLastTurns / 2));
+
+  return { effectiveThresholdChars, effectiveKeepLastTurns, ctxFill };
 }
 
 /** Approximate char cost of one ModelMessage's content. Mirrors recording.ts. */
@@ -183,10 +248,15 @@ interface ToolResultPartLike {
 }
 
 /**
- * F1 — detect a tool-result whose output is already a compactor stub. Used
- * for super-stubbing: a run of N already-elided results becomes ONE marker.
+ * F1 + G3 — detect a tool-result whose output is already an elided form:
+ *   - F1 compactor stub: "earlier tool_result for tool=X ... elided by ..."
+ *   - F4 sub-agent dup marker: "[dup of call #N — reuse it]"
+ *   - G3 cross-turn dedup marker: "[dup of <tool> from turn <N> — reuse]"
+ * Used for super-stubbing: re-shrinks the already-elided content down to a
+ * minimal "[elided <tool>]" form so repeated compaction rounds keep
+ * extracting space.
  */
-const STUB_RE = /elided by (sub-agent|top-level) compactor/;
+const STUB_RE = /elided by (sub-agent|top-level) compactor|\[dup of /;
 function isStubbedToolResult(msg: ModelMessage): boolean {
   if (msg.role !== "tool" || !Array.isArray(msg.content)) return false;
   for (const part of msg.content as ReadonlyArray<Record<string, unknown>>) {
@@ -228,16 +298,21 @@ export function compactSubAgentMessages(
   messages: ReadonlyArray<ModelMessage>,
   opts: SubAgentCompactorOptions = {},
 ): ModelMessage[] {
-  const { thresholdChars, keepLastTurns, outputPreviewChars, label, envelopeChars } = resolveOpts(opts);
+  const resolved = resolveOpts(opts);
+  const { outputPreviewChars, label, envelopeChars } = resolved;
   // F2 — threshold check uses TRUE prompt size (messages + system + tools).
   // The envelope (system prompt + JSON-schema for every tool) is re-sent on
   // every step and was previously invisible to the compactor, so a session
   // with 20-50K of fixed overhead would never trip the messages-only check.
   const messagesTotal = cumulativeMessageChars(messages);
   const total = messagesTotal + envelopeChars;
-  if (total < thresholdChars) return messages.slice();
+  // G1 + G2 — derive effective threshold and keepLastTurns from context
+  // window utilization. Falls back to static char threshold + keepLast
+  // when no contextWindowTokens supplied (preserves old behaviour).
+  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
+  if (total < effectiveThresholdChars) return messages.slice();
 
-  const keepFrom = findKeepFromIndex(messages, keepLastTurns);
+  const keepFrom = findKeepFromIndex(messages, effectiveKeepLastTurns);
   if (keepFrom <= 0) return messages.slice();
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink

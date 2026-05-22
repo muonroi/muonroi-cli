@@ -141,4 +141,109 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     const out = compactSubAgentMessages(msgs, { thresholdChars: 1_000_000 });
     expect(cumulativeMessageChars(out)).toBe(cumulativeMessageChars(msgs));
   });
+
+  // F2 — envelope counted in threshold
+  it("envelopeChars contributes to threshold check (F2)", () => {
+    const msgs = buildHistory(2, 5); // only ~10kb of messages
+    // Without envelope: well below 80K → no compaction.
+    const noEnv = compactSubAgentMessages(msgs);
+    expect(cumulativeMessageChars(noEnv)).toBe(cumulativeMessageChars(msgs));
+    // With 100K envelope: total > 80K → compactor fires (but only 2 turns
+    // means everything is in the keep window, so still no-op).
+    const withEnv = compactSubAgentMessages(buildHistory(10, 5), {
+      thresholdChars: 80_000,
+      envelopeChars: 100_000,
+    });
+    // 10 turns × 5kb ≈ 50K + 100K envelope = 150K → fires; older stubs land.
+    let foundStub = false;
+    for (const m of withEnv) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+      for (const p of m.content as ReadonlyArray<Record<string, unknown>>) {
+        if (p.type !== "tool-result") continue;
+        const o = (p as { output?: { value?: string } }).output;
+        if (typeof o?.value === "string" && /elided by sub-agent compactor/.test(o.value)) {
+          foundStub = true;
+        }
+      }
+    }
+    expect(foundStub).toBe(true);
+  });
+
+  // F1 — re-compaction super-shrinks existing stubs
+  it("super-shrinks already-stubbed tool_results on re-compaction (F1)", () => {
+    const msgs = buildHistory(10, 10);
+    const firstPass = compactSubAgentMessages(msgs);
+    // Force re-compaction by lowering threshold below first-pass total.
+    const total = cumulativeMessageChars(firstPass);
+    const secondPass = compactSubAgentMessages(firstPass, { thresholdChars: Math.floor(total / 2) });
+    // Second pass should be SHORTER than the first because stubs were
+    // super-shrunk to "[elided <tool> (<label>)]".
+    expect(cumulativeMessageChars(secondPass)).toBeLessThan(cumulativeMessageChars(firstPass));
+    // Detect the super-shrunk marker (it's shorter than the original stub).
+    let foundSuper = false;
+    for (const m of secondPass) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+      for (const p of m.content as ReadonlyArray<Record<string, unknown>>) {
+        if (p.type !== "tool-result") continue;
+        const o = (p as { output?: { value?: string } }).output;
+        if (typeof o?.value === "string" && /^\[elided read_file \(sub-agent\)\]$/.test(o.value)) {
+          foundSuper = true;
+        }
+      }
+    }
+    expect(foundSuper).toBe(true);
+  });
+
+  // G1 — context-window-aware threshold
+  it("contextWindowTokens overrides char threshold to fire earlier (G1)", () => {
+    // 8K window × 0.5 ratio × 4 chars/token = 16K char budget.
+    // Build 30K of messages — char-threshold 80K would NOT fire, but the
+    // tiny window MUST trigger compaction.
+    const msgs = buildHistory(6, 5); // ~30K chars
+    const out = compactSubAgentMessages(msgs, {
+      thresholdChars: 80_000, // would normally skip
+      contextWindowTokens: 8_000,
+      contextFillRatio: 0.5,
+    });
+    // Earlier tool results stubbed.
+    let stubbed = 0;
+    for (const m of out) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+      for (const p of m.content as ReadonlyArray<Record<string, unknown>>) {
+        if (p.type !== "tool-result") continue;
+        const o = (p as { output?: { value?: string } }).output;
+        if (typeof o?.value === "string" && /elided by sub-agent compactor/.test(o.value)) {
+          stubbed += 1;
+        }
+      }
+    }
+    expect(stubbed).toBeGreaterThan(0);
+  });
+
+  // G2 — dynamic keepLastTurns shrinks when context is near full
+  it("shrinks keepLastTurns when context fill ≥ 80% (G2)", () => {
+    // Window 8K, message+envelope chars ≈ 7K tokens × 4 = 28K → 0.875 fill.
+    // keepLastTurns starts at 5; should drop to 1 → more turns get stubbed.
+    const msgs = buildHistory(10, 3); // ~30K chars ≈ 7.5K tokens
+    const out = compactSubAgentMessages(msgs, {
+      thresholdChars: 10_000,
+      keepLastTurns: 5,
+      contextWindowTokens: 8_000,
+      contextFillRatio: 0.3,
+    });
+    // Count NON-stubbed tool messages (these were kept verbatim).
+    let kept = 0;
+    for (const m of out) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+      for (const p of m.content as ReadonlyArray<Record<string, unknown>>) {
+        if (p.type !== "tool-result") continue;
+        const o = (p as { output?: { value?: string } }).output;
+        if (typeof o?.value === "string" && !/elided/.test(o.value)) {
+          kept += 1;
+        }
+      }
+    }
+    // Effective keepLast was 1 (not 5) → only 1 tool result kept verbatim.
+    expect(kept).toBe(1);
+  });
 });
