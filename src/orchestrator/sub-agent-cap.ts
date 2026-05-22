@@ -122,7 +122,9 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
     const firstSeen = state.seenHashes.get(hash);
     if (firstSeen !== undefined) {
       state.dedupHits += 1;
-      const stub = `[duplicate tool output detected — identical to result of call #${firstSeen} in this ${state.label} (sha1:${hash}, ${raw.length} chars). Reuse the earlier result instead of re-running.]`;
+      // F4 — short marker (~50 chars vs ~150). Hash and length are nice-to-
+      // have but the LLM only needs "this is a known duplicate of call #N".
+      const stub = `[dup of call #${firstSeen} — reuse it]`;
       state.cumulative += stub.length;
       return stub;
     }

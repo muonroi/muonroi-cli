@@ -41,6 +41,8 @@ export interface StatusBarState {
   routed_from: string | null;
   ee_status: "ok" | "warn" | "down" | "unknown";
   ctx_tokens?: number;
+  /** F5 — percent of model contextWindow filled by the latest call. */
+  ctx_pct?: number;
   compaction_summary?: string;
   /** Sprint progress segment — present only while an /ideal run is active. */
   sprint?: SprintProgressSegment;
