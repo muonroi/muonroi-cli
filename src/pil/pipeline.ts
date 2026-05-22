@@ -93,7 +93,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     layerSnapshots.push({ name, charsBefore, charsAfter, charsDelta: charsAfter - charsBefore, durationMs: ms });
   }
 
-  await timed("layer1-intent", layer1Intent);
+  await timed("layer1-intent", (c) => layer1Intent(c, { llmFallback: options?.llmFallback }));
 
   // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
   if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
@@ -202,6 +202,13 @@ export interface PipelineOptions {
   activeRunId?: string | null;
   sessionId?: string | null;
   interactionHandler?: import("./discovery-types.js").DiscoveryInteractionHandler | null;
+  /**
+   * Optional LLM classifier fallback used by Layer 1 Pass 4 when the EE brain
+   * (pilContext) returns null or low confidence. Caller constructs this with
+   * `createLlmClassifier(providerFactory, modelId)` from `llm-classify.ts` so
+   * PIL stays ignorant of provider-factory wiring.
+   */
+  llmFallback?: import("./llm-classify.js").LlmClassifyFn;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {

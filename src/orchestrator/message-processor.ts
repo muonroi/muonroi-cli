@@ -463,11 +463,22 @@ export class MessageProcessor {
 
     const pilTask = (async () => {
       try {
+        // Build Pass 4 LLM fallback closure using the orchestrator's already-
+        // constructed provider factory + current model. PIL stays ignorant of
+        // provider wiring — it just receives a `classify(prompt)` callback.
+        let llmFallback: import("../pil/llm-classify.js").LlmClassifyFn | undefined;
+        try {
+          const { createLlmClassifier } = await import("../pil/llm-classify.js");
+          llmFallback = createLlmClassifier(deps.requireProvider(), deps.modelId);
+        } catch (err) {
+          console.error(`[pil] LLM fallback wiring failed: ${(err as Error)?.message}`);
+        }
         pilCtxResolved = await runPipeline(userMessage, {
           resumeDigest: deps.getResumeDigest(),
           activeRunId: deps.getActiveRunId(),
           sessionId: deps.session?.id ?? null,
           interactionHandler: discoveryHandler,
+          llmFallback,
         });
       } catch (err) {
         pilCtxResolved = {
