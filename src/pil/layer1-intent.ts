@@ -382,16 +382,18 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       }
     }
 
-    // Pass 4 LLM FALLBACK: fires when brain was attempted but the outcome is
-    // still weak (brain returned null OR final confidence < 0.7 OR taskType
-    // still null). Uses the orchestrator-provided closure so PIL stays
-    // ignorant of provider factories. Cost ~$0.0001 / call.
+    // Pass 4 LLM FALLBACK: true backstop — only fires when brain is missing
+    // an answer or really uncertain. Original threshold 0.7 made Pass 4 fire
+    // on every routine turn (brain returns 0.55–0.65 frequently), adding ~1s
+    // wall time + $0.0001 to confirm an answer the brain already had right.
+    // Threshold 0.5 reserves Pass 4 for genuinely weak signals.
+    const LLM_FALLBACK_CONF_FLOOR = 0.5;
     let pass4LlmAttempted = false;
     let pass4LlmSucceeded = false;
     const llmFallbackEligible =
       !!opts.llmFallback &&
       intentKind !== "chitchat" &&
-      (taskType === null || confidence < HIGH_CONF_THRESHOLD || unifiedFailed);
+      (taskType === null || unifiedFailed || confidence < LLM_FALLBACK_CONF_FLOOR);
     if (llmFallbackEligible) {
       pass4LlmAttempted = true;
       try {
