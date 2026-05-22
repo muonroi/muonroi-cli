@@ -19,6 +19,7 @@ import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";
+import { isDiscoveryEnabled } from "./config.js";
 import { layer1Intent } from "./layer1-intent.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection } from "./layer3-ee-injection.js";
@@ -69,7 +70,7 @@ const SKIPPED_LAYERS: Array<{ timingName: string; deltaName: string }> = [
   { timingName: "layer5-context-enrichment", deltaName: "context-enrichment" },
 ];
 
-async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
+async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promise<PipelineContext> {
   const pipelineStart = Date.now();
   const timings: Array<{ name: string; ms: number }> = [];
   // Track each layer's contribution to the enriched-prompt size so the
@@ -93,6 +94,43 @@ async function runLayers(ctx: PipelineContext): Promise<PipelineContext> {
   }
 
   await timed("layer1-intent", layer1Intent);
+
+  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
+  if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
+    const { runDiscovery } = await import("./discovery.js");
+    const discoveryStart = Date.now();
+    try {
+      const l1Result = {
+        taskType: ctx.taskType,
+        confidence: ctx.confidence,
+        complexity: (ctx._intentTrace?.complexity ?? "low") as "low" | "medium" | "high",
+        domain: ctx.domain,
+        outputStyle: ctx.outputStyle,
+        intentKind: ctx.intentKind ?? null,
+      };
+      const discovery = await runDiscovery(ctx.raw, l1Result, process.cwd(), options?.interactionHandler ?? null);
+      ctx = { ...ctx, _discoveryResult: discovery };
+      if (discovery.interviewed && discovery.accepted) {
+        const discoveryPrefix = [
+          `[Discovery] Intent: ${discovery.intentStatement}`,
+          `[Discovery] Outcome: ${discovery.outcome}`,
+          discovery.scope.length > 0 ? `[Discovery] Scope: ${discovery.scope.join(", ")}` : "",
+          discovery.feasibilityWarnings.length > 0
+            ? `[Discovery] Warnings: ${discovery.feasibilityWarnings.join("; ")}`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+        ctx = { ...ctx, enriched: `${discoveryPrefix}\n\n${ctx.enriched}` };
+      }
+      if (!discovery.accepted) {
+        return { ...ctx, enriched: ctx.raw, fallbackReason: "discovery-cancelled" };
+      }
+    } catch {
+      // Discovery failure — continue with existing enrichment (fail-open)
+    }
+    timings.push({ name: "discovery", ms: Date.now() - discoveryStart });
+  }
 
   if (ctx.taskType !== null) {
     await timed("layer2-personality", layer2Personality);
@@ -163,6 +201,7 @@ export interface PipelineOptions {
   resumeDigest?: string | null;
   activeRunId?: string | null;
   sessionId?: string | null;
+  interactionHandler?: import("./discovery-types.js").DiscoveryInteractionHandler | null;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
@@ -184,7 +223,7 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
   };
   try {
     const result = await Promise.race([
-      runLayers({ ...fallback }),
+      runLayers({ ...fallback }, options),
       resolveAfter(pipelineTimeoutMs(), { ...fallback, fallbackReason: "pipeline-timeout" } as PipelineContext),
     ]);
     const parse = PipelineContextSchema.safeParse(result);

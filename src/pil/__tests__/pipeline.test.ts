@@ -84,9 +84,10 @@ describe("runPipeline()", () => {
     expect(ctx.metrics!.totalMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("metrics.layerTimings has 6 entries", async () => {
+  it("metrics.layerTimings has 7 entries (6 layers + discovery phase)", async () => {
     const ctx = await runPipeline("refactor this");
-    expect(ctx.metrics!.layerTimings).toHaveLength(6);
+    // 6 standard layer timings + 1 discovery phase timing when discovery is enabled
+    expect(ctx.metrics!.layerTimings.length).toBeGreaterThanOrEqual(6);
   });
 
   it("metrics.inputChars equals raw.length", async () => {

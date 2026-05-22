@@ -89,6 +89,7 @@ export interface PipelineContext {
    * forwards it to the PIL budget log when present.
    */
   _intentTrace?: IntentDetectionTrace | null;
+  _discoveryResult?: import("./discovery-types.js").DiscoveryResult | null;
 }
 
 /**
