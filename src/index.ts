@@ -817,7 +817,13 @@ function resolveConfig(options: CliOptions) {
   const baseURL = stringOption(options.baseUrl) || getBaseURL();
   const explicitModel = stringOption(options.model);
   const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
-  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "400", 10) || 400;
+  // PIL-L6 v2 — default cap lowered 400 → 100 after session 127140a47b56
+  // (a single debug turn ran 275 LLM calls over 21 min, $0.63 cost, never
+  // converged). 100 rounds still covers legitimate multi-file refactor/debug
+  // work; runaway loops abort with the "Reached max tool rounds" error
+  // surface so the user can adjust scope. Override via --max-tool-rounds CLI
+  // flag or MUONROI_MAX_TOOL_ROUNDS env.
+  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "100", 10) || 100;
   const sandboxMode = resolveCliSandboxMode(options.sandbox) || getCurrentSandboxMode();
 
   const cliOverrides: SandboxSettings = {};
@@ -882,7 +888,7 @@ program
   .option("--port <mapping>", "Forward a host port to sandbox guest (HOST:GUEST, repeatable)", collect, [])
   .option("-s, --session <id>", "Continue a saved session by id, or use 'latest'")
   .option("--background-task-file <path>", "Run a persisted background delegation")
-  .option("--max-tool-rounds <n>", "Max tool execution rounds", "400")
+  .option("--max-tool-rounds <n>", "Max tool execution rounds", "100")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option(
     "--permission <mode>",
