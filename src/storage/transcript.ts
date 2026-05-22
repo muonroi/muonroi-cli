@@ -395,6 +395,50 @@ export function markMessageErrored(sessionId: string, seq: number): void {
   }
 }
 
+/**
+ * Mark write-ahead rows orphaned by an earlier process kill (Ctrl+C, OOM,
+ * `taskkill /F`) as `aborted` instead of leaving them `pending` forever.
+ *
+ * Triggered by SessionStore.openSession() so a fresh launch cleans up after
+ * the previous run that died mid-turn. Only rows older than `staleAfterMs`
+ * are touched — leaving a 5-minute safety margin so a concurrently-running
+ * muonroi-cli process never has its live in-flight rows clobbered.
+ *
+ * Two row classes:
+ *  - `tool_calls.status = 'pending'`  and `started_at` older than threshold
+ *    → set status='aborted', completed_at=now (so forensics can distinguish
+ *    "tool exec threw" (errored) from "process died before result" (aborted))
+ *  - `messages.status = 'pending'`    and `created_at` older than threshold
+ *    → set status='aborted'
+ *
+ * Returns the row counts changed (mostly for tests + ops visibility).
+ */
+export function sweepStalePendingRows(staleAfterMs = 5 * 60 * 1000): { toolCalls: number; messages: number } {
+  const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
+  const now = new Date().toISOString();
+  try {
+    const db = getDatabase();
+    const toolCalls = db
+      .prepare(`
+        UPDATE tool_calls
+        SET status = 'aborted', completed_at = ?
+        WHERE status = 'pending' AND started_at < ?
+      `)
+      .run(now, cutoff) as { changes: number };
+    const messages = db
+      .prepare(`
+        UPDATE messages
+        SET status = 'aborted'
+        WHERE status = 'pending' AND created_at < ?
+      `)
+      .run(cutoff) as { changes: number };
+    return { toolCalls: toolCalls.changes, messages: messages.changes };
+  } catch (err) {
+    console.error(`[transcript] sweepStalePendingRows failed: ${(err as Error)?.message}`);
+    return { toolCalls: 0, messages: 0 };
+  }
+}
+
 export function markToolCallErrored(sessionId: string, toolCallId: string, errorMessage: string): void {
   const now = new Date().toISOString();
   try {
