@@ -28,7 +28,6 @@ async function openDb(dbPath: string): Promise<{
   // bun:sqlite under Bun). Suppress the TS lookup; the try/catch below handles
   // the runtime ENOENT when the module is genuinely missing.
   try {
-    // @ts-expect-error optional peer module — see comment above
     const mod = await import("better-sqlite3");
     const Better = (mod as { default?: unknown }).default ?? mod;
     const db = new (Better as new (p: string, o?: unknown) => unknown)(dbPath, { readonly: true }) as {
@@ -91,10 +90,11 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
     const cutoff = Date.now() - maxAgeDays * 86400_000;
     const cutoffIso = new Date(cutoff).toISOString();
 
-    // Pull sessions touched in window.
+    // Pull sessions touched in window. cwd_last is the cwd at session-end —
+    // critical for EE scope detection so framework/lang resolve correctly.
     const sessions = db.all(
-      `SELECT id, updated_at FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
-    ) as unknown as Array<{ id: string; updated_at: string }>;
+      `SELECT id, updated_at, cwd_last FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
+    ) as unknown as Array<{ id: string; updated_at: string; cwd_last: string | null }>;
 
     const out: ExportResult = {
       totalSessions: sessions.length,
@@ -146,6 +146,7 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
         messages as unknown as Parameters<typeof emitTranscriptToDisk>[0],
         s.id,
         "cli-exit",
+        s.cwd_last ?? null,
       );
       if (target) out.written++;
     }
