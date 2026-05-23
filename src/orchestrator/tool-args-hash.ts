@@ -61,12 +61,30 @@ export function canonicalizeBashCommand(command: string): string {
  *
  * Returns the prefix `<toolName>:` followed by a sha1[0..12) of the canonical
  * form. Same `toolName` with cosmetic-only arg changes hash identically.
+ *
+ * Special cases beyond the generic JSON hash:
+ *
+ *   - `bash`: canonical command form (strip pipes/redirects/cd prefix).
+ *   - `edit_file` / `write_file`: hash by file_path only — fires when the
+ *     agent re-edits the same file with different old_string/new_string
+ *     pairs. Observed in session 39884b072b5f where the agent edited
+ *     `src/ee/export-transcripts.ts` 7+ times fighting biome auto-format,
+ *     each attempt with a different old_string. Generic JSON hash never
+ *     collapsed them. Now collapses.
  */
 export function hashToolArgs(toolName: string, args: unknown): string {
   if (toolName === "bash" && args && typeof args === "object") {
     const cmd = (args as { command?: unknown }).command;
     if (typeof cmd === "string") {
       return `bash:${sha1(canonicalizeBashCommand(cmd))}`;
+    }
+  }
+  if ((toolName === "edit_file" || toolName === "write_file") && args && typeof args === "object") {
+    const filePath = (args as { file_path?: unknown }).file_path;
+    if (typeof filePath === "string") {
+      // Normalize path separators so D:\Personal\... and D:/Personal/... collapse.
+      const normalized = filePath.replace(/\\/g, "/");
+      return `${toolName}:${sha1(normalized)}`;
     }
   }
   return `${toolName}:${sha1(stableJson(args ?? null))}`;
