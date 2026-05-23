@@ -307,7 +307,13 @@ function createTitle(text: string, fallback: string): string {
 function createSummary(text: string): string {
   const compact = text.replace(/\s+/g, " ").trim();
   if (!compact) return "No summary available.";
-  return compact.length <= 180 ? compact : `${compact.slice(0, 177).trimEnd()}...`;
+  // Re-insert space when model token-stream glommed sentence terminators
+  // against the next capital ("changes.Now" → "changes. Now").
+  const spaced = compact.replace(/([.!?:])(?=[A-Z])/g, "$1 ");
+  // Prefer the first sentence so the notification stays a one-liner.
+  const sentenceMatch = spaced.match(/^.+?[.!?](?=\s|$)/);
+  const candidate = (sentenceMatch ? sentenceMatch[0] : spaced).trim();
+  return candidate.length <= 120 ? candidate : `${candidate.slice(0, 117).trimEnd()}...`;
 }
 
 function renderOutput(record: StoredDelegation, content: string): string {
