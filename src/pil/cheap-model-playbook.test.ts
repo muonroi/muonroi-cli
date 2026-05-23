@@ -3,6 +3,7 @@ import type { ModelInfo } from "../types/index.js";
 import {
   appendCheapModelPlaybook,
   CHEAP_MODEL_PLAYBOOK,
+  injectCheapModelPlaybook,
   shouldInjectCheapModelPlaybook,
 } from "./cheap-model-playbook.js";
 
@@ -63,20 +64,17 @@ describe("shouldInjectCheapModelPlaybook", () => {
   });
 });
 
-describe("appendCheapModelPlaybook", () => {
-  it("appends the playbook with blank-line separator when prompt has no trailing newline", () => {
-    const out = appendCheapModelPlaybook("You are an agent.");
-    expect(out).toBe(`You are an agent.\n\n${CHEAP_MODEL_PLAYBOOK}`);
+describe("injectCheapModelPlaybook", () => {
+  it("PREPENDS the playbook so it lands at the front of attention", () => {
+    const out = injectCheapModelPlaybook("You are an agent.");
+    expect(out).toBe(`${CHEAP_MODEL_PLAYBOOK}You are an agent.`);
+    // Primacy property — system prompt now opens with the CRITICAL marker.
+    expect(out.startsWith("[CRITICAL TOOL-USE RULES")).toBe(true);
   });
 
-  it("uses single newline separator when prompt already ends with newline", () => {
-    const out = appendCheapModelPlaybook("You are an agent.\n");
-    expect(out).toBe(`You are an agent.\n\n${CHEAP_MODEL_PLAYBOOK}`);
-  });
-
-  it("is idempotent — passing already-suffixed prompt returns it unchanged", () => {
-    const once = appendCheapModelPlaybook("Sys.");
-    const twice = appendCheapModelPlaybook(once);
+  it("is idempotent — passing already-prefixed prompt returns it unchanged", () => {
+    const once = injectCheapModelPlaybook("Sys.");
+    const twice = injectCheapModelPlaybook(once);
     expect(twice).toBe(once);
   });
 
@@ -87,7 +85,20 @@ describe("appendCheapModelPlaybook", () => {
     expect(CHEAP_MODEL_PLAYBOOK).toMatch(/ERROR/);
   });
 
-  it("playbook is short (under 800 chars) to preserve attention budget", () => {
-    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(800);
+  it("rule 1 wording now applies to every bash call (not just retries)", () => {
+    // Live forensics showed cheap models rationalized that the first call
+    // isn't a re-run, so the "NEVER re-run" wording let them skip the rule.
+    // The new wording explicitly says EVERY bash call.
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/EVERY bash call/i);
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/do NOT pipe.*tail/i);
+  });
+
+  it("playbook is short (under 1500 chars) to preserve attention budget", () => {
+    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1500);
+  });
+
+  it("deprecated appendCheapModelPlaybook alias still works (now actually prepends)", () => {
+    const out = appendCheapModelPlaybook("Sys.");
+    expect(out).toBe(`${CHEAP_MODEL_PLAYBOOK}Sys.`);
   });
 });

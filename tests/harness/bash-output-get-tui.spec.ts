@@ -203,16 +203,20 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     // verify the slice came from cache (not a re-run of the bash command).
     expect(after_bog).toMatch(/\[bash-1 mode=grep/);
 
-    // Verify the cheap-model playbook landed in the system prompt for fast
-    // tier — Bước 1 (ad6ce6d) E2E confirmation. PIL's classifier has a
-    // different system, so check agentCalls only.
-    const agentSystems = agentCalls
-      .map((c) => {
-        const p = c?.options?.prompt;
-        const sys = Array.isArray(p) && p[0] ? p[0] : null;
-        return typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-      })
-      .join("\n");
-    expect(agentSystems).toContain("BUDGET MODEL TOOL-USE PLAYBOOK");
+    // Verify the cheap-model playbook landed at the TOP of the system prompt
+    // for fast tier (Bước 3-2 — prepend with CRITICAL marker). PIL's
+    // classifier has a different system, so check agentCalls only.
+    const agentSystems = agentCalls.map((c) => {
+      const p = c?.options?.prompt;
+      const sys = Array.isArray(p) && p[0] ? p[0] : null;
+      return typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
+    });
+    // Primacy assertion — first agent system prompt must OPEN with the
+    // CRITICAL marker, not just contain it somewhere mid-text.
+    expect(agentSystems[0]?.startsWith("[CRITICAL TOOL-USE RULES")).toBe(true);
+    // Playbook content still present.
+    const joined = agentSystems.join("\n");
+    expect(joined).toContain("bash_output_get");
+    expect(joined).toMatch(/EVERY bash call/);
   }, 90_000);
 });
