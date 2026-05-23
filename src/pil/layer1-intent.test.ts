@@ -174,6 +174,97 @@ describe("layer1Intent", () => {
     expect(result.domain).toBe("typescript");
   });
 
+  // 4P-2: bridge classifier system prompt MUST be neutral. The legacy classifier
+  // text (sent to classifyViaBrain when local signal is weak) was previously
+  // biased toward `refactor` because it listed refactor first and treated any
+  // code touch as restructuring. Phase 4P-2 rewrites the prompt to enumerate
+  // categories in neutral order, restrict refactor to explicit restructure
+  // verbs, and prefer the catch-all `general` over guessing.
+  describe("4P-2: bridge classifier system prompt — neutral guidance", () => {
+    it("prompt text declares categories in neutral order (analyze, debug, generate, refactor, plan, documentation, general)", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("general,balanced");
+      await layer1Intent(makeCtx("some longer ambiguous prompt that triggers brain"));
+      const promptArg = mockedClassifyViaBrain.mock.calls[0]?.[0] ?? "";
+      // Neutral-order requirement: analyze appears before refactor
+      const idxAnalyze = promptArg.indexOf("analyze");
+      const idxRefactor = promptArg.indexOf("refactor");
+      expect(idxAnalyze).toBeGreaterThanOrEqual(0);
+      expect(idxAnalyze).toBeLessThan(idxRefactor);
+    });
+
+    it("prompt text contains explicit refactor restriction sentence", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("general,balanced");
+      await layer1Intent(makeCtx("some longer ambiguous prompt that triggers brain"));
+      const promptArg = mockedClassifyViaBrain.mock.calls[0]?.[0] ?? "";
+      expect(promptArg).toMatch(/Only return refactor when/);
+    });
+
+    it("prompt text instructs preferring 'general' over guessing when ambiguous", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("general,balanced");
+      await layer1Intent(makeCtx("some longer ambiguous prompt that triggers brain"));
+      const promptArg = mockedClassifyViaBrain.mock.calls[0]?.[0] ?? "";
+      expect(promptArg).toMatch(/prefer 'general'|when uncertain|when ambiguous/i);
+    });
+
+    it("prompt text clarifies feature-add prompts are 'generate', not refactor", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("general,balanced");
+      await layer1Intent(makeCtx("some longer ambiguous prompt that triggers brain"));
+      const promptArg = mockedClassifyViaBrain.mock.calls[0]?.[0] ?? "";
+      expect(promptArg).toMatch(/Feature additions|add flag|generate.*even when they touch/i);
+    });
+  });
+
+  describe("4P-2: bridge classifier — 5 baseline prompts produce correct labels", () => {
+    // The bridge classifier mock returns each baseline's expected label as if
+    // the LLM had read the new neutral prompt. This guards the WIRING
+    // (mocked brain reply → taskType on ctx) and pins the 5 baseline prompts
+    // into the regression suite so future prompt changes that break any of
+    // them fail loudly.
+
+    it("baseline 1: 'giải thích đoạn code ở src/index.ts:1403' → analyze", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("analyze,balanced");
+      const result = await layer1Intent(makeCtx("giải thích đoạn code ở src/index.ts:1403"));
+      expect(result.taskType).toBe("analyze");
+    });
+
+    it("baseline 2: 'đổi default --max-tool-rounds từ 100 → 150 trong src/orchestrator/cli-args.ts' → generate", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("generate,concise");
+      const result = await layer1Intent(
+        makeCtx("đổi default --max-tool-rounds từ 100 → 150 trong src/orchestrator/cli-args.ts"),
+      );
+      expect(result.taskType).toBe("generate");
+    });
+
+    it("baseline 3: 'tìm xem tại sao bash_output_get trả empty khi run_id sai' → debug", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("debug,balanced");
+      const result = await layer1Intent(makeCtx("tìm xem tại sao bash_output_get trả empty khi run_id sai"));
+      expect(result.taskType).toBe("debug");
+    });
+
+    it("baseline 4: 'thêm flag --budget-tokens N, khi total tokens > N thì halt với reason=budget exhausted' → generate", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("generate,concise");
+      const result = await layer1Intent(
+        makeCtx("thêm flag --budget-tokens N, khi total tokens > N thì halt với reason='budget exhausted'"),
+      );
+      expect(result.taskType).toBe("generate");
+    });
+
+    it("baseline 5: 'improve test coverage' → analyze OR general (ambiguous)", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("general,balanced");
+      const result = await layer1Intent(makeCtx("improve test coverage"));
+      expect(["analyze", "general"]).toContain(result.taskType);
+    });
+  });
+
   it("fails open on error — returns ctx unchanged with applied=false", async () => {
     mockedClassify.mockImplementation(() => {
       throw new Error("classifier crashed");
