@@ -70,6 +70,14 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { classifyStreamError } from "./retry-classifier.js";
+import { incSessionStep, resolveCeiling } from "./scope-ceiling.js";
+import {
+  attachReminderToMessages,
+  buildScopeReminder,
+  cadenceForSize,
+  shouldInjectReminder,
+  shouldInjectSoftWarn,
+} from "./scope-reminder.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { firstLine, formatSubagentActivity } from "./tool-utils";
@@ -471,12 +479,25 @@ export class StreamRunner {
     // `reasoning` parts (HTTP 400 code 20015). The siliconflow capability
     // override strips them; every other provider's capability is identity.
     const subMessagesForCall = taskCaps.sanitizeHistory(childMessages) as typeof childMessages;
+    // Phase 4 Plan 04 (4B) — mirror top-level scope-ceiling integration.
+    // Sub-agent ceiling resolves against ("general", "medium") because the
+    // sub-agent has no PIL ctx of its own; the caller already bounded the
+    // work via maxSteps. We compose alongside that hard step cap so a
+    // wandering sub-agent loop trips whichever fires first (logical OR).
+    const _subCeiling = resolveCeiling("general", "medium");
+    const _subCounterKey = `subagent:${subCallId}`;
+    const _subStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+      if (state.steps.length >= maxSteps) return true;
+      const next = incSessionStep(_subCounterKey);
+      return next >= _subCeiling;
+    }) as unknown as Parameters<typeof streamText>[0]["stopWhen"];
+
     const result = streamText({
       model: childRuntime.model,
       system: childSystem,
       messages: subMessagesForCall,
       tools: !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
-      stopWhen: stepCountIs(maxSteps),
+      stopWhen: _subStopWhen ?? stepCountIs(maxSteps),
       maxRetries: 0,
       abortSignal: signal,
       prepareStep: ({ messages, stepNumber }) => {
@@ -496,6 +517,29 @@ export class StreamRunner {
           keepLastTurns: compactKeepLast,
           contextWindowTokens: childCtxWindow,
         });
+        // Phase 4A — scope reminder injection for the sub-agent loop.
+        // Mirror of the top-level wiring in message-processor.ts:
+        // K = cadenceForSize(size) where size defaults to "medium" because
+        // the sub-agent has no PIL ctx of its own (matches 4B sub-agent
+        // ceiling that uses ("general", "medium") above). Original prompt
+        // is `prepared.request.prompt`. Session id reuses the sub-agent
+        // counter key so soft-warn fires at most once per sub-agent call.
+        const _subSize: ComplexitySize = "medium";
+        const _subK = cadenceForSize(_subSize);
+        const _subShouldRemind = shouldInjectReminder(stepNumber, _subK);
+        const _subShouldWarn = shouldInjectSoftWarn(stepNumber, _subCeiling, _subCounterKey);
+        if (_subShouldRemind || _subShouldWarn) {
+          const _baseReminder = buildScopeReminder({
+            step: stepNumber,
+            ceiling: _subCeiling,
+            taskType: "general",
+            size: _subSize,
+            originalPrompt: prepared.request.prompt,
+          });
+          const _reminder = _subShouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+          const withReminder = attachReminderToMessages(compacted, _reminder);
+          return { messages: withReminder };
+        }
         if (compacted === stripped && stripped === messages) return undefined;
         return { messages: compacted };
       },

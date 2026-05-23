@@ -140,7 +140,21 @@ import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import {
+  attachReminderToMessages,
+  buildScopeReminder,
+  cadenceForSize,
+  shouldInjectReminder,
+  shouldInjectSoftWarn,
+  type ComplexitySize,
+} from "./scope-reminder.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
+import {
+  forcedFinalize,
+  incSessionStep,
+  parseBudgetOverride,
+  resolveCeiling,
+} from "./scope-ceiling.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 
 /**
@@ -405,6 +419,14 @@ export class MessageProcessor {
       signal.addEventListener("abort", aborter, { once: true });
     }
 
+    // Phase 4 Plan 04 (4B) — parse `--budget-rounds N` flag BEFORE PIL so the
+    // flag never reaches the model and never biases intent classification.
+    // The stashed override is consumed after PIL produces taskType + size.
+    const _budgetOverride = parseBudgetOverride(userMessage);
+    if (_budgetOverride.override !== undefined) {
+      userMessage = _budgetOverride.cleanedPrompt;
+    }
+
     // P0 native observation: cache turn-level intent fields for PreToolUse.
     deps.setTurnUserGoalExcerpt(userMessage.slice(0, 200));
     deps.setTurnAssistantReasoning("");
@@ -528,6 +550,34 @@ export class MessageProcessor {
     await pilTask;
 
     const pilCtx = pilCtxResolved!;
+
+    // Phase 4 Plan 04 (4B) — resolve per-session step ceiling using
+    // (task_type × complexitySize) matrix. Override (from --budget-rounds N
+    // parsed earlier) wins. When the override differs from the natural
+    // ceiling, emit info toast so the user sees the explicit cap.
+    const _ceilingTaskType = pilCtx.taskType ?? "general";
+    const _ceilingSize = pilCtx.complexitySize?.size ?? "medium";
+    const _naturalCeiling = resolveCeiling(_ceilingTaskType, _ceilingSize);
+    const _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
+    if (_budgetOverride.override !== undefined && _budgetOverride.override !== _naturalCeiling) {
+      try {
+        const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+          | { emitEvent: (e: unknown) => void }
+          | undefined;
+        _ar?.emitEvent({
+          t: "event",
+          kind: "toast",
+          level: "info",
+          text: `override active: ceiling ${_budgetOverride.override}, default was ${_naturalCeiling} (task=${_ceilingTaskType}/size=${_ceilingSize})`,
+        });
+      } catch {
+        /* best-effort */
+      }
+    }
+    // Track whether forced-finalize is needed (set by stopWhen when the
+    // ceiling fires). Read AFTER the streamText fullStream finishes.
+    let _ceilingHit = false;
+
     // Cheap signal forwarded from PIL Layer 1 — true when input is greeting /
     // small-talk (≤10 chars + ≤2 words OR brain-classified "none"). Used to
     // skip the MCP tool catalog, which dominates input tokens (~20K) and is
@@ -1265,9 +1315,25 @@ export class MessageProcessor {
           // Closure-mutable cap for the tool-loop askcard rescue.
           // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
           // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
-          const dynamicStopWhen = createToolLoopCapPredicate({
+          const _baseDynamicStopWhen = createToolLoopCapPredicate({
             initialCap: deps.maxToolRounds,
             ask: deps.askToolLoopContinue,
+          });
+          // Phase 4 Plan 04 (4B) — compose per-session ceiling alongside the
+          // existing cap + pattern guard. Logical OR: any condition true → halt.
+          // Counter is per-SESSION and increments once per stopWhen invocation
+          // (i.e. once per finished tool step), persisting across user turns
+          // so a wandering 3-turn burst still trips at the matrix limit.
+          const _ceilingSessionId = deps.session?.id ?? "no-session";
+          const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+            const base = await _baseDynamicStopWhen(state);
+            if (base) return true;
+            const next = incSessionStep(_ceilingSessionId);
+            if (next >= _stepCeiling) {
+              _ceilingHit = true;
+              return true;
+            }
+            return false;
           }) as unknown as StopCondition<typeof tools>;
           const result = streamText({
             model: runtime.model,
@@ -1297,6 +1363,33 @@ export class MessageProcessor {
                 envelopeChars,
                 contextWindowTokens,
               });
+              // Phase 4A — scope reminder injection (REQ-005).
+              // Cadence K = 3/5/8 for small/medium/large. Soft-warn fires
+              // ONCE per session at floor(ceiling*0.7). Reminder lives in
+              // the tool_result/system channel so B3/B4 compaction cannot
+              // strip it (system-prompt path is unsafe at high step counts).
+              // Ceiling reuses the 4B (task_type × size) matrix result
+              // resolved above (`_stepCeiling`, `_ceilingTaskType`,
+              // `_ceilingSize`, `_ceilingSessionId`) so the reminder and the
+              // halt boundary agree on the same number.
+              const _scopeSize: ComplexitySize = _ceilingSize;
+              const _scopeK = cadenceForSize(_scopeSize);
+              const _scopeCeiling = Math.max(1, _stepCeiling ?? deps.maxToolRounds ?? 30);
+              const _scopeStep = sn;
+              const _shouldRemind = shouldInjectReminder(_scopeStep, _scopeK);
+              const _shouldWarn = shouldInjectSoftWarn(_scopeStep, _scopeCeiling, _ceilingSessionId);
+              if (_shouldRemind || _shouldWarn) {
+                const _baseReminder = buildScopeReminder({
+                  step: _scopeStep,
+                  ceiling: _scopeCeiling,
+                  taskType: _ceilingTaskType,
+                  size: _scopeSize,
+                  originalPrompt: userMessage,
+                });
+                const _reminder = _shouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+                const withReminder = attachReminderToMessages(compacted, _reminder);
+                return { messages: withReminder };
+              }
               if (compacted === stripped && stripped === stepMessages) return {};
               return { messages: compacted };
             },
@@ -1839,6 +1932,38 @@ export class MessageProcessor {
             deps.discardAbortedTurn(userModelMessage);
             yield { type: "done" };
             return;
+          }
+
+          // Phase 4 Plan 04 (4B) — forced-finalize on ceiling hit. One final
+          // LLM call with toolChoice:"none" so the cheap model can synthesize a
+          // partial answer from accumulated context, then emit warn toast.
+          if (_ceilingHit && !signal.aborted) {
+            try {
+              const ff = await forcedFinalize({
+                model: runtime.model,
+                messages: _topMessagesForCall as unknown[],
+                system: typeof systemForModel === "string" ? systemForModel : undefined,
+              });
+              if (ff.text.trim()) {
+                assistantText += ff.text;
+                yield { type: "content", content: ff.text };
+              }
+            } catch {
+              /* forced-finalize is best-effort — never block the halt */
+            }
+            try {
+              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar?.emitEvent({
+                t: "event",
+                kind: "toast",
+                level: "warn",
+                text: `halted: step ceiling exceeded for task_type=${_ceilingTaskType} size=${_ceilingSize} at step ${_stepCeiling}/${_stepCeiling}`,
+              });
+            } catch {
+              /* best-effort */
+            }
           }
 
           if (!streamOk && assistantText.trim()) {
