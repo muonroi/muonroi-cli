@@ -163,8 +163,11 @@ const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
   "regex:explain": "analyze",
   "regex:search": "analyze",
   "regex:install": "analyze",
-  "tree-sitter:typescript": "refactor",
-  "tree-sitter:python": "refactor",
+  // tree-sitter:* parses indicate code presence ONLY — no intent signal.
+  // Mapping these to "refactor" caused 4/5 baseline misclassifications
+  // (Phase 4, 4P-1). Leave undefined so Pass 2 keyword fallback decides.
+  "tree-sitter:typescript": undefined,
+  "tree-sitter:python": undefined,
   "regex:read": "analyze",
   "regex:git": "analyze",
   "regex:short-message": "general",
