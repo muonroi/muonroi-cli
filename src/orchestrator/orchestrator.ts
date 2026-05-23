@@ -137,6 +137,7 @@ import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { setProviderHint } from "./token-counter.js";
+import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 
 // ---------------------------------------------------------------------------
@@ -640,13 +641,9 @@ export class Agent {
   // cap. The UI surfaces an askcard ("Continue +50? / Stop and answer") and
   // resolves with the verdict. When unset, the loop stops gracefully — no
   // hard-throw, matches the user-friendly behaviour we promised.
-  private _toolLoopCapHandler:
-    | null
-    | ((info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">) = null;
+  private _toolLoopCapHandler: ToolLoopCapAsk | null = null;
 
-  setToolLoopCapHandler(
-    fn: ((info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">) | null,
-  ): void {
+  setToolLoopCapHandler(fn: ToolLoopCapAsk | null): void {
     this._toolLoopCapHandler = fn;
   }
 

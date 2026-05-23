@@ -178,6 +178,15 @@ export interface ToolResult {
   computer?: ComputerToolMetadata;
   verifyRecipe?: VerifyRecipe;
   lspDiagnostics?: LspDiagnosticFile[];
+  /**
+   * Opaque ID assigned by BashTool when a foreground command runs. The full
+   * (untruncated, ANSI-stripped) stdout+stderr is cached in-memory keyed by
+   * this ID so the agent can re-query it via `bash_output_get` instead of
+   * re-running expensive commands with cosmetic flag changes (Fix #2).
+   */
+  bashRunId?: string;
+  /** Total chars of cached stdout+stderr for this bashRunId, pre-truncation. */
+  bashTotalChars?: number;
 }
 
 export interface ToolCall {

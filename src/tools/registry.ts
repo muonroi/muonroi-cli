@@ -11,6 +11,7 @@ import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../pro
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import type { BashTool } from "./bash.js";
+import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import { executeGrep } from "./grep.js";
@@ -107,7 +108,11 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // bash
   tools.bash = dynamicTool({
-    description: "Execute a shell command. Set background=true for long-running processes.",
+    description:
+      "Execute a shell command. Set background=true for long-running processes. " +
+      "If output is truncated, use bash_output_get with the returned run_id to re-query " +
+      "the full output with head/tail/grep/lines slicing — do NOT re-run the command with " +
+      "different pipe flags.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -123,7 +128,57 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         return formatResult(result);
       }
       const result = await bash.execute(input.command, input.timeout ?? 30000);
-      return formatResult(result);
+      const formatted = formatResult(result);
+      // Append a run_id footer so the model can re-query the full output via
+      // bash_output_get instead of running the command again with different
+      // flags. We only annotate when truncation actually happened — when the
+      // output already fit, the run_id is noise.
+      if (result.bashRunId && result.bashTotalChars !== undefined && result.bashTotalChars > MAX_TOOL_OUTPUT_CHARS) {
+        return `${formatted}\n\n[bash_run_id: ${result.bashRunId} — ${result.bashTotalChars} chars cached; use bash_output_get(run_id, mode=tail|head|grep|lines) to re-query]`;
+      }
+      return formatted;
+    },
+  });
+
+  // bash_output_get — re-query the cached full output of a previous bash run.
+  // Designed to break the "re-run vitest with different pipe flags" loop by
+  // letting the agent slice cached stdout/stderr instead.
+  tools.bash_output_get = dynamicTool({
+    description:
+      "Re-query the full (untruncated, ANSI-stripped) stdout+stderr of a previous bash run by run_id. " +
+      "Use this INSTEAD of re-running the same command with different `| tail`, `| head`, `| grep`, or " +
+      "`> file` flags. Modes: head/tail (first/last N lines), grep (regex filter), lines (range N-M).",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        run_id: { type: "string", description: "Run ID from a previous bash result, e.g. 'bash-42'" },
+        mode: { type: "string", enum: ["head", "tail", "grep", "lines", "full"] },
+        lines: { type: "number", description: "Line count for head/tail (default 50)" },
+        pattern: { type: "string", description: "Regex pattern for grep mode" },
+        range: { type: "string", description: "Line range 'N-M' (1-based, inclusive) for lines mode" },
+        case_insensitive: { type: "boolean", description: "Case-insensitive grep (default false)" },
+      },
+      required: ["run_id", "mode"],
+    }),
+    execute: async (input: any) => {
+      const record = getBashRun(input.run_id);
+      if (!record) {
+        return truncateOutput(`ERROR: No cached bash run with id '${input.run_id}'. Cache holds up to 50 runs.`);
+      }
+      const slice = sliceBashOutput(record, {
+        mode: input.mode as BashSliceMode,
+        lines: input.lines,
+        pattern: input.pattern,
+        range: input.range,
+        caseInsensitive: input.case_insensitive,
+      });
+      if (!slice.ok) {
+        return truncateOutput(`ERROR: ${slice.text}`);
+      }
+      const meta = `[${input.run_id} mode=${input.mode} total_lines=${slice.totalLines}${
+        slice.matchedLines !== undefined ? ` matched=${slice.matchedLines}` : ""
+      } exit=${record.exitCode ?? "?"}]`;
+      return truncateOutput(`${meta}\n${slice.text}`);
     },
   });
 

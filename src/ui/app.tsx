@@ -2146,22 +2146,37 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // for the user's verdict, and resolve the promise with continue/stop. When
   // the user cancels (Esc) we treat it as stop — same UX as other askcards.
   useEffect(() => {
-    agent.setToolLoopCapHandler(async ({ stepNumber, cap, bumpBy }) => {
+    agent.setToolLoopCapHandler(async (info) => {
       return new Promise<"continue" | "stop">((resolve) => {
-        const qid = `tool-loop-cap-${stepNumber}-${Date.now()}`;
+        const isPattern = info.kind === "pattern";
+        const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
         toolLoopCapResolversRef.current.set(qid, resolve);
-        const question: CouncilQuestionData = {
-          questionId: qid,
-          question: `Agent đã chạy ${stepNumber} tool rounds (cap ${cap}). Có dấu hiệu loop — tiếp tục?`,
-          context: `Continue raises the cap by +${bumpBy}. Stop returns the agent's best answer with current context.`,
-          isRequired: true,
-          phase: "tool-loop-cap",
-          options: [
-            { label: `Continue (+${bumpBy} rounds)`, value: "continue", kind: "choice" },
-            { label: "Stop and answer", value: "stop", kind: "choice" },
-          ],
-          defaultIndex: 0,
-        };
+        const question: CouncilQuestionData = isPattern
+          ? {
+              questionId: qid,
+              question: `Tool \`${info.toolName}\` đã chạy ${info.count}/${info.windowSize} lần với args gần giống — có thể đang loop. Tiếp tục?`,
+              context:
+                "Continue lets the agent keep trying. Stop returns the agent's best answer with current context and lets you reprompt.",
+              isRequired: true,
+              phase: "tool-loop-cap",
+              options: [
+                { label: "Continue (let agent try)", value: "continue", kind: "choice" },
+                { label: "Stop and answer", value: "stop", kind: "choice" },
+              ],
+              defaultIndex: 1,
+            }
+          : {
+              questionId: qid,
+              question: `Agent đã chạy ${info.stepNumber} tool rounds (cap ${info.cap}). Có dấu hiệu loop — tiếp tục?`,
+              context: `Continue raises the cap by +${info.bumpBy}. Stop returns the agent's best answer with current context.`,
+              isRequired: true,
+              phase: "tool-loop-cap",
+              options: [
+                { label: `Continue (+${info.bumpBy} rounds)`, value: "continue", kind: "choice" },
+                { label: "Stop and answer", value: "stop", kind: "choice" },
+              ],
+              defaultIndex: 0,
+            };
         setPendingCouncilQuestionSync(question);
         setCouncilCardStateSync(initialCardState(question));
         try {
@@ -2172,7 +2187,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             question: question.question,
             phase: "tool-loop-cap",
             optionCount: question.options!.length,
-            defaultIndex: 0,
+            defaultIndex: question.defaultIndex ?? 0,
           });
         } catch {
           /* best-effort */
