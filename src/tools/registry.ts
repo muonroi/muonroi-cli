@@ -23,6 +23,52 @@ interface ToolRegistryOpts {
   readDelegation?: (id: string) => Promise<ToolResult>;
   listDelegations?: () => Promise<ToolResult>;
   modelId?: string;
+  /**
+   * Phase 4R: session id used to key the bash canonical-repeat detector
+   * state across multiple createBuiltinTools() rebuilds within the same
+   * agent session. When omitted, each registry instance gets its own
+   * isolated state (legacy per-closure behaviour).
+   */
+  sessionId?: string;
+}
+
+/**
+ * Phase 4R: session-scoped bash repeat detector state.
+ *
+ * Previously the `lastBashCanonical` / `lastBashRunId` lived in the closure
+ * of `createBuiltinTools()`. Every askcard answer / sub-agent invocation
+ * rebuilds the tool registry, wiping that state and letting cheap models
+ * re-run identical `grep` calls across turns (baseline session
+ * `77cd2e11c6a5` did this 9 times in a row).
+ *
+ * We now key the state by sessionId on a process-global Map so the detector
+ * sees identical canonical commands no matter how many times the registry
+ * is rebuilt within the same session. When no sessionId is provided we
+ * synthesise a unique fallback key per registry instance, preserving the
+ * legacy per-closure semantics for callers that haven't been wired yet.
+ */
+interface BashRepeatEntry {
+  lastCanonical: string | null;
+  lastRunId: string | null;
+}
+
+declare global {
+  // eslint-disable-next-line no-var
+  var __muonroiBashRepeatState: Map<string, BashRepeatEntry> | undefined;
+}
+
+function getBashRepeatState(): Map<string, BashRepeatEntry> {
+  if (!globalThis.__muonroiBashRepeatState) {
+    globalThis.__muonroiBashRepeatState = new Map<string, BashRepeatEntry>();
+  }
+  return globalThis.__muonroiBashRepeatState;
+}
+
+let __anonRepeatCounter = 0;
+function resolveBashRepeatKey(sessionId: string | undefined): string {
+  if (sessionId && sessionId.length > 0) return sessionId;
+  __anonRepeatCounter += 1;
+  return `__no_session__:${process.pid}:${Date.now()}:${__anonRepeatCounter}`;
 }
 
 /**
@@ -108,15 +154,19 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   });
 
   // bash — every foreground call goes through here. We track the LAST
-  // canonical command + runId in this closure so we can inject a reminder
-  // when the model issues another bash call that canonicalizes to the same
-  // shape (e.g. `bunx vitest run | tail` followed by `bunx vitest run | head`
-  // — both canonicalize to `bunx vitest run`). The reminder rides on the
-  // tool_result of the SECOND call, which the model is forced to read
-  // before its next step — far stronger signal than a system-prompt rule
-  // it can attention-decay past.
-  let lastBashCanonical: string | null = null;
-  let lastBashRunId: string | null = null;
+  // canonical command + runId in SESSION-SCOPED state so we can inject a
+  // reminder when the model issues another bash call that canonicalizes to
+  // the same shape (e.g. `bunx vitest run | tail` followed by
+  // `bunx vitest run | head` — both canonicalize to `bunx vitest run`).
+  // The reminder rides on the tool_result of the SECOND call, which the
+  // model is forced to read before its next step — far stronger signal
+  // than a system-prompt rule it can attention-decay past.
+  //
+  // Phase 4R: state was previously a per-closure local; now it lives on a
+  // process-global Map keyed by sessionId so a registry rebuild between
+  // user turns / askcards no longer wipes it. See getBashRepeatState().
+  const repeatState = getBashRepeatState();
+  const repeatKey = resolveBashRepeatKey(opts?.sessionId);
   tools.bash = dynamicTool({
     description:
       "Execute a shell command. Output is automatically cached — every call returns a " +
@@ -142,17 +192,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       // inline reminder if it matches the previous bash call.
       const cmd = typeof input.command === "string" ? input.command : "";
       const canonical = cmd ? canonicalizeBashCommand(cmd) : "";
-      const repeatedIntent = canonical !== "" && canonical === lastBashCanonical && lastBashRunId !== null;
-      const prevRunId = lastBashRunId;
+      const entry = repeatState.get(repeatKey) ?? { lastCanonical: null, lastRunId: null };
+      const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
+      const prevRunId = entry.lastRunId;
 
       const result = await bash.execute(input.command, input.timeout ?? 30000);
       const formatted = formatResult(result);
 
       // Update last-canonical state AFTER we compared, so the current call's
-      // runId becomes the comparison target for the next one.
+      // runId becomes the comparison target for the next one. Session-scoped
+      // map persists across createBuiltinTools() rebuilds (Phase 4R).
       if (result.bashRunId) {
-        lastBashCanonical = canonical;
-        lastBashRunId = result.bashRunId;
+        repeatState.set(repeatKey, { lastCanonical: canonical, lastRunId: result.bashRunId });
       }
 
       // 3-3 reminder rides on the tool_result of the SECOND+ same-intent
