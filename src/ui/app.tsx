@@ -838,7 +838,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
   const [streamContent, setStreamContent] = useState("");
-  const [_streamReasoning, setStreamReasoning] = useState("");
+  // Reasoning state: track activity + last-elapsed for a "💭 Thought for Ns"
+  // pill instead of dumping CoT into the chat (saves 80–120 setState/sec on
+  // DeepSeek Flash's verbose reasoning stream — was a freeze contributor).
+  const [reasoningActive, setReasoningActive] = useState(false);
+  const [lastReasoningElapsedMs, setLastReasoningElapsedMs] = useState(0);
+  const reasoningStartRef = useRef<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [liveTurnSourceLabel, setLiveTurnSourceLabel] = useState<string | null>(null);
   modelRef.current = model;
@@ -1914,7 +1919,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const clearLiveTurnUi = useCallback(() => {
     setStreamContent("");
-    setStreamReasoning("");
+    setReasoningActive(false);
+    setLastReasoningElapsedMs(0);
+    reasoningStartRef.current = null;
     setActiveToolCalls([]);
     setActiveSubagent(null);
     setLiveTurnSourceLabel(null);
@@ -2841,12 +2848,31 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
             switch (chunk.type) {
               case "content":
+                // Reasoning streak ended (model started speaking). Stamp the
+                // elapsed time so the pill can replace the live "Thinking…"
+                // indicator.
+                if (reasoningStartRef.current !== null) {
+                  setLastReasoningElapsedMs(Date.now() - reasoningStartRef.current);
+                  reasoningStartRef.current = null;
+                  setReasoningActive(false);
+                }
                 applyLocalAssistantDelta(chunk.content || "");
                 break;
               case "reasoning":
-                setStreamReasoning((p) => p + (chunk.content || ""));
+                // Drop CoT body — keep only the duration as a "Thought for Ns"
+                // pill. DeepSeek emits 80–120 reasoning tokens/sec; rendering
+                // those into the chat froze the renderer.
+                if (reasoningStartRef.current === null) {
+                  reasoningStartRef.current = Date.now();
+                  setReasoningActive(true);
+                }
                 break;
               case "tool_calls":
+                if (reasoningStartRef.current !== null) {
+                  setLastReasoningElapsedMs(Date.now() - reasoningStartRef.current);
+                  reasoningStartRef.current = null;
+                  setReasoningActive(false);
+                }
                 if (chunk.toolCalls) {
                   showLiveToolCalls(chunk.toolCalls);
                 }
@@ -6469,6 +6495,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       theme={t}
                       state={preflightCardState}
                     />
+                  )}
+                  {/* Reasoning pill — Claude-style "💭 Thinking…" while a
+                      reasoning streak is active, then "💭 Thought for Ns"
+                      once the model emits text or a tool call. CoT body is
+                      discarded so we never re-render heavy markdown for it. */}
+                  {(reasoningActive || lastReasoningElapsedMs > 0) && (
+                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                      <text fg={t.textMuted}>
+                        {reasoningActive
+                          ? "💭 Thinking…"
+                          : `💭 Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
+                      </text>
+                    </box>
                   )}
                   {/* Streaming assistant content */}
                   {streamContent && (
