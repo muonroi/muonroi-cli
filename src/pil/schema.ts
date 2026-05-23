@@ -48,6 +48,14 @@ export const PipelineContextSchema = z.object({
   digestAgeMs: z.number().nullable().optional(),
   sessionId: z.string().nullable().optional(),
   complexityTier: z.enum(["quick", "standard", "heavy"]).nullable().optional(),
+  complexitySize: z
+    .object({
+      size: z.enum(["small", "medium", "large"]),
+      score: z.number(),
+      features: z.record(z.string(), z.union([z.number(), z.boolean()])),
+    })
+    .nullable()
+    .optional(),
   grayAreas: z
     .array(
       z.object({

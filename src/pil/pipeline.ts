@@ -21,6 +21,7 @@ import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";
 import { isDiscoveryEnabled } from "./config.js";
 import { layer1Intent } from "./layer1-intent.js";
+import { scoreComplexitySize } from "./layer1_5-complexity-size.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
@@ -94,6 +95,27 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   }
 
   await timed("layer1-intent", (c) => layer1Intent(c, { llmFallback: options?.llmFallback }));
+
+  // Layer 1.5: deterministic complexity-size classification. Pure heuristic,
+  // no LLM call, no network. Consumed by 4B (step ceiling matrix) and 4A
+  // (scope-reminder cadence K). Mirrored into _intentTrace for forensics.
+  {
+    const sizeResult = scoreComplexitySize({
+      rawText: ctx.raw,
+      taskType: ctx.taskType ?? "general",
+    });
+    ctx = {
+      ...ctx,
+      complexitySize: sizeResult,
+      _intentTrace: ctx._intentTrace
+        ? {
+            ...ctx._intentTrace,
+            complexitySize: sizeResult.size,
+            complexitySizeScore: sizeResult.score,
+          }
+        : ctx._intentTrace,
+    };
+  }
 
   // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
   if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
