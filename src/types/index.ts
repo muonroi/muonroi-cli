@@ -189,8 +189,26 @@ export interface ToolCall {
   };
 }
 
+export interface ToolGroupItem {
+  toolCall: ToolCall;
+  result?: ToolResult;
+  startedAt: number;
+  finishedAt?: number;
+  failed?: boolean;
+}
+
+export interface ToolGroup {
+  id: string;
+  state: "active" | "done" | "failed";
+  items: ToolGroupItem[];
+  startedAt: number;
+  finishedAt?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export interface ChatEntry {
-  type: "user" | "assistant" | "tool_call" | "tool_result" | "structured_response";
+  type: "user" | "assistant" | "tool_call" | "tool_result" | "structured_response" | "tool_group";
   content: string;
   timestamp: Date;
   modeColor?: string;
@@ -200,6 +218,7 @@ export interface ChatEntry {
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
   toolResult?: ToolResult;
+  toolGroup?: ToolGroup;
   structuredResponse?: StructuredResponse;
 }
 
@@ -224,7 +243,8 @@ export type CouncilQuestionPhase =
   | "plan-confirm"
   | "post-debate"
   | "pil-interview"
-  | "pil-acceptance";
+  | "pil-acceptance"
+  | "tool-loop-cap";
 
 export type CouncilOptionKind = "choice" | "freetext" | "chat";
 
@@ -389,7 +409,8 @@ export interface StreamChunk {
     | "experience_warning"
     | "experience_injected"
     | "push_notification"
-    | "halt";
+    | "halt"
+    | "task_list_update";
   content?: string;
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
@@ -409,6 +430,32 @@ export interface StreamChunk {
   haltChunk?: import("../product-loop/types.js").HaltChunk;
   experienceWarning?: ExperienceWarningData;
   experienceInjected?: ExperienceInjectedData;
+  taskListSnapshot?: TaskListSnapshot;
+}
+
+export type TaskListItemStatus = "pending" | "in_progress" | "completed";
+
+export interface TaskListItem {
+  id: string;
+  subject: string;
+  /** Present-continuous form shown while in_progress (e.g. "Reading files"). Falls back to subject. */
+  activeForm?: string;
+  status: TaskListItemStatus;
+}
+
+// Full snapshot of the agent's current task list. Each todo_write tool call
+// replaces the previous snapshot entirely — the UI panel re-renders from this.
+export interface TaskListSnapshot {
+  items: TaskListItem[];
+  /** Derived counts, included so the UI footer doesn't need to recompute. */
+  counts: {
+    completed: number;
+    inProgress: number;
+    pending: number;
+    total: number;
+  };
+  /** Server timestamp (ms since epoch) of the snapshot. */
+  ts: number;
 }
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAnswerForLog } from "../format.js";
+import { buildToolGroupEntry, formatAnswerForLog } from "../format.js";
 
 describe("formatAnswerForLog", () => {
   it("freetext: returns text verbatim (or '(empty)' for blank)", () => {
@@ -17,12 +17,9 @@ describe("formatAnswerForLog", () => {
   });
 
   it("choice with selectedOptionLabel: appends value", () => {
-    expect(
-      formatAnswerForLog(
-        { kind: "choice", text: "accept" },
-        { selectedOptionLabel: '"internal-tool"' },
-      ),
-    ).toBe('accept · "internal-tool"');
+    expect(formatAnswerForLog({ kind: "choice", text: "accept" }, { selectedOptionLabel: '"internal-tool"' })).toBe(
+      'accept · "internal-tool"',
+    );
   });
 
   it("choice with selectedOptionLabel + questionId: includes field name", () => {
@@ -47,20 +44,28 @@ describe("formatAnswerForLog", () => {
   });
 
   it("choice: when label === verb, no decoration (avoid 'accept · accept')", () => {
-    expect(
-      formatAnswerForLog(
-        { kind: "choice", text: "accept" },
-        { selectedOptionLabel: "accept" },
-      ),
-    ).toBe("accept");
+    expect(formatAnswerForLog({ kind: "choice", text: "accept" }, { selectedOptionLabel: "accept" })).toBe("accept");
   });
 
   it("choice: empty/whitespace label is treated as missing", () => {
-    expect(
-      formatAnswerForLog(
-        { kind: "choice", text: "accept" },
-        { selectedOptionLabel: "   " },
-      ),
-    ).toBe("accept");
+    expect(formatAnswerForLog({ kind: "choice", text: "accept" }, { selectedOptionLabel: "   " })).toBe("accept");
+  });
+});
+
+describe("buildToolGroupEntry", () => {
+  it("creates an active group with a unique id and empty items list", () => {
+    const e1 = buildToolGroupEntry();
+    const e2 = buildToolGroupEntry();
+    expect(e1.type).toBe("tool_group");
+    expect(e1.toolGroup?.state).toBe("active");
+    expect(e1.toolGroup?.items).toEqual([]);
+    expect(e1.toolGroup?.id).not.toBe(e2.toolGroup?.id);
+    expect(typeof e1.toolGroup?.startedAt).toBe("number");
+  });
+
+  it("propagates partial ChatEntry overrides to the entry", () => {
+    const e = buildToolGroupEntry({ modeColor: "#ff0000", sourceLabel: "test-source" });
+    expect(e.modeColor).toBe("#ff0000");
+    expect(e.sourceLabel).toBe("test-source");
   });
 });

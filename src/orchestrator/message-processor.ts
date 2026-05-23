@@ -50,7 +50,7 @@
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
 //   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
 
-import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
@@ -105,6 +105,7 @@ import {
   type SessionStore,
 } from "../storage/index";
 import { createBuiltinTools } from "../tools/registry.js";
+import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
@@ -139,6 +140,7 @@ import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
+import { createToolLoopCapPredicate } from "./tool-loop-cap.js";
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -258,6 +260,16 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   estimateProjectSize(): "small" | "medium" | "large" | null;
   countFilesTouched(): number;
   respondToToolApproval(approvalId: string, approved: boolean): void;
+  /**
+   * Tool-loop cap askcard hook (Claude-Code-style "continue?" prompt).
+   *
+   * Fires when the streamText loop reaches `maxToolRounds`. Returning
+   * `"continue"` raises the cap by `bumpBy` and lets the loop run; `"stop"`
+   * halts gracefully (no error). When undefined the loop hard-stops as before
+   * — preserves backward compat for batch / headless paths that have no UI to
+   * surface the askcard.
+   */
+  askToolLoopContinue?: (info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">;
   runCouncilV2(
     userMessage: string,
     opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
@@ -1237,16 +1249,20 @@ export class MessageProcessor {
           // (see siliconflow-history.ts). Sub-agent path applies the same strip
           // via the capability hook; identity for every other provider.
           const _topMessagesForCall = turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages;
+          // Closure-mutable cap for the tool-loop askcard rescue.
+          // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
+          // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
+          const dynamicStopWhen = createToolLoopCapPredicate({
+            initialCap: deps.maxToolRounds,
+            ask: deps.askToolLoopContinue,
+          }) as unknown as StopCondition<typeof tools>;
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
             messages: _topMessagesForCall,
             tools,
             toolChoice: _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : undefined,
-            stopWhen:
-              stepRouterPhase === "phase1"
-                ? stepCountIs(1) // SAMR Phase 1: stop after reasoning step
-                : stepCountIs(deps.maxToolRounds),
+            stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
             maxRetries: 0,
             abortSignal: signal,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
@@ -1602,6 +1618,14 @@ export class MessageProcessor {
                   /* fail-open */
                 }
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
+                // todo_write side-effect: surface the task list to the UI via a
+                // dedicated chunk so the sticky checklist panel can re-render
+                // without parsing tool args itself. Skipped when the snapshot
+                // doesn't parse (malformed args) so the UI is never poisoned.
+                if (tc.function.name === "todo_write" && tr.success) {
+                  const snap = snapshotFromTodoWriteArgs(tc.function.arguments);
+                  if (snap) yield { type: "task_list_update", taskListSnapshot: snap };
+                }
                 break;
               }
 

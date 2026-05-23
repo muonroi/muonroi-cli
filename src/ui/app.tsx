@@ -36,6 +36,7 @@ import type {
   ReasoningEffort,
   StructuredResponse,
   SubagentStatus,
+  TaskListSnapshot,
   ToolCall,
   ToolResult,
 } from "../types/index";
@@ -116,6 +117,7 @@ import { PromptBox } from "./components/prompt-box.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SessionHeader } from "./components/session-header.js";
 import { Toast, type ToastLevel } from "./components/Toast.js";
+import { TaskListPanel } from "./components/task-list-panel.js";
 import {
   DelegationTaskLine,
   InlineTool,
@@ -193,6 +195,7 @@ import {
 import {
   buildAssistantEntry,
   buildPreflightQuestion,
+  buildToolGroupEntry,
   buildToolResultEntry,
   buildUserEntry,
   formatAnswerForLog,
@@ -201,7 +204,7 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
-import { toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
+import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 const DEFAULT_MODEL = getCurrentModel();
 
@@ -497,6 +500,13 @@ ${prompt}`;
 
 // AppStartupConfig, AppProps, ActiveTurnState extracted to ./types.ts
 
+// Splash UX: only DeepSeek + SiliconFlow are surfaced. Other providers
+// (openai/anthropic/google/xai/ollama) keep working programmatically when
+// the router picks them, but the user-facing picker hides them so the
+// user cannot enable a provider we are not actively maintaining UX for.
+// Hoisted to module-level so React useEffect deps stay stable across renders.
+const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow"];
+
 export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
   const t = dark;
   const renderer = useRenderer();
@@ -672,12 +682,6 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   } = useModelPicker(agent.getModel());
   const modelRef = useRef(model);
 
-  // Splash UX: only DeepSeek + SiliconFlow are surfaced. Other providers
-  // (openai/anthropic/google/xai/ollama) keep working programmatically when
-  // the router picks them, but the user-facing picker hides them so the
-  // user cannot enable a provider we are not actively maintaining UX for.
-  const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow"];
-
   const [providersWithKey, setProvidersWithKey] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const refreshProvidersWithKey = useCallback(async () => {
     try {
@@ -689,7 +693,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     } catch {
       setProvidersWithKey(new Set());
     }
-  }, [SPLASH_PROVIDERS]);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -707,7 +711,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     return () => {
       cancelled = true;
     };
-  }, [setConfiguredProviders, refreshProvidersWithKey, SPLASH_PROVIDERS]);
+  }, [setConfiguredProviders, refreshProvidersWithKey]);
 
   const [apiKeyPrompt, setApiKeyPrompt] = useState<{
     provider: ProviderId;
@@ -798,7 +802,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     } catch (e) {
       setBwSync({ ...bwSync, loading: false, error: (e as Error).message });
     }
-  }, [bwSync, SPLASH_PROVIDERS]);
+  }, [bwSync]);
 
   const commitBwImport = useCallback(async () => {
     if (!bwSync || bwSync.phase !== "picker") return;
@@ -1041,6 +1045,18 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     return () => clearInterval(id);
   }, [councilStatuses.length]);
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCall[]>([]);
+  // ID of the in-progress ToolGroup entry (Claude-style grouping). Non-null while
+  // the assistant is in a tool-calling streak; cleared when text arrives or the
+  // stream ends so the next streak opens a fresh group.
+  const currentToolGroupIdRef = useRef<string | null>(null);
+  // Pending resolvers for tool-loop-cap askcards. Keyed by questionId; populated
+  // by setToolLoopCapHandler, drained by the askcard answer/cancel branches.
+  const toolLoopCapResolversRef = useRef<Map<string, (verdict: "continue" | "stop") => void>>(new Map());
+  // Current todo snapshot (Claude-style sticky checklist). Updated by
+  // `task_list_update` chunks emitted after every `todo_write` tool call.
+  // Auto-hides ~2s after 100% completion so the panel doesn't linger.
+  const [taskListSnapshot, setTaskListSnapshot] = useState<TaskListSnapshot | null>(null);
+  const taskListClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
   const [sessionId, setSessionId] = useState<string | null>(() => agent.getSessionId());
   const [showApiKeyModal, setShowApiKeyModal] = useState(() => !initialHasApiKey);
@@ -1965,13 +1981,40 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     setStreamContent("");
   }, []);
 
+  // Close the in-progress ToolGroup (if any) and stamp it as done / failed.
+  // Declared before applyLocalAssistantDelta so the latter can use it.
+  const closeCurrentToolGroup = useCallback(() => {
+    const groupId = currentToolGroupIdRef.current;
+    if (!groupId) return;
+    currentToolGroupIdRef.current = null;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.type !== "tool_group" || m.toolGroup?.id !== groupId) return m;
+        const failed = m.toolGroup.items.some((it) => it.failed);
+        return {
+          ...m,
+          toolGroup: {
+            ...m.toolGroup,
+            state: failed ? "failed" : "done",
+            finishedAt: Date.now(),
+          },
+        };
+      }),
+    );
+  }, []);
+
   const applyLocalAssistantDelta = useCallback(
     (delta: string) => {
+      // First non-empty assistant text after a tool streak ends that streak —
+      // mirrors Claude Code's "Done (N tool uses · ...)" collapse moment.
+      if (delta && currentToolGroupIdRef.current) {
+        closeCurrentToolGroup();
+      }
       contentAccRef.current += delta;
       setStreamContent(sanitizeContent(contentAccRef.current));
       setTimeout(scrollToBottom, 10);
     },
-    [scrollToBottom],
+    [closeCurrentToolGroup, scrollToBottom],
   );
 
   const applyTelegramAssistantPreview = useCallback(
@@ -1990,6 +2033,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   const showLiveToolCalls = useCallback(
     (toolCalls: ToolCall[]) => {
       flushPendingAssistantMessage();
+      const activeTurn = activeTurnRef.current;
+      if (!activeTurn || toolCalls.length === 0) {
+        setActiveToolCalls(toolCalls);
+        setTimeout(scrollToBottom, 10);
+        return;
+      }
+      // Lazy-open: first tool of a streak creates the group entry; subsequent
+      // tool_calls in the same streak are appended in place keyed on id.
+      setMessages((prev) => {
+        let groupId = currentToolGroupIdRef.current;
+        let next = prev;
+        if (!groupId) {
+          const entry = buildToolGroupEntry({
+            modeColor: activeTurn.modeColor,
+            remoteKey: activeTurn.remoteKey,
+            sourceLabel: activeTurn.sourceLabel,
+          });
+          groupId = entry.toolGroup!.id;
+          currentToolGroupIdRef.current = groupId;
+          next = [...prev, entry];
+        }
+        return next.map((m) => {
+          if (m.type !== "tool_group" || m.toolGroup?.id !== groupId) return m;
+          const knownIds = new Set(m.toolGroup.items.map((it) => it.toolCall.id));
+          const additions = toolCalls
+            .filter((tc) => !knownIds.has(tc.id))
+            .map((tc) => ({ toolCall: tc, startedAt: Date.now() }));
+          if (additions.length === 0) return m;
+          return { ...m, toolGroup: { ...m.toolGroup, items: [...m.toolGroup.items, ...additions] } };
+        });
+      });
+      // Keep the legacy ephemeral panel populated as a fallback for code paths
+      // (e.g. accessibility, harness queries) that still read activeToolCalls.
       setActiveToolCalls(toolCalls);
       setTimeout(scrollToBottom, 10);
     },
@@ -2001,14 +2077,39 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       const activeTurn = activeTurnRef.current;
       if (!activeTurn) return;
 
-      setMessages((prev) => [
-        ...prev,
-        buildToolResultEntry(toolCall, toolResult, {
-          modeColor: activeTurn.modeColor,
-          remoteKey: activeTurn.remoteKey,
-          sourceLabel: activeTurn.sourceLabel,
-        }),
-      ]);
+      const groupId = currentToolGroupIdRef.current;
+      if (groupId) {
+        // Update the matching item in the active group. If the item is missing
+        // (tool_result arrived before tool_call — rare race), append it.
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.type !== "tool_group" || m.toolGroup?.id !== groupId) return m;
+            const failed = !toolResult.success;
+            const finishedAt = Date.now();
+            let touched = false;
+            const items = m.toolGroup.items.map((it) => {
+              if (it.toolCall.id !== toolCall.id) return it;
+              touched = true;
+              return { ...it, result: toolResult, finishedAt, failed };
+            });
+            if (!touched) {
+              items.push({ toolCall, result: toolResult, startedAt: finishedAt, finishedAt, failed });
+            }
+            return { ...m, toolGroup: { ...m.toolGroup, items } };
+          }),
+        );
+      } else {
+        // Fallback: no active group (e.g. legacy code path) — preserve the
+        // pre-grouping behaviour so headless / non-TUI consumers see results.
+        setMessages((prev) => [
+          ...prev,
+          buildToolResultEntry(toolCall, toolResult, {
+            modeColor: activeTurn.modeColor,
+            remoteKey: activeTurn.remoteKey,
+            sourceLabel: activeTurn.sourceLabel,
+          }),
+        ]);
+      }
 
       if (toolResult.plan?.questions?.length) {
         setActivePlan(toolResult.plan);
@@ -2032,6 +2133,50 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     telegramEntryCountsRef.current.set(activeTurn.userId, currentEntries.length);
     setMessages((prev) => replaceTurnEntries(prev, activeTurn.remoteKey!, delta));
   }, []);
+
+  // Register the tool-loop cap handler. The orchestrator's askToolLoopContinue
+  // dep calls this when stepCount reaches the cap; we surface an askcard, wait
+  // for the user's verdict, and resolve the promise with continue/stop. When
+  // the user cancels (Esc) we treat it as stop — same UX as other askcards.
+  useEffect(() => {
+    agent.setToolLoopCapHandler(async ({ stepNumber, cap, bumpBy }) => {
+      return new Promise<"continue" | "stop">((resolve) => {
+        const qid = `tool-loop-cap-${stepNumber}-${Date.now()}`;
+        toolLoopCapResolversRef.current.set(qid, resolve);
+        const question: CouncilQuestionData = {
+          questionId: qid,
+          question: `Agent đã chạy ${stepNumber} tool rounds (cap ${cap}). Có dấu hiệu loop — tiếp tục?`,
+          context: `Continue raises the cap by +${bumpBy}. Stop returns the agent's best answer with current context.`,
+          isRequired: true,
+          phase: "tool-loop-cap",
+          options: [
+            { label: `Continue (+${bumpBy} rounds)`, value: "continue", kind: "choice" },
+            { label: "Stop and answer", value: "stop", kind: "choice" },
+          ],
+          defaultIndex: 0,
+        };
+        setPendingCouncilQuestionSync(question);
+        setCouncilCardStateSync(initialCardState(question));
+        try {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-open",
+            questionId: qid,
+            question: question.question,
+            phase: "tool-loop-cap",
+            optionCount: question.options!.length,
+            defaultIndex: 0,
+          });
+        } catch {
+          /* best-effort */
+        }
+      });
+    });
+    return () => {
+      agent.setToolLoopCapHandler(null);
+      toolLoopCapResolversRef.current.clear();
+    };
+  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
 
   const finalizeActiveTurn = useCallback(
     ({ wasInterrupted = false, hadError = false }: { wasInterrupted?: boolean; hadError?: boolean } = {}) => {
@@ -2918,6 +3063,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                   });
                 }
                 break;
+              case "task_list_update":
+                if (chunk.taskListSnapshot) {
+                  // Clear any pending auto-collapse — a fresh update means the
+                  // agent is still working, even if the previous snapshot was
+                  // already 100% done.
+                  if (taskListClearTimerRef.current) {
+                    clearTimeout(taskListClearTimerRef.current);
+                    taskListClearTimerRef.current = null;
+                  }
+                  setTaskListSnapshot(chunk.taskListSnapshot);
+                  // Auto-collapse 2s after 100% completion so finished lists
+                  // don't linger on screen.
+                  const c = chunk.taskListSnapshot.counts;
+                  if (c.total > 0 && c.completed === c.total) {
+                    taskListClearTimerRef.current = setTimeout(() => {
+                      setTaskListSnapshot(null);
+                      taskListClearTimerRef.current = null;
+                    }, 2000);
+                  }
+                }
+                break;
               case "done":
                 break;
             }
@@ -2935,6 +3101,10 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             });
           }
         } finally {
+          // Defensive: if the stream ends mid-tool-streak (no trailing text
+          // chunk), still close the group so it renders as "done" instead of
+          // forever-active. Failed items keep the group expanded via state.
+          closeCurrentToolGroup();
           setActiveEeYield(null);
         }
         const wasInterrupted = interruptedRunIdRef.current === runId;
@@ -2962,6 +3132,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       appendLiveToolResult,
       applyLocalAssistantDelta,
       beginLiveTurn,
+      closeCurrentToolGroup,
       finalizeActiveTurn,
       scrollToBottom,
       sessionTitle,
@@ -4705,6 +4876,34 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           if (result.emit?.type === "answer") {
             const qid = pendingQuestion.questionId;
             const ans = result.emit.answer;
+            // Tool-loop-cap askcards bypass the council answer machinery — the
+            // verdict resolves a stored Promise that's awaited inside the
+            // streamText stopWhen predicate. Drain the resolver, emit the
+            // harness event, and return so the council path doesn't see this.
+            if (pendingQuestion.phase === "tool-loop-cap") {
+              const resolver = toolLoopCapResolversRef.current.get(qid);
+              toolLoopCapResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              const verdict = ans.text === "continue" ? "continue" : "stop";
+              resolver?.(verdict);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: verdict,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: "choice", answerText: verdict },
+              });
+              return;
+            }
             // Resolve the label of the option that was selected. For "choice"
             // and "freetext" the option index lives on the card state; for
             // "chat" the user typed a free reply and there is no option to
@@ -4754,6 +4953,21 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             });
           } else if (result.emit?.type === "cancel") {
             const qid = pendingQuestion.questionId;
+            // Tool-loop-cap cancel → treat as "stop" (user wants out, not loop).
+            if (pendingQuestion.phase === "tool-loop-cap") {
+              const resolver = toolLoopCapResolversRef.current.get(qid);
+              toolLoopCapResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              clearInterCardHeartbeat();
+              resolver?.("stop");
+              try {
+                agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
+              } catch {
+                /* best-effort */
+              }
+              return;
+            }
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
@@ -6102,6 +6316,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               sessionId={sessionId}
               onCopySessionId={showCopyBanner}
             />
+            {taskListSnapshot && (
+              <box paddingLeft={2} paddingRight={2}>
+                <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
+              </box>
+            )}
             <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
               {/* Scrollable messages */}
               <Semantic id="log" role="log" props={{ scrollTop: scrollRef.current?.scrollTop ?? 0 }}>

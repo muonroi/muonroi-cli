@@ -635,6 +635,21 @@ export class Agent {
     ]);
   }
 
+  // Tool-loop cap handler — set by the UI (app.tsx) at startup. Invoked from
+  // the message-processor streamText loop when stepCount reaches the current
+  // cap. The UI surfaces an askcard ("Continue +50? / Stop and answer") and
+  // resolves with the verdict. When unset, the loop stops gracefully — no
+  // hard-throw, matches the user-friendly behaviour we promised.
+  private _toolLoopCapHandler:
+    | null
+    | ((info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">) = null;
+
+  setToolLoopCapHandler(
+    fn: ((info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">) | null,
+  ): void {
+    this._toolLoopCapHandler = fn;
+  }
+
   respondToToolApproval(approvalId: string, approved: boolean): void {
     const toolApprovalResponse: ModelMessage = {
       role: "tool",
@@ -2491,6 +2506,15 @@ export class Agent {
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model) => self.recordUsage(usage, source, model),
       respondToToolApproval: (id, ok) => self.respondToToolApproval(id, ok),
+      askToolLoopContinue: async (info) => {
+        const h = self._toolLoopCapHandler;
+        if (!h) return "stop";
+        try {
+          return await h(info);
+        } catch {
+          return "stop";
+        }
+      },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),
       processMessage: (msg, obs, imgs) => self.processMessage(msg, obs, imgs),
       processMessageBatchTurn: (args) => self.processMessageBatchTurn(args),

@@ -99,20 +99,20 @@ export function PointToExistingFormCard({ state, terminalCols, theme: t }: Point
 
           {/* Done state */}
           {state.step === "done" && (
+            // biome-ignore lint/a11y/useValidAriaRole: muonroi harness Role union includes "statusbar" (see packages/agent-harness-core/src/protocol.ts)
             <Semantic id="point-to-existing-result" role="statusbar" name="Recipe detected">
               <box flexDirection="column" marginTop={1}>
                 <text fg={t.initFormSuccess} attributes={1}>
                   ✓ Verify recipe detected!
                 </text>
-                {state.resultPath && (
-                  <text fg={t.initFormLabel}>Sprint will re-enter at: {state.resultPath}</text>
-                )}
+                {state.resultPath && <text fg={t.initFormLabel}>Sprint will re-enter at: {state.resultPath}</text>}
               </box>
             </Semantic>
           )}
 
           {/* Error state */}
           {state.step === "error" && (
+            // biome-ignore lint/a11y/useValidAriaRole: muonroi harness Role union includes "statusbar" (see packages/agent-harness-core/src/protocol.ts)
             <Semantic id="point-to-existing-result" role="statusbar" name="Recipe not found">
               <box flexDirection="column" marginTop={1}>
                 <text fg={t.initFormError} attributes={1}>

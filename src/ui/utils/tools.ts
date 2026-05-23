@@ -62,6 +62,48 @@ export function tryParseArg(tc: ToolCall | undefined, key: string): string {
   }
 }
 
+// Maps a tool name to a present-continuous verb used as the group header.
+// Mirrors Claude Code's "Reading…" / "Searching…" / "Running…" affordances.
+// Returns "Working" for unknown tools so the header never goes blank.
+export function verbForTool(name: string): string {
+  if (name === "read_file" || /^mcp_+filesystem__read_(text_)?file$/.test(name) || name === "read_multiple_files")
+    return "Reading";
+  if (name === "write_file" || name === "edit_file" || /^mcp_+filesystem__(write_file|edit_file)$/.test(name))
+    return "Editing";
+  if (name === "bash") return "Running";
+  if (name === "grep" || name === "search_files" || /^mcp_+filesystem__search_files$/.test(name)) return "Searching";
+  if (name === "search_web" || name === "search_x") return "Searching";
+  if (name === "task" || name === "delegate") return "Exploring";
+  if (name === "generate_image" || name === "generate_video" || name === "generate_plan") return "Generating";
+  if (name === "list_directory" || /^mcp_+filesystem__(list_directory|directory_tree)/.test(name)) return "Listing";
+  if (name === "lsp") return "Inspecting";
+  if (name === "process_logs" || name === "process_list" || name === "delegation_list" || name === "delegation_read")
+    return "Reading";
+  if (name === "process_stop") return "Stopping";
+  return "Working";
+}
+
+// Pick the verb that dominates a batch of tool calls. Falls back to "Working"
+// when the list is empty or no verb wins outright. Used by ToolGroup header
+// to mirror the dominant action ("Reading 4 files" vs generic "Working").
+export function dominantVerb(toolNames: readonly string[]): string {
+  if (toolNames.length === 0) return "Working";
+  const counts = new Map<string, number>();
+  for (const n of toolNames) {
+    const v = verbForTool(n);
+    counts.set(v, (counts.get(v) ?? 0) + 1);
+  }
+  let best = "Working";
+  let max = 0;
+  for (const [v, c] of counts) {
+    if (c > max) {
+      max = c;
+      best = v;
+    }
+  }
+  return best;
+}
+
 export function toolLabel(tc: ToolCall): string {
   const args = toolArgs(tc);
   if (tc.function.name === "bash") {

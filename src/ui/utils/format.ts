@@ -73,6 +73,29 @@ export function buildToolResultEntry(
   };
 }
 
+let toolGroupSeq = 0;
+
+// Create a fresh active tool-group entry. Caller is expected to append items
+// via setMessages mutation keyed on `toolGroup.id`, and close the group by
+// setting `state` to "done" / "failed" once the assistant emits text or the
+// stream ends.
+export function buildToolGroupEntry(extra?: Partial<ChatEntry>): ChatEntry {
+  const now = Date.now();
+  const id = `tg-${now}-${++toolGroupSeq}`;
+  return {
+    type: "tool_group",
+    content: "",
+    timestamp: new Date(now),
+    toolGroup: {
+      id,
+      state: "active",
+      items: [],
+      startedAt: now,
+    },
+    ...extra,
+  };
+}
+
 export function buildUserEntry(content: string, extra?: Partial<ChatEntry>): ChatEntry {
   return { type: "user", content, timestamp: new Date(), ...extra };
 }
