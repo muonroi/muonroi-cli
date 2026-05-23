@@ -62,16 +62,20 @@
 
 **Acceptance:** Bridge classifier system prompt updated. Re-running the 5 baseline prompts through the classifier in isolation produces 5/5 correct labels.
 
-## REQ-007: Harness E2E verification
+## REQ-007: Harness E2E verification — COMPLETE
+
+**Status:** Complete (Plan 04-07, commits `6d16695` (fixture), `342f576` (spec), 2026-05-23)
 
 **Why:** Every PIL/orchestrator change in Phase 4 needs an automated guard so regressions are caught immediately. Template: `tests/harness/bash-output-get-tui.spec.ts`.
 
 **Acceptance:** New `tests/harness/scope-adherence-tui.spec.ts` asserts:
-- Reminder appears at step K=3 with verbatim original-prompt snippet
-- Soft-warn fires at 70% of ceiling
-- Hard halt + forced-finalize toast at 100%
-- `--budget-rounds N` override branch works
-- `complexitySize=X` tag observable in trace
+- [x] Reminder appears at step K=3 with verbatim original-prompt snippet
+- [x] Soft-warn fires at 70% of ceiling
+- [x] Hard halt + forced-finalize toast at 100%
+- [x] `--budget-rounds N` override branch works
+- [x] `complexitySize=X` tag observable in trace
+
+5/5 tests green via `bunx vitest -c vitest.harness.config.ts run tests/harness/scope-adherence-tui.spec.ts`.
 
 ## Goals (cross-cutting acceptance — must hold across 5 baseline re-runs)
 

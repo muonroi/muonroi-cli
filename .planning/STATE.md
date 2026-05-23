@@ -1,14 +1,16 @@
 # Project State — muonroi-cli
 
-**Last updated:** 2026-05-23 (Plan 04-06 4P-2 complete)
+**Last updated:** 2026-05-23 (Plan 04-07 4V complete — Phase 4 implementation done; awaiting user 5-baseline re-run)
 
-**Last completed plan:** Phase 4, Plan 06 (4P-2 bridge classifier) — commits `d1fafad` (RED tests), `0fa4550` (GREEN prompt rewrite). Legacy bridge classifier system prompt rewritten with neutral category order (analyze first), explicit refactor restriction, prefer-general-when-ambiguous rule, and feature-add clarification. Pass 3 parser accepts `general` alongside legacy `none`. REQ-006 satisfied; REQ-001 fully closed (tree-sitter + bridge classifier sides both done).
+**Last completed plan:** Phase 4, Plan 07 (4V harness E2E) — commits `6d16695` (fixture), `342f576` (spec). New `tests/harness/scope-adherence-tui.spec.ts` covers all 5 REQ-007 assertion categories: reminder injection cadence (live spawn), soft-warn at floor(ceiling × 0.7), hard halt + forced-finalize toast, `--budget-rounds 20` override, and `complexitySize` observability. 5/5 tests green via `bunx vitest -c vitest.harness.config.ts run tests/harness/scope-adherence-tui.spec.ts`. REQ-007 satisfied.
 
 **Previously completed:**
-- Plan 04 (4B ceiling + forced-finalize) — commits `4e7ad66`, `96cfd46`, `3178239`. Per-session step ceiling resolved from locked `(task_type × complexity_size)` matrix; hard halt triggers forcedFinalize LLM call with `toolChoice:"none"`. `--budget-rounds N` parsed before PIL. REQ-004 satisfied.
+- Plan 06 (4P-2 bridge classifier) — commits `d1fafad`, `0fa4550`. Legacy bridge classifier system prompt rewritten with neutral category order (analyze first), explicit refactor restriction, prefer-general-when-ambiguous rule, and feature-add clarification. REQ-006 satisfied; REQ-001 fully closed.
+- Plan 05 (4A scope reminder) — commits `563ab24`, `68b4113`, `a57b2e4` (+ message-processor wiring landed via `3178239`). Reminder cadence K=3/5/8 + soft-warn at floor(ceiling × 0.7). REQ-005 satisfied.
+- Plan 04 (4B ceiling + forced-finalize) — commits `4e7ad66`, `96cfd46`, `3178239`. Per-session step ceiling matrix + `--budget-rounds N` parse. REQ-004 satisfied.
 - Plan 02 (4C complexity-size) — commits `f37f45f`, `ec4e4a0`. Deterministic Layer 1.5 classifier wired into PIL pipeline; `ctx.complexitySize` populated for downstream 4B/4A consumption. REQ-003 satisfied.
 - Plan 03 (4R session-bash-repeat) — commit `b04ef51`. Session-scoped bash canonical-repeat detector. REQ-002 satisfied.
-- Plan 01 (4P-1 tree-sitter fix) — commit `bc07709`. Tree-sitter:* reasons no longer bias taskType=refactor. REQ-001 partially satisfied (bridge classifier tuning completed in 4P-2).
+- Plan 01 (4P-1 tree-sitter fix) — commit `bc07709`. Tree-sitter:* reasons no longer bias taskType=refactor. REQ-001 partially satisfied (closed by Plan 06).
 
 ## What this repo is
 
