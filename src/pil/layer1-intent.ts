@@ -226,6 +226,12 @@ const KEYWORD_PATTERNS: Array<{ pattern: RegExp; taskType: TaskType; confidence:
   },
 ];
 
+// Catch-all classifier reasons whose taskType assignment is weak — Pass 2 keyword
+// rescue is allowed to override them when confidence is sub-threshold. Specific
+// rules like `regex:run-command` / `regex:git` stay authoritative.
+const CATCHALL_REASONS = new Set<string>(["regex:edit", "regex:create-file"]);
+const HIGH_CONF_THRESHOLD_PASS2 = 0.7;
+
 // Valid task types for bridge classification parsing (matches RESPONSE_SCHEMAS keys minus 'general').
 const VALID_TASK_TYPES: TaskType[] = ["refactor", "debug", "plan", "analyze", "documentation", "generate"];
 
@@ -314,9 +320,18 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     let styleSource: IntentDetectionTrace["styleSource"] = "none";
 
     // Pass 2: keyword fallback. Runs when classifier abstains OR when the
-    // classifier match was a low-signal "general" (regex:short-message).
+    // classifier match was a low-signal "general" (regex:short-message) OR
+    // when the catch-all `regex:edit` / `regex:create-file` mapped a vague
+    // "fix X" / "tạo X" verb to taskType=generate at sub-threshold confidence
+    // (< 0.7). The catch-all v2 rules are deliberately weak (conf 0.55) so a
+    // VN debug prompt like "ci/cd đang bị lỗi, check và fix cho tôi" still
+    // routes through the keyword rescue here — which carries the bare-`lỗi`
+    // and `\bfix\b` debug cues that the catch-all regex cannot tell apart
+    // from generic edit.
     const lowSignal = taskType === "general" && result.reason === "regex:short-message";
-    if (taskType === null || lowSignal) {
+    const catchAllRescue =
+      taskType !== null && confidence < HIGH_CONF_THRESHOLD_PASS2 && CATCHALL_REASONS.has(result.reason);
+    if (taskType === null || lowSignal || catchAllRescue) {
       for (const { pattern, taskType: kwType, confidence: kwConf } of KEYWORD_PATTERNS) {
         if (pattern.test(ctx.raw)) {
           taskType = kwType;

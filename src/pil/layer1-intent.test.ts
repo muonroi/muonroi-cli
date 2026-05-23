@@ -82,6 +82,35 @@ describe("layer1Intent", () => {
     expect(result.confidence).toBe(0.65);
   });
 
+  it("rescues VN CI-debug prompts that hit the catch-all regex:edit (conf < 0.7)", async () => {
+    // Reproduces session 2f8e70c6a169: prompt "ci/cd ... đang bị lỗi ... fix cho tôi"
+    // hits the v2 catch-all `regex:edit` at 0.55 → would otherwise route as
+    // taskType=generate and trigger an irrelevant "feature implemented" askcard.
+    // The catch-all rescue branch in Pass 2 must let the VN debug keyword
+    // pattern (`\blỗi\b`) override generate → debug before any brain call.
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:edit", confidence: 0.55 });
+
+    const result = await layer1Intent(
+      makeCtx(
+        "hiện tại ci/cd của repo này đang bị lỗi gh đã cài sẵn, bạn check và fix cho tôi nhé, mục tiêu là ci/cd xanh",
+      ),
+    );
+
+    expect(result.taskType).toBe("debug");
+    expect(result.confidence).toBe(0.65);
+  });
+
+  it("does NOT trigger catch-all rescue when regex:edit is high-confidence", async () => {
+    // Defensive: if someone later raises regex:edit conf ≥ 0.7, Pass 2 must
+    // NOT silently rewrite the classification.
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:edit", confidence: 0.8 });
+
+    const result = await layer1Intent(makeCtx("fix the bug in login.ts"));
+
+    expect(result.taskType).toBe("generate");
+    expect(result.confidence).toBe(0.8);
+  });
+
   it("applies keyword fallback (Pass 2) for plan-related messages", async () => {
     mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
 
