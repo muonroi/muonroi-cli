@@ -68,4 +68,40 @@ describe("hashToolArgs", () => {
     expect(b.startsWith("read_file:")).toBe(true);
     expect(a).not.toBe(b);
   });
+
+  it("collapses edit_file calls on same file regardless of old/new string", () => {
+    // Real session 39884b072b5f scenario — agent edited the same file 7 times
+    // with different old_string each attempt. Generic JSON hash kept them
+    // distinct; the dedicated file_path hash now collapses them.
+    const variants = [
+      { file_path: "src/ee/export.ts", old_string: "@ts-expect-error", new_string: "@ts-ignore" },
+      { file_path: "src/ee/export.ts", old_string: "  @ts-expect-error", new_string: "// @ts-ignore" },
+      { file_path: "src/ee/export.ts", old_string: "    const mod", new_string: "// @ts-ignore\n    const mod" },
+    ];
+    const hashes = new Set(variants.map((v) => hashToolArgs("edit_file", v)));
+    expect(hashes.size).toBe(1);
+  });
+
+  it("distinguishes edit_file on different files", () => {
+    const a = hashToolArgs("edit_file", { file_path: "src/a.ts", old_string: "x", new_string: "y" });
+    const b = hashToolArgs("edit_file", { file_path: "src/b.ts", old_string: "x", new_string: "y" });
+    expect(a).not.toBe(b);
+  });
+
+  it("normalizes path separators (D:\\foo vs D:/foo collapse)", () => {
+    const win = hashToolArgs("edit_file", { file_path: "D:\\Personal\\Core\\file.ts", old_string: "x" });
+    const posix = hashToolArgs("edit_file", { file_path: "D:/Personal/Core/file.ts", old_string: "x" });
+    expect(win).toBe(posix);
+  });
+
+  it("write_file uses same file-path hash as edit_file (cross-tool overwrite loops collapse separately)", () => {
+    const e = hashToolArgs("edit_file", { file_path: "a.ts" });
+    const w = hashToolArgs("write_file", { file_path: "a.ts" });
+    // Same file, but namespaced by tool — overwrite-loop and edit-loop are
+    // tracked separately so a legitimate "edit then verify-via-write" doesn't
+    // trip the guard, but 5 repeated write_file does.
+    expect(e).not.toBe(w);
+    expect(e.startsWith("edit_file:")).toBe(true);
+    expect(w.startsWith("write_file:")).toBe(true);
+  });
 });
