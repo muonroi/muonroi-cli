@@ -1,0 +1,117 @@
+{
+  "___comment_purpose": "Phase 4 / REQ-007 — scope-adherence E2E mock fixture. Drives the orchestrator through K=3 reminder cadence + soft-warn at floor(6*0.7)=4 + hard halt at step 6 (ceiling for debug/small) + forced-finalize round 7. A second `__scenario_override` block documents the --budget-rounds 20 override path; the spec consumes it via parseBudgetOverride directly because the override raises the ceiling beyond what is practical to drive through a real spawn loop.",
+  "___comment_consumption": "The companion spec (tests/harness/scope-adherence-tui.spec.ts) reads this file for documentation/auditing but spawns its TUI via spawnCostLeakHarness with INLINE chunks (matching the template tests/harness/bash-output-get-tui.spec.ts). The file must remain a valid mock-fixture (loadable by src/agent-harness/mock-model.ts::loadMockModelFromDir) so that future hand-driven debugging via `--mock-llm tests/harness/fixtures/llm` works as an alternate entry point.",
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-deepseek-v4-flash",
+    "stream": [
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "text-start", "id": "pil" },
+        { "type": "text-delta", "id": "pil", "delta": "{\"task_type\":\"debug\",\"confidence\":0.9}" },
+        { "type": "text-end", "id": "pil" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "stop", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 30, "noCache": 30, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 8, "text": 8, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-1", "toolName": "bash", "input": "{\"command\":\"echo step1\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 60, "noCache": 60, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-2", "toolName": "bash", "input": "{\"command\":\"echo step2\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 70, "noCache": 70, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-3", "toolName": "bash", "input": "{\"command\":\"echo step3-reminder-should-fire-now\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 80, "noCache": 80, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-4", "toolName": "bash", "input": "{\"command\":\"echo step4-soft-warn-floor-of-6x0.7\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 90, "noCache": 90, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-5", "toolName": "bash", "input": "{\"command\":\"echo step5\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 100, "noCache": 100, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-call", "toolCallId": "bash-6", "toolName": "bash", "input": "{\"command\":\"echo step6-ceiling-hit\"}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 110, "noCache": 110, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 12, "text": 12, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "text-start", "id": "final" },
+        { "type": "text-delta", "id": "final", "delta": "forced-finalize synthesis: halted at ceiling, partial answer follows." },
+        { "type": "text-end", "id": "final" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "stop", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 120, "noCache": 120, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 14, "text": 14, "reasoning": null }
+          }
+        }
+      ]
+    ]
+  },
+  "__scenario_override": {
+    "purpose": "Documents the --budget-rounds 20 override path. Asserted via parseBudgetOverride unit call in the spec because driving 20 real tool rounds through a spawned TUI is prohibitively brittle. Toast string `override active: ceiling 20` is wired at src/orchestrator/message-processor.ts:571.",
+    "raw_prompt": "--budget-rounds 20 debug why the parser drops single-char tokens",
+    "expected_cleaned_prompt": "debug why the parser drops single-char tokens",
+    "expected_override": 20,
+    "expected_toast_substring": "override active: ceiling 20"
+  }
+}
