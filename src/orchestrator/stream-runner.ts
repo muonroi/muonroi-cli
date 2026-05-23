@@ -30,6 +30,7 @@
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { normalizeModelId } from "../models/registry.js";
+import { appendCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
@@ -318,7 +319,7 @@ export class StreamRunner {
         },
       };
     }
-    const childSystem = applyModelConstraints(
+    const childSystemBase = applyModelConstraints(
       buildSubagentPrompt(
         request,
         childBash.getCwd(),
@@ -330,6 +331,13 @@ export class StreamRunner {
       ),
       childRuntime.modelId,
     );
+    // Tier-aware behavioural suffix — same playbook as top-level, gated on
+    // the SUB-AGENT's runtime (a top-level claude turn can still spawn a
+    // deepseek sub-agent via SAMR/cost optimisation, and the sub-agent needs
+    // the playbook even though the parent does not).
+    const childSystem = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
+      ? appendCheapModelPlaybook(childSystemBase)
+      : childSystemBase;
 
     onActivity?.(initialDetail);
 

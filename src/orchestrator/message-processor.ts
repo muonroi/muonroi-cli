@@ -70,6 +70,7 @@ import type {
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo } from "../models/registry.js";
+import { appendCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
@@ -1159,6 +1160,15 @@ export class MessageProcessor {
           // See src/providers/runtime.ts for the central rule.
           const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
 
+          // Tier-aware behavioural suffix. Cheap models (DeepSeek V4 Flash etc.)
+          // ignore well-worded tool descriptions but DO adopt instructions when
+          // surfaced in the system prompt. Smart models don't need this — gated
+          // by `modelInfo.tier === "fast"`. See cheap-model-playbook.ts for
+          // motivation + escape hatch (MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1).
+          const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
+            ? appendCheapModelPlaybook(system)
+            : system;
+
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
                 {
@@ -1166,9 +1176,12 @@ export class MessageProcessor {
                   content: systemParts.staticPrefix,
                   providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
                 },
-                { role: "system" as const, content: system.slice(systemParts.staticPrefix.length) },
+                {
+                  role: "system" as const,
+                  content: systemWithPlaybook.slice(systemParts.staticPrefix.length),
+                },
               ]
-            : system;
+            : systemWithPlaybook;
 
           // Capture prompt-size breakdown so recordUsage can attach it to the
           // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
