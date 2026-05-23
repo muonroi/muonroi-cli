@@ -140,7 +140,7 @@ import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
-import { createToolLoopCapPredicate } from "./tool-loop-cap.js";
+import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -269,7 +269,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
    * — preserves backward compat for batch / headless paths that have no UI to
    * surface the askcard.
    */
-  askToolLoopContinue?: (info: { stepNumber: number; cap: number; bumpBy: number }) => Promise<"continue" | "stop">;
+  askToolLoopContinue?: ToolLoopCapAsk;
   runCouncilV2(
     userMessage: string,
     opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },

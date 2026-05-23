@@ -8,6 +8,7 @@ import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
+import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -146,6 +147,8 @@ export class BashTool {
         return { success: false, error: prepared.error };
       }
 
+      const runId = nextBashRunId();
+      const startedAt = Date.now();
       return await new Promise<ToolResult>((resolve) => {
         let settled = false;
         let aborted = false;
@@ -171,30 +174,52 @@ export class BashTool {
             // works on Windows instead of falling back to cmd.exe.
             ...(this.resolvedShell.binary ? { shell: this.resolvedShell.binary } : {}),
           },
-          (err, stdout, stderr) => {
+          (err, stdoutRaw, stderrRaw) => {
             if (aborted || abortSignal?.aborted) {
               finish({ success: false, error: "[Cancelled]" });
               return;
             }
 
+            // ANSI strip — FORCE_COLOR=0 covers cooperating children, but
+            // vitest / bun emit cursor-control sequences regardless, so we
+            // strip post-process before the output ever leaves this module.
+            const stdout = stripAnsi(stdoutRaw);
+            const stderr = stripAnsi(stderrRaw);
+            const exitCode = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
+            recordBashRun({
+              id: runId,
+              command,
+              stdout,
+              stderr,
+              exitCode,
+              durationMs: Date.now() - startedAt,
+            });
+            const totalChars = stdout.length + stderr.length;
             const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
             if (err) {
               const sandboxError = this.formatSandboxRuntimeError(output, err.message);
               if (sandboxError) {
-                finish({ success: false, error: sandboxError });
+                finish({ success: false, error: sandboxError, bashRunId: runId, bashTotalChars: totalChars });
                 return;
               }
               if (output.trim()) {
-                finish({ success: false, error: output.trim() });
+                finish({ success: false, error: output.trim(), bashRunId: runId, bashTotalChars: totalChars });
                 return;
               }
-              finish({ success: false, error: `Command failed: ${err.message}` });
+              finish({
+                success: false,
+                error: `Command failed: ${err.message}`,
+                bashRunId: runId,
+                bashTotalChars: totalChars,
+              });
               return;
             }
 
             finish({
               success: true,
               output: output.trim() || "Command executed successfully (no output)",
+              bashRunId: runId,
+              bashTotalChars: totalChars,
             });
           },
         );
