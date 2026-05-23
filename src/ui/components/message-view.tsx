@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { ChatEntry } from "../../types/index";
 import { Markdown } from "../markdown.js";
 import { PlanView } from "../plan.js";
@@ -34,6 +35,44 @@ const SPLIT = {
 };
 
 const USER_MSG_COLLAPSED_LINES = 5;
+// Long assistant blocks (model narration between tool batches) auto-collapse
+// to this many lines to stop the chat scroll wall and cut markdown re-render
+// cost. 8 fits comfortably on a short terminal and conveys the gist.
+const ASSISTANT_MSG_COLLAPSED_LINES = 8;
+
+export function AssistantMessageContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
+  const lines = content.split("\n");
+  const isLong = lines.length > ASSISTANT_MSG_COLLAPSED_LINES;
+  if (!isLong) {
+    return <Markdown content={content} t={t} />;
+  }
+  if (expanded) {
+    return (
+      <>
+        <Markdown content={content} t={t} />
+        <box marginTop={1}>
+          <text fg={t.textDim}>
+            {"ctrl+e "}
+            <span style={{ fg: t.textMuted }}>{"collapse"}</span>
+          </text>
+        </box>
+      </>
+    );
+  }
+  const preview = lines.slice(0, ASSISTANT_MSG_COLLAPSED_LINES).join("\n");
+  const hidden = lines.length - ASSISTANT_MSG_COLLAPSED_LINES;
+  return (
+    <>
+      <Markdown content={preview} t={t} />
+      <box marginTop={1}>
+        <text fg={t.textDim}>
+          {"ctrl+e "}
+          <span style={{ fg: t.textMuted }}>{`expand (${hidden} more lines)`}</span>
+        </text>
+      </box>
+    </>
+  );
+}
 
 export function UserMessageContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
   const lines = content.split("\n");
@@ -129,7 +168,7 @@ export function computeMcpRunInfo(messages: ChatEntry[]): McpRunInfo[] {
   return out;
 }
 
-export function MessageView({
+function MessageViewImpl({
   entry,
   index,
   t,
@@ -173,7 +212,7 @@ export function MessageView({
       return (
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
-          <Markdown content={entry.content} t={t} />
+          <AssistantMessageContent content={entry.content} t={t} expanded={expandedMessages?.has(index) ?? false} />
         </box>
       );
 
@@ -355,3 +394,26 @@ export function MessageView({
       return <text fg={t.textMuted}>{entry.content}</text>;
   }
 }
+
+// React.memo wrapper — message log re-renders on every keystroke + every
+// 60Hz harness tick. Without memo, every assistant block re-runs its
+// Markdown parser per frame; an 11KB CoT block froze the renderer in
+// session 7b6f6ea1b719. The comparator skips re-render when:
+//   - the entry reference is identical (append-only log → safe)
+//   - the per-index expanded flag is unchanged
+//   - mcpRun shape (hidden + count) hasn't shifted
+// Theme + modeColor are module-level constants so they don't need to
+// drive re-renders.
+export const MessageView = memo(MessageViewImpl, (prev, next) => {
+  if (prev.entry !== next.entry) return false;
+  if (prev.index !== next.index) return false;
+  if (prev.modeColor !== next.modeColor) return false;
+  const prevExpanded = prev.expandedMessages?.has(prev.index) ?? false;
+  const nextExpanded = next.expandedMessages?.has(next.index) ?? false;
+  if (prevExpanded !== nextExpanded) return false;
+  const prevMcp = prev.mcpRun;
+  const nextMcp = next.mcpRun;
+  if ((prevMcp?.hidden ?? false) !== (nextMcp?.hidden ?? false)) return false;
+  if ((prevMcp?.count ?? 0) !== (nextMcp?.count ?? 0)) return false;
+  return true;
+});
