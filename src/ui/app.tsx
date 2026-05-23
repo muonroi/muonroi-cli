@@ -2762,6 +2762,47 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     };
   }, [interruptActiveRun, renderer]);
 
+  // Typing-to-jump-to-bottom: when the user is mid-scroll-up reading the log
+  // and starts typing into the composer, snap the scroll back to the newest
+  // message so their next response lands where they expect. Triggers on any
+  // printable char + backspace/delete. Skipped while a modal/picker is open
+  // so arrow-key nav in those overlays doesn't shift the log.
+  useEffect(() => {
+    const onTypingKey = (key: KeyEvent) => {
+      if (key.ctrl || key.meta) return; // modifier combos are commands
+      const name = key.name ?? "";
+      const isPrintable = name.length === 1 || name === "space";
+      const isEdit = name === "backspace" || name === "delete";
+      if (!isPrintable && !isEdit) return;
+      if (
+        showModelPicker ||
+        showSandboxPicker ||
+        showWalletPicker ||
+        (activePlan?.questions?.length ?? 0) > 0 ||
+        showApiKeyModal ||
+        showSlashMenu ||
+        pendingCouncilQuestionRef.current ||
+        preflightCardStateRef.current
+      ) {
+        return;
+      }
+      scrollToBottom();
+    };
+    renderer._internalKeyInput.onInternal("keypress", onTypingKey);
+    return () => {
+      renderer._internalKeyInput.offInternal("keypress", onTypingKey);
+    };
+  }, [
+    renderer,
+    scrollToBottom,
+    showModelPicker,
+    showSandboxPicker,
+    showWalletPicker,
+    activePlan,
+    showApiKeyModal,
+    showSlashMenu,
+  ]);
+
   useEffect(() => {
     const onRawInput = (sequence: string) => {
       const parsed = parseKeypress(sequence, { useKittyKeyboard: renderer.useKittyKeyboard });
