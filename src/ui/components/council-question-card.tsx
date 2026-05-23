@@ -9,6 +9,7 @@ const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
   "post-debate": "Post-Debate",
   "pil-interview": "Understanding",
   "pil-acceptance": "Confirm Intent",
+  "tool-loop-cap": "Tool-loop guard",
 };
 
 export interface CouncilQuestionAnswer {

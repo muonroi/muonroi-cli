@@ -126,7 +126,8 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
 
   if (mockModel) {
     const mockProviderId = providerId ?? detectProviderForModel(modelId);
-    const mockModelInfo = modelInfo ?? mockGlobals.__muonroiMockModelInfo ?? { id: canonicalId, provider: mockProviderId } as ModelInfo;
+    const mockModelInfo =
+      modelInfo ?? mockGlobals.__muonroiMockModelInfo ?? ({ id: canonicalId, provider: mockProviderId } as ModelInfo);
     const caps = getProviderCapabilities(mockProviderId);
     const providerOptions = caps.buildProviderOptions({
       model: mockModelInfo,

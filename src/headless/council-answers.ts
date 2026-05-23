@@ -41,6 +41,7 @@ export function createCouncilAutoAnswerer(opts: {
     "post-debate": [...(opts.file?.["post-debate"] ?? [])],
     "pil-interview": [],
     "pil-acceptance": [],
+    "tool-loop-cap": [],
   };
   const preflightApprove = opts.file?.preflightApprove ?? true;
 

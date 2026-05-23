@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { isUnifiedPilEnabled, isDiscoveryEnabled, getAutoPassThreshold, getMaxInterviewQuestions } from "../config.js";
+import { getAutoPassThreshold, getMaxInterviewQuestions, isDiscoveryEnabled, isUnifiedPilEnabled } from "../config.js";
 
 describe("isUnifiedPilEnabled", () => {
   const orig = process.env.MUONROI_PIL_UNIFIED;

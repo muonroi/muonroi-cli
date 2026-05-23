@@ -4,7 +4,9 @@ import { loadCatalog } from "../models/registry.js";
 import type { AgentMode } from "../types/index";
 import { getCurrentModel, parseSubAgentsRawList } from "./settings";
 
-beforeAll(async () => { await loadCatalog(); });
+beforeAll(async () => {
+  await loadCatalog();
+});
 
 describe("parseSubAgentsRawList", () => {
   it("returns empty for non-array or missing", () => {

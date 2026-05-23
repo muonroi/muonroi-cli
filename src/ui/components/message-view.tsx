@@ -8,6 +8,7 @@ import { DiffView, ReadFilePreviewView } from "./diff-view.js";
 import { LspDiagnosticsView, LspResultView } from "./lsp-views.js";
 import { MediaAutoOpenView, MediaToolResultView } from "./media-views.js";
 import { StructuredResponseView } from "./structured-response-view.js";
+import { ToolGroupView } from "./tool-group.js";
 import {
   BackgroundProcessLine,
   DelegationListView,
@@ -184,6 +185,11 @@ export function MessageView({
             <span style={{ fg: t.textMuted }}>{entry.content.replace("▣  ", "")}</span>
           </text>
         </box>
+      );
+
+    case "tool_group":
+      return (
+        <ToolGroupView entry={entry} t={t} expanded={expandedMessages?.has(index) ?? false} modeColor={modeColor} />
       );
 
     case "tool_result": {
