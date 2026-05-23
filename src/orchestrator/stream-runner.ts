@@ -75,6 +75,7 @@ import {
   attachReminderToMessages,
   buildScopeReminder,
   cadenceForSize,
+  type ComplexitySize,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
