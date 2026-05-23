@@ -6,6 +6,7 @@
 
 import type { ComplexityTier } from "../gsd/complexity.js";
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import type { ComplexitySizeResult } from "./layer1_5-complexity-size.js";
 
 export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "general";
 
@@ -48,6 +49,14 @@ export interface PipelineContext {
   sessionId?: string | null;
   /** GSD-native triage tier (set by layer4). */
   complexityTier?: ComplexityTier | null;
+  /**
+   * Layer 1.5 deterministic complexity-size classification.
+   * Populated immediately after `layer1Intent` in `runLayers()`. Consumers:
+   *   - 4B step ceiling (task_type × size matrix lookup)
+   *   - 4A reminder cadence K (3 small / 5 medium / 8 large)
+   * Pure heuristic — no LLM call. See `layer1_5-complexity-size.ts`.
+   */
+  complexitySize?: ComplexitySizeResult | null;
   /** Heuristic gray-area questions surfaced by layer4 when tier === "heavy". */
   grayAreas?: GrayAreaQuestion[];
   /**
@@ -145,6 +154,10 @@ export interface IntentDetectionTrace {
   complexity: "low" | "medium" | "high";
   /** Raw score that produced complexity (-3..+10 range). */
   complexityScore: number;
+  /** Layer 1.5 bucketed size — small/medium/large. */
+  complexitySize?: "small" | "medium" | "large";
+  /** Layer 1.5 raw heuristic score. */
+  complexitySizeScore?: number;
 }
 
 export interface BrainData {
