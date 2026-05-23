@@ -27,7 +27,9 @@
 
 **Acceptance:** New `src/pil/layer1_5-complexity-size.ts` exports `scoreComplexitySize({rawText, taskType}): {size: "small"|"medium"|"large", score, features}`. Wired into pipeline after Layer 1, writes `ctx.complexitySize`. Unit tests cover 5 baseline prompts mapping to expected sizes.
 
-## REQ-004: Per-session step ceiling with forced-finalize
+## REQ-004: Per-session step ceiling with forced-finalize — COMPLETE
+
+**Status:** Complete (Plan 04-04, commits `4e7ad66`, `96cfd46`, `3178239`, 2026-05-23)
 
 **Why:** Sessions 4 & 5 wandered to 371 and 259 tool calls. `--max-tool-rounds=100` is per-turn, not per-session (9 turns × 40 tools = 371). Need hard halt at task-appropriate threshold with graceful finalize.
 
