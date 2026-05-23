@@ -1,13 +1,14 @@
 # Project State — muonroi-cli
 
-**Last updated:** 2026-05-23 (Plan 04-04 4B complete)
+**Last updated:** 2026-05-23 (Plan 04-06 4P-2 complete)
 
-**Last completed plan:** Phase 4, Plan 04 (4B ceiling + forced-finalize) — commits `4e7ad66` (RED test), `96cfd46` (GREEN scope-ceiling module), `3178239` (top-level + sub-agent wiring). Per-session step ceiling resolved from locked `(task_type × complexity_size)` matrix; hard halt triggers forcedFinalize LLM call with `toolChoice:"none"`. `--budget-rounds N` parsed before PIL. REQ-004 satisfied.
+**Last completed plan:** Phase 4, Plan 06 (4P-2 bridge classifier) — commits `d1fafad` (RED tests), `0fa4550` (GREEN prompt rewrite). Legacy bridge classifier system prompt rewritten with neutral category order (analyze first), explicit refactor restriction, prefer-general-when-ambiguous rule, and feature-add clarification. Pass 3 parser accepts `general` alongside legacy `none`. REQ-006 satisfied; REQ-001 fully closed (tree-sitter + bridge classifier sides both done).
 
 **Previously completed:**
+- Plan 04 (4B ceiling + forced-finalize) — commits `4e7ad66`, `96cfd46`, `3178239`. Per-session step ceiling resolved from locked `(task_type × complexity_size)` matrix; hard halt triggers forcedFinalize LLM call with `toolChoice:"none"`. `--budget-rounds N` parsed before PIL. REQ-004 satisfied.
 - Plan 02 (4C complexity-size) — commits `f37f45f`, `ec4e4a0`. Deterministic Layer 1.5 classifier wired into PIL pipeline; `ctx.complexitySize` populated for downstream 4B/4A consumption. REQ-003 satisfied.
 - Plan 03 (4R session-bash-repeat) — commit `b04ef51`. Session-scoped bash canonical-repeat detector. REQ-002 satisfied.
-- Plan 01 (4P-1 tree-sitter fix) — commit `bc07709`. Tree-sitter:* reasons no longer bias taskType=refactor. REQ-001 partially satisfied (bridge classifier tuning remains for 4P-2).
+- Plan 01 (4P-1 tree-sitter fix) — commit `bc07709`. Tree-sitter:* reasons no longer bias taskType=refactor. REQ-001 partially satisfied (bridge classifier tuning completed in 4P-2).
 
 ## What this repo is
 

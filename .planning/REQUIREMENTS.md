@@ -4,6 +4,8 @@
 
 ## REQ-001: Eliminate PIL refactor bias
 
+**Status:** Complete (Plan 04-01 tree-sitter side `bc07709`; Plan 04-06 bridge classifier side `d1fafad`, `0fa4550`, 2026-05-23)
+
 **Why:** 4/5 baseline prompts misclassified as `refactor` (1/5 correct). Root cause: `tree-sitter:typescript`/`tree-sitter:python` reasons → `refactor` taskType in `REASON_TO_TASK_TYPE` map (`src/pil/layer1-intent.ts:166-167`). Additionally, the LLM bridge classifier returns `refactor` too often for ambiguous prompts (confidence 0.75 trace observed).
 
 **Acceptance:** Same 5 baseline prompts run after fix produce 5/5 correct `task_type` classifications. Specifically:
@@ -53,6 +55,8 @@
 - Total reminder cost <1.5% of session tokens
 
 ## REQ-006: Tune LLM bridge classifier prompt
+
+**Status:** Complete (Plan 04-06, commits `d1fafad`, `0fa4550`, 2026-05-23)
 
 **Why:** Beyond the tree-sitter map fix (REQ-001), the bridge classifier itself biases toward `refactor` for ambiguous prompts (observed 0.75 confidence on prompt 4). Need prompt rework so feature-add and trivial-edit prompts classify correctly.
 
