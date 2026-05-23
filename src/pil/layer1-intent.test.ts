@@ -141,6 +141,39 @@ describe("layer1Intent", () => {
     expect(result.domain).toBe("typescript");
   });
 
+  // 4P-1 regression: tree-sitter:* reasons indicate code presence ONLY, no
+  // intent signal. Mapping them to "refactor" caused 4/5 baseline
+  // misclassifications. They must now map to undefined so Pass 2 keyword
+  // fallback decides — and the keyword path must still classify real refactor
+  // prompts correctly.
+  it("4P-1: tree-sitter:typescript reason alone (no refactor keyword) does NOT classify as refactor", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "tree-sitter:typescript", confidence: 0.9 });
+
+    // Prompt contains code-like signals but no refactor/keyword cues.
+    const result = await layer1Intent(makeCtx("here is some typescript: const x = 1; what does this print?"));
+
+    expect(result.taskType).not.toBe("refactor");
+  });
+
+  it("4P-1: tree-sitter:python reason alone (no refactor keyword) does NOT classify as refactor", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "tree-sitter:python", confidence: 0.9 });
+
+    const result = await layer1Intent(makeCtx("here is some python code that I want explained"));
+
+    expect(result.taskType).not.toBe("refactor");
+  });
+
+  it("4P-1: real refactor keyword prompt + tree-sitter:typescript STILL classifies as refactor via Pass 2", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "tree-sitter:typescript", confidence: 0.9 });
+
+    const result = await layer1Intent(
+      makeCtx("rename helper function buildContext to buildContextV2 across the file refactor"),
+    );
+
+    expect(result.taskType).toBe("refactor");
+    expect(result.domain).toBe("typescript");
+  });
+
   it("fails open on error — returns ctx unchanged with applied=false", async () => {
     mockedClassify.mockImplementation(() => {
       throw new Error("classifier crashed");
