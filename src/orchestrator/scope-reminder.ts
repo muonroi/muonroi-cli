@@ -125,7 +125,8 @@ export function buildScopeReminder(opts: BuildScopeReminderOpts): string {
   // string literals + small ints; only the snippet can blow the budget
   // when taskType/size labels are pathologically long. Re-derive a smaller
   // snippet that fits.
-  const fixedOverhead = `[scope-check step ${step}/${ceiling} — task=${taskType} size=${size}]\noriginal: ""\n${tail}`.length;
+  const fixedOverhead = `[scope-check step ${step}/${ceiling} — task=${taskType} size=${size}]\noriginal: ""\n${tail}`
+    .length;
   const room = Math.max(0, SCOPE_REMINDER_MAX_CHARS - fixedOverhead);
   const trimmed = snippet.slice(0, room);
   const candidate = `${header}\noriginal: "${trimmed}"\n${tail}`;
@@ -154,34 +155,32 @@ export function attachReminderToMessages<T>(messages: ReadonlyArray<T>, reminder
   if (!Array.isArray(messages) || messages.length === 0) {
     return [{ role: "system", content: reminder } as unknown as T];
   }
-  const last = messages[messages.length - 1] as unknown as {
-    role?: string;
-    content?: unknown;
-  } | undefined;
+  const last = messages[messages.length - 1] as unknown as
+    | {
+        role?: string;
+        content?: unknown;
+      }
+    | undefined;
   if (last && last.role === "tool" && Array.isArray(last.content)) {
     const parts = last.content as ReadonlyArray<Record<string, unknown>>;
-    // Find the last tool-result part to reuse its toolCallId/toolName.
-    let refId: string | undefined;
-    let refName: string | undefined;
+    // Append reminder text INTO the last tool-result part's output value.
+    // We must NOT create a new tool-result part with a duplicate toolCallId —
+    // AI SDK v6 serializes multi-part `tool` messages into one OpenAI tool
+    // message per part, and duplicate tool_call_id causes DeepSeek/OpenAI to
+    // reject the request with "messages with role 'tool' must be a response
+    // to a preceding message with 'tool_calls'". Mutating the existing part
+    // keeps the 1:1 tool_call ↔ tool_result pairing intact.
     for (let i = parts.length - 1; i >= 0; i--) {
       const p = parts[i]!;
-      if (p.type === "tool-result") {
-        refId = p.toolCallId as string | undefined;
-        refName = p.toolName as string | undefined;
-        break;
-      }
-    }
-    if (refId && refName) {
-      const appended = [
-        ...parts,
-        {
-          type: "tool-result",
-          toolCallId: refId,
-          toolName: refName,
-          output: { type: "text", value: reminder },
-        },
-      ];
-      const rewritten = { ...last, content: appended } as unknown as T;
+      if (p.type !== "tool-result") continue;
+      const out_parts = parts.slice();
+      const oldOut = p.output as { type?: string; value?: unknown } | undefined;
+      const oldValue = typeof oldOut?.value === "string" ? oldOut.value : "";
+      out_parts[i] = {
+        ...p,
+        output: { type: "text", value: `${oldValue}\n\n${reminder}` },
+      };
+      const rewritten = { ...last, content: out_parts } as unknown as T;
       const out = messages.slice() as T[];
       out[out.length - 1] = rewritten;
       return out;
