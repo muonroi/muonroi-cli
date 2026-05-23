@@ -448,18 +448,33 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       if (taskType === null) {
         legacyBrainAttempted = true;
         pass3LegacyTaskAttempted = true;
+        // 4P-2: neutral bridge-classifier prompt. Earlier wording biased the
+        // LLM toward `refactor` for any code touch (baseline trace
+        // taskType=refactor,conf=0.75 on a clear feature-add). The rewrite:
+        //   - Lists categories in neutral order (analyze first, refactor 4th).
+        //   - Restricts refactor to explicit restructure verbs.
+        //   - Tells the model to prefer 'general' over guessing when ambiguous.
+        //   - Clarifies that feature additions are 'generate' even when they
+        //     touch existing files.
+        // 0.7 confidence threshold for Pass 2 keyword override remains
+        // unchanged (HIGH_CONF_THRESHOLD_PASS2 above).
         const brainRaw = await classifyViaBrain(
           `You are a multilingual prompt classifier. The user's prompt may be in English, Vietnamese, or a mix of both.
 Classify the prompt's INTENT (not its language). Reply with TWO lowercase words separated by a comma: <category>,<style>
 
-Category — pick ONE:
-  refactor      — restructure existing code (tái cấu trúc, refactor)
+Category — pick ONE (listed in neutral order, no precedence):
+  analyze       — explain / inspect / review existing code (giải thích, phân tích, review)
   debug         — fix a bug or investigate failure (sửa lỗi, fix bug, lỗi, traceback)
+  generate      — create new code/file or add new behavior (tạo, sinh code, viết function mới, thêm)
+  refactor      — restructure existing code (tái cấu trúc, refactor)
   plan          — design / roadmap / architecture (kế hoạch, thiết kế, kiến trúc)
-  analyze       — explain / inspect / review code (giải thích, phân tích, review)
   documentation — write docs/comments (viết docs, comment, jsdoc)
-  generate      — create new code/file (tạo, sinh code, viết function mới)
-  none          — pure chitchat with NO coding intent
+  general       — chitchat OR unclear / ambiguous coding intent
+
+Rules:
+- Only return refactor when the user explicitly asks to restructure, rename, migrate, or reshape EXISTING code without adding new behavior.
+- Feature additions ('add flag', 'thêm', 'create endpoint', 'thêm option') are 'generate' even when they touch existing files.
+- When the request is ambiguous, prefer 'general' over guessing.
 
 Style — pick ONE:
   concise (ngắn gọn) | balanced (cân bằng) | detailed (chi tiết)
@@ -468,7 +483,8 @@ Examples:
   "Refactor this function" → refactor,balanced
   "tại sao test fail" → debug,balanced
   "thiết kế hệ thống auth" → plan,detailed
-  "hi" → none,concise
+  "thêm flag --foo" → generate,concise
+  "hi" → general,concise
 
 Prompt: "${ctx.raw.slice(0, 500)}"`,
           1500,
@@ -476,18 +492,23 @@ Prompt: "${ctx.raw.slice(0, 500)}"`,
         if (brainRaw) {
           pass3LegacyTaskSucceeded = true;
           const lower = brainRaw.toLowerCase();
-          const matched = VALID_TASK_TYPES.find((t) => lower.includes(t));
-          if (matched) {
-            taskType = matched;
-            confidence = 0.55;
-            intentKind = "task";
-          } else if (/\bnone\b/.test(lower)) {
+          // 4P-2: match `general` BEFORE the coding-category list so an
+          // ambiguous prompt the model marked `general,*` doesn't accidentally
+          // fall through to a substring hit later. `none` kept as legacy alias.
+          if (/\bgeneral\b/.test(lower) || /\bnone\b/.test(lower)) {
             taskType = "general";
             confidence = 0.6;
             intentKind = "chitchat";
             if (outputStyle === null) {
               outputStyle = "concise";
               styleSource = "chitchat-default";
+            }
+          } else {
+            const matched = VALID_TASK_TYPES.find((t) => lower.includes(t));
+            if (matched) {
+              taskType = matched;
+              confidence = 0.55;
+              intentKind = "task";
             }
           }
           const styleMatched = VALID_STYLES.find((s) => lower.includes(s));
