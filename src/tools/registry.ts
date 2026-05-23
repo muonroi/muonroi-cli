@@ -7,6 +7,7 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
@@ -106,13 +107,23 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     },
   });
 
-  // bash
+  // bash — every foreground call goes through here. We track the LAST
+  // canonical command + runId in this closure so we can inject a reminder
+  // when the model issues another bash call that canonicalizes to the same
+  // shape (e.g. `bunx vitest run | tail` followed by `bunx vitest run | head`
+  // — both canonicalize to `bunx vitest run`). The reminder rides on the
+  // tool_result of the SECOND call, which the model is forced to read
+  // before its next step — far stronger signal than a system-prompt rule
+  // it can attention-decay past.
+  let lastBashCanonical: string | null = null;
+  let lastBashRunId: string | null = null;
   tools.bash = dynamicTool({
     description:
-      "Execute a shell command. Set background=true for long-running processes. " +
-      "If output is truncated, use bash_output_get with the returned run_id to re-query " +
-      "the full output with head/tail/grep/lines slicing — do NOT re-run the command with " +
-      "different pipe flags.",
+      "Execute a shell command. Output is automatically cached — every call returns a " +
+      "run_id you can re-query via bash_output_get(run_id, mode=tail|head|grep|lines). " +
+      "Do NOT pipe `| tail`, `| head`, `| grep`, or `> file` — that hides output from " +
+      "the cache. Run unpiped and slice via bash_output_get instead. Set background=true " +
+      "for long-running processes (dev servers, watchers).",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -127,14 +138,43 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         const result = await bash.startBackground(input.command);
         return formatResult(result);
       }
+      // 3-3: compute canonical form BEFORE running so we can attach an
+      // inline reminder if it matches the previous bash call.
+      const cmd = typeof input.command === "string" ? input.command : "";
+      const canonical = cmd ? canonicalizeBashCommand(cmd) : "";
+      const repeatedIntent = canonical !== "" && canonical === lastBashCanonical && lastBashRunId !== null;
+      const prevRunId = lastBashRunId;
+
       const result = await bash.execute(input.command, input.timeout ?? 30000);
       const formatted = formatResult(result);
-      // Append a run_id footer so the model can re-query the full output via
-      // bash_output_get instead of running the command again with different
-      // flags. We only annotate when truncation actually happened — when the
-      // output already fit, the run_id is noise.
-      if (result.bashRunId && result.bashTotalChars !== undefined && result.bashTotalChars > MAX_TOOL_OUTPUT_CHARS) {
-        return `${formatted}\n\n[bash_run_id: ${result.bashRunId} — ${result.bashTotalChars} chars cached; use bash_output_get(run_id, mode=tail|head|grep|lines) to re-query]`;
+
+      // Update last-canonical state AFTER we compared, so the current call's
+      // runId becomes the comparison target for the next one.
+      if (result.bashRunId) {
+        lastBashCanonical = canonical;
+        lastBashRunId = result.bashRunId;
+      }
+
+      // 3-3 reminder rides on the tool_result of the SECOND+ same-intent
+      // bash call. Cheap models that ignored the system-prompt rule still
+      // see this — it's inside the actual tool output they parse next step.
+      const reminder = repeatedIntent
+        ? `\n\n[reminder: previous bash call had the same canonical intent and produced run_id=${prevRunId}. Use bash_output_get("${prevRunId}", mode=tail|head|grep|lines) to slice the cached output instead of re-running.]`
+        : "";
+
+      // 3-1: ALWAYS surface the run_id footer (no truncation gate). The
+      // previous gate created a Catch-22 — when the model used `| tail -40`,
+      // exec captured only ~5K, totalChars stayed below MAX_TOOL_OUTPUT_CHARS,
+      // footer never fired, model never learned the cache existed. The hint
+      // about bash_output_get fires only when the cached output is large
+      // enough that slicing makes sense (>= 4K chars).
+      if (result.bashRunId) {
+        const chars = result.bashTotalChars ?? 0;
+        const hint =
+          chars >= 4_000
+            ? ` — ${chars} chars cached; use bash_output_get(run_id, mode=tail|head|grep|lines) to re-query`
+            : "";
+        return `${formatted}\n\n[bash_run_id: ${result.bashRunId}${hint}]${reminder}`;
       }
       return formatted;
     },

@@ -70,7 +70,7 @@ import type {
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo } from "../models/registry.js";
-import { appendCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
+import { injectCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
@@ -1166,7 +1166,7 @@ export class MessageProcessor {
           // by `modelInfo.tier === "fast"`. See cheap-model-playbook.ts for
           // motivation + escape hatch (MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1).
           const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
-            ? appendCheapModelPlaybook(system)
+            ? injectCheapModelPlaybook(system)
             : system;
 
           const systemForModel = runtime.modelId.startsWith("claude")

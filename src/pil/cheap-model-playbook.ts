@@ -1,46 +1,56 @@
 /**
  * src/pil/cheap-model-playbook.ts
  *
- * Tier-aware behavioural suffix injected into the system prompt for budget
+ * Tier-aware behavioural prelude PREPENDED to the system prompt for budget
  * models. Smart models (sonnet, gpt-5, etc.) make these decisions correctly
  * on their own — the playbook only fires when `modelInfo.tier === "fast"`.
  *
- * Motivation: forensics on DeepSeek V4 Flash sessions showed it ignored the
- * (correctly-worded) `bash_output_get` tool description and re-ran `bunx
- * vitest` three times with different pipe flags before the loop-pattern guard
- * caught it (session 9b56560aeeb6 → e9c510d7d213 — see commit 8674334). Tool
- * descriptions are "read but not weighted"; cheap models adopt instructions
- * far more reliably when surfaced in the SYSTEM PROMPT itself.
+ * Why prepend (not append)? Live-session forensics on session 622fdeb8f658
+ * (DeepSeek V4 Flash, ~8K system prompt) showed the original append-at-end
+ * placement let attention decay before the rules registered: model emitted
+ * `bunx vitest run | tail -40` despite the rule saying not to pipe. Primacy
+ * effect — putting the rules FIRST, behind a CRITICAL marker — is a real
+ * fix, not a workaround.
  *
- * Design constraints:
+ * The wording also changed: the previous rule 1 said "NEVER re-run with
+ * different pipe flags". Cheap models rationalized that the first call
+ * isn't a re-run, so the rule didn't apply. Rule 1 now applies to EVERY
+ * bash call where output might need to be queried — including the first.
  *
- *   - Stay short (~300 chars). Long suffixes dilute the model's attention.
- *   - Concrete prohibitions ("NEVER re-run with `| tail`"), not abstract
- *     principles ("be efficient").
- *   - Name the correct tool right next to the prohibited action so the model
- *     doesn't have to search the tool list.
- *   - One escape hatch: `MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1` for users
- *     who want to A/B test impact or have a corner case where the suffix
- *     hurts a specific cheap model.
+ * Escape hatch: `MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1` for A/B testing.
  */
 
 import type { ModelInfo } from "../types/index.js";
 
 /**
- * The playbook text appended to the system prompt for fast-tier models.
+ * Playbook text injected at the TOP of the system prompt for fast-tier models.
  *
- * Rules ordered by frequency of the underlying anti-pattern in real session
- * forensics — most-violated first so the model sees it before the suffix runs
- * out of attention budget.
+ * Wrapped with the `[CRITICAL TOOL-USE RULES ...]` marker so the model knows
+ * to treat these as overrides to anything that follows.
  */
-export const CHEAP_MODEL_PLAYBOOK = `[BUDGET MODEL TOOL-USE PLAYBOOK — apply strictly]
-1. NEVER re-run the same command with different \`| tail\`, \`| head\`, \`| grep\`, or \`> file\` flags.
-   The previous bash result included a run_id — call \`bash_output_get(run_id, mode=tail|head|grep|lines)\` instead.
-2. Before reading more than 3 files to understand a topic, delegate to \`task(agent="explore")\`.
-   The sub-agent returns a compressed summary; you save reading tokens.
-3. Use the \`grep\` tool (ripgrep) for content search — NOT \`bash\` with \`grep\` / \`find\` piped.
-4. When a tool returns "ERROR: ...", do NOT retry the identical call.
-   Either pick a different tool, change inputs meaningfully, or stop and report.
+export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before invoking any tool; these override defaults that follow]
+
+1. Bash output is AUTOMATICALLY cached. Every \`bash\` call returns a \`run_id\`
+   (e.g. \`bash-1\`) you can re-query via \`bash_output_get(run_id, mode=tail|head|grep|lines)\`.
+   - When you want only the last N lines: do NOT pipe \`| tail -N\`. Run the
+     bare command, then call \`bash_output_get(run_id, mode=tail, lines=N)\`.
+   - Same for \`| head\`, \`| grep PATTERN\`, \`> file\`. Pipes/redirects HIDE
+     the full output from the cache; \`bash_output_get\` reads from the cache
+     without re-running.
+   - This applies to EVERY bash call, not just retries.
+
+2. Before reading more than 3 files to understand a topic, delegate to
+   \`task(agent="explore")\`. The sub-agent returns a compressed summary;
+   you save reading tokens.
+
+3. Use the \`grep\` tool (ripgrep) for content search — NOT \`bash\` with
+   \`grep\` / \`find\` piped.
+
+4. When a tool returns \`ERROR: ...\`, do NOT retry the identical call.
+   Pick a different tool, change inputs meaningfully, or stop and report.
+
+[END CRITICAL TOOL-USE RULES — your regular instructions begin below]
+
 `;
 
 /**
@@ -49,9 +59,6 @@ export const CHEAP_MODEL_PLAYBOOK = `[BUDGET MODEL TOOL-USE PLAYBOOK — apply s
  * Returns true iff:
  *   - `modelInfo.tier === "fast"` (budget tier from catalog.json)
  *   - env `MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK` is unset / not "1"
- *
- * The env check uses `process.env` directly (no settings.ts indirection) so
- * the predicate stays pure and unit-testable by mutating the env in tests.
  */
 export function shouldInjectCheapModelPlaybook(modelInfo: ModelInfo | undefined): boolean {
   if (process.env.MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK === "1") return false;
@@ -59,17 +66,25 @@ export function shouldInjectCheapModelPlaybook(modelInfo: ModelInfo | undefined)
 }
 
 /**
- * Append the playbook to a system prompt, separated by a blank line.
+ * Prepend the playbook to a system prompt so it lands at the FRONT of the
+ * model's attention window. Idempotent — passing an already-prefixed prompt
+ * returns it unchanged so compaction reruns don't double-stack.
  *
- * Called from message-processor right before streamText so the suffix lands
- * in the model's prompt window for every step of the same turn (it is part
- * of `systemForModel`, not per-step injection).
- *
- * Idempotent: passing an already-suffixed prompt returns it unchanged so the
- * top-level loop and any compaction reruns don't double-stack the suffix.
+ * Replaces the earlier `appendCheapModelPlaybook` which placed the rules at
+ * the END of the system block. Live forensics showed end-placement let the
+ * rules drop under attention threshold for DeepSeek V4 Flash (session
+ * 622fdeb8f658 — model emitted `| tail -40` on first call despite the
+ * "don't pipe" rule). Primacy fixes that.
  */
-export function appendCheapModelPlaybook(systemPrompt: string): string {
-  if (systemPrompt.includes(CHEAP_MODEL_PLAYBOOK)) return systemPrompt;
-  const sep = systemPrompt.endsWith("\n") ? "\n" : "\n\n";
-  return `${systemPrompt}${sep}${CHEAP_MODEL_PLAYBOOK}`;
+export function injectCheapModelPlaybook(systemPrompt: string): string {
+  if (systemPrompt.startsWith(CHEAP_MODEL_PLAYBOOK)) return systemPrompt;
+  return `${CHEAP_MODEL_PLAYBOOK}${systemPrompt}`;
 }
+
+/**
+ * Deprecated alias for backwards-compat with call sites that haven't moved
+ * to the new name. New code should use `injectCheapModelPlaybook`.
+ *
+ * @deprecated use injectCheapModelPlaybook (prepends instead of appending)
+ */
+export const appendCheapModelPlaybook = injectCheapModelPlaybook;

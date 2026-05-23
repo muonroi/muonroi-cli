@@ -30,7 +30,7 @@
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { normalizeModelId } from "../models/registry.js";
-import { appendCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
+import { injectCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
@@ -336,7 +336,7 @@ export class StreamRunner {
     // deepseek sub-agent via SAMR/cost optimisation, and the sub-agent needs
     // the playbook even though the parent does not).
     const childSystem = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
-      ? appendCheapModelPlaybook(childSystemBase)
+      ? injectCheapModelPlaybook(childSystemBase)
       : childSystemBase;
 
     onActivity?.(initialDetail);
