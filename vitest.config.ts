@@ -50,6 +50,10 @@ export default defineConfig({
       // OpenTUI E2E specs require the dedicated harness config (longer timeouts,
       // fileParallelism:false). Run via: bunx vitest -c vitest.harness.config.ts run tests/harness/
       "tests/harness/**",
+      // export-transcripts.test.ts is bun-native (uses bun:sqlite `db.run(sql, ...args)`
+      // API that vitest's module loader cannot resolve). Run with: `bun test
+      // src/ee/__tests__/export-transcripts.test.ts`.
+      "src/ee/__tests__/export-transcripts.test.ts",
     ],
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 30_000,

@@ -114,6 +114,7 @@ export interface DriverContext {
     maxSprints: number;
     doneThreshold: number;
     stack?: string;
+    budgetTokens?: number;
   };
   respondToQuestion: import("../council/types.js").QuestionResponder;
   respondToPreflight: import("../council/types.js").PreflightResponder;
@@ -413,8 +414,8 @@ export interface RecoveryOption {
  */
 export interface HaltChunk {
   type: "halt";
-  /** CB-3 currently only emits "no_recipe"; kept as a union for future CBs. */
-  reason: "no_recipe" | "zero_coverage";
+  /** CB-3 emits "no_recipe" / "zero_coverage"; product-loop emits "budget_exhausted" when --budget-tokens trips. */
+  reason: "no_recipe" | "zero_coverage" | "budget_exhausted";
   /** Optional human-readable detail rendered alongside the recovery card. */
   detail?: string;
   /** Actionable choices. UI renders these as buttons / list items. */

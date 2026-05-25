@@ -26,8 +26,12 @@ import path from "node:path";
 
 import type { ModelMessage } from "ai";
 
-const EXPERIENCE_ROOT = path.join(os.homedir(), ".experience");
-const EMIT_ROOT = path.join(EXPERIENCE_ROOT, "muonroi-cli-sessions");
+function experienceRoot(): string {
+  return path.join(os.homedir(), ".experience");
+}
+function emitRoot(): string {
+  return path.join(experienceRoot(), "muonroi-cli-sessions");
+}
 const MAX_BLOCK_CHARS = 8000;
 
 /**
@@ -41,7 +45,7 @@ const MAX_BLOCK_CHARS = 8000;
 function isEnabled(): boolean {
   if (process.env.MUONROI_DISABLE_TRANSCRIPT_EMIT === "1") return false;
   try {
-    return fs.existsSync(path.join(EXPERIENCE_ROOT, "config.json"));
+    return fs.existsSync(path.join(experienceRoot(), "config.json"));
   } catch {
     return false;
   }
@@ -146,10 +150,10 @@ export function emitTranscriptToDisk(
     const entries = messages.map((m) => toJsonlEntry(m, reason)).filter((e): e is ClaudeJsonlEntry => e !== null);
     if (entries.length === 0) return null;
 
-    ensureDir(EMIT_ROOT);
+    ensureDir(emitRoot());
     const reasonSuffix = reason === "cli-exit" ? "" : `.${reason}`;
     const filename = `${sessionId}${reasonSuffix}.jsonl`;
-    const target = path.join(EMIT_ROOT, filename);
+    const target = path.join(emitRoot(), filename);
 
     const meta: SessionMetaLine = {
       type: "session_meta",
@@ -166,5 +170,5 @@ export function emitTranscriptToDisk(
 }
 
 export function getEmitRoot(): string {
-  return EMIT_ROOT;
+  return emitRoot();
 }

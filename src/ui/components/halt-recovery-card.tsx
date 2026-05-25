@@ -26,6 +26,7 @@ const FALLBACK_THRESHOLD = 70;
 const REASON_LABELS: Record<HaltChunk["reason"], string> = {
   no_recipe: "No verify recipe detected",
   zero_coverage: "Zero test coverage detected",
+  budget_exhausted: "Token budget exhausted",
 };
 
 export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: HaltRecoveryCardProps) {
