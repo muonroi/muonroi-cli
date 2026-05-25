@@ -45,10 +45,12 @@ beforeEach(() => {
 
 describe("IntentDetectionTrace", () => {
   it("Pass 1 hit: high-confidence classifier reason maps to taskType; no legacy TASK brain call", async () => {
-    mockClassify.mockReturnValue({ tier: "hot", reason: "tree-sitter:typescript", confidence: 0.95 });
-    const result = await layer1Intent(makeCtx("refactor handler.ts"));
+    // Phase 4 4P-1: switched from tree-sitter:typescript (now undefined) to
+    // regex:refactor — a real Pass 1 mapping that survives Phase 4.
+    mockClassify.mockReturnValue({ tier: "hot", reason: "regex:refactor", confidence: 0.95 });
+    const result = await layer1Intent(makeCtx("rename foo to bar across the module"));
     const trace = result._intentTrace!;
-    expect(trace.pass1Reason).toBe("tree-sitter:typescript");
+    expect(trace.pass1Reason).toBe("regex:refactor");
     expect(trace.pass1TaskType).toBe("refactor");
     expect(trace.pass1Hit).toBe(true);
     expect(trace.pass2Hit).toBe(false);

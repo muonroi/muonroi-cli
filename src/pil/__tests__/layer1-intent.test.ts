@@ -70,19 +70,23 @@ describe("layer1Intent — classifier pass", () => {
     expect(result.taskType).toBe("analyze");
   });
 
-  it("tree-sitter:typescript → refactor, domain=typescript", async () => {
+  it("tree-sitter:typescript → no intent signal (Phase 4 4P-1), domain still extracted", async () => {
+    // Phase 4 4P-1: tree-sitter parse reasons no longer imply refactor.
+    // They indicate code PRESENCE but carry no intent. taskType falls through
+    // to Pass 2 keyword fallback; here "const x = 1" matches nothing → null.
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.8, reason: "tree-sitter:typescript" });
     const result = await layer1Intent(makeCtx("const x = 1"));
-    expect(result.taskType).toBe("refactor");
+    expect(result.taskType).toBeNull();
     expect(result.domain).toBe("typescript");
-    expect(result.layers[0].delta).toContain("domain=typescript");
+    expect(result.layers[0].applied).toBe(false);
   });
 
-  it("tree-sitter:python → refactor, domain=python", async () => {
+  it("tree-sitter:python → no intent signal (Phase 4 4P-1), domain still extracted", async () => {
     mockClassify.mockReturnValue({ tier: "hot", confidence: 0.8, reason: "tree-sitter:python" });
     const result = await layer1Intent(makeCtx("def foo(): pass"));
-    expect(result.taskType).toBe("refactor");
+    expect(result.taskType).toBeNull();
     expect(result.domain).toBe("python");
+    expect(result.layers[0].applied).toBe(false);
   });
 
   it("low-confidence → null taskType, applied=false", async () => {
