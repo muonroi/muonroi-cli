@@ -371,9 +371,16 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
     if (sz < 80) return part; // tiny calls aren't worth touching
     mutated = true;
+    // F3b — use a STRING marker, not the legacy `{_elided:true,original_chars:N}`
+    // object. The LLM previously hallucinated the elided object shape as its
+    // NEXT tool input (session 101870b4d9bb: read_file called with
+    // `{_elided:true,original_chars:75}` → "path must be string, got undefined").
+    // A plain string in `input` is impossible to confuse with a valid tool
+    // schema (every tool expects an object), so the model is forced to
+    // synthesize fresh args from the user's actual intent.
     return {
       ...part,
-      input: { _elided: true, original_chars: sz },
+      input: `[earlier call args elided by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
     } as Record<string, unknown>;
   });
   if (!mutated) return msg;
