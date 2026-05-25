@@ -1683,6 +1683,7 @@ export class Agent {
         maxCost: number;
         maxSprints: number;
         doneThreshold: number;
+        budgetTokens?: number;
         stack?: string;
         noCustomerDebate?: boolean;
         noPriorContext?: boolean;
@@ -1740,6 +1741,7 @@ export class Agent {
         maxCost: payload.flags.maxCost,
         maxSprints: payload.flags.maxSprints,
         doneThreshold: payload.flags.doneThreshold,
+        budgetTokens: payload.flags.budgetTokens,
         stack: payload.flags.stack,
         forceCouncil: payload.flags.forceCouncil,
       },

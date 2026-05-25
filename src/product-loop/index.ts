@@ -36,6 +36,8 @@ export interface ProductLoopFlags {
   stack?: string;
   /** P2.7: when true, always run full council debate even for low-complexity ideas. */
   forceCouncil?: boolean;
+  /** If set, halt when total tokens exceed this limit. */
+  budgetTokens?: number;
 }
 
 export interface ProductLoopOptions {
@@ -975,6 +977,23 @@ async function* drainSprints(args: {
 
   for (let sprintN = history.length + 1; sprintN <= flags.maxSprints; sprintN++) {
     let iter: IterationState;
+    // Check token budget
+    if (flags.budgetTokens) {
+      const { getProductTotalTokens } = await import("../usage/product-ledger.js");
+      const totalTokens = await getProductTotalTokens(ctx.runId);
+      if (totalTokens > flags.budgetTokens) {
+        yield {
+          type: "halt",
+          haltChunk: {
+            type: "halt",
+            reason: "budget_exhausted",
+            detail: `Token budget exceeded: used ${totalTokens} > limit ${flags.budgetTokens}`,
+            recovery_options: [],
+          },
+        } as StreamChunk;
+        return { runId: ctx.runId, stage: "halted", success: false, reason: "budget exhausted" };
+      }
+    }
     try {
       const sprintGen = runSprint({
         sprintN,
