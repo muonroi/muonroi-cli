@@ -471,10 +471,17 @@ Category — pick ONE (listed in neutral order, no precedence):
   documentation — write docs/comments (viết docs, comment, jsdoc)
   general       — chitchat OR unclear / ambiguous coding intent
 
-Rules:
-- Only return refactor when the user explicitly asks to restructure, rename, migrate, or reshape EXISTING code without adding new behavior.
-- Feature additions ('add flag', 'thêm', 'create endpoint', 'thêm option') are 'generate' even when they touch existing files.
-- When the request is ambiguous, prefer 'general' over guessing.
+Rules (Phase 4 4P-2 disambiguation):
+- Only return refactor when the user EXPLICITLY uses one of: rename, restructure, reorganize, extract, inline, move, migrate, reshape — applied to EXISTING code WITHOUT adding new behavior.
+- Feature additions ('add flag', 'thêm', 'create endpoint', 'thêm option'), changing a DEFAULT value, adding tests, or improving coverage are 'generate' — NOT refactor.
+- 'improve', 'change', 'update', 'modify', 'đổi', 'cải thiện' alone do NOT imply refactor — pick the specific category by what the change actually does.
+- When the request is ambiguous, prefer 'general' over guessing refactor.
+
+Negative examples (NOT refactor):
+- "đổi default --max-tool-rounds 8 sang 12" → generate
+- "improve test coverage" → generate
+- "tại sao X trả empty" → analyze
+- "fix CI failing" → debug
 
 Style — pick ONE:
   concise (ngắn gọn) | balanced (cân bằng) | detailed (chi tiết)
