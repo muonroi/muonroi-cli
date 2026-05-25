@@ -43,14 +43,23 @@ const SYSTEM_PROMPT =
   "You classify user prompts for a coding assistant. Reply with ONE line of two lowercase words separated by a comma: <taskType>,<style>\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
   "style ∈ { concise | balanced | detailed }\n\n" +
-  "Rules:\n" +
+  "Rules (read carefully — Phase 4 4P-2 disambiguation):\n" +
   "- debug — fix a bug, CI/build/test failure, error, exception, crash, or any 'why is X broken' question.\n" +
-  "- generate — create new code, scaffold, write a new file, add a feature from scratch.\n" +
-  "- refactor — restructure existing code without changing behavior.\n" +
+  "- generate — create new code, scaffold, write a new file, add a feature from scratch, ADD A NEW TEST, CHANGE A DEFAULT VALUE, modify configuration, improve coverage.\n" +
+  "- refactor — ONLY when the user explicitly says rename, restructure, reorganize, extract, inline, move, migrate, or reshape existing code WITHOUT adding new behavior. Words like 'improve', 'change', 'update', 'fix', 'modify' are NOT refactor — pick the closest specific category instead.\n" +
   "- plan — architecture, roadmap, multi-step design, strategy.\n" +
-  "- analyze — explain, review, inspect, audit, compare existing code.\n" +
+  "- analyze — explain, review, inspect, audit, compare, find-out-why existing code/data.\n" +
   "- documentation — write docs, comments, JSDoc, README.\n" +
-  "- general — chitchat or unclear intent.\n\n" +
+  "- general — chitchat or unclear intent. Prefer 'general' over guessing refactor.\n\n" +
+  "Negative examples (these are NOT refactor):\n" +
+  "- 'đổi default --max-tool-rounds từ 8 sang 12' → generate (changes a default value)\n" +
+  "- 'improve test coverage' → generate (adds new tests)\n" +
+  "- 'tại sao bash_output_get trả empty' → analyze (investigate behavior)\n" +
+  "- 'fix CI failing on Windows' → debug\n" +
+  "Positive refactor examples:\n" +
+  "- 'rename function shouldInjectReminder to needsReminderAt' → refactor\n" +
+  "- 'extract this into a helper' → refactor\n" +
+  "- 'migrate from class component to hooks' → refactor\n\n" +
   "Style picking — MANDATORY mapping (do NOT deviate):\n" +
   "- debug, refactor, generate → concise (action tasks; the diff is the answer)\n" +
   "- analyze → concise (bullet findings, no narrative)\n" +
