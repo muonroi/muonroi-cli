@@ -347,7 +347,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // edit_file
     tools.edit_file = dynamicTool({
       description:
-        "Replace a unique string in a file with new content. The old_string must appear exactly once. SAFETY: you must call read_file on the target in the same session before editing; if the file changed on disk after your read, re-read it first.",
+        "Replace a unique string in a file with new content. The old_string must appear exactly once. MANDATORY: call read_file on the same file_path EARLIER in this session before edit_file — the edit WILL fail with 'File must be read first' otherwise. Batch reads when editing multiple files (parallel tool calls), then issue edits. If the file changed on disk after your read, re-read it first.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
