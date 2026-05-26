@@ -33,27 +33,21 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-
-import { scoreComplexitySize } from "../../src/pil/layer1_5-complexity-size.js";
-import {
-  parseBudgetOverride,
-  resolveCeiling,
-  softWarnStep,
-} from "../../src/orchestrator/scope-ceiling.js";
+import { parseBudgetOverride, resolveCeiling, softWarnStep } from "../../src/orchestrator/scope-ceiling.js";
 import {
   buildScopeReminder,
   cadenceForSize,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "../../src/orchestrator/scope-reminder.js";
+import { scoreComplexitySize } from "../../src/pil/layer1_5-complexity-size.js";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
 // Locked test prompt — empirically classified as (debug, small) by Layer 1.5
 // (78 chars under the <80 small threshold, no sweep words, no path tokens).
 // Drives ceiling = 6 → reminder cadence K=3 → soft-warn at step 4.
-const TEST_PROMPT =
-  "debug why the json parser drops single-char tokens in src/parsers/lex.ts";
+const TEST_PROMPT = "debug why the json parser drops single-char tokens in src/parsers/lex.ts";
 
 function bashCallRound(callId: string, cmd: string): unknown[] {
   return [
@@ -114,10 +108,7 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
 
     // Verify the soft-warn handoff wires the prefix as documented:
     // Source: src/orchestrator/message-processor.ts (search "approaching ceiling")
-    const msgProc = readFileSync(
-      resolve("src/orchestrator/message-processor.ts"),
-      "utf8",
-    );
+    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
     expect(msgProc).toContain("approaching ceiling");
   });
 
@@ -136,19 +127,13 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
     // `override active: ceiling ${N}, default was ...`). Verify the toast
     // template is present so grep marker `override active: ceiling 20` in
     // THIS spec file pairs with the live emission site.
-    const msgProc = readFileSync(
-      resolve("src/orchestrator/message-processor.ts"),
-      "utf8",
-    );
+    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
     expect(msgProc).toContain("override active: ceiling");
   });
 
   // ---- Assertion 3 (wiring): halted: step ceiling exceeded toast wired ----
   it("hard halt: 'halted: step ceiling exceeded' toast string wired in orchestrator", () => {
-    const msgProc = readFileSync(
-      resolve("src/orchestrator/message-processor.ts"),
-      "utf8",
-    );
+    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
     expect(msgProc).toContain("halted: step ceiling exceeded");
     // Spec asserts the literal string the toast emits for THIS test's
     // (task_type=debug, size=small, ceiling=6) configuration:
@@ -235,14 +220,8 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
         const p = c?.options?.prompt;
         if (!Array.isArray(p) || p.length === 0) return false;
         const sys = p[0] as { content?: unknown } | undefined;
-        const sysText =
-          typeof sys?.content === "string"
-            ? sys.content
-            : JSON.stringify(sys?.content ?? "");
-        return (
-          sysText.includes("muonroi-cli in Agent mode") ||
-          sysText.includes("[CRITICAL TOOL-USE RULES")
-        );
+        const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
+        return sysText.includes("muonroi-cli in Agent mode") || sysText.includes("[CRITICAL TOOL-USE RULES");
       });
 
       // Sanity: at least one main-agent round ran. Bounds the ceiling+1 check
@@ -250,16 +229,19 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       expect(agentCalls.length).toBeGreaterThanOrEqual(1);
 
       // Ceiling-bound assertion (Assertion 3 quantitative part): main-agent
-      // calls MUST stay under ceiling+1 (6 + forced-finalize round = 7). Real
-      // run hits 4 (PIL + 3 bash rounds + final stop), well below the cap.
+      // calls MUST stay under the effective auto-continue cap. Phase 5 Fix 4
+      // (Option A) silently bumps the ceiling up to MAX_CHECKPOINT_BUMPS=3
+      // times before hard halt, so the effective cap is
+      // ceiling × (MAX_BUMPS + 1) + 1 (= 6 × 4 + 1 = 25 for debug/small).
+      // Real run hits 4 (PIL + 3 bash rounds + final stop), well below the
+      // cap — this bound exists so a runaway agent still terminates.
       const ceiling = resolveCeiling("debug", "small");
-      expect(agentCalls.length).toBeLessThanOrEqual(ceiling + 1);
+      const MAX_CHECKPOINT_BUMPS = 3;
+      expect(agentCalls.length).toBeLessThanOrEqual(ceiling * (MAX_CHECKPOINT_BUMPS + 1) + 1);
 
       // Concatenate all prompt content across agent calls — we are looking
       // for the reminder marker injected by prepareStep on/after step 3.
-      const joinedPromptText = agentCalls
-        .map((c) => JSON.stringify(c?.options?.prompt ?? {}))
-        .join("\n");
+      const joinedPromptText = agentCalls.map((c) => JSON.stringify(c?.options?.prompt ?? {})).join("\n");
 
       // Primary assertion (4V locked): "[scope-check step 3/" appears.
       // The reminder is injected by message-processor.ts::prepareStep at the
