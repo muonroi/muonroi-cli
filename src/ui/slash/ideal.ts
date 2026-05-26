@@ -31,6 +31,7 @@ import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
 export interface IdealFlags {
+  budgetTokens?: number;
   maxCost: number;
   maxSprints: number;
   doneThreshold: number;
@@ -178,6 +179,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .option("--maintain", "force Mode C (existing project → single PR)")
     .option("--new", "force Mode A (greenfield) — overrides verify-recipe auto-detect")
     .option("--gh-pr", "Mode C only — run gh pr create after building the PR artifact")
+    .option("--budget-tokens <N>", "halt when total tokens exceed N", parseInt)
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
@@ -199,6 +201,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     maxSprints: number;
     doneThreshold: number;
     stack?: string;
+    budgetTokens?: number;
     /** Commander emits priorContext=false when user passes --no-prior-context. */
     priorContext?: boolean;
     forceCouncil?: boolean;
@@ -246,6 +249,7 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
       noCustomerDebate,
       noPriorContext: opts.priorContext === false ? true : undefined,
       forceCouncil: opts.forceCouncil === true ? true : undefined,
+      budgetTokens: opts.budgetTokens ? opts.budgetTokens : undefined,
       mode,
       ghPr: opts.ghPr === true ? true : undefined,
     },

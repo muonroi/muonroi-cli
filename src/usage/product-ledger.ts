@@ -109,3 +109,11 @@ export async function getProductSpentUsd(productRunId: string, homeOverride?: st
   const entries = await readProductLedger(productRunId, homeOverride);
   return entries.reduce((sum, entry) => sum + entry.actualUsd, 0);
 }
+
+/**
+ * Calculate total tokens consumed for a specific product run.
+ */
+export async function getProductTotalTokens(productRunId: string, homeOverride?: string): Promise<number> {
+  const entries = await readProductLedger(productRunId, homeOverride);
+  return entries.reduce((sum, entry) => sum + (entry.actualInputTokens ?? 0) + (entry.actualOutputTokens ?? 0), 0);
+}
