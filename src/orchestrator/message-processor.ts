@@ -1101,16 +1101,32 @@ export class MessageProcessor {
           // never needs bash/read_file/edit_file/grep — those schemas alone
           // cost ~1.5K input tokens on this CLI. Falls back to baseTools for
           // every non-chitchat turn (PIL gates conservatively).
+          //
+          // BUG-A guard — when prior turns already issued tool_calls (their
+          // results still live in the messages history), DROPPING tools on a
+          // continuation chitchat ("tiếp tục" / "continue") causes two
+          // failures: (1) DeepSeek goes into native DSML markup fallback
+          // because it sees tool-call history but no schema (visible in
+          // sessions 002df4014cb4 + fc19b4daee20); (2) the agent has no way
+          // to actually CONTINUE the prior task — the user's clear intent.
+          // Detect prior-tool-context and keep the base tool set in that
+          // case. The 1.5K token saving for true greetings (no prior tool
+          // history) is preserved.
           const turnCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
+          const _priorTurnHadTools = (deps.messages as Array<{ role?: string }>).some((m) => m?.role === "tool");
           let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
             ? {}
-            : isChitchat
+            : isChitchat && !_priorTurnHadTools
               ? {}
               : baseToolsRaw;
           // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
           // worth of tool schemas (~20K input tokens). PIL Layer 1 already
           // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
-          if (deps.mode === "agent" && !isChitchat && turnCaps.supportsClientTools(runtime.modelInfo)) {
+          if (
+            deps.mode === "agent" &&
+            (!isChitchat || _priorTurnHadTools) &&
+            turnCaps.supportsClientTools(runtime.modelInfo)
+          ) {
             // Smart MCP filter: skip browser/vision MCP servers unless the
             // user's current message has a URL or explicitly invokes the
             // browser/screenshot/design vocabulary. Local code work — which
@@ -1342,23 +1358,40 @@ export class MessageProcessor {
             }
             return false;
           }) as unknown as StopCondition<typeof tools>;
+          // BUG-A fix — when this turn carries an empty tool set (the
+          // chitchat optimization at line ~1107 drops all schemas), AI SDK
+          // sends `tools:[], tool_choice:undefined` to the provider. DeepSeek
+          // V4 Flash sees prior `tool_call`/`tool_result` parts still in the
+          // messages history (the previous turn used 20 tools) and the
+          // model stays in agent-mode — but with no schema to call, it
+          // falls back to its NATIVE DSML markup syntax and emits that as
+          // plain text. AI SDK does not parse the native format, so the
+          // markup leaks straight to the TUI as garbage and the turn
+          // produces no useful output. Setting `toolChoice:"none"` is the
+          // canonical way to tell the model "you cannot call tools this
+          // turn" so it emits text-only. Verified by stream_start telemetry
+          // on sessions 002df4014cb4 (leak) + fc19b4daee20 (leak): both had
+          // toolCount=0 + toolChoice=undefined on chitchat continuation.
+          const _toolsAreEmpty = Object.keys(tools as Record<string, unknown>).length === 0;
+          const _finalToolChoice: "auto" | "none" | undefined = _toolsAreEmpty
+            ? "none"
+            : _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo)
+              ? "auto"
+              : undefined;
           // BUG-C telemetry — record tool availability + toolChoice at the
-          // call site. Cheap "passive agent" responses (bash code blocks
-          // instead of bash tool calls) might be caused by tools={} OR by
-          // toolChoice being undefined/none. Capture both.
+          // call site so future regressions show up in telemetry not in TUI.
           try {
             const _toolNamesAtCall = Object.keys(tools as Record<string, unknown>);
-            const _toolChoiceAtCall =
-              _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : "undefined";
             logInteraction(deps.session?.id ?? "no-session", "stream_start", {
               model: turnModelId,
               data: {
                 toolCount: _toolNamesAtCall.length,
                 hasBash: _toolNamesAtCall.includes("bash"),
                 toolNames: _toolNamesAtCall.slice(0, 25),
-                toolChoice: _toolChoiceAtCall,
+                toolChoice: _finalToolChoice ?? "undefined",
                 hasResponseTools: _hasResponseTools,
                 supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
+                priorTurnHadTools: (_topMessagesForCall as Array<{ role?: string }>).some((m) => m?.role === "tool"),
               },
             });
           } catch {
@@ -1369,7 +1402,7 @@ export class MessageProcessor {
             system: systemForModel,
             messages: _topMessagesForCall,
             tools,
-            toolChoice: _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : undefined,
+            toolChoice: _finalToolChoice,
             stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
             maxRetries: 0,
             abortSignal: signal,
