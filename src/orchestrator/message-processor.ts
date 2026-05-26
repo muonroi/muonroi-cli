@@ -130,7 +130,7 @@ import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
-import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
+import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { applyModelConstraints, buildSystemPromptParts } from "./prompts";
@@ -2110,20 +2110,26 @@ export class MessageProcessor {
               case "error": {
                 const authError = isAuthenticationError(part.error);
                 const friendly = humanizeApiError(part.error);
+                const forensics = summarizeApiErrorForLog(part.error);
                 notifyObserver(observer?.onError, {
                   message: friendly,
                   timestamp: Date.now(),
                 });
-                // Interaction log: error
+                // Interaction log: error + forensics envelope so opaque
+                // provider 4xx ("parameter is invalid" / unknown 400s) leave
+                // an actionable wire-level trace without needing a repro.
                 try {
                   if (deps.session) {
                     logInteraction(deps.session.id, "error", {
                       eventSubtype: authError ? "auth" : "api",
-                      data: { message: friendly.slice(0, 200) },
+                      data: {
+                        message: friendly.slice(0, 200),
+                        ...(forensics ? { forensics } : {}),
+                      },
                     });
                   }
-                } catch {
-                  /* fail-open */
+                } catch (logErr) {
+                  console.error(`[message-processor] interaction-log error failed: ${(logErr as Error)?.message}`);
                 }
                 yield {
                   type: "error",

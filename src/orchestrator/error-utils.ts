@@ -69,4 +69,51 @@ function extractResponseDetail(body: string | undefined): string | null {
   return null;
 }
 
+/**
+ * Forensics envelope for opaque provider 4xx errors. SiliconFlow / DeepSeek
+ * routinely return "The parameter is invalid. Please check again." with no
+ * indication of WHICH parameter — sessions hit by that string in
+ * interaction_logs leave no actionable trace because we only persisted the
+ * friendly message. This helper extracts the wire-level shape from an
+ * APICallError so logInteraction can persist enough info to diagnose without
+ * needing a repro.
+ *
+ * Body and headers are truncated/redacted. Request body is reduced to the
+ * top-level parameter names — values may contain secrets or PII and must
+ * NEVER be persisted.
+ */
+export interface ApiErrorForensics {
+  statusCode: number | undefined;
+  urlHost: string | undefined;
+  responseBodyTrunc: string | undefined;
+  requestParamKeys: string[] | undefined;
+  isRetryable: boolean | undefined;
+}
+
+const RESPONSE_BODY_CAP = 1000;
+
+export function summarizeApiErrorForLog(error: unknown): ApiErrorForensics | null {
+  if (!APICallError.isInstance(error)) return null;
+  let urlHost: string | undefined;
+  try {
+    urlHost = new URL(error.url).host;
+  } catch {
+    urlHost = undefined;
+  }
+  let requestParamKeys: string[] | undefined;
+  if (error.requestBodyValues && typeof error.requestBodyValues === "object") {
+    requestParamKeys = Object.keys(error.requestBodyValues as Record<string, unknown>).sort();
+  }
+  const body = typeof error.responseBody === "string" ? error.responseBody : undefined;
+  const responseBodyTrunc =
+    body && body.length > RESPONSE_BODY_CAP ? `${body.slice(0, RESPONSE_BODY_CAP)}…[truncated]` : body;
+  return {
+    statusCode: error.statusCode,
+    urlHost,
+    responseBodyTrunc,
+    requestParamKeys,
+    isRetryable: error.isRetryable,
+  };
+}
+
 export { extractResponseDetail, STATUS_MESSAGES };
