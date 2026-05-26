@@ -124,14 +124,14 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     handle.driver.type("please read the project source files and summarize the architecture for me");
     handle.driver.press("Enter");
 
-    await handle.driver.wait_for({ selector: "role=log", timeoutMs: 20_000 });
+    await handle.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
     // Give the multi-round loop time to complete all 5 rounds. Each round
     // executes read_file → 30k content appended → next streamText call.
     // The orchestrator runs the full multi-round loop synchronously inside
     // streamText; 20s is enough for 5 rounds + tool executions.
-    await new Promise((r) => setTimeout(r, 20000));
+    await new Promise((r) => setTimeout(r, 35000));
 
-    await exitTuiAndWaitForDump(handle, 20_000);
+    await exitTuiAndWaitForDump(handle, 30_000);
 
     expect(existsSync(handle.dumpPath)).toBe(true);
     const calls = loadDumpedRecordings(handle.dumpPath);

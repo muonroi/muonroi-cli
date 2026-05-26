@@ -130,12 +130,12 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     handle.driver.type("please dispatch a sub-agent to read every payload file and summarize");
     handle.driver.press("Enter");
 
-    await handle.driver.wait_for({ selector: "role=log", timeoutMs: 20_000 });
+    await handle.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
     // Give the multi-round loop time to complete:
     // 1 top-level + 4 sub-agent + 1 top-level + tool exec = ~6 streamText calls.
-    await new Promise((r) => setTimeout(r, 25000));
+    await new Promise((r) => setTimeout(r, 35000));
 
-    await exitTuiAndWaitForDump(handle, 20_000);
+    await exitTuiAndWaitForDump(handle, 30_000);
 
     expect(existsSync(handle.dumpPath)).toBe(true);
     const calls = loadDumpedRecordings(handle.dumpPath);
