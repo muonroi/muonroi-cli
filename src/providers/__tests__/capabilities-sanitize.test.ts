@@ -1,82 +1,66 @@
 /**
- * G2 sanitizeHistory coverage — verifies which capabilities strip assistant
- * `reasoning` parts. Per DeepSeek docs, reasoning_content must not round-trip
- * in subsequent turns, so both `deepseek` and `siliconflow` strip. Other
- * providers' capabilities return the input by reference.
+ * sanitizeHistory coverage — every provider now returns the input array by
+ * reference. The previous DeepSeek/SiliconFlow strip was removed once
+ * reasoning-roundtrip.test.ts proved AI SDK 2.0.42 serializes assistant
+ * reasoning parts as `reasoning_content` natively. Stripping them BEFORE the
+ * send would re-introduce the original HTTP 400 code 20015 by breaking the
+ * round-trip the DeepSeek thinking_mode guide requires.
  */
 import { describe, expect, it } from "vitest";
 import { getProviderCapabilities } from "../capabilities.js";
 import type { ProviderId } from "../types.js";
 
-const IDENTITY_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "xai", "ollama"];
-const STRIPPING_PROVIDERS: ProviderId[] = ["deepseek", "siliconflow"];
+const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "xai", "deepseek", "siliconflow", "ollama"];
 
-describe("ProviderCapabilities.sanitizeHistory — G2", () => {
-  describe("identity providers", () => {
-    for (const p of IDENTITY_PROVIDERS) {
-      it(`${p} returns the input array by reference (no rewrite)`, () => {
-        const caps = getProviderCapabilities(p);
-        const messages = [
-          { role: "user", content: "hi" },
-          {
-            role: "assistant",
-            content: [
-              { type: "reasoning", text: "internal thought" },
-              { type: "text", text: "Hello!" },
-            ],
-          },
-        ];
-        const out = caps.sanitizeHistory(messages);
-        expect(out).toBe(messages);
-      });
-    }
-
-    it("unknown provider id falls back to identity", () => {
-      const caps = getProviderCapabilities("unknown-future-provider");
+describe("ProviderCapabilities.sanitizeHistory — identity for every provider", () => {
+  for (const p of ALL_PROVIDERS) {
+    it(`${p} returns the input array by reference when reasoning parts present`, () => {
+      const caps = getProviderCapabilities(p);
       const messages = [
+        { role: "user", content: "hi" },
         {
           role: "assistant",
-          content: [{ type: "reasoning", text: "x" }],
+          content: [
+            { type: "reasoning", text: "internal thought" },
+            { type: "text", text: "Hello!" },
+          ],
         },
       ];
-      expect(caps.sanitizeHistory(messages)).toBe(messages);
+      const out = caps.sanitizeHistory(messages);
+      expect(out).toBe(messages);
     });
+
+    it(`${p} returns the input array by reference when no reasoning parts present`, () => {
+      const caps = getProviderCapabilities(p);
+      const messages = [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: [{ type: "text", text: "hello" }] },
+      ];
+      const out = caps.sanitizeHistory(messages);
+      expect(out).toBe(messages);
+    });
+  }
+
+  it("unknown provider id falls back to identity", () => {
+    const caps = getProviderCapabilities("unknown-future-provider");
+    const messages = [
+      {
+        role: "assistant",
+        content: [{ type: "reasoning", text: "x" }],
+      },
+    ];
+    expect(caps.sanitizeHistory(messages)).toBe(messages);
   });
 
-  describe("stripping providers", () => {
-    for (const p of STRIPPING_PROVIDERS) {
-      const caps = getProviderCapabilities(p);
+  it("deepseek still drops respond_general tool (separate quirk from reasoning)", () => {
+    const caps = getProviderCapabilities("deepseek");
+    expect(caps.supportsResponseTool("general")).toBe(false);
+    expect(caps.supportsResponseTool("plan")).toBe(true);
+  });
 
-      it(`${p} strips assistant reasoning parts from history`, () => {
-        const messages = [
-          { role: "user", content: "hi" },
-          {
-            role: "assistant",
-            content: [
-              { type: "reasoning", text: "think" },
-              { type: "text", text: "Hello!" },
-            ],
-          },
-        ];
-        const out = caps.sanitizeHistory(messages);
-        expect(out).not.toBe(messages);
-        expect(out).toHaveLength(2);
-        expect((out[1] as { content: unknown[] }).content).toEqual([{ type: "text", text: "Hello!" }]);
-      });
-
-      it(`${p} returns input by reference when no reasoning parts present`, () => {
-        const messages = [
-          { role: "user", content: "hi" },
-          { role: "assistant", content: [{ type: "text", text: "hello" }] },
-        ];
-        const out = caps.sanitizeHistory(messages);
-        expect(out).toBe(messages);
-      });
-
-      it(`${p} still satisfies the deepseek supportsResponseTool override`, () => {
-        expect(caps.supportsResponseTool("general")).toBe(false);
-        expect(caps.supportsResponseTool("plan")).toBe(true);
-      });
-    }
+  it("siliconflow still drops respond_general tool (separate quirk from reasoning)", () => {
+    const caps = getProviderCapabilities("siliconflow");
+    expect(caps.supportsResponseTool("general")).toBe(false);
+    expect(caps.supportsResponseTool("plan")).toBe(true);
   });
 });

@@ -459,10 +459,9 @@ export function createCouncilLLM(
         }
       }
 
-      // RC#1: SiliconFlow/DeepSeek thinking-mode rejects multi-step tool flows
-      // when the SDK re-sends the assistant's `reasoning` content on step 2+.
-      // Mirror the orchestrator's prepareStep strip (see message-processor.ts
-      // ~line 1155) so debate() with tools doesn't fail HTTP 400 code 20015.
+      // sanitizeHistory is identity for every provider (kept as a hook for
+      // future provider-specific quirks). Reasoning round-trips natively —
+      // see src/providers/__tests__/reasoning-roundtrip.test.ts.
       const debateCaps = getProviderCapabilities(providerId);
 
       const t0 = Date.now();
@@ -633,9 +632,9 @@ export function createCouncilLLM(
         ? `## Context\n${conversationContext}\n\n---\n\n## Research Topic\n${topic}\n\nInvestigate and report findings.`
         : `## Research Topic\n${topic}\n\nInvestigate and report findings.`;
 
-      // RC#1: same reasoning-strip as debate() — research() is the WORST offender
-      // because stepCountIs(15) lets the SDK chain up to 15 internal tool steps,
-      // each one re-sending the previous assistant reasoning content.
+      // sanitizeHistory hook (identity today) preserved for symmetry with
+      // debate(). Reasoning round-trips natively across all 15 chained tool
+      // steps — see src/providers/__tests__/reasoning-roundtrip.test.ts.
       const researchCaps = getProviderCapabilities(providerId);
 
       const t0 = Date.now();

@@ -28,7 +28,6 @@
 import { createHash } from "node:crypto";
 import type { ModelInfo } from "../types/index.js";
 import { consoleUrlFor } from "./endpoints.js";
-import { stripReasoningForSiliconflow } from "./siliconflow-history.js";
 import type { ProviderId } from "./types.js";
 
 /**
@@ -286,34 +285,22 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
     // in src/cli/cost-forensics.ts).
     return { readField: "promptCacheHitTokens", creationSupported: false };
   }
-  // RC#1 root cause: DeepSeek docs (thinking_mode guide) state that when tool
-  // calls occur, `reasoning_content` MUST be passed back to the API in every
-  // subsequent turn. `@ai-sdk/openai-compatible` does not serialize reasoning
-  // parts as `reasoning_content`, so the API rejects with HTTP 400 code 20015.
-  // Council research/debate both use tools, so the only safe fix is to disable
-  // thinking mode entirely — research needs tool-use, not chain-of-thought.
-  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
-    const m = ctx.model;
-    if (m?.thinkingType === "enabled" || m?.thinkingType === "adaptive") {
-      return { [this.providerNamespace()]: { thinking: { type: "disabled" } } };
-    }
-    return undefined;
-  }
-  // Defense-in-depth: keep stripping any reasoning parts that may still appear
-  // in history (e.g. on models where thinking can't be server-disabled). No-op
-  // on non-reasoning turns (identity returned by reference).
-  override sanitizeHistory<T>(messages: readonly T[]): readonly T[] {
-    return stripReasoningForSiliconflow(messages);
-  }
+  // Root-fix (reasoning-roundtrip.test.ts): `@ai-sdk/openai-compatible@2.0.42`
+  // DOES serialize assistant reasoning parts as `reasoning_content` on the
+  // wire (dist/index.js:257-263). The earlier RC#1 workaround that disabled
+  // thinking mode entirely is no longer needed — reasoning round-trips
+  // natively, satisfying the DeepSeek thinking_mode guide requirement that
+  // `reasoning_content` MUST be passed back on subsequent tool turns.
+  //
+  // If a future AI SDK upgrade ever regresses this, the proof test will fail
+  // first; restore the unconditional disable here as a quick safety net.
+  //
+  // buildProviderOptions/sanitizeHistory inherit reliable no-op defaults.
 }
 
 /**
- * SiliconFlow shares DeepSeek's tool-call quirk and inherits the
- * reasoning-strip from DeepSeek. The strip was originally added here when
- * SiliconFlow returned HTTP 400 code 20015 ("reasoning_content must be
- * passed back") — see siliconflow-history.ts for wire evidence — but the
- * DeepSeek native endpoint behaves the same way per docs, so the override
- * now lives on the DeepSeek base class.
+ * SiliconFlow shares DeepSeek's `<｜DSML｜>` tool-call quirk; everything else
+ * (cache metric layout, signup URL pointer) differs only by namespace.
  */
 class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
   protected override providerNamespace(): string {
@@ -322,7 +309,6 @@ class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("siliconflow");
   }
-  // sanitizeHistory + cacheMetricLayout + buildProviderOptions inherit from DeepSeek.
 }
 
 /**
