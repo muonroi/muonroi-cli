@@ -22,7 +22,16 @@ import {
 } from "./cost-leak-tui-helpers.js";
 import { getProviderOption, loadDumpedRecordings } from "./recording.js";
 
-describe("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
+// F1 routes through `gpt-5.4-mini`, which is not in the catalog (catalog.json
+// ships only deepseek/qwen/glm ids today). The CLI rejects the unknown model
+// id at startup and never reaches the agent-mode handshake, so `beforeAll`'s
+// `wait_for({selector: "role=textbox"})` times out and fails the suite —
+// even though the only `it()` is marked `.skip`. `.skip` on the describe
+// suppresses the beforeAll spawn entirely, which is what CLAUDE.md's
+// known-caveat #4 already documents as the desired state until an openai
+// model lands in catalog.json. (Evidence: CI runs 26431673369 / 26431994835
+// — the F1 failure was always the spawn timeout, never an assertion.)
+describe.skip("F1 TUI: providerOptions.openai.promptCacheKey is present and stable", () => {
   let handle: CostLeakHarness;
 
   beforeAll(async () => {
