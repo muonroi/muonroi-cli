@@ -637,10 +637,16 @@ export class MessageProcessor {
     try {
       if (deps.session) {
         const pilDurationMs = Date.now() - _pilStart;
+        // BUG-B telemetry — hash the raw user message so post-hoc queries can
+        // detect Layer 1 classifier drift on identical inputs within a session.
+        const { createHash } = await import("node:crypto");
+        const _userMsgSha8 = createHash("sha1").update(userMessage).digest("hex").slice(0, 8);
         logInteraction(deps.session.id, "pil", {
           eventSubtype: pilCtx.taskType ?? "none",
           durationMs: pilDurationMs,
           data: {
+            userMsgSha8: _userMsgSha8,
+            userMsgPreview: userMessage.slice(0, 60),
             layers: pilCtx.layers?.filter((l) => l.applied).map((l) => l.name) ?? [],
             fullLayers: pilCtx.layers?.map((l) => ({ name: l.name, applied: l.applied, delta: l.delta })) ?? [],
             layerCount: pilCtx.layers?.length ?? 0,
@@ -743,7 +749,13 @@ export class MessageProcessor {
       if (deps.session) {
         logInteraction(deps.session.id, "routing", {
           model: turnModelId,
-          data: { defaultModel: deps.modelId, routedModel: turnModelId, taskHash },
+          data: {
+            defaultModel: deps.modelId,
+            routedModel: turnModelId,
+            taskHash,
+            pilTaskType: pilCtx.taskType ?? null,
+            pilIntentKind: pilCtx.intentKind ?? null,
+          },
         });
       }
     } catch {
@@ -1330,6 +1342,28 @@ export class MessageProcessor {
             }
             return false;
           }) as unknown as StopCondition<typeof tools>;
+          // BUG-C telemetry — record tool availability + toolChoice at the
+          // call site. Cheap "passive agent" responses (bash code blocks
+          // instead of bash tool calls) might be caused by tools={} OR by
+          // toolChoice being undefined/none. Capture both.
+          try {
+            const _toolNamesAtCall = Object.keys(tools as Record<string, unknown>);
+            const _toolChoiceAtCall =
+              _hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo) ? "auto" : "undefined";
+            logInteraction(deps.session?.id ?? "no-session", "stream_start", {
+              model: turnModelId,
+              data: {
+                toolCount: _toolNamesAtCall.length,
+                hasBash: _toolNamesAtCall.includes("bash"),
+                toolNames: _toolNamesAtCall.slice(0, 25),
+                toolChoice: _toolChoiceAtCall,
+                hasResponseTools: _hasResponseTools,
+                supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
+              },
+            });
+          } catch {
+            /* telemetry only */
+          }
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -1920,35 +1954,68 @@ export class MessageProcessor {
               // Skip when 4B ceiling already triggered its own forcedFinalize
               // below — running both would double-bill and duplicate text.
               let _f6SynthesisText: string | null = null;
+              const _f6LastMsg = scrubbed[scrubbed.length - 1] as { role?: string; content?: unknown } | undefined;
+              const _f6LastRole = _f6LastMsg?.role ?? "none";
+              let _f6Outcome: "skip_ceiling" | "skip_has_text" | "fired_empty" | "fired_text" | "error" =
+                "skip_ceiling";
+              let _f6Elapsed = 0;
+              let _f6ChunkChars = 0;
+              let _f6Error: string | null = null;
               if (!_ceilingHit) {
-                const _lastMsg = scrubbed[scrubbed.length - 1] as { role?: string; content?: unknown } | undefined;
                 const _needsSynthesis = (() => {
-                  if (!_lastMsg) return false;
-                  if (_lastMsg.role === "tool") return true;
-                  if (_lastMsg.role !== "assistant") return false;
-                  const _c = _lastMsg.content;
+                  if (!_f6LastMsg) return false;
+                  if (_f6LastMsg.role === "tool") return true;
+                  if (_f6LastMsg.role !== "assistant") return false;
+                  const _c = _f6LastMsg.content;
                   if (typeof _c === "string") return !_c.trim();
                   if (!Array.isArray(_c)) return false;
                   return !(_c as Array<Record<string, unknown>>).some(
                     (p) => p && p.type === "text" && typeof p.text === "string" && (p.text as string).trim().length > 0,
                   );
                 })();
-                if (_needsSynthesis) {
+                if (!_needsSynthesis) {
+                  _f6Outcome = "skip_has_text";
+                } else {
+                  const _f6Start = Date.now();
                   try {
                     const _ff = await forcedFinalize({
                       model: runtime.model,
                       messages: _topMessagesForCall as unknown[],
                       system: typeof systemForModel === "string" ? systemForModel : undefined,
                     });
+                    _f6Elapsed = Date.now() - _f6Start;
+                    _f6ChunkChars = (_ff.text ?? "").length;
                     if (_ff.text.trim()) {
                       _f6SynthesisText = _ff.text;
                       assistantText += _ff.text;
                       yield { type: "content", content: _ff.text };
+                      _f6Outcome = "fired_text";
+                    } else {
+                      _f6Outcome = "fired_empty";
                     }
-                  } catch {
-                    /* F6 synthesis is best-effort — never block the turn */
+                  } catch (_err) {
+                    _f6Elapsed = Date.now() - _f6Start;
+                    _f6Outcome = "error";
+                    _f6Error = (_err as Error)?.message?.slice(0, 200) ?? String(_err).slice(0, 200);
                   }
                 }
+              }
+              try {
+                if (deps.session) {
+                  logInteraction(deps.session.id, "f6_synthesis", {
+                    data: {
+                      outcome: _f6Outcome,
+                      lastMsgRole: _f6LastRole,
+                      elapsedMs: _f6Elapsed,
+                      chars: _f6ChunkChars,
+                      error: _f6Error,
+                      ceilingHit: _ceilingHit,
+                      scrubbedLen: scrubbed.length,
+                    },
+                  });
+                }
+              } catch {
+                /* telemetry is best-effort */
               }
 
               const _finalMessages = sanitizeModelMessages(scrubbed) as ModelMessage[];
@@ -2074,6 +2141,12 @@ export class MessageProcessor {
             if (deps.session) {
               const sb = statusBarStore.getState();
               const turnDurationMs = Date.now() - turnStartMs;
+              // BUG-A telemetry — detect raw DeepSeek native tool-call markup
+              // leaking into assistant text. Signature is `<｜｜DSML｜｜` (the
+              // fullwidth vertical bars are NOT pipes, they're U+FF5C).
+              const _dsmlSig = "｜｜DSML｜｜";
+              const _dsmlMatches = assistantText.includes(_dsmlSig);
+              const _codeBlockBash = /```\s*bash\b/i.test(assistantText);
               logInteraction(deps.session.id, "agent_response", {
                 model: turnModelId,
                 inputTokens: sb.in_tokens,
@@ -2083,6 +2156,8 @@ export class MessageProcessor {
                   textLength: assistantText.length,
                   toolCallCount: activeToolCalls.length,
                   compacted: deps.getCompactedThisTurn(),
+                  dsmlLeak: _dsmlMatches,
+                  bashCodeBlock: _codeBlockBash,
                 },
               });
             }
