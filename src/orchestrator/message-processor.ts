@@ -138,6 +138,7 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { repairToolCallHook } from "./repair-tool-call.js";
 import {
   buildRepetitionReminder,
   recordAssistantBurst,
@@ -1540,6 +1541,11 @@ export class MessageProcessor {
             stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
             maxRetries: 0,
             abortSignal: signal,
+            // Repair malformed tool-call JSON args before they bubble up as
+            // InvalidToolInputError → tool-error → repetition-detector abort.
+            // Conservative: only fixes the two observed Qwen-style defects.
+            // See src/orchestrator/tool-args-repair.ts for the transforms.
+            experimental_repairToolCall: repairToolCallHook,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
