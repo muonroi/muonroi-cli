@@ -17,6 +17,7 @@ import {
 } from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
 import { buildAcceptanceCard, buildAcceptanceQuestion } from "./layer18-acceptance.js";
+import { getSessionState, isLikelyFollowUp, markDiscoveryAccepted } from "./session-state.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
 export interface L1Result {
@@ -47,6 +48,7 @@ export async function runDiscovery(
   l1: L1Result,
   cwd: string,
   handler: DiscoveryInteractionHandler | null,
+  sessionId: string | null = null,
 ): Promise<DiscoveryResult> {
   const start = Date.now();
 
@@ -70,6 +72,18 @@ export async function runDiscovery(
 
   if (!isDiscoveryEnabled()) return baseResult();
   if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
+
+  // Session-continuation guard: when the user is on turn >= 2 of an ongoing
+  // session AND the new prompt looks like a continuation (short, modal verb
+  // or context pronoun), skip the interview entirely. The prior turn already
+  // established context; asking "Which part of the codebase?" on "Can you
+  // fix it?" forces the user to re-type their intent as a freetext answer,
+  // which PIL then mis-routes through gap-resolution + acceptance, producing
+  // duplicate askcards (evidence: session 1f29e238a816 timeline).
+  const sessionState = getSessionState(sessionId);
+  if (sessionState && sessionState.turnCount > 1 && isLikelyFollowUp(raw)) {
+    return baseResult();
+  }
 
   const l1Signal: L1Signal = { confidence: l1.confidence, taskType: l1.taskType, complexity: l1.complexity };
 
@@ -143,21 +157,42 @@ export async function runDiscovery(
     if (decision === "cancel") {
       accepted = false;
     } else if (decision === "adjust") {
-      // Re-run interview once
+      // Re-run interview once — but ONLY for gaps where the user's prior
+      // freetext answer was empty, identical to the raw prompt itself, or
+      // a continuation phrase. Re-asking gaps the user already answered
+      // (with non-trivial text) just produces duplicate askcards (evidence:
+      // session 1f29e238a816 — user picked "adjust", re-interview fired the
+      // same "Which part of codebase?" question they had just answered).
       const reGaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
+      const priorAnswers = new Map<string, string | null>(
+        clarifiedIntent.gaps.map((g) => [g.dimension, g.answer ?? null]),
+      );
       const reAnswered: Array<(typeof reGaps)[number] & { answer: string | null }> = reGaps.map((g) => ({
         ...g,
-        answer: null,
+        answer: priorAnswers.get(g.dimension) ?? null,
       }));
-      for (let i = 0; i < Math.min(reGaps.length, getMaxInterviewQuestions()); i++) {
-        const q = buildInterviewQuestion(reGaps[i]!, randomUUID());
+      const maxRe = Math.min(reGaps.length, getMaxInterviewQuestions());
+      for (let i = 0; i < maxRe; i++) {
+        const gap = reAnswered[i]!;
+        const prior = gap.answer?.trim() ?? "";
+        const isTrivialPriorAnswer =
+          prior === "" || prior.toLowerCase() === raw.trim().toLowerCase() || isLikelyFollowUp(prior);
+        if (!isTrivialPriorAnswer) {
+          // User already gave a substantive answer for this gap. Keep it.
+          continue;
+        }
+        const q = buildInterviewQuestion(gap, randomUUID());
         const ans = await handler.askQuestion(q);
-        reAnswered[i] = { ...reGaps[i]!, answer: ans.text };
+        reAnswered[i] = { ...gap, answer: ans.text };
       }
       clarifiedIntent = buildClarifiedIntentFromAnswers(reAnswered, raw, projectContext);
       feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => feasibility);
       accepted = true;
     }
+  }
+
+  if (accepted) {
+    markDiscoveryAccepted(sessionId);
   }
 
   return {
