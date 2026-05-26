@@ -40,10 +40,25 @@ const USER_MSG_COLLAPSED_LINES = 5;
 // cost. 8 fits comfortably on a short terminal and conveys the gist.
 const ASSISTANT_MSG_COLLAPSED_LINES = 8;
 
-export function AssistantMessageContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
+export function AssistantMessageContent({
+  content,
+  t,
+  expanded,
+  isFinal,
+}: {
+  content: string;
+  t: Theme;
+  expanded: boolean;
+  isFinal?: boolean;
+}) {
   const lines = content.split("\n");
   const isLong = lines.length > ASSISTANT_MSG_COLLAPSED_LINES;
-  if (!isLong) {
+  // Phase 5 F7 — the FINAL assistant message in a turn IS the answer the
+  // user is waiting for. Auto-collapsing it behind "ctrl+e expand (N more
+  // lines)" hides the actual response. Intermediate assistant blocks
+  // (narration between tool batches) keep the auto-collapse behavior so
+  // the chat doesn't become a scroll wall.
+  if (!isLong || isFinal) {
     return <Markdown content={content} t={t} />;
   }
   if (expanded) {
@@ -175,6 +190,7 @@ function MessageViewImpl({
   modeColor,
   expandedMessages,
   mcpRun,
+  isFinalAssistant,
 }: {
   entry: ChatEntry;
   index: number;
@@ -182,6 +198,8 @@ function MessageViewImpl({
   modeColor: string;
   expandedMessages?: Set<number>;
   mcpRun?: McpRunInfo;
+  /** True iff this entry is the last assistant message in the current message list. */
+  isFinalAssistant?: boolean;
 }) {
   if (mcpRun?.hidden) return null;
   switch (entry.type) {
@@ -212,7 +230,12 @@ function MessageViewImpl({
       return (
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
-          <AssistantMessageContent content={entry.content} t={t} expanded={expandedMessages?.has(index) ?? false} />
+          <AssistantMessageContent
+            content={entry.content}
+            t={t}
+            expanded={expandedMessages?.has(index) ?? false}
+            isFinal={isFinalAssistant === true}
+          />
         </box>
       );
 
