@@ -1,6 +1,26 @@
 # Project State — muonroi-cli
 
-**Last updated:** 2026-05-23 (Plan 04-07 4V complete — Phase 4 implementation done; awaiting user 5-baseline re-run)
+**Last updated:** 2026-05-25 (Phase 4 CLOSED — 5-baseline re-run verified all G1-G5)
+
+**Phase 4 status: ✅ COMPLETE.** Final 5-baseline re-run (sessions `348b4006e74c`, `5b7935e07f37`, `f904feb2971d`, `91b134d50c77`, `9f55731759a0`):
+- G1-Cost $0.0800 ≤ $0.30 ✅
+- G1-Tools 51 ≤ 120 ✅
+- G2-PIL 5/5 ✅ (sessions 2 & 5 now `generate` — was `refactor` pre-fix)
+- G3-Cache 82.7% ≥ 15% ✅
+- G4-Bash repeat detector fired correctly ✅
+- G5-Outcome 4-5/5 senior ✅
+
+Post-Phase-4 cleanup wave (commits `e2d5c6f`, `a908a0b`, `e4e3f2e`, `945d3e2`):
+- F1: 3 PIL unit tests aligned with new tree-sitter mapping
+- F2: TS errors fixed (transcript-emit, HaltChunk, budgetTokens)
+- F3a: bridge classifier tightened with negative examples
+- F3b: sub-agent compactor uses string marker (no more `{_elided:true}` hallucination)
+- F3c: edit_file description has explicit read-first MANDATORY hint
+
+Deferred to Phase 5:
+- F4: PIL discovery module-suggestion (suggests non-existent folders)
+- F5: EE 100% IRRELEVANT logging noise
+- G5 minor: "improve coverage" prompts don't auto-measure coverage delta
 
 **Last completed plan:** Phase 4, Plan 07 (4V harness E2E) — commits `6d16695` (fixture), `342f576` (spec). New `tests/harness/scope-adherence-tui.spec.ts` covers all 5 REQ-007 assertion categories: reminder injection cadence (live spawn), soft-warn at floor(ceiling × 0.7), hard halt + forced-finalize toast, `--budget-rounds 20` override, and `complexitySize` observability. 5/5 tests green via `bunx vitest -c vitest.harness.config.ts run tests/harness/scope-adherence-tui.spec.ts`. REQ-007 satisfied.
 

@@ -1,6 +1,35 @@
 # Roadmap — muonroi-cli
 
-## Phase 4: Scope Discipline for Cheap Models
+## Phase 4: Scope Discipline for Cheap Models — ✅ COMPLETE (2026-05-25)
+
+**Final verification (5-prompt baseline re-run with all fixes deployed):**
+
+| Goal | Target | Actual | Status |
+|---|---|---|---|
+| G1-Cost | ≤ $0.30 | $0.0800 | ✅ |
+| G1-Tools | ≤ 120 | 51 | ✅ |
+| G2-PIL classification | 5/5 correct | 5/5 (analyze, generate, analyze, analyze, generate) | ✅ |
+| G3-Cache hit ratio | ≥ 15% | 82.7% | ✅ |
+| G4-Bash repeats | 0 canonical | 0 (4R detector fired correctly) | ✅ |
+| G5-Outcome quality | ≥ 4/5 senior | 4-5/5 (session 5 minor: didn't measure coverage delta) | ✅ |
+
+Verification session IDs (telemetry in `~/.muonroi-cli/muonroi.db`):
+`348b4006e74c`, `5b7935e07f37`, `f904feb2971d`, `91b134d50c77`, `9f55731759a0`
+
+Post-Phase-4 cleanup commits (2026-05-25):
+- `e2d5c6f` test(04-01): tree-sitter mapping tests aligned with Phase 4 mapping
+- `a908a0b` fix(04): resolve TS errors blocking clean tsc --noEmit
+- `e4e3f2e` fix(04-06): tighten bridge classifier negative examples (4P-2)
+- `945d3e2` fix(04): edit_file read-first hint + sub-agent compactor string marker
+
+Deferred to Phase 5 (see "Scope exclusions" below + new findings):
+- F4: PIL discovery module-suggestion incorrect (suggests non-existent folders)
+- F5: EE IRRELEVANT 100% logging noise
+- G5 weakness: "improve coverage" prompts don't auto-measure coverage delta
+
+---
+
+## Phase 4 (original spec)
 
 **Goal:** Drive DeepSeek V4 Flash (and other fast-tier cheap models) through the muonroi-cli so they emit zero tokens on scope-wandering while preserving output quality. Measured against 5 baseline sessions captured 2026-05-23.
 
