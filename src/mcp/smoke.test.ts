@@ -162,7 +162,7 @@ function handleMessage(msg) {
         expect(Object.keys(bundle.tools)).toContain("mcp_test_echo__echo");
       } finally {
         if (bundle) await bundle.close();
-        await rm(tmpDir, { recursive: true, force: true });
+        await rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
       }
     },
     15000,

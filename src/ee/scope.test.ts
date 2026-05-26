@@ -15,7 +15,7 @@ describe("buildScope", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   });
 
   it("returns { kind: 'global' } for a directory without .git", async () => {

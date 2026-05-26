@@ -180,7 +180,7 @@ describe("shouldApplyEcosystemBias", () => {
     try {
       expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(true);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -191,7 +191,7 @@ describe("shouldApplyEcosystemBias", () => {
       fsMod.writeFileSync(path.join(tmp, "package.json"), "{}");
       expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -202,7 +202,7 @@ describe("shouldApplyEcosystemBias", () => {
       fsMod.writeFileSync(path.join(tmp, "MyApp.csproj"), "<Project/>");
       expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -213,7 +213,7 @@ describe("shouldApplyEcosystemBias", () => {
       fsMod.writeFileSync(path.join(tmp, "stray.ts"), "export {};");
       expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(false);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -225,7 +225,7 @@ describe("shouldApplyEcosystemBias", () => {
       fsMod.writeFileSync(path.join(tmp, ".gitignore"), "node_modules\n");
       expect(shouldApplyEcosystemBias({ cwd: tmp })).toBe(true);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -235,7 +235,7 @@ describe("shouldApplyEcosystemBias", () => {
     try {
       expect(shouldApplyEcosystemBias({ detection: { classification: "existing" }, cwd: tmp })).toBe(false);
     } finally {
-      fsMod.rmSync(tmp, { recursive: true, force: true });
+      fsMod.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

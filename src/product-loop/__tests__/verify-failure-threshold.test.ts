@@ -53,7 +53,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(flowDir, { recursive: true, force: true });
+  // Windows ENOTEMPTY guard — see plan.test.ts:33 for rationale.
+  await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   vi.restoreAllMocks();
   vi.mocked(logInteraction).mockClear();
 });

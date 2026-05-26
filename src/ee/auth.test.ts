@@ -13,7 +13,7 @@ describe("loadEEAuthToken", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpHome, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   });
 
   it("returns token when ~/.experience/config.json exists", async () => {
@@ -58,7 +58,7 @@ describe("refreshAuthToken", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpHome, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   });
 
   it("re-reads config.json and updates the cached value", async () => {

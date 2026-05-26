@@ -32,7 +32,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await rm(tmpDir, { recursive: true, force: true });
+  await rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("sprint-store", () => {

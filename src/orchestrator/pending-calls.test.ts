@@ -41,7 +41,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.MUONROI_CLI_HOME;
-  await fs.rm(tmpBase, { recursive: true, force: true }).catch(() => {
+  await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {
     /* best-effort cleanup */
   });
 });

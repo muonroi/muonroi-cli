@@ -13,7 +13,7 @@ describe("product-ledger", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(TEST_HOME, { recursive: true, force: true });
+    await fs.rm(TEST_HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("appends and reads entries", async () => {

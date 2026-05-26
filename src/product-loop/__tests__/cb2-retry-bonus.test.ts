@@ -58,7 +58,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(flowDir, { recursive: true, force: true });
+  await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   _resetCb2RetryUsed(runId);
 });
 

@@ -117,14 +117,18 @@ describe("A2: buildBacklogAndSprintPlan writes backlog.json + sprint-plan.json",
       return { success: true, stage: "approved" };
     });
 
-    // Sprint runner returns shipped immediately
+    // Sprint runner returns shipped immediately. async function* with no
+    // yield is the correct shape for runSprint (AsyncGenerator<StreamChunk,
+    // IterationState>) — only the IterationState return matters here.
+    // biome-ignore lint/correctness/useYield: intentional no-yield mock
     (runSprint as ReturnType<typeof vi.fn>).mockImplementation(async function* () {
       return shippedIter(1);
     });
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    // Windows ENOTEMPTY guard — see plan.test.ts:33 for rationale.
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("creates backlog.json and sprint-plan.json when they do not exist", async () => {

@@ -30,7 +30,10 @@ describe("/plan slash command", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    // Windows: under parallel vitest workers, file handles released by SQLite
+    // / write-streams can linger briefly after close, producing ENOTEMPTY on
+    // rmdir. maxRetries waits past the antivirus / kernel handle window.
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns error when no active run", async () => {

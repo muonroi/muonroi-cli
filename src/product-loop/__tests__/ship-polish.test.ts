@@ -31,7 +31,7 @@ describe("polishDelivery", () => {
   const cleanups: string[] = [];
   afterEach(async () => {
     for (const c of cleanups) {
-      await fs.rm(c, { recursive: true, force: true });
+      await fs.rm(c, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
     cleanups.length = 0;
   });
