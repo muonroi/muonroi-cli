@@ -139,22 +139,17 @@ import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import { forcedFinalize, incSessionStep, parseBudgetOverride, resolveCeiling } from "./scope-ceiling.js";
 import {
   attachReminderToMessages,
   buildScopeReminder,
+  type ComplexitySize,
   cadenceForSize,
   shouldInjectReminder,
   shouldInjectSoftWarn,
-  type ComplexitySize,
 } from "./scope-reminder.js";
+import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
-import {
-  forcedFinalize,
-  incSessionStep,
-  parseBudgetOverride,
-  resolveCeiling,
-} from "./scope-ceiling.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 
 /**
@@ -1913,7 +1908,57 @@ export class MessageProcessor {
               // screenshot, ~1.5MB). Persisting that lets it accumulate and
               // overflow the model's context on subsequent turns.
               const scrubbed = scrubImagePayloadsInMessages(response.messages);
-              deps.appendCompletedTurn(userModelMessage, sanitizeModelMessages(scrubbed));
+
+              // Phase 5 F6 — synthesis step when stream ended without a final
+              // text response. Cheap models (DeepSeek V4 Flash) frequently
+              // emit only tool-calls in their last step and stop, leaving the
+              // user staring at "Here's the summary:..." truncation that
+              // required a manual "tiếp tục" turn-2 to coax out. Detect that
+              // shape and inject ONE forcedFinalize call (same path as 4B
+              // ceiling-hit) so the answer arrives on turn 1.
+              //
+              // Skip when 4B ceiling already triggered its own forcedFinalize
+              // below — running both would double-bill and duplicate text.
+              let _f6SynthesisText: string | null = null;
+              if (!_ceilingHit) {
+                const _lastMsg = scrubbed[scrubbed.length - 1] as { role?: string; content?: unknown } | undefined;
+                const _needsSynthesis = (() => {
+                  if (!_lastMsg) return false;
+                  if (_lastMsg.role === "tool") return true;
+                  if (_lastMsg.role !== "assistant") return false;
+                  const _c = _lastMsg.content;
+                  if (typeof _c === "string") return !_c.trim();
+                  if (!Array.isArray(_c)) return false;
+                  return !(_c as Array<Record<string, unknown>>).some(
+                    (p) => p && p.type === "text" && typeof p.text === "string" && (p.text as string).trim().length > 0,
+                  );
+                })();
+                if (_needsSynthesis) {
+                  try {
+                    const _ff = await forcedFinalize({
+                      model: runtime.model,
+                      messages: _topMessagesForCall as unknown[],
+                      system: typeof systemForModel === "string" ? systemForModel : undefined,
+                    });
+                    if (_ff.text.trim()) {
+                      _f6SynthesisText = _ff.text;
+                      assistantText += _ff.text;
+                      yield { type: "content", content: _ff.text };
+                    }
+                  } catch {
+                    /* F6 synthesis is best-effort — never block the turn */
+                  }
+                }
+              }
+
+              const _finalMessages = sanitizeModelMessages(scrubbed) as ModelMessage[];
+              if (_f6SynthesisText !== null) {
+                _finalMessages.push({
+                  role: "assistant",
+                  content: _f6SynthesisText,
+                } as ModelMessage);
+              }
+              deps.appendCompletedTurn(userModelMessage, _finalMessages);
               streamOk = true;
             }
           } catch (responseError: unknown) {
