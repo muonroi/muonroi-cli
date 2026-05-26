@@ -37,9 +37,14 @@ describe("buildAcceptanceQuestion()", () => {
     expect(q.context).toContain("risk: oauth.ts");
   });
 
-  // PIL-L6 fix — default flips to "Adjust" when warnings present.
-  it("defaults to Adjust (index 1) when warnings present", () => {
-    const card = { intentStatement: "Fix auth", outcome: "done", scope: ["src/"], warnings: ["mismatch detected"] };
+  // Default flips to "Adjust" only for BLOCKING warnings (e.g. infeasibility).
+  it("defaults to Adjust (index 1) when warning is blocking", () => {
+    const card = {
+      intentStatement: "Fix auth",
+      outcome: "done",
+      scope: ["src/"],
+      warnings: ["infeasible: file does not exist"],
+    };
     const q = buildAcceptanceQuestion(card, "acc-3");
     expect(q.defaultIndex).toBe(1);
   });
@@ -48,6 +53,32 @@ describe("buildAcceptanceQuestion()", () => {
     const card = { intentStatement: "Fix auth", outcome: "done", scope: ["src/"], warnings: [] };
     const q = buildAcceptanceQuestion(card, "acc-4");
     expect(q.defaultIndex).toBe(0);
+  });
+
+  // Fix #7 — informational mismatch warning should NOT flip default to Adjust.
+  // Evidence: session 1f29e238 ("Can you fix it?" follow-up) — the intent
+  // mismatch detector emitted "Detected debug/bug-fix signals..." which is
+  // informational; forcing Adjust looped PIL through another interview round.
+  it("defaults to Accept when only warning is intent-mismatch (informational)", () => {
+    const card = {
+      intentStatement: "debug: Complete: Can you fix it?",
+      outcome: "done",
+      scope: ["src/"],
+      warnings: ['Detected debug/bug-fix signals in your prompt ("fail") but intent reframed as "..."'],
+    };
+    const q = buildAcceptanceQuestion(card, "acc-5");
+    expect(q.defaultIndex).toBe(0);
+  });
+
+  it("defaults to Adjust when mix of informational + blocking warnings", () => {
+    const card = {
+      intentStatement: "Fix auth",
+      outcome: "done",
+      scope: ["src/"],
+      warnings: ["Detected debug signals — Verify before accepting", "infeasible: file does not exist"],
+    };
+    const q = buildAcceptanceQuestion(card, "acc-6");
+    expect(q.defaultIndex).toBe(1);
   });
 });
 
