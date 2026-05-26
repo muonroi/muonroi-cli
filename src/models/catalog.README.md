@@ -21,11 +21,11 @@ drift > 10%.
 
 | Slot | Model | Provider | Pricing ($/M in/out) | Notes |
 |---|---|---|---|---|
-| **fast** | `alibaba/Qwen3-8B` | siliconflow | 0.06 / 0.06 | Cheapest tool-capable. Mechanical tool-execution default. |
+| **fast** | `Qwen/Qwen3-8B` | siliconflow | 0.06 / 0.06 | Cheapest tool-capable. Mechanical tool-execution default. |
 | fast (DS) | `deepseek-ai/DeepSeek-V4-Flash` | siliconflow | 0.14 / 0.28 | Reasoning-capable fast; use when CoT helps. |
 | fast (native) | `deepseek-v4-flash` | deepseek | 0.27 / 1.1 | Native fallback when SF rate-limited. |
-| **balanced** | `alibaba/Qwen3-30B-A3B-Instruct-2507` | siliconflow | 0.09 / 0.30 | MoE default for general turns. |
-| balanced (code) | `alibaba/Qwen3-Coder-30B-A3B-Instruct` | siliconflow | 0.07 / 0.28 | Coding-tuned. Router override pending. |
+| **balanced** | `Qwen/Qwen3-30B-A3B-Instruct-2507` | siliconflow | 0.09 / 0.30 | MoE default for general turns. |
+| balanced (code) | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | siliconflow | 0.07 / 0.28 | Coding-tuned. Router override pending. |
 | balanced (reasoning) | `deepseek-ai/DeepSeek-V3.2` | siliconflow | 0.27 / 0.42 | Cheap CoT when needed. |
 | balanced (vision) | `z-ai/GLM-4.6V` | siliconflow | 0.30 / 0.90 | Only vision model with confirmed function-calling. |
 | **premium** | `deepseek-v4-pro` | deepseek | 0.55 / 2.19 | Native premium — cheaper than SF-hosted. |
@@ -78,11 +78,11 @@ registry / flow rather than catalog entries:
 
 | Category | Best pick | Pricing |
 |---|---|---|
-| Embedding | `alibaba/Qwen3-Embedding-0.6B` | $0.01/M tokens |
-| Rerank | `alibaba/Qwen3-Reranker-0.6B` | $0.01/M tokens |
-| TTS | `funaudiollm/CosyVoice2-0.5B` | $7.15/M UTF-8 bytes |
+| Embedding | `Qwen/Qwen3-Embedding-0.6B` | $0.01/M tokens |
+| Rerank | `Qwen/Qwen3-Reranker-0.6B` | $0.01/M tokens |
+| TTS | `FunAudioLLM/CosyVoice2-0.5B` | $7.15/M UTF-8 bytes |
 | Image gen | `tongyi-mai/Z-Image-Turbo` | $0.005/image |
-| Video gen | `alibaba/Wan2.2-T2V-A14B` | $0.29/video |
+| Video gen | `Wan-AI/Wan2.2-T2V-A14B` | $0.29/video |
 
 Async modality (image/video) returns URLs that expire (image 1h, video 10min)
 — if/when we add `/image` or `/video` slash commands they must download
@@ -123,7 +123,7 @@ async-flow design.
   over the generic balanced model. Hook point: `pickModelForTask` in
   `src/orchestrator/orchestrator.ts:1369`.
 - Router coding-override: when `pil.taskType === "coding"` and provider is SF,
-  prefer `alibaba/Qwen3-Coder-30B-A3B-Instruct`. Hook point:
+  prefer `Qwen/Qwen3-Coder-30B-A3B-Instruct`. Hook point:
   `src/router/decide.ts` Step 0 PIL branch.
 - Tool-call safety gate: before any model selection, if `tools.length > 0`,
   drop any candidate not on SF's function-calling whitelist.
