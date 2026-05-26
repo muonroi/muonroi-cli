@@ -1,6 +1,6 @@
 # Roadmap — muonroi-cli
 
-## Phase 5: Post-Phase-4 Cleanup + UX Bugs — 🟡 OPEN (2026-05-25)
+## Phase 5: Post-Phase-4 Cleanup + UX Bugs — 🟢 SHIPPED (2026-05-25)
 
 **Goal:** Close 4 deferred/new items surfaced by Phase 4 closure: PIL discovery
 fix (F4), EE noise reduction (F5), agent halt bug (F6, NEW — highest priority),
