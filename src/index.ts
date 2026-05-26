@@ -931,8 +931,38 @@ program
       // it is installed so `resolveModelRuntime` returns it instead of the
       // real provider model. This enables cost-leak verification (G1, F1,
       // B3/B4, C1) through the orchestrator's streamText path.
+      //
+      // Failure mode (silent until 2026-05-26): the original
+      // `.catch(() => null)` swallowed every load error — directory
+      // missing, JSON parse fail, no `model` block in any file — and
+      // the orchestrator silently fell back to the real provider, which
+      // failed because tests use a FAKE_KEY. The dump file then contained
+      // `[]`, producing the cryptic "expected 0 to be greater than or
+      // equal to 3" failures in cost-leak-b3/b4 TUI specs. Logging every
+      // failure path makes the root cause visible in CI stderr.
       const { loadMockModelFromDir } = await import("./agent-harness/mock-model.js");
-      const modelHandle = await loadMockModelFromDir(options.mockLlm).catch(() => null);
+      const modelHandle = await loadMockModelFromDir(options.mockLlm).catch((err) => {
+        process.stderr.write(
+          `[muonroi-cli] mock-llm: loadMockModelFromDir(${options.mockLlm}) threw: ${
+            err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+          }\n`,
+        );
+        return null;
+      });
+      if (!modelHandle) {
+        // The user explicitly passed `--mock-llm <dir>` — they EXPECT the
+        // mock to be installed. Silent fallback to the real provider is the
+        // wrong default for test environments. Refuse to continue so the
+        // failure is loud, not a dump full of zero calls.
+        process.stderr.write(
+          `[muonroi-cli] mock-llm: no fixture in ${options.mockLlm} declared a {model:...} block — refusing to fall back to real provider. ` +
+            `Verify the fixture JSON has a top-level "model" key with a "stream" array.\n`,
+        );
+        // Exit code chosen to differ from the AI SDK's typical 1/2 so test
+        // harnesses can distinguish "mock didn't install" from "test
+        // assertion failed". 78 = EX_CONFIG per BSD sysexits.
+        process.exit(78);
+      }
       if (modelHandle) {
         // Install all three globals atomically so the runtime sees a
         // consistent picture: model + the OAuth-registry-equivalent

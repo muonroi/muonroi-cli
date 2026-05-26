@@ -252,38 +252,81 @@ function normalizeStreamChunks(chunks: StreamChunks): StreamChunks {
 }
 
 export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModelHandle | null> {
-  const { readdirSync, readFileSync } = await import("node:fs");
+  // Diagnostic logging path. Without these messages, every failure mode
+  // (directory missing, no .json files, malformed JSON, no `model` block)
+  // returns `null` silently — and the caller in src/index.ts used to swallow
+  // it, leaving the orchestrator to fall back to the real provider with a
+  // fake API key. Result: dump file contains `[]`, cost-leak specs fail
+  // with "expected 0 to be greater than or equal to 3" with no clue why.
+  // (Evidence: harness CI run 26431994835.)
+  const log = (msg: string): void => {
+    process.stderr.write(`[mock-model] ${msg}\n`);
+  };
+  const { readdirSync, readFileSync, existsSync } = await import("node:fs");
   const { join } = await import("node:path");
-  const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  if (!existsSync(dir)) {
+    log(`loadMockModelFromDir: dir does not exist: ${dir}`);
+    return null;
+  }
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+  } catch (err) {
+    log(`loadMockModelFromDir: readdirSync(${dir}) failed: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+  if (files.length === 0) {
+    log(`loadMockModelFromDir: no .json files in ${dir}`);
+    return null;
+  }
   for (const f of files) {
-    const raw = JSON.parse(readFileSync(join(dir, f), "utf8")) as {
+    const full = join(dir, f);
+    let raw: {
       model?: MockModelFixture & {
         unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
         defaultProviderOptions?: Record<string, unknown>;
       };
     };
-    if (raw.model !== undefined) {
-      // Wrap plain-string `error` payloads in Error instances before passing
-      // to createMockModel, so the AI SDK stream-loop and orchestrator see a
-      // consistent Error shape regardless of fixture serialization.
-      const normalized: MockModelFixture = {
-        ...raw.model,
-        stream: isNestedArray(raw.model.stream)
-          ? raw.model.stream.map(normalizeStreamChunks)
-          : normalizeStreamChunks(raw.model.stream),
-      };
-      const base = createMockModel(normalized);
-      return {
-        model: base.model,
-        get calls() {
-          return base.calls;
-        },
-        reset: base.reset,
-        unsupportedParams: raw.model.unsupportedParams,
-        defaultProviderOptions: raw.model.defaultProviderOptions,
-      };
+    try {
+      raw = JSON.parse(readFileSync(full, "utf8"));
+    } catch (err) {
+      log(`loadMockModelFromDir: JSON parse failed for ${full}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
     }
+    if (raw.model === undefined) {
+      // Not fatal — caller iterates further. But log so the test author
+      // knows why their fixture was ignored.
+      log(`loadMockModelFromDir: ${full} has no "model" top-level key — skipping`);
+      continue;
+    }
+    if (raw.model.stream === undefined) {
+      log(`loadMockModelFromDir: ${full} has "model" but no "stream" — skipping`);
+      continue;
+    }
+    // Wrap plain-string `error` payloads in Error instances before passing
+    // to createMockModel, so the AI SDK stream-loop and orchestrator see a
+    // consistent Error shape regardless of fixture serialization.
+    const normalized: MockModelFixture = {
+      ...raw.model,
+      stream: isNestedArray(raw.model.stream)
+        ? raw.model.stream.map(normalizeStreamChunks)
+        : normalizeStreamChunks(raw.model.stream),
+    };
+    const base = createMockModel(normalized);
+    log(
+      `loadMockModelFromDir: installed mock from ${full} (provider=${raw.model.provider ?? "mock"}, modelId=${raw.model.modelId ?? "mock-model"})`,
+    );
+    return {
+      model: base.model,
+      get calls() {
+        return base.calls;
+      },
+      reset: base.reset,
+      unsupportedParams: raw.model.unsupportedParams,
+      defaultProviderOptions: raw.model.defaultProviderOptions,
+    };
   }
+  log(`loadMockModelFromDir: scanned ${files.length} file(s) in ${dir} but none declared a {model:...} block`);
   return null;
 }
 
