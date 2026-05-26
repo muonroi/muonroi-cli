@@ -1,12 +1,18 @@
 # Project State — muonroi-cli
 
-**Last updated:** 2026-05-25 (Phase 5 OPENED — F4/F5/F6/F7 scope defined; Phase 4 closed)
+**Last updated:** 2026-05-25 (Phase 5 SHIPPED — all 5 fixes deployed, awaiting user verify)
 
-**Phase 5 status: 🟡 OPEN.** Scope: F4 (PIL discovery module-suggestion fix),
-F5 (EE IRRELEVANT noise reduction), F6 (agent halt "tiếp tục" bug — NEW,
-HIGHEST PRIORITY), F7 (TUI collapse UX — NEW). See
-`.planning/phases/05-post-phase4-cleanup-and-ux/05-CONTEXT.md`. Awaiting
-plan-phase to drill F6 root cause via stopWhen telemetry.
+**Phase 5 status: 🟢 SHIPPED.** All 5 fixes landed:
+- F4 (commit `f5640c4`): scope module-suggestions ranked by mtime, not alpha
+- F5 (commit `f5640c4`): EE judge writes gated behind hadWarnings — ~95% noise cut
+- F6 (commit `8b186a6`): auto-forcedFinalize when stream ends without text — "tiếp tục" bug eliminated
+- F7 (commit `f5640c4`): final assistant message no longer auto-collapses
+- F8 (commit `f5640c4`): askcard pickBestOutcomeIndex — context-aware Recommended badge
+
+Tests green: tsc 0 errors, pil/hooks 398/398, orchestrator 132/132.
+
+Awaiting user re-run of 5-baseline to confirm: G1-G5 still pass + no "tiếp
+tục" needed + askcard recommends best option + ee_judge noise dropped.
 
 **Phase 4 status: ✅ COMPLETE.** Final 5-baseline re-run (sessions `348b4006e74c`, `5b7935e07f37`, `f904feb2971d`, `91b134d50c77`, `9f55731759a0`):
 - G1-Cost $0.0800 ≤ $0.30 ✅
