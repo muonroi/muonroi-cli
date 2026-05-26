@@ -138,6 +138,11 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import {
+  buildRepetitionReminder,
+  recordAssistantBurst,
+  shouldInjectRepetitionReminder,
+} from "./repetition-detector.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import {
   forcedFinalize,
@@ -1129,6 +1134,10 @@ export class MessageProcessor {
 
         deps.setCompactedThisTurn(false);
         let assistantText = "";
+        // Tracks where `assistantText` was at the previous step boundary so
+        // `onStepFinish` can compute the text emitted within the just-finished
+        // step (input to the self-repetition detector).
+        let _assistantTextAtLastStep = 0;
         let reasoningPreview = "";
         let encryptedReasoningHidden = false;
         let streamOk = false;
@@ -1571,7 +1580,14 @@ export class MessageProcessor {
               const _pastNaturalCeiling = _scopeStep > _naturalCeiling;
               const _justCrossedCeiling = shouldInjectCeilingCrossing(_scopeStep, _naturalCeiling, _ceilingSessionId);
               const _pastCeilingAtCadence = _pastNaturalCeiling && _shouldRemind;
-              if (_shouldRemind || _shouldWarn || _justCrossedCeiling) {
+              // Fix #8 — self-repetition one-shot. Fires when the assistant
+              // has opened the last 3 streamText steps with the same 4-word
+              // phrase (e.g. "YES still on scope" — session 1f29e238a816
+              // emitted 15 such bursts past ceiling). Reminder is attached
+              // alongside (and before) any scope reminder so the model sees
+              // the behavioural correction first.
+              const _shouldRepeatReminder = shouldInjectRepetitionReminder(_ceilingSessionId);
+              if (_shouldRemind || _shouldWarn || _justCrossedCeiling || _shouldRepeatReminder) {
                 const _baseReminder = buildScopeReminder({
                   step: _scopeStep,
                   ceiling: _scopeCeiling,
@@ -1584,11 +1600,19 @@ export class MessageProcessor {
                 // the crossing event or at a cadence step past ceiling, not
                 // on every silent step in between.
                 const _useStrong = _justCrossedCeiling || _pastCeilingAtCadence;
-                const _reminder = _useStrong
-                  ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If wandering, simplify the next step. ${_baseReminder}`
-                  : _shouldWarn
-                    ? `[approaching ceiling] ${_baseReminder}`
-                    : _baseReminder;
+                const _scopePart =
+                  _shouldRemind || _shouldWarn || _justCrossedCeiling
+                    ? _useStrong
+                      ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If wandering, simplify the next step. ${_baseReminder}`
+                      : _shouldWarn
+                        ? `[approaching ceiling] ${_baseReminder}`
+                        : _baseReminder
+                    : null;
+                const _reminder = _shouldRepeatReminder
+                  ? _scopePart
+                    ? `${buildRepetitionReminder(_ceilingSessionId)}\n${_scopePart}`
+                    : buildRepetitionReminder(_ceilingSessionId)
+                  : _scopePart!;
                 const withReminder = attachReminderToMessages(compacted, _reminder);
                 return { messages: withReminder };
               }
@@ -1619,6 +1643,15 @@ export class MessageProcessor {
               if (stepUsage.inputTokens || stepUsage.outputTokens) {
                 deps.recordUsage(stepUsage, "message", runtime.modelId);
               }
+              // Fix #8 — feed the assistant text emitted in this step into
+              // the self-repetition detector. The slice covers everything
+              // appended to `assistantText` since the previous step boundary;
+              // a step with no text (pure tool call) records as empty, which
+              // recordAssistantBurst treats as a no-op so the current run is
+              // preserved across tool interludes.
+              const _stepText = assistantText.slice(_assistantTextAtLastStep);
+              _assistantTextAtLastStep = assistantText.length;
+              recordAssistantBurst(_ceilingSessionId, _stepText);
             },
             onFinish: ({ finishReason }) => {
               _lastFinishReason = finishReason ?? null;
