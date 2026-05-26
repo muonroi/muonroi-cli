@@ -90,6 +90,32 @@ export function shouldInjectSoftWarn(step: number, ceiling: number, sessionId: s
   return true;
 }
 
+/**
+ * One-shot ceiling-crossing guard. Returns true exactly once per session at
+ * the first step strictly past `naturalCeiling`. After that, subsequent calls
+ * for the same session return false — the orchestrator should rely on the
+ * regular cadence reminder (every K steps) to anchor a model that keeps
+ * working past the budget. Without this guard, sessions that went deep past
+ * ceiling (e.g. step 77 / ceiling 6 in session 1f29e238a816) received the
+ * "past natural budget" strong reminder on EVERY step, generating 70+
+ * redundant reminders that bloat tool_result channel and force the model
+ * into a "YES still on scope" loop on every tool call.
+ */
+export function shouldInjectCeilingCrossing(step: number, naturalCeiling: number, sessionId: string): boolean {
+  if (!Number.isFinite(step) || step <= 0) return false;
+  if (!Number.isFinite(naturalCeiling) || naturalCeiling <= 0) return false;
+  if (step <= naturalCeiling) return false;
+  const g = globalThis as Record<string, unknown>;
+  let fired = g.__muonroiCeilingCrossingFired as Map<string, true> | undefined;
+  if (!(fired instanceof Map)) {
+    fired = new Map<string, true>();
+    g.__muonroiCeilingCrossingFired = fired;
+  }
+  if (fired.has(sessionId)) return false;
+  fired.set(sessionId, true);
+  return true;
+}
+
 export interface BuildScopeReminderOpts {
   step: number;
   ceiling: number;

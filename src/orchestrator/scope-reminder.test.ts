@@ -18,6 +18,7 @@ import {
   attachReminderToMessages,
   buildScopeReminder,
   cadenceForSize,
+  shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
@@ -95,6 +96,40 @@ describe("shouldInjectSoftWarn", () => {
   });
 });
 
+describe("shouldInjectCeilingCrossing", () => {
+  beforeEach(() => {
+    (globalThis as Record<string, unknown>).__muonroiCeilingCrossingFired = undefined;
+  });
+  afterEach(() => {
+    (globalThis as Record<string, unknown>).__muonroiCeilingCrossingFired = undefined;
+  });
+
+  it("fires exactly once per session at the first step past the natural ceiling", () => {
+    expect(shouldInjectCeilingCrossing(6, 6, "s1")).toBe(false); // equal, not past
+    expect(shouldInjectCeilingCrossing(7, 6, "s1")).toBe(true); // first crossing
+    expect(shouldInjectCeilingCrossing(8, 6, "s1")).toBe(false); // already fired
+    expect(shouldInjectCeilingCrossing(77, 6, "s1")).toBe(false); // still suppressed
+  });
+
+  it("fires independently per session", () => {
+    expect(shouldInjectCeilingCrossing(7, 6, "a")).toBe(true);
+    expect(shouldInjectCeilingCrossing(7, 6, "b")).toBe(true);
+    expect(shouldInjectCeilingCrossing(8, 6, "b")).toBe(false);
+  });
+
+  it("never fires below or at the ceiling", () => {
+    expect(shouldInjectCeilingCrossing(1, 6, "x")).toBe(false);
+    expect(shouldInjectCeilingCrossing(6, 6, "x")).toBe(false);
+  });
+
+  it("rejects non-positive or non-finite inputs", () => {
+    expect(shouldInjectCeilingCrossing(0, 6, "x")).toBe(false);
+    expect(shouldInjectCeilingCrossing(-1, 6, "x")).toBe(false);
+    expect(shouldInjectCeilingCrossing(7, 0, "x")).toBe(false);
+    expect(shouldInjectCeilingCrossing(Number.NaN, 6, "x")).toBe(false);
+  });
+});
+
 describe("buildScopeReminder", () => {
   it("contains verbatim first 100 chars of prompt and stays <= 200 chars", () => {
     const prompt = "A".repeat(200);
@@ -167,9 +202,7 @@ describe("attachReminderToMessages", () => {
         ],
       },
     ];
-    const out = attachReminderToMessages(messages, "[scope-check step 3/10] etc") as Array<
-      Record<string, unknown>
-    >;
+    const out = attachReminderToMessages(messages, "[scope-check step 3/10] etc") as Array<Record<string, unknown>>;
     expect(out.length).toBe(2);
     const last = out[1]!;
     expect(last.role).toBe("tool");
