@@ -74,7 +74,7 @@
       "supports_vision": false
     },
     {
-      "id": "alibaba/Qwen3-8B",
+      "id": "Qwen/Qwen3-8B",
       "name": "Qwen3 8B (SiliconFlow)",
       "provider": "siliconflow",
       "tier": "fast",
@@ -87,11 +87,11 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Cheapest tool-capable SiliconFlow model. Symmetric pricing — ideal for mechanical tool-execution loops. Supports thinking/non-thinking hybrid mode.",
-      "aliases": ["qwen3-8b-sf"],
+      "aliases": ["qwen3-8b-sf", "alibaba/Qwen3-8B"],
       "supports_vision": false
     },
     {
-      "id": "alibaba/Qwen3-30B-A3B-Instruct-2507",
+      "id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
       "name": "Qwen3 30B A3B Instruct (SiliconFlow)",
       "provider": "siliconflow",
       "tier": "balanced",
@@ -104,11 +104,11 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "MoE balanced default. 3B active params keeps cost low while 30B total gives strong instruction following + tool use. Recommended SF balanced pick.",
-      "aliases": ["qwen3-30b-instruct-sf"],
+      "aliases": ["qwen3-30b-instruct-sf", "alibaba/Qwen3-30B-A3B-Instruct-2507"],
       "supports_vision": false
     },
     {
-      "id": "alibaba/Qwen3-Coder-30B-A3B-Instruct",
+      "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
       "name": "Qwen3 Coder 30B A3B (SiliconFlow)",
       "provider": "siliconflow",
       "tier": "balanced",
@@ -121,7 +121,7 @@
       "supports_effort": false,
       "default_reasoning_effort": null,
       "description": "Coding-specialized Qwen3 MoE. Cheaper than the generic Qwen3-30B variant. Use when pil.taskType is coding (router override pending).",
-      "aliases": ["qwen3-coder-sf", "qwen-coder-sf"],
+      "aliases": ["qwen3-coder-sf", "qwen-coder-sf", "alibaba/Qwen3-Coder-30B-A3B-Instruct"],
       "supports_vision": false
     },
     {

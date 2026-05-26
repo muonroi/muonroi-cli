@@ -58,8 +58,20 @@ describe("end-to-end: create factory + resolve runtime", () => {
     const pf = createProviderFactory("siliconflow", {
       apiKey: MOCK_KEY,
     });
-    const runtime = resolveModelRuntime(pf.factory, "alibaba/Qwen3-8B");
+    const runtime = resolveModelRuntime(pf.factory, "Qwen/Qwen3-8B");
     expect(runtime.modelInfo?.provider).toBe("siliconflow");
+    expect(runtime.modelId).toBe("Qwen/Qwen3-8B");
+  });
+
+  test("legacy alibaba/* id resolves to Qwen/* canonical via alias (catalog fix 2026-05-26)", () => {
+    // SiliconFlow's /v1/models endpoint returned Qwen/Qwen3-* but the catalog
+    // shipped alibaba/Qwen3-* in version 2.1; session 500325a9f0a9 failed with
+    // HTTP 400 code 20012 "Model does not exist." Aliases keep the legacy id
+    // routable so user-settings.json and persisted sessions don't break.
+    const pf = createProviderFactory("siliconflow", { apiKey: MOCK_KEY });
+    const runtime = resolveModelRuntime(pf.factory, "alibaba/Qwen3-30B-A3B-Instruct-2507");
+    expect(runtime.modelInfo?.provider).toBe("siliconflow");
+    expect(runtime.modelId).toBe("Qwen/Qwen3-30B-A3B-Instruct-2507");
   });
 
   test("openai model not in catalog throws", () => {
