@@ -595,7 +595,7 @@ export class MessageProcessor {
     // Phase 5 Fix 4 (Option A) — make ceiling mutable so the stopWhen
     // closure can bump it on auto-continue checkpoints. See checkpoint
     // logic at dynamicStopWhen below for the bump policy.
-    let _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
+    const _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
     // Record this turn's task row for future continuation inheritance.
     // Only non-chitchat task turns update the slot.
     if (_sessionIdForLastTask && _pilTaskType !== "general" && pilCtx.intentKind === "task") {
@@ -618,7 +618,7 @@ export class MessageProcessor {
     }
     // Track whether forced-finalize is needed (set by stopWhen when the
     // ceiling fires). Read AFTER the streamText fullStream finishes.
-    let _ceilingHit = false;
+    const _ceilingHit = false;
 
     // Cheap signal forwarded from PIL Layer 1 — true when input is greeting /
     // small-talk (≤10 chars + ≤2 words OR brain-classified "none"). Used to
@@ -1399,74 +1399,57 @@ export class MessageProcessor {
           // trips so the halt toast can report the real value, not the
           // ceiling/ceiling literal that always showed e.g. "5/5" regardless
           // of how many steps the turn actually ran.
-          let _ceilingHitAtStep = 0;
-          // Phase 5 Fix 4 (Option A) — auto-continue checkpoints. The matrix
-          // ceiling was calibrated against a wandering-baseline and is
-          // tighter than what legitimate multi-step tasks need (telemetry on
-          // sessions b16092857184 / f9a4cea1bf44 / 002df4014cb4 shows tasks
-          // routinely require 20-40 tools to complete). Rather than hard-
-          // halting and forcing the user to manually type "tiếp tục", silently
-          // bump the ceiling by one natural-budget unit up to MAX_CHECKPOINT_BUMPS
-          // times. Hard halt only kicks in after the bumps are exhausted, at
-          // which point we genuinely suspect wandering and surface the toast.
+          const _ceilingHitAtStep = 0;
+          // Phase 5 Fix 5 — matrix ceiling is now a SOFT BOUNDARY, never a
+          // hard halt. Phase 4's hard halt was a blunt anti-wandering
+          // measure that also blocked legitimate multi-step work: every
+          // long task (improve coverage, optimize startup, refactor) ran
+          // out of budget mid-flight and required the user to manually
+          // type "tiếp tục". Wrong philosophy — "done" must be the agent's
+          // call, not the counter's.
           //
-          // Total budget = _naturalCeiling × (1 + MAX_CHECKPOINT_BUMPS).
-          // With MAX=3 and generate × medium = 18, that lets a turn use up
-          // to 72 tools before hard halt — generous enough for real work,
-          // tight enough that a runaway agent still stops eventually.
+          // What replaced the hard halt:
+          //  - Scope-reminders (4A path, prepareStep above) inject
+          //    "[approaching ceiling]" reminder at floor(ceiling*0.7) and
+          //    repeat at K cadence. Past the ceiling, every step gets a
+          //    re-anchor so the model is repeatedly nudged toward closure.
+          //  - The dynamicStopWhen no longer checks the matrix ceiling at
+          //    all. The only halt source is `_baseDynamicStopWhen` which
+          //    enforces `deps.maxToolRounds` as the ULTIMATE runaway safety
+          //    net (default raised; see CLI default).
+          //  - 4R bash repeat detector still catches the dominant wandering
+          //    pattern (identical command twice in a row).
+          //  - F6 synthesis still ensures any natural stream-end without
+          //    text gets a final summary.
           //
-          // Each bump emits an `info` toast so the user sees the agent is
-          // intentionally going past the natural cap (transparency >
-          // surprise). The 4A scope-reminder still fires at every 70%
-          // boundary of the current ceiling, re-anchoring the model on
-          // each checkpoint.
-          const MAX_CHECKPOINT_BUMPS = 3;
-          let _checkpointBumps = 0;
+          // _ceilingHit and _ceilingHitAtStep are kept for telemetry: a
+          // crossing event is logged for forensics, but no action is taken.
           const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
             const base = await _baseDynamicStopWhen(state);
             if (base) return true;
             const next = incSessionStep(_ceilingSessionId);
-            if (next < _stepCeiling) return false;
-            // Counter reached current ceiling. Decide bump-vs-halt.
-            if (_checkpointBumps < MAX_CHECKPOINT_BUMPS) {
-              _checkpointBumps += 1;
-              _stepCeiling += _naturalCeiling;
-              try {
-                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-                  | { emitEvent: (e: unknown) => void }
-                  | undefined;
-                _ar?.emitEvent({
-                  t: "event",
-                  kind: "toast",
-                  level: "info",
-                  text: `auto-continue ${_checkpointBumps}/${MAX_CHECKPOINT_BUMPS} (task_type=${_ceilingTaskType} size=${_ceilingSize}) — budget bumped to step ${_stepCeiling}`,
-                });
-              } catch {
-                /* best-effort */
-              }
+            // Telemetry-only: record the first time the counter crosses
+            // the matrix ceiling, so post-hoc queries can correlate the
+            // ceiling crossing with task completion outcomes. No halt.
+            if (next === _stepCeiling) {
               try {
                 if (deps.session?.id) {
                   logInteraction(deps.session.id, "f6_synthesis", {
                     data: {
-                      outcome: "checkpoint_bump",
-                      bumpIndex: _checkpointBumps,
-                      maxBumps: MAX_CHECKPOINT_BUMPS,
-                      stepAtBump: next,
-                      newCeiling: _stepCeiling,
+                      outcome: "ceiling_crossed_softly",
+                      stepAtCrossing: next,
+                      naturalCeiling: _naturalCeiling,
                       taskType: _ceilingTaskType,
                       size: _ceilingSize,
+                      hardCapMaxToolRounds: deps.maxToolRounds,
                     },
                   });
                 }
               } catch {
                 /* telemetry only */
               }
-              return false; // continue running
             }
-            // Bumps exhausted — hard halt.
-            _ceilingHit = true;
-            _ceilingHitAtStep = next;
-            return true;
+            return false;
           }) as unknown as StopCondition<typeof tools>;
           // BUG-A fix — when this turn carries an empty tool set (the
           // chitchat optimization at line ~1107 drops all schemas), AI SDK
@@ -1550,7 +1533,14 @@ export class MessageProcessor {
               const _scopeStep = sn;
               const _shouldRemind = shouldInjectReminder(_scopeStep, _scopeK);
               const _shouldWarn = shouldInjectSoftWarn(_scopeStep, _scopeCeiling, _ceilingSessionId);
-              if (_shouldRemind || _shouldWarn) {
+              // Phase 5 Fix 5 — when past the natural matrix ceiling but
+              // still under the maxToolRounds runaway safety, every step
+              // gets a STRONG reminder. The matrix ceiling is no longer a
+              // halt; it's now a "you should be wrapping up" signal. The
+              // model decides actual completion, but it gets re-anchored
+              // every step past the natural budget.
+              const _pastNaturalCeiling = _scopeStep > _naturalCeiling;
+              if (_shouldRemind || _shouldWarn || _pastNaturalCeiling) {
                 const _baseReminder = buildScopeReminder({
                   step: _scopeStep,
                   ceiling: _scopeCeiling,
@@ -1558,7 +1548,11 @@ export class MessageProcessor {
                   size: _scopeSize,
                   originalPrompt: userMessage,
                 });
-                const _reminder = _shouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+                const _reminder = _pastNaturalCeiling
+                  ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If wandering, simplify the next step. ${_baseReminder}`
+                  : _shouldWarn
+                    ? `[approaching ceiling] ${_baseReminder}`
+                    : _baseReminder;
                 const withReminder = attachReminderToMessages(compacted, _reminder);
                 return { messages: withReminder };
               }
@@ -2189,37 +2183,13 @@ export class MessageProcessor {
             return;
           }
 
-          // Phase 4 Plan 04 (4B) — forced-finalize on ceiling hit. One final
-          // LLM call with toolChoice:"none" so the cheap model can synthesize a
-          // partial answer from accumulated context, then emit warn toast.
-          if (_ceilingHit && !signal.aborted) {
-            try {
-              const ff = await forcedFinalize({
-                model: runtime.model,
-                messages: _topMessagesForCall as unknown[],
-                system: typeof systemForModel === "string" ? systemForModel : undefined,
-              });
-              if (ff.text.trim()) {
-                assistantText += ff.text;
-                yield { type: "content", content: ff.text };
-              }
-            } catch {
-              /* forced-finalize is best-effort — never block the halt */
-            }
-            try {
-              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-                | { emitEvent: (e: unknown) => void }
-                | undefined;
-              _ar?.emitEvent({
-                t: "event",
-                kind: "toast",
-                level: "warn",
-                text: `halted: step ceiling exceeded for task_type=${_ceilingTaskType} size=${_ceilingSize} at step ${_ceilingHitAtStep || _stepCeiling}/${_stepCeiling}`,
-              });
-            } catch {
-              /* best-effort */
-            }
-          }
+          // Phase 5 Fix 5 — the Phase 4 4B forced-finalize-on-ceiling-hit
+          // block lived here. With the matrix ceiling no longer halting the
+          // stream (it's pure telemetry now), _ceilingHit can never be true
+          // and this branch is dead. F6 synthesis above already covers the
+          // "stream ended with no final text" case for both natural model
+          // termination AND maxToolRounds halt. Keeping the comment as a
+          // breadcrumb for future archaeology.
 
           if (!streamOk && assistantText.trim()) {
             deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
