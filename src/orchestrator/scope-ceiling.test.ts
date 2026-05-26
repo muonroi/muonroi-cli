@@ -14,9 +14,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   forcedFinalize,
+  getSessionLastTask,
   getSessionStepCount,
   incSessionStep,
   parseBudgetOverride,
+  recordSessionLastTask,
   resetSessionStep,
   resolveCeiling,
   softWarnStep,
@@ -168,5 +170,46 @@ describe("forcedFinalize", () => {
     } as unknown as Parameters<typeof forcedFinalize>[0]);
 
     expect(result.text).toContain("forced-finalize");
+  });
+});
+
+describe("Phase 5 — session last-task tracking (Fix 2)", () => {
+  afterEach(() => {
+    const host = globalThis as unknown as { __muonroiSessionLastTask?: Map<string, unknown> };
+    host.__muonroiSessionLastTask?.clear();
+  });
+
+  it("records and reads the last non-chitchat task row", () => {
+    recordSessionLastTask("sess-X", "generate", "medium");
+    expect(getSessionLastTask("sess-X")).toEqual({ taskType: "generate", size: "medium" });
+  });
+
+  it("returns null when no task has been recorded", () => {
+    expect(getSessionLastTask("sess-empty")).toBeNull();
+  });
+
+  it("ignores chitchat / general / empty taskType writes", () => {
+    recordSessionLastTask("sess-Y", "general", "small");
+    expect(getSessionLastTask("sess-Y")).toBeNull();
+    recordSessionLastTask("sess-Y", "", "small");
+    expect(getSessionLastTask("sess-Y")).toBeNull();
+  });
+
+  it("isolates sessions from each other", () => {
+    recordSessionLastTask("sess-A", "refactor", "large");
+    recordSessionLastTask("sess-B", "debug", "small");
+    expect(getSessionLastTask("sess-A")).toEqual({ taskType: "refactor", size: "large" });
+    expect(getSessionLastTask("sess-B")).toEqual({ taskType: "debug", size: "small" });
+  });
+
+  it("overwrites prior row on subsequent task turns within the same session", () => {
+    recordSessionLastTask("sess-C", "analyze", "small");
+    recordSessionLastTask("sess-C", "refactor", "medium");
+    expect(getSessionLastTask("sess-C")).toEqual({ taskType: "refactor", size: "medium" });
+  });
+
+  it("rejects empty sessionId", () => {
+    recordSessionLastTask("", "generate", "medium");
+    expect(getSessionLastTask("")).toBeNull();
   });
 });
