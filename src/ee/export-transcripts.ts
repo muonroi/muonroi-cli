@@ -29,7 +29,7 @@ async function openDb(dbPath: string): Promise<{
   // node_modules even when listed in package.json. The try/catch below handles
   // the runtime ENOENT; the ts-ignore keeps the build unblocked.
   try {
-    // @ts-expect-error — optional dep, may not be installed
+    // optional dep, may not be installed
     const mod = await import("better-sqlite3");
     const Better = (mod as { default?: unknown }).default ?? mod;
     const db = new (Better as new (p: string, o?: unknown) => unknown)(dbPath, { readonly: true }) as {
