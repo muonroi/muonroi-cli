@@ -20,14 +20,15 @@ import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
 import { appendPilLog } from "./budget-log.js";
 import { isDiscoveryEnabled } from "./config.js";
-import { layer1Intent } from "./layer1-intent.js";
 import { scoreComplexitySize } from "./layer1_5-complexity-size.js";
+import { layer1Intent } from "./layer1-intent.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
 import { layer6Output } from "./layer6-output.js";
 import { PipelineContextSchema } from "./schema.js";
+import { bumpSessionTurn } from "./session-state.js";
 import { setPilLastResult } from "./store.js";
 import { resolveAfter } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
@@ -130,7 +131,13 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
         outputStyle: ctx.outputStyle,
         intentKind: ctx.intentKind ?? null,
       };
-      const discovery = await runDiscovery(ctx.raw, l1Result, process.cwd(), options?.interactionHandler ?? null);
+      const discovery = await runDiscovery(
+        ctx.raw,
+        l1Result,
+        process.cwd(),
+        options?.interactionHandler ?? null,
+        ctx.sessionId ?? null,
+      );
       ctx = { ...ctx, _discoveryResult: discovery };
       if (discovery.interviewed && discovery.accepted) {
         const discoveryPrefix = [
@@ -234,6 +241,11 @@ export interface PipelineOptions {
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
+  // Bump the per-session turn counter BEFORE any pipeline work so discovery
+  // can distinguish first-turn (full interview) from follow-ups (skip).
+  // Safe to call with null sessionId — bumpSessionTurn no-ops in that case.
+  bumpSessionTurn(options?.sessionId ?? null);
+
   const fallback: PipelineContext = {
     raw,
     enriched: raw,
