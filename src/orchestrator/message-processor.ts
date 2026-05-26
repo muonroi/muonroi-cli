@@ -592,7 +592,10 @@ export class MessageProcessor {
     const _ceilingTaskType = _lastTask?.taskType ?? _pilTaskType;
     const _ceilingSize = _lastTask?.size ?? _pilSize;
     const _naturalCeiling = resolveCeiling(_ceilingTaskType, _ceilingSize);
-    const _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
+    // Phase 5 Fix 4 (Option A) — make ceiling mutable so the stopWhen
+    // closure can bump it on auto-continue checkpoints. See checkpoint
+    // logic at dynamicStopWhen below for the bump policy.
+    let _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
     // Record this turn's task row for future continuation inheritance.
     // Only non-chitchat task turns update the slot.
     if (_sessionIdForLastTask && _pilTaskType !== "general" && pilCtx.intentKind === "task") {
@@ -1397,16 +1400,73 @@ export class MessageProcessor {
           // ceiling/ceiling literal that always showed e.g. "5/5" regardless
           // of how many steps the turn actually ran.
           let _ceilingHitAtStep = 0;
+          // Phase 5 Fix 4 (Option A) — auto-continue checkpoints. The matrix
+          // ceiling was calibrated against a wandering-baseline and is
+          // tighter than what legitimate multi-step tasks need (telemetry on
+          // sessions b16092857184 / f9a4cea1bf44 / 002df4014cb4 shows tasks
+          // routinely require 20-40 tools to complete). Rather than hard-
+          // halting and forcing the user to manually type "tiếp tục", silently
+          // bump the ceiling by one natural-budget unit up to MAX_CHECKPOINT_BUMPS
+          // times. Hard halt only kicks in after the bumps are exhausted, at
+          // which point we genuinely suspect wandering and surface the toast.
+          //
+          // Total budget = _naturalCeiling × (1 + MAX_CHECKPOINT_BUMPS).
+          // With MAX=3 and generate × medium = 18, that lets a turn use up
+          // to 72 tools before hard halt — generous enough for real work,
+          // tight enough that a runaway agent still stops eventually.
+          //
+          // Each bump emits an `info` toast so the user sees the agent is
+          // intentionally going past the natural cap (transparency >
+          // surprise). The 4A scope-reminder still fires at every 70%
+          // boundary of the current ceiling, re-anchoring the model on
+          // each checkpoint.
+          const MAX_CHECKPOINT_BUMPS = 3;
+          let _checkpointBumps = 0;
           const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
             const base = await _baseDynamicStopWhen(state);
             if (base) return true;
             const next = incSessionStep(_ceilingSessionId);
-            if (next >= _stepCeiling) {
-              _ceilingHit = true;
-              _ceilingHitAtStep = next;
-              return true;
+            if (next < _stepCeiling) return false;
+            // Counter reached current ceiling. Decide bump-vs-halt.
+            if (_checkpointBumps < MAX_CHECKPOINT_BUMPS) {
+              _checkpointBumps += 1;
+              _stepCeiling += _naturalCeiling;
+              try {
+                const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                _ar?.emitEvent({
+                  t: "event",
+                  kind: "toast",
+                  level: "info",
+                  text: `auto-continue ${_checkpointBumps}/${MAX_CHECKPOINT_BUMPS} (task_type=${_ceilingTaskType} size=${_ceilingSize}) — budget bumped to step ${_stepCeiling}`,
+                });
+              } catch {
+                /* best-effort */
+              }
+              try {
+                if (deps.session?.id) {
+                  logInteraction(deps.session.id, "f6_synthesis", {
+                    data: {
+                      outcome: "checkpoint_bump",
+                      bumpIndex: _checkpointBumps,
+                      maxBumps: MAX_CHECKPOINT_BUMPS,
+                      stepAtBump: next,
+                      newCeiling: _stepCeiling,
+                      taskType: _ceilingTaskType,
+                      size: _ceilingSize,
+                    },
+                  });
+                }
+              } catch {
+                /* telemetry only */
+              }
+              return false; // continue running
             }
-            return false;
+            // Bumps exhausted — hard halt.
+            _ceilingHit = true;
+            _ceilingHitAtStep = next;
+            return true;
           }) as unknown as StopCondition<typeof tools>;
           // BUG-A fix — when this turn carries an empty tool set (the
           // chitchat optimization at line ~1107 drops all schemas), AI SDK
