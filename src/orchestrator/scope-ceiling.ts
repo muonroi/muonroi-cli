@@ -26,14 +26,7 @@
  * receives the already-resolved model from its caller.
  */
 
-export type TaskType =
-  | "analyze"
-  | "debug"
-  | "refactor"
-  | "generate"
-  | "plan"
-  | "documentation"
-  | "general";
+export type TaskType = "analyze" | "debug" | "refactor" | "generate" | "plan" | "documentation" | "general";
 
 export type ComplexitySize = "small" | "medium" | "large";
 
@@ -132,6 +125,45 @@ export function resetSessionStep(sessionId: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 5 — Session last-task ceiling row.
+//
+// When a user's continuation message ("tiếp tục" / "continue") is classified
+// chitchat by PIL Layer 1 Pass 0, the natural ceiling resolution collapses
+// from the original task's row (e.g. generate × medium = 18) to general ×
+// small = 5. After turn 1 used 18 tools, any continuation would be halted
+// almost immediately because the per-session step counter never resets.
+//
+// Fix part 2: record the (taskType, size) of every NON-chitchat turn so
+// continuation turns can inherit it. The lifetime mirrors __muonroiSessionStepCount
+// — global Map, cleared at process exit. Memory is bounded (one entry per
+// active session).
+// ---------------------------------------------------------------------------
+
+interface GlobalLastTaskHost {
+  __muonroiSessionLastTask?: Map<string, { taskType: string; size: ComplexitySize }>;
+}
+
+function getLastTaskMap(): Map<string, { taskType: string; size: ComplexitySize }> {
+  const host = globalThis as unknown as GlobalLastTaskHost;
+  if (!host.__muonroiSessionLastTask) {
+    host.__muonroiSessionLastTask = new Map<string, { taskType: string; size: ComplexitySize }>();
+  }
+  return host.__muonroiSessionLastTask;
+}
+
+/** Record the most recent NON-chitchat (taskType, size) for this session. */
+export function recordSessionLastTask(sessionId: string, taskType: string, size: ComplexitySize): void {
+  if (!sessionId || !taskType || taskType === "general") return;
+  getLastTaskMap().set(sessionId, { taskType, size });
+}
+
+/** Read the most recent non-chitchat task row, or null when none recorded. */
+export function getSessionLastTask(sessionId: string): { taskType: string; size: ComplexitySize } | null {
+  if (!sessionId) return null;
+  return getLastTaskMap().get(sessionId) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // forcedFinalize — single LLM call with toolChoice:"none" after ceiling hit.
 // ---------------------------------------------------------------------------
 
@@ -170,12 +202,18 @@ export async function forcedFinalize(opts: ForcedFinalizeOptions): Promise<Force
   }
   // Lazy import keeps test-only paths from paying the AI SDK import cost.
   const { generateText } = await import("ai");
-  const result = await generateText({
-    model: opts.model as Parameters<typeof generateText>[0]["model"],
-    system: opts.system,
-    messages: opts.messages as Parameters<typeof generateText>[0]["messages"],
+  // Cast to `any` at the call boundary — the AI SDK's generic Prompt shape
+  // requires either `prompt` xor `messages`, and we have already validated
+  // `messages` shape at the orchestrator caller. Keeping types loose here
+  // keeps this helper provider-agnostic per the Zero Hardcode Rule.
+  // biome-ignore lint/suspicious/noExplicitAny: AI SDK generic call boundary
+  const callArgs: any = {
+    model: opts.model,
+    messages: opts.messages,
     toolChoice: "none",
     maxRetries: 0,
-  });
+  };
+  if (opts.system) callArgs.system = opts.system;
+  const result = await generateText(callArgs);
   return { text: result.text ?? "" };
 }

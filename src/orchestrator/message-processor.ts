@@ -139,7 +139,15 @@ import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { classifyStreamError } from "./retry-classifier.js";
-import { forcedFinalize, incSessionStep, parseBudgetOverride, resolveCeiling } from "./scope-ceiling.js";
+import {
+  forcedFinalize,
+  getSessionLastTask,
+  incSessionStep,
+  parseBudgetOverride,
+  recordSessionLastTask,
+  resetSessionStep,
+  resolveCeiling,
+} from "./scope-ceiling.js";
 import {
   attachReminderToMessages,
   buildScopeReminder,
@@ -341,6 +349,21 @@ export class MessageProcessor {
     }
     const signal = deps.getAbortController()!.signal;
     deps.emitSubagentStatus(null);
+
+    // Phase 5 Fix 1 — reset the per-session step counter at every user-turn
+    // boundary. The original Phase 4 design kept the counter per-SESSION so a
+    // wandering agent bursting 50 tools across pseudo-turns would still trip
+    // the ceiling. In practice that punishes legitimate multi-turn work: turn
+    // 1 fills the counter, turn 2 (even a deliberate continuation) is halted
+    // almost immediately because the ceiling row may resolve smaller for the
+    // continuation's classified task. A new user message is an explicit
+    // human-in-the-loop signal — the user has seen results and chose to
+    // continue. Reset the counter so each user turn gets the full budget the
+    // matrix specifies for its own (taskType, size). Within-turn wandering
+    // is still capped by the per-turn ceiling, which is the real concern.
+    if (deps.session?.id) {
+      resetSessionStep(deps.session.id);
+    }
 
     // Phase C3: advance the cross-turn dedup turn counter so stubs can point
     // back to the correct prior turn.
@@ -550,10 +573,31 @@ export class MessageProcessor {
     // (task_type × complexitySize) matrix. Override (from --budget-rounds N
     // parsed earlier) wins. When the override differs from the natural
     // ceiling, emit info toast so the user sees the explicit cap.
-    const _ceilingTaskType = pilCtx.taskType ?? "general";
-    const _ceilingSize = pilCtx.complexitySize?.size ?? "medium";
+    //
+    // Phase 5 Fix 2 — continuation phrases ("tiếp tục" / "continue") are
+    // classified `general/chitchat` by PIL Layer 1 Pass 0. Resolving the
+    // ceiling from that label collapses the budget to general × small = 5,
+    // which is wrong: the user wants the agent to RESUME the prior task,
+    // not start a generic chitchat. When this session has a recorded
+    // non-chitchat task row, inherit it for ceiling resolution. The Pass 0
+    // classification itself stays general so downstream code (style /
+    // chitchat skip / tools-empty optimization in `BUG-A guard`) reads the
+    // correct intent; only the ceiling row is borrowed.
+    const _pilTaskType = pilCtx.taskType ?? "general";
+    const _pilSize = pilCtx.complexitySize?.size ?? "medium";
+    const _sessionIdForLastTask = deps.session?.id ?? "";
+    const _isContinuationChitchat =
+      _pilTaskType === "general" && pilCtx.intentKind === "chitchat" && _sessionIdForLastTask !== "";
+    const _lastTask = _isContinuationChitchat ? getSessionLastTask(_sessionIdForLastTask) : null;
+    const _ceilingTaskType = _lastTask?.taskType ?? _pilTaskType;
+    const _ceilingSize = _lastTask?.size ?? _pilSize;
     const _naturalCeiling = resolveCeiling(_ceilingTaskType, _ceilingSize);
     const _stepCeiling = _budgetOverride.override ?? _naturalCeiling;
+    // Record this turn's task row for future continuation inheritance.
+    // Only non-chitchat task turns update the slot.
+    if (_sessionIdForLastTask && _pilTaskType !== "general" && pilCtx.intentKind === "task") {
+      recordSessionLastTask(_sessionIdForLastTask, _pilTaskType, _pilSize);
+    }
     if (_budgetOverride.override !== undefined && _budgetOverride.override !== _naturalCeiling) {
       try {
         const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -1348,12 +1392,18 @@ export class MessageProcessor {
           // (i.e. once per finished tool step), persisting across user turns
           // so a wandering 3-turn burst still trips at the matrix limit.
           const _ceilingSessionId = deps.session?.id ?? "no-session";
+          // Phase 5 Fix 3 — capture the actual step number when the ceiling
+          // trips so the halt toast can report the real value, not the
+          // ceiling/ceiling literal that always showed e.g. "5/5" regardless
+          // of how many steps the turn actually ran.
+          let _ceilingHitAtStep = 0;
           const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
             const base = await _baseDynamicStopWhen(state);
             if (base) return true;
             const next = incSessionStep(_ceilingSessionId);
             if (next >= _stepCeiling) {
               _ceilingHit = true;
+              _ceilingHitAtStep = next;
               return true;
             }
             return false;
@@ -2104,7 +2154,7 @@ export class MessageProcessor {
                 t: "event",
                 kind: "toast",
                 level: "warn",
-                text: `halted: step ceiling exceeded for task_type=${_ceilingTaskType} size=${_ceilingSize} at step ${_stepCeiling}/${_stepCeiling}`,
+                text: `halted: step ceiling exceeded for task_type=${_ceilingTaskType} size=${_ceilingSize} at step ${_ceilingHitAtStep || _stepCeiling}/${_stepCeiling}`,
               });
             } catch {
               /* best-effort */
