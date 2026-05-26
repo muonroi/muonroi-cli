@@ -24,8 +24,21 @@ import type { ToolSet } from "ai";
 // those legitimately re-issue against a changing FS state.
 const READ_TOOL_PATTERN = /(^|_|__)read(_file|_text_file)?$/i;
 
+// Matches built-in write/edit tools + common MCP equivalents. These do NOT
+// get a budget cap of their own (the cumulative tool budget covers them);
+// instead a successful write/edit invalidates the read counter for the same
+// path so the agent can refresh its view of the post-write content. Without
+// this, an Edit on F.ts → agent re-reads F.ts → cap-blocked even though the
+// content changed under it (evidenced by session 1f29e238a816 where biome
+// reformatted a freshly-edited file and the next Read hit the budget cap).
+const WRITE_TOOL_PATTERN = /(^|_|__)(write_file|edit_file|create_file|notebook_edit|str_replace_editor)$/i;
+
 function isReadTool(name: string): boolean {
   return READ_TOOL_PATTERN.test(name);
+}
+
+function isWriteTool(name: string): boolean {
+  return WRITE_TOOL_PATTERN.test(name);
 }
 
 /**
@@ -51,11 +64,13 @@ function normalizePath(p: string): string {
 export interface ReadBudgetStats {
   capExceededHits: number;
   trackedPaths: number;
+  writeInvalidations: number;
 }
 
 export class ReadPathBudget {
   private counts = new Map<string, number>();
   private capExceededHits = 0;
+  private writeInvalidations = 0;
   constructor(private readonly cap: number) {}
 
   /** Returns null if under cap (caller passes through); stub string if over. */
@@ -71,14 +86,48 @@ export class ReadPathBudget {
     return null;
   }
 
+  /**
+   * Reset every read counter pointing at `path` (across all toolName keys).
+   * Called after a successful write/edit so the agent can re-read the
+   * post-write content without immediately tripping the cap. Without this,
+   * external rewriters (lint-staged biome, formatters) that mutate the file
+   * between agent edits leave the read-counter "primed" and block recovery
+   * reads. Evidence: session 1f29e238a816, cost-leak-tui-helpers.ts edits
+   * → biome reformatted → next read hit cap → agent could not refresh.
+   */
+  public notifyWrite(path: string): void {
+    if (this.cap <= 0) return;
+    const normalized = normalizePath(path);
+    let removed = 0;
+    for (const key of Array.from(this.counts.keys())) {
+      // Key shape: `${toolName}::${normalizedPath}` — strip the prefix and
+      // compare the path portion. Read-tool name varies (read_file,
+      // mcp__filesystem__read_text_file, etc.) so we can't pre-compute the
+      // key.
+      const sepIdx = key.indexOf("::");
+      if (sepIdx === -1) continue;
+      const keyPath = key.slice(sepIdx + 2);
+      if (keyPath === normalized) {
+        this.counts.delete(key);
+        removed += 1;
+      }
+    }
+    if (removed > 0) this.writeInvalidations += removed;
+  }
+
   public getStats(): ReadBudgetStats {
-    return { capExceededHits: this.capExceededHits, trackedPaths: this.counts.size };
+    return {
+      capExceededHits: this.capExceededHits,
+      trackedPaths: this.counts.size,
+      writeInvalidations: this.writeInvalidations,
+    };
   }
 
   /** Test-only. */
   public clear(): void {
     this.counts.clear();
     this.capExceededHits = 0;
+    this.writeInvalidations = 0;
   }
 }
 
@@ -91,8 +140,14 @@ export function getReadPathBudgetCap(): number {
 }
 
 /**
- * Wrap a ToolSet so read-tool execute() calls are short-circuited once a
- * per-path cap is exceeded. Non-read tools pass through unchanged. Stub
+ * Wrap a ToolSet so:
+ *   - read-tool execute() calls are short-circuited once a per-path cap is
+ *     exceeded
+ *   - write/edit-tool execute() calls invalidate the read counter for the
+ *     same path AFTER a successful invocation, so the agent can refresh its
+ *     view of post-write content without tripping the cap
+ *
+ * Tools that are neither read nor write pass through unchanged. Stub
  * matches the format the LLM already sees from cross-turn dedup so the
  * model interprets it consistently.
  */
@@ -100,7 +155,9 @@ export function wrapToolSetWithReadBudget(tools: ToolSet, budget: ReadPathBudget
   if (!budget) return tools;
   const wrapped: ToolSet = {};
   for (const [name, tool] of Object.entries(tools)) {
-    if (!isReadTool(name)) {
+    const reading = isReadTool(name);
+    const writing = isWriteTool(name);
+    if (!reading && !writing) {
       wrapped[name] = tool;
       continue;
     }
@@ -110,19 +167,36 @@ export function wrapToolSetWithReadBudget(tools: ToolSet, budget: ReadPathBudget
       wrapped[name] = tool;
       continue;
     }
-    wrapped[name] = {
-      ...(tool as object),
-      execute: async (input: unknown, ctx?: unknown) => {
-        const path = extractPath(input);
-        if (path) {
-          const stub = budget.checkAndIncrement(name, path);
-          if (stub !== null) return stub;
-        }
-        return innerExecute(input, ctx);
-      },
-    } as ToolSet[string];
+    if (reading) {
+      wrapped[name] = {
+        ...(tool as object),
+        execute: async (input: unknown, ctx?: unknown) => {
+          const path = extractPath(input);
+          if (path) {
+            const stub = budget.checkAndIncrement(name, path);
+            if (stub !== null) return stub;
+          }
+          return innerExecute(input, ctx);
+        },
+      } as ToolSet[string];
+    } else {
+      wrapped[name] = {
+        ...(tool as object),
+        execute: async (input: unknown, ctx?: unknown) => {
+          const path = extractPath(input);
+          const result = await innerExecute(input, ctx);
+          // Only invalidate on apparent success — i.e. the wrapped tool did
+          // not throw. We can't easily inspect the result shape (tools return
+          // formatted strings here, not structured objects) so we trust that
+          // a non-throwing call wrote something. False positives are cheap
+          // (a free re-read), false negatives are not (the bug we're fixing).
+          if (path) budget.notifyWrite(path);
+          return result;
+        },
+      } as ToolSet[string];
+    }
   }
   return wrapped;
 }
 
-export const _internals = { isReadTool, extractPath, normalizePath };
+export const _internals = { isReadTool, isWriteTool, extractPath, normalizePath };
