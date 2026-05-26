@@ -22,7 +22,8 @@
     }
   },
   "bin": {
-    "muonroi-cli": "dist/src/index.js"
+    "muonroi-cli": "dist/src/index.js",
+    "mu": "dist/src/index.js"
   },
   "scripts": {
     "dev": "node scripts/sync-version.cjs && bun run src/index.ts",
