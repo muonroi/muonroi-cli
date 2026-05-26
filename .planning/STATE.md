@@ -1,6 +1,12 @@
 # Project State — muonroi-cli
 
-**Last updated:** 2026-05-25 (Phase 4 CLOSED — 5-baseline re-run verified all G1-G5)
+**Last updated:** 2026-05-25 (Phase 5 OPENED — F4/F5/F6/F7 scope defined; Phase 4 closed)
+
+**Phase 5 status: 🟡 OPEN.** Scope: F4 (PIL discovery module-suggestion fix),
+F5 (EE IRRELEVANT noise reduction), F6 (agent halt "tiếp tục" bug — NEW,
+HIGHEST PRIORITY), F7 (TUI collapse UX — NEW). See
+`.planning/phases/05-post-phase4-cleanup-and-ux/05-CONTEXT.md`. Awaiting
+plan-phase to drill F6 root cause via stopWhen telemetry.
 
 **Phase 4 status: ✅ COMPLETE.** Final 5-baseline re-run (sessions `348b4006e74c`, `5b7935e07f37`, `f904feb2971d`, `91b134d50c77`, `9f55731759a0`):
 - G1-Cost $0.0800 ≤ $0.30 ✅

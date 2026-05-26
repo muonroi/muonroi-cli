@@ -1,5 +1,22 @@
 # Roadmap — muonroi-cli
 
+## Phase 5: Post-Phase-4 Cleanup + UX Bugs — 🟡 OPEN (2026-05-25)
+
+**Goal:** Close 4 deferred/new items surfaced by Phase 4 closure: PIL discovery
+fix (F4), EE noise reduction (F5), agent halt bug (F6, NEW — highest priority),
+TUI collapse UX (F7, NEW). See `.planning/phases/05-post-phase4-cleanup-and-ux/05-CONTEXT.md`.
+
+**Highest priority:** F6 — across all 5 Phase-4-verification sessions, agent
+emits only partial intro then stops. User must type "tiếp tục" to get the
+actual answer. Directly contradicts the kim chỉ nam (zero wasted tokens).
+
+Implementation order:
+- Wave 1 (parallel): F4 (~1-2h), F5 (~30min), F7 (~30min)
+- Wave 2: F6 — needs root-cause investigation (stopWhen telemetry + 5-baseline
+  re-run with instrumentation)
+
+---
+
 ## Phase 4: Scope Discipline for Cheap Models — ✅ COMPLETE (2026-05-25)
 
 **Final verification (5-prompt baseline re-run with all fixes deployed):**
