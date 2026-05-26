@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Checkout muonroi-cli
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: muonroi-cli
 
       - name: Checkout muonroi-building-block
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: muonroi/muonroi-building-block
           path: muonroi-building-block
@@ -37,7 +37,7 @@ jobs:
 
       # Templates are public NuGet template repos; skip if not available in CI
       - name: Checkout BaseTemplate (optional)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: muonroi/Muonroi.BaseTemplate
           path: Muonroi.BaseTemplate
@@ -45,7 +45,7 @@ jobs:
         continue-on-error: true
 
       - name: Checkout Modular.Template (optional)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: muonroi/Muonroi.Modular.Template
           path: Muonroi.Modular.Template
@@ -53,7 +53,7 @@ jobs:
         continue-on-error: true
 
       - name: Checkout Microservices.Template (optional)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: muonroi/Muonroi.Microservices.Template
           path: Muonroi.Microservices.Template
