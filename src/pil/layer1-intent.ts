@@ -182,6 +182,61 @@ const REASON_TO_TASK_TYPE: Partial<Record<string, TaskType>> = {
   "low-confidence": undefined,
 };
 
+/**
+ * Pass 0 — deterministic full-prompt overrides.
+ *
+ * Two narrow regexes that run BEFORE the local classifier and the LLM bridge.
+ * Each must match the ENTIRE trimmed prompt (anchored ^…$) so they never
+ * accidentally swallow embedded substrings like "ok let's refactor X".
+ *
+ * Rationale (Phase 5 BUG-B + BUG-D, evidenced by sha8-tagged pil rows):
+ *  - "tiếp tục nhé" (12 chars, 3 words) bypassed Pass 2.5 hot-path chitchat
+ *    short-circuit (<10 chars, ≤2 words gate) → fell into Pass 3 LLM bridge,
+ *    which non-deterministically classified the same input as
+ *    general/chitchat one turn and generate/task the next (session
+ *    fc19b4daee20 seq 22 vs 24). Continuation phrases never carry a task —
+ *    pin them to general/chitchat deterministically.
+ *  - "optimize startup performance" classified as analyze (session
+ *    9c63a38197f3) once and generate (session 1bc27b79223c) the next time
+ *    by the LLM bridge. Pass 2 keyword fallback had no pattern for
+ *    optimization verbs, so the only signal was the LLM bridge — which
+ *    drifted. The correct label is refactor (restructure existing code
+ *    for performance). Pin it deterministically.
+ *
+ * When either pattern hits we short-circuit the whole layer1Intent flow
+ * by setting `passes0Hit` and skipping Pass 1-4 entirely. This eliminates
+ * the LLM round-trip cost on these high-frequency patterns and removes
+ * the nondeterminism source.
+ */
+const CONTINUATION_FULL_RE =
+  /^\s*(tiếp tục|tiep tuc|tiếp|tiep|continue|go on|keep going|proceed|next|carry on|được rồi|duoc roi|được|duoc|ok|okay|oke|yes|yeah|yep)(\s+(nhé|nha|nhe|please|then|now|đi|di))?\s*[.!?]?\s*$/i;
+
+const PERF_REFACTOR_RE =
+  /\b(optimi[zs]e|optimi[zs]ation|speed\s*up|make\s+.+?\s+faster|run\s+faster|load\s+faster|throughput|latency|tối\s*ưu|toi\s*uu|tăng\s*tốc|tang\s*toc)\b/i;
+
+/** Detect optimization-verb prompts where refactor is the correct taskType. */
+export function isPerformanceRefactor(raw: string): boolean {
+  const t = raw.trim();
+  if (!t) return false;
+  if (!PERF_REFACTOR_RE.test(t)) return false;
+  // Guard: if the prompt explicitly asks to ADD a new test/feature/file
+  // about performance, defer to the LLM bridge — those are 'generate'.
+  if (/\b(add|create|write|generate|scaffold|implement|tạo|tao|viết|viet|sinh|thêm|them)\b/i.test(t)) return false;
+  // Guard: explicit analyze verbs override (we want analyze, not refactor).
+  if (
+    /\b(explain|describe|why|how does|analy[sz]e|review|investigate|tại sao|tai sao|giải thích|giai thich)\b/i.test(t)
+  )
+    return false;
+  return true;
+}
+
+/** Detect short continuation prompts ("tiếp tục", "ok", "continue", …). */
+export function isContinuationPhrase(raw: string): boolean {
+  const t = raw.trim();
+  if (!t || t.length > 40) return false;
+  return CONTINUATION_FULL_RE.test(t);
+}
+
 // Keyword patterns for task types the classifier doesn't natively handle.
 // Applied when classifier abstains OR matches the low-signal "general" path.
 // Patterns are bilingual (EN + VN) — Vietnamese cues use accent-insensitive
@@ -301,6 +356,109 @@ export interface Layer1Options {
 
 export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {}): Promise<PipelineContext> {
   try {
+    // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
+    // Two narrow patterns short-circuit the whole pipeline:
+    //  - continuation phrase → general/chitchat
+    //  - performance/optimization verbs → refactor/task
+    // Both eliminate LLM-bridge nondeterminism on inputs whose correct
+    // label is unambiguous from the prompt alone.
+    if (isContinuationPhrase(ctx.raw)) {
+      const { complexity, score: complexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: "general",
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      const intentTrace: IntentDetectionTrace = {
+        pass1Reason: "pass0:continuation",
+        pass1Confidence: 0.9,
+        pass1TaskType: "general",
+        pass1Hit: true,
+        pass2Hit: false,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: "chitchat-default",
+        finalTaskType: "general",
+        finalConfidence: 0.9,
+        complexity,
+        complexityScore,
+      };
+      return {
+        ...ctx,
+        taskType: "general",
+        domain: null,
+        confidence: 0.9,
+        outputStyle: "concise",
+        intentKind: "chitchat",
+        _brainData: null,
+        _intentTrace: intentTrace,
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: true,
+            delta: "taskType=general,kind=chitchat,conf=0.90,domain=none,style=concise,pass0=continuation",
+          },
+        ],
+      };
+    }
+    if (isPerformanceRefactor(ctx.raw)) {
+      const domainPass0 = extractDomain("", ctx.raw);
+      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
+      const { complexity, score: complexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: "refactor",
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      const intentTrace: IntentDetectionTrace = {
+        pass1Reason: "pass0:performance",
+        pass1Confidence: 0.85,
+        pass1TaskType: "refactor",
+        pass1Hit: true,
+        pass2Hit: false,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
+        finalTaskType: "refactor",
+        finalConfidence: 0.85,
+        complexity,
+        complexityScore,
+      };
+      return {
+        ...ctx,
+        taskType: "refactor",
+        domain: domainPass0,
+        confidence: 0.85,
+        outputStyle: styleFromText,
+        intentKind: "task",
+        _brainData: null,
+        _intentTrace: intentTrace,
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: true,
+            delta: `taskType=refactor,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=performance`,
+          },
+        ],
+      };
+    }
+
     // Pass 1: local classifier.
     const result = classify(ctx.raw);
     const pass1TaskType: TaskType | null = REASON_TO_TASK_TYPE[result.reason] ?? null;

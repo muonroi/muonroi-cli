@@ -265,6 +265,90 @@ describe("layer1Intent", () => {
     });
   });
 
+  describe("Pass 0 — deterministic overrides (BUG-B + BUG-D)", () => {
+    const continuationCases = [
+      "tiếp tục",
+      "tiếp tục nhé",
+      "tiếp",
+      "continue",
+      "go on",
+      "keep going",
+      "ok",
+      "okay",
+      "được rồi",
+      "duoc roi",
+      "yes",
+      "yeah",
+    ];
+
+    for (const phrase of continuationCases) {
+      it(`Pass 0 continuation '${phrase}' → general/chitchat, skips classifier`, async () => {
+        const result = await layer1Intent(makeCtx(phrase));
+        expect(result.taskType).toBe("general");
+        expect(result.intentKind).toBe("chitchat");
+        expect(result.confidence).toBe(0.9);
+        expect(result.outputStyle).toBe("concise");
+        expect(mockedClassify).not.toHaveBeenCalled();
+        expect(mockedClassifyViaBrain).not.toHaveBeenCalled();
+        const trace = result._intentTrace;
+        expect(trace?.pass1Reason).toBe("pass0:continuation");
+      });
+    }
+
+    it("Pass 0 continuation does NOT swallow embedded substrings", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      const result = await layer1Intent(makeCtx("ok let's refactor this function"));
+      expect(mockedClassify).toHaveBeenCalled();
+      expect(result.taskType).not.toBe("general");
+    });
+
+    const performanceCases = [
+      "optimize startup performance",
+      "optimise the bundle",
+      "speed up the build",
+      "make the tests run faster",
+      "tối ưu thời gian load",
+      "tăng tốc quá trình init",
+      "reduce latency",
+      "improve throughput",
+    ];
+
+    for (const phrase of performanceCases) {
+      it(`Pass 0 performance '${phrase}' → refactor/task, skips classifier`, async () => {
+        const result = await layer1Intent(makeCtx(phrase));
+        expect(result.taskType).toBe("refactor");
+        expect(result.intentKind).toBe("task");
+        expect(result.confidence).toBe(0.85);
+        expect(mockedClassify).not.toHaveBeenCalled();
+        expect(mockedClassifyViaBrain).not.toHaveBeenCalled();
+        const trace = result._intentTrace;
+        expect(trace?.pass1Reason).toBe("pass0:performance");
+      });
+    }
+
+    it("Pass 0 performance defers to bridge when prompt asks to ADD new code", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("generate,balanced");
+      // Avoid the word "test" — Pass 2 keyword `analyze` rule fires on "test"
+      // before the brain is consulted. The point of this test is to verify
+      // Pass 0's `add` guard defers control back to the cascade, regardless
+      // of which subsequent pass decides.
+      const result = await layer1Intent(makeCtx("add a benchmark for the optimize() helper"));
+      expect(mockedClassify).toHaveBeenCalled();
+      // Pass 2 keyword "generate" rule matches `\bgenerate|scaffold|bootstrap\b`.
+      // We just verify Pass 0 did NOT pin refactor.
+      expect(result.taskType).not.toBe("refactor");
+    });
+
+    it("Pass 0 performance defers to bridge when prompt asks to explain/analyze", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("analyze,balanced");
+      const result = await layer1Intent(makeCtx("explain why optimize() is slow"));
+      expect(mockedClassify).toHaveBeenCalled();
+      expect(result.taskType).toBe("analyze");
+    });
+  });
+
   it("fails open on error — returns ctx unchanged with applied=false", async () => {
     mockedClassify.mockImplementation(() => {
       throw new Error("classifier crashed");
