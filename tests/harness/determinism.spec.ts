@@ -113,18 +113,26 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
           if (inputSent) {
             const frame = msg as unknown as LiveFrame;
             frames.push(frame);
-            // Settle as soon as we observe the post-input steady state
-            // (msg-0 = "user:hello" appears in the log). This drains
-            // startup-time variance: instead of a fixed 1500ms window
-            // that sometimes catches the response and sometimes doesn't,
-            // we wait until the deterministic outcome is observed.
+            // Settle when both messages are present:
+            //   msg-0 = "user:hello" (user echo)
+            //   msg-1 = assistant response from the mock model
+            // Previously the test settled 200ms after msg-0 appeared, which
+            // captured msg-1 on fast machines and missed it on slow ones —
+            // producing non-deterministic snapshots between runs even though
+            // the eventual steady state is the same. Waiting for msg-1
+            // explicitly drains the variance.
+            // Falls back to settling on msg-0 alone if the safety timer
+            // fires (e.g. mock-model never replied).
             const nodes =
               (frame as unknown as { nodes?: Array<{ id?: string; children?: Array<{ id?: string }> }> }).nodes ?? [];
             const log = nodes.find((n) => n.id === "log");
-            const hasMsg = log?.children?.some((c) => c.id === "msg-0") ?? false;
-            if (hasMsg) {
+            const children = log?.children ?? [];
+            const hasMsg0 = children.some((c) => c.id === "msg-0");
+            const hasMsg1 = children.some((c) => c.id === "msg-1");
+            if (hasMsg0 && hasMsg1) {
               clearTimeout(safetyTimer);
-              // Grace period for any trailing frames to flush, then settle.
+              // Short grace for trailing frames to flush after the steady
+              // state is reached.
               setTimeout(settle, 200);
             }
           }
