@@ -111,6 +111,16 @@ export async function spawnCostLeakHarness(
     env: {
       MUONROI_MOCK_MODEL_DUMP: dumpPath,
       MUONROI_NO_SHELL_HOLD: "1",
+      // Cost-leak specs verify provider-layer behaviour (param drops, cache
+      // keys, message compaction). They do NOT exercise PIL discovery, but
+      // discovery WILL fire interview askcards for the synthetic test prompts
+      // (e.g. "please dispatch a sub-agent...") and block streamText until
+      // the test answers — which it never does, producing a dump file with
+      // zero recorded calls and the cryptic "expected 0 to be greater than
+      // or equal to 3" failure seen in CI runs 26431673369 / 26431994835.
+      // Disabling discovery is the surgical fix: the specs need streamText
+      // round-trips, not gap-elicitation UX.
+      MUONROI_PIL_DISCOVERY: "0",
     },
   });
 
