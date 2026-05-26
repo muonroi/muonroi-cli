@@ -99,3 +99,181 @@ describe("scoreComplexitySize — output shape", () => {
     expect(a.features).toBeDefined();
   });
 });
+
+describe("scoreComplexitySize — null/undefined defaults", () => {
+  it("missing rawText defaults to empty string", () => {
+    const r = scoreComplexitySize({} as any);
+    expect(r.size).toBe("small");
+    expect(r.features.len).toBe(0);
+  });
+
+  it("missing taskType defaults to 'general'", () => {
+    const r = scoreComplexitySize({ rawText: "some text", taskType: undefined } as any);
+    expect(r.size).toBe("small");
+  });
+});
+
+describe("scoreComplexitySize — path score edges", () => {
+  it("pathCount === 2 gives neutral pathScore 0", () => {
+    const r = scoreComplexitySize({
+      rawText: "update foo.ts and bar.py",
+      taskType: "generate",
+    });
+    expect(r.features.pathCount).toBe(2);
+    expect(r.features.pathScore).toBe(0);
+  });
+
+  it("pathCount === 0 gives neutral pathScore 0 when no sweep word", () => {
+    const r = scoreComplexitySize({
+      rawText: "fix typo",
+      taskType: "general",
+    });
+    expect(r.features.pathCount).toBe(0);
+    expect(r.features.pathScore).toBe(0);
+  });
+
+  it("pathCount >= 3 gives pathScore 2", () => {
+    const r = scoreComplexitySize({
+      rawText: "fix src/a.ts, src/b.ts, src/c.ts",
+      taskType: "generate",
+    });
+    expect(r.features.pathCount).toBe(3);
+    expect(r.features.pathScore).toBe(2);
+  });
+
+  it("countDistinctPaths deduplicates case-insensitive matches", () => {
+    const r = scoreComplexitySize({
+      rawText: "update SRC/a.ts AND src/A.ts",
+      taskType: "generate",
+    });
+    expect(r.features.pathCount).toBe(1);
+  });
+
+  it("non-code extensions are not counted as path tokens", () => {
+    const r = scoreComplexitySize({
+      rawText: "check file.txt and photo.jpg",
+      taskType: "general",
+    });
+    expect(r.features.pathCount).toBe(0);
+  });
+});
+
+describe("scoreComplexitySize — vagueness amplifier", () => {
+  it("sweep word with zero path anchors → amplifier 4", () => {
+    const r = scoreComplexitySize({
+      rawText: "improve things around here",
+      taskType: "general",
+    });
+    expect(r.features.sweepCount).toBeGreaterThan(0);
+    expect(r.features.pathCount).toBe(0);
+    expect(r.features.vaguenessAmplifier).toBe(4);
+  });
+
+  it("sweep word with at least one path anchor → amplifier 0", () => {
+    const r = scoreComplexitySize({
+      rawText: "improve test coverage in src/pil/",
+      taskType: "general",
+    });
+    expect(r.features.sweepCount).toBeGreaterThan(0);
+    expect(r.features.pathCount).toBeGreaterThanOrEqual(1);
+    expect(r.features.vaguenessAmplifier).toBe(0);
+  });
+});
+
+describe("scoreComplexitySize — length thresholds", () => {
+  it("exactly 80 chars → lenScore 0 (not small)", () => {
+    const r = scoreComplexitySize({ rawText: "a".repeat(80), taskType: "general" });
+    expect(r.features.lenScore).toBe(0);
+    expect(r.features.len).toBe(80);
+  });
+
+  it("exactly 241 chars → lenScore 2", () => {
+    const r = scoreComplexitySize({ rawText: "a".repeat(241), taskType: "general" });
+    expect(r.features.lenScore).toBe(2);
+    expect(r.features.len).toBe(241);
+  });
+
+  it("79 chars → lenScore -2", () => {
+    const r = scoreComplexitySize({ rawText: "a".repeat(79), taskType: "general" });
+    expect(r.features.lenScore).toBe(-2);
+  });
+});
+
+describe("scoreComplexitySize — size bucket boundaries", () => {
+  it("score <= -1 → small", () => {
+    const r = scoreComplexitySize({ rawText: "hi", taskType: "general" });
+    // len=-2, pathScore=-1 (1 path match 'hi'? no — no path), score = -2
+    expect(r.score).toBeLessThanOrEqual(-1);
+    expect(r.size).toBe("small");
+  });
+
+  it("score 0..3 → medium", () => {
+    // 80 chars → lenScore 0, 1 file path → pathScore -1, no sweep → score = -1 + 0 = -1? Too low.
+    // Instead: no sweep, no path, exactly 80 chars → score = 0 → medium
+    const r = scoreComplexitySize({
+      rawText: "b".repeat(80),
+      taskType: "general",
+    });
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThanOrEqual(3);
+    expect(r.size).toBe("medium");
+  });
+
+  it("score >= 4 → large", () => {
+    // vagueness amplifier 4 + sweep +2 => score >= 4
+    const r = scoreComplexitySize({
+      rawText: "improve everything all across the entire codebase",
+      taskType: "general",
+    });
+    expect(r.score).toBeGreaterThanOrEqual(4);
+    expect(r.size).toBe("large");
+  });
+});
+
+describe("scoreComplexitySize — imperative detection", () => {
+  it("imperative start verb is flagged", () => {
+    const r = scoreComplexitySize({
+      rawText: "add a new endpoint for user profile",
+      taskType: "generate",
+    });
+    expect(r.features.isImperative).toBe(true);
+  });
+
+  it("non-imperative start is not flagged", () => {
+    const r = scoreComplexitySize({
+      rawText: "the system should have an endpoint",
+      taskType: "analyze",
+    });
+    expect(r.features.isImperative).toBe(false);
+  });
+});
+
+describe("scoreComplexitySize — stack trace (non-debug)", () => {
+  it("non-debug task with stack trace does NOT get mitigation", () => {
+    const stackTrace = Array.from({ length: 50 }, (_, i) => `    at fn${i} (foo.ts:${i}:10)`).join("\n");
+    const rawText = `Error:\n${stackTrace}`;
+    const r = scoreComplexitySize({ rawText, taskType: "generate" });
+    // Without mitigation len > 240 => lenScore 2
+    expect(r.features.lenScore).toBe(2);
+  });
+});
+
+describe("scoreComplexitySize — debug without stack trace", () => {
+  it("debug prompt without stack trace does not get mitigation (len is normal)", () => {
+    const r = scoreComplexitySize({ rawText: "why is this slow", taskType: "debug" });
+    expect(r.features.len).toBe("why is this slow".length);
+    expect(r.size).toBe("small");
+  });
+});
+
+describe("scoreComplexitySize — heavy score composition", () => {
+  it("refactor + sweep + 3+ paths → large", () => {
+    const r = scoreComplexitySize({
+      rawText: "refactor all the things in src/a.ts, src/b.ts, src/c.ts, src/d.ts",
+      taskType: "refactor",
+    });
+    expect(r.features.heavyScore).toBe(2);
+    expect(r.features.pathCount).toBeGreaterThanOrEqual(3);
+    expect(r.size).toBe("large");
+  });
+});
