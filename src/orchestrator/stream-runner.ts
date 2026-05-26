@@ -69,13 +69,14 @@ import {
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
+import { repairToolCallHook } from "./repair-tool-call.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import { incSessionStep, resolveCeiling } from "./scope-ceiling.js";
 import {
   attachReminderToMessages,
   buildScopeReminder,
-  cadenceForSize,
   type ComplexitySize,
+  cadenceForSize,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
@@ -501,6 +502,11 @@ export class StreamRunner {
       stopWhen: _subStopWhen ?? stepCountIs(maxSteps),
       maxRetries: 0,
       abortSignal: signal,
+      // Repair malformed tool-call JSON args — same wiring as the top-level
+      // loop in message-processor.ts. Without this, sub-agents on models
+      // with broken tool-arg emission (Qwen3-30B-Instruct observed) loop on
+      // tool-error until the repetition detector aborts the whole run.
+      experimental_repairToolCall: repairToolCallHook,
       prepareStep: ({ messages, stepNumber }) => {
         if (stepNumber < 1) return undefined;
         // SiliconFlow internal multi-step loop: AI-SDK accumulates streamed
