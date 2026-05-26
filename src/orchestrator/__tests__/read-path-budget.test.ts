@@ -38,6 +38,42 @@ describe("ReadPathBudget", () => {
       expect(b.checkAndIncrement("read_file", "/a")).toBeNull();
     }
   });
+
+  it("notifyWrite resets counters for the same path across all tool names", () => {
+    const b = new ReadPathBudget(1);
+    expect(b.checkAndIncrement("read_file", "/a.ts")).toBeNull();
+    expect(b.checkAndIncrement("mcp__filesystem__read_text_file", "/a.ts")).toBeNull();
+    // Both tools are now at cap for /a.ts
+    expect(b.checkAndIncrement("read_file", "/a.ts")).not.toBeNull();
+    // Simulate a write to /a.ts — both counters must reset.
+    b.notifyWrite("/a.ts");
+    expect(b.checkAndIncrement("read_file", "/a.ts")).toBeNull();
+    expect(b.checkAndIncrement("mcp__filesystem__read_text_file", "/a.ts")).toBeNull();
+    expect(b.getStats().writeInvalidations).toBe(2);
+  });
+
+  it("notifyWrite normalizes path case + slashes", () => {
+    const b = new ReadPathBudget(1);
+    expect(b.checkAndIncrement("read_file", "C:\\Foo\\Bar.ts")).toBeNull();
+    expect(b.checkAndIncrement("read_file", "C:\\Foo\\Bar.ts")).not.toBeNull();
+    b.notifyWrite("c:/foo/bar.ts");
+    expect(b.checkAndIncrement("read_file", "C:\\Foo\\Bar.ts")).toBeNull();
+  });
+
+  it("notifyWrite does not touch counters for other paths", () => {
+    const b = new ReadPathBudget(1);
+    b.checkAndIncrement("read_file", "/a.ts");
+    b.checkAndIncrement("read_file", "/b.ts");
+    b.notifyWrite("/a.ts");
+    expect(b.checkAndIncrement("read_file", "/a.ts")).toBeNull(); // reset
+    expect(b.checkAndIncrement("read_file", "/b.ts")).not.toBeNull(); // still capped
+  });
+
+  it("notifyWrite is a no-op when cap=0 (budget disabled)", () => {
+    const b = new ReadPathBudget(0);
+    b.notifyWrite("/a.ts"); // should not throw
+    expect(b.getStats().writeInvalidations).toBe(0);
+  });
 });
 
 describe("isReadTool detection", () => {
@@ -94,10 +130,35 @@ describe("wrapToolSetWithReadBudget", () => {
     expect(calls).toEqual(["/x"]); // inner execute only fired once
   });
 
-  it("passes non-read tools through unchanged", () => {
+  it("passes neither-read-nor-write tools through unchanged", () => {
     const tool = makeReadTool(() => "nope");
-    const wrapped = wrapToolSetWithReadBudget({ write_file: tool as never }, new ReadPathBudget(1));
-    expect(wrapped.write_file).toBe(tool as never);
+    const wrapped = wrapToolSetWithReadBudget({ list_directory: tool as never }, new ReadPathBudget(1));
+    expect(wrapped.list_directory).toBe(tool as never);
+  });
+
+  it("wraps write_file/edit_file so post-write read counters reset", async () => {
+    const readCalls: string[] = [];
+    const writeCalls: string[] = [];
+    const readTool = makeReadTool(async (input: unknown) => {
+      const p = (input as { path: string }).path;
+      readCalls.push(p);
+      return `content of ${p}`;
+    });
+    const writeTool = makeReadTool(async (input: unknown) => {
+      const p = (input as { path: string }).path;
+      writeCalls.push(p);
+      return `wrote ${p}`;
+    });
+    const budget = new ReadPathBudget(1);
+    const wrapped = wrapToolSetWithReadBudget({ read_file: readTool as never, edit_file: writeTool as never }, budget);
+    const readExec = (wrapped.read_file as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    const editExec = (wrapped.edit_file as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    expect(await readExec({ path: "/foo.ts" })).toBe("content of /foo.ts");
+    expect(String(await readExec({ path: "/foo.ts" }))).toContain("read budget exceeded");
+    expect(await editExec({ path: "/foo.ts" })).toBe("wrote /foo.ts");
+    expect(await readExec({ path: "/foo.ts" })).toBe("content of /foo.ts");
+    expect(readCalls).toEqual(["/foo.ts", "/foo.ts"]);
+    expect(writeCalls).toEqual(["/foo.ts"]);
   });
 
   it("null budget returns original tool set by reference", () => {
