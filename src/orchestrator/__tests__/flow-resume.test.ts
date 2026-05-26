@@ -22,7 +22,7 @@ async function makeTempDir(prefix: string): Promise<string> {
 
 afterEach(async () => {
   for (const d of tempDirs) {
-    await rm(d, { recursive: true, force: true }).catch(() => {});
+    await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
   }
   tempDirs = [];
 });

@@ -315,7 +315,7 @@ describe("C2: writeDecisionsLock and readDecisionsLock", () => {
   });
 
   afterEach(async () => {
-    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    await fs.promises.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("writes decisions.lock.md and reads it back", async () => {

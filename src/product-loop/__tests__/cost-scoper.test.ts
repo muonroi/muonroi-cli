@@ -16,7 +16,7 @@ describe("cost-scoper", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(TEST_HOME, { recursive: true, force: true });
+    await fs.rm(TEST_HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("issues reservation when both caps are fine", async () => {

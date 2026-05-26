@@ -102,7 +102,7 @@ describe("token-store — file fallback", () => {
 
   afterEach(async () => {
     delete process.env.MUONROI_AUTH_DIR;
-    await rm(tempDir, { recursive: true, force: true });
+    await rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("saves tokens to file when keytar unavailable", async () => {

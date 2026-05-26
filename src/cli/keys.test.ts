@@ -23,7 +23,7 @@ describe("runKeysCleanupSettings", () => {
     else process.env.HOME = originalHome;
     if (originalUserprofile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserprofile;
-    await fs.rm(tmpHome, { recursive: true, force: true });
+    await fs.rm(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.restoreAllMocks();
   });
 

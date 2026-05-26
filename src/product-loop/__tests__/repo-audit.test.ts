@@ -17,7 +17,7 @@ async function makeFixture(layout: Record<string, string>): Promise<string> {
 describe("auditRepo", () => {
   let cwd: string;
   afterEach(async () => {
-    if (cwd) await fs.rm(cwd, { recursive: true, force: true });
+    if (cwd) await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns greenfield mode for empty cwd", async () => {

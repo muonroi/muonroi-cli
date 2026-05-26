@@ -33,7 +33,7 @@ describe("buildRepoBrief", () => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-repo-brief-"));
   });
   afterEach(() => {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("includes package.json name, scripts, deps when present", async () => {

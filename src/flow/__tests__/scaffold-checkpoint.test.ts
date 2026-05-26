@@ -19,7 +19,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  await fs.rm(cwd, { recursive: true, force: true });
+  await fs.rm(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 const baseInputs: ScaffoldCheckpoint["inputs"] = {
@@ -108,6 +108,6 @@ describe("scaffold-checkpoint", () => {
   it("listResumable returns empty array when flow dir missing", async () => {
     const empty = await fs.mkdtemp(path.join(os.tmpdir(), "muonroi-empty-"));
     expect(await listResumableScaffoldCheckpoints(empty)).toEqual([]);
-    await fs.rm(empty, { recursive: true, force: true });
+    await fs.rm(empty, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 });

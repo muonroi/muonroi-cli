@@ -29,7 +29,7 @@ describe("/discuss slash command", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("creates a new run when no active run and args provided", async () => {

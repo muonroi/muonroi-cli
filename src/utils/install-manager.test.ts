@@ -16,7 +16,7 @@ import {
 let tempDirs: string[] = [];
 
 afterEach(() => {
-  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true });
+  for (const dir of tempDirs) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   tempDirs = [];
 });
 

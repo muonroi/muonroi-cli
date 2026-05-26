@@ -24,7 +24,7 @@ let origUserProfile: string | undefined;
 function cleanDb() {
   if (tmpHome) {
     try {
-      rmSync(tmpHome, { recursive: true, force: true });
+      rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch {
       /* ok */
     }

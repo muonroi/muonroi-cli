@@ -48,7 +48,7 @@ async function importDelegationsModule(options: { home?: string; spawnMock?: Ret
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
   vi.restoreAllMocks();
   vi.resetModules();

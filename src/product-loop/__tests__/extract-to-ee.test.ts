@@ -57,7 +57,7 @@ describe("composeRunTranscript", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(flowDir, { recursive: true, force: true });
+    await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns all 4 sections in order when all files are present", async () => {
@@ -135,7 +135,7 @@ describe("extractRunToEE", () => {
   });
 
   afterEach(async () => {
-    await fs.rm(flowDir, { recursive: true, force: true });
+    await fs.rm(flowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns ok=true with mistakes/stored and calls extract with correct meta", async () => {
