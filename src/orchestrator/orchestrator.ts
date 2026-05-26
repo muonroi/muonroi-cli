@@ -31,7 +31,7 @@ import {
   requireRuntimeProvider,
   resolveModelRuntime as resolveRuntime,
 } from "../providers/runtime.js";
-import type { ProviderId } from "../providers/types.js";
+import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
 import {
   appendCompaction,
   appendMessages,
@@ -149,6 +149,19 @@ import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
  */
 function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string): LegacyProvider {
   return createProviderFactory(providerId, { apiKey, baseURL }).factory;
+}
+
+/**
+ * True iff `url` equals the default apiBase of ANY registered provider.
+ * Used to detect stale carryover of one provider's default URL into another
+ * provider's factory after a /model switch (see setModel + setApiKey).
+ */
+function isAnyProviderApiBase(url: string | null | undefined): boolean {
+  if (!url) return false;
+  for (const id of ALL_PROVIDER_IDS) {
+    if (url === apiBaseFor(id)) return true;
+  }
+  return false;
 }
 
 /**
@@ -434,10 +447,21 @@ export class Agent {
     if (newProviderId !== this.providerId && this.apiKey) {
       this.providerId = newProviderId;
       setProviderHint(this.providerId);
-      const effectiveBaseURL =
-        this.providerId !== "anthropic" && this.baseURL === apiBaseFor("anthropic")
-          ? undefined
-          : (this.baseURL ?? undefined);
+      // Drop this.baseURL when it points at a DIFFERENT provider's default
+      // apiBase — otherwise the rebuilt factory binds the new provider's
+      // strategy to the OLD provider's URL, sending requests to the wrong
+      // host. Evidence: session 2492d6579b1d — user switched defaultProvider
+      // siliconflow→ (via UI), this.baseURL was still api.deepseek.com from
+      // startup, SiliconflowStrategy.createFactory was created with that
+      // baseURL, requests landed at api.deepseek.com which rejected the SF-
+      // style model id ("deepseek-ai/DeepSeek-V4-Flash") with "supported API
+      // model names are deepseek-v4-pro or deepseek-v4-flash".
+      // A user-supplied custom baseURL is preserved only when it does NOT
+      // match any known provider's apiBase (i.e. it's a real override, not
+      // a stale default).
+      const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
+      const effectiveBaseURL = staleBaseURL ? undefined : (this.baseURL ?? undefined);
+      if (staleBaseURL) this.baseURL = null;
       this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
     }
     if (this.sessionStore && this.session) {
@@ -495,11 +519,14 @@ export class Agent {
 
   setApiKey(apiKey: string, baseURL?: string): void {
     this.apiKey = apiKey;
-    this.baseURL = baseURL || null;
-    // Only pass baseURL to provider factory if it's an explicit override,
-    // not the default Anthropic URL (which would break non-Anthropic providers).
-    const effectiveBaseURL =
-      this.providerId !== "anthropic" && baseURL === apiBaseFor("anthropic") ? undefined : baseURL;
+    // Drop baseURL when it points at a DIFFERENT provider's default apiBase
+    // (e.g. caller passed the legacy anthropic URL while providerId is
+    // siliconflow — without this we'd send siliconflow requests to
+    // api.anthropic.com or similar). User-supplied custom URLs that don't
+    // match any known provider's apiBase are preserved as real overrides.
+    const stale = isAnyProviderApiBase(baseURL) && baseURL !== apiBaseFor(this.providerId);
+    const effectiveBaseURL = stale ? undefined : baseURL;
+    this.baseURL = stale ? null : baseURL || null;
     this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
   }
 
