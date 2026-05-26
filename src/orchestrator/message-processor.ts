@@ -1409,9 +1409,10 @@ export class MessageProcessor {
               providerOptions: providerOpts,
             });
           }
-          // SiliconFlow DeepSeek thinking-mode reasoning_content workaround
-          // (see siliconflow-history.ts). Sub-agent path applies the same strip
-          // via the capability hook; identity for every other provider.
+          // sanitizeHistory is identity for every provider (kept as a hook
+          // for future provider-specific quirks). Reasoning round-trips
+          // natively via @ai-sdk/openai-compatible — see
+          // src/providers/__tests__/reasoning-roundtrip.test.ts.
           const _topMessagesForCall = turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages;
           // Closure-mutable cap for the tool-loop askcard rescue.
           // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).

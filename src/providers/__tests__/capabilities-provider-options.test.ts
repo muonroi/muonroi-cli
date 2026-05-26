@@ -192,44 +192,32 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
     }
   });
 
-  // RC#1 — DeepSeek/SiliconFlow disable thinking when models have it enabled.
-  // Required because @ai-sdk/openai-compatible can't round-trip reasoning_content
-  // and DeepSeek API rejects tool-using turns without it (HTTP 400 code 20015).
-  describe("DeepSeek / SiliconFlow — RC#1 thinking disable", () => {
-    it("deepseek: emits {deepseek:{thinking:{type:disabled}}} when thinkingType=enabled", () => {
+  // DeepSeek/SiliconFlow no longer override buildProviderOptions.
+  // The previous RC#1 workaround (disable thinking entirely) was removed
+  // after reasoning-roundtrip.test.ts proved that @ai-sdk/openai-compatible
+  // 2.0.42 correctly serializes assistant reasoning parts as
+  // `reasoning_content` on the wire — satisfying the DeepSeek thinking_mode
+  // guide requirement natively.
+  describe("DeepSeek / SiliconFlow — reasoning round-trips natively (no override)", () => {
+    it("deepseek: returns undefined regardless of thinkingType", () => {
       const caps = getProviderCapabilities("deepseek");
-      const model = baseModel({ provider: "deepseek", thinkingType: "enabled" });
-      expect(caps.buildProviderOptions({ model })).toEqual({
-        deepseek: { thinking: { type: "disabled" } },
-      });
-    });
-    it("deepseek: emits {deepseek:{thinking:{type:disabled}}} when thinkingType=adaptive", () => {
-      const caps = getProviderCapabilities("deepseek");
-      const model = baseModel({ provider: "deepseek", thinkingType: "adaptive" });
-      expect(caps.buildProviderOptions({ model })).toEqual({
-        deepseek: { thinking: { type: "disabled" } },
-      });
-    });
-    it("siliconflow: emits {siliconflow:{thinking:{type:disabled}}} when thinkingType=enabled", () => {
-      const caps = getProviderCapabilities("siliconflow");
-      const model = baseModel({ provider: "siliconflow", thinkingType: "enabled" });
-      expect(caps.buildProviderOptions({ model })).toEqual({
-        siliconflow: { thinking: { type: "disabled" } },
-      });
-    });
-    it("deepseek: returns undefined when thinkingType is absent", () => {
-      const caps = getProviderCapabilities("deepseek");
-      const model = baseModel({ provider: "deepseek" });
-      expect(caps.buildProviderOptions({ model })).toBeUndefined();
-    });
-    it("siliconflow: returns undefined when thinkingType is absent", () => {
-      const caps = getProviderCapabilities("siliconflow");
-      const model = baseModel({ provider: "siliconflow" });
-      expect(caps.buildProviderOptions({ model })).toBeUndefined();
-    });
-    it("deepseek: returns undefined when model is undefined", () => {
-      const caps = getProviderCapabilities("deepseek");
+      expect(
+        caps.buildProviderOptions({ model: baseModel({ provider: "deepseek", thinkingType: "enabled" }) }),
+      ).toBeUndefined();
+      expect(
+        caps.buildProviderOptions({ model: baseModel({ provider: "deepseek", thinkingType: "adaptive" }) }),
+      ).toBeUndefined();
+      expect(caps.buildProviderOptions({ model: baseModel({ provider: "deepseek" }) })).toBeUndefined();
       expect(caps.buildProviderOptions({ model: undefined })).toBeUndefined();
+    });
+    it("siliconflow: returns undefined regardless of thinkingType", () => {
+      const caps = getProviderCapabilities("siliconflow");
+      expect(
+        caps.buildProviderOptions({
+          model: baseModel({ provider: "siliconflow", thinkingType: "enabled" }),
+        }),
+      ).toBeUndefined();
+      expect(caps.buildProviderOptions({ model: baseModel({ provider: "siliconflow" }) })).toBeUndefined();
     });
   });
 
