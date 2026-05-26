@@ -131,14 +131,15 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
     expect(msgProc).toContain("override active: ceiling");
   });
 
-  // ---- Assertion 3 (wiring): halted: step ceiling exceeded toast wired ----
-  it("hard halt: 'halted: step ceiling exceeded' toast string wired in orchestrator", () => {
+  // ---- Assertion 3 (wiring): soft-ceiling reminder wired ----
+  it("soft ceiling: 'past natural budget' re-anchor reminder wired in orchestrator", () => {
     const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
-    expect(msgProc).toContain("halted: step ceiling exceeded");
-    // Spec asserts the literal string the toast emits for THIS test's
-    // (task_type=debug, size=small, ceiling=6) configuration:
-    // `halted: step ceiling exceeded for task_type=debug size=small at step 6/6`
-    expect(msgProc).toMatch(/halted: step ceiling exceeded for task_type=\$\{[^}]+\} size=/);
+    // Phase 5 Fix 5 — the Phase 4 hard-halt toast was removed. The matrix
+    // ceiling is now a soft signal: past _naturalCeiling the orchestrator
+    // injects a strong re-anchor reminder telling the model to emit final
+    // answer if complete or simplify if wandering.
+    expect(msgProc).toContain("past natural budget");
+    expect(msgProc).toContain("emit final answer NOW");
   });
 
   // ---- Assertion 1 (live spawn): reminder injection in recorded prompt ----
@@ -228,16 +229,17 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       // below as well — if zero agent calls, the test was a no-op.
       expect(agentCalls.length).toBeGreaterThanOrEqual(1);
 
-      // Ceiling-bound assertion (Assertion 3 quantitative part): main-agent
-      // calls MUST stay under the effective auto-continue cap. Phase 5 Fix 4
-      // (Option A) silently bumps the ceiling up to MAX_CHECKPOINT_BUMPS=3
-      // times before hard halt, so the effective cap is
-      // ceiling × (MAX_BUMPS + 1) + 1 (= 6 × 4 + 1 = 25 for debug/small).
-      // Real run hits 4 (PIL + 3 bash rounds + final stop), well below the
-      // cap — this bound exists so a runaway agent still terminates.
+      // Ceiling-bound assertion (Assertion 3 quantitative part): Phase 5
+      // Fix 5 made the matrix ceiling a SOFT BOUNDARY — it no longer halts.
+      // The only true cap is now deps.maxToolRounds (default 120, raised
+      // for legitimate multi-step work). Real test runs complete in ~4
+      // calls so the bound is just a runaway-safety net. We still assert
+      // the ceiling is RESOLVED correctly (deterministic call), but the
+      // upper bound is the runaway cap, not the matrix value.
       const ceiling = resolveCeiling("debug", "small");
-      const MAX_CHECKPOINT_BUMPS = 3;
-      expect(agentCalls.length).toBeLessThanOrEqual(ceiling * (MAX_CHECKPOINT_BUMPS + 1) + 1);
+      expect(ceiling).toBe(6); // matrix lookup still correct
+      const RUNAWAY_HARD_CAP = 120;
+      expect(agentCalls.length).toBeLessThanOrEqual(RUNAWAY_HARD_CAP + 1);
 
       // Concatenate all prompt content across agent calls — we are looking
       // for the reminder marker injected by prepareStep on/after step 3.

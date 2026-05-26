@@ -823,7 +823,7 @@ function resolveConfig(options: CliOptions) {
   // work; runaway loops abort with the "Reached max tool rounds" error
   // surface so the user can adjust scope. Override via --max-tool-rounds CLI
   // flag or MUONROI_MAX_TOOL_ROUNDS env.
-  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "100", 10) || 100;
+  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "12", 10) || 12;
   const sandboxMode = resolveCliSandboxMode(options.sandbox) || getCurrentSandboxMode();
 
   const cliOverrides: SandboxSettings = {};
@@ -888,7 +888,7 @@ program
   .option("--port <mapping>", "Forward a host port to sandbox guest (HOST:GUEST, repeatable)", collect, [])
   .option("-s, --session <id>", "Continue a saved session by id, or use 'latest'")
   .option("--background-task-file <path>", "Run a persisted background delegation")
-  .option("--max-tool-rounds <n>", "Max tool execution rounds", "100")
+  .option("--max-tool-rounds <n>", "Max tool execution rounds (ultimate runaway safety net)", "120")
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option(
     "--permission <mode>",
