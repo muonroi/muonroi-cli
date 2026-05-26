@@ -165,6 +165,11 @@ import {
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
+import {
+  buildToolRepetitionAbortMessage,
+  recordToolError as recordToolRepetitionError,
+  recordToolSuccess as recordToolRepetitionSuccess,
+} from "./tool-repetition-detector.js";
 
 /**
  * F2 — approximate the char cost of the FIXED prompt envelope (system +
@@ -1989,6 +1994,12 @@ export class MessageProcessor {
                   /* fail-open */
                 }
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
+                // Reset tool-repetition counter on any non-error result. A
+                // successful call between two failures of the same shape is
+                // progress and should not accumulate toward the abort gate.
+                if (tr.success) {
+                  recordToolRepetitionSuccess(deps.session?.id ?? null);
+                }
                 // todo_write side-effect: surface the task list to the UI via a
                 // dedicated chunk so the sticky checklist panel can re-render
                 // without parsing tool args itself. Skipped when the snapshot
@@ -2061,12 +2072,47 @@ export class MessageProcessor {
                       data: { success: false, error: errMsg.slice(0, 500), reason: "tool-error" },
                     });
                   }
-                } catch {
-                  /* fail-open */
+                } catch (logErr) {
+                  console.error(
+                    `[message-processor] interaction-log tool_result failed: ${(logErr as Error)?.message}`,
+                  );
                 }
 
                 notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
                 yield { type: "tool_result", toolCall: tc, toolResult: tr };
+
+                // Tool-call perseveration guard. After N consecutive identical
+                // (toolName, args, error) triples, abort the streaming loop
+                // before TPM rate limits do (session 080fe2fcbf24).
+                const repetition = recordToolRepetitionError(
+                  deps.session?.id ?? null,
+                  errPart.toolName,
+                  errPart.input,
+                  errMsg,
+                );
+                if (repetition.shouldAbort) {
+                  const abortMsg = buildToolRepetitionAbortMessage(errPart.toolName, repetition.runLength, errMsg);
+                  try {
+                    if (deps.session) {
+                      logInteraction(deps.session.id, "error", {
+                        eventSubtype: "tool_repetition_abort",
+                        data: {
+                          toolName: errPart.toolName,
+                          runLength: repetition.runLength,
+                          errorPreview: errMsg.slice(0, 200),
+                        },
+                      });
+                    }
+                  } catch (logErr) {
+                    console.error(
+                      `[message-processor] interaction-log tool_repetition_abort failed: ${(logErr as Error)?.message}`,
+                    );
+                  }
+                  notifyObserver(observer?.onError, { message: abortMsg, timestamp: Date.now() });
+                  yield { type: "error", content: abortMsg, isAuthError: false };
+                  yield { type: "done" };
+                  return;
+                }
                 break;
               }
 
