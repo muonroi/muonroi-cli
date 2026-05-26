@@ -1,0 +1,23 @@
+{
+  "mode": "yolo",
+  "granularity": "fine",
+  "parallelization": true,
+  "commit_docs": true,
+  "model_profile": "balanced",
+  "context_window": 1000000,
+  "workflow": {
+    "research": false,
+    "plan_check": true,
+    "verifier": true,
+    "nyquist_validation": false,
+    "auto_advance": false,
+    "skip_discuss": true,
+    "ui_phase": false,
+    "ui_review": false,
+    "discuss_mode": "discuss",
+    "_auto_chain_active": false
+  },
+  "model_overrides": {
+    "gsd-debugger": "opus"
+  }
+}
