@@ -153,6 +153,7 @@ import {
   buildScopeReminder,
   type ComplexitySize,
   cadenceForSize,
+  shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
@@ -1558,14 +1559,19 @@ export class MessageProcessor {
               const _scopeStep = sn;
               const _shouldRemind = shouldInjectReminder(_scopeStep, _scopeK);
               const _shouldWarn = shouldInjectSoftWarn(_scopeStep, _scopeCeiling, _ceilingSessionId);
-              // Phase 5 Fix 5 — when past the natural matrix ceiling but
-              // still under the maxToolRounds runaway safety, every step
-              // gets a STRONG reminder. The matrix ceiling is no longer a
-              // halt; it's now a "you should be wrapping up" signal. The
-              // model decides actual completion, but it gets re-anchored
-              // every step past the natural budget.
+              // Phase 5 Fix 5 (revised) — past the natural matrix ceiling the
+              // orchestrator emits a STRONG re-anchor reminder, but only when
+              //   (a) crossing the ceiling for the first time (one-shot), OR
+              //   (b) hitting a normal cadence step (multiple of K).
+              // Original Phase 5 Fix 5 fired on EVERY step past ceiling, which
+              // on long-running sessions (e.g. step 77 / ceiling 6 in session
+              // 1f29e238a816) produced 70+ redundant reminders that bloated
+              // the tool_result channel and forced the model into a "YES still
+              // on scope" loop on every tool call.
               const _pastNaturalCeiling = _scopeStep > _naturalCeiling;
-              if (_shouldRemind || _shouldWarn || _pastNaturalCeiling) {
+              const _justCrossedCeiling = shouldInjectCeilingCrossing(_scopeStep, _naturalCeiling, _ceilingSessionId);
+              const _pastCeilingAtCadence = _pastNaturalCeiling && _shouldRemind;
+              if (_shouldRemind || _shouldWarn || _justCrossedCeiling) {
                 const _baseReminder = buildScopeReminder({
                   step: _scopeStep,
                   ceiling: _scopeCeiling,
@@ -1573,7 +1579,12 @@ export class MessageProcessor {
                   size: _scopeSize,
                   originalPrompt: userMessage,
                 });
-                const _reminder = _pastNaturalCeiling
+                // Strong "past natural budget" prefix only applies when we
+                // ACTUALLY want the model to consider wrapping up — i.e. on
+                // the crossing event or at a cadence step past ceiling, not
+                // on every silent step in between.
+                const _useStrong = _justCrossedCeiling || _pastCeilingAtCadence;
+                const _reminder = _useStrong
                   ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If wandering, simplify the next step. ${_baseReminder}`
                   : _shouldWarn
                     ? `[approaching ceiling] ${_baseReminder}`
