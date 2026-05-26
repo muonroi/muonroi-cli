@@ -25,7 +25,7 @@ export function detectClarityGaps(
         description: "Cannot infer the expected outcome from the prompt",
         suggestedQuestion: `What's the expected outcome? ${taskType === "debug" ? "(e.g., error gone, test passes, behavior fixed)" : "(e.g., feature works, file updated, test passes)"}`,
         options: outcomeOptions,
-        defaultIndex: 0,
+        defaultIndex: pickBestOutcomeIndex(taskType, outcomeOptions, raw),
       });
     }
   }
@@ -58,6 +58,99 @@ export function detectClarityGaps(
   return gaps;
 }
 
+/**
+ * Phase 5 F8 — context-aware default option for outcome askcards.
+ *
+ * The askcard's "Recommended" badge previously pinned to options[0]
+ * regardless of prompt content. For prompts like "improve test coverage"
+ * (generate options: Feature implemented / File created / Tests added),
+ * defaulting to "Feature implemented" was wrong — the user explicitly
+ * mentioned tests. This picks a more relevant option based on prompt
+ * keywords, with a fallback to 0 when nothing matches.
+ *
+ * Keep this list short — overengineering breaks predictability. We only
+ * encode the keyword→index pairs we've actually seen mismatch in the
+ * 5-baseline + sanity sessions.
+ */
+function pickBestOutcomeIndex(taskType: TaskType | null, options: string[], raw: string): number {
+  if (options.length <= 1) return 0;
+  const lower = raw.toLowerCase();
+  const has = (re: RegExp): boolean => re.test(lower);
+  const find = (substring: string): number => options.findIndex((o) => o.toLowerCase().includes(substring));
+
+  switch (taskType) {
+    case "generate": {
+      // "improve coverage", "add tests", "viết test" → "Tests added"
+      if (has(/\b(coverage|unit test|viết test|viet test|spec|jest|vitest|pytest)\b/) || has(/\btest(?:s|ing)?\b/)) {
+        const idx = find("test");
+        if (idx >= 0) return idx;
+      }
+      // "scaffold", "boilerplate", "tạo file mới" → "File created with boilerplate"
+      if (has(/\b(scaffold|boilerplate|template|skeleton)\b/) || has(/\btạo file\b|\btao file\b/)) {
+        const idx = find("file created");
+        if (idx >= 0) return idx;
+      }
+      return 0; // "Feature implemented and working"
+    }
+    case "refactor": {
+      // "performance", "speed", "faster" → "Better performance"
+      if (has(/\b(performance|speed|fast(er)?|slow|latency|throughput|optimi[zs]e)\b/)) {
+        const idx = find("performance");
+        if (idx >= 0) return idx;
+      }
+      // "test", "testable" → "Easier to test"
+      if (has(/\b(testable|easier to test|unit test)\b/)) {
+        const idx = find("test");
+        if (idx >= 0) return idx;
+      }
+      return 0; // "Code cleaner, same behavior"
+    }
+    case "debug": {
+      // "test fail", "test pass" → "Test passes"
+      if (has(/\btest(?:s|ing)? (?:fail|pass)/) || has(/\bspec fail/)) {
+        const idx = find("test passes");
+        if (idx >= 0) return idx;
+      }
+      return 0; // "Error disappears"
+    }
+    case "documentation": {
+      if (has(/\b(readme)\b/)) {
+        const idx = find("readme");
+        if (idx >= 0) return idx;
+      }
+      if (has(/\b(api docs|api documentation|openapi|swagger)\b/)) {
+        const idx = find("api docs");
+        if (idx >= 0) return idx;
+      }
+      return 0;
+    }
+    case "plan": {
+      if (has(/\b(trade-?offs?|alternative|compare)\b/)) {
+        const idx = find("trade");
+        if (idx >= 0) return idx;
+      }
+      if (has(/\b(step.?by.?step|phase|roadmap)\b/)) {
+        const idx = find("step-by-step");
+        if (idx >= 0) return idx;
+      }
+      return 0;
+    }
+    case "analyze": {
+      if (has(/\b(root cause|why|tại sao|tai sao|crash|stack trace)\b/)) {
+        const idx = find("root cause");
+        if (idx >= 0) return idx;
+      }
+      if (has(/\b(recommend|suggest|đề xuất|de xuat)\b/)) {
+        const idx = find("recommendations");
+        if (idx >= 0) return idx;
+      }
+      return 0;
+    }
+    default:
+      return 0;
+  }
+}
+
 function buildOutcomeOptions(taskType: TaskType | null, ctx: ProjectContext): string[] {
   switch (taskType) {
     case "debug":
@@ -88,10 +181,63 @@ function buildScopeOptions(raw: string, ctx: ProjectContext): string[] {
   });
   const options = matching.map((bc) => `${bc.path} (${bc.name})`);
   if (options.length === 0 && ctx.boundedContexts.length > 0) {
-    options.push(...ctx.boundedContexts.slice(0, 3).map((bc) => `${bc.path} (${bc.name})`));
+    // Phase 5 F4 — when no keyword matches a module name, the previous
+    // fallback returned the first 3 alphabetically (which on muonroi-cli
+    // surfaced `agent-harness`, `billing`, `chat` — three OLD scaffolding
+    // folders that almost never match a fresh prompt). Rank by recency
+    // signal instead: most recently modified module dir comes first.
+    const ranked = rankModulesByRecency(ctx.boundedContexts, ctx.cwd);
+    options.push(...ranked.slice(0, 3).map((bc) => `${bc.path} (${bc.name})`));
   }
   options.push("Entire project");
   return options.slice(0, 4);
+}
+
+/**
+ * F4 — rank bounded contexts by recency-of-modification of any tracked file
+ * inside. Falls back to alphabetical order when stat() throws for the dir.
+ * The 4-level depth cap + 50-entry-per-level cap keeps the walk under 200ms
+ * even on huge monorepos.
+ */
+function rankModulesByRecency(
+  contexts: ReadonlyArray<{ path: string; name: string }>,
+  cwd: string,
+): Array<{ path: string; name: string }> {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const path = require("node:path") as typeof import("node:path");
+  const scored = contexts.map((bc) => {
+    const dirPath = path.join(cwd, bc.path);
+    let maxMtime = 0;
+    try {
+      // walk up to 4 levels deep, cap entries per level
+      const walk = (dir: string, depth: number): void => {
+        if (depth > 4) return;
+        let entries: string[] = [];
+        try {
+          entries = fs.readdirSync(dir).slice(0, 50);
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          if (e.startsWith(".") || e === "node_modules" || e === "dist") continue;
+          try {
+            const full = path.join(dir, e);
+            const st = fs.statSync(full);
+            if (st.mtimeMs > maxMtime) maxMtime = st.mtimeMs;
+            if (st.isDirectory()) walk(full, depth + 1);
+          } catch {
+            /* skip unreadable entries */
+          }
+        }
+      };
+      walk(dirPath, 0);
+    } catch {
+      /* fall back to mtime=0 — keeps the entry at the bottom of the ranked list */
+    }
+    return { bc, mtime: maxMtime };
+  });
+  scored.sort((a, b) => b.mtime - a.mtime);
+  return scored.map((s) => s.bc);
 }
 
 export function buildInterviewQuestion(gap: ClarityGap, questionId: string): CouncilQuestionData {

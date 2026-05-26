@@ -295,40 +295,48 @@ export async function executeEventHooks(
         tenantId: getTenantId(),
       };
 
-      // EE detail log: judge classification and agent feedback behavior
+      // EE detail log: judge classification and agent feedback behavior.
+      // Phase 5 F5 — skip the write when EE produced ZERO warnings for this
+      // tool call. 5-baseline measurements showed ~100% of ee_judge rows
+      // came from hadWarnings=false / agent_response_to_ee="no_warning_present"
+      // — pure logging noise, no signal. We only persist the judge event when
+      // there were warnings to evaluate against.
       try {
         const sid = (input as PostToolUseHookInput).session_id;
         if (sid) {
           const classification = judge(judgeCtx);
           const matches = _lastWarningResponse?.matches ?? [];
           const hadWarnings = matches.length > 0;
-          logInteraction(sid, "ee_judge", {
-            eventSubtype: classification,
-            data: {
-              phase: "post_tool",
-              role: "judge",
-              toolName: input.tool_name,
-              classification,
-              hadWarnings,
-              matchCount: matches.length,
-              cwdMatched: judgeCtx.cwdMatchedAtPretool,
-              outcomeSuccess: true,
-              agent_response_to_ee: hadWarnings
-                ? classification === "FOLLOWED"
-                  ? "agent_complied"
-                  : classification === "IGNORED"
-                    ? "agent_overrode"
-                    : "no_relevant_warning"
-                : "no_warning_present",
-              noise_analysis: hadWarnings
-                ? {
-                    all_low_confidence: matches.every((m) => m.confidence < 0.5),
-                    forced_feedback_on_noise:
-                      matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
-                  }
-                : null,
-            },
-          });
+          if (!hadWarnings) {
+            // F5 skip — no warnings, no judge row.
+          } else
+            logInteraction(sid, "ee_judge", {
+              eventSubtype: classification,
+              data: {
+                phase: "post_tool",
+                role: "judge",
+                toolName: input.tool_name,
+                classification,
+                hadWarnings,
+                matchCount: matches.length,
+                cwdMatched: judgeCtx.cwdMatchedAtPretool,
+                outcomeSuccess: true,
+                agent_response_to_ee: hadWarnings
+                  ? classification === "FOLLOWED"
+                    ? "agent_complied"
+                    : classification === "IGNORED"
+                      ? "agent_overrode"
+                      : "no_relevant_warning"
+                  : "no_warning_present",
+                noise_analysis: hadWarnings
+                  ? {
+                      all_low_confidence: matches.every((m) => m.confidence < 0.5),
+                      forced_feedback_on_noise:
+                        matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                    }
+                  : null,
+              },
+            });
         }
       } catch {
         /* fail-open */
@@ -401,35 +409,41 @@ export async function executeEventHooks(
         tenantId: getTenantId(),
       };
 
-      // EE detail log: judge classification on tool failure
+      // EE detail log: judge classification on tool failure.
+      // F5 — same suppression: skip when EE issued no warning. A tool failure
+      // without a pre-warning is signal for OTHER systems (verify-failure
+      // tracker etc.), not for the EE judge log.
       try {
         const sid = failInput.session_id;
         if (sid) {
           const classification = judge(judgeCtx);
           const matches = _lastWarningResponse?.matches ?? [];
           const hadWarnings = matches.length > 0;
-          logInteraction(sid, "ee_judge", {
-            eventSubtype: classification,
-            data: {
-              phase: "post_tool_failure",
-              role: "judge",
-              toolName: failInput.tool_name,
-              classification,
-              hadWarnings,
-              matchCount: matches.length,
-              cwdMatched: judgeCtx.cwdMatchedAtPretool,
-              outcomeSuccess: false,
-              errorPreview: failInput.error?.slice(0, 120) ?? null,
-              agent_response_to_ee: hadWarnings ? "tool_failed_after_warning" : "tool_failed_no_warning",
-              noise_analysis: hadWarnings
-                ? {
-                    all_low_confidence: matches.every((m) => m.confidence < 0.5),
-                    forced_feedback_on_noise:
-                      matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
-                  }
-                : null,
-            },
-          });
+          if (!hadWarnings) {
+            // F5 skip
+          } else
+            logInteraction(sid, "ee_judge", {
+              eventSubtype: classification,
+              data: {
+                phase: "post_tool_failure",
+                role: "judge",
+                toolName: failInput.tool_name,
+                classification,
+                hadWarnings,
+                matchCount: matches.length,
+                cwdMatched: judgeCtx.cwdMatchedAtPretool,
+                outcomeSuccess: false,
+                errorPreview: failInput.error?.slice(0, 120) ?? null,
+                agent_response_to_ee: hadWarnings ? "tool_failed_after_warning" : "tool_failed_no_warning",
+                noise_analysis: hadWarnings
+                  ? {
+                      all_low_confidence: matches.every((m) => m.confidence < 0.5),
+                      forced_feedback_on_noise:
+                        matches.some((m) => m.confidence < 0.3) && classification !== "IRRELEVANT",
+                    }
+                  : null,
+              },
+            });
         }
       } catch {
         /* fail-open */

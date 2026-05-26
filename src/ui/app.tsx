@@ -6410,6 +6410,17 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
                   {(() => {
                     const mcpRuns = computeMcpRunInfo(messages);
+                    // Phase 5 F7 — index of the last assistant message so
+                    // MessageView can skip auto-collapse on it (final answer
+                    // should always be fully visible, not hidden behind
+                    // "ctrl+e expand").
+                    let _lastAssistantIdx = -1;
+                    for (let _i = messages.length - 1; _i >= 0; _i--) {
+                      if (messages[_i]?.type === "assistant") {
+                        _lastAssistantIdx = _i;
+                        break;
+                      }
+                    }
                     return messages.map((msg, i) => (
                       // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
                       <Semantic
@@ -6426,6 +6437,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                           modeColor={modeInfo.color}
                           expandedMessages={expandedMessages}
                           mcpRun={mcpRuns[i]}
+                          isFinalAssistant={i === _lastAssistantIdx}
                         />
                       </Semantic>
                     ));
