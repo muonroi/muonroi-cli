@@ -46,6 +46,20 @@ function matchedWord(haystack: string, re: RegExp): string {
   return m?.[0] ?? "";
 }
 
+/**
+ * Classify a card warning as blocking (should force Adjust default) or
+ * informational (Accept default is fine). Intent-mismatch detector output
+ * is informational — the card body already surfaces it so the user can see
+ * the hint without being routed back into another interview round.
+ */
+function isBlockingWarning(warning: string): boolean {
+  const w = warning.toLowerCase();
+  if (w.includes("detected") && (w.includes("signals") || w.includes("verify before accepting"))) {
+    return false;
+  }
+  return true;
+}
+
 export function buildAcceptanceQuestion(card: AcceptanceCardData, questionId: string): CouncilQuestionData {
   const contextLines: string[] = [];
   contextLines.push(`Outcome: ${card.outcome}`);
@@ -60,10 +74,17 @@ export function buildAcceptanceQuestion(card: AcceptanceCardData, questionId: st
     { label: "Cancel", value: "cancel", kind: "choice", description: "Never mind" },
   ];
 
-  // PIL-L6 fix — if any warnings present, default to "Adjust" (index 1) so
-  // the user must consciously override. Stops silent rubber-stamp accepts on
-  // mis-reframed intents.
-  const defaultIndex = card.warnings.length > 0 ? 1 : 0;
+  // Default-index policy:
+  //  - No warnings → Accept (0).
+  //  - Any blocking warning (feasibility text like "infeasible", "blocked by",
+  //    "cannot") → Adjust (1).
+  //  - Only informational warnings (intent-mismatch detector output —
+  //    "Detected ... signals" / "Verify before accepting") → Accept (0).
+  //  Evidence (session 1f29e238a816): intent-mismatch detector fired on a
+  //  4-word follow-up ("Can you fix it?"), forcing Adjust default and a
+  //  PIL chain that burned 35s on questions the user had already answered.
+  const hasBlockingWarning = card.warnings.some((w) => isBlockingWarning(w));
+  const defaultIndex = hasBlockingWarning ? 1 : 0;
 
   return {
     questionId,
