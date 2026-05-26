@@ -134,8 +134,19 @@ describe("layer1Intent — keyword fallback (classifier returns null)", () => {
     expect(result.confidence).toBe(0.6);
   });
 
-  it('keyword "test" → analyze', async () => {
+  // Phase 5 BUG-E — "write tests for X" is a test-generation task, not analyze.
+  // Pass 0 pins it to `generate` deterministically before the Pass 2 keyword
+  // fallback (which used to map any test-keyword to analyze).
+  it('keyword "write tests" → generate (Pass 0 test-generation pin)', async () => {
     const result = await layer1Intent(makeCtx("write tests for the auth module"));
+    expect(result.taskType).toBe("generate");
+  });
+
+  // The bare "test" / "kiểm thử" keyword without a write/add verb still falls
+  // through Pass 0 (verb guard) — Pass 2 keyword fallback can then label it
+  // analyze when the request is about REVIEWING the test surface.
+  it('keyword "review tests" (no write verb) → analyze via Pass 2 keyword', async () => {
+    const result = await layer1Intent(makeCtx("review the tests for the auth module"));
     expect(result.taskType).toBe("analyze");
   });
 

@@ -77,15 +77,19 @@ describe("createToolLoopCapPredicate — pattern guard", () => {
     expect(ask).not.toHaveBeenCalled();
   });
 
+  // Phase 5 BUG-F+G: verification commands (vitest/tsc/test/lint) are now
+  // exempt from pattern detection — agents re-run them as part of normal
+  // edit→typecheck→fix cycles, and counting them as loop tripped the askcard
+  // on legitimate work. We swap to git diff invocations for the same scenario.
   it("fires when 3-of-5 bash calls collapse to the same canonical hash", async () => {
     const ask = vi.fn().mockResolvedValue("stop");
     const stop = createToolLoopCapPredicate({ initialCap: 1000, ask });
     const verdicts = await feed(stop, [
-      "git status",
-      "bunx vitest run | tail -20",
-      "ls",
-      "bunx vitest run | head -10",
-      "bunx vitest run 2>&1 | grep FAIL",
+      "ls -la",
+      "cat package.json",
+      "git diff HEAD",
+      "git diff HEAD > /tmp/diff.txt",
+      "git diff HEAD 2>&1",
     ]);
     expect(ask).toHaveBeenCalledOnce();
     expect(ask).toHaveBeenCalledWith({
@@ -93,6 +97,8 @@ describe("createToolLoopCapPredicate — pattern guard", () => {
       toolName: "bash",
       count: 3,
       windowSize: 5,
+      stepNumber: 5,
+      naturalCeiling: undefined,
     });
     expect(verdicts[verdicts.length - 1]).toBe(true);
   });
@@ -101,15 +107,11 @@ describe("createToolLoopCapPredicate — pattern guard", () => {
     const ask = vi.fn().mockResolvedValueOnce("continue");
     const stop = createToolLoopCapPredicate({ initialCap: 1000, ask });
     // Fire pattern detection on call 3.
-    const v1 = await feed(stop, [
-      "bunx vitest run | tail -20",
-      "bunx vitest run | head -10",
-      "bunx vitest run 2>&1 | grep FAIL",
-    ]);
+    const v1 = await feed(stop, ["git diff HEAD | head", "git diff HEAD | tail", "git diff HEAD > /tmp/x"]);
     expect(ask).toHaveBeenCalledOnce();
     // Continue → ring cleared → 3 more identical calls should NOT fire again
     // (one-shot per session).
-    await feed(stop, ["bunx vitest run | tail -5", "bunx vitest run | head -5", "bunx vitest run > /tmp/x"]);
+    await feed(stop, ["git diff HEAD | wc -l", "git diff HEAD | grep diff", "git diff HEAD > /tmp/y"]);
     expect(ask).toHaveBeenCalledOnce();
     expect(v1.every((v) => v === false)).toBe(true);
   });
@@ -122,23 +124,70 @@ describe("createToolLoopCapPredicate — pattern guard", () => {
       patternWindow: 3,
       patternThreshold: 2,
     });
-    await feed(stop, ["git status", "bunx vitest run", "bunx vitest run | tail"]);
+    await feed(stop, ["git status", "git diff HEAD", "git diff HEAD > /tmp/x"]);
     expect(ask).toHaveBeenCalledOnce();
     expect(ask).toHaveBeenCalledWith({
       kind: "pattern",
       toolName: "bash",
       count: 2,
       windowSize: 3,
+      stepNumber: 3,
+      naturalCeiling: undefined,
     });
   });
 
   it("does not fire without an ask handler (headless safety)", async () => {
     const stop = createToolLoopCapPredicate({ initialCap: 1000 });
-    const verdicts = await feed(stop, [
-      "bunx vitest run | tail -20",
-      "bunx vitest run | head -10",
-      "bunx vitest run 2>&1 | grep FAIL",
-    ]);
+    const verdicts = await feed(stop, ["git diff HEAD | head", "git diff HEAD | tail", "git diff HEAD > /tmp/x"]);
     expect(verdicts.every((v) => v === false)).toBe(true);
+  });
+
+  // Phase 5 BUG-F — verification commands MUST NOT trigger the pattern guard
+  // even when run 5x in a row (edit→typecheck→fix iteration is normal work).
+  it("does NOT fire when verification commands are repeated", async () => {
+    const ask = vi.fn().mockResolvedValue("stop");
+    const stop = createToolLoopCapPredicate({ initialCap: 1000, ask });
+    await feed(stop, ["bunx tsc --noEmit", "bunx tsc --noEmit", "bunx tsc --noEmit", "bunx tsc --noEmit"]);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  // Phase 5 BUG-G — pipe-native tools (grep, sed, awk, jq, find) preserve
+  // their pipe chain in the canonical form because the pipe IS the query.
+  // Three legitimately-different grep filter chains on the same file should
+  // NOT collide.
+  it("does NOT fire when grep pipe-chains differ on the same target", async () => {
+    const ask = vi.fn().mockResolvedValue("stop");
+    const stop = createToolLoopCapPredicate({ initialCap: 1000, ask });
+    await feed(stop, [
+      'grep -n "^import " src/index.ts | head -60',
+      'grep -n "^import " src/index.ts | wc -l',
+      'grep -n "^import " src/index.ts | grep -v type',
+    ]);
+    expect(ask).not.toHaveBeenCalled();
+  });
+
+  // Phase 5 BUG-H — pattern info carries stepNumber + naturalCeiling so the
+  // UI can pick a context-aware default action.
+  it("propagates stepNumber and naturalCeiling to the ask handler", async () => {
+    const ask = vi.fn().mockResolvedValue("stop");
+    const stop = createToolLoopCapPredicate({
+      initialCap: 1000,
+      ask,
+      naturalCeiling: 18,
+    });
+    await feed(stop, [
+      "git diff HEAD",
+      "git diff HEAD | head",
+      "ls",
+      "git diff HEAD | wc -l", // <- pattern fires here (3 git-diffs in window)
+      "git diff HEAD > /tmp/x",
+    ]);
+    expect(ask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "pattern",
+        stepNumber: 4,
+        naturalCeiling: 18,
+      }),
+    );
   });
 });

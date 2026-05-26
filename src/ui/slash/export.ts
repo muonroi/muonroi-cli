@@ -105,6 +105,19 @@ function renderEntries(entries: readonly ChatEntry[]): string[] {
         const toolName = entry.toolCall?.function?.name ?? "unknown";
         lines.push(`[${ts}] Tool [${toolName}]:`);
         lines.push(entry.content);
+        // Phase 5 BUG-J — for write/edit tools, surface the full unified
+        // diff inline. Earlier the export only carried the "(+N -M)" summary,
+        // so reviewers couldn't see WHAT changed without re-running git diff
+        // against the post-session checkout. The structured `diff.patch`
+        // (computed by `createTwoFilesPatch` in src/tools/file.ts) is already
+        // captured on the in-memory ChatEntry; we just had to print it.
+        const diffPatch = entry.toolResult?.diff?.patch;
+        if (diffPatch && (toolName === "edit_file" || toolName === "write_file" || toolName === "update_file")) {
+          lines.push("");
+          lines.push("```diff");
+          lines.push(diffPatch.trimEnd());
+          lines.push("```");
+        }
         lines.push("");
         break;
       }
