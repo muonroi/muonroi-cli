@@ -127,9 +127,17 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     await handle.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
     // Give the multi-round loop time to complete all 5 rounds. Each round
     // executes read_file → 30k content appended → next streamText call.
-    // The orchestrator runs the full multi-round loop synchronously inside
-    // streamText; 20s is enough for 5 rounds + tool executions.
-    await new Promise((r) => setTimeout(r, 35000));
+    // Poll the dump file for >=3 recorded calls (event-driven, not wall-clock).
+    // The dump is written after every doStream call by writeDumpAlways.
+    const deadline_b4 = Date.now() + 60_000;
+    let calls_b4: ReturnType<typeof loadDumpedRecordings> = [];
+    while (Date.now() < deadline_b4) {
+      if (existsSync(handle.dumpPath)) {
+        calls_b4 = loadDumpedRecordings(handle.dumpPath);
+        if (calls_b4.length >= 3) break;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
 
     await exitTuiAndWaitForDump(handle, 30_000);
 
