@@ -999,20 +999,37 @@ export class MessageProcessor {
     const MAX_STREAM_RETRIES = 2; // 3 total attempts = 1 first try + 2 retries
 
     // Auto-council: route to multi-model debate when EITHER
-    //   (a) PIL classified taskType=plan|analyze with high confidence, OR
+    //   (a) PIL classified taskType=plan|analyze with high confidence AND the
+    //       prompt is complex enough to justify the debate cost, OR
     //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
     // After the debate finishes, runCouncilV2 records synthesis on
     // councilManager.lastSynthesis; we then re-enter processMessage with the synthesis
     // as the next user turn so the main loop continues with full debate context.
     // Skip if this is already a council continuation turn (prevent infinite recursion).
+    //
+    // Phase 5 BUG-I (session f1a2a2a547db) — the gate previously fired on
+    // taskType=analyze + conf≥0.85 alone, with no complexity check. Result:
+    // "improve test coverage cho src/X.ts" (single-file, scoreComplexity=low,
+    // score=2) sank 13 minutes into council debate, then halted on pattern-loop
+    // after sprint 1 read 6 files. The complexity gate below bypasses council
+    // for low-complexity analyze prompts — they get the hot-path direct exec
+    // and stay productive. `plan` keeps the old behaviour (architectural
+    // decisions deserve debate regardless of length).
     const autoCouncilTypes = new Set(["plan", "analyze"]);
     const councilRoles = getRoleModels();
     const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
     const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
     const autoCouncilConfidence = getAutoCouncilConfidence();
     const autoCouncilMinRoles = getAutoCouncilMinRoles();
+    const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
+      ?.complexity;
+    const _complexityGatePassed =
+      pilCtx.taskType === "plan" || _complexityFromTrace === undefined || _complexityFromTrace !== "low";
     const taskTypeMatch =
-      pilCtx.taskType && autoCouncilTypes.has(pilCtx.taskType) && pilCtx.confidence >= autoCouncilConfidence;
+      pilCtx.taskType &&
+      autoCouncilTypes.has(pilCtx.taskType) &&
+      pilCtx.confidence >= autoCouncilConfidence &&
+      _complexityGatePassed;
     const shouldAutoCouncil =
       !deps.councilManager.isContinuation &&
       isAutoCouncilEnabled() &&
@@ -1032,6 +1049,8 @@ export class MessageProcessor {
           return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
         if (pilCtx.confidence < autoCouncilConfidence)
           return `confidence<${autoCouncilConfidence} (got ${pilCtx.confidence.toFixed(2)})`;
+        if (!_complexityGatePassed)
+          return `complexity=low + taskType=${pilCtx.taskType} (analyze needs medium+; plan bypasses gate)`;
         return "no-trigger";
       }
       return "taken";
@@ -1046,6 +1065,8 @@ export class MessageProcessor {
         taskType: pilCtx.taskType ?? null,
         confidence: pilCtx.confidence,
         complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
+        complexityScore: _complexityFromTrace ?? null,
+        complexityGatePassed: _complexityGatePassed,
         configuredRoleCount,
         autoCouncilConfidence,
         autoCouncilMinRoles,
@@ -1388,6 +1409,10 @@ export class MessageProcessor {
           const _baseDynamicStopWhen = createToolLoopCapPredicate({
             initialCap: deps.maxToolRounds,
             ask: deps.askToolLoopContinue,
+            // Phase 5 BUG-H — thread the resolved natural ceiling down so the
+            // pattern askcard can pick a context-aware default action (continue
+            // early in the run, stop once we're past 50% of the natural budget).
+            naturalCeiling: _naturalCeiling,
           });
           // Phase 4 Plan 04 (4B) — compose per-session ceiling alongside the
           // existing cap + pattern guard. Logical OR: any condition true → halt.
@@ -1876,14 +1901,43 @@ export class MessageProcessor {
                   toolResult: tr,
                   timestamp: Date.now(),
                 });
-                // Interaction log: tool result
+                // Interaction log: tool result.
+                // Phase 5 BUG-J — for edit/write/update tools, persist the
+                // structured diff (file_path, +N/-M counts, isNew flag, and
+                // a bounded patch preview) so forensics queries can audit
+                // what actually changed in each turn without re-reading
+                // git history. Earlier the log only had the summary string
+                // ("Edited X (+1 -1)") — the patch text was lost.
                 try {
                   if (deps.session) {
                     const outputPreview =
                       typeof tr.output === "string" ? tr.output.slice(0, 200) : JSON.stringify(tr.output).slice(0, 200);
+                    const _trWithDiff = tr as {
+                      diff?: { filePath: string; additions: number; removals: number; patch: string; isNew: boolean };
+                    };
+                    const diffMeta =
+                      _trWithDiff.diff &&
+                      (tc.function.name === "edit_file" ||
+                        tc.function.name === "write_file" ||
+                        tc.function.name === "update_file")
+                        ? {
+                            filePath: _trWithDiff.diff.filePath,
+                            additions: _trWithDiff.diff.additions,
+                            removals: _trWithDiff.diff.removals,
+                            isNew: _trWithDiff.diff.isNew,
+                            // Cap at 4000 chars — enough to inspect small/medium
+                            // edits without ballooning the SQLite row. Large
+                            // refactors get truncated with a tail marker so
+                            // readers know the patch is partial.
+                            patchPreview:
+                              _trWithDiff.diff.patch.length > 4000
+                                ? _trWithDiff.diff.patch.slice(0, 4000) + "\n…[truncated]"
+                                : _trWithDiff.diff.patch,
+                          }
+                        : undefined;
                     logInteraction(deps.session.id, "tool_result", {
                       eventSubtype: tc.function.name,
-                      data: { success: tr.success, outputPreview },
+                      data: { success: tr.success, outputPreview, ...(diffMeta ? { diff: diffMeta } : {}) },
                     });
                   }
                 } catch {

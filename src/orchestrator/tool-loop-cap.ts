@@ -24,7 +24,16 @@ import { hashToolArgs } from "./tool-args-hash.js";
 
 export type ToolLoopCapAskInfo =
   | { kind: "cap"; stepNumber: number; cap: number; bumpBy: number }
-  | { kind: "pattern"; toolName: string; count: number; windowSize: number };
+  | {
+      kind: "pattern";
+      toolName: string;
+      count: number;
+      windowSize: number;
+      /** Step count at the time the pattern fired — drives default-action heuristic. */
+      stepNumber: number;
+      /** Resolved natural ceiling for the current (taskType, size). Optional — undefined when caller can't compute it. */
+      naturalCeiling?: number;
+    };
 
 export type ToolLoopCapAsk = (info: ToolLoopCapAskInfo) => Promise<"continue" | "stop">;
 
@@ -35,6 +44,12 @@ export interface ToolLoopCapOptions {
   /** Override defaults — exposed for tests. */
   patternWindow?: number;
   patternThreshold?: number;
+  /**
+   * Natural step ceiling for the current (taskType, size). Passed to the ask
+   * handler so the askcard UI can pick a context-aware defaultIndex (continue
+   * early, stop late).
+   */
+  naturalCeiling?: number;
 }
 
 export const DEFAULT_TOOL_LOOP_BUMP = 50;
@@ -45,6 +60,39 @@ export const DEFAULT_PATTERN_THRESHOLD = 3;
 // step type is generic over toolset and we don't want to fight types here.
 interface MinimalStep {
   toolCalls?: ReadonlyArray<{ toolName?: string; input?: unknown; args?: unknown }>;
+}
+
+/**
+ * Hash an entire step (all tool calls in order) so two parallel reads of
+ * different files don't collide just because the first-positional call
+ * happens to be identical. Phase 5 BUG-G (session f1a2a2a547db) — agent
+ * issued 3 parallel-style steps reading layer16-clarity.ts + its test file;
+ * detecting only `toolCalls[0]` hashed all 3 to the same value and tripped
+ * the loop guard even though step-2 and step-4 also touched the test file.
+ *
+ * Skips `verify:` sentinel hashes — verification commands MUST NOT count
+ * toward the pattern window (they're iteration markers, not loop signal).
+ *
+ * Returns null when the step has no usable tool calls.
+ */
+function hashStep(step: MinimalStep | undefined): { hash: string; toolName: string } | null {
+  if (!step?.toolCalls?.length) return null;
+  const parts: string[] = [];
+  for (const tc of step.toolCalls) {
+    if (!tc?.toolName) continue;
+    const argsCandidate = tc.input !== undefined ? tc.input : tc.args;
+    const h = hashToolArgs(tc.toolName, argsCandidate);
+    // Verification calls — drop entirely from the step signature so they
+    // can't cause repeated edit+typecheck cycles to look identical.
+    if (h.startsWith("verify:")) continue;
+    parts.push(h);
+  }
+  if (parts.length === 0) return null;
+  const firstToolName = step.toolCalls.find((tc) => tc?.toolName)?.toolName ?? "unknown";
+  // Join with `|` — order-sensitive on purpose: a step doing [read A, read B]
+  // is distinct from [read B, read A] in tool-emission order, so collapsing
+  // them risks hiding a real loop where the agent reorders calls.
+  return { hash: parts.join("|"), toolName: firstToolName };
 }
 
 /**
@@ -81,20 +129,20 @@ export function createToolLoopCapPredicate(
     if (ask && !patternAskFired && sn > lastSeenStepCount) {
       lastSeenStepCount = sn;
       const lastStep = steps[sn - 1] as MinimalStep | undefined;
-      const tc = lastStep?.toolCalls?.[0];
-      if (tc?.toolName) {
-        const argsCandidate = tc.input !== undefined ? tc.input : tc.args;
-        const hash = hashToolArgs(tc.toolName, argsCandidate);
-        recent.push({ hash, toolName: tc.toolName });
+      const stepSig = hashStep(lastStep);
+      if (stepSig) {
+        recent.push(stepSig);
         if (recent.length > patternWindow) recent.shift();
-        const dupCount = recent.filter((r) => r.hash === hash).length;
+        const dupCount = recent.filter((r) => r.hash === stepSig.hash).length;
         if (dupCount >= patternThreshold) {
           patternAskFired = true; // one-shot regardless of verdict
           const verdict = await ask({
             kind: "pattern",
-            toolName: tc.toolName,
+            toolName: stepSig.toolName,
             count: dupCount,
             windowSize: recent.length,
+            stepNumber: sn,
+            naturalCeiling: opts.naturalCeiling,
           });
           if (verdict === "stop") return true;
           // Continue → clear the ring so we don't immediately re-fire on the

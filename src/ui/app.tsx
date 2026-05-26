@@ -2151,19 +2151,37 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         const isPattern = info.kind === "pattern";
         const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
         toolLoopCapResolversRef.current.set(qid, resolve);
+        // Phase 5 BUG-H — context-aware default:
+        //   - Early in the run (step < natural ceiling × 0.5) loops are
+        //     usually a temporary fixation on a single file/cmd; "continue"
+        //     is the right default.
+        //   - Past the soft-warn line (≥ 50% of natural ceiling) we've used
+        //     up the cheap budget — "stop" becomes the safer default.
+        // Falls back to a static stepNumber heuristic (≤ 15) when caller
+        // didn't supply a naturalCeiling.
+        const patternStep = isPattern ? info.stepNumber : 0;
+        const patternCeiling = isPattern ? info.naturalCeiling : undefined;
+        const patternEarly =
+          patternCeiling !== undefined
+            ? patternStep < Math.floor(patternCeiling * 0.5)
+            : patternStep > 0 && patternStep <= 15;
+        const patternDefaultIdx = patternEarly ? 0 : 1;
         const question: CouncilQuestionData = isPattern
           ? {
               questionId: qid,
-              question: `Tool \`${info.toolName}\` đã chạy ${info.count}/${info.windowSize} lần với args gần giống — có thể đang loop. Tiếp tục?`,
-              context:
-                "Continue lets the agent keep trying. Stop returns the agent's best answer with current context and lets you reprompt.",
+              question: `Tool \`${info.toolName}\` đã chạy ${info.count}/${info.windowSize} lần với args gần giống (step ${info.stepNumber}${
+                patternCeiling ? `/${patternCeiling}` : ""
+              }) — có thể đang loop. Tiếp tục?`,
+              context: patternEarly
+                ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
+                : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
               isRequired: true,
               phase: "tool-loop-cap",
               options: [
                 { label: "Continue (let agent try)", value: "continue", kind: "choice" },
                 { label: "Stop and answer", value: "stop", kind: "choice" },
               ],
-              defaultIndex: 1,
+              defaultIndex: patternDefaultIdx,
             }
           : {
               questionId: qid,
@@ -2188,6 +2206,32 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             phase: "tool-loop-cap",
             optionCount: question.options!.length,
             defaultIndex: question.defaultIndex ?? 0,
+          });
+        } catch {
+          /* best-effort */
+        }
+        // Phase 5 BUG-H — persist the askcard_open to DB so verify queries can
+        // confirm the context-aware defaultIndex was picked correctly. Earlier
+        // the tool-loop-cap askcards only emitted via the harness sidechannel,
+        // leaving no DB trail; we couldn't audit defaults from past sessions.
+        try {
+          logUIInteraction(agent.getSessionId() ?? undefined, {
+            subtype: "askcard_open",
+            data: {
+              questionId: qid,
+              question: question.question,
+              phase: "tool-loop-cap",
+              optionCount: question.options!.length,
+              defaultIndex: question.defaultIndex ?? 0,
+              ...(isPattern
+                ? {
+                    stepNumber: info.stepNumber,
+                    naturalCeiling: info.naturalCeiling ?? null,
+                    toolName: info.toolName,
+                    count: info.count,
+                  }
+                : { stepNumber: info.stepNumber, cap: info.cap }),
+            },
           });
         } catch {
           /* best-effort */

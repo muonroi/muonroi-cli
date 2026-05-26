@@ -31,21 +31,35 @@ describe("canonicalizeBashCommand", () => {
 });
 
 describe("hashToolArgs", () => {
-  it("collapses cosmetic bash variations to one hash", () => {
+  // Phase 5 BUG-F+G: verification commands now return `verify:` sentinel
+  // hashes with a per-call nonce so they NEVER collide with each other (each
+  // re-run of typecheck is a fresh progress marker, not a loop signal).
+  // We pick a non-verification cosmetic-variant set (npm-style install) to
+  // assert the original collapse behaviour still works.
+  it("collapses cosmetic bash variations to one hash (non-verification)", () => {
     const variants = [
-      { command: "bunx vitest run | tail -20" },
-      { command: "bunx vitest run | head -10" },
-      { command: "bunx vitest run 2>&1 | grep FAIL" },
-      { command: "bunx vitest run > /tmp/out.log" },
-      { command: "cd /d/Personal/Core/muonroi-cli && bunx vitest run | tail -5" },
+      { command: "bun add zod | tail -20" },
+      { command: "bun add zod 2>&1" },
+      { command: "bun add zod > /tmp/out.log" },
+      { command: "cd /d/Personal/Core/muonroi-cli && bun add zod" },
     ];
     const hashes = new Set(variants.map((v) => hashToolArgs("bash", v)));
     expect(hashes.size).toBe(1);
   });
 
-  it("distinguishes substantively different bash commands", () => {
-    const a = hashToolArgs("bash", { command: "bunx vitest run" });
-    const b = hashToolArgs("bash", { command: "bunx tsc --noEmit" });
+  // Verification commands NEVER collide — every call must return a unique hash
+  // so the pattern detector skips them (edit→typecheck→fix is normal work).
+  it("verification commands produce unique hashes per call", () => {
+    const a = hashToolArgs("bash", { command: "bunx vitest run | tail -20" });
+    const b = hashToolArgs("bash", { command: "bunx vitest run | head -10" });
+    expect(a).not.toBe(b);
+    expect(a.startsWith("verify:")).toBe(true);
+    expect(b.startsWith("verify:")).toBe(true);
+  });
+
+  it("distinguishes substantively different non-verify bash commands", () => {
+    const a = hashToolArgs("bash", { command: "git status" });
+    const b = hashToolArgs("bash", { command: "git log -5" });
     expect(a).not.toBe(b);
   });
 

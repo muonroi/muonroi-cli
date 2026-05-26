@@ -214,6 +214,31 @@ const CONTINUATION_FULL_RE =
 const PERF_REFACTOR_RE =
   /\b(optimi[zs]e|optimi[zs]ation|speed\s*up|make\s+.+?\s+faster|run\s+faster|load\s+faster|throughput|latency|tối\s*ưu|toi\s*uu|tăng\s*tốc|tang\s*toc)\b/i;
 
+// Phase 5 BUG-E (session f1a2a2a547db) — prompts like
+// "improve test coverage cho src/X.ts (viết test cases, chạy test verify pass)"
+// were classified `analyze` by Pass 1 (regex:read), conf=0.85, which then
+// tripped the auto-council gate (analyze + conf>=0.85). The correct label is
+// `generate` (writing new tests = creating code). Pin it deterministically
+// BEFORE Pass 1 so the auto-council check sees taskType=generate.
+//
+// We require BOTH a coverage/test signal AND an action verb that means
+// "produce tests" — bare "review the tests" stays as analyze.
+const TEST_COVERAGE_TRIGGER_RE =
+  /\b(test\s*coverage|unit\s*test(?:s|ing)?|coverage|độ\s*phủ|do\s*phu)\b|\b(write|add|create|generate|scaffold|viết|viet|thêm|them|tạo|tao|sinh)\s+(?:new\s+)?(?:unit\s+)?test/i;
+const TEST_GENERATE_VERB_RE =
+  /\b(write|add|create|generate|scaffold|implement|improve|tạo|tao|viết|viet|sinh|thêm|them|tăng|tang)\b/i;
+
+/** Detect prompts asking to WRITE/ADD test cases — these are 'generate', not 'analyze'. */
+export function isTestGenerationTask(raw: string): boolean {
+  const t = raw.trim();
+  if (!t) return false;
+  if (!TEST_COVERAGE_TRIGGER_RE.test(t)) return false;
+  if (!TEST_GENERATE_VERB_RE.test(t)) return false;
+  // Guard: pure review prompts (no production verb) stay analyze.
+  if (/^(review|inspect|read|đọc|doc|xem)\b/i.test(t) && !TEST_GENERATE_VERB_RE.test(t)) return false;
+  return true;
+}
+
 /** Detect optimization-verb prompts where refactor is the correct taskType. */
 export function isPerformanceRefactor(raw: string): boolean {
   const t = raw.trim();
@@ -405,6 +430,55 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
             name: "intent-detection",
             applied: true,
             delta: "taskType=general,kind=chitchat,conf=0.90,domain=none,style=concise,pass0=continuation",
+          },
+        ],
+      };
+    }
+    if (isTestGenerationTask(ctx.raw)) {
+      const domainPass0 = extractDomain("", ctx.raw);
+      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
+      const { complexity, score: complexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: "generate",
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      const intentTrace: IntentDetectionTrace = {
+        pass1Reason: "pass0:test-generation",
+        pass1Confidence: 0.9,
+        pass1TaskType: "generate",
+        pass1Hit: true,
+        pass2Hit: false,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
+        finalTaskType: "generate",
+        finalConfidence: 0.9,
+        complexity,
+        complexityScore,
+      };
+      return {
+        ...ctx,
+        taskType: "generate",
+        domain: domainPass0,
+        confidence: 0.9,
+        outputStyle: styleFromText,
+        intentKind: "task",
+        _brainData: null,
+        _intentTrace: intentTrace,
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: true,
+            delta: `taskType=generate,kind=task,conf=0.90,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=test-generation`,
           },
         ],
       };

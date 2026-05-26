@@ -257,11 +257,18 @@ describe("layer1Intent", () => {
       expect(result.taskType).toBe("generate");
     });
 
-    it("baseline 5: 'improve test coverage' → analyze OR general (ambiguous)", async () => {
+    // Phase 5 BUG-E — "improve test coverage" is a test-generation prompt
+    // (writing new test cases), not analysis. Pass 0 pins it deterministically
+    // to `generate` BEFORE Pass 1, so the auto-council gate (which fires on
+    // analyze + conf≥0.85) never receives a wrong label. See session
+    // f1a2a2a547db: misclassification routed a 327-line single-file task
+    // through 13 minutes of council debate before halting on tool-pattern-loop.
+    it("baseline 5: 'improve test coverage' → generate (Pass 0 test-generation pin)", async () => {
       mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
       mockedClassifyViaBrain.mockResolvedValue("general,balanced");
       const result = await layer1Intent(makeCtx("improve test coverage"));
-      expect(["analyze", "general"]).toContain(result.taskType);
+      expect(result.taskType).toBe("generate");
+      expect(result._intentTrace?.pass1Reason).toBe("pass0:test-generation");
     });
   });
 
