@@ -9,6 +9,7 @@ import {
   type SandboxMode,
   type SandboxSettings,
 } from "../utils/settings";
+import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 
 // F3 — hard cap on tool rounds per user turn. Default reduced 75 → 50
@@ -16,7 +17,7 @@ import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 // monotonically growing billed input. Env override allowed range 10..200.
 function readMaxToolRoundsFromEnv(): number {
   const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 50;
+  if (!raw) return 12;
   const n = Number(raw);
   if (!Number.isFinite(n)) return 50;
   return Math.max(10, Math.min(200, Math.floor(n)));
@@ -25,14 +26,96 @@ export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
 export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 
-const ENVIRONMENT = `ENVIRONMENT:
-You are running inside a terminal (CLI). Your text output is rendered in a plain terminal — not a browser, not a rich text editor.
-- Use plain text only. No markdown tables, no HTML, no images, no colored text.
-- Use simple markers like dashes (-) or asterisks (*) for lists.
-- Use indentation and blank lines for structure.
-- Keep lines under 100 characters when possible.
-- Use backticks for inline code and triple backticks for code blocks — these are rendered.
-- Never use unicode box-drawing, fancy borders, or ASCII art in your responses.`;
+/**
+ * Phase 5 Fix — Env-aware ENVIRONMENT block.
+ *
+ * Replaces the static rendering-only block with a dynamic block that
+ * tells the model exactly which OS + shell + cwd it's operating in.
+ * Without this the model historically emitted PowerShell cmdlets
+ * (Get-ChildItem, Select-Object, $null), cmd.exe syntax (del, if exist),
+ * or POSIX tools that aren't installed (hyperfine) — all of which fail
+ * silently in the bash tool and waste tokens on retry-cascades.
+ *
+ * Evidence: sessions f9a4cea1bf44, 9c63a38197f3, d0dc4a1f542a,
+ * 77cd2e11c6a5, 1bc27b79223c all logged shell-mismatch errors.
+ *
+ * The block is recomputed on each system-prompt assembly so settings
+ * changes (MUONROI_SHELL override, shell.kind config) are reflected
+ * without a CLI restart.
+ */
+function buildEnvironmentBlock(): string {
+  const platform = process.platform;
+  const osName =
+    platform === "win32" ? "Windows" : platform === "darwin" ? "macOS" : platform === "linux" ? "Linux" : platform;
+  const shell = resolveShell({});
+  const shellKindLabel =
+    shell.kind === "bash"
+      ? "POSIX bash"
+      : shell.kind === "wsl"
+        ? "WSL bash (POSIX)"
+        : shell.kind === "powershell"
+          ? "PowerShell"
+          : shell.kind === "cmd"
+            ? "cmd.exe"
+            : shell.kind;
+  const cwd = (() => {
+    try {
+      return process.cwd();
+    } catch {
+      return "<unknown>";
+    }
+  })();
+
+  // Shell-specific forbidden-pattern guidance. Each rule is tied to an
+  // observed failure pattern in production telemetry.
+  const shellRules: string[] = [];
+  if (shell.kind === "bash" || shell.kind === "wsl") {
+    shellRules.push(
+      "- The bash tool runs POSIX shell. ONLY use POSIX commands: ls, grep, sed, awk, wc, find, cat, cut, sort, uniq, head, tail, xargs.",
+      "- DO NOT use PowerShell cmdlets: Get-ChildItem, Select-Object, Where-Object, Measure-Object, Write-Host, $null, ConvertTo-Json, etc.",
+      "- DO NOT use cmd.exe syntax: dir, del, copy, move, rd, md, if exist, for %%, type, &, |, > nul.",
+      "- For paths in commands, use forward slashes (e.g. src/foo.ts) or escape backslashes. Paths like /d/Personal/... auto-translate to D:\\Personal\\....",
+    );
+    if (platform === "win32") {
+      shellRules.push(
+        '- When a Windows-native command is genuinely needed, invoke it explicitly: `cmd.exe /c "command"` or `powershell -NoProfile -Command "command"`.',
+      );
+    }
+  } else if (shell.kind === "powershell") {
+    shellRules.push(
+      "- The bash tool runs PowerShell. Use PowerShell cmdlets: Get-ChildItem, Select-String, Measure-Object, ConvertTo-Json, $env:VAR.",
+      "- DO NOT use POSIX-only commands: grep, sed, awk, wc (use Select-String / Measure-Object / -split instead).",
+      "- For pipe redirection, use PowerShell syntax: `cmd | Select-Object -First 10`, not `cmd | head -10`.",
+    );
+  } else if (shell.kind === "cmd") {
+    shellRules.push(
+      "- The bash tool runs cmd.exe. Use cmd.exe syntax: dir, type, copy, del, if exist, for %%.",
+      "- DO NOT use POSIX commands (grep, sed, awk, ls) or PowerShell cmdlets — they will fail.",
+      "- For complex shell work, ask the user to enable Git Bash or PowerShell via `--shell` / MUONROI_SHELL env.",
+    );
+  }
+
+  return [
+    "ENVIRONMENT:",
+    `- OS: ${osName} (${platform})`,
+    `- Shell available via bash tool: ${shellKindLabel} (kind=${shell.kind})`,
+    `- Working directory: ${cwd}`,
+    "",
+    "Terminal rendering:",
+    "- Your text output is rendered in a plain terminal — not a browser, not a rich text editor.",
+    "- Use plain text only. No markdown tables, no HTML, no images, no colored text.",
+    "- Use simple markers like dashes (-) or asterisks (*) for lists.",
+    "- Use indentation and blank lines for structure.",
+    "- Keep lines under 100 characters when possible.",
+    "- Use backticks for inline code and triple backticks for code blocks — these are rendered.",
+    "- Never use unicode box-drawing, fancy borders, or ASCII art in your responses.",
+    "",
+    "Shell rules for the bash tool:",
+    ...shellRules,
+  ].join("\n");
+}
+
+const ENVIRONMENT = buildEnvironmentBlock();
 
 const MODE_PROMPTS: Record<AgentMode, string> = {
   agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
@@ -128,18 +211,7 @@ IMPORTANT:
 - Use read_file instead of cat/head/tail for reading files.
 - When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
 - After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
-${
-  process.platform === "win32"
-    ? `
-WINDOWS ENVIRONMENT:
-- The bash tool runs inside Git Bash (POSIX shell) on Windows — use POSIX syntax (grep, sed, wc), NOT cmd.exe or PowerShell commands.
-- Do NOT use \`findstr\`, \`dir\`, \`cd /d\`, \`for %%\`, or other cmd.exe syntax in bash.
-- Use forward slashes in paths or escape backslashes: \`grep -rn "pattern" src/\` not \`findstr /sn "pattern" src\\\\\`.
-- \`&&\` chaining works. \`cd\` followed by \`&&\` works. Avoid \`cd /d\`.
-- For Windows-specific commands, explicitly use: \`cmd.exe /c "command"\` or \`powershell -c "command"\`.
-`
-    : ""
-}
+
 Be direct. Execute, don't just describe. Show results, not plans.`,
 
   plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
