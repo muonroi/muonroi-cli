@@ -30,6 +30,7 @@ import type {
   CouncilMessage,
   CouncilPhaseEvent,
   CouncilQuestionData,
+  CouncilQuestionOption,
   CouncilStatusData,
   Plan,
   PlanQuestion,
@@ -2165,22 +2166,42 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           patternCeiling !== undefined
             ? patternStep < Math.floor(patternCeiling * 0.5)
             : patternStep > 0 && patternStep <= 15;
-        const patternDefaultIdx = patternEarly ? 0 : 1;
+        // Extreme-overage trip: stepNumber > 5× naturalCeiling. Evidence
+        // (session 1f29e238): at step 77/6 = 12.8× ceiling the askcard still
+        // showed Continue as a first-class option and user chose Continue
+        // within 4s. At extreme overage we put Stop FIRST (Enter = Stop) and
+        // label Continue with the explicit overage multiplier so the cost is
+        // visible at decision time.
+        const patternExtreme = patternCeiling !== undefined && patternCeiling > 0 && patternStep > patternCeiling * 5;
+        const overageMultiplier = patternExtreme && patternCeiling ? (patternStep / patternCeiling).toFixed(1) : null;
+        const patternDefaultIdx = patternEarly ? 0 : patternExtreme ? 0 : 1;
+        const patternOptions: CouncilQuestionOption[] = patternExtreme
+          ? [
+              { label: "Stop and answer (recommended)", value: "stop", kind: "choice" },
+              {
+                label: `Continue anyway (⚠ ${overageMultiplier}× over budget — expensive)`,
+                value: "continue",
+                kind: "choice",
+              },
+            ]
+          : [
+              { label: "Continue (let agent try)", value: "continue", kind: "choice" },
+              { label: "Stop and answer", value: "stop", kind: "choice" },
+            ];
         const question: CouncilQuestionData = isPattern
           ? {
               questionId: qid,
               question: `Tool \`${info.toolName}\` đã chạy ${info.count}/${info.windowSize} lần với args gần giống (step ${info.stepNumber}${
                 patternCeiling ? `/${patternCeiling}` : ""
               }) — có thể đang loop. Tiếp tục?`,
-              context: patternEarly
-                ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
-                : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
+              context: patternExtreme
+                ? `EXTREME OVERAGE — ${overageMultiplier}× past natural budget. Continuing has historically not converged in this regime (see session 1f29e238: 8× over budget, still failed). Stop returns the agent's best answer with current context.`
+                : patternEarly
+                  ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
+                  : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
               isRequired: true,
               phase: "tool-loop-cap",
-              options: [
-                { label: "Continue (let agent try)", value: "continue", kind: "choice" },
-                { label: "Stop and answer", value: "stop", kind: "choice" },
-              ],
+              options: patternOptions,
               defaultIndex: patternDefaultIdx,
             }
           : {
