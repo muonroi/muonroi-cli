@@ -29,6 +29,9 @@ describe("tools-mcp server smoke", () => {
       expect(names).toContain("selfverify.result");
       expect(names).toContain("selfverify.list");
       expect(names).toContain("selfverify.cancel");
+      expect(names).toContain("ee.query");
+      expect(names).toContain("ee.health");
+      expect(names).toContain("usage.forensics");
     } finally {
       await client.close();
     }
