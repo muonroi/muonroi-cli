@@ -52,4 +52,19 @@ describe("lsp-tools", () => {
     expect(out.json.error).toBe("lsp_error");
     expect(out.json.message).toContain("server launch failed");
   });
+
+  it("lsp.query returns lsp_error when the enabled check throws", async () => {
+    const handlers = collectTools((s) =>
+      registerLspTools(s, {
+        enabled: () => {
+          throw new Error("settings read failed");
+        },
+        query: async () => ({ success: true, output: "x" }),
+      }),
+    );
+    const out = parse(await handlers["lsp.query"]!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("lsp_error");
+    expect(out.json.message).toContain("settings read failed");
+  });
 });
