@@ -79,6 +79,19 @@ function resolveSessionId(prefix: string): string | null {
   return null;
 }
 
+/**
+ * Return ALL session ids matching a prefix (newest first, capped at 5).
+ * Additive sibling of the private resolveSessionId — exposes the raw match
+ * list for callers (e.g. the MCP forensics tool) that need to distinguish
+ * "no match" from "ambiguous". The CLI path keeps using resolveSessionId.
+ */
+export function resolveSessionIds(prefix: string): string[] {
+  const rows = getDatabase()
+    .prepare(`SELECT id FROM sessions WHERE id LIKE ? ORDER BY created_at DESC LIMIT 5`)
+    .all(`${prefix}%`) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
 export function collectCostForensics(sessionId: string): CostForensicsSummary {
   const db = getDatabase();
 
