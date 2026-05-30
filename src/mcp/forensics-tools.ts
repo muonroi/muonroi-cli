@@ -10,8 +10,8 @@ import { z } from "zod";
 import type { CostForensicsSummary } from "../cli/cost-forensics.js";
 
 export interface ForensicsToolDeps {
-  resolve?: (prefix: string) => string[];
-  collect?: (sessionId: string) => CostForensicsSummary;
+  resolve?: (prefix: string) => string[] | Promise<string[]>;
+  collect?: (sessionId: string) => CostForensicsSummary | Promise<CostForensicsSummary>;
 }
 
 function ok(data: unknown) {
@@ -34,8 +34,8 @@ async function defaultCollect(sessionId: string): Promise<CostForensicsSummary> 
 }
 
 export function registerForensicsTools(server: McpServer, deps: ForensicsToolDeps = {}): void {
-  const resolve = deps.resolve;
-  const collect = deps.collect;
+  const resolve = deps.resolve ?? defaultResolve;
+  const collect = deps.collect ?? defaultCollect;
 
   server.registerTool(
     "usage.forensics",
@@ -47,14 +47,14 @@ export function registerForensicsTools(server: McpServer, deps: ForensicsToolDep
     async ({ prefix }) => {
       let ids: string[];
       try {
-        ids = resolve ? resolve(prefix) : await defaultResolve(prefix);
+        ids = await resolve(prefix);
       } catch (e) {
         return fail("db_error", e instanceof Error ? e.message : String(e));
       }
       if (ids.length === 0) return fail("not_found", `no session matches prefix '${prefix}'`);
       if (ids.length > 1) return fail("ambiguous", `prefix '${prefix}' matched ${ids.length} sessions`, { matches: ids });
       try {
-        const summary = collect ? collect(ids[0]!) : await defaultCollect(ids[0]!);
+        const summary = await collect(ids[0]!);
         return ok(summary);
       } catch (e) {
         return fail("db_error", e instanceof Error ? e.message : String(e));

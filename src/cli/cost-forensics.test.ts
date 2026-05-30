@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CostForensicsRow, CostForensicsSummary } from "./cost-forensics.js";
 import { printCostForensics } from "./cost-forensics.js";
+import { getDatabase } from "../storage/db.js";
 
 // ─── Fake DB for resolveSessionIds tests ────────────────────────────────────
 // The sessions table rows keyed by id, ordered by created_at DESC for LIKE queries.
 const fakeSessionRows: Array<{ id: string; created_at: string }> = [];
 
-vi.mock("../storage/db.js", () => ({
-  getDatabase: () => ({
+function makeFakeDb() {
+  return {
     prepare: (sql: string) => ({
       all: (pattern: string) => {
         if (sql.includes("FROM sessions") && sql.includes("LIKE")) {
@@ -27,7 +28,11 @@ vi.mock("../storage/db.js", () => ({
     pragma: () => undefined,
     transaction: <T>(fn: () => T) => fn,
     close: () => undefined,
-  }),
+  };
+}
+
+vi.mock("../storage/db.js", () => ({
+  getDatabase: vi.fn(() => makeFakeDb()),
 }));
 
 function event(overrides: Partial<CostForensicsRow> = {}): CostForensicsRow {
@@ -177,5 +182,14 @@ describe("resolveSessionIds", () => {
 
   it("returns empty array for an unknown prefix", () => {
     expect(resolveSessionIds("zzzznomatch")).toEqual([]);
+  });
+
+  it("resolveSessionIds queries newest-first via SQL ORDER BY DESC", () => {
+    let capturedSql = "";
+    vi.mocked(getDatabase).mockReturnValueOnce({
+      prepare: (sql: string) => { capturedSql = sql; return { all: () => [] as Array<{ id: string }> }; },
+    } as never);
+    resolveSessionIds("anything");
+    expect(capturedSql).toContain("ORDER BY created_at DESC");
   });
 });

@@ -27,7 +27,7 @@ describe("ee-tools", () => {
   it("ee.query returns hits from the injected search", async () => {
     const handlers = collectTools((s) =>
       registerEETools(s, {
-        search: async (q) => ({ hits: [{ id: "1", score: 0.9, text: `match:${q}` }] }) as never,
+        search: async (q) => ({ points: [{ id: "1", score: 0.9, text: `match:${q}`, collection: "experience-behavioral" }] }),
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
@@ -51,5 +51,17 @@ describe("ee-tools", () => {
     );
     const out = textOf(await handlers["ee.health"]!({})) as { json: { ok: boolean; status: number } };
     expect(out.json).toEqual({ ok: true, status: 200 });
+  });
+
+  it("ee.health returns ee_unavailable when health throws", async () => {
+    const handlers = collectTools((s) =>
+      registerEETools(s, {
+        search: async () => null,
+        health: async () => { throw new Error("boom"); },
+      }),
+    );
+    const out = textOf(await handlers["ee.health"]!({})) as { json: { error?: string }; isError?: boolean };
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("ee_unavailable");
   });
 });
