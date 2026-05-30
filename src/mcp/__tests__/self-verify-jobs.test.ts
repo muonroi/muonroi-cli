@@ -90,4 +90,13 @@ describe("JobManager", () => {
     expect(jm.status(ids[0])).toBeUndefined(); // oldest evicted
     expect(jm.status(ids[24])).toBeDefined();
   });
+
+  it("cancel returns false for a non-running job", async () => {
+    const d = deferred<unknown>();
+    const jm = new JobManager(makeRunner({ tier1: () => d.promise }));
+    const runId = jm.start({ kind: "tier1" });
+    expect(jm.cancel(runId)).toBe(true);   // first cancel succeeds
+    expect(jm.cancel(runId)).toBe(false);  // second cancel: not running
+    expect(jm.cancel("nonexistent")).toBe(false);
+  });
 });
