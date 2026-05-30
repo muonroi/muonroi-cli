@@ -18,6 +18,8 @@ const LOG_TAIL = 40;
 /** Default runner: drives the real self-verify functions in-process. */
 const defaultRunner: Runner = {
   async tier1(opts, log) {
+    // signal intentionally not forwarded: runSelfVerify/runAgenticLoop do not yet
+    // accept an AbortSignal. cancel() marks the job and discards the late result.
     const { runSelfVerify } = await import("../self-qa/index.js");
     return runSelfVerify({
       baseRef: opts.since,
@@ -28,6 +30,8 @@ const defaultRunner: Runner = {
     });
   },
   async agentic(opts, log) {
+    // signal intentionally not forwarded: runSelfVerify/runAgenticLoop do not yet
+    // accept an AbortSignal. cancel() marks the job and discards the late result.
     const { createLLMBrain, runAgenticLoop } = await import("../self-qa/agentic-loop.js");
     const brain = await createLLMBrain({ modelId: opts.llm });
     return runAgenticLoop({ goal: opts.goal, brain, maxTurns: opts.turns ?? 20, log });
@@ -74,8 +78,7 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
         if (!args.goal || !args.llm) {
           return fail("invalid_args", "agentic mode requires both goal and llm");
         }
-        const { getModelInfo, loadCatalog } = await import("../models/registry.js");
-        await loadCatalog();
+        const { getModelInfo } = await import("../models/registry.js");
         if (!getModelInfo(args.llm)) {
           return fail("unknown_model", `llm '${args.llm}' is not in catalog.json`);
         }
@@ -107,7 +110,7 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
         finishedAt: job.finishedAt,
         elapsedMs: (job.finishedAt ?? Date.now()) - job.startedAt,
         logTail: job.logBuffer.slice(-LOG_TAIL),
-        summary: jobSummary(job),
+        summary: jobSummary(job) ?? null,
         error: job.error,
       });
     },
@@ -152,6 +155,8 @@ export function createToolsServer(runner: Runner = defaultRunner): McpServer {
 }
 
 export async function runToolsMcpServer(): Promise<void> {
+  const { loadCatalog } = await import("../models/registry.js");
+  await loadCatalog();
   const server = createToolsServer();
   await server.connect(new StdioServerTransport());
 }
