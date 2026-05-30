@@ -110,9 +110,13 @@ function resolveHandshakeTimeoutMs(opts: SpawnOptions): number {
   }
   const envOverride = Number.parseInt(process.env["MUONROI_HARNESS_HANDSHAKE_TIMEOUT"] ?? "", 10);
   if (Number.isFinite(envOverride) && envOverride > 0) return envOverride;
-  // Bumped from 5s → 15s. Cold-spawn under MCP server load (e.g. parallel
-  // tui.start retries after a kill) routinely exceeded 5s on Windows.
-  return 15_000;
+  // Bumped 5s → 15s → 90s. Cold child boot is a full `bun run src/index.ts`
+  // import of the whole CLI, which on heavy/resource-constrained hosts measures
+  // ~40s (smoke-boot) before the named pipe is even opened — and agent-mode boot
+  // under MCP-server load runs longer — so 15s surfaced as a confusing
+  // "client did not connect" on the first tui.start. 90s gives comfortable margin;
+  // override via MUONROI_HARNESS_HANDSHAKE_TIMEOUT for slower hosts/prebuilt runs.
+  return 90_000;
 }
 
 async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnResult> {
