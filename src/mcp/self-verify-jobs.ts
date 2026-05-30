@@ -88,12 +88,14 @@ export class JobManager {
 
     run.then(
       (report) => {
+        this.controllers.delete(runId); // I2: keep maps symmetric after natural completion
         if (job.status === "cancelled") return;
         job.report = report;
         job.status = "done";
         job.finishedAt = Date.now();
       },
       (err) => {
+        this.controllers.delete(runId); // I2: keep maps symmetric after natural completion
         if (job.status === "cancelled") return;
         job.error = err instanceof Error ? err.message : String(err);
         job.status = "error";
@@ -127,6 +129,7 @@ export class JobManager {
     while (this.jobs.size > JOB_CAP) {
       const oldest = sorted.shift();
       if (!oldest) break;
+      this.controllers.get(oldest.runId)?.abort(); // I1: abort still-running evicted jobs
       this.jobs.delete(oldest.runId);
       this.controllers.delete(oldest.runId);
     }
