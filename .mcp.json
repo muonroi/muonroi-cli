@@ -6,7 +6,10 @@
     },
     "muonroi-harness": {
       "command": "bun",
-      "args": ["run", "src/index.ts", "mcp-driver"]
+      "args": ["run", "src/index.ts", "mcp-driver"],
+      "env": {
+        "MUONROI_HARNESS_HANDSHAKE_TIMEOUT": "75000"
+      }
     }
   }
 }
