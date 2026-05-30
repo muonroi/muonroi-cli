@@ -1,0 +1,70 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { describe, expect, it } from "vitest";
+import type { LspToolResponse } from "../../lsp/types.js";
+import { registerLspTools } from "../lsp-tools.js";
+
+function collectTools(register: (s: McpServer) => void) {
+  const handlers: Record<string, (args: unknown) => Promise<unknown>> = {};
+  const fake = {
+    registerTool(name: string, _def: unknown, handler: (args: unknown) => Promise<unknown>) {
+      handlers[name] = handler;
+    },
+  } as unknown as McpServer;
+  register(fake);
+  return handlers;
+}
+function parse(result: unknown) {
+  const r = result as { content: Array<{ text: string }>; isError?: boolean };
+  return { json: JSON.parse(r.content[0]!.text), isError: r.isError };
+}
+
+describe("lsp-tools", () => {
+  it("lsp.query passes through the LspToolResponse when enabled", async () => {
+    const resp: LspToolResponse = { success: true, output: "def at file.ts:10" };
+    const handlers = collectTools((s) =>
+      registerLspTools(s, { enabled: () => true, query: async () => resp }),
+    );
+    const out = parse(await handlers["lsp.query"]!({ operation: "goToDefinition", filePath: "a.ts", line: 1, character: 2 }));
+    expect(out.isError).toBeFalsy();
+    expect(out.json).toEqual(resp);
+  });
+
+  it("lsp.query returns lsp_disabled when LSP is off", async () => {
+    const handlers = collectTools((s) =>
+      registerLspTools(s, { enabled: () => false, query: async () => ({ success: true, output: "x" }) }),
+    );
+    const out = parse(await handlers["lsp.query"]!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("lsp_disabled");
+  });
+
+  it("lsp.query returns lsp_error when the query throws", async () => {
+    const handlers = collectTools((s) =>
+      registerLspTools(s, {
+        enabled: () => true,
+        query: async () => {
+          throw new Error("server launch failed");
+        },
+      }),
+    );
+    const out = parse(await handlers["lsp.query"]!({ operation: "findReferences", filePath: "a.ts", line: 3, character: 4 }));
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("lsp_error");
+    expect(out.json.message).toContain("server launch failed");
+  });
+
+  it("lsp.query returns lsp_error when the enabled check throws", async () => {
+    const handlers = collectTools((s) =>
+      registerLspTools(s, {
+        enabled: () => {
+          throw new Error("settings read failed");
+        },
+        query: async () => ({ success: true, output: "x" }),
+      }),
+    );
+    const out = parse(await handlers["lsp.query"]!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("lsp_error");
+    expect(out.json.message).toContain("settings read failed");
+  });
+});

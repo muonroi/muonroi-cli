@@ -1549,6 +1549,14 @@ program
   });
 
 program
+  .command("tools-mcp")
+  .description("Run the muonroi native-tools MCP server over stdio (self-verify; more tools later)")
+  .action(async () => {
+    const { runToolsMcpServer } = await import("./mcp/tools-server.js");
+    await runToolsMcpServer();
+  });
+
+program
   .command("self-verify")
   .description(
     "Harness-Verified Self-QA: spawn a child muonroi-cli, drive it through scenarios derived from git diff, and emit regression specs for every passing run",
