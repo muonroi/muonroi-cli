@@ -32,6 +32,7 @@ describe("tools-mcp server smoke", () => {
       expect(names).toContain("ee.query");
       expect(names).toContain("ee.health");
       expect(names).toContain("usage.forensics");
+      expect(names).toContain("lsp.query");
     } finally {
       await client.close();
     }
