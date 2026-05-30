@@ -125,7 +125,9 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
       if (job.status === "running") return fail("still_running", "run not finished; poll selfverify.status first");
       if (job.status === "error") return fail("run_error", job.error ?? "unknown error");
       if (job.status === "cancelled") return fail("cancelled", "run was cancelled");
-      return ok(job.report);
+      // A "done" job always has a report set before status flips, but guard the
+      // MCP text-content contract against JSON.stringify(undefined) regardless.
+      return ok(job.report ?? {});
     },
   );
 
