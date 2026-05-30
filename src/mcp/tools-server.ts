@@ -14,6 +14,7 @@ import { z } from "zod";
 import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
 import { registerEETools } from "./ee-tools.js";
 import { registerForensicsTools } from "./forensics-tools.js";
+import { registerLspTools } from "./lsp-tools.js";
 
 const LOG_TAIL = 40;
 
@@ -157,6 +158,7 @@ export function createToolsServer(runner: Runner = defaultRunner): McpServer {
   registerSelfVerifyTools(server, jm);
   registerEETools(server);
   registerForensicsTools(server);
+  registerLspTools(server);
   return server;
 }
 
