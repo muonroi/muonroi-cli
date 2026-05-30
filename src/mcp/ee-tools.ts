@@ -66,17 +66,27 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
       },
     },
     async ({ query, collections, limit }) => {
-      const resp = await search(query, { limit, collections });
-      if (resp === null) {
-        return fail("ee_unavailable", "EE search returned no response (server down, timeout, or circuit open)");
+      try {
+        const resp = await search(query, { limit, collections });
+        if (resp === null) {
+          return fail("ee_unavailable", "EE search returned no response (server down, timeout, or circuit open)");
+        }
+        return ok(resp);
+      } catch (e) {
+        return fail("ee_unavailable", e instanceof Error ? e.message : String(e));
       }
-      return ok(resp);
     },
   );
 
   server.registerTool(
     "ee.health",
     { description: "Check Experience Engine server reachability.", inputSchema: {} },
-    async () => ok(await health()),
+    async () => {
+      try {
+        return ok(await health());
+      } catch (e) {
+        return fail("ee_unavailable", e instanceof Error ? e.message : String(e));
+      }
+    },
   );
 }
