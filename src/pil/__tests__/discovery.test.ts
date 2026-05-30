@@ -111,4 +111,24 @@ describe("runDiscovery()", () => {
     expect(result.interviewed).toBe(false);
     expect(result.accepted).toBe(true);
   });
+
+  it("skips discovery for low-signal general prompts (no concrete task detected)", async () => {
+    // A conversational/question prompt that the classifier could not pin to a
+    // concrete task type lands as taskType="general" + intentKind=null. It must
+    // NOT trigger task-style clarification askcards ("expected outcome" /
+    // "which codebase part") — those are a TASK feature. Regression for the
+    // "Tính 17*23" misroute (a trivial math question fell into the interview).
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "x", kind: "choice" }),
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const result = await runDiscovery(
+      "Tính 17*23, kèm 1 câu lý do ngắn.",
+      { taskType: "general", confidence: 0.6, complexity: "low", domain: null, outputStyle: null, intentKind: null },
+      process.cwd(),
+      handler,
+    );
+    expect(result.interviewed).toBe(false);
+    expect(handler.askQuestion).not.toHaveBeenCalled();
+  });
 });

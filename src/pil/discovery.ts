@@ -71,7 +71,14 @@ export async function runDiscovery(
   });
 
   if (!isDiscoveryEnabled()) return baseResult();
-  if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
+  // Clarification (discovery interview) is a TASK feature: only run it once a
+  // concrete coding task has actually been detected. chitchat, an unclassified
+  // prompt (taskType null), or a low-signal "general" prompt (the classifier
+  // found no task signal — e.g. a plain question like "Tính 17*23") must be
+  // answered directly, NOT funnelled into "expected outcome / which codebase"
+  // askcards. Skipping on "general" here fixes that misroute at its structural
+  // root (intentKind stays null for general, so the chitchat check alone misses it).
+  if (l1.intentKind === "chitchat" || l1.taskType === null || l1.taskType === "general") return baseResult();
 
   // Session-continuation guard: when the user is on turn >= 2 of an ongoing
   // session AND the new prompt looks like a continuation (short, modal verb
