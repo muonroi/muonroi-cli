@@ -19,6 +19,12 @@
  * Frame collection: read every JSONL line from the out channel that has mode="live";
  * strip nothing when --agent-fake-clock is active (ts is deterministic).
  *
+ * Settle point: anchored on the SECOND idle sentinel (assistant turn fully
+ * complete), NOT a fixed delay after msg-1's id first appears. The earlier
+ * timer-based settle could capture a mid-stream partial of msg-1, which differed
+ * run-to-run and made this determinism test itself flaky. See the splitter for
+ * the rationale.
+ *
  * Known limitation: if the TUI emits zero frames (because no <Semantic> nodes
  * are wired, which is the current state of app.tsx), all 10 runs will produce
  * an empty trace — the assertion trivially passes but tests nothing meaningful.
@@ -64,7 +70,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
 
   return new Promise<FrameTrace>((resolve, reject) => {
     const frames: LiveFrame[] = [];
-    let idleReceived = false;
+    let idleCount = 0;
     let inputSent = false;
     let settled = false;
 
@@ -111,37 +117,29 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
         const msg = JSON.parse(line) as Record<string, unknown>;
         if (msg["mode"] === "live") {
           if (inputSent) {
-            const frame = msg as unknown as LiveFrame;
-            frames.push(frame);
-            // Settle when both messages are present:
-            //   msg-0 = "user:hello" (user echo)
-            //   msg-1 = assistant response from the mock model
-            // Previously the test settled 200ms after msg-0 appeared, which
-            // captured msg-1 on fast machines and missed it on slow ones —
-            // producing non-deterministic snapshots between runs even though
-            // the eventual steady state is the same. Waiting for msg-1
-            // explicitly drains the variance.
-            // Falls back to settling on msg-0 alone if the safety timer
-            // fires (e.g. mock-model never replied).
-            const nodes =
-              (frame as unknown as { nodes?: Array<{ id?: string; children?: Array<{ id?: string }> }> }).nodes ?? [];
-            const log = nodes.find((n) => n.id === "log");
-            const children = log?.children ?? [];
-            const hasMsg0 = children.some((c) => c.id === "msg-0");
-            const hasMsg1 = children.some((c) => c.id === "msg-1");
-            if (hasMsg0 && hasMsg1) {
-              clearTimeout(safetyTimer);
-              // Short grace for trailing frames to flush after the steady
-              // state is reached.
-              setTimeout(settle, 200);
-            }
+            frames.push(msg as unknown as LiveFrame);
           }
         } else if (msg["t"] === "idle") {
-          if (!idleReceived) {
-            idleReceived = true;
+          idleCount += 1;
+          if (idleCount === 1) {
+            // First idle = boot steady state. Drive the fixed interaction.
             inWrite.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
             inWrite.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
             inputSent = true;
+          } else if (idleCount === 2) {
+            // Second idle = the assistant turn has FULLY completed and the loop
+            // is quiet again (input markActivity in Phase 8 suppresses a spurious
+            // idle between Enter and the reply). This is the only deterministic
+            // settle point: anchoring on idle — a real lifecycle boundary —
+            // instead of "200ms after msg-1's id first appears" guarantees every
+            // captured trailing frame is POST-completion (msg-1 fully rendered),
+            // never a mid-stream partial. The short grace lets the final
+            // post-process tick flush; any frames within it are
+            // steady-state-identical, so capturing the last is reproducible
+            // across runs. Falls back to the safety timer if idle #2 never comes
+            // (e.g. mock-model never replied).
+            clearTimeout(safetyTimer);
+            setTimeout(settle, 250);
           }
         }
       } catch {
