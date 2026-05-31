@@ -57,6 +57,23 @@ const TASK_WORKBOOKS: Partial<Record<TaskType, string>> = {
 };
 
 /**
+ * Map a sub-agent role (agentKey) to the workbook TaskType that best matches
+ * its job. Sub-agents never run PIL Layer 1, so they have no classifier-derived
+ * taskType — their ROLE is their task type:
+ *   - explore           → analyze  (read-only research; "answer from what you read")
+ *   - verify*           → debug    (runs tests / diagnoses failures; "read the real error")
+ *   - general/vision/computer/custom → null (convergence-only anti-ramble block)
+ *
+ * Returning null is a safe default: the convergence block still applies, only
+ * the per-type addendum is omitted.
+ */
+export function subagentTaskType(agentKey: string): TaskType | null {
+  if (agentKey === "explore") return "analyze";
+  if (agentKey === "verify" || agentKey === "verify-detect" || agentKey === "verify-manifest") return "debug";
+  return null;
+}
+
+/**
  * Build the workbook text for a task type (convergence + optional addendum).
  */
 export function getCheapModelWorkbook(taskType: TaskType | null | undefined): string {
