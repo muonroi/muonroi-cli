@@ -169,29 +169,41 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     expect(foundStub).toBe(true);
   });
 
-  // F1 — re-compaction super-shrinks existing stubs
-  it("super-shrinks already-stubbed tool_results on re-compaction (F1)", () => {
-    const msgs = buildHistory(10, 10);
+  // F1 (revised, A3 cache-stability) — compaction is IDEMPOTENT.
+  //
+  // Previously a second pass super-shrank existing stubs further, mutating
+  // their content every round. In the agentic loop the compactor runs once
+  // per streamText call, so an already-stubbed message changed bytes on every
+  // call → the OpenAI prompt-cache prefix churned (forensics: 0% cache hit on
+  // calls 1-4, only stabilising by call 5). Terminal stubs let the prefix
+  // cache from call 2. The marginal extra shrink is not worth the cache loss.
+  it("is idempotent (fixed point) — compacting twice equals once, keeping the cached prefix stable", () => {
+    const msgs = buildHistory(12, 10);
+    const once = compactSubAgentMessages(msgs);
+    const twice = compactSubAgentMessages(once);
+    expect(twice).toEqual(once);
+  });
+
+  it("does NOT rewrite an already-written stub on re-compaction (terminal stubs)", () => {
+    const msgs = buildHistory(12, 10);
     const firstPass = compactSubAgentMessages(msgs);
-    // Force re-compaction by lowering threshold below first-pass total.
     const total = cumulativeMessageChars(firstPass);
+    // Force another pass with a lower threshold; existing stubs must be byte-identical.
     const secondPass = compactSubAgentMessages(firstPass, { thresholdChars: Math.floor(total / 2) });
-    // Second pass should be SHORTER than the first because stubs were
-    // super-shrunk to "[elided <tool> (<label>)]".
-    expect(cumulativeMessageChars(secondPass)).toBeLessThan(cumulativeMessageChars(firstPass));
-    // Detect the super-shrunk marker (it's shorter than the original stub).
-    let foundSuper = false;
-    for (const m of secondPass) {
-      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
-      for (const p of m.content as ReadonlyArray<Record<string, unknown>>) {
-        if (p.type !== "tool-result") continue;
-        const o = (p as { output?: { value?: string } }).output;
-        if (typeof o?.value === "string" && /^\[elided read_file \(sub-agent\)\]$/.test(o.value)) {
-          foundSuper = true;
-        }
-      }
+    const stubsOf = (arr: ReadonlyArray<{ role: string; content: unknown }>): string[] =>
+      arr
+        .flatMap((m) =>
+          Array.isArray(m.content)
+            ? (m.content as ReadonlyArray<Record<string, unknown>>)
+                .filter((p) => p.type === "tool-result")
+                .map((p) => (p as { output?: { value?: string } }).output?.value)
+            : [],
+        )
+        .filter((v): v is string => typeof v === "string" && /elided by sub-agent compactor/.test(v));
+    // Every stub the first pass produced is present, byte-identical, after re-compaction.
+    for (const s of stubsOf(firstPass)) {
+      expect(stubsOf(secondPass)).toContain(s);
     }
-    expect(foundSuper).toBe(true);
   });
 
   // G1 — context-window-aware threshold
