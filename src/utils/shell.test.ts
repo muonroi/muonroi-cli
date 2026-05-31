@@ -1,5 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { _resetResolvedShellCache, posixToNative, resolveShell } from "./shell";
+import { _resetResolvedShellCache, classifyShellBinary, posixToNative, resolveShell } from "./shell";
+
+describe("classifyShellBinary", () => {
+  it("classifies pwsh.exe as PowerShell, NOT bash (regression: 'pwsh.exe' ends with 'sh.exe')", () => {
+    // BUG: the bash branch matched `endsWith('sh.exe')`, which also matches
+    // `pwsh.exe`. A user setting MUONROI_SHELL=.../pwsh.exe was misclassified
+    // as POSIX bash, so the agent was told to use POSIX syntax while the tool
+    // actually spawned PowerShell — every sed/grep/ls then failed.
+    const r = classifyShellBinary("C:/Program Files/PowerShell/7/pwsh.exe");
+    expect(r.kind).toBe("powershell");
+    expect(r.isPosix).toBe(false);
+  });
+
+  it("classifies powershell.exe as PowerShell", () => {
+    const r = classifyShellBinary("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe");
+    expect(r.kind).toBe("powershell");
+    expect(r.isPosix).toBe(false);
+  });
+
+  it("still classifies a genuine POSIX sh/bash correctly", () => {
+    expect(classifyShellBinary("C:/Program Files/Git/bin/bash.exe").kind).toBe("bash");
+    expect(classifyShellBinary("/bin/sh").kind).toBe("bash");
+    expect(classifyShellBinary("/usr/bin/bash").kind).toBe("bash");
+    expect(classifyShellBinary("C:/msys64/usr/bin/sh.exe").kind).toBe("bash");
+  });
+
+  it("classifies cmd.exe and wsl.exe", () => {
+    expect(classifyShellBinary("C:/Windows/System32/cmd.exe").kind).toBe("cmd");
+    expect(classifyShellBinary("C:/Windows/System32/wsl.exe").kind).toBe("wsl");
+  });
+});
 
 describe("posixToNative", () => {
   it("translates /<letter>/path to <Letter>:\\path on Windows", () => {
