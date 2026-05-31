@@ -140,7 +140,10 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
         buildFinalTextRound("done"),
       ],
     });
-  }, 30_000);
+    // 90s (was 30s): the harness spawn + handshake intermittently exceeded 30s
+    // under CI load, surfacing as a beforeAll "Hook timed out" flake unrelated
+    // to the assertions below.
+  }, 90_000);
 
   afterAll(() => {
     handle?.cleanup();
@@ -211,9 +214,15 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
       const sys = Array.isArray(p) && p[0] ? p[0] : null;
       return typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
     });
-    // Primacy assertion — first agent system prompt must OPEN with the
-    // CRITICAL marker, not just contain it somewhere mid-text.
-    expect(agentSystems[0]?.startsWith("[CRITICAL TOOL-USE RULES")).toBe(true);
+    // Primacy assertion. A2 (PR #14) front-loads a one-line [ENV] shell
+    // directive for fast-tier models AHEAD of the playbook, so the system
+    // prompt now OPENS with "[ENV] …" immediately followed by the CRITICAL
+    // playbook marker. Both are front-loaded; assert both, in order.
+    expect(agentSystems[0]?.startsWith("[ENV]")).toBe(true);
+    expect(agentSystems[0]).toContain("[CRITICAL TOOL-USE RULES");
+    expect(agentSystems[0]?.indexOf("[ENV]")).toBeLessThan(
+      agentSystems[0]?.indexOf("[CRITICAL TOOL-USE RULES") ?? Number.MAX_SAFE_INTEGER,
+    );
     // Playbook content still present.
     const joined = agentSystems.join("\n");
     expect(joined).toContain("bash_output_get");
