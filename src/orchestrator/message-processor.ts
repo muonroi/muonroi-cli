@@ -70,7 +70,12 @@ import type {
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo } from "../models/registry.js";
-import { injectCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
+import {
+  cheapModelShellLine,
+  injectCheapModelPlaybook,
+  injectCheapModelShellDirective,
+  shouldInjectCheapModelPlaybook,
+} from "../pil/cheap-model-playbook.js";
 import { injectCheapModelWorkbook, shouldInjectCheapModelWorkbook } from "../pil/cheap-model-workbooks.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
@@ -126,6 +131,7 @@ import {
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
+import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import { relaxCompactionSettings } from "./compaction";
@@ -1341,6 +1347,19 @@ export class MessageProcessor {
           const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
             ? injectCheapModelPlaybook(systemWithWorkbook)
             : systemWithWorkbook;
+          // A2: front-load a one-line shell/env directive for fast-tier models.
+          // The authoritative ENVIRONMENT block already states OS/shell/cwd in
+          // the prompt body, but budget models underweight non-front-loaded
+          // rules — so echo the correct-syntax line at the very front. Derived
+          // from resolveShell({}) (same source as buildEnvironmentBlock) so it
+          // is always accurate to the actual shell the bash tool will spawn.
+          // Gated to fast tier, so the claude branch below still sees `system`.
+          const systemWithShell = shouldInjectCheapModelPlaybook(runtime.modelInfo)
+            ? injectCheapModelShellDirective(
+                systemWithPlaybook,
+                cheapModelShellLine(resolveShell({}).kind, process.platform),
+              )
+            : systemWithPlaybook;
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
@@ -1351,10 +1370,10 @@ export class MessageProcessor {
                 },
                 {
                   role: "system" as const,
-                  content: systemWithPlaybook.slice(systemParts.staticPrefix.length),
+                  content: systemWithShell.slice(systemParts.staticPrefix.length),
                 },
               ]
-            : systemWithPlaybook;
+            : systemWithShell;
 
           // Capture prompt-size breakdown so recordUsage can attach it to the
           // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
