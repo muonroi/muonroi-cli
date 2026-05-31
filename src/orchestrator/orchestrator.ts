@@ -1221,6 +1221,7 @@ export class Agent {
       setLastProviderOptionsShape: (shape) => {
         this._lastProviderOptionsShape = shape;
       },
+      getSessionId: () => this.session?.id,
       runTaskRequestBatch: (args) => this.runTaskRequestBatch(args),
     };
     const runner = new StreamRunner(deps);

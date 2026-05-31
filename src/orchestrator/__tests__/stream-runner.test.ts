@@ -7,9 +7,9 @@
 
 import type { ModelMessage } from "ai";
 import { beforeAll, describe, expect, it } from "vitest";
-import { getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
+import { getTestModelForProvider, getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
-import type { ResolvedModelRuntime } from "../../providers/runtime.js";
+import { computePromptCacheKey, type ResolvedModelRuntime } from "../../providers/runtime.js";
 import type { BashTool } from "../../tools/bash";
 import type { TaskRequest, ToolResult } from "../../types/index";
 import type { LegacyProvider } from "../agent-options";
@@ -46,6 +46,7 @@ function makeDeps(overrides: Partial<StreamRunnerDeps> = {}): StreamRunnerDeps {
     recordUsage: () => {},
     setCurrentCallId: () => {},
     setLastProviderOptionsShape: () => {},
+    getSessionId: () => undefined,
     runTaskRequestBatch: async (): Promise<ToolResult> => ({
       success: false,
       output: "batch path not exercised in this test",
@@ -113,6 +114,46 @@ describe("StreamRunner — cheap-model steering on sub-agent system prompt", () 
   });
 });
 
+describe("StreamRunner — F1 promptCacheKey parity on the sub-agent path", () => {
+  // The top-level turn derives a stable openai.promptCacheKey per turn via
+  // buildTurnProviderOptions({ sessionId }) so every tool round in a session
+  // routes to the same cache node (message-processor.ts). The sub-agent path
+  // previously used only resolve-time childRuntime.providerOptions, which has
+  // NO promptCacheKey — so every explore/verify OpenAI call auto-hashed its
+  // prompt and fragmented the cache, re-billing the unchanging prefix. setup()
+  // must now thread the session id so sub-agents get the SAME stable key.
+  it("threads sessionId → openai.promptCacheKey onto the sub-agent providerOptions", async () => {
+    const sessionId = "sess-fixed-for-f1-parity";
+    const openaiModel = getTestModelForProvider("openai", "fast");
+    const runner = new StreamRunner(
+      makeDeps({
+        resolveModelForTask: () => openaiModel,
+        getSessionId: () => sessionId,
+      }),
+    );
+    const outcome = await runner.setup({ agent: "explore", description: "scan", prompt: "find auth wiring" });
+    expect(outcome.kind).toBe("prepared");
+    if (outcome.kind !== "prepared") return;
+    const opts = outcome.prepared.childProviderOptions as { openai?: { promptCacheKey?: string } } | undefined;
+    expect(opts?.openai?.promptCacheKey).toBe(computePromptCacheKey(sessionId));
+  });
+
+  it("omits promptCacheKey when there is no session id (headless one-shot)", async () => {
+    const openaiModel = getTestModelForProvider("openai", "fast");
+    const runner = new StreamRunner(
+      makeDeps({
+        resolveModelForTask: () => openaiModel,
+        getSessionId: () => undefined,
+      }),
+    );
+    const outcome = await runner.setup({ agent: "explore", description: "scan", prompt: "find auth wiring" });
+    expect(outcome.kind).toBe("prepared");
+    if (outcome.kind !== "prepared") return;
+    const opts = outcome.prepared.childProviderOptions as { openai?: { promptCacheKey?: string } } | undefined;
+    expect(opts?.openai?.promptCacheKey).toBeUndefined();
+  });
+});
+
 describe("StreamRunner — DI surface", () => {
   it("constructs without invoking any dep callbacks", () => {
     let touched = 0;
@@ -135,6 +176,7 @@ describe("StreamRunner — DI surface", () => {
       recordUsage: trip,
       setCurrentCallId: trip,
       setLastProviderOptionsShape: trip,
+      getSessionId: trip as unknown as () => string | undefined,
       runTaskRequestBatch: trip as unknown as (args: {
         request: TaskRequest;
         childMessages: ModelMessage[];
