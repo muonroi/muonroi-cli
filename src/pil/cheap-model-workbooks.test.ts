@@ -60,8 +60,17 @@ describe("getCheapModelWorkbook", () => {
     expect(CHEAP_MODEL_CONVERGENCE).toMatch(/STOP investigating/i);
   });
 
-  it("stays compact (under 900 chars) to preserve attention budget", () => {
-    expect(getCheapModelWorkbook("debug").length).toBeLessThan(900);
+  it("steers a crisp completion line — finish the action, don't stop mid-step (A4)", () => {
+    // Live obs (workbook run 3308b3d02e11): the model's FINAL message was a
+    // mid-action narration ("I'm verifying the final workflow content now…")
+    // instead of stating completion. Steer it to finish, then state done.
+    expect(CHEAP_MODEL_CONVERGENCE).toMatch(/finish the action|don't stop mid|do not stop mid/i);
+    expect(CHEAP_MODEL_CONVERGENCE).toMatch(/one line|1 line|state.*(done|complet)/i);
+  });
+
+  it("stays compact (under 1000 chars) to preserve attention budget", () => {
+    // Bumped 900 → 1000 when the A4 completion-line rule was added.
+    expect(getCheapModelWorkbook("debug").length).toBeLessThan(1000);
   });
 });
 
