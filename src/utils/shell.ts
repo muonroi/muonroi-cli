@@ -87,11 +87,11 @@ export function _resetResolvedShellCache(): void {
 function resolveShellInner(settings: ShellSettings): ResolvedShell {
   const envOverride = process.env.MUONROI_SHELL;
   if (envOverride && existsSync(envOverride)) {
-    return classify(envOverride);
+    return classifyShellBinary(envOverride);
   }
 
   if (settings.path && existsSync(settings.path)) {
-    return classify(settings.path);
+    return classifyShellBinary(settings.path);
   }
 
   const kind: ShellKind = settings.kind ?? "auto";
@@ -129,8 +129,28 @@ function resolveShellInner(settings: ShellSettings): ResolvedShell {
   return { binary: undefined, isPosix: false, kind: "cmd" };
 }
 
-function classify(binary: string): ResolvedShell {
+/**
+ * Classify a shell binary path into a {@link ShellKind}.
+ *
+ * Order matters: PowerShell and cmd are matched BEFORE the POSIX bash/sh
+ * fallback. The bash branch matches a bare `sh.exe` suffix, which ALSO matches
+ * `pwsh.exe` (pw-sh.exe) — so PowerShell must be classified first, otherwise
+ * a user's `MUONROI_SHELL=.../pwsh.exe` is misread as POSIX bash and the agent
+ * is fed POSIX syntax while the tool actually spawns PowerShell.
+ *
+ * Exported for direct unit testing (pure string logic, no filesystem).
+ */
+export function classifyShellBinary(binary: string): ResolvedShell {
   const lower = binary.toLowerCase();
+  if (lower.endsWith("pwsh.exe") || lower.endsWith("powershell.exe")) {
+    return { binary, isPosix: false, kind: "powershell" };
+  }
+  if (lower.endsWith("cmd.exe")) {
+    return { binary, isPosix: false, kind: "cmd" };
+  }
+  if (lower.endsWith("wsl.exe") || lower.endsWith("\\wsl") || lower.endsWith("/wsl")) {
+    return { binary, isPosix: true, kind: "wsl" };
+  }
   if (
     lower.endsWith("bash.exe") ||
     lower.endsWith("/bash") ||
@@ -139,15 +159,6 @@ function classify(binary: string): ResolvedShell {
     lower.endsWith("/sh")
   ) {
     return { binary, isPosix: true, kind: "bash" };
-  }
-  if (lower.endsWith("wsl.exe") || lower.endsWith("\\wsl") || lower.endsWith("/wsl")) {
-    return { binary, isPosix: true, kind: "wsl" };
-  }
-  if (lower.endsWith("pwsh.exe") || lower.endsWith("powershell.exe")) {
-    return { binary, isPosix: false, kind: "powershell" };
-  }
-  if (lower.endsWith("cmd.exe")) {
-    return { binary, isPosix: false, kind: "cmd" };
   }
   return { binary, isPosix: true, kind: "bash" };
 }
