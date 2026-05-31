@@ -401,7 +401,7 @@ export class BatchTurnRunner {
         }
 
         const authError = isAuthenticationError(err);
-        const friendly = humanizeApiError(err);
+        const friendly = humanizeApiError(err, { modelId: runtime.modelId, providerId: modelInfo?.provider });
         notifyObserver(observer?.onError, {
           message: friendly,
           timestamp: Date.now(),
