@@ -66,9 +66,16 @@ export async function createProviderFactoryAsync(
       const tokens = await cfg.loadTokensWithRefresh().catch(() => null);
       if (tokens) {
         const headers = cfg.provider.authHeaders(tokens);
-        // OAuth subscription tokens may need a different base URL than the
-        // provider's API-key endpoint (e.g. OpenAI's ChatGPT backend).
-        const baseURL = opts.baseURL ?? cfg.baseURL;
+        // OAuth subscription tokens are only valid against the provider's OAuth
+        // backend (e.g. OpenAI's ChatGPT Codex backend), NOT its API-key
+        // endpoint. cfg.baseURL is therefore authoritative and MUST take
+        // precedence: callers (index.ts) always pass opts.baseURL = getBaseURL()
+        // (the api-key endpoint, e.g. api.openai.com), which would otherwise
+        // override the OAuth backend and produce a 401 "Missing scopes:
+        // api.responses.write" when the subscription token hits the platform
+        // API. Fall back to opts.baseURL only when the OAuth provider declares
+        // no dedicated backend (cfg.baseURL undefined, e.g. some Gemini flows).
+        const baseURL = cfg.baseURL ?? opts.baseURL;
         const result = createProviderFactory(id, { ...opts, baseURL, headers });
         // Attach provider-level OAuth-only defaults so downstream code can merge them.
         if (cfg.defaultProviderOptions) {
