@@ -174,6 +174,57 @@
       "description": "Vision-language model with confirmed function-calling support. Use when the turn contains image attachments (router vision-override pending).",
       "aliases": ["glm-4.6v-sf"],
       "supports_vision": true
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "name": "GPT-5.4 mini (OpenAI ChatGPT OAuth)",
+      "provider": "openai",
+      "tier": "fast",
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "low",
+      "description": "OpenAI GPT-5.4 mini via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
+      "aliases": ["gpt-5.4-mini-oauth"],
+      "supports_vision": false
+    },
+    {
+      "id": "gpt-5.4",
+      "name": "GPT-5.4 (OpenAI ChatGPT OAuth)",
+      "provider": "openai",
+      "tier": "premium",
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "OpenAI GPT-5.4 via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
+      "aliases": ["gpt-5.4-oauth"],
+      "supports_vision": false
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "name": "GPT-5.3 Codex (OpenAI ChatGPT OAuth)",
+      "provider": "openai",
+      "tier": "balanced",
+      "context_window": 256000,
+      "max_output_tokens": 32000,
+      "input_price_per_million": 0,
+      "output_price_per_million": 0,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "OpenAI GPT-5.3 Codex (coding-specialized) via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
+      "aliases": ["gpt-5.3-codex-oauth", "codex"],
+      "supports_vision": false
     }
   ]
 }

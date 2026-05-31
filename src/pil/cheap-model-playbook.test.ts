@@ -93,8 +93,23 @@ describe("injectCheapModelPlaybook", () => {
     expect(CHEAP_MODEL_PLAYBOOK).toMatch(/do NOT pipe.*tail/i);
   });
 
-  it("playbook is short (under 1500 chars) to preserve attention budget", () => {
-    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1500);
+  it("steers fix QUALITY: root-cause over masking (rule 5) and read real failure logs (rule 6)", () => {
+    // Grounded in a live observation (gpt-5.4-mini self-fixing a failing CI
+    // workflow): the cheap model masked the failure with `continue-on-error:
+    // true` instead of guarding the missing-secret root cause, and never read
+    // the actual run log. These two rules steer fast-tier models away from
+    // symptom-masking and toward evidence-first root-cause fixes.
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/root cause/i);
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("continue-on-error");
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/CONDITIONAL|skip when absent/i);
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/failure (log|output)|run log/i);
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/before .*hypothesi/i);
+  });
+
+  it("playbook stays short (under 1600 chars) to preserve attention budget", () => {
+    // Bumped 1500 → 1600 when rules 5/6 (fix-quality steering) were added.
+    // Still a tight prelude; primacy placement matters more than absolute length.
+    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1600);
   });
 
   it("deprecated appendCheapModelPlaybook alias still works (now actually prepends)", () => {
