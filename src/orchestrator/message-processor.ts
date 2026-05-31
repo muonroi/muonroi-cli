@@ -1696,7 +1696,15 @@ export class MessageProcessor {
               });
               // Realtime status bar update per step
               if (stepUsage.inputTokens || stepUsage.outputTokens) {
-                deps.recordUsage(stepUsage, "message", runtime.modelId);
+                // O1 — thread THIS turn's providerOptions shape per step so every
+                // step event records it (not just step 1) and an interleaved task
+                // can't overwrite it. Mirrors the gate used for the call itself.
+                deps.recordUsage(
+                  stepUsage,
+                  "message",
+                  runtime.modelId,
+                  Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
+                );
               }
               // Fix #8 — feed the assistant text emitted in this step into
               // the self-repetition detector. The slice covers everything
