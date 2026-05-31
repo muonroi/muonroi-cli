@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CostForensicsRow, CostForensicsSummary } from "./cost-forensics.js";
-import { printCostForensics } from "./cost-forensics.js";
 import { getDatabase } from "../storage/db.js";
+import type { CostForensicsRow, CostForensicsSummary } from "./cost-forensics.js";
+import { computeCacheCadence, printCostForensics } from "./cost-forensics.js";
 
 // ─── Fake DB for resolveSessionIds tests ────────────────────────────────────
 // The sessions table rows keyed by id, ordered by created_at DESC for LIKE queries.
@@ -160,6 +160,81 @@ describe("printCostForensics", () => {
   });
 });
 
+describe("computeCacheCadence", () => {
+  it("estimates re-billed tokens for calls that miss a cacheable prefix AFTER warm-up", () => {
+    // Prefix proven cacheable (call 2 hit 16,896). Calls 3-4 read 0% despite it
+    // → fast-loop latency re-bill. Call 1 cold-start is NOT counted.
+    const c = computeCacheCadence([
+      event({ source: "message", inputTokens: 17_000, cacheReadTokens: 0 }), // cold start (not counted)
+      event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }), // warm-up hit
+      event({ source: "message", inputTokens: 19_000, cacheReadTokens: 0 }), // missed (re-bill)
+      event({ source: "message", inputTokens: 20_000, cacheReadTokens: 0 }), // missed (re-bill)
+    ]);
+    expect(c.warmPrefixTokens).toBe(16_896);
+    expect(c.coldCallsAfterWarmup).toBe(2);
+    expect(c.estReBilledTokens).toBe(33_792);
+  });
+
+  it("reports zero re-bill when every post-warm call keeps the cache", () => {
+    const c = computeCacheCadence([
+      event({ source: "message", inputTokens: 17_000, cacheReadTokens: 0 }),
+      event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }),
+      event({ source: "message", inputTokens: 18_500, cacheReadTokens: 16_896 }),
+    ]);
+    expect(c.coldCallsAfterWarmup).toBe(0);
+    expect(c.estReBilledTokens).toBe(0);
+  });
+
+  it("reports zero warmPrefix when the cache never warmed (cold session)", () => {
+    const c = computeCacheCadence([
+      event({ source: "message", inputTokens: 17_000, cacheReadTokens: 0 }),
+      event({ source: "message", inputTokens: 18_000, cacheReadTokens: 0 }),
+    ]);
+    expect(c.warmPrefixTokens).toBe(0);
+    expect(c.coldCallsAfterWarmup).toBe(0);
+    expect(c.estReBilledTokens).toBe(0);
+  });
+
+  it("ignores non-message events (task/sub-agent) in the cadence window", () => {
+    const c = computeCacheCadence([
+      event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }),
+      event({ source: "task", inputTokens: 90_000, cacheReadTokens: 0 }), // sub-agent, not the top-level loop
+      event({ source: "message", inputTokens: 19_000, cacheReadTokens: 0 }),
+    ]);
+    expect(c.messageCalls).toBe(2);
+    expect(c.coldCallsAfterWarmup).toBe(1);
+  });
+});
+
+describe("printCostForensics — cache cadence line", () => {
+  it("prints the re-bill diagnostic when post-warm calls miss the prefix", () => {
+    const out = captureStdout(() =>
+      printCostForensics(
+        summary([
+          event({ source: "message", inputTokens: 17_000, cacheReadTokens: 0 }),
+          event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }),
+          event({ source: "message", inputTokens: 19_000, cacheReadTokens: 0 }),
+          event({ source: "message", inputTokens: 20_000, cacheReadTokens: 0 }),
+        ]),
+      ),
+    );
+    expect(out).toContain("Cache cadence");
+    expect(out).toContain("33,792");
+  });
+
+  it("does NOT print the cadence line when there is no post-warm miss", () => {
+    const out = captureStdout(() =>
+      printCostForensics(
+        summary([
+          event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }),
+          event({ source: "message", inputTokens: 18_500, cacheReadTokens: 16_896 }),
+        ]),
+      ),
+    );
+    expect(out).not.toContain("Cache cadence");
+  });
+});
+
 import { resolveSessionIds } from "./cost-forensics.js";
 
 describe("resolveSessionIds", () => {
@@ -187,7 +262,10 @@ describe("resolveSessionIds", () => {
   it("resolveSessionIds queries newest-first via SQL ORDER BY DESC", () => {
     let capturedSql = "";
     vi.mocked(getDatabase).mockReturnValueOnce({
-      prepare: (sql: string) => { capturedSql = sql; return { all: () => [] as Array<{ id: string }> }; },
+      prepare: (sql: string) => {
+        capturedSql = sql;
+        return { all: () => [] as Array<{ id: string }> };
+      },
     } as never);
     resolveSessionIds("anything");
     expect(capturedSql).toContain("ORDER BY created_at DESC");
