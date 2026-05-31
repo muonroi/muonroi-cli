@@ -44,6 +44,7 @@ import {
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
+  buildTurnProviderOptions,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
   resolveModelRuntime,
@@ -139,6 +140,12 @@ export interface StreamRunnerDeps {
   /** Persist the last providerOptions shape (O1 forensics). */
   setLastProviderOptionsShape(shape: string | null): void;
   /**
+   * Current session id, used to derive a stable openai.promptCacheKey for the
+   * sub-agent (F1 parity with the top-level turn). Returns undefined for
+   * headless one-shot requests with no persisted session.
+   */
+  getSessionId(): string | undefined;
+  /**
    * Delegate to Agent.runTaskRequestBatch when batchApi is enabled. Returning
    * the call signature inline keeps StreamRunner from importing the orchestrator.
    */
@@ -168,6 +175,13 @@ export interface PreparedSubAgentCall {
   childSystem: string;
   childMessages: ModelMessage[];
   childTools: ToolSet;
+  /**
+   * Per-turn providerOptions for the sub-agent streamText call. Built via
+   * buildTurnProviderOptions so it carries the session-derived
+   * openai.promptCacheKey (F1) on top of resolve-time defaults — not the bare
+   * childRuntime.providerOptions, which has no cache key.
+   */
+  childProviderOptions?: Record<string, unknown>;
   initialDetail: string;
   lastActivity: string;
   maxSteps: number;
@@ -419,6 +433,18 @@ export class StreamRunner {
 
     const maxSteps = Math.min(this.deps.getMaxToolRounds(), isExplore ? 60 : 120);
 
+    // F1 parity — derive per-turn providerOptions so the sub-agent OpenAI calls
+    // carry a stable session-derived promptCacheKey (every tool round routes to
+    // the same cache node, keeping the unchanging prefix cached). The top-level
+    // turn does this in message-processor.ts; the sub-agent path previously used
+    // only resolve-time childRuntime.providerOptions (no cache key). Guard on a
+    // resolvable provider so a runtime without catalog modelInfo (vision/computer
+    // constants) falls back to the resolve-time options instead of throwing.
+    const childProviderOptions = childRuntime.modelInfo?.provider
+      ? (buildTurnProviderOptions(childRuntime, { sessionId: this.deps.getSessionId() }) ??
+        (childRuntime.providerOptions as Record<string, unknown> | undefined))
+      : (childRuntime.providerOptions as Record<string, unknown> | undefined);
+
     return {
       kind: "prepared",
       prepared: {
@@ -430,6 +456,7 @@ export class StreamRunner {
         childSystem,
         childMessages,
         childTools,
+        childProviderOptions,
         initialDetail,
         lastActivity,
         maxSteps,
@@ -450,6 +477,9 @@ export class StreamRunner {
     signal?: AbortSignal,
   ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string; stalled?: boolean }> {
     const { childRuntime, childSystem, childMessages, childTools, maxSteps } = prepared;
+    // F1 — per-turn options (with promptCacheKey) built in setup(); falls back
+    // to resolve-time options when no provider/session was available.
+    const childProviderOptions = prepared.childProviderOptions ?? childRuntime.providerOptions;
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     let assistantText = "";
     let lastActivity = prepared.lastActivity;
@@ -471,7 +501,7 @@ export class StreamRunner {
         `start: model=${childRuntime.modelId} provider=${mi?.provider} reasoning=${mi?.reasoning} thinkingType=${mi?.thinkingType} supportsClientTools=${mi?.supportsClientTools} supportsMaxOutputTokens=${mi?.supportsMaxOutputTokens} agent=${prepared.request.agent}`,
       );
       try {
-        debugLog(`providerOptions=${JSON.stringify(childRuntime.providerOptions ?? {})}`);
+        debugLog(`providerOptions=${JSON.stringify(childProviderOptions ?? {})}`);
       } catch {
         /* providerOptions may contain non-serializable refs */
       }
@@ -490,7 +520,7 @@ export class StreamRunner {
     const compactThreshold = getSubAgentCompactThresholdChars();
     const compactKeepLast = getSubAgentCompactKeepLast();
     // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
-    this.deps.setLastProviderOptionsShape(extractProviderOptionsShape(childRuntime.providerOptions));
+    this.deps.setLastProviderOptionsShape(extractProviderOptionsShape(childProviderOptions));
     if (wireDebug.enabled) {
       wireDebug.logRequest({
         providerId: childRuntime.modelInfo?.provider ?? "unknown",
@@ -498,7 +528,7 @@ export class StreamRunner {
         messages: childMessages as readonly unknown[],
         systemChars: childSystem?.length ?? 0,
         toolNames: childTools ? Object.keys(childTools) : undefined,
-        providerOptions: childRuntime.providerOptions,
+        providerOptions: childProviderOptions,
       });
     }
     // SiliconFlow DeepSeek thinking-mode rejects assistant history with
@@ -587,7 +617,7 @@ export class StreamRunner {
       },
       ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
-      ...(childRuntime.providerOptions ? { providerOptions: childRuntime.providerOptions } : {}),
+      ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
       onFinish: ({ totalUsage, finishReason }) => {
         const tu = totalUsage as Record<string, unknown>;
         const details = tu.inputTokenDetails as Record<string, unknown> | undefined;
