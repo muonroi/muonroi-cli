@@ -71,6 +71,7 @@ import type {
 import { buildMcpToolSet } from "../mcp/runtime";
 import { getModelInfo } from "../models/registry.js";
 import { injectCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
+import { injectCheapModelWorkbook, shouldInjectCheapModelWorkbook } from "../pil/cheap-model-workbooks.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
 import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
@@ -1329,9 +1330,17 @@ export class MessageProcessor {
           // surfaced in the system prompt. Smart models don't need this — gated
           // by `modelInfo.tier === "fast"`. See cheap-model-playbook.ts for
           // motivation + escape hatch (MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1).
-          const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
-            ? injectCheapModelPlaybook(system)
+          // Fast-tier steering, front-loaded for primacy: task convergence
+          // workbook (anti-ramble — cuts tool-call count, the dominant
+          // cheap-model cost) layered UNDER the tool-use playbook so the
+          // CRITICAL tool rules stay at the very front. Both fixed per turn, so
+          // they stay inside the cached prefix.
+          const systemWithWorkbook = shouldInjectCheapModelWorkbook(runtime.modelInfo)
+            ? injectCheapModelWorkbook(system, pilCtx.taskType)
             : system;
+          const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
+            ? injectCheapModelPlaybook(systemWithWorkbook)
+            : systemWithWorkbook;
 
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
