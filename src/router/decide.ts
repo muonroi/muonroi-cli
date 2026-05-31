@@ -17,7 +17,7 @@ import { downgradeChain, emitDowngrade, getDowngradeChain } from "../usage/downg
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
 import { CapBreachError } from "../usage/types.js";
-import { getRoleModel, isProviderDisabled } from "../utils/settings.js";
+import { getRoleModel, isCouncilMultiProviderPreferred, isProviderDisabled } from "../utils/settings.js";
 import { classify } from "./classifier/index.js";
 import { callColdRoute } from "./cold.js";
 import { isInheritProvider } from "./provider-sentinel.js";
@@ -314,6 +314,30 @@ async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<Rout
   };
 }
 
+/**
+ * Decide whether a user-configured role→model override should be honored.
+ *
+ * A role model is honored only when its provider is usable in the current
+ * session. Specifically a CROSS-provider role model (one whose provider differs
+ * from the user's active `defaultProvider`) is honored ONLY when the user
+ * explicitly opted into multi-provider council (`councilPreferMultiProvider`).
+ *
+ * Why: live observation showed a stale roleModel (left pointing at deepseek
+ * after the user switched their active provider to openai) silently routed the
+ * council/sprint role phases back to deepseek and failed mid-task with 402.
+ * Honoring only same-provider role models (unless multi-provider is on) keeps
+ * "I switched to provider X" meaning "everything uses X".
+ */
+export function shouldUseRoleModel(
+  roleProvider: string,
+  defaultProvider: string,
+  opts: { providerDisabled: boolean; multiProviderPreferred: boolean },
+): boolean {
+  if (opts.providerDisabled) return false;
+  if (roleProvider !== defaultProvider && !opts.multiProviderPreferred) return false;
+  return true;
+}
+
 export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDecision> {
   const cacheKey = routeCacheKey(opts.pil);
   if (cacheKey) {
@@ -338,7 +362,12 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     if (roleModelId) {
       const _info = getModelInfo(roleModelId);
       const provider = detectProviderForModel(roleModelId);
-      if (!isProviderDisabled(provider)) {
+      if (
+        shouldUseRoleModel(provider, opts.defaultProvider, {
+          providerDisabled: isProviderDisabled(provider as ProviderId),
+          multiProviderPreferred: isCouncilMultiProviderPreferred(),
+        })
+      ) {
         const d: RouteDecision = {
           tier: "hot",
           model: roleModelId,

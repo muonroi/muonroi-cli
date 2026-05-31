@@ -49,6 +49,14 @@ export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before in
 4. When a tool returns \`ERROR: ...\`, do NOT retry the identical call.
    Pick a different tool, change inputs meaningfully, or stop and report.
 
+5. Fix the ROOT CAUSE, never mask a failure to make it "pass"
+   (\`continue-on-error\`, swallowed try/catch, skipped/deleted test, \`|| true\`).
+   If a step fails from a missing secret/config, make it CONDITIONAL (skip when
+   absent) so it still runs when present — do NOT blanket-ignore it.
+
+6. For a build / CI / test failure, read the ACTUAL failure log or stack trace
+   BEFORE hypothesizing — fix the real error, not a guess from source alone.
+
 [END CRITICAL TOOL-USE RULES — your regular instructions begin below]
 
 `;

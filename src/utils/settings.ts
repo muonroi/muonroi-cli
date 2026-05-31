@@ -946,6 +946,24 @@ export function getSubAgentBudgetChars(): number {
 }
 
 /**
+ * Stall watchdog timeout (ms) for streaming model calls: if the provider sends
+ * no stream chunk for this long, the stream is aborted and the error is
+ * surfaced as a toast instead of leaving the agent silently frozen. Re-armed on
+ * every chunk, so it only fires on genuine stalls (first-chunk or mid-stream),
+ * never on an actively-producing stream. Range 10_000–600_000; 0 disables.
+ * Default 120_000 (2 min). Env override: MUONROI_PROVIDER_STALL_TIMEOUT_MS.
+ */
+export function getProviderStallTimeoutMs(): number {
+  const envRaw = process.env.MUONROI_PROVIDER_STALL_TIMEOUT_MS;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n === 0) return 0; // explicit disable
+    if (Number.isFinite(n) && n >= 10_000 && n <= 600_000) return Math.floor(n);
+  }
+  return 120_000;
+}
+
+/**
  * Phase B3 — threshold (in chars of cumulative message content) above which
  * the sub-agent `prepareStep` compactor rewrites older tool_result parts
  * into short summary stubs. Below the threshold compaction is a no-op.
