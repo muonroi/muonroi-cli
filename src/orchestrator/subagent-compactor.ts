@@ -339,10 +339,14 @@ export function compactSubAgentMessages(
     }
     if (isToolResultMessage(msg)) {
       if (isStubbedToolResult(msg)) {
-        // F1 — already-stubbed result. Super-shrink: drop the 200-char
-        // preview down to a marker just naming the tool. The original ~150
-        // chars of stub envelope becomes ~40 chars.
-        out.push(superShrinkStubbedToolMessage(msg, label));
+        // A3 cache-stability: an already-written stub is TERMINAL — push it
+        // unchanged. The compactor runs once per streamText call in the
+        // agentic loop; the former F1 super-shrink rewrote the stub's bytes on
+        // every pass, which churned the OpenAI prompt-cache prefix (forensics:
+        // 0% cache hit on calls 1-4, only stabilising by call 5). Keeping the
+        // stub byte-identical makes compaction idempotent so the prefix caches
+        // from call 2. The marginal extra shrink is not worth the cache loss.
+        out.push(msg);
         continue;
       }
       out.push(rewriteOlderToolMessage(msg, outputPreviewChars, label));
@@ -368,6 +372,11 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   const next = parts.map((part) => {
     if (part.type !== "tool-call") return part;
     const input = part.input;
+    // A3 cache-stability / idempotency: never re-wrap an already-elided marker.
+    // The marker is itself ~95 chars, so without this guard a second pass
+    // re-wrapped it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and
+    // churning the cached prefix every call. Once elided, leave it terminal.
+    if (typeof input === "string" && input.startsWith("[earlier call args elided")) return part;
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
     if (sz < 80) return part; // tiny calls aren't worth touching
     mutated = true;
@@ -385,20 +394,4 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   });
   if (!mutated) return msg;
   return { ...msg, content: next } as unknown as ModelMessage;
-}
-
-function superShrinkStubbedToolMessage(msg: ModelMessage, label: string): ModelMessage {
-  if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
-  const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
-    if (part.type !== "tool-result") return part;
-    const tr = part as unknown as ToolResultPartLike;
-    const stub = `[elided ${tr.toolName} (${label})]`;
-    return {
-      type: "tool-result",
-      toolCallId: tr.toolCallId,
-      toolName: tr.toolName,
-      output: { type: "text", value: stub },
-    } as Record<string, unknown>;
-  });
-  return { ...msg, content: rewritten } as unknown as ModelMessage;
 }
