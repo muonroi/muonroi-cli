@@ -169,6 +169,56 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
   };
 }
 
+/**
+ * Cache-cadence diagnostic. OpenAI's automatic prompt cache has a population
+ * latency (~5-8s observed): in a fast tool loop where calls land ~2s apart, a
+ * prefix written on call N is not yet readable on call N+1, so the call reads
+ * 0% even though the prefix is identical and provably cacheable. This surfaces
+ * that cost: it counts only the message-loop calls that read 0% AFTER the cache
+ * has demonstrably warmed at least once (so cold-start misses are NOT blamed),
+ * and estimates the tokens re-billed = those calls × the warmed prefix size.
+ *
+ * It is a cost OBSERVATION, not a target breach — the fix is fewer/batched tool
+ * rounds (or a slower cadence), not a code change, since the prefix is stable
+ * (F1 promptCacheKey + A3 idempotent compaction already hold it byte-stable).
+ */
+export interface CacheCadenceDiagnostic {
+  /** Largest cache_read seen on a message call = the stable cacheable prefix. */
+  warmPrefixTokens: number;
+  /** Top-level message-loop calls (sub-agent `task` calls excluded). */
+  messageCalls: number;
+  /** Message calls reading 0% AFTER the first cache hit (cold-start excluded). */
+  coldCallsAfterWarmup: number;
+  /** Estimated tokens re-billed by those misses (coldCallsAfterWarmup × warmPrefixTokens). */
+  estReBilledTokens: number;
+}
+
+export function computeCacheCadence(events: CostForensicsRow[]): CacheCadenceDiagnostic {
+  // Only the top-level message loop shares one cached prefix per session;
+  // sub-agent `task` calls carry a different prefix, so exclude them.
+  const msgs = events.filter((e) => e.source === "message");
+  const warmPrefixTokens = msgs.reduce((m, e) => Math.max(m, e.cacheReadTokens), 0);
+  let firstHit = -1;
+  for (let i = 0; i < msgs.length; i++) {
+    if ((msgs[i]?.cacheReadTokens ?? 0) > 0) {
+      firstHit = i;
+      break;
+    }
+  }
+  let coldCallsAfterWarmup = 0;
+  if (firstHit >= 0) {
+    for (let i = firstHit + 1; i < msgs.length; i++) {
+      if ((msgs[i]?.cacheReadTokens ?? 0) === 0) coldCallsAfterWarmup += 1;
+    }
+  }
+  return {
+    warmPrefixTokens,
+    messageCalls: msgs.length,
+    coldCallsAfterWarmup,
+    estReBilledTokens: coldCallsAfterWarmup * warmPrefixTokens,
+  };
+}
+
 function formatNum(n: number): string {
   return n.toLocaleString("en-US");
 }
@@ -197,6 +247,16 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
   w(`Cache create tokens: ${formatNum(summary.totalCacheCreation)}`);
   w(`Peak single call:    ${formatNum(summary.peakSingleCallInput)} input`);
   w(`Estimated cost:      $${summary.totalCostUsd.toFixed(4)}`);
+  // Cache-cadence diagnostic — surface fast-loop prompt-cache latency loss.
+  const cadence = computeCacheCadence(summary.events);
+  if (cadence.warmPrefixTokens > 0 && cadence.coldCallsAfterWarmup > 0) {
+    w(
+      `Cache cadence:       ${cadence.coldCallsAfterWarmup} call(s) after warm-up read 0% ` +
+        `despite a cacheable ~${formatNum(cadence.warmPrefixTokens)}-tok prefix ` +
+        `(~${formatNum(cadence.estReBilledTokens)} tok re-billed). ` +
+        `Likely fast tool-loop latency — fewer/batched tool rounds recover this.`,
+    );
+  }
   w(``);
   w(`Per-event breakdown:`);
   w(
