@@ -85,6 +85,34 @@ describe("StreamRunner — setup short-circuit paths", () => {
   });
 });
 
+describe("StreamRunner — cheap-model steering on sub-agent system prompt", () => {
+  // The sub-agent prompt must carry the SAME front-loaded steering stack as the
+  // top-level turn for fast-tier models (regression: previously only the
+  // playbook was injected, leaving the sub-agent without the anti-ramble
+  // workbook or the shell directive). Final prompt order: [ENV] → [CRITICAL
+  // playbook] → [CONVERGENCE workbook] → base.
+  //
+  // `explore` is used because its childMode is "ask" (no MCP load) so setup()
+  // completes synchronously without spawning anything.
+  it("front-loads [ENV] → [CRITICAL] → [CONVERGENCE] for a fast-tier explore sub-agent", async () => {
+    const runner = new StreamRunner(makeDeps());
+    const outcome = await runner.setup({ agent: "explore", description: "scan", prompt: "find auth wiring" });
+    expect(outcome.kind).toBe("prepared");
+    if (outcome.kind !== "prepared") return;
+    const sys = outcome.prepared.childSystem;
+
+    const iEnv = sys.indexOf("[ENV]");
+    const iCritical = sys.indexOf("[CRITICAL TOOL-USE RULES");
+    const iConvergence = sys.indexOf("[CONVERGENCE");
+    expect(sys.startsWith("[ENV]")).toBe(true);
+    expect(iEnv).toBeGreaterThanOrEqual(0);
+    expect(iCritical).toBeGreaterThan(iEnv);
+    expect(iConvergence).toBeGreaterThan(iCritical);
+    // explore → analyze workbook addendum.
+    expect(sys).toMatch(/do not read the whole codebase/i);
+  });
+});
+
 describe("StreamRunner — DI surface", () => {
   it("constructs without invoking any dep callbacks", () => {
     let touched = 0;

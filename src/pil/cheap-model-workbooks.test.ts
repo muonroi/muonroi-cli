@@ -5,6 +5,7 @@ import {
   getCheapModelWorkbook,
   injectCheapModelWorkbook,
   shouldInjectCheapModelWorkbook,
+  subagentTaskType,
 } from "./cheap-model-workbooks.js";
 
 const base = { id: "x", name: "x", description: "", provider: "x", contextWindow: 100_000 } as const;
@@ -71,6 +72,38 @@ describe("getCheapModelWorkbook", () => {
   it("stays compact (under 1000 chars) to preserve attention budget", () => {
     // Bumped 900 → 1000 when the A4 completion-line rule was added.
     expect(getCheapModelWorkbook("debug").length).toBeLessThan(1000);
+  });
+});
+
+describe("subagentTaskType", () => {
+  // Sub-agents have no PIL classifier run of their own; their role IS their
+  // task type. The Explore agent is read-only research → analyze; the verify
+  // family runs tests/diagnoses failures → debug. Everything else (general,
+  // vision, computer, custom) gets the convergence-only block (null).
+  it("maps explore → analyze", () => {
+    expect(subagentTaskType("explore")).toBe("analyze");
+  });
+
+  it("maps the verify family → debug", () => {
+    expect(subagentTaskType("verify")).toBe("debug");
+    expect(subagentTaskType("verify-detect")).toBe("debug");
+    expect(subagentTaskType("verify-manifest")).toBe("debug");
+  });
+
+  it("returns null (convergence-only) for general/vision/computer", () => {
+    expect(subagentTaskType("general")).toBeNull();
+    expect(subagentTaskType("vision")).toBeNull();
+    expect(subagentTaskType("computer")).toBeNull();
+  });
+
+  it("returns null for an unknown/custom sub-agent name", () => {
+    expect(subagentTaskType("my-custom-agent")).toBeNull();
+    expect(subagentTaskType("")).toBeNull();
+  });
+
+  it("feeds the workbook builder — explore yields the ANALYZE addendum", () => {
+    const wb = getCheapModelWorkbook(subagentTaskType("explore"));
+    expect(wb).toMatch(/do not read the whole codebase/i);
   });
 });
 
