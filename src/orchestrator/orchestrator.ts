@@ -841,6 +841,16 @@ export class Agent {
     },
     source: UsageSource = "message",
     model = this.modelId,
+    /**
+     * Phase O1 — the providerOptions shape of the call that produced THIS event,
+     * threaded explicitly per call. Multi-step turns emit one event per step and
+     * a `task` sub-agent can run mid-turn, so a single mutable
+     * `_lastProviderOptionsShape` corrupted later events (the clear nulled it
+     * after step 1; an interleaved task overwrote it). When omitted (title /
+     * other one-shot calls that set no shape), fall back to the mutable field,
+     * which is cleared after each message event so they record null, not stale.
+     */
+    providerOptionsShape?: string | null,
   ): void {
     if (!usage) return;
     if (this.session) {
@@ -851,19 +861,12 @@ export class Agent {
       const lastSeq = lastPersistedSeq(this.messageSeqs);
       // Phase O1 — providerOptions shape (types only, no values) attached
       // to every usage event so post-mortem can answer "what provider
-      // options did this billed call carry?". Cleared below for "message"
-      // sources so non-message calls don't reuse stale data.
-      const providerOptionsShape = this._lastProviderOptionsShape;
-      recordUsageEvent(
-        this.session.id,
-        source,
-        model,
-        usage,
-        lastSeq,
-        pilActive,
-        enrichmentDelta,
-        providerOptionsShape,
-      );
+      // options did this billed call carry?". Prefer the explicitly-threaded
+      // shape (correct per-event, immune to the clear + task interleaving);
+      // fall back to the mutable field only when the caller passed nothing
+      // (title / other), which is cleared below so they record null, not stale.
+      const resolvedShape = providerOptionsShape !== undefined ? providerOptionsShape : this._lastProviderOptionsShape;
+      recordUsageEvent(this.session.id, source, model, usage, lastSeq, pilActive, enrichmentDelta, resolvedShape);
       if (source === "message") {
         this._pilActive = false;
         this._pilEnrichmentDelta = 0;
@@ -1214,7 +1217,7 @@ export class Agent {
       isBatchApiEnabled: () => this.batchApi,
       getCrossTurnDedup: () => this._crossTurnDedup,
       getReadBudget: () => this._readBudget,
-      recordUsage: (usage, source, model) => this.recordUsage(usage, source, model),
+      recordUsage: (usage, source, model, shape) => this.recordUsage(usage, source, model, shape),
       setCurrentCallId: (id) => {
         this._currentCallId = id;
       },
@@ -2311,7 +2314,7 @@ export class Agent {
         self.executeBatchToolCall(tools, toolCall, messages, signal),
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
-      recordUsage: (usage, source, model) => self.recordUsage(usage, source, model),
+      recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
     };
   }
 
@@ -2531,7 +2534,7 @@ export class Agent {
       listDelegations: () => self.listDelegations(),
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
-      recordUsage: (usage, source, model) => self.recordUsage(usage, source, model),
+      recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
       respondToToolApproval: (id, ok) => self.respondToToolApproval(id, ok),
       askToolLoopContinue: async (info) => {
         const h = self._toolLoopCapHandler;

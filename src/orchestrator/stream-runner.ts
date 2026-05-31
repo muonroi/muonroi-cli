@@ -134,6 +134,8 @@ export interface StreamRunnerDeps {
     },
     source: "task",
     model?: string,
+    /** O1 — providerOptions shape of this sub-agent call, threaded per event. */
+    providerOptionsShape?: string | null,
   ): void;
   /** Set the current call id (for forensics correlation). */
   setCurrentCallId(id: string): void;
@@ -629,7 +631,14 @@ export class StreamRunner {
           0;
         const cacheCreationTokens =
           asNumber(details?.cacheWriteTokens) ?? asNumber(raw?.cache_creation_input_tokens) ?? 0;
-        this.deps.recordUsage({ ...totalUsage, cacheReadTokens, cacheCreationTokens }, "task", childRuntime.modelId);
+        this.deps.recordUsage(
+          { ...totalUsage, cacheReadTokens, cacheCreationTokens },
+          "task",
+          childRuntime.modelId,
+          // O1 — thread THIS sub-agent's providerOptions shape so the task event
+          // records its own shape, not whatever the mutable field last held.
+          extractProviderOptionsShape(childProviderOptions),
+        );
         // Task 2.6b — emit llm-done (agent-mode only).
         try {
           const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as

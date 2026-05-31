@@ -79,5 +79,7 @@ export interface TurnRunnerDepsBase {
       | undefined,
     source?: UsageSource,
     model?: string,
+    /** O1 — providerOptions shape of this call, threaded per event (see Agent.recordUsage). */
+    providerOptionsShape?: string | null,
   ): void;
 }
