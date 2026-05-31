@@ -2205,7 +2205,10 @@ export class MessageProcessor {
 
               case "error": {
                 const authError = isAuthenticationError(part.error);
-                const friendly = humanizeApiError(part.error);
+                const friendly = humanizeApiError(part.error, {
+                  modelId: runtime.modelId,
+                  providerId: runtime.modelInfo?.provider,
+                });
                 const forensics = summarizeApiErrorForLog(part.error);
                 notifyObserver(observer?.onError, {
                   message: friendly,
@@ -2665,7 +2668,9 @@ export class MessageProcessor {
           const authError = isAuthenticationError(err);
           // Stall aborts carry an opaque DOMException; show the clear stall
           // message instead of the raw abort reason.
-          const friendly = stallTriggered ? STALL_ERROR_MESSAGE : humanizeApiError(err);
+          const friendly = stallTriggered
+            ? STALL_ERROR_MESSAGE
+            : humanizeApiError(err, { modelId: runtime.modelId, providerId: runtime.modelInfo?.provider });
           notifyObserver(observer?.onError, {
             message: friendly,
             timestamp: Date.now(),

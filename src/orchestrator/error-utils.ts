@@ -31,7 +31,53 @@ export function isMalformedFunctionNameError(error: unknown): boolean {
   return /Expected ['"]function\.name['"] to be a string/i.test(message);
 }
 
-export function humanizeApiError(error: unknown): string {
+/** Routing context for humanizeApiError — the model/provider that actually ran. */
+export interface ApiErrorContext {
+  modelId?: string;
+  providerId?: string;
+}
+
+/** Statuses where the model/provider CHOICE is the lever, so naming it helps. */
+const ROUTING_STATUSES = new Set([401, 402, 403, 429]);
+
+function getStatusCode(error: unknown): number | undefined {
+  if (APICallError.isInstance(error)) return error.statusCode ?? undefined;
+  const e = error as { statusCode?: number; status?: number } | null;
+  return e?.statusCode ?? e?.status;
+}
+
+/**
+ * For account/auth/rate errors, append the routed model + provider and a
+ * targeted fix hint. Reveals e.g. a project-pinned deepseek model overriding
+ * the user's default (the "402 Insufficient Balance" mystery) and points at the
+ * lever (`-m`, `keys login`, top-up). Returns "" for non-routing errors so a
+ * server-side 5xx isn't mislabeled as the user's routing problem.
+ */
+function routingSuffix(error: unknown, ctx: ApiErrorContext | undefined): string {
+  if (!ctx?.modelId) return "";
+  const message = error instanceof Error ? error.message : String(error);
+  let status = getStatusCode(error);
+  // Some gateways surface a balance error without a clean statusCode.
+  if (status === undefined && /insufficient balance|out of (balance|credit)/i.test(message)) {
+    status = 402;
+  }
+  if (status === undefined || !ROUTING_STATUSES.has(status)) return "";
+
+  const where = `routed to model "${ctx.modelId}"${ctx.providerId ? ` via provider "${ctx.providerId}"` : ""}`;
+  const hint =
+    status === 402
+      ? "out of balance/credit — top up the provider account, or switch model with `-m <model>`."
+      : status === 401 || status === 403
+        ? "not authenticated for this provider — run `keys login <provider>` (or set its API key), or switch model with `-m <model>`."
+        : "rate-limited — wait and retry, or switch model with `-m <model>`.";
+  return ` [${where}] — ${hint}`;
+}
+
+export function humanizeApiError(error: unknown, ctx?: ApiErrorContext): string {
+  return `${humanizeApiErrorBase(error)}${routingSuffix(error, ctx)}`;
+}
+
+function humanizeApiErrorBase(error: unknown): string {
   if (isMalformedFunctionNameError(error)) {
     return "Model emitted a malformed tool call (function.name missing). Skipping this turn — please retry or rephrase.";
   }
