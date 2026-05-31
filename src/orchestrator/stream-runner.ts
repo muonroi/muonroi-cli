@@ -30,7 +30,17 @@
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { normalizeModelId } from "../models/registry.js";
-import { injectCheapModelPlaybook, shouldInjectCheapModelPlaybook } from "../pil/cheap-model-playbook.js";
+import {
+  cheapModelShellLine,
+  injectCheapModelPlaybook,
+  injectCheapModelShellDirective,
+  shouldInjectCheapModelPlaybook,
+} from "../pil/cheap-model-playbook.js";
+import {
+  injectCheapModelWorkbook,
+  shouldInjectCheapModelWorkbook,
+  subagentTaskType,
+} from "../pil/cheap-model-workbooks.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
@@ -54,6 +64,7 @@ import {
   loadValidSubAgents,
   type SandboxSettings,
 } from "../utils/settings";
+import { resolveShell } from "../utils/shell.js";
 import { prepareVerifySandbox } from "../verify/entrypoint";
 import type { LegacyProvider } from "./agent-options";
 import { asNumber } from "./batch-utils";
@@ -341,13 +352,24 @@ export class StreamRunner {
       ),
       childRuntime.modelId,
     );
-    // Tier-aware behavioural suffix — same playbook as top-level, gated on
-    // the SUB-AGENT's runtime (a top-level claude turn can still spawn a
-    // deepseek sub-agent via SAMR/cost optimisation, and the sub-agent needs
-    // the playbook even though the parent does not).
-    const childSystem = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
-      ? injectCheapModelPlaybook(childSystemBase)
+    // Tier-aware behavioural steering — same front-loaded stack as the
+    // top-level turn (see message-processor.ts), gated on the SUB-AGENT's
+    // runtime (a top-level claude turn can still spawn a deepseek sub-agent
+    // via SAMR/cost optimisation, and the sub-agent needs the steering even
+    // though the parent does not). Layered so the final prompt OPENS with
+    // [ENV] → [CRITICAL playbook] → [CONVERGENCE workbook] → base, matching
+    // the cached-prefix order used at the top level. The sub-agent has no PIL
+    // classifier of its own, so its workbook task type is derived from its
+    // role via subagentTaskType (explore→analyze, verify*→debug, else null).
+    const childWithWorkbook = shouldInjectCheapModelWorkbook(childRuntime.modelInfo)
+      ? injectCheapModelWorkbook(childSystemBase, subagentTaskType(agentKey))
       : childSystemBase;
+    const childWithPlaybook = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
+      ? injectCheapModelPlaybook(childWithWorkbook)
+      : childWithWorkbook;
+    const childSystem = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
+      ? injectCheapModelShellDirective(childWithPlaybook, cheapModelShellLine(resolveShell({}).kind, process.platform))
+      : childWithPlaybook;
 
     onActivity?.(initialDetail);
 
