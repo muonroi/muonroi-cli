@@ -379,6 +379,27 @@ export interface Layer1Options {
   llmFallback?: LlmClassifyFn;
 }
 
+// Explicit command/tool-execution signals (EN + VI). When any fires the turn
+// is a real action request, so it must NEVER be classified chitchat — chitchat
+// drops the entire toolset (incl. bash) in message-processor, leaving the
+// agent unable to act. Found via harness session 817e508f57ee: the cheap LLM
+// classifier labelled "Dùng bash tool chạy 1 lệnh…" as general → chitchat →
+// bash dropped. High-precision tokens only; a false positive merely re-adds
+// ~1.5K tokens of tool schema, while a false negative breaks the turn.
+const TOOL_NAME_RE = /\b(bash|read_file|edit_file|write_file|ripgrep)\b/i;
+const EXEC_INTENT_RE =
+  /\b(run|execute|exec)\b[^.?!\n]{0,40}\b(command|cmd|commands|script|scripts|shell|bash|test|tests|build|lint)\b/i;
+const VI_EXEC_RE = /\bch[ạa]y\b[^.?!\n]{0,40}\b(l[ệe]nh|command|cmd|script|shell|bash|test|build|lint)\b/i;
+
+/**
+ * True when the prompt is an explicit request to RUN a command / use a shell
+ * tool. Used to veto a chitchat classification so the toolset is preserved.
+ */
+export function hasActionableToolIntent(raw: string): boolean {
+  if (!raw) return false;
+  return TOOL_NAME_RE.test(raw) || EXEC_INTENT_RE.test(raw) || VI_EXEC_RE.test(raw);
+}
+
 export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {}): Promise<PipelineContext> {
   try {
     // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
@@ -811,6 +832,15 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
     }
 
     if (intentKind === null && taskType !== null && taskType !== "general") {
+      intentKind = "task";
+    }
+
+    // Safety net (harness 817e508f57ee): an explicit command/tool-execution
+    // request must NEVER be chitchat. Chitchat drops the whole toolset (incl.
+    // bash) in message-processor, so a "run this command" turn would leave the
+    // agent unable to act. Only ever UPGRADES chitchat → task (never the
+    // reverse), so the token-saving for genuine greetings is preserved.
+    if (intentKind === "chitchat" && hasActionableToolIntent(ctx.raw)) {
       intentKind = "task";
     }
 

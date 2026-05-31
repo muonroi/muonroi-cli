@@ -16,7 +16,7 @@ vi.mock("./config.js", () => ({
 
 import { classifyViaBrain } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { layer1Intent } from "./layer1-intent";
+import { hasActionableToolIntent, layer1Intent } from "./layer1-intent";
 import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);
@@ -367,5 +367,46 @@ describe("layer1Intent", () => {
     expect(result.taskType).toBeNull();
     expect(result.layers).toHaveLength(1);
     expect(result.layers[0]!.applied).toBe(false);
+  });
+});
+
+describe("hasActionableToolIntent — explicit run/tool requests are never chitchat", () => {
+  it("detects an explicit bash/command-execution request (VI + EN)", () => {
+    // The exact prompt from live harness session 817e508f57ee that the LLM
+    // classifier mislabelled chitchat → tools dropped → agent could not act.
+    expect(hasActionableToolIntent("Dùng bash tool chạy đúng 1 lệnh để đếm số file *.ts")).toBe(true);
+    expect(hasActionableToolIntent("Run exactly 1 bash command to count all *.ts files")).toBe(true);
+    expect(hasActionableToolIntent("chạy lệnh build cho tôi")).toBe(true);
+    expect(hasActionableToolIntent("execute the test script")).toBe(true);
+  });
+
+  it("does NOT fire on greetings / continuations / pure-explanation asks", () => {
+    expect(hasActionableToolIntent("hi there")).toBe(false);
+    expect(hasActionableToolIntent("tiếp tục nhé")).toBe(false);
+    expect(hasActionableToolIntent("thank you so much for that")).toBe(false);
+    expect(hasActionableToolIntent("what time is it")).toBe(false);
+  });
+});
+
+describe("intentKind guard — a tool/command request must never route as chitchat", () => {
+  const generalFallback = async () => ({ taskType: "general" as const, outputStyle: null, confidence: 0.75 });
+
+  it("flips chitchat → task when the LLM fallback returns 'general' but the prompt is a command request", async () => {
+    // Reproduces 817e508f57ee: classify abstains, LLM fallback returns
+    // general → intentKind would be chitchat → message-processor drops the
+    // entire toolset (incl. bash). The guard must keep it a task.
+    mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+    const result = await layer1Intent(makeCtx("Dùng bash tool chạy đúng 1 lệnh để đếm số file *.ts"), {
+      llmFallback: generalFallback,
+    });
+    expect(result.intentKind).toBe("task");
+  });
+
+  it("leaves a genuine chitchat turn as chitchat (no false promotion)", async () => {
+    mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+    const result = await layer1Intent(makeCtx("thank you so much for that"), {
+      llmFallback: generalFallback,
+    });
+    expect(result.intentKind).toBe("chitchat");
   });
 });
