@@ -115,6 +115,7 @@ import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getProviderStallTimeoutMs,
   getRoleModels,
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
@@ -163,6 +164,7 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
@@ -1009,6 +1011,11 @@ export class MessageProcessor {
     // for the current turn. Reset to 0 on each new user turn (we're in processMessage).
     let streamRetryCount = 0;
     const MAX_STREAM_RETRIES = 2; // 3 total attempts = 1 first try + 2 retries
+    // Silent-hang guard: set true when the stall watchdog aborts a stuck stream.
+    // Reset before each streamText attempt; read in the stream catch to surface a
+    // clear toast and SKIP the transient-retry (a stalled provider just stalls
+    // again, wasting another full timeout of silence).
+    let stallTriggered = false;
 
     // Auto-council: route to multi-model debate when EITHER
     //   (a) PIL classified taskType=plan|analyze with high confidence AND the
@@ -1532,6 +1539,14 @@ export class MessageProcessor {
           } catch {
             /* telemetry only */
           }
+          // Silent-hang guard: abort the stream (and surface a toast in the
+          // catch below) if the provider sends no chunk for too long. Re-armed
+          // on every chunk via stall.pet(), so it never kills an actively
+          // streaming call. Disposed when the stream ends or errors.
+          stallTriggered = false;
+          const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
+            stallTriggered = true;
+          });
           const result = streamText({
             model: runtime.model,
             system: systemForModel,
@@ -1540,7 +1555,7 @@ export class MessageProcessor {
             toolChoice: _finalToolChoice,
             stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
             maxRetries: 0,
-            abortSignal: signal,
+            abortSignal: combineAbortSignals(signal, stall.signal),
             // Repair malformed tool-call JSON args before they bubble up as
             // InvalidToolInputError → tool-error → repetition-detector abort.
             // Conservative: only fixes the two observed Qwen-style defects.
@@ -1689,6 +1704,7 @@ export class MessageProcessor {
           let _topTokenIndex = 0;
           const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
           for await (const part of result.fullStream) {
+            stall.pet(); // chunk arrived — reset the stall watchdog
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
               break;
@@ -2192,10 +2208,24 @@ export class MessageProcessor {
               }
 
               case "abort":
+                // A stall-watchdog abort arrives here as an "abort" stream part
+                // (the SDK surfaces it as a part, not a throw). Distinguish it
+                // from a genuine user cancel — which is caught at the top of the
+                // loop via `signal.aborted` — and surface it as a visible error
+                // instead of a benign "[Cancelled]" so a hung provider no longer
+                // looks like a silent freeze.
+                if (stallTriggered) {
+                  stall.dispose();
+                  notifyObserver(observer?.onError, { message: STALL_ERROR_MESSAGE, timestamp: Date.now() });
+                  yield { type: "error", content: STALL_ERROR_MESSAGE, isAuthError: false };
+                  yield { type: "done" };
+                  return;
+                }
                 yield { type: "content", content: "\n\n[Cancelled]" };
                 break;
             }
           }
+          stall.dispose(); // stream drained normally — stop the stall watchdog
 
           // ─── SAMR Phase 1 → Phase 2 transition ─────────────────────────
           // Phase 1 (premium model) produced tool calls but the SDK stopped
@@ -2552,7 +2582,9 @@ export class MessageProcessor {
           // Transient network/server error retry — up to MAX_STREAM_RETRIES extra attempts.
           // Only retry when no content has flowed yet (assistantText empty) to avoid
           // partial-output corruption. Honour the abort signal between retries.
-          if (!assistantText.trim() && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted) {
+          // Skip retry on a stall abort: the provider is unresponsive, so a retry
+          // just burns another full stall timeout of silence — surface it instead.
+          if (!assistantText.trim() && streamRetryCount < MAX_STREAM_RETRIES && !signal.aborted && !stallTriggered) {
             const { transient } = classifyStreamError(err);
             if (transient) {
               streamRetryCount++;
@@ -2603,7 +2635,9 @@ export class MessageProcessor {
           }
 
           const authError = isAuthenticationError(err);
-          const friendly = humanizeApiError(err);
+          // Stall aborts carry an opaque DOMException; show the clear stall
+          // message instead of the raw abort reason.
+          const friendly = stallTriggered ? STALL_ERROR_MESSAGE : humanizeApiError(err);
           notifyObserver(observer?.onError, {
             message: friendly,
             timestamp: Date.now(),
