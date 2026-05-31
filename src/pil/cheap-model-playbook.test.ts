@@ -3,7 +3,9 @@ import type { ModelInfo } from "../types/index.js";
 import {
   appendCheapModelPlaybook,
   CHEAP_MODEL_PLAYBOOK,
+  cheapModelShellLine,
   injectCheapModelPlaybook,
+  injectCheapModelShellDirective,
   shouldInjectCheapModelPlaybook,
 } from "./cheap-model-playbook.js";
 
@@ -106,14 +108,84 @@ describe("injectCheapModelPlaybook", () => {
     expect(CHEAP_MODEL_PLAYBOOK).toMatch(/before .*hypothesi/i);
   });
 
-  it("playbook stays short (under 1600 chars) to preserve attention budget", () => {
-    // Bumped 1500 → 1600 when rules 5/6 (fix-quality steering) were added.
-    // Still a tight prelude; primacy placement matters more than absolute length.
-    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1600);
+  it("playbook stays short (under 1800 chars) to preserve attention budget", () => {
+    // Bumped 1500 → 1600 (rules 5/6 fix-quality) → 1800 (rule 1 file-viewing
+    // clause, A1: kills the observed read_file+sed double-read). Still a tight
+    // prelude; primacy placement matters more than absolute length.
+    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1800);
   });
 
   it("deprecated appendCheapModelPlaybook alias still works (now actually prepends)", () => {
     const out = appendCheapModelPlaybook("Sys.");
     expect(out).toBe(`${CHEAP_MODEL_PLAYBOOK}Sys.`);
+  });
+
+  it("steers file-VIEWING to read_file, not a redundant bash sed/cat (A1 anti-redundancy)", () => {
+    // Live observation (workbook run 3308b3d02e11): gpt-5.4-mini read the same
+    // lines TWICE — once via read_file(60-95), once via `sed -n '60,95p'`. The
+    // ENVIRONMENT block legitimises sed as "POSIX-OK" while the playbook only
+    // forbade PIPING output. The missing rule: viewing a file is read_file's
+    // job; bash_output_get is for COMMAND output, not files.
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("read_file");
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/never[\s`]*sed|do NOT[\s`]*sed/i);
+    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/COMMAND output/i);
+  });
+});
+
+describe("cheapModelShellLine (A2 — front-loaded env/shell directive)", () => {
+  it("POSIX bash: demands POSIX commands, forbids PowerShell/cmd, names the OS", () => {
+    const line = cheapModelShellLine("bash", "win32");
+    expect(line).toMatch(/POSIX/);
+    expect(line).toMatch(/Windows/);
+    expect(line).toMatch(/NEVER|do not|don't/i);
+    expect(line).toMatch(/PowerShell|cmd/);
+    // single line — front-loaded primacy, token-frugal
+    expect(line).not.toContain("\n");
+  });
+
+  it("WSL is treated as POSIX too", () => {
+    expect(cheapModelShellLine("wsl", "win32")).toMatch(/POSIX/);
+  });
+
+  it("PowerShell: demands cmdlets, forbids POSIX grep/sed/awk", () => {
+    const line = cheapModelShellLine("powershell", "win32");
+    expect(line).toMatch(/PowerShell|cmdlet/i);
+    expect(line).toMatch(/Select-String|Get-ChildItem/);
+    expect(line).toMatch(/NEVER|do not|don't/i);
+    expect(line).toMatch(/grep|sed|awk|POSIX/);
+  });
+
+  it("cmd.exe: demands cmd syntax, forbids POSIX and PowerShell", () => {
+    const line = cheapModelShellLine("cmd", "win32");
+    expect(line).toMatch(/cmd/i);
+    expect(line).toMatch(/dir|type|copy/);
+    expect(line).toMatch(/NEVER|do not|don't/i);
+  });
+
+  it("maps platform to a human OS name", () => {
+    expect(cheapModelShellLine("bash", "linux")).toMatch(/Linux/);
+    expect(cheapModelShellLine("bash", "darwin")).toMatch(/macOS/);
+  });
+
+  it("auto/unknown kind stays conservative — does not assert a syntax it cannot confirm", () => {
+    const line = cheapModelShellLine("auto", "win32");
+    // Must NOT claim a definite POSIX/PowerShell/cmd syntax when undetermined.
+    expect(line).toMatch(/confirm|ENVIRONMENT/i);
+  });
+});
+
+describe("injectCheapModelShellDirective (A2 wiring)", () => {
+  it("prepends the shell line at the very front, ahead of the playbook", () => {
+    const line = cheapModelShellLine("powershell", "win32");
+    const sys = injectCheapModelShellDirective("Body.", line);
+    expect(sys.startsWith(line)).toBe(true);
+    expect(sys).toContain("Body.");
+  });
+
+  it("is idempotent — re-injecting the same directive does not double-stack", () => {
+    const line = cheapModelShellLine("bash", "linux");
+    const once = injectCheapModelShellDirective("Body.", line);
+    const twice = injectCheapModelShellDirective(once, line);
+    expect(twice).toBe(once);
   });
 });
