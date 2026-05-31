@@ -33,7 +33,9 @@ export const CHEAP_MODEL_CONVERGENCE = `[CONVERGENCE — minimise tool calls; th
   Do NOT broad-grep, re-read a file you already read, or explore "just in case".
 - The moment you have enough to act, STOP investigating and make the change.
 - Make the SMALLEST correct change for the request; do not widen scope.
-- When the task is done, answer concisely and stop — no recap, no next-steps padding.`;
+- Finish the action before you answer — never stop mid-step (e.g. "I'm verifying…").
+  When done, state completion in ONE line (what changed + that it's verified);
+  no recap, no next-steps padding.`;
 
 /**
  * Per-task-type addenda. Each is 1–2 tight lines targeting that type's most
