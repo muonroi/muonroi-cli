@@ -57,6 +57,7 @@ import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/
 import { statusBarStore } from "../ui/status-bar/store.js";
 import {
   getCurrentShellSettings,
+  getProviderStallTimeoutMs,
   getSubAgentBudgetChars,
   getSubAgentCompactKeepLast,
   getSubAgentCompactThresholdChars,
@@ -91,9 +92,10 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
-import { firstLine, formatSubagentActivity } from "./tool-utils";
+import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
  * Dependency callbacks the StreamRunner needs to reach back into Agent state
@@ -446,7 +448,7 @@ export class StreamRunner {
     prepared: PreparedSubAgentCall,
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
-  ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string }> {
+  ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string; stalled?: boolean }> {
     const { childRuntime, childSystem, childMessages, childTools, maxSteps } = prepared;
     const taskCaps = getProviderCapabilities(requireRuntimeProvider(childRuntime));
     let assistantText = "";
@@ -516,6 +518,17 @@ export class StreamRunner {
       return next >= _subCeiling;
     }) as unknown as Parameters<typeof streamText>[0]["stopWhen"];
 
+    // Silent-hang guard — mirror the top-level loop (message-processor.ts).
+    // A sub-agent provider connection can accept the request but never send a
+    // chunk (overloaded/stalled backend); `streamText` has no time-to-first-
+    // byte timeout, so the drain loop below would block forever with ZERO user
+    // feedback. The watchdog aborts after getProviderStallTimeoutMs of silence
+    // and is re-armed by stall.pet() on every chunk. Cheap models (which run
+    // mostly as sub-agents via SAMR) hit this most.
+    let stallTriggered = false;
+    const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
+      stallTriggered = true;
+    });
     const result = streamText({
       model: childRuntime.model,
       system: childSystem,
@@ -523,7 +536,7 @@ export class StreamRunner {
       tools: !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
       stopWhen: _subStopWhen ?? stepCountIs(maxSteps),
       maxRetries: 0,
-      abortSignal: signal,
+      abortSignal: combineAbortSignals(signal, stall.signal),
       // Repair malformed tool-call JSON args — same wiring as the top-level
       // loop in message-processor.ts. Without this, sub-agents on models
       // with broken tool-arg emission (Qwen3-30B-Instruct observed) loop on
@@ -611,93 +624,117 @@ export class StreamRunner {
     let toolCallCount = 0;
     let textDeltaCount = 0;
     const wireProviderIdSub = childRuntime.modelInfo?.provider ?? "unknown";
-    for await (const part of result.fullStream) {
+    try {
+      for await (const part of result.fullStream) {
+        stall.pet(); // chunk arrived — reset the stall watchdog
+        if (signal?.aborted) {
+          break;
+        }
+
+        if (debugSubagent) {
+          partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+        }
+
+        if (wireDebug.enabled) {
+          wireDebug.logChunk(wireProviderIdSub, String(part.type ?? "unknown"), {
+            hasText:
+              typeof (part as { text?: string }).text === "string" ? (part as { text: string }).text.length : undefined,
+            hasReasoning:
+              typeof (part as unknown as { reasoning?: string }).reasoning === "string"
+                ? (part as unknown as { reasoning: string }).reasoning.length
+                : undefined,
+            errorMsg:
+              part.type === "error"
+                ? (() => {
+                    const e = (part as { error?: unknown }).error;
+                    wireDebug.logError(wireProviderIdSub, e);
+                    return typeof (e as Error)?.message === "string" ? (e as Error).message : String(e);
+                  })()
+                : undefined,
+          });
+        }
+
+        if (part.type === "text-delta") {
+          textDeltaCount++;
+          assistantText += part.text;
+          // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "llm-token",
+              correlationId: subCallId,
+              delta: part.text,
+              tokenIndex: subTokenIndex++,
+            });
+          } catch {
+            /* best-effort */
+          }
+          continue;
+        }
+
+        if (part.type === "tool-call") {
+          toolCallCount++;
+          lastActivity = formatSubagentActivity(part.toolName, part.input);
+          onActivity?.(lastActivity);
+          continue;
+        }
+
+        if (debugSubagent) {
+          // Capture finish reasons + error parts that we'd otherwise swallow.
+          if ((part as { type: string }).type === "error") {
+            const errPart = (part as { error?: unknown }).error ?? part;
+            const errStr = (() => {
+              try {
+                return JSON.stringify(errPart, Object.getOwnPropertyNames(errPart as object));
+              } catch {
+                return String(errPart);
+              }
+            })();
+            debugLog(`stream-error-part: ${errStr.slice(0, 500)}`);
+          }
+          if ((part as { type: string }).type === "finish") {
+            const reason = (part as { finishReason?: string }).finishReason ?? null;
+            debugLog(`stream-finish: reason=${reason}`);
+          }
+        }
+      }
+
       if (signal?.aborted) {
-        break;
+        return { output: "[Cancelled]", lastActivity, cancelled: true, assistantText };
       }
 
       if (debugSubagent) {
-        partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
+        debugLog(
+          `stream-end: textDeltas=${textDeltaCount} toolCalls=${toolCallCount} assistantTextLen=${assistantText.length} parts=${JSON.stringify(partCounts)}`,
+        );
       }
 
-      if (wireDebug.enabled) {
-        wireDebug.logChunk(wireProviderIdSub, String(part.type ?? "unknown"), {
-          hasText:
-            typeof (part as { text?: string }).text === "string" ? (part as { text: string }).text.length : undefined,
-          hasReasoning:
-            typeof (part as unknown as { reasoning?: string }).reasoning === "string"
-              ? (part as unknown as { reasoning: string }).reasoning.length
-              : undefined,
-          errorMsg:
-            part.type === "error"
-              ? (() => {
-                  const e = (part as { error?: unknown }).error;
-                  wireDebug.logError(wireProviderIdSub, e);
-                  return typeof (e as Error)?.message === "string" ? (e as Error).message : String(e);
-                })()
-              : undefined,
-        });
-      }
-
-      if (part.type === "text-delta") {
-        textDeltaCount++;
-        assistantText += part.text;
-        // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
+      await result.response;
+    } catch (err) {
+      // Provider stalled (no chunk within the stall timeout): surface a clear
+      // error toast + a failed ToolResult instead of an opaque hang/throw.
+      // Returning (not throwing) means run()'s transient-retry path is skipped
+      // — a stalled provider would just stall again for another full timeout.
+      // (retry-classifier also marks provider-stall non-transient as defence.)
+      if (stallTriggered) {
         try {
           const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
             | { emitEvent: (e: unknown) => void }
             | undefined;
-          _ar?.emitEvent({
-            t: "event",
-            kind: "llm-token",
-            correlationId: subCallId,
-            delta: part.text,
-            tokenIndex: subTokenIndex++,
-          });
+          _ar?.emitEvent({ t: "event", kind: "toast", level: "error", text: STALL_ERROR_MESSAGE });
         } catch {
-          /* best-effort */
+          /* best-effort toast */
         }
-        continue;
+        onActivity?.(STALL_ERROR_MESSAGE);
+        return { output: STALL_ERROR_MESSAGE, lastActivity, cancelled: false, assistantText, stalled: true };
       }
-
-      if (part.type === "tool-call") {
-        toolCallCount++;
-        lastActivity = formatSubagentActivity(part.toolName, part.input);
-        onActivity?.(lastActivity);
-        continue;
-      }
-
-      if (debugSubagent) {
-        // Capture finish reasons + error parts that we'd otherwise swallow.
-        if ((part as { type: string }).type === "error") {
-          const errPart = (part as { error?: unknown }).error ?? part;
-          const errStr = (() => {
-            try {
-              return JSON.stringify(errPart, Object.getOwnPropertyNames(errPart as object));
-            } catch {
-              return String(errPart);
-            }
-          })();
-          debugLog(`stream-error-part: ${errStr.slice(0, 500)}`);
-        }
-        if ((part as { type: string }).type === "finish") {
-          const reason = (part as { finishReason?: string }).finishReason ?? null;
-          debugLog(`stream-finish: reason=${reason}`);
-        }
-      }
+      throw err;
+    } finally {
+      stall.dispose();
     }
-
-    if (signal?.aborted) {
-      return { output: "[Cancelled]", lastActivity, cancelled: true, assistantText };
-    }
-
-    if (debugSubagent) {
-      debugLog(
-        `stream-end: textDeltas=${textDeltaCount} toolCalls=${toolCallCount} assistantTextLen=${assistantText.length} parts=${JSON.stringify(partCounts)}`,
-      );
-    }
-
-    await result.response;
 
     const output = assistantText.trim() || `Task completed. Last action: ${lastActivity}`;
     return { output, lastActivity, cancelled: false, assistantText };
@@ -740,6 +777,21 @@ export class StreamRunner {
       assistantText = streamResult.assistantText;
       if (streamResult.cancelled) {
         return { success: false, output: "[Cancelled]" };
+      }
+      if (streamResult.stalled) {
+        // Provider stalled — surface as a failed task so the parent agent (and
+        // the user via the toast emitted in runStream) sees it, instead of a
+        // success carrying the stall message as "output".
+        return {
+          success: false,
+          output: streamResult.output,
+          task: {
+            agent: request.agent,
+            description: request.description,
+            summary: firstLine(streamResult.output),
+            activity: lastActivity,
+          },
+        };
       }
       return {
         success: true,

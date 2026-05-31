@@ -1,4 +1,5 @@
 import { APICallError } from "@ai-sdk/provider";
+import { STALL_ABORT_REASON } from "./stall-watchdog.js";
 
 export interface TransientCheck {
   transient: boolean;
@@ -41,6 +42,14 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
   // AbortError: user cancellation — never retry, caller must handle
   if (e.name === "AbortError") {
     return { transient: false, reason: "user-abort" };
+  }
+
+  // Provider-stall watchdog abort (DOMException(STALL_ABORT_REASON,
+  // "TimeoutError")): the stream produced no chunk within the stall timeout.
+  // Must NOT be retried — a stalled provider just stalls again, burning another
+  // full timeout of silence. Check BEFORE the generic TimeoutError branch.
+  if (e.name === "TimeoutError" && e.message === STALL_ABORT_REASON) {
+    return { transient: false, reason: "provider-stall" };
   }
 
   // TimeoutError: AbortSignal.timeout() fired — transient
