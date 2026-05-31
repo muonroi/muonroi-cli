@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyStreamError } from "../retry-classifier.js";
+import { STALL_ABORT_REASON } from "../stall-watchdog.js";
 
 describe("classifyStreamError", () => {
   it("classifies ECONNREFUSED as transient", () => {
@@ -72,6 +73,16 @@ describe("classifyStreamError", () => {
     const err = new DOMException("Aborted", "AbortError");
     const result = classifyStreamError(err);
     expect(result.transient).toBe(false);
+  });
+
+  it("classifies a provider-stall watchdog abort as NOT transient (no retry-storm)", () => {
+    // The stall watchdog aborts with DOMException(STALL_ABORT_REASON, "TimeoutError").
+    // It must NOT be retried — a stalled provider just stalls again, burning
+    // another full timeout of silence. Distinct from a generic AbortSignal.timeout().
+    const err = new DOMException(STALL_ABORT_REASON, "TimeoutError");
+    const result = classifyStreamError(err);
+    expect(result.transient).toBe(false);
+    expect(result.reason).toBe("provider-stall");
   });
 
   it("classifies TimeoutError (AbortSignal.timeout) as transient", () => {
