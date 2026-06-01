@@ -237,6 +237,11 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const authToken = opts.authToken;
   const interceptTimeoutMs = opts.timeoutMs ?? defaultTimeoutForBase(baseUrl);
+  // posttool is AWAITED by the PostToolUse hook (src/hooks/index.ts) on the hot
+  // path, yet is semantically fire-and-forget telemetry. Bound it on the same
+  // per-base budget as intercept so a reachable-but-wedged server (accepts TCP,
+  // never responds) can never hang the hook / stall the orchestrator.
+  const postToolTimeoutMs = defaultTimeoutForBase(baseUrl);
   const f = opts.fetchImpl ?? fetch;
 
   function headers(): Record<string, string> {
@@ -299,6 +304,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(postToolTimeoutMs),
       }).catch((err) => {
         logEeFailure("client.posttool", classifyEeError(err), err);
         /* fire-and-forget error swallowed */

@@ -121,6 +121,36 @@ describe("EEClient - posttool", () => {
     // Must not throw even when awaited
     await expect(ee.posttool(mockPayload)).resolves.toBeUndefined();
   });
+
+  it("Test 9: posttool does not hang on a wedged server — bounded by an abort signal", async () => {
+    // PostToolUse hook (src/hooks/index.ts) AWAITS posttool on the hot path.
+    // A reachable-but-wedged EE server (accepts TCP, never responds) must NOT
+    // hang the hook — posttool must carry a timeout abort signal like every
+    // other client method, honouring the "never block orchestrator" intent.
+    vi.useFakeTimers();
+    try {
+      const mockFetch = vi.fn().mockImplementation((_url: string, opts: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = opts?.signal as AbortSignal | undefined;
+          // Wedged server: only ever settles if the client aborts it.
+          signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"));
+          });
+        });
+      });
+      const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+      const p = ee.posttool(mockPayload);
+      // Structural: the call must be bounded by an AbortSignal (deterministic).
+      const opts = mockFetch.mock.calls[0]![1] as RequestInit;
+      expect(opts.signal).toBeInstanceOf(AbortSignal);
+      // Behavioral: once the timeout fires, the wedged call is aborted and the
+      // fire-and-forget catch resolves posttool to undefined (never throws).
+      await vi.advanceTimersByTimeAsync(15_000);
+      await expect(p).resolves.toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("EEClient - auth", () => {
