@@ -14,6 +14,21 @@ describe("canInferOutcome()", () => {
   it("returns false for general taskType", () => {
     expect(canInferOutcome("general", "fix stuff")).toBe(false);
   });
+  it("returns true for a general taskType that is a direct imperative command", () => {
+    // A direct command has a self-evident outcome (it runs / it shows), so it
+    // should auto-pass instead of triggering an outcome-clarification askcard.
+    expect(canInferOutcome("general", "run the test suite")).toBe(true);
+    expect(canInferOutcome("general", "echo harness-ok")).toBe(true);
+    expect(canInferOutcome("general", "show the package.json scripts")).toBe(true);
+    expect(canInferOutcome("general", "list the open ports")).toBe(true);
+  });
+  it("returns false for a general imperative verb with no object", () => {
+    expect(canInferOutcome("general", "run")).toBe(false);
+    expect(canInferOutcome("general", "execute   ")).toBe(false);
+  });
+  it("returns false for a general non-imperative prompt", () => {
+    expect(canInferOutcome("general", "the build is slow")).toBe(false);
+  });
   it("returns true when prompt has error reference", () => {
     expect(canInferOutcome("debug", "fix the TypeError in login")).toBe(true);
   });
