@@ -101,6 +101,33 @@ describe("runDiscovery()", () => {
     expect(result.accepted).toBe(false);
   });
 
+  it("does not swallow the original request into a generic outcome for a general prompt (B2)", async () => {
+    // B2 — answering the (now-skipped) generic outcome askcard used to collapse
+    // the intent to "general: Task completed", discarding the user's prompt.
+    // The scope gap may still fire; the outcome must derive from the raw text.
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "Task completed", kind: "choice" }),
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const result = await runDiscovery(
+      "make the dashboard feel less cluttered",
+      {
+        taskType: "general",
+        confidence: 0.6,
+        complexity: "low",
+        domain: null,
+        outputStyle: null,
+        intentKind: "task",
+      },
+      process.cwd(),
+      handler,
+    );
+    expect(result.intentStatement).not.toBe("general: Task completed");
+    expect(result.outcome).not.toBe("Task completed");
+    // The original request must survive into the resolved outcome.
+    expect(result.outcome.toLowerCase()).toContain("dashboard");
+  });
+
   it("skips discovery entirely for chitchat", async () => {
     const result = await runDiscovery(
       "hi",

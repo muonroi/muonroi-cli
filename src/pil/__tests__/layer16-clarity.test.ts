@@ -33,6 +33,17 @@ describe("detectClarityGaps()", () => {
     expect(outcomeGap).toBeUndefined();
   });
 
+  it("does NOT detect an outcome gap for a vague general prompt (B2 intent-swallow guard)", () => {
+    // B2 — a `general` prompt's only outcome options are tautological
+    // ("Task completed" / "Issue resolved"). Asking them lets the default
+    // answer overwrite the user's real request, so the intent collapses to
+    // "general: Task completed" and the original prompt is lost. Skip the
+    // askcard so the outcome falls back to the raw request downstream.
+    const gaps = detectClarityGaps("the project feels messy", "general", 0.7, EMPTY_PROJECT);
+    const outcomeGap = gaps.find((g) => g.dimension === "outcome");
+    expect(outcomeGap).toBeUndefined();
+  });
+
   it("detects scope gap when no file reference", () => {
     const gaps = detectClarityGaps("fix auth", "debug", 0.7, EMPTY_PROJECT);
     const scopeGap = gaps.find((g) => g.dimension === "scope");
