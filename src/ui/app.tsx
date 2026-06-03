@@ -140,6 +140,7 @@ import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
 import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
+import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
@@ -690,25 +691,30 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       // listStoredProviders only sees keychain, which falsely shows "no key"
       // for users who set keys via env/settings.
       const configured = await getConfiguredProviders();
-      setProvidersWithKey(new Set(configured.filter((p) => SPLASH_PROVIDERS.includes(p))));
+      // Surface every credentialed provider that has catalog models (e.g. an
+      // OAuth-authenticated OpenAI) in the picker — not just the curated splash
+      // set. Previously configuredProviders stayed pinned to SPLASH_PROVIDERS,
+      // so OAuth providers worked at the routing layer but could never be
+      // selected in /models. Splash providers stay listed even with no key so
+      // the user can still press `k` to add one.
+      setConfiguredProviders(
+        resolvePickerProviders(SPLASH_PROVIDERS, configured, (p) => getModelsForProvider(p).length > 0),
+      );
+      setProvidersWithKey(new Set(configured));
     } catch {
+      setConfiguredProviders([...SPLASH_PROVIDERS]);
       setProvidersWithKey(new Set());
     }
-  }, []);
+  }, [setConfiguredProviders]);
 
   useEffect(() => {
     let cancelled = false;
-    // Always list the curated splash providers, even when no key is stored —
-    // the modal shows a "(no key)" badge and lets the user press `k` to set
-    // one without leaving the TUI.
+    // Paint the curated splash providers immediately, then replace with the
+    // resolved list (splash ∪ configured-with-models) once the async credential
+    // check completes. The modal shows a "(no key)" badge and lets the user
+    // press `k` to set a key without leaving the TUI.
     setConfiguredProviders([...SPLASH_PROVIDERS]);
-    getConfiguredProviders()
-      .then(() => {
-        if (!cancelled) refreshProvidersWithKey();
-      })
-      .catch(() => {
-        if (!cancelled) setProvidersWithKey(new Set());
-      });
+    if (!cancelled) void refreshProvidersWithKey();
     return () => {
       cancelled = true;
     };
