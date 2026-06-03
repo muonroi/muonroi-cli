@@ -60,6 +60,29 @@ describe("detectClarityGaps()", () => {
     const scopeGap = gaps.find((g) => g.dimension === "scope");
     expect(scopeGap?.options.some((o) => o.includes("auth"))).toBe(true);
   });
+
+  it("does NOT detect a scope gap for a general prompt with no codebase signal (B2-symmetric scope guard)", () => {
+    // Live drive (session 8a87aa060c6a): the pure non-codebase prompt "Reply
+    // with exactly one word: PONG" fired the scope askcard "Which part of the
+    // codebase should this target?" because countFileReferences /
+    // hasExplicitScope / hasOperationalScope were all empty — the detector
+    // assumes every prompt is a codebase task. A general/unclassified prompt
+    // has no codebase dimension to scope, so the question is nonsensical (and
+    // its acceptance card is downstream noise). Skip it, symmetric to the B2
+    // outcome guard; scope falls back to project-root downstream.
+    const gaps = detectClarityGaps("Reply with exactly one word: PONG", "general", 0.6, EMPTY_PROJECT);
+    expect(gaps.find((g) => g.dimension === "scope")).toBeUndefined();
+    // The only candidate gap was scope → general prompt now yields zero gaps,
+    // so discovery never marks interviewed=true and shows no acceptance card.
+    expect(gaps).toHaveLength(0);
+  });
+
+  it("STILL detects a scope gap for a classified (non-general) task with no file reference", () => {
+    // Guard must stay narrow: a real code task that simply omitted a path still
+    // benefits from the scope-narrowing askcard. Only general/null is skipped.
+    const gaps = detectClarityGaps("implement the search feature", "generate", 0.7, EMPTY_PROJECT);
+    expect(gaps.find((g) => g.dimension === "scope")).toBeDefined();
+  });
 });
 
 describe("buildInterviewQuestion()", () => {
