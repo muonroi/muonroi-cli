@@ -40,7 +40,19 @@ export function detectClarityGaps(
 
   // PIL-L6 fix — operational scope (CI / build / deploy / lint) is enough
   // even without a file path. The task's target is the pipeline itself.
-  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw)) {
+  //
+  // B2-symmetric scope guard — the scope detector assumes EVERY prompt is a
+  // codebase task: any prompt lacking a file/module/operational reference gets
+  // asked "Which part of the codebase should this target?". For a general or
+  // unclassified prompt that has no codebase dimension at all (e.g. a pure
+  // chat / generation request like "Reply with one word: PONG", live session
+  // 8a87aa060c6a) this question is nonsensical, and because it is the only gap
+  // it also drags in a downstream acceptance card. Skip it for general/null —
+  // the same population the B2 outcome guard above protects. Scope then falls
+  // back to project-root in resolveGapsNonInteractive. Classified code tasks
+  // (debug/generate/refactor/…) still get the scope-narrowing askcard.
+  const scopeAppliesToCodebase = !!taskType && taskType !== "general";
+  if (scopeAppliesToCodebase && countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw)) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({
       dimension: "scope",
