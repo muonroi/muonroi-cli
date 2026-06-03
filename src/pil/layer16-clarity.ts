@@ -18,6 +18,14 @@ export function detectClarityGaps(
   if (!canInferOutcome(taskType, raw)) {
     if (taskType && AUTOFILL_OUTCOME_TYPES.has(taskType)) {
       // These task types have predictable outcomes — auto-fill without asking
+    } else if (!taskType || taskType === "general") {
+      // B2 intent-swallow fix — a `general` (or unclassified) prompt has no
+      // task-specific outcome options, so `buildOutcomeOptions` falls back to
+      // the tautological ["Task completed", "Issue resolved"]. Asking that
+      // askcard adds zero signal, and its default answer overwrites the intent
+      // → "general: Task completed", discarding the user's original request.
+      // Skip it; the outcome defaults to the raw prompt downstream
+      // (buildClarifiedIntentFromAnswers / getDefaultOutcome), preserving intent.
     } else {
       const outcomeOptions = buildOutcomeOptions(taskType, projectContext);
       gaps.push({
