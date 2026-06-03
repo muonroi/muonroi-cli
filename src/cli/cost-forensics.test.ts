@@ -1,6 +1,39 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CostForensicsRow, CostForensicsSummary } from "./cost-forensics.js";
 import { printCostForensics } from "./cost-forensics.js";
+import { getDatabase } from "../storage/db.js";
+
+// ─── Fake DB for resolveSessionIds tests ────────────────────────────────────
+// The sessions table rows keyed by id, ordered by created_at DESC for LIKE queries.
+const fakeSessionRows: Array<{ id: string; created_at: string }> = [];
+
+function makeFakeDb() {
+  return {
+    prepare: (sql: string) => ({
+      all: (pattern: string) => {
+        if (sql.includes("FROM sessions") && sql.includes("LIKE")) {
+          // Simulate: WHERE id LIKE ? ORDER BY created_at DESC LIMIT 5
+          const prefix = pattern.replace(/%$/, "");
+          return fakeSessionRows
+            .filter((r) => r.id.startsWith(prefix))
+            .sort((a, b) => b.created_at.localeCompare(a.created_at))
+            .slice(0, 5);
+        }
+        return [];
+      },
+      get: () => undefined,
+      run: () => undefined,
+    }),
+    exec: () => undefined,
+    pragma: () => undefined,
+    transaction: <T>(fn: () => T) => fn,
+    close: () => undefined,
+  };
+}
+
+vi.mock("../storage/db.js", () => ({
+  getDatabase: vi.fn(() => makeFakeDb()),
+}));
 
 function event(overrides: Partial<CostForensicsRow> = {}): CostForensicsRow {
   return {
@@ -124,5 +157,39 @@ describe("printCostForensics", () => {
     const parsed = JSON.parse(out.trim());
     expect(parsed.sessionId).toBe("test-session");
     expect(Array.isArray(parsed.events)).toBe(true);
+  });
+});
+
+import { resolveSessionIds } from "./cost-forensics.js";
+
+describe("resolveSessionIds", () => {
+  beforeEach(() => {
+    fakeSessionRows.length = 0;
+    // Seed two sessions sharing the "deadbeef" prefix; 0002 is newer.
+    fakeSessionRows.push({ id: "deadbeef0001", created_at: "2026-01-01T00:00:00.000Z" });
+    fakeSessionRows.push({ id: "deadbeef0002", created_at: "2026-01-02T00:00:00.000Z" });
+  });
+  afterEach(() => {
+    fakeSessionRows.length = 0;
+  });
+
+  it("returns all session ids matching a prefix, newest first", () => {
+    const ids = resolveSessionIds("deadbeef");
+    expect(ids).toContain("deadbeef0001");
+    expect(ids).toContain("deadbeef0002");
+    expect(ids[0]).toBe("deadbeef0002"); // newest (later created_at) first
+  });
+
+  it("returns empty array for an unknown prefix", () => {
+    expect(resolveSessionIds("zzzznomatch")).toEqual([]);
+  });
+
+  it("resolveSessionIds queries newest-first via SQL ORDER BY DESC", () => {
+    let capturedSql = "";
+    vi.mocked(getDatabase).mockReturnValueOnce({
+      prepare: (sql: string) => { capturedSql = sql; return { all: () => [] as Array<{ id: string }> }; },
+    } as never);
+    resolveSessionIds("anything");
+    expect(capturedSql).toContain("ORDER BY created_at DESC");
   });
 });

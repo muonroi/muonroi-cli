@@ -12,6 +12,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
+import { registerEETools } from "./ee-tools.js";
+import { registerForensicsTools } from "./forensics-tools.js";
 
 const LOG_TAIL = 40;
 
@@ -153,6 +155,8 @@ export function createToolsServer(runner: Runner = defaultRunner): McpServer {
   const server = new McpServer({ name: "muonroi-tools", version: "0.1.0" });
   const jm = new JobManager(runner);
   registerSelfVerifyTools(server, jm);
+  registerEETools(server);
+  registerForensicsTools(server);
   return server;
 }
 
