@@ -13,6 +13,7 @@ import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
+import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
@@ -242,62 +243,9 @@ const COUNCIL_LLM_TIMEOUT_MS = (() => {
   return 300_000;
 })();
 
-/**
- * Combine an optional parent AbortSignal with a wall-clock deadline. Returns
- * the merged signal plus a `cleanup` thunk the caller must invoke once the
- * underlying request settles so the timeout timer doesn't keep the process
- * alive past the call.
- */
-function withTimeoutSignal(
-  parent: AbortSignal | undefined,
-  timeoutMs: number,
-): { signal: AbortSignal; cleanup: () => void } {
-  const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`council LLM call exceeded ${timeoutMs}ms deadline (timeout)`));
-  }, timeoutMs);
-  let parentListener: (() => void) | null = null;
-  if (parent) {
-    if (parent.aborted) {
-      clearTimeout(timer);
-      controller.abort(parent.reason);
-    } else {
-      parentListener = () => controller.abort(parent.reason);
-      parent.addEventListener("abort", parentListener, { once: true });
-    }
-  }
-  return {
-    signal: controller.signal,
-    cleanup: () => {
-      clearTimeout(timer);
-      if (parent && parentListener) parent.removeEventListener("abort", parentListener);
-    },
-  };
-}
-
-/**
- * Race a promise against a wall-clock deadline. AI SDK occasionally fails to
- * honour `abortSignal` mid-tool-execution (observed: deepseek-v4-flash with
- * MCP verification tools sitting on a stuck firecrawl HTTP request, the
- * controller.abort fires but generateText keeps awaiting the tool result).
- * This race guarantees the surrounding code receives an Error within
- * `deadlineMs`, regardless of what the SDK does internally. The in-flight
- * request is still aborted via `controller.abort` for cleanup; this layer
- * just ensures the caller is not blocked past the deadline.
- */
-async function withDeadlineRace<T>(fn: () => Promise<T>, deadlineMs: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label} exceeded ${deadlineMs}ms deadline (timeout)`));
-    }, deadlineMs);
-  });
-  try {
-    return await Promise.race([fn(), deadline]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
+// withTimeoutSignal + withDeadlineRace moved to ../utils/llm-deadline.js so all
+// pre-flight LLM call sites (council, debate-planner, scope-ceiling) share one
+// implementation. Imported at the top of this file.
 
 export function createCouncilLLM(
   bash: BashTool,

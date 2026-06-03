@@ -26,6 +26,9 @@
  * receives the already-resolved model from its caller.
  */
 
+import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
+import { getProviderStallTimeoutMs } from "../utils/settings.js";
+
 export type TaskType = "analyze" | "debug" | "refactor" | "generate" | "plan" | "documentation" | "general";
 
 export type ComplexitySize = "small" | "medium" | "large";
@@ -214,6 +217,18 @@ export async function forcedFinalize(opts: ForcedFinalizeOptions): Promise<Force
     maxRetries: 0,
   };
   if (opts.system) callArgs.system = opts.system;
-  const result = await generateText(callArgs);
-  return { text: result.text ?? "" };
+  // Bound the forced-finalize call: a wedged provider response must not freeze
+  // the orchestrator silently (no streamText stall watchdog covers this call).
+  const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(undefined, getProviderStallTimeoutMs());
+  callArgs.abortSignal = timedSignal;
+  try {
+    const result = await withDeadlineRace(
+      () => generateText(callArgs),
+      getProviderStallTimeoutMs() + 5_000,
+      "forced_finalize",
+    );
+    return { text: result.text ?? "" };
+  } finally {
+    cleanupTimeout();
+  }
 }
