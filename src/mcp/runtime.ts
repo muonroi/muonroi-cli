@@ -4,6 +4,7 @@ import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { ToolSet } from "ai";
 import type { McpServerConfig } from "../utils/settings.js";
+import { capMcpToolResult } from "./cap-tool-result.js";
 import { getMcpKey, type McpKeyId } from "./mcp-keychain.js";
 import { createOAuthProviderWithCallback } from "./oauth-provider.js";
 import { validateMcpServerConfig } from "./validate.js";
@@ -149,9 +150,19 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
         const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
         const prefixedName = `${prefix}__${safeName}`;
         const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
+        // Cap MCP tool output the same way built-in tools are capped
+        // (`truncateOutput` / MAX_TOOL_OUTPUT_CHARS). Without this wrap the raw
+        // server payload streams into the model context uncapped — a cost leak
+        // that hits cheap models hardest. See cap-tool-result.ts.
+        const baseExecute = (stripped as { execute?: (args: unknown, options: unknown) => Promise<unknown> }).execute;
         tools[prefixedName] = {
           ...(stripped as object),
           description: `[MCP ${server.label}] ${tool.description ?? name}`,
+          ...(typeof baseExecute === "function"
+            ? {
+                execute: async (args: unknown, options: unknown) => capMcpToolResult(await baseExecute(args, options)),
+              }
+            : {}),
         } as ToolSet[string];
       }
     } catch (error: unknown) {

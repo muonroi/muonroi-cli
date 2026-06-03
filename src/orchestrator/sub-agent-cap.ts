@@ -154,6 +154,26 @@ function compressResult(state: SubAgentCapState, raw: unknown): unknown {
     if (typeof obj.output === "string") {
       return { ...obj, output: compressForCap(state, obj.output) };
     }
+    // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.
+    // Without this branch the whole payload escaped the cumulative tracker —
+    // its text never counted toward the budget and was never compressed, so
+    // many MCP calls could blow past the cap. Thread each text part through
+    // compressForCap (counts + compresses + dedups); leave non-text parts
+    // (images/media) intact so base64 isn't corrupted.
+    if (obj.type === "content" && Array.isArray(obj.value)) {
+      const value = obj.value.map((part) => {
+        if (
+          part &&
+          typeof part === "object" &&
+          (part as { type?: unknown }).type === "text" &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          return { ...(part as object), text: compressForCap(state, (part as { text: string }).text) };
+        }
+        return part;
+      });
+      return { ...obj, value };
+    }
   }
   return raw;
 }
