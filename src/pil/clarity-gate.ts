@@ -7,8 +7,25 @@ export interface L1Signal {
   complexity: "low" | "medium" | "high";
 }
 
+/**
+ * A direct imperative command — "run the tests", "echo ok", "show the config",
+ * "list the ports" — has a self-evident outcome (the command executes / the
+ * thing is shown), so it should NOT trigger an outcome-clarification askcard.
+ * Requires an executable verb at the very start followed by a concrete object
+ * (a bare "run" with no object stays ambiguous → false).
+ */
+const DIRECT_IMPERATIVE_RE = /^\s*(run|execute|show|list|print|echo)\b\s+\S/i;
+
+export function isDirectImperative(raw: string): boolean {
+  return DIRECT_IMPERATIVE_RE.test(raw);
+}
+
 export function canInferOutcome(taskType: TaskType | null, raw: string): boolean {
-  if (!taskType || taskType === "general") return false;
+  if (!taskType) return false;
+  // PIL clarity over-trigger fix: a "general" prompt normally can't infer its
+  // outcome, but a direct imperative command is the exception — its outcome is
+  // obvious, so asking "what's the expected outcome?" is pure noise.
+  if (taskType === "general") return isDirectImperative(raw);
   const hasErrorRef = /error|exception|stack|TypeError|Cannot|failed|crash|fail(?:s|ed|ing)?|broken|red/i.test(raw);
   const hasFileLineRef = /\.\w+:\d+/.test(raw);
   const hasTargetState = /should|must|expect|return|produce|output|become/i.test(raw);
