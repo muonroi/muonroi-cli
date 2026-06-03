@@ -183,6 +183,26 @@ function dedupResult(dedup: CrossTurnDedup, toolName: string, raw: unknown): unk
       const stub = dedup.maybeDedup(toolName, obj.output);
       if (stub !== null) return { ...obj, output: stub };
     }
+    // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.
+    // Without this branch a re-fetched MCP payload (same docs page, same query)
+    // re-billed full content every turn — the dedup never saw it. Dedup each
+    // text part; non-text parts (images/media) pass through untouched.
+    if (obj.type === "content" && Array.isArray(obj.value)) {
+      const value = obj.value.map((part) => {
+        if (
+          part &&
+          typeof part === "object" &&
+          (part as { type?: unknown }).type === "text" &&
+          typeof (part as { text?: unknown }).text === "string"
+        ) {
+          const text = (part as { text: string }).text;
+          const stub = dedup.maybeDedup(toolName, text);
+          if (stub !== null) return { ...(part as object), text: stub };
+        }
+        return part;
+      });
+      return { ...obj, value };
+    }
   }
   return raw;
 }
