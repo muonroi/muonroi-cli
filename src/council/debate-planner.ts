@@ -4,7 +4,8 @@ import type { CouncilWarning } from "../ee/council-bridge.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { StreamChunk } from "../types/index.js";
-import type { CouncilExperienceMode } from "../utils/settings.js";
+import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
+import { type CouncilExperienceMode, getProviderStallTimeoutMs } from "../utils/settings.js";
 import { tracedGenerate } from "./llm.js";
 import { buildDebatePlanPrompt } from "./prompts.js";
 import type { ClarifiedSpec, CouncilLLM, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
@@ -152,13 +153,23 @@ export async function* planDebate(
     const { factory } = createProviderFactory(providerId, { apiKey: key });
     const runtime = resolveModelRuntime(factory, leaderModelId);
 
-    const { object } = await generateObject({
-      model: runtime.model,
-      schema: DebatePlanSchema,
-      system,
-      prompt,
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-    });
+    // Bound attempt-1: a wedged provider response here would freeze the whole
+    // council/loop silently (no streamText stall watchdog covers generateObject).
+    // On timeout this rejects → caught below → retry (guarded) → fallback plan.
+    const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(undefined, getProviderStallTimeoutMs());
+    const { object } = await withDeadlineRace(
+      () =>
+        generateObject({
+          model: runtime.model,
+          schema: DebatePlanSchema,
+          system,
+          prompt,
+          abortSignal: timedSignal,
+          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        }),
+      getProviderStallTimeoutMs() + 5_000,
+      "plan_debate",
+    ).finally(() => cleanupTimeout());
 
     // Validate with existing sanitize helpers for normalization
     const stances = sanitizeStances(object.stances);
