@@ -183,4 +183,45 @@ describe("wrapToolSetWithCap", () => {
     expect(out.output.length).toBeLessThan(50_000);
     expect(out.output).toContain("trimmed");
   });
+
+  it("counts MCP content-array text toward the cumulative budget", async () => {
+    // MCP tools return { type: "content", value: [{type:"text", text}, ...] },
+    // not a string or {output}. Previously this shape escaped the cumulative
+    // tracker entirely (cumulative stayed 0), letting many MCP calls blow past
+    // the budget even with the per-call cap in place.
+    const innerExec = async () => ({ type: "content", value: [{ type: "text", text: "M".repeat(5_000) }] });
+    const tools: ToolSet = {
+      mcp_demo__q: { description: "mcp", inputSchema: {} as never, execute: innerExec } as ToolSet[string],
+    };
+    const { tools: wrapped, state } = wrapToolSetWithCap(tools, { maxCumulativeChars: 20_000 });
+    const execute = (wrapped.mcp_demo__q as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    await execute({});
+    expect(state.cumulative).toBe(5_000);
+  });
+
+  it("compresses MCP content-array text parts when the budget is in the trim tier", async () => {
+    const innerExec = async () => ({ type: "content", value: [{ type: "text", text: "N".repeat(50_000) }] });
+    const tools: ToolSet = {
+      mcp_demo__big: { description: "mcp", inputSchema: {} as never, execute: innerExec } as ToolSet[string],
+    };
+    const { tools: wrapped, state } = wrapToolSetWithCap(tools, { maxCumulativeChars: 20_000 });
+    state.cumulative = 7_000; // trim tier
+    const execute = (wrapped.mcp_demo__big as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    const out = (await execute({})) as { type: string; value: Array<{ type: string; text: string }> };
+    expect(out.type).toBe("content");
+    expect(out.value[0]!.text.length).toBeLessThan(50_000);
+    expect(out.value[0]!.text).toContain("trimmed");
+  });
+
+  it("leaves non-text MCP content parts (images) untouched", async () => {
+    const image = { type: "image", data: "BASE64", mediaType: "image/png" };
+    const innerExec = async () => ({ type: "content", value: [image] });
+    const tools: ToolSet = {
+      mcp_demo__img: { description: "mcp", inputSchema: {} as never, execute: innerExec } as ToolSet[string],
+    };
+    const { tools: wrapped } = wrapToolSetWithCap(tools, { maxCumulativeChars: 20_000 });
+    const execute = (wrapped.mcp_demo__img as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    const out = (await execute({})) as { value: unknown[] };
+    expect(out.value[0]).toEqual(image);
+  });
 });
