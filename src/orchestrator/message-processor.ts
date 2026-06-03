@@ -69,6 +69,7 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
+import { filterMcpServersByMessage } from "../mcp/smart-filter";
 import { getModelInfo } from "../models/registry.js";
 import {
   cheapModelShellLine,
@@ -1225,21 +1226,19 @@ export class MessageProcessor {
             (!isChitchat || _priorTurnHadTools) &&
             turnCaps.supportsClientTools(runtime.modelInfo)
           ) {
-            // Smart MCP filter: skip browser/vision MCP servers unless the
-            // user's current message has a URL or explicitly invokes the
-            // browser/screenshot/design vocabulary. Local code work — which
-            // is the majority of turns — does not need Playwright/Figma/Canva
-            // tool schemas (each MCP contributes 8-15 tools at ~150 tok each).
+            // Smart MCP filter: drop OPTIONAL MCP servers whose category the
+            // current message gives no signal for. Browser/vision servers
+            // (Playwright/Chrome/Figma/Canva) skip unless the message touches a
+            // page; docs/web servers (context7/fetch) skip unless the message
+            // looks like an external lookup. Each MCP contributes 8-15 tools at
+            // ~150 tok each, so local code work — the majority of turns — saves
+            // ~13K input tokens it would otherwise pay every turn. Domain
+            // servers (filesystem/tools/harness) always pass through. Logic is
+            // a pure helper (src/mcp/smart-filter.ts) so it is unit-tested.
             // Override with MUONROI_DISABLE_SMART_MCP=1.
-            const smartMcp = process.env.MUONROI_DISABLE_SMART_MCP !== "1";
-            const browserSignal =
-              /https?:\/\/\S+|\b(screenshot|browser|playwright|chrome|figma|canva|render|webpage|website|url|hyperlink|navigate|click|scrape)\b/i.test(
-                userMessage,
-              );
-            const SKIP_WHEN_NO_BROWSER = /playwright|chrome|browser|devtools|vision|figma|canva/i;
-            const allServers = loadMcpServers();
-            const filteredServers =
-              smartMcp && !browserSignal ? allServers.filter((s) => !SKIP_WHEN_NO_BROWSER.test(s.id)) : allServers;
+            const filteredServers = filterMcpServersByMessage(loadMcpServers(), userMessage, {
+              disabled: process.env.MUONROI_DISABLE_SMART_MCP === "1",
+            });
             const mcpBundle = await buildMcpToolSet(filteredServers, {
               onOAuthRequired: (_serverId, url) => {
                 const urlStr = url.toString();
