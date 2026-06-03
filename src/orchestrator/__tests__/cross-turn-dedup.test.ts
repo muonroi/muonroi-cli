@@ -165,5 +165,37 @@ describe("CrossTurnDedup", () => {
       const second = (await exec({})) as { output: string };
       expect(second.output).toContain("[dup of");
     });
+
+    it("dedups MCP content-array text parts across calls", async () => {
+      // MCP results are { type: "content", value: [{type:"text", text}] } — a
+      // shape the dedup previously ignored, so re-fetching the same MCP payload
+      // (e.g. the same docs page) re-billed full content every turn.
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      dedup.beginTurn();
+      const payload = "r".repeat(1_000);
+      const tools: ToolSet = {
+        mcp_docs__fetch: makeTool({ type: "content", value: [{ type: "text", text: payload }] }),
+      };
+      const wrapped = wrapToolSetWithDedup(tools, dedup);
+      const exec = (wrapped.mcp_docs__fetch as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+
+      const first = (await exec({})) as { value: Array<{ text: string }> };
+      expect(first.value[0]!.text).toBe(payload);
+
+      const second = (await exec({})) as { value: Array<{ text: string }> };
+      expect(second.value[0]!.text).toContain("[dup of");
+    });
+
+    it("leaves non-text MCP content parts (images) untouched", async () => {
+      const dedup = new CrossTurnDedup({ minChars: 10 });
+      dedup.beginTurn();
+      const image = { type: "image", data: "BASE64", mediaType: "image/png" };
+      const tools: ToolSet = { mcp_x__shot: makeTool({ type: "content", value: [image] }) };
+      const wrapped = wrapToolSetWithDedup(tools, dedup);
+      const exec = (wrapped.mcp_x__shot as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+
+      const out = (await exec({})) as { value: unknown[] };
+      expect(out.value[0]).toEqual(image);
+    });
   });
 });
