@@ -86,6 +86,7 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   bridgeMcpToolResult,
   getVisionGuidanceForTextOnly,
+  listCachedImages,
   scrubImagePayloadsInMessages,
 } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
@@ -114,6 +115,7 @@ import {
 } from "../storage/index";
 import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
+import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
@@ -1183,6 +1185,16 @@ export class MessageProcessor {
             );
           }
 
+          // Vision-tool gate: for vision-proxy (text-only) models the registry
+          // adds 3 image tools (~500-700 tok) on every turn. Drop them when the
+          // turn has no plausible image involvement. Bias is KEEP — retained on
+          // any image signal, attachment, cached image, or prior-tool turn.
+          const includeVisionTools = visionToolsNeeded({
+            userMessage,
+            messages: deps.messages as unknown[],
+            cachedImageCount: listCachedImages().length,
+            priorTurnHadTools: (deps.messages as Array<{ role?: string }>).some((m) => m?.role === "tool"),
+          });
           const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
             runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
             runDelegation: (request, abortSignal) =>
@@ -1190,6 +1202,7 @@ export class MessageProcessor {
             readDelegation: (id) => deps.readDelegation(id),
             listDelegations: () => deps.listDelegations(),
             modelId: turnModelId,
+            includeVisionTools,
           });
           // Top-level cumulative cap state. We accumulate the raw tool set
           // (base + MCP + PIL response tools) across the assembly below,
