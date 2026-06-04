@@ -6,6 +6,7 @@ import {
   hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
+  hasWholeRepoScope,
 } from "./clarity-gate.js";
 import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
 import type { TaskType } from "./types.js";
@@ -70,7 +71,11 @@ export function detectClarityGaps(
     !hasExplicitScope(raw) &&
     !hasOperationalScope(raw) &&
     !hasImageScope(raw) &&
-    !hasExternalInfoScope(raw)
+    !hasExternalInfoScope(raw) &&
+    // Whole-repo / eval prompts ("đánh giá repo", "review the entire codebase")
+    // are already scoped to everything — asking "which part?" (and recommending
+    // a narrow subdir as default) is nonsensical. See hasWholeRepoScope.
+    !hasWholeRepoScope(raw)
   ) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({

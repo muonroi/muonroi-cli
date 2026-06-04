@@ -107,6 +107,32 @@ export function hasExternalInfoScope(raw: string): boolean {
   return EXTERNAL_INFO_SCOPE_RE.test(raw);
 }
 
+/**
+ * A whole-repo / whole-project prompt ("đánh giá repo này", "review the entire
+ * codebase", "audit the whole project") is ALREADY scoped — to everything — so
+ * the "Which part of the codebase should this target?" askcard is nonsensical
+ * (and worse, it recommends a single bounded context like "src/cli" as the
+ * default, which is wrong for a repo-wide eval). Symmetric to the other scope
+ * predicates. Live: gemini-2.5-flash classified "đánh giá repo …" as analyze and
+ * got the scope askcard whose recommended option was a narrow subdir.
+ *
+ * Deliberately NARROW — it must NOT fire on a narrow task that merely mentions a
+ * repo/project ("add X to this repo", "fix the bug in the project"), or those
+ * would wrongly skip a legitimate scope question. So it requires EITHER an
+ * explicit wholeness qualifier (whole/entire/all/toàn bộ/cả) on a repo/project/
+ * codebase noun, OR an evaluation/overview verb (review/audit/evaluate/assess/
+ * analyze/overview · đánh giá/phân tích/tổng quan/kiểm tra) applied to that noun.
+ */
+const WHOLE_REPO_SCOPE_RE =
+  // NOTE: leading anchors on Vietnamese-initial alternatives use (?:^|\s) not
+  // \b — JS \b is ASCII-only and never matches before a non-ASCII letter like
+  // "đ", so "\bđánh" would silently fail to match "đánh giá repo".
+  /\b(whole|entire|overall|all\s+of\s+the|across\s+the)\s+(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(toàn\s*bộ|toan\s*bo|cả|ca)\s+(repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b|\b(review|audit|evaluate|assess|analy[sz]e|overview\s+of)\s+(the\s+)?(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(đánh\s*giá|danh\s*gia|phân\s*tích|phan\s*tich|tổng\s*quan|tong\s*quan|kiểm\s*tra|kiem\s*tra)\s+(toàn|toan|repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b/i;
+
+export function hasWholeRepoScope(raw: string): boolean {
+  return WHOLE_REPO_SCOPE_RE.test(raw);
+}
+
 export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
   if (l1.confidence < getAutoPassThreshold()) return false;
   if (!canInferOutcome(l1.taskType, raw)) return false;
@@ -117,7 +143,8 @@ export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
     !hasExplicitScope(raw) &&
     !hasOperationalScope(raw) &&
     !hasImageScope(raw) &&
-    !hasExternalInfoScope(raw)
+    !hasExternalInfoScope(raw) &&
+    !hasWholeRepoScope(raw)
   )
     return false;
   if (l1.complexity === "high") return false;
