@@ -69,9 +69,34 @@ describe("getCheapModelWorkbook", () => {
     expect(CHEAP_MODEL_CONVERGENCE).toMatch(/one line|1 line|state.*(done|complet)/i);
   });
 
-  it("stays compact (under 1000 chars) to preserve attention budget", () => {
-    // Bumped 900 → 1000 when the A4 completion-line rule was added.
-    expect(getCheapModelWorkbook("debug").length).toBeLessThan(1000);
+  it("stays compact (under 1300 chars) to preserve attention budget", () => {
+    // Bumped 900 → 1000 when the A4 completion-line rule was added; 1000 → 1300
+    // when the universal grounding (anti-hallucination) rule was added.
+    expect(getCheapModelWorkbook("debug").length).toBeLessThan(1300);
+  });
+});
+
+describe("grounding (anti-hallucination) directive", () => {
+  // Live obs (deepseek-v4-flash repo-eval, session 17fc23f0): the model
+  // fabricated a test count (claimed 67, actual ~479), invented a "model
+  // display bug" with fake file:line refs, and falsely claimed the finding
+  // was "already documented this session". That eval classified taskType=null
+  // on deepseek, so it received the convergence-ONLY block — which is why the
+  // grounding rule must live in the UNIVERSAL convergence block, not the
+  // per-type analyze addendum (or it would miss the exact observed case).
+  it("convergence block carries a grounding rule", () => {
+    expect(CHEAP_MODEL_CONVERGENCE).toMatch(/GROUND every claim/i);
+    expect(CHEAP_MODEL_CONVERGENCE).toMatch(/never invent/i);
+    expect(CHEAP_MODEL_CONVERGENCE).toMatch(/unverified/i);
+  });
+
+  it("applies even when taskType is null (the deepseek null-classified eval case)", () => {
+    expect(getCheapModelWorkbook(null)).toMatch(/GROUND every claim/i);
+    expect(getCheapModelWorkbook(null)).toMatch(/never invent/i);
+  });
+
+  it("applies to analyze/eval tasks too (inherited from convergence)", () => {
+    expect(getCheapModelWorkbook("analyze")).toMatch(/GROUND every claim/i);
   });
 });
 

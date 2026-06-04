@@ -35,7 +35,11 @@ export const CHEAP_MODEL_CONVERGENCE = `[CONVERGENCE — minimise tool calls; th
 - Make the SMALLEST correct change for the request; do not widen scope.
 - Finish the action before you answer — never stop mid-step (e.g. "I'm verifying…").
   When done, state completion in ONE line (what changed + that it's verified);
-  no recap, no next-steps padding.`;
+  no recap, no next-steps padding.
+- GROUND every claim in what you actually read or ran THIS turn: cite real
+  file:line, and never invent counts, line numbers, names, or bugs. If a number
+  (test/file count) is not verified by a command you ran, run the check or mark
+  it "unverified" — do NOT guess a value or assert a finding you did not observe.`;
 
 /**
  * Per-task-type addenda. Each is 1–2 tight lines targeting that type's most
