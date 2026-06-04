@@ -57,6 +57,16 @@ interface AskcardOpenPayload {
   phase: string;
   optionCount: number;
   defaultIndex?: number;
+  /**
+   * The rendered option labels, in order. Persisted so a DB / `usage forensics`
+   * audit can measure WHAT the "Recommended" badge pointed at — not just its
+   * index. Without it, recommend-correctness (e.g. the scope-card "Entire
+   * project" fix) was unverifiable from past sessions: metadata only carried
+   * optionCount + defaultIndex, never the labels.
+   */
+  optionLabels?: string[];
+  /** Convenience: optionLabels[defaultIndex] — the recommended option's label. */
+  recommendedLabel?: string;
 }
 
 interface AskcardAnsweredPayload {
