@@ -193,6 +193,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       required: ["command"],
     }),
     execute: async (input: any) => {
+      // Corrective guard for malformed calls: a cheap model sometimes emits a
+      // bash call with a missing / empty `command` (live: deepseek sent `{}`
+      // repeatedly until the loop-guard fired). Passing undefined to
+      // bash.execute() throws an opaque TypeError that doesn't steer the model
+      // to self-correct, and a whitespace command "succeeds" with no output —
+      // both look like progress and feed the loop. Return a crisp instruction
+      // so the next step supplies a real command instead of repeating.
+      if (typeof input.command !== "string" || input.command.trim() === "") {
+        return 'ERROR: the `bash` tool requires a non-empty "command" string, but the call had empty arguments. Provide the shell command to run, e.g. {"command":"ls -la"}.';
+      }
       if (input.background) {
         const result = await bash.startBackground(input.command);
         return formatResult(result);
