@@ -400,6 +400,168 @@ export function hasActionableToolIntent(raw: string): boolean {
   return TOOL_NAME_RE.test(raw) || EXEC_INTENT_RE.test(raw) || VI_EXEC_RE.test(raw);
 }
 
+// Pure social-pleasantry vocabulary (EN + VI). CORE = greeting/thanks/ack/
+// farewell tokens that carry the social intent; FILLER = pronouns, particles,
+// articles, intensifiers, politeness words that legitimately surround them.
+// Deliberately EXCLUDES any token that could carry work ("help", "fix",
+// "make", "do", file names, …) so the all-tokens-whitelist test below can never
+// match a real task.
+const SOCIAL_CORE = new Set([
+  // greetings
+  "hi",
+  "hello",
+  "hey",
+  "yo",
+  "hiya",
+  "heya",
+  "hallo",
+  "chào",
+  "chao",
+  "hola",
+  // thanks
+  "thanks",
+  "thank",
+  "thx",
+  "ty",
+  "tks",
+  "thankyou",
+  "cảm",
+  "ơn",
+  "cám",
+  "cam",
+  "ơn",
+  "thankss",
+  // farewells
+  "bye",
+  "goodbye",
+  "cya",
+  "tạm",
+  "biệt",
+  "biet",
+  "farewell",
+  // acknowledgements / affirmations
+  "ok",
+  "okay",
+  "okie",
+  "oke",
+  "okey",
+  "k",
+  "great",
+  "nice",
+  "cool",
+  "perfect",
+  "awesome",
+  "good",
+  "fine",
+  "sweet",
+  "excellent",
+  "brilliant",
+  "wonderful",
+  "amazing",
+  "superb",
+  "tuyệt",
+  "tuyet",
+  "vời",
+  "voi",
+  "ngon",
+  "ổn",
+  "yeah",
+  "yep",
+  "yup",
+  "nice1",
+]);
+const SOCIAL_FILLER = new Set([
+  // pronouns / address
+  "you",
+  "u",
+  "ya",
+  "bạn",
+  "ban",
+  "mình",
+  "minh",
+  "we",
+  "i",
+  // intensifiers / quantity
+  "very",
+  "much",
+  "so",
+  "really",
+  "lot",
+  "lots",
+  "too",
+  "rất",
+  "rat",
+  "nhiều",
+  "nhieu",
+  // articles / connectors / objects-of-thanks (safe: surrounding task words block the match)
+  "a",
+  "an",
+  "the",
+  "for",
+  "all",
+  "that",
+  "this",
+  "it",
+  "everything",
+  "again",
+  "and",
+  // time / address fillers
+  "today",
+  "now",
+  "there",
+  "here",
+  "mate",
+  "man",
+  "friend",
+  "bro",
+  "guys",
+  "team",
+  // politeness / particles (VI + EN)
+  "please",
+  "pls",
+  "plz",
+  "nhé",
+  "nhe",
+  "nha",
+  "ạ",
+  "à",
+  "ạ.",
+  "dude",
+  "buddy",
+]);
+
+/**
+ * True when the prompt is a PURE social pleasantry (greeting / thanks / ack /
+ * farewell) — even when it is longer than the 2-word hot-path that Pass 2.5
+ * catches. Used to classify such turns as chitchat so message-processor can
+ * drop the ~15-20K tool-schema tax (a thank-you never needs bash/read_file/MCP).
+ *
+ * STRICT by construction: EVERY whitespace token must be social CORE or FILLER
+ * vocabulary, and at least one must be CORE. Any task/tool/file token (not in
+ * the whitelist) makes it false, so it can never swallow a real request — the
+ * bias is keep-tools. Live leak: "cảm ơn bạn rất nhiều nhé" (session
+ * 40c726a31a37) paid toolCount=37 because the old gate required ≤10 chars.
+ */
+export function isSocialPleasantry(raw: string): boolean {
+  if (!raw) return false;
+  const tokens = raw
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ""))
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  let hasCore = false;
+  for (const t of tokens) {
+    if (SOCIAL_CORE.has(t)) {
+      hasCore = true;
+      continue;
+    }
+    if (SOCIAL_FILLER.has(t)) continue;
+    return false;
+  }
+  return hasCore;
+}
+
 export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {}): Promise<PipelineContext> {
   try {
     // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
@@ -611,6 +773,30 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
     const noTaskSignal = taskType === null || (taskType === "general" && result.reason === "regex:short-message");
     if (noTaskSignal && trimmed.length < 10 && wordCount <= 2) {
+      taskType = "general";
+      confidence = 0.5;
+      intentKind = "chitchat";
+      outputStyle = "concise";
+      pass25ChitchatHit = true;
+      styleSource = "chitchat-default";
+    }
+
+    // Pass 2.6 — multi-word PURE social pleasantries ("cảm ơn bạn rất nhiều
+    // nhé", "thank you so much", "ok great thanks") that the 2-word hot-path
+    // above misses. Without this they fall through to the brain/LLM passes,
+    // which classify intentKind inconsistently (live session 40c726a31a37
+    // returned intentKind=null → toolCount=37, ~15-20K wasted tool-schema
+    // tokens for a thank-you). isSocialPleasantry is strict (every token is
+    // greeting/thanks/ack/filler vocab) so it can never swallow a task; the
+    // hasActionableToolIntent veto is belt-and-suspenders. Classifying here is
+    // also a cost win: it skips the brain round-trip (needsBrain requires
+    // intentKind !== "chitchat").
+    if (
+      intentKind !== "chitchat" &&
+      (taskType === null || taskType === "general") &&
+      !hasActionableToolIntent(trimmed) &&
+      isSocialPleasantry(trimmed)
+    ) {
       taskType = "general";
       confidence = 0.5;
       intentKind = "chitchat";
