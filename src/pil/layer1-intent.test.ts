@@ -16,7 +16,7 @@ vi.mock("./config.js", () => ({
 
 import { classifyViaBrain } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { hasActionableToolIntent, layer1Intent } from "./layer1-intent";
+import { hasActionableToolIntent, isSocialPleasantry, layer1Intent } from "./layer1-intent";
 import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);
@@ -408,5 +408,58 @@ describe("intentKind guard — a tool/command request must never route as chitch
       llmFallback: generalFallback,
     });
     expect(result.intentKind).toBe("chitchat");
+  });
+});
+
+describe("isSocialPleasantry — pure social phrases beyond the 2-word hot-path", () => {
+  it("detects multi-word greetings / thanks / acks (EN + VI)", () => {
+    // Live leak (session 40c726a31a37): "cảm ơn bạn rất nhiều nhé" (>10 chars,
+    // 6 words) missed the ≤10-char/≤2-word chitchat gate → intentKind=null →
+    // toolCount=37 (~15K wasted tool-schema tokens for a thank-you).
+    for (const m of [
+      "cảm ơn bạn rất nhiều nhé",
+      "thank you so much",
+      "thanks a lot",
+      "ok great thanks",
+      "hello there friend",
+      "tạm biệt nhé",
+    ]) {
+      expect(isSocialPleasantry(m), m).toBe(true);
+    }
+  });
+
+  it("returns false when ANY token carries task/tool content (never swallow work)", () => {
+    for (const m of [
+      "thanks now fix the auth bug",
+      "ok but the build fails",
+      "cảm ơn, giờ sửa file login.ts",
+      "can you help me",
+      "analyze data.csv",
+      "fix it please",
+    ]) {
+      expect(isSocialPleasantry(m), m).toBe(false);
+    }
+  });
+
+  it("requires at least one core social token (bare fillers / empty are not pleasantries)", () => {
+    expect(isSocialPleasantry("the a for")).toBe(false);
+    expect(isSocialPleasantry("")).toBe(false);
+  });
+});
+
+describe("Pass 2.6 — social pleasantries route to chitchat (drop the tool-schema tax)", () => {
+  it("classifies a multi-word thank-you as chitchat deterministically", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:short-message", confidence: 0.3 });
+    const result = await layer1Intent(makeCtx("cảm ơn bạn rất nhiều nhé"));
+    expect(result.intentKind).toBe("chitchat");
+    expect(result.taskType).toBe("general");
+  });
+
+  it("does NOT route a thanks-then-task prompt to chitchat", async () => {
+    mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+    const result = await layer1Intent(makeCtx("thanks, now fix the bug in src/auth/login.ts"), {
+      llmFallback: async () => ({ taskType: "debug" as const, outputStyle: null, confidence: 0.8 }),
+    });
+    expect(result.intentKind).toBe("task");
   });
 });
