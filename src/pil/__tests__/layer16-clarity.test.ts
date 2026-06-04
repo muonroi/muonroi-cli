@@ -109,6 +109,17 @@ describe("detectClarityGaps()", () => {
     const gaps = detectClarityGaps("add a logo to the header", "generate", 0.7, EMPTY_PROJECT);
     expect(gaps.find((g) => g.dimension === "scope")).toBeDefined();
   });
+
+  it("does NOT detect a scope gap for a web-search / external-info prompt", () => {
+    // Live drive (tavily probe, session d7a45a2dba30): "search the web for the
+    // latest vitest release notes" classified taskType=analyze fired the
+    // codebase-scope askcard and recorded a wrong scope ("src/mcp"). A
+    // web-search task is scoped to the web, not the codebase — symmetric to the
+    // image-scope and operational-scope guards.
+    const gaps = detectClarityGaps("search the web for the latest vitest release notes", "analyze", 0.7, EMPTY_PROJECT);
+    expect(gaps.find((g) => g.dimension === "scope")).toBeUndefined();
+    expect(gaps).toHaveLength(0);
+  });
 });
 
 describe("buildInterviewQuestion()", () => {

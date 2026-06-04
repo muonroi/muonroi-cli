@@ -3,6 +3,7 @@ import {
   canInferOutcome,
   countFileReferences,
   hasExplicitScope,
+  hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
   shouldAutoPass,
@@ -124,6 +125,33 @@ describe("shouldAutoPass()", () => {
         "analyze screenshot.png — goal: describe the layout",
       ),
     ).toBe(true);
+  });
+
+  // External-info fix — a web-search task is scoped to the web, not a file path.
+  it("auto-passes a web-search task even without file path (external-info scope)", () => {
+    expect(
+      shouldAutoPass(
+        { confidence: 0.9, taskType: "analyze", complexity: "low" },
+        "search the web for the vitest release date — goal: find the version",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("hasExternalInfoScope()", () => {
+  it("detects web-search / external-info intent", () => {
+    expect(hasExternalInfoScope("search the web for the latest vitest release notes")).toBe(true);
+    expect(hasExternalInfoScope("google the error message")).toBe(true);
+    expect(hasExternalInfoScope("what's the latest news on the framework")).toBe(true);
+    expect(hasExternalInfoScope("summarize https://example.com/post")).toBe(true);
+  });
+  it("returns false for codebase tasks, including in-repo 'search'", () => {
+    // Narrow: must NOT swallow a real code task. "search the codebase" and
+    // "search feature" are codebase work and still deserve a scope askcard.
+    expect(hasExternalInfoScope("search the codebase for usages of foo")).toBe(false);
+    expect(hasExternalInfoScope("implement the search feature")).toBe(false);
+    expect(hasExternalInfoScope("add the zod library to the auth module")).toBe(false);
+    expect(hasExternalInfoScope("refactor the login flow")).toBe(false);
   });
 });
 

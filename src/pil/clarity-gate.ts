@@ -85,12 +85,40 @@ export function hasImageScope(raw: string): boolean {
   return IMAGE_SCOPE_RE.test(raw);
 }
 
+/**
+ * A web-search / external-information prompt ("search the web for X", "google
+ * the error", a bare URL, "latest news on Y") is scoped to the WEB, not the
+ * codebase, so the "Which part of the codebase should this target?" askcard is
+ * nonsensical for it — symmetric to hasOperationalScope / hasImageScope. (Live:
+ * "search the web for the latest vitest release notes" → taskType=analyze fired
+ * the scope askcard and recorded a wrong scope of "src/mcp".)
+ *
+ * Deliberately NARROW — only UNAMBIGUOUSLY-external intent. It must not reuse
+ * the broad hasDocsSignal vocabulary (library/api/install/package), because
+ * those words routinely describe real codebase tasks ("add the zod library to
+ * the auth module") that genuinely need the scope askcard. In particular a bare
+ * "search" is excluded so "search the codebase" / "implement the search
+ * feature" still get scoped.
+ */
+const EXTERNAL_INFO_SCOPE_RE =
+  /https?:\/\/\S+|\bsearch\s+(the\s+)?(web|internet|online)\b|\bweb\s*search\b|\bon\s+the\s+(web|internet)\b|\bgoogle\b|\b(news|weather|headlines)\b/i;
+
+export function hasExternalInfoScope(raw: string): boolean {
+  return EXTERNAL_INFO_SCOPE_RE.test(raw);
+}
+
 export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
   if (l1.confidence < getAutoPassThreshold()) return false;
   if (!canInferOutcome(l1.taskType, raw)) return false;
   // PIL-L6 fix — debug prompts about CI/build/deploy don't need a file path
   // because their scope is the pipeline itself. Operational scope counts.
-  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw) && !hasImageScope(raw))
+  if (
+    countFileReferences(raw) === 0 &&
+    !hasExplicitScope(raw) &&
+    !hasOperationalScope(raw) &&
+    !hasImageScope(raw) &&
+    !hasExternalInfoScope(raw)
+  )
     return false;
   if (l1.complexity === "high") return false;
   return true;
