@@ -3,6 +3,7 @@ import {
   canInferOutcome,
   countFileReferences,
   hasExplicitScope,
+  hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
 } from "./clarity-gate.js";
@@ -68,7 +69,8 @@ export function detectClarityGaps(
     countFileReferences(raw) === 0 &&
     !hasExplicitScope(raw) &&
     !hasOperationalScope(raw) &&
-    !hasImageScope(raw)
+    !hasImageScope(raw) &&
+    !hasExternalInfoScope(raw)
   ) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({
