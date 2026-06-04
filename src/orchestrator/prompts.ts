@@ -1,4 +1,5 @@
 import { getModelInfo } from "../models/registry";
+import { buildContractSection } from "../pil/agent-operating-contract.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
@@ -342,7 +343,13 @@ export function buildSystemPromptParts(
     modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
   }
 
-  const staticPrefix = `${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
+  // Front-load the Agent Operating Contract (all tiers) so the
+  // grounding/evidence discipline registers — the same rules buried in
+  // CUSTOM INSTRUCTIONS get underweighted when not front-loaded. Skipped for
+  // chitchat (no tools, no factual claims). See agent-operating-contract.ts.
+  const contractSection = buildContractSection({ chitchat });
+
+  const staticPrefix = `${contractSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
 
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
