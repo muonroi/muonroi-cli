@@ -176,6 +176,7 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
@@ -1169,6 +1170,10 @@ export class MessageProcessor {
         let closeMcp: (() => Promise<void>) | undefined;
         let stepNumber = -1;
         const activeToolCalls: ToolCall[] = [];
+        // Capped digest of tool outputs gathered this attempt — fuels the
+        // best-effort answer rescue if the stream stalls mid-turn (see
+        // stall-rescue.ts). Reset per attempt; only the most recent results win.
+        const turnToolResults: StallToolResult[] = [];
         // SAMR: track whether Phase 1 produced tool calls
         let phase1HadToolCalls = false;
 
@@ -1971,6 +1976,15 @@ export class MessageProcessor {
                   /* fail-open */
                 }
 
+                // Capture into the stall-rescue digest before any further
+                // processing — if the stream stalls after this, these outputs
+                // are all we have to synthesize a final answer from.
+                pushStallToolResult(
+                  turnToolResults,
+                  part.toolName,
+                  typeof tr.output === "string" ? tr.output : JSON.stringify(tr.output),
+                );
+
                 // Pitfall 9: settle the pending call log entry.
                 if (deps.pendingCalls) {
                   const pending = activeToolCalls.find((t) => t.id === part.toolCallId);
@@ -2269,12 +2283,56 @@ export class MessageProcessor {
                 // looks like a silent freeze.
                 if (stallTriggered) {
                   stall.dispose();
+                  // Best-effort answer rescue: a turn that already ran tools but
+                  // stalled before the final synthesis would otherwise return
+                  // ONLY "Model not responding", discarding all that work (live
+                  // obs 2026-06-04, deepseek session 734e65cffdf6: 67 tool calls
+                  // → user got nothing). Make ONE guarded forced-finalize call
+                  // over the gathered tool outputs. forcedFinalize has its own
+                  // stall timeout, so a still-dead provider just falls through.
+                  let _rescued: string | null = null;
+                  if (turnToolResults.length > 0) {
+                    try {
+                      const _userText =
+                        typeof userModelMessage?.content === "string"
+                          ? userModelMessage.content
+                          : JSON.stringify(userModelMessage?.content ?? "");
+                      _rescued = await attemptStallRescue({
+                        baseMessages: _topMessagesForCall as unknown[],
+                        userText: _userText.slice(0, 4000),
+                        toolResults: turnToolResults,
+                        system: typeof systemForModel === "string" ? systemForModel : undefined,
+                        finalize: (a) =>
+                          forcedFinalize({ model: runtime.model, messages: a.messages, system: a.system }),
+                      });
+                    } catch {
+                      _rescued = null;
+                    }
+                    try {
+                      if (deps.session) {
+                        logInteraction(deps.session.id, "stall_rescue", {
+                          data: {
+                            outcome: _rescued ? "rescued" : "no_text",
+                            toolResultCount: turnToolResults.length,
+                            chars: _rescued?.length ?? 0,
+                          },
+                        });
+                      }
+                    } catch {
+                      /* telemetry is best-effort */
+                    }
+                  }
+                  if (_rescued) {
+                    assistantText += (assistantText ? "\n\n" : "") + _rescued;
+                    yield { type: "content", content: _rescued };
+                  }
                   // Persist a record of the interrupted turn BEFORE returning so
                   // the next turn is not amnesiac. Previously this returned with
                   // nothing persisted → the next turn saw "no previous turn" and
                   // redid the work, orphaning any edits the stalled turn applied
-                  // (live obs 2026-06-04, deepseek-v4-flash). Best-effort: never
-                  // let persistence failure block surfacing the stall.
+                  // (live obs 2026-06-04, deepseek-v4-flash). When rescued, the
+                  // note now carries the synthesized answer too (assistantText).
+                  // Best-effort: never let persistence failure block surfacing.
                   if (!streamOk) {
                     try {
                       const _stallNote = buildInterruptedTurnNote(
@@ -2288,6 +2346,18 @@ export class MessageProcessor {
                     } catch {
                       /* best-effort — surface the stall regardless */
                     }
+                  }
+                  if (_rescued) {
+                    // Recovered a best-effort answer from partial data — surface
+                    // a soft notice instead of the scary "not responding" error.
+                    yield {
+                      type: "content",
+                      content:
+                        "\n\n[Note: the model connection stalled; the answer above is a best-effort synthesis " +
+                        "from the tool results gathered before the stall and may be incomplete.]",
+                    };
+                    yield { type: "done" };
+                    return;
                   }
                   notifyObserver(observer?.onError, { message: STALL_ERROR_MESSAGE, timestamp: Date.now() });
                   yield { type: "error", content: STALL_ERROR_MESSAGE, isAuthError: false };
