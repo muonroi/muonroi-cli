@@ -143,6 +143,7 @@ import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
 import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
+import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { applyModelConstraints, buildSystemPromptParts } from "./prompts";
@@ -2268,6 +2269,26 @@ export class MessageProcessor {
                 // looks like a silent freeze.
                 if (stallTriggered) {
                   stall.dispose();
+                  // Persist a record of the interrupted turn BEFORE returning so
+                  // the next turn is not amnesiac. Previously this returned with
+                  // nothing persisted → the next turn saw "no previous turn" and
+                  // redid the work, orphaning any edits the stalled turn applied
+                  // (live obs 2026-06-04, deepseek-v4-flash). Best-effort: never
+                  // let persistence failure block surfacing the stall.
+                  if (!streamOk) {
+                    try {
+                      const _stallNote = buildInterruptedTurnNote(
+                        assistantText,
+                        activeToolCalls.map((c) => c.function.name),
+                      );
+                      deps.appendCompletedTurn(userModelMessage, [
+                        { role: "assistant", content: _stallNote } as ModelMessage,
+                      ]);
+                      streamOk = true;
+                    } catch {
+                      /* best-effort — surface the stall regardless */
+                    }
+                  }
                   notifyObserver(observer?.onError, { message: STALL_ERROR_MESSAGE, timestamp: Date.now() });
                   yield { type: "error", content: STALL_ERROR_MESSAGE, isAuthError: false };
                   yield { type: "done" };
