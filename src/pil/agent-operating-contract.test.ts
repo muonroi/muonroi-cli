@@ -27,6 +27,13 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/verify|cross-check|reproduc/i);
   });
 
+  it("REPORTING forbids over-answering with unrequested numbers", () => {
+    // Live (deepseek Task B, 2026-06-04): the model volunteered an unrequested,
+    // wrong "10026 total lines" stat. REPORTING must steer "answer only what
+    // was asked".
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/only what (was|is) asked|do not volunteer|don't volunteer/i);
+  });
+
   it("has clear start/end markers so the model treats it as a prelude", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/AGENT OPERATING CONTRACT/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/END CONTRACT/i);

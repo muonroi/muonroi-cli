@@ -44,7 +44,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 2. READING: base every statement on what you actually read or ran THIS turn. Do not infer the contents of a file you did not open.
 3. EXECUTING: make the smallest correct change; never widen scope; never mask a failure (no \`|| true\`, no skipped/deleted tests, no swallowed catch).
 4. WHEN UNSURE: verify or research and cross-check BEFORE concluding. A bug needs a reproduction or trace — reading the code is not proof on its own.
-5. REPORTING: state only verified facts. Any count, metric, name, or file:line you report MUST come from a command you ran or a file you read this turn; if you did not verify it, run the check or label it "unverified" — never guess a number or invent a finding.
+5. REPORTING: state only verified facts, and answer ONLY what was asked — do not volunteer extra, unrequested numbers. Any count, metric, name, or file:line you report MUST come from a command you ran or a file you read this turn; if you did not verify it, run the check or label it "unverified" — never guess a number or invent a finding.
 
 [END CONTRACT — your regular instructions follow]`;
 
