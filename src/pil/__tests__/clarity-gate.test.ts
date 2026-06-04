@@ -6,8 +6,39 @@ import {
   hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
+  hasWholeRepoScope,
   shouldAutoPass,
 } from "../clarity-gate.js";
+
+describe("hasWholeRepoScope()", () => {
+  it("detects whole-repo / whole-project intent (EN + VI)", () => {
+    // The repo-eval prompt that fired a nonsensical "which part?" askcard.
+    expect(hasWholeRepoScope("đánh giá repo muonroi-cli này: điểm mạnh, điểm yếu")).toBe(true);
+    expect(hasWholeRepoScope("evaluate the repo: strengths and weaknesses")).toBe(true);
+    expect(hasWholeRepoScope("review the whole codebase")).toBe(true);
+    expect(hasWholeRepoScope("audit the entire project")).toBe(true);
+    expect(hasWholeRepoScope("phân tích toàn bộ dự án")).toBe(true);
+    expect(hasWholeRepoScope("give me an overview of the repository")).toBe(true);
+  });
+
+  it("does NOT fire on narrow tasks that merely mention a repo/project", () => {
+    // "this repo" without a wholeness/eval signal must still be scoped.
+    expect(hasWholeRepoScope("add a logout button to this repo")).toBe(false);
+    expect(hasWholeRepoScope("fix the login bug in the project")).toBe(false);
+    expect(hasWholeRepoScope("implement the search feature")).toBe(false);
+    expect(hasWholeRepoScope("refactor the auth module")).toBe(false);
+  });
+
+  it("whole-repo scope no longer blocks auto-pass (was: scope-gap → false)", () => {
+    // With an inferable outcome (explicit goal), the ONLY remaining blocker for a
+    // repo-wide prompt was the scope gap. hasWholeRepoScope clears it.
+    const prompt = "review the entire codebase — goal: a report of strengths and weaknesses";
+    expect(shouldAutoPass({ confidence: 0.9, taskType: "analyze", complexity: "low" }, prompt)).toBe(true);
+    // Control: same shape but NOT repo-wide still fails on the scope gap.
+    const narrow = "review the system — goal: a report of strengths and weaknesses";
+    expect(shouldAutoPass({ confidence: 0.9, taskType: "analyze", complexity: "low" }, narrow)).toBe(false);
+  });
+});
 
 describe("canInferOutcome()", () => {
   it("returns false for null taskType", () => {
