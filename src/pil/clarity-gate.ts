@@ -60,12 +60,38 @@ export function hasExplicitScope(raw: string): boolean {
   return /\b(src\/|lib\/|app\/|pages\/|components\/|modules\/|packages\/)\S+/.test(raw);
 }
 
+/**
+ * An image-analysis prompt is scoped to the IMAGE, not the codebase. "analyze
+ * diagram.png", "take a screenshot and describe it" name their target directly,
+ * so the "Which part of the codebase should this target?" askcard is
+ * nonsensical for them — exactly like operational (CI/build) prompts are scoped
+ * to the pipeline (see hasOperationalScope). Detect a concrete image signal: an
+ * image file extension, a data:image URI, or an unambiguous image noun.
+ *
+ * Deliberately NARROW: a false positive here SUPPRESSES a legitimate clarifying
+ * question (quality risk), so overloaded words are excluded —
+ *   - "logo" / "icon" / "diagram" / "chart" / "mockup" appear in real codebase
+ *     tasks ("add a logo to the header"),
+ *   - bare "image" collides with container/Docker usage ("rebuild the image"),
+ *   - "picture" collides with the "bigger picture" idiom,
+ *   - Vietnamese substrings (ảnh/hình) collide with frequent non-image words
+ *     ("ảnh hưởng", "màn hình", "hình thức").
+ * Only a file extension, data:image URI, "screenshot", or "photo" qualify.
+ */
+const IMAGE_SCOPE_RE =
+  /\.(png|jpe?g|gif|webp|svg|bmp|tiff?|heic|avif|ico)\b|data:image\/|\bscreen-?shots?\b|\bphotos?\b/i;
+
+export function hasImageScope(raw: string): boolean {
+  return IMAGE_SCOPE_RE.test(raw);
+}
+
 export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
   if (l1.confidence < getAutoPassThreshold()) return false;
   if (!canInferOutcome(l1.taskType, raw)) return false;
   // PIL-L6 fix — debug prompts about CI/build/deploy don't need a file path
   // because their scope is the pipeline itself. Operational scope counts.
-  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw)) return false;
+  if (countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw) && !hasImageScope(raw))
+    return false;
   if (l1.complexity === "high") return false;
   return true;
 }

@@ -3,6 +3,7 @@ import {
   canInferOutcome,
   countFileReferences,
   hasExplicitScope,
+  hasImageScope,
   hasOperationalScope,
   shouldAutoPass,
 } from "../clarity-gate.js";
@@ -112,6 +113,38 @@ describe("shouldAutoPass()", () => {
         "fix the ci fail — goal: green pipeline",
       ),
     ).toBe(true);
+  });
+
+  // Image-scope fix — an image-analysis task is scoped to the image, not a file
+  // path, so it should auto-pass when its outcome is inferrable.
+  it("auto-passes an image-analysis task even without file path (image scope)", () => {
+    expect(
+      shouldAutoPass(
+        { confidence: 0.9, taskType: "analyze", complexity: "low" },
+        "analyze screenshot.png — goal: describe the layout",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("hasImageScope()", () => {
+  it("detects an image file extension", () => {
+    expect(hasImageScope("analyze diagram.png")).toBe(true);
+    expect(hasImageScope("describe the layout of mock.jpg")).toBe(true);
+    expect(hasImageScope("read chart.svg")).toBe(true);
+  });
+  it("detects a data:image URI and screenshot/photo nouns", () => {
+    expect(hasImageScope("here is data:image/png;base64,AAAA")).toBe(true);
+    expect(hasImageScope("take a screenshot and analyze it")).toBe(true);
+    expect(hasImageScope("look at the photo")).toBe(true);
+  });
+  it("returns false for codebase tasks and ambiguous/overloaded words", () => {
+    // Narrow on purpose: a false positive SUPPRESSES a legitimate scope
+    // question, so overloaded words must NOT match.
+    expect(hasImageScope("refactor the login flow")).toBe(false);
+    expect(hasImageScope("add a logo to the header")).toBe(false); // "logo" excluded
+    expect(hasImageScope("rebuild the docker image")).toBe(false); // bare "image" excluded
+    expect(hasImageScope("look at the bigger picture")).toBe(false); // "picture" excluded
   });
 });
 
