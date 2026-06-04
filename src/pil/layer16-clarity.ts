@@ -83,7 +83,7 @@ export function detectClarityGaps(
       description: "No specific file or module referenced",
       suggestedQuestion: "Which part of the codebase should this target?",
       options: scopeOptions,
-      defaultIndex: 0,
+      defaultIndex: pickBestScopeIndex(raw, scopeOptions),
     });
   }
 
@@ -212,6 +212,34 @@ function buildOutcomeOptions(taskType: TaskType | null, ctx: ProjectContext): st
     default:
       return ["Task completed", "Issue resolved"];
   }
+}
+
+/**
+ * Pick the "Recommended" default index for the scope askcard.
+ *
+ * Bug fixed (live obs 2026-06-04, deepseek session): the scope gap hardcoded
+ * defaultIndex 0, but buildScopeOptions lists recency-ranked (NOT prompt-matched)
+ * bounded contexts first when nothing matched — so the card recommended an
+ * arbitrary subdir (e.g. "src/cli") for a repo-wide prompt while "Entire project"
+ * was demoted to last. Only recommend a specific bounded context when the prompt
+ * literally names it (same word-overlap test buildScopeOptions uses); otherwise
+ * recommend "Entire project".
+ */
+export function pickBestScopeIndex(raw: string, options: string[]): number {
+  const entireIdx = options.findIndex((o) => /entire project/i.test(o));
+  const fallback = entireIdx >= 0 ? entireIdx : Math.max(0, options.length - 1);
+  const words = raw
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+  for (let i = 0; i < options.length; i++) {
+    const opt = options[i] ?? "";
+    if (/entire project/i.test(opt)) continue;
+    const nameMatch = opt.match(/\(([^)]+)\)\s*$/);
+    const name = (nameMatch?.[1] ?? opt).toLowerCase();
+    if (words.some((w) => name.includes(w) || w.includes(name))) return i;
+  }
+  return fallback;
 }
 
 function buildScopeOptions(raw: string, ctx: ProjectContext): string[] {
