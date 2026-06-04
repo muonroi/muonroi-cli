@@ -91,7 +91,11 @@ describe("layer1Intent — classifier pass", () => {
 
   it("low-confidence → null taskType, applied=false", async () => {
     mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.3, reason: "low-confidence" });
-    const result = await layer1Intent(makeCtx("hello there"));
+    // Use a non-social low-signal phrase: a greeting like "hello there" now
+    // correctly resolves to chitchat via the Pass 2.6 social-pleasantry gate,
+    // so it would no longer be null. This asserts the low-confidence→null path
+    // for genuinely-ambiguous (non-pleasantry) input.
+    const result = await layer1Intent(makeCtx("lorem ipsum dolor sit"));
     expect(result.taskType).toBeNull();
     expect(result.layers[0].applied).toBe(false);
     expect(result.layers[0].delta).toBeNull();
