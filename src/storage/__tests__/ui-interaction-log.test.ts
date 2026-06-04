@@ -35,6 +35,37 @@ describe("logUIInteraction", () => {
     expect(logInteraction).not.toHaveBeenCalled();
   });
 
+  it("persists askcard_open option labels + recommended label for measurement", () => {
+    // Observability gap (live obs 2026-06-04): askcard_open only stored
+    // optionCount + defaultIndex, so a DB/forensics audit could see WHICH index
+    // was recommended but never WHAT it pointed at — making the scope-card
+    // recommend fix (#47) unverifiable from past sessions. Persist the labels.
+    logUIInteraction("sess-labels", {
+      subtype: "askcard_open",
+      data: {
+        questionId: "q-scope",
+        question: "Which part of the codebase should this target?",
+        phase: "clarify",
+        optionCount: 3,
+        defaultIndex: 2,
+        optionLabels: ["src/cli (cli)", "src/council (council)", "Entire project"],
+        recommendedLabel: "Entire project",
+      },
+    });
+    expect(logInteraction).toHaveBeenCalledWith("sess-labels", "ui_interaction", {
+      eventSubtype: "askcard_open",
+      data: {
+        questionId: "q-scope",
+        question: "Which part of the codebase should this target?",
+        phase: "clarify",
+        optionCount: 3,
+        defaultIndex: 2,
+        optionLabels: ["src/cli (cli)", "src/council (council)", "Entire project"],
+        recommendedLabel: "Entire project",
+      },
+    });
+  });
+
   it("writes ui_interaction with subtype and structured payload", () => {
     logUIInteraction("sess-1", {
       subtype: "askcard_answered",

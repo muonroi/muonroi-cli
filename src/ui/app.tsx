@@ -2250,6 +2250,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               phase: "tool-loop-cap",
               optionCount: question.options!.length,
               defaultIndex: question.defaultIndex ?? 0,
+              optionLabels: question.options!.map((o) => o.label),
+              recommendedLabel: question.options![question.defaultIndex ?? 0]?.label,
               ...(isPattern
                 ? {
                     stepNumber: info.stepNumber,
@@ -3080,6 +3082,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       phase: cq.phase ?? "clarify",
                       optionCount: cq.options?.length ?? 0,
                       defaultIndex: cq.defaultIndex,
+                      optionLabels: cq.options?.map((o) => o.label),
+                      recommendedLabel: cq.options?.[cq.defaultIndex ?? 0]?.label,
                     },
                   });
                 }
@@ -3807,6 +3811,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       phase: cq2.phase ?? "clarify",
                       optionCount: cq2.options?.length ?? 0,
                       defaultIndex: cq2.defaultIndex,
+                      optionLabels: cq2.options?.map((o: { label: string }) => o.label),
+                      recommendedLabel: cq2.options?.[cq2.defaultIndex ?? 0]?.label,
                     },
                   });
                 }
@@ -4034,6 +4040,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                       phase: cq3.phase ?? "clarify",
                       optionCount: cq3.options?.length ?? 0,
                       defaultIndex: cq3.defaultIndex,
+                      optionLabels: cq3.options?.map((o) => o.label),
+                      recommendedLabel: cq3.options?.[cq3.defaultIndex ?? 0]?.label,
                     },
                   });
                 }
