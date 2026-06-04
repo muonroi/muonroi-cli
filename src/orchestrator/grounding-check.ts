@@ -47,6 +47,15 @@ const COUNT_NOUN =
 // number (2+ digits, or thousands-separated) + up to 2 filler words + count noun.
 const COUNT_RE = new RegExp(`\\b(\\d{1,3}(?:,\\d{3})+|\\d{2,})\\b(?:\\s+(?:\\w+\\s+){0,2}?)(?:${COUNT_NOUN})\\b`, "gi");
 
+// count noun … : | = … number — the inverse shape ("total lines: 10026",
+// "modules = 240"). Requires an explicit ':' or '=' separator so it stays a
+// narrow "noun = value" assertion and never matches "line 42" prose. The span
+// before the separator excludes '.' so it can't bridge across sentences.
+const NOUN_SEP_NUM_RE = new RegExp(
+  `\\b(?:${COUNT_NOUN})\\b[^.\\n:=]{0,40}?[:=]\\s*(\\d{1,3}(?:,\\d{3})+|\\d{2,})\\b`,
+  "gi",
+);
+
 // filename.ext:line — basename only (the char class excludes "/").
 const FILELINE_RE = /\b([\w.-]+\.[a-z]{1,5}):(\d+)\b/gi;
 
@@ -76,17 +85,31 @@ export function findUnverifiedClaims(finalText: string, corpus: string): Unverif
     out.push(claim);
   };
 
-  // --- Count claims ---
+  // Consider one count match: hedge-skip, corpus-check, then push.
+  const considerCount = (raw: string, numberIdxInText: number, text: string) => {
+    if (out.length >= MAX_CLAIMS) return;
+    // Skip hedged numbers (the chars right before the digit say "estimate").
+    const before = finalText.slice(Math.max(0, numberIdxInText - 16), numberIdxInText);
+    if (HEDGE_RE.test(before)) return;
+    const norm = stripCommas(raw);
+    if (corpusNorm.includes(norm)) return; // value appears in a tool output → verified
+    push({ kind: "count", value: norm, text: text.trim() });
+  };
+
+  // --- Count claims: number → noun ("67 tests") ---
   for (const m of finalText.matchAll(COUNT_RE)) {
     if (out.length >= MAX_CLAIMS) break;
+    considerCount(m[1]!, m.index ?? 0, m[0]!);
+  }
+
+  // --- Count claims: noun → :|= → number ("total lines: 10026") ---
+  for (const m of finalText.matchAll(NOUN_SEP_NUM_RE)) {
+    if (out.length >= MAX_CLAIMS) break;
     const raw = m[1]!;
-    const idx = m.index ?? 0;
-    // Skip hedged numbers (the chars right before the digit say "estimate").
-    const before = finalText.slice(Math.max(0, idx - 16), idx);
-    if (HEDGE_RE.test(before)) continue;
-    const norm = stripCommas(raw);
-    if (corpusNorm.includes(norm)) continue; // value appears in a tool output → verified
-    push({ kind: "count", value: norm, text: m[0]!.trim() });
+    // Locate the number within the match so the hedge look-back checks the
+    // chars immediately before the digits, not before the noun.
+    const numberIdxInText = (m.index ?? 0) + m[0]!.lastIndexOf(raw);
+    considerCount(raw, numberIdxInText, m[0]!);
   }
 
   // --- file:line claims ---

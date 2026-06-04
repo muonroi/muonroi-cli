@@ -41,6 +41,33 @@ describe("findUnverifiedClaims — count claims", () => {
     // A bare number with no count noun is not a verifiable 'count claim'.
     expect(findUnverifiedClaims("The answer is 42 ultimately.", "")).toHaveLength(0);
   });
+
+  // Gap found in the live deepseek-vs-gemini comparison (2026-06-04): deepseek
+  // emitted "total lines of code across all .ts files in src/: 10026" — a
+  // fabricated count where the NOUN precedes the NUMBER (separated by a colon),
+  // which the number-then-noun pattern missed. Cover the noun→:/=→number shape.
+  it("flags a noun-before-number count claim (noun : number)", () => {
+    const claims = findUnverifiedClaims("Total lines of code across all .ts files in src/: 10026.", "");
+    expect(claims.some((c) => c.kind === "count" && c.value === "10026")).toBe(true);
+  });
+
+  it("flags a noun = number claim", () => {
+    const claims = findUnverifiedClaims("Estimated modules = 240 in the repo.", "");
+    expect(claims.some((c) => c.kind === "count" && c.value === "240")).toBe(true);
+  });
+
+  it("does NOT flag a noun:number when the number is in the corpus", () => {
+    expect(findUnverifiedClaims("Total commits: 1,273.", "$ git rev-list --count HEAD\n1273\n")).toHaveLength(0);
+  });
+
+  it("does NOT flag a hedged noun:number", () => {
+    expect(findUnverifiedClaims("Total lines: ~10026.", "")).toHaveLength(0);
+  });
+
+  it("does NOT treat 'line 42' (no separator) as a count claim", () => {
+    // file:line context — handled separately; must not become a count claim.
+    expect(findUnverifiedClaims("See line 42 for details.", "").filter((c) => c.kind === "count")).toHaveLength(0);
+  });
 });
 
 describe("findUnverifiedClaims — file:line claims", () => {
