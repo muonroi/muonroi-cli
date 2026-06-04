@@ -83,6 +83,32 @@ describe("detectClarityGaps()", () => {
     const gaps = detectClarityGaps("implement the search feature", "generate", 0.7, EMPTY_PROJECT);
     expect(gaps.find((g) => g.dimension === "scope")).toBeDefined();
   });
+
+  it("does NOT detect a scope gap for an image-analysis prompt (image is the scope)", () => {
+    // Live drive (PR#34 probe): "Take a screenshot of the homepage and analyze
+    // the diagram.png image to describe its layout" fired the codebase-scope
+    // askcard "Which part of the codebase should this target?" — nonsensical for
+    // an image-analysis task. The image (screenshot / diagram.png) IS the scope,
+    // symmetric to how operational (CI/build) prompts are scoped to the pipeline.
+    const gaps = detectClarityGaps(
+      "Take a screenshot of the homepage and analyze the diagram.png image to describe its layout",
+      "analyze",
+      0.7,
+      EMPTY_PROJECT,
+    );
+    expect(gaps.find((g) => g.dimension === "scope")).toBeUndefined();
+    // analyze autofills outcome, so with scope suppressed there are zero gaps →
+    // no interview, no acceptance card.
+    expect(gaps).toHaveLength(0);
+  });
+
+  it("STILL detects a scope gap for a code task that mentions an ambiguous non-image word", () => {
+    // Narrowness guard: image-scope suppression must not swallow real codebase
+    // tasks. "add a logo to the header" carries no concrete image signal (no
+    // file extension / screenshot / photo), so the scope askcard stays.
+    const gaps = detectClarityGaps("add a logo to the header", "generate", 0.7, EMPTY_PROJECT);
+    expect(gaps.find((g) => g.dimension === "scope")).toBeDefined();
+  });
 });
 
 describe("buildInterviewQuestion()", () => {

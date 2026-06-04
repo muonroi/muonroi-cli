@@ -1,5 +1,11 @@
 import type { CouncilQuestionData, CouncilQuestionOption } from "../types/index.js";
-import { canInferOutcome, countFileReferences, hasExplicitScope, hasOperationalScope } from "./clarity-gate.js";
+import {
+  canInferOutcome,
+  countFileReferences,
+  hasExplicitScope,
+  hasImageScope,
+  hasOperationalScope,
+} from "./clarity-gate.js";
 import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
 import type { TaskType } from "./types.js";
 
@@ -51,8 +57,19 @@ export function detectClarityGaps(
   // the same population the B2 outcome guard above protects. Scope then falls
   // back to project-root in resolveGapsNonInteractive. Classified code tasks
   // (debug/generate/refactor/…) still get the scope-narrowing askcard.
+  // Image-scope guard — an image-analysis task (e.g. "analyze diagram.png",
+  // "take a screenshot and describe it") is scoped to the IMAGE, not the
+  // codebase, so the "Which part of the codebase?" askcard is nonsensical for
+  // it. Symmetric to hasOperationalScope (pipeline-scoped). hasImageScope is
+  // deliberately narrow so it never swallows a real codebase task.
   const scopeAppliesToCodebase = !!taskType && taskType !== "general";
-  if (scopeAppliesToCodebase && countFileReferences(raw) === 0 && !hasExplicitScope(raw) && !hasOperationalScope(raw)) {
+  if (
+    scopeAppliesToCodebase &&
+    countFileReferences(raw) === 0 &&
+    !hasExplicitScope(raw) &&
+    !hasOperationalScope(raw) &&
+    !hasImageScope(raw)
+  ) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({
       dimension: "scope",
