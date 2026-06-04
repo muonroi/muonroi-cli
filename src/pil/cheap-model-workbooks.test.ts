@@ -49,6 +49,12 @@ describe("getCheapModelWorkbook", () => {
     expect(getCheapModelWorkbook("analyze")).toMatch(/do not read the whole codebase/i);
   });
 
+  it("analyze addendum steers code inspection over doc-skimming", () => {
+    // Live (gemini-flash Task A, 2026-06-04): a repo eval based mostly on
+    // AGENTS.md/CLAUDE.md docs, with little code inspection → shallow findings.
+    expect(getCheapModelWorkbook("analyze")).toMatch(/actual code|inspect the code|not just (the )?docs/i);
+  });
+
   it("falls back to convergence-only for an unlisted task type", () => {
     const general = getCheapModelWorkbook("general");
     expect(general).toContain(CHEAP_MODEL_CONVERGENCE);
