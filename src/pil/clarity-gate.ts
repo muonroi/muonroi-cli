@@ -127,7 +127,7 @@ const WHOLE_REPO_SCOPE_RE =
   // NOTE: leading anchors on Vietnamese-initial alternatives use (?:^|\s) not
   // \b — JS \b is ASCII-only and never matches before a non-ASCII letter like
   // "đ", so "\bđánh" would silently fail to match "đánh giá repo".
-  /\b(whole|entire|overall|all\s+of\s+the|across\s+the)\s+(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(toàn\s*bộ|toan\s*bo|cả|ca)\s+(repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b|\b(review|audit|evaluate|assess|analy[sz]e|overview\s+of)\s+(the\s+)?(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(đánh\s*giá|danh\s*gia|phân\s*tích|phan\s*tich|tổng\s*quan|tong\s*quan|kiểm\s*tra|kiem\s*tra)\s+(toàn|toan|repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b/i;
+  /\b(whole|entire|overall|all\s+of\s+the|across\s+the)\s+(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(toàn\s*bộ|toan\s*bo|cả|ca)\s+(repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b|\b(review|audit|evaluate|assess|analy[sz]e|summari[sz]e|overview\s+of|summary\s+of)\s+(?:\S+\s+){0,2}?(repo(?:sitory)?|code-?base|project)\b|(?:^|\s)(đánh\s*giá|danh\s*gia|phân\s*tích|phan\s*tich|tổng\s*quan|tong\s*quan|kiểm\s*tra|kiem\s*tra|tóm\s*tắt|tom\s*tat)\s+(?:\S+\s+){0,2}?(toàn|toan|repo|dự\s*án|du\s*an|m[ãa]\s*ngu[ồo]n|code-?base|project)\b/i;
 
 export function hasWholeRepoScope(raw: string): boolean {
   return WHOLE_REPO_SCOPE_RE.test(raw);
