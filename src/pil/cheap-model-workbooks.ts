@@ -55,7 +55,8 @@ const TASK_WORKBOOKS: Partial<Record<TaskType, string>> = {
     "Do not scaffold extras or restructure unrelated code.",
   refactor: "REFACTOR: change only what was named (rename/extract/move). Preserve behaviour; add nothing new.",
   analyze:
-    "ANALYZE: answer from what you have already read — do not read the whole codebase. Bullet findings, no narrative.",
+    "ANALYZE: answer from what you have already read — do not read the whole codebase. Bullet findings, no narrative. " +
+    "For a repo/code review, base findings on the ACTUAL code you inspect (file sizes, structure, key modules), not just AGENTS.md/CLAUDE.md docs.",
   documentation: "DOCS: document only what was asked, with a short example. No tangents.",
   plan: "PLAN: produce concise ordered steps with one line of rationale each. No essays.",
 };
