@@ -25,6 +25,7 @@ export type InteractionEventType =
   | "stream_retry"
   | "f6_synthesis"
   | "grounding_flag"
+  | "stall_rescue"
   | "stream_start";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace
