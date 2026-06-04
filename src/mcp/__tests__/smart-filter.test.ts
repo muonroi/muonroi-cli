@@ -9,6 +9,7 @@ const servers = [
   { id: "muonroi-harness" },
   { id: "context7" },
   { id: "fetch" },
+  { id: "tavily" },
   { id: "chrome-devtools" },
   { id: "playwright" },
   { id: "figma" },
@@ -35,6 +36,26 @@ describe("filterMcpServersByMessage", () => {
     const out = filterMcpServersByMessage(servers, "how do I use the zod library API?");
     expect(ids(out)).toContain("context7");
     expect(ids(out)).toContain("fetch");
+    // web-search server is also an external-lookup server → kept on a docs signal.
+    expect(ids(out)).toContain("tavily");
+  });
+
+  it("drops the web-search server on a pure code prompt (no external-info signal)", () => {
+    const out = filterMcpServersByMessage(servers, "fix the auth bug in src/auth/login.ts");
+    expect(ids(out)).not.toContain("tavily");
+  });
+
+  it("keeps the web-search server on web-search intent (low-collision terms)", () => {
+    for (const msg of [
+      "search the web for the release date",
+      "look up the latest news on this",
+      "what's the weather today",
+      "find this online",
+      "check the internet for outages",
+    ]) {
+      const out = filterMcpServersByMessage(servers, msg);
+      expect(ids(out), msg).toContain("tavily");
+    }
   });
 
   it("keeps both browser and docs servers when the message has a URL", () => {
