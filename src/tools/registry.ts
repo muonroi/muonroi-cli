@@ -16,6 +16,7 @@ import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-c
 import { editFile, readFile, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import { executeGrep } from "./grep.js";
+import { VISION_TOOL_NAMES } from "./vision-gate.js";
 
 interface ToolRegistryOpts {
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
@@ -23,6 +24,14 @@ interface ToolRegistryOpts {
   readDelegation?: (id: string) => Promise<ToolResult>;
   listDelegations?: () => Promise<ToolResult>;
   modelId?: string;
+  /**
+   * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
+   * list_vision_cache) are omitted even for vision-proxy models. Used by the
+   * orchestrator to drop them on pure-text turns with no image involvement
+   * (see src/tools/vision-gate.ts). Defaults to true (include them) so every
+   * other caller keeps its current behaviour. todo_write is never affected.
+   */
+  includeVisionTools?: boolean;
   /**
    * Phase 4R: session id used to key the bash canonical-repeat detector
    * state across multiple createBuiltinTools() rebuilds within the same
@@ -582,6 +591,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         return `Tracking ${counts.total} todo${counts.total !== 1 ? "s" : ""}: ${counts.completed} done · ${counts.inProgress} in progress · ${counts.pending} queued.`;
       },
     });
+  }
+
+  // Vision-tool gate: drop the 3 vision-proxy tools on turns with no plausible
+  // image involvement. Built then deleted (closures are cheap) to avoid
+  // re-indenting the tool definitions above. todo_write + core tools untouched.
+  if (opts?.includeVisionTools === false) {
+    for (const name of VISION_TOOL_NAMES) delete tools[name];
   }
 
   return tools;
