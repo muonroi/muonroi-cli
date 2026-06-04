@@ -26,8 +26,14 @@
 /** Browser/vision automation servers — only needed when the turn touches a page. */
 const SKIP_WHEN_NO_BROWSER = /playwright|chrome|browser|devtools|vision|figma|canva/i;
 
-/** External lookup servers (docs / web fetch) — only needed for external info. */
-const SKIP_WHEN_NO_DOCS = /context7|(^|[-_])fetch([-_]|$)|docs/i;
+/**
+ * External-lookup servers (docs / URL fetch / web search) — only needed when
+ * the turn reaches for information outside the codebase. Web-search servers
+ * (tavily/exa/brave/serper/perplexity/…) belong to the same category: a pure
+ * code-edit turn never needs them, and each carries 2-3 tool schemas.
+ */
+const SKIP_WHEN_NO_DOCS =
+  /context7|(^|[-_])fetch([-_]|$)|docs|tavily|exa|brave|serper|perplexity|web[-_]?search|websearch/i;
 
 /** Matches a browser/page-automation intent (kept identical to the legacy inline regex, plus a URL). */
 function hasBrowserSignal(message: string): boolean {
@@ -39,11 +45,17 @@ function hasBrowserSignal(message: string): boolean {
   );
 }
 
-/** Matches an external-information intent (docs lookup / web fetch). Broad on purpose. */
+/**
+ * Matches an external-information intent (docs lookup / URL fetch / web search).
+ * Broad on purpose — bias is keep-not-drop. Web-search intent adds a few
+ * low-collision terms (news/weather/online/internet/"look up") that rarely
+ * appear in a pure code-edit prompt; bare "search" is intentionally excluded
+ * because it collides with "search the codebase" / "add a search feature".
+ */
 function hasDocsSignal(message: string): boolean {
   return (
     /https?:\/\/\S+/i.test(message) ||
-    /\b(docs?|documentation|api|sdk|library|libraries|framework|package|npm|pip|cargo|crate|gem|maven|nuget|install|migrat\w*|changelog|release\s*notes?|reference|usage|fetch|download|http|web|google|search\s+(the\s+)?web)\b/i.test(
+    /\b(docs?|documentation|api|sdk|library|libraries|framework|package|npm|pip|cargo|crate|gem|maven|nuget|install|migrat\w*|changelog|release\s*notes?|reference|usage|fetch|download|http|web|google|search\s+(the\s+)?web|news|weather|headlines|look\s*up|online|internet)\b/i.test(
       message,
     )
   );
