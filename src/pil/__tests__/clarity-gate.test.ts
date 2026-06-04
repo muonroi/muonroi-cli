@@ -19,6 +19,16 @@ describe("hasWholeRepoScope()", () => {
     expect(hasWholeRepoScope("audit the entire project")).toBe(true);
     expect(hasWholeRepoScope("phân tích toàn bộ dự án")).toBe(true);
     expect(hasWholeRepoScope("give me an overview of the repository")).toBe(true);
+    // summarize/overview verbs (gap found in the deepseek session probe: "tóm tắt
+    // repo này" still fired the scope askcard because the verb list lacked it).
+    expect(hasWholeRepoScope("tóm tắt nhanh repo này")).toBe(true);
+    expect(hasWholeRepoScope("summarize the repository")).toBe(true);
+    expect(hasWholeRepoScope("give me a summary of the project")).toBe(true);
+  });
+
+  it("does NOT fire on summarize/review of a narrow target", () => {
+    expect(hasWholeRepoScope("summarize the login function")).toBe(false);
+    expect(hasWholeRepoScope("tóm tắt hàm xử lý auth")).toBe(false);
   });
 
   it("does NOT fire on narrow tasks that merely mention a repo/project", () => {
