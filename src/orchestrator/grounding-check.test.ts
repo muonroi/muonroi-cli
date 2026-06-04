@@ -1,0 +1,84 @@
+import { describe, expect, it } from "vitest";
+import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
+
+describe("findUnverifiedClaims — count claims", () => {
+  it("flags an exact count not present in the tool-output corpus", () => {
+    // The decisive live case: deepseek claimed 67 tests while no command output
+    // contained 67 (actual 401). corpus has no '67'.
+    const claims = findUnverifiedClaims("There are 67 tests in the repository.", "ran find; output: 401\n");
+    expect(claims.some((c) => c.kind === "count" && c.value === "67")).toBe(true);
+  });
+
+  it("does NOT flag a count that appears verbatim in the corpus", () => {
+    const claims = findUnverifiedClaims("There are 401 tests.", "$ find src -name '*.test.ts' | wc -l\n401\n");
+    expect(claims).toHaveLength(0);
+  });
+
+  it("matches counts with thousands separators against an unseparated corpus", () => {
+    // Model prints '1,273 commits'; git output is '1273'. Should be VERIFIED.
+    const claims = findUnverifiedClaims("The repo has 1,273 commits.", "$ git rev-list --count HEAD\n1273\n");
+    expect(claims).toHaveLength(0);
+  });
+
+  it("ignores small numbers (< 10) — too common, low risk", () => {
+    expect(findUnverifiedClaims("Fixed 3 files.", "")).toHaveLength(0);
+  });
+
+  it("ignores percentages, multipliers, versions, money", () => {
+    const text = "97% cache hit, 16x faster, v0.4.0 shipped, $50 saved across 99 files.";
+    // Only "99 files" is a real count claim; the rest must be skipped. corpus
+    // lacks 99 -> 99 flagged, others NOT.
+    const claims = findUnverifiedClaims(text, "");
+    expect(claims.map((c) => c.value)).toEqual(["99"]);
+  });
+
+  it("ignores hedged/approximate numbers (presented as estimates, not facts)", () => {
+    const text = "~130,220 lines, about 500 files, roughly 40 modules.";
+    expect(findUnverifiedClaims(text, "")).toHaveLength(0);
+  });
+
+  it("only counts a number when followed by a recognised count noun", () => {
+    // A bare number with no count noun is not a verifiable 'count claim'.
+    expect(findUnverifiedClaims("The answer is 42 ultimately.", "")).toHaveLength(0);
+  });
+});
+
+describe("findUnverifiedClaims — file:line claims", () => {
+  it("flags a file:line whose file never appears in the corpus", () => {
+    const claims = findUnverifiedClaims("The bug is at app.tsx:836.", "read src/index.ts lines 1-40\n");
+    expect(claims.some((c) => c.kind === "fileline" && c.value === "app.tsx:836")).toBe(true);
+  });
+
+  it("does NOT flag a file:line whose file was read/grepped this turn", () => {
+    const claims = findUnverifiedClaims("See app.tsx:836.", "$ read_file app.tsx\n...contents of app.tsx...\n");
+    expect(claims).toHaveLength(0);
+  });
+});
+
+describe("findUnverifiedClaims — bounds & dedup", () => {
+  it("caps the number of returned claims", () => {
+    const text = "100 files, 200 files, 300 files, 400 files, 500 files, 600 files, 700 files.";
+    expect(findUnverifiedClaims(text, "").length).toBeLessThanOrEqual(5);
+  });
+
+  it("returns empty for empty text", () => {
+    expect(findUnverifiedClaims("", "anything")).toHaveLength(0);
+  });
+});
+
+describe("buildGroundingFootnote", () => {
+  it("returns empty string when there are no claims", () => {
+    expect(buildGroundingFootnote([])).toBe("");
+  });
+
+  it("lists the unverified claims with an advisory (non-accusatory) tone", () => {
+    const note = buildGroundingFootnote([
+      { kind: "count", value: "67", text: "67 tests" },
+      { kind: "fileline", value: "app.tsx:836", text: "app.tsx:836" },
+    ]);
+    expect(note).toMatch(/unverified/i);
+    expect(note).toMatch(/67 tests/);
+    expect(note).toMatch(/app\.tsx:836/);
+    expect(note).toMatch(/may be derived|confirm/i);
+  });
+});

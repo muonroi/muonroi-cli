@@ -218,6 +218,19 @@ export type LiveEvent =
       errorMessage: string;
       nextDelayMs: number;
     }
+  // Summary-phase grounding check — emitted at turn finalize when the model's
+  // final synthesis asserts counts / file:line refs that do NOT appear in this
+  // turn's tool outputs (possible hallucination). Soft-flag only; the turn is
+  // never blocked. See src/orchestrator/grounding-check.ts.
+  | {
+      t: "event";
+      kind: "grounding-flag";
+      /** The unverified claim texts, e.g. ["67 tests", "app.tsx:836"]. */
+      claims: string[];
+      /** Total number of unverified claims in this turn. */
+      count: number;
+      ts: number;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;
