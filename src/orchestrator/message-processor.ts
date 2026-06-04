@@ -142,6 +142,7 @@ import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
+import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { applyModelConstraints, buildSystemPromptParts } from "./prompts";
@@ -2391,6 +2392,66 @@ export class MessageProcessor {
                 }
               } catch {
                 /* telemetry is best-effort */
+              }
+
+              // Summary-phase grounding check (Agent Operating Contract, runtime
+              // half). Soft-flag counts / file:line refs in the final synthesis
+              // that don't appear in this turn's tool outputs — possible
+              // hallucination. Never blocks: emits a grounding-flag event + a
+              // warn toast + an inline advisory footnote. Only runs when the
+              // turn actually produced tool output (a corpus to ground against)
+              // and is not chitchat. See grounding-check.ts.
+              if (
+                process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" &&
+                !isChitchat &&
+                assistantText.trim().length > 0
+              ) {
+                try {
+                  const _gParts: string[] = [];
+                  let _gHadTool = false;
+                  for (const _gm of scrubbed as Array<{ role?: string; content?: unknown }>) {
+                    if (!_gm || _gm.role === "assistant") continue;
+                    if (_gm.role === "tool") _gHadTool = true;
+                    const _gc = _gm.content;
+                    _gParts.push(typeof _gc === "string" ? _gc : JSON.stringify(_gc));
+                  }
+                  if (_gHadTool) {
+                    const _claims = findUnverifiedClaims(assistantText, _gParts.join("\n"));
+                    if (_claims.length > 0) {
+                      const _footnote = buildGroundingFootnote(_claims);
+                      assistantText += _footnote;
+                      yield { type: "content", content: _footnote };
+                      const _gar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                        | { emitEvent: (e: unknown) => void }
+                        | undefined;
+                      const _claimTexts = _claims.map((c) => c.text);
+                      _gar?.emitEvent({
+                        t: "event",
+                        kind: "grounding-flag",
+                        claims: _claimTexts,
+                        count: _claims.length,
+                        ts: Date.now(),
+                      });
+                      _gar?.emitEvent({
+                        t: "event",
+                        kind: "toast",
+                        level: "warn",
+                        text: `grounding: ${_claims.length} unverified claim(s) — ${_claimTexts.join(", ")}`,
+                      });
+                      if (deps.session) {
+                        try {
+                          logInteraction(deps.session.id, "grounding_flag", {
+                            data: { claims: _claimTexts, count: _claims.length },
+                          });
+                        } catch {
+                          /* telemetry is best-effort */
+                        }
+                      }
+                    }
+                  }
+                } catch {
+                  /* grounding check is best-effort — never break finalize */
+                }
               }
 
               const _finalMessages = sanitizeModelMessages(scrubbed) as ModelMessage[];
