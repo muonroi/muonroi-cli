@@ -99,6 +99,23 @@ export async function loadOAuthRegistry(): Promise<Partial<Record<ProviderId, OA
     /* gemini-oauth unavailable */
   }
 
+  try {
+    const { grokOAuth, loadGrokTokensWithRefresh } = await import("./grok-oauth.js");
+    r.xai = {
+      provider: grokOAuth,
+      displayName: "xAI (Grok)",
+      // xAI subscription (SuperGrok / X Premium+) OAuth tokens hit the SAME
+      // api.x.ai/v1 host as API-key auth (unlike OpenAI, whose subscription
+      // tokens require a separate ChatGPT backend). baseURL is therefore left
+      // undefined so the api-key endpoint from endpoints.ts flows through; the
+      // strategy injects the Bearer header on the OpenAI-compatible path.
+      useResponsesApi: true,
+      loadTokensWithRefresh: () => loadGrokTokensWithRefresh(),
+    };
+  } catch {
+    /* grok-oauth unavailable */
+  }
+
   _registry = r;
   return r;
 }

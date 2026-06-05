@@ -220,6 +220,7 @@ export async function runKeysList(): Promise<void> {
     console.log("Run 'muonroi-cli keys set <provider>' or 'muonroi-cli keys import-bw' to add some.");
     console.log("Run 'muonroi-cli keys login openai' to log in with your OpenAI subscription.");
     console.log("Run 'muonroi-cli keys login google' to log in with your Google account.");
+    console.log("Run 'muonroi-cli keys login xai' to log in with your SuperGrok / X Premium+ subscription.");
     return;
   }
 

@@ -27,7 +27,11 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
   const provider = createOpenAICompatible({
     name: config.id,
     baseURL,
-    apiKey: config.apiKey,
+    // OAuth (subscription) path: oauthHeaders carries the Bearer token; it
+    // overrides the apiKey-derived Authorization header. apiKey falls back to a
+    // placeholder because the SDK always emits an Authorization header from it.
+    apiKey: config.apiKey ?? (config.oauthHeaders ? "oauth" : undefined),
+    ...(config.oauthHeaders ? { headers: config.oauthHeaders } : {}),
   });
 
   return {
