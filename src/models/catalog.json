@@ -310,6 +310,40 @@
       "description": "Google Gemini 3.1 Pro Preview via Generative Language API. Strongest agentic/reasoning Gemini, multimodal, 1M context. Preview model — id/pricing may change; pricing APPROXIMATE (verify at ai.google.dev/pricing).",
       "aliases": ["gemini-pro-preview"],
       "supports_vision": true
+    },
+    {
+      "id": "grok-4.3",
+      "name": "Grok 4.3 (xAI)",
+      "provider": "xai",
+      "tier": "premium",
+      "context_window": 1048576,
+      "max_output_tokens": 32768,
+      "input_price_per_million": 1.25,
+      "output_price_per_million": 2.5,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "Flagship model mạnh nhất hiện tại của xAI. Agentic tool-calling xuất sắc, hallucination thấp, hỗ trợ reasoning + non-reasoning mode. Context 1M tokens. Model mặc định khuyến nghị cho Grok CLI.",
+      "aliases": ["grok-4.3", "grok-latest", "grok-4"],
+      "supports_vision": true
+    },
+    {
+      "id": "grok-build-0.1",
+      "name": "Grok Build 0.1 (xAI)",
+      "provider": "xai",
+      "tier": "balanced",
+      "context_window": 262144,
+      "max_output_tokens": 65536,
+      "input_price_per_million": 1.0,
+      "output_price_per_million": 2.0,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Model coding chuyên biệt, nhanh, tối ưu cho agentic coding workflows. Chính là model powering Grok Build CLI. Rất phù hợp cho lập trình, debug, multi-step tasks.",
+      "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
+      "supports_vision": true
     }
   ]
 }

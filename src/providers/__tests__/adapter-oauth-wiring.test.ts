@@ -75,6 +75,24 @@ describe("createProviderFactory — headers option wires into OpenAI client", ()
     const model = result.factory("gpt-4o");
     expect(model).toBeDefined();
   });
+
+  it("creates xai (Grok) factory with custom headers (subscription OAuth bearer)", () => {
+    // xAI OAuth tokens hit the same OpenAI-compatible api.x.ai/v1 host as a key,
+    // so the strategy just injects the Bearer header and builds without error.
+    const result = createProviderFactory("xai", {
+      headers: { Authorization: `Bearer ${MOCK_TOKENS.accessToken}` },
+    });
+    expect(result.id).toBe("xai");
+    const model = result.factory("grok-4.3");
+    expect(model).toBeDefined();
+  });
+
+  it("creates xai factory with API key (no headers) — regression", () => {
+    const result = createProviderFactory("xai", { apiKey: ["xai", "fixture", "key"].join("-") });
+    expect(result.id).toBe("xai");
+    const model = result.factory("grok-4.3");
+    expect(model).toBeDefined();
+  });
 });
 
 // ---------------------------------------------------------------------------
