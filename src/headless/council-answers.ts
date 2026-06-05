@@ -59,6 +59,25 @@ export function createCouncilAutoAnswerer(opts: {
   };
 }
 
+/**
+ * Headless council policy. Headless (`-p` / `--verify`) has NO TUI to render an
+ * askcard, so a council question must never block — otherwise the responder
+ * promise never resolves and the process hangs with zero output (observed
+ * 2026-06-05: a code/analyze prompt that triggers auto-council hung forever
+ * without `--yes`). This always returns an active answerer that auto-proceeds
+ * with the recommended (`defaultIndex`) option and approves preflights. A
+ * `--council-answers` file customizes per-phase answers; `--yes` is implied in
+ * headless mode (no human to confirm), so it is no longer required to avoid the
+ * hang. Each auto-answer is logged to stderr by `handleCouncilChunk` for
+ * cost/decision transparency.
+ */
+export function createHeadlessCouncilAutoAnswerer(opts: { file?: CouncilAnswersFile }): CouncilAutoAnswerer {
+  // enabled is forced true: in headless there is no interactive answerer, so
+  // auto-proceeding with recommended defaults is the only non-hanging behavior.
+  // createCouncilAutoAnswerer never returns null when enabled is true.
+  return createCouncilAutoAnswerer({ enabled: true, file: opts.file }) as CouncilAutoAnswerer;
+}
+
 function defaultAnswerFor(q: CouncilQuestionData): string {
   if (q.options && q.options.length > 0) {
     const idx =
