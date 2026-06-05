@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CouncilQuestionData } from "../../types/index.js";
-import { createCouncilAutoAnswerer, handleCouncilChunk, parseCouncilAnswersFile } from "../council-answers.js";
+import {
+  createCouncilAutoAnswerer,
+  createHeadlessCouncilAutoAnswerer,
+  handleCouncilChunk,
+  parseCouncilAnswersFile,
+} from "../council-answers.js";
 
 function q(over: Partial<CouncilQuestionData>): CouncilQuestionData {
   return {
@@ -123,6 +128,35 @@ describe("createCouncilAutoAnswerer", () => {
     a!.answerQuestion(q({ phase: "clarify" }));
     // The caller's queue must remain intact.
     expect(file.clarify).toEqual(["a", "b"]);
+  });
+});
+
+describe("createHeadlessCouncilAutoAnswerer (headless never hangs)", () => {
+  it("ALWAYS returns an active answerer even with no file and no --yes", () => {
+    // Regression: previously headless gated the answerer on `--yes`, so a prompt
+    // that triggered council without --yes left the responder promise unresolved
+    // and the process hung forever (0 output). Headless has no TUI to answer, so
+    // the answerer must always be present and auto-proceed with the recommended
+    // (defaultIndex) option.
+    const a = createHeadlessCouncilAutoAnswerer({});
+    expect(a).not.toBeNull();
+    const answer = a.answerQuestion(
+      q({
+        phase: "post-debate",
+        defaultIndex: 1,
+        options: [
+          { label: "A", value: "a", kind: "choice" },
+          { label: "B", value: "b", kind: "choice" },
+        ],
+      }),
+    );
+    expect(answer).toBe("b"); // recommended (defaultIndex) option
+    expect(a.approvePreflight()).toBe(true);
+  });
+
+  it("still honors a scripted --council-answers file", () => {
+    const a = createHeadlessCouncilAutoAnswerer({ file: { clarify: ["mongo"] } });
+    expect(a.answerQuestion(q({ phase: "clarify" }))).toBe("mongo");
   });
 });
 
