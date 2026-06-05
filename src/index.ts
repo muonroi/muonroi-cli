@@ -24,7 +24,7 @@ import { setRenderSink } from "./ee/render.js";
 import {
   type CouncilAnswersFile,
   type CouncilAutoAnswerer,
-  createCouncilAutoAnswerer,
+  createHeadlessCouncilAutoAnswerer,
   handleCouncilChunk,
   parseCouncilAnswersFile,
 } from "./headless/council-answers";
@@ -1171,8 +1171,11 @@ program
 
     const councilAnswersFile =
       typeof options.councilAnswers === "string" ? loadCouncilAnswersOrExit(options.councilAnswers) : undefined;
-    const councilAutoAnswer = createCouncilAutoAnswerer({
-      enabled: options.yes === true,
+    // Headless (`-p` / `--verify`) has no TUI to render council askcards, so the
+    // answerer is ALWAYS active (auto-proceeds with the recommended option). This
+    // is why a council-triggering prompt no longer hangs without `--yes`. A
+    // `--council-answers` file still customizes per-phase answers.
+    const councilAutoAnswer = createHeadlessCouncilAutoAnswerer({
       file: councilAnswersFile,
     });
 
