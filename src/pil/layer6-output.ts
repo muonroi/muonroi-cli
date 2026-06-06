@@ -179,11 +179,39 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   return result;
 }
 
+/**
+ * Detect an explicit IMPLEMENTATION / edit-the-files intent. When the user asks
+ * to implement/edit/refactor (the deliverable is file changes, not a structured
+ * report), a terminal `respond_<task>` tool is inappropriate: the model can call
+ * it mid-task to "state a plan/answer" and the turn then winds down before the
+ * edits are finished. Live (grok session 19fa8895c41c): an "Improve … implement
+ * these fixes" prompt was classified `debug`, so `respond_debug` was offered; the
+ * model called it after reading the files, made a few edits, then stopped — the
+ * HTML was never wired. Dropping the tool just falls through to the markdown
+ * OUTPUT RULES (graceful — exactly what code-heavy tasks already do), so a false
+ * positive on an analysis turn only forgoes structured JSON, never breaks output.
+ *
+ * High-signal verbs only (implement/edit/wire/rewrite/rename/scaffold/refactor,
+ * "make the change", "apply the fix/patch", VI equivalents). Bare "fix"/"replace"
+ * are excluded — too common in analysis ("explain the fix") — so pure
+ * analyze/plan/debug-investigation turns keep their structured output.
+ */
+const IMPLEMENTATION_INTENT_RE =
+  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten)\b/i;
+
+export function isImplementationIntent(raw: string): boolean {
+  return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);
+}
+
 export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId): ToolSet {
   if (!ctx.taskType) return {};
   // PIL-04 Tier 1.1: gate JSON-structured output to list-shaped tasks where it
   // wins on tokens. Code-heavy tasks fall through to markdown OUTPUT RULES.
   if (!RESPONSE_TOOL_TASK_TYPES.has(ctx.taskType)) return {};
+  // Implementation/edit turns: the deliverable is file changes, not a structured
+  // report. A terminal respond_<task> tool lets the model "answer" (state a plan)
+  // and end the turn before the edits complete — drop it for clear edit intent.
+  if (isImplementationIntent(ctx.raw)) return {};
   // Provider-aware gating: a provider may report it can't reliably emit
   // valid JSON tool input for this task type (e.g. DeepSeek leaks special
   // tokens into `general` responses). Drop the tool to avoid retry storms.
