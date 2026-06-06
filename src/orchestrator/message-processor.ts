@@ -2668,13 +2668,18 @@ export class MessageProcessor {
             }
           }
 
-          // Detect a tool call emitted as plain TEXT (wrong dialect) when the
-          // model produced NO real tool call this turn — the action never ran,
-          // so the turn would otherwise end silently with broken/half-done work
-          // (live: storyflow_ui A/B, deepseek session 905d564dbde4 emitted
-          // `<read_file><path>…` as text after a destructive edit and stopped).
-          const _textToolCall =
-            activeToolCalls.length === 0 ? detectTextEmittedToolCall(assistantText) : { detected: false, tool: null };
+          // Detect a tool call emitted as plain TEXT (wrong dialect) in the final
+          // assistant answer — the action never ran, so the turn would otherwise
+          // end silently with broken/half-done work (live: deepseek session
+          // 905d564dbde4 emitted `<read_file>` as text after a destructive edit).
+          // Detect regardless of how many real tool calls already succeeded: the
+          // common failure is the model doing a few real tools, then emitting the
+          // NEXT call as text and stopping (live deepseek-native, full-fix CLI: 2
+          // real read_file calls, then `<read_file><path>` as text → silent stop).
+          // An earlier `activeToolCalls.length === 0` guard suppressed exactly
+          // that case. Detector precision (structural invocation shape, not a bare
+          // mention) guards against false-firing on a normal final answer.
+          const _textToolCall = detectTextEmittedToolCall(assistantText);
 
           // Interaction log: agent response complete
           try {
