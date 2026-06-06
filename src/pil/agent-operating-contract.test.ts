@@ -34,6 +34,15 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/only what (was|is) asked|do not volunteer|don't volunteer/i);
   });
 
+  it("REPORTING forbids claiming verification or edits that were not actually done", () => {
+    // Live (grok, 2026-06-06): the model reported it added listener-cleanup code
+    // and "verified" a build — but the cleanup was never written and the build
+    // step was skipped (it hit a phantom sandbox path). REPORTING must forbid
+    // claiming a build/test ran or that code was applied unless it actually was.
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/never claim a (build|test|command|verification)/i);
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/describe edits|did not actually (do|apply|run)/i);
+  });
+
   it("has clear start/end markers so the model treats it as a prelude", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/AGENT OPERATING CONTRACT/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/END CONTRACT/i);
