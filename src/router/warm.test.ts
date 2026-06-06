@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { type StubHandle, startStubEEServer } from "../__test-stubs__/ee-server.js";
 import { createEEClient } from "../ee/client.js";
 import { setDefaultEEClient } from "../ee/intercept.js";
+import { getModelByTier, loadCatalog } from "../models/registry.js";
 import { callWarmRoute } from "./warm.js";
 
 // ─── Bridge cascade tests ────────────────────────────────────────────────────
@@ -82,6 +83,63 @@ describe("callWarmRoute bridge cascade", () => {
     expect(result!.reason).toMatch(/^warm:/);
     expect(result!.reason).not.toMatch(/^warm:bridge:/);
     expect(result!.taskHash).toBe("http-hash");
+  });
+
+  it("derives the EE runtime from the session provider (not hardcoded 'claude')", async () => {
+    mockBridgeRouteModel.mockResolvedValue({
+      tier: "balanced",
+      model: "gpt-5.3-codex",
+      confidence: 0.9,
+      source: "brain",
+      reason: "x",
+      taskHash: null,
+    });
+
+    await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "openai" });
+    expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("codex");
+
+    await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "google" });
+    expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("gemini");
+
+    await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "anthropic" });
+    expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("claude");
+
+    // Providers without an EE runtime ladder pass "" so EE returns tier only.
+    await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "deepseek" });
+    expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("");
+  });
+
+  it("emits PROVIDER_INHERIT on the bridge path so constrainToProvider governs", async () => {
+    mockBridgeRouteModel.mockResolvedValue({
+      tier: "balanced",
+      model: "gpt-5.3-codex",
+      confidence: 0.9,
+      source: "brain",
+      reason: "x",
+      taskHash: null,
+    });
+    const result = await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "openai" });
+    expect(result!.provider).toBe(""); // PROVIDER_INHERIT
+  });
+
+  it("falls back to the catalog model when EE returns a null model (no EE runtime)", async () => {
+    await loadCatalog();
+    const fastDeepseek = getModelByTier("fast", "deepseek");
+    // Skip gracefully if the test catalog has no deepseek-fast entry.
+    if (!fastDeepseek) return;
+    mockBridgeRouteModel.mockResolvedValue({
+      // EE returns the tier but a null model for a runtime it cannot resolve.
+      tier: "fast",
+      model: null as unknown as string,
+      confidence: 0.8,
+      source: "keyword",
+      reason: "fast complexity",
+      taskHash: null,
+    });
+    const result = await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "deepseek" });
+    expect(result).not.toBeNull();
+    expect(result!.model).toBe(fastDeepseek.id);
+    expect(result!.provider).toBe(""); // still PROVIDER_INHERIT
   });
 
   it("maps bridge tier 'fast' to 'hot' and 'premium' to 'cold'", async () => {
