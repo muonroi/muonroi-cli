@@ -151,6 +151,7 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { repairToolCallHook } from "./repair-tool-call.js";
 import {
   buildRepetitionReminder,
@@ -1024,6 +1025,12 @@ export class MessageProcessor {
     // for the current turn. Reset to 0 on each new user turn (we're in processMessage).
     let streamRetryCount = 0;
     const MAX_STREAM_RETRIES = 2; // 3 total attempts = 1 first try + 2 retries
+    // Re-steer budget for a tool-call emitted as plain text (wrong dialect). One
+    // corrective retry: if the model still emits text instead of invoking the
+    // tool, we surface the warning and stop rather than loop. Loop-persistent so
+    // a model that degrades every step can't burn unbounded re-steers.
+    let textToolReSteerCount = 0;
+    const MAX_TEXT_TOOL_RESTEER = 1;
     // Silent-hang guard: set true when the stall watchdog aborts a stuck stream.
     // Reset before each streamText attempt; read in the stream catch to surface a
     // clear toast and SKIP the transient-retry (a stalled provider just stalls
@@ -2661,6 +2668,14 @@ export class MessageProcessor {
             }
           }
 
+          // Detect a tool call emitted as plain TEXT (wrong dialect) when the
+          // model produced NO real tool call this turn — the action never ran,
+          // so the turn would otherwise end silently with broken/half-done work
+          // (live: storyflow_ui A/B, deepseek session 905d564dbde4 emitted
+          // `<read_file><path>…` as text after a destructive edit and stopped).
+          const _textToolCall =
+            activeToolCalls.length === 0 ? detectTextEmittedToolCall(assistantText) : { detected: false, tool: null };
+
           // Interaction log: agent response complete
           try {
             if (deps.session) {
@@ -2683,6 +2698,8 @@ export class MessageProcessor {
                   compacted: deps.getCompactedThisTurn(),
                   dsmlLeak: _dsmlMatches,
                   bashCodeBlock: _codeBlockBash,
+                  textToolXmlLeak: _textToolCall.detected,
+                  textToolXmlTool: _textToolCall.tool,
                 },
               });
             }
@@ -2705,6 +2722,81 @@ export class MessageProcessor {
                 `Re-run with \`--max-tool-rounds ${deps.maxToolRounds * 2}\` to continue, ` +
                 "or accept the partial result above.]\n",
             };
+          }
+
+          // Tool-call-as-text leak: the model wrote a tool invocation as plain
+          // text (wrong dialect) and made NO real tool call, so the action never
+          // ran. Auto-recover ONCE: append a corrective message and re-run the
+          // turn so the model can invoke the tool properly. The just-finished
+          // (text-only) turn is already persisted above — the model sees its own
+          // mistake plus the correction. Mirrors the proven phase-switch re-entry
+          // (it also pushes to deps.messages then `continue`s); bounded by
+          // MAX_TEXT_TOOL_RESTEER so a persistently-degrading model can't loop.
+          if (_textToolCall.detected && streamOk && textToolReSteerCount < MAX_TEXT_TOOL_RESTEER) {
+            textToolReSteerCount++;
+            // Recover the model's INTENT from the leaked markup (DeepSeek-native
+            // DSML carries the tool + args) so the corrective restates the exact
+            // call — far more effective than a generic "use the tool" nudge.
+            const _parsedCalls = parseDsmlToolCalls(assistantText);
+            const _intent =
+              _parsedCalls.length > 0
+                ? ` You appear to have intended: ${_parsedCalls
+                    .map((c) => `${c.name}(${Object.entries(c.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})`)
+                    .join("; ")}. Make those exact call(s) via the tool interface now.`
+                : "";
+            deps.messages.push({
+              role: "user",
+              content:
+                `Your previous reply wrote a \`${_textToolCall.tool}\` tool call as XML/text. That is NOT how tools are invoked here — ` +
+                "writing tool calls as text does nothing, so the action did not run. " +
+                "Use the actual tool-calling interface (function/tool calls) to perform the action now. " +
+                "Do NOT output XML tags like <read_file>, <write_to_file>, <execute_command>, or <tool_call> (or DSML markup) as text." +
+                _intent,
+            });
+            if (deps.session) {
+              try {
+                logInteraction(deps.session.id, "text_tool_resteer", {
+                  model: turnModelId,
+                  data: { tool: _textToolCall.tool, attempt: textToolReSteerCount },
+                });
+              } catch {
+                /* telemetry best-effort */
+              }
+            }
+            {
+              const _gar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _gar?.emitEvent({
+                t: "event",
+                kind: "toast",
+                level: "info",
+                text: `model wrote a ${_textToolCall.tool} tool call as text — re-steering to use the tool interface`,
+              });
+            }
+            await closeMcp?.().catch(() => {});
+            continue;
+          }
+
+          // Re-steer budget exhausted (or no clean finish): surface the leak so
+          // the turn is not SILENTLY wasted. The "answer" above is unexecuted XML.
+          if (_textToolCall.detected) {
+            yield {
+              type: "content",
+              content:
+                `\n\n[⚠ The model wrote a \`${_textToolCall.tool}\` tool call as TEXT instead of invoking the tool, ` +
+                "so that action did NOT run and this turn made no real progress. " +
+                "Re-run the request (optionally with a more capable model) — the tool interface was not used.]\n",
+            };
+            const _gar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _gar?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "warn",
+              text: `model emitted a ${_textToolCall.tool} tool call as text — action not executed`,
+            });
           }
 
           const stopInput: StopHookInput = {
