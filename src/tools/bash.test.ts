@@ -291,8 +291,34 @@ describe("BashTool sandbox state", () => {
     const on = new BashTool("/repo", { sandboxMode: "shuru" });
 
     expect(off.getToolDescription()).not.toContain("Shuru");
-    expect(on.getToolDescription()).toContain("Shuru sandbox");
-    expect(on.getToolDescription()).toContain("do not persist back to the host");
+
+    // Shuru only actually engages on macOS/arm64. Elsewhere the tool degrades
+    // to host execution, so the description must NOT advertise the phantom
+    // /workspace mount that a non-mac platform cannot provide.
+    const shuruSupported = process.platform === "darwin" && process.arch === "arm64";
+    if (shuruSupported) {
+      expect(on.getToolDescription()).toContain("Shuru sandbox");
+      expect(on.getToolDescription()).toContain("do not persist back to the host");
+    } else {
+      expect(on.getToolDescription()).not.toContain("Shuru");
+      expect(on.getToolDescription()).not.toContain("/workspace");
+    }
+  });
+
+  it("degrades shuru to host execution when the platform cannot run Shuru", async () => {
+    const shuruSupported = process.platform === "darwin" && process.arch === "arm64";
+    if (shuruSupported) return; // on a real Shuru host this path doesn't apply
+
+    const root = makeTempDir("muonroi-bash-shuru-degrade-");
+    const bash = new BashTool(root, { sandboxMode: "shuru" });
+
+    // getSandboxMode() still reports the CONFIGURED mode (intent preserved)...
+    expect(bash.getSandboxMode()).toBe("shuru");
+    // ...but a real command runs on the host instead of failing with the
+    // "requires macOS on Apple Silicon" error that previously bricked the shell.
+    const result = await bash.execute("echo sandbox-degrade-ok", 15_000);
+    expect(result.output).toContain("sandbox-degrade-ok");
+    expect(result.output).not.toContain("Apple Silicon");
   });
 
   it("stores and returns sandbox settings", () => {
@@ -396,6 +422,10 @@ describe("BashTool sandbox state", () => {
   });
 
   it("includes network status in tool description when allowNet is set", () => {
+    // Network status only appears in the Shuru description, which engages on
+    // macOS/arm64. Off-platform the tool degrades to host execution.
+    if (process.platform !== "darwin" || process.arch !== "arm64") return;
+
     const netOn = new BashTool("/repo", {
       sandboxMode: "shuru",
       sandboxSettings: { allowNet: true },
