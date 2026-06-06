@@ -17,6 +17,17 @@ export function getCatalogUrl(): string {
   return override && override.length > 0 ? override : DEFAULT_CATALOG_URL;
 }
 
+/**
+ * Build request headers for the catalog fetch. Attaches the shared API key
+ * (anti-spam) from MUONROI_CATALOG_API_KEY when present. When absent, the
+ * request goes out keyless — fine for a self-hosted catalog with no key set,
+ * and a 401 from a key-protected catalog simply triggers the static fallback.
+ */
+export function getCatalogHeaders(): Record<string, string> {
+  const key = process.env.MUONROI_CATALOG_API_KEY?.trim();
+  return key && key.length > 0 ? { "X-API-Key": key } : {};
+}
+
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface CatalogModel {
@@ -85,7 +96,7 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(getCatalogUrl(), { signal: controller.signal });
+    const res = await fetch(getCatalogUrl(), { signal: controller.signal, headers: getCatalogHeaders() });
     clearTimeout(timeout);
     if (res.ok) {
       const data = (await res.json()) as CatalogResponse;
