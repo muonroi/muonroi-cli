@@ -208,6 +208,32 @@ import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
+/**
+ * Strip terminal bracketed-paste guards (ESC[200~ / ESC[201~), all control
+ * bytes, and DEL from pasted/typed text. Keeps printable characters including
+ * spaces (a master password may legitimately contain them).
+ */
+function stripControlBytes(raw: string): string {
+  return (
+    raw
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal bracketed-paste guards (ESC[200~ / ESC[201~)
+      .replace(/?\[20[01]~/g, "")
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: strip control bytes + DEL from typed/pasted secrets
+      .replace(/[ -]/g, "")
+  );
+}
+
+/**
+ * Sanitize text destined for a single-line secret field (provider API key).
+ * stripControlBytes + removes every whitespace character — an API key never
+ * contains whitespace, and terminal paste often arrives wrapped in guards or
+ * with a trailing newline. Shared by the keydown and paste handlers so both
+ * input routes behave identically.
+ */
+function sanitizeSecretInput(raw: string): string {
+  return stripControlBytes(raw).replace(/\s+/g, "");
+}
+
 const DEFAULT_MODEL = getCurrentModel();
 
 // ---------------------------------------------------------------------------
@@ -724,6 +750,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     provider: ProviderId;
     value: string;
     error: string | null;
+    reveal?: boolean;
   } | null>(null);
   const submitProviderKey = useCallback(async () => {
     if (!apiKeyPrompt) return;
@@ -5680,16 +5707,19 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               return;
             }
             if (key.name === "backspace") {
-              setBwSync({ ...bwSync, value: bwSync.value.slice(0, -1), error: null });
+              // Functional updater — burst-safe (see API-key prompt above).
+              setBwSync((bw) =>
+                bw && bw.phase === "password" ? { ...bw, value: bw.value.slice(0, -1), error: null } : bw,
+              );
               return;
             }
             if (key.sequence && !key.ctrl && !key.meta) {
-              const cleaned = key.sequence
-                .replace(/\[200~|\[201~/g, "")
-                // biome-ignore lint/suspicious/noControlCharactersInRegex: strip terminal control bytes
-                .replace(/[ -]/g, "");
+              // Keep spaces: a master password may legitimately contain them.
+              const cleaned = stripControlBytes(key.sequence);
               if (cleaned.length === 0) return;
-              setBwSync({ ...bwSync, value: bwSync.value + cleaned, error: null });
+              setBwSync((bw) =>
+                bw && bw.phase === "password" ? { ...bw, value: bw.value + cleaned, error: null } : bw,
+              );
               return;
             }
             return;
@@ -5733,17 +5763,24 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             return;
           }
           if (key.name === "backspace") {
-            setApiKeyPrompt({ ...apiKeyPrompt, value: apiKeyPrompt.value.slice(0, -1), error: null });
+            // Functional updater: a burst of keystrokes (paste, or the harness
+            // delivering type() synchronously) batches before React re-renders,
+            // so reading apiKeyPrompt.value from the closure would be stale.
+            setApiKeyPrompt((s) => (s ? { ...s, value: s.value.slice(0, -1), error: null } : s));
+            return;
+          }
+          // Ctrl+R toggles plaintext reveal so the user can verify a pasted key.
+          if (key.name === "r" && key.ctrl && !key.meta) {
+            setApiKeyPrompt((s) => (s ? { ...s, reveal: !s.reveal } : s));
             return;
           }
           if (key.sequence && !key.ctrl && !key.meta) {
-            // Accept multi-char sequences too — terminal paste arrives as one
-            // chunk (often 40-100 chars for an API key). Strip control bytes
-            // and the bracketed-paste guards just in case.
-            // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional ESC + control-byte stripping for terminal-pasted API keys
-            const cleaned = key.sequence.replace(/\[200~|\[201~/g, "").replace(/[ -]/g, "");
+            // Terminal paste sometimes arrives as one chunk (40-100 chars for
+            // an API key) through the keydown path rather than the bracketed-
+            // paste handler. sanitizeSecretInput strips guards/control/whitespace.
+            const cleaned = sanitizeSecretInput(key.sequence);
             if (cleaned.length === 0) return;
-            setApiKeyPrompt({ ...apiKeyPrompt, value: apiKeyPrompt.value + cleaned, error: null });
+            setApiKeyPrompt((s) => (s ? { ...s, value: s.value + cleaned, error: null } : s));
             return;
           }
           return;
@@ -6199,6 +6236,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       providerChipIndex,
       configuredProviders,
       toggleProviderEnabled,
+      // Model-picker credential sub-modals — MUST stay in deps. handleKey reads
+      // these directly; omitting them froze the closure on a stale `null`, which
+      // is why typing/pasting into the per-provider key prompt did nothing.
+      apiKeyPrompt,
+      bwSync,
+      submitProviderKey,
+      submitBwPassword,
+      commitBwImport,
       openApiKeyModal,
       openCatalogMcp,
       openMcpEditor,
@@ -6248,6 +6293,8 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       initNewForm,
       toggleModelDisabled,
       pointToExistingForm,
+      setApiKeyPrompt,
+      setBwSync,
       setCouncilCardStateSync,
       setPendingCouncilQuestionSync,
       setShowSlashMenuSync,
@@ -6264,6 +6311,26 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
 
   const handlePaste = useCallback(
     (event: PasteEvent) => {
+      // A credential prompt steals paste so the secret lands in the right
+      // field instead of the composer. API keys are single-line, so without
+      // this they hit the `lineCount < 2` early-return below and vanish.
+      if (apiKeyPrompt) {
+        event.preventDefault();
+        const pasted = sanitizeSecretInput(decodePasteBytes(event.bytes));
+        if (pasted) setApiKeyPrompt((s) => (s ? { ...s, value: s.value + pasted, error: null } : s));
+        return;
+      }
+      if (bwSync && bwSync.phase === "password") {
+        event.preventDefault();
+        // Master passwords may contain spaces — keep them; only drop guards,
+        // control bytes and line breaks (which a trailing paste newline adds).
+        const pasted = stripControlBytes(decodePasteBytes(event.bytes)).replace(/[\r\n]+/g, "");
+        if (pasted) {
+          setBwSync((s) => (s && s.phase === "password" ? { ...s, value: s.value + pasted, error: null } : s));
+        }
+        return;
+      }
+
       if (!hasApiKeyRef.current) {
         event.preventDefault();
         openApiKeyModal();
@@ -6289,7 +6356,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       replacePasteBlocks([...pasteBlocksRef.current, block]);
       inputRef.current?.insertText(getPasteBlockToken(block));
     },
-    [openApiKeyModal, replacePasteBlocks],
+    [apiKeyPrompt, bwSync, openApiKeyModal, replacePasteBlocks],
   );
 
   const handleSubmit = useCallback(() => {

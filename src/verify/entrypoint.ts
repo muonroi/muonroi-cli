@@ -1,5 +1,5 @@
 import type { TaskRequest, VerifyRecipe } from "../types/index";
-import type { SandboxSettings } from "../utils/settings";
+import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpoint";
 import { loadVerifyEnvironment } from "./environment";
 import { buildBrowserGuidance, buildEvidenceGuidance, buildReadinessGuidance } from "./evidence";
@@ -18,7 +18,7 @@ export const VERIFY_SUBAGENT_ID = "verify";
 export const VERIFY_TASK_DESCRIPTION = "Run local verification";
 
 export interface VerifyRuntimeConfig {
-  sandboxMode: "shuru";
+  sandboxMode: SandboxMode;
   sandboxSettings: SandboxSettings;
   taskRequest: TaskRequest;
   profile: VerifyProjectProfile;
@@ -65,6 +65,7 @@ export function buildVerifyTaskPrompt(
   cwd: string,
   settings?: SandboxSettings,
   recipeOverride?: VerifyRecipe | null,
+  sandboxMode: SandboxMode = "shuru",
 ): string {
   const manifest = recipeOverride ? null : loadVerifyEnvironment(cwd, settings);
   const effectiveSettings = manifest?.sandboxSettings ?? settings;
@@ -76,31 +77,54 @@ export function buildVerifyTaskPrompt(
       : "enabled"
     : "disabled";
 
+  const envDesc =
+    sandboxMode === "shuru"
+      ? [
+          "Environment:",
+          "- Sandbox mode should be Shuru with workspace mounted at /workspace.",
+          `- Network is ${network}.`,
+          checkpoint
+            ? `- Start from the configured Shuru checkpoint: ${checkpoint}.`
+            : "- No Shuru checkpoint is configured; use the current sandbox settings as-is.",
+          "- Shuru runs are ephemeral in this version. Shell-side workspace edits do not persist back to the host.",
+        ]
+      : [
+          "Environment:",
+          "- Direct host execution (no sandbox).",
+          "- Workspace is the current directory.",
+          "- Network is unrestricted (host networking).",
+          "- Changes to files are persistent.",
+        ];
+
+  const setupDesc =
+    sandboxMode === "shuru"
+      ? [
+          "Phase 1 — Setup:",
+          "- Probe the sandbox for runtimes (`command -v node`, `command -v npm`, etc). Only install what is missing.",
+          "- Ephemeral installs are allowed. Chain install + build in the same sandbox command if no checkpoint provides deps.",
+        ]
+      : [
+          "Phase 1 — Setup:",
+          "- Probe the host for runtimes. If missing, attempt to install them or report as blockers.",
+        ];
+
   return [
     "Run a local verification pass for the current workspace.",
     "",
     "Goals:",
     "- Prove the current changes work as well as possible in phase 1.",
     "- First derive and sanity-check a runnable verification recipe from the repository.",
-    "- Then execute that recipe inside the active Shuru sandbox and report the result.",
+    `- Then execute that recipe ${sandboxMode === "shuru" ? "inside the active Shuru sandbox" : "on the host"} and report the result.`,
     "",
     "Detected project context and inferred recipe:",
     ...(manifest ? [`- Verify environment manifest: ${manifest.path}.`] : []),
     ...buildProjectContextLines(profile),
     "",
-    "Environment:",
-    "- Sandbox mode should be Shuru with workspace mounted at /workspace.",
-    `- Network is ${network}.`,
-    checkpoint
-      ? `- Start from the configured Shuru checkpoint: ${checkpoint}.`
-      : "- No Shuru checkpoint is configured; use the current sandbox settings as-is.",
-    "- Shuru runs are ephemeral in this version. Shell-side workspace edits do not persist back to the host.",
+    ...envDesc,
     "",
     "MANDATORY workflow (do ALL steps in order, do NOT stop after build/lint):",
     "",
-    "Phase 1 — Setup:",
-    "- Probe the sandbox for runtimes (`command -v node`, `command -v npm`, etc). Only install what is missing.",
-    "- Ephemeral installs are allowed. Chain install + build in the same sandbox command if no checkpoint provides deps.",
+    ...setupDesc,
     "",
     "Phase 2 — Build and test:",
     "- Run installCommands, buildCommands, and testCommands from the recipe.",
@@ -112,7 +136,7 @@ export function buildVerifyTaskPrompt(
     "",
     "Phase 4 — Browser QA testing (REQUIRED, do not skip):",
     "- You are a QA tester. Open the app in the browser and test it like a human would.",
-    "- agent-browser commands run on the HOST, not the sandbox. They WILL work. Do not skip them.",
+    `- agent-browser commands run on the HOST${sandboxMode === "shuru" ? ", not the sandbox" : ""}. They WILL work. Do not skip them.`,
     "- Record a video of the entire browser session.",
     "- Navigate the app: click links, buttons, menus. Verify pages load correctly.",
     "- Check for JavaScript console errors.",
@@ -144,21 +168,45 @@ export function createVerifyTaskRequest(
   cwd: string,
   settings?: SandboxSettings,
   recipeOverride?: VerifyRecipe | null,
+  sandboxMode: SandboxMode = "shuru",
 ): TaskRequest {
   return {
     agent: VERIFY_SUBAGENT_ID,
     description: VERIFY_TASK_DESCRIPTION,
-    prompt: buildVerifyTaskPrompt(cwd, settings, recipeOverride),
+    prompt: buildVerifyTaskPrompt(cwd, settings, recipeOverride, sandboxMode),
   };
 }
 
-export function buildVerifyDetectPrompt(cwd: string, settings?: SandboxSettings): string {
+export function buildVerifyDetectPrompt(
+  cwd: string,
+  settings?: SandboxSettings,
+  sandboxMode: SandboxMode = "shuru",
+): string {
   const manifest = loadVerifyEnvironment(cwd, settings);
   const fallbackProfile = inferVerifyProjectProfile(
     cwd,
     manifest?.sandboxSettings ?? settings,
     manifest?.recipe ?? null,
   );
+  const envDesc = sandboxMode === "shuru" ? "fresh Debian Linux environment" : "local host environment";
+
+  const setupDesc =
+    sandboxMode === "shuru"
+      ? [
+          "IMPORTANT for shellInitCommands and bootstrapCommands:",
+          "- The sandbox is a fresh Debian Linux VM with almost nothing pre-installed.",
+          '- shellInitCommands run before every bash command. Use them for PATH exports (e.g. export PATH="$HOME/.bun/bin:$PATH").',
+          "- bootstrapCommands run once during checkpoint creation to install runtimes and tools.",
+          "- You MUST include bootstrap commands to install any runtime the project needs (e.g. bun, node, npm, python3, go, cargo, java).",
+          "- Example for a Bun + Next.js project: bootstrapCommands should install both bun AND node/npm, since Next.js calls npm internally.",
+          '- Example: ["apt-get update && apt-get install -y curl unzip ca-certificates && curl -fsSL https://bun.sh/install | bash", "apt-get install -y nodejs npm"]',
+        ]
+      : [
+          "IMPORTANT for shellInitCommands and bootstrapCommands:",
+          "- Execution is on the local host.",
+          "- bootstrapCommands should ensure required runtimes are present if they can be installed automatically, or assume they are pre-installed.",
+        ];
+
   return [
     "Inspect this repository and produce a structured verification recipe.",
     "",
@@ -167,17 +215,11 @@ export function buildVerifyDetectPrompt(cwd: string, settings?: SandboxSettings)
     "- If environment.json or .muonroi-cli/environment.json exists, treat it as the highest-priority source of truth and only fill in missing details.",
     "- Infer how the project should be installed, built, tested, and started.",
     "- Infer whether verification should use HTTP/browser smoke checks, CLI checks, or no runtime smoke step.",
-    "- Prefer concrete commands that are likely to work in a fresh Debian Linux environment.",
+    `- Prefer concrete commands that are likely to work in a ${envDesc}.`,
     "- Design the recipe so verification probes for runtimes/tools first and only installs missing dependencies or toolchains when necessary.",
     "- Use the fallback hints below only as clues, not as the final answer.",
     "",
-    "IMPORTANT for shellInitCommands and bootstrapCommands:",
-    "- The sandbox is a fresh Debian Linux VM with almost nothing pre-installed.",
-    '- shellInitCommands run before every bash command. Use them for PATH exports (e.g. export PATH="$HOME/.bun/bin:$PATH").',
-    "- bootstrapCommands run once during checkpoint creation to install runtimes and tools.",
-    "- You MUST include bootstrap commands to install any runtime the project needs (e.g. bun, node, npm, python3, go, cargo, java).",
-    "- Example for a Bun + Next.js project: bootstrapCommands should install both bun AND node/npm, since Next.js calls npm internally.",
-    '- Example: ["apt-get update && apt-get install -y curl unzip ca-certificates && curl -fsSL https://bun.sh/install | bash", "apt-get install -y nodejs npm"]',
+    ...setupDesc,
     "",
     "Fallback hints from static detection:",
     ...(manifest ? [`- Detected verify environment manifest: ${manifest.path}.`] : []),
@@ -298,6 +340,7 @@ export function createVerifyRuntimeConfig(
   cwd: string,
   baseSettings: SandboxSettings = {},
   recipeOverride?: VerifyRecipe | null,
+  sandboxMode: SandboxMode = "shuru",
 ): VerifyRuntimeConfig {
   const manifest = recipeOverride ? null : loadVerifyEnvironment(cwd, baseSettings);
   const profile = inferVerifyProjectProfile(
@@ -315,7 +358,7 @@ export function createVerifyRuntimeConfig(
   };
   sandboxSettings.shellInit = dedupe([...(sandboxSettings.shellInit ?? []), ...profile.recipe.shellInitCommands]);
   return {
-    sandboxMode: "shuru",
+    sandboxMode,
     sandboxSettings,
     taskRequest: createVerifyTaskRequest(cwd, sandboxSettings, profile.recipe),
     profile: { ...profile, sandboxSettings },
@@ -327,8 +370,9 @@ export async function prepareVerifySandbox(
   baseSettings: SandboxSettings = {},
   recipeOverride?: VerifyRecipe | null,
   onProgress?: (detail: string) => void,
+  sandboxMode: SandboxMode = "shuru",
 ): Promise<PreparedVerifySandbox> {
-  const runtime = createVerifyRuntimeConfig(cwd, baseSettings, recipeOverride);
+  const runtime = createVerifyRuntimeConfig(cwd, baseSettings, recipeOverride, sandboxMode);
   onProgress?.("Preparing verify checkpoint");
   const checkpoint = await ensureVerifyCheckpoint(cwd, runtime.profile, runtime.sandboxSettings, onProgress);
   if (checkpoint.checkpointName) {
@@ -352,7 +396,7 @@ export async function prepareVerifySandbox(
   };
 }
 
-export function buildVerifyPrompt(cwd: string): string {
+export function buildVerifyPrompt(cwd: string, sandboxMode: SandboxMode = "shuru"): string {
   const profile = inferVerifyProjectProfile(cwd);
   const recipe = ensureBootstrapCommands(cwd, profile.recipe);
   const draftJson = JSON.stringify(
@@ -378,6 +422,19 @@ export function buildVerifyPrompt(cwd: string): string {
     2,
   );
 
+  const sandboxNote =
+    sandboxMode === "shuru"
+      ? "- IMPORTANT: The Shuru sandbox is Debian 13 trixie on aarch64 (ARM64) with NOTHING pre-installed. bootstrapCommands MUST install every runtime from scratch (e.g. nodejs, npm, python3, go, cargo)."
+      : "- IMPORTANT: Execution is on the local host. Ensure bootstrapCommands are appropriate or assume runtimes are present.";
+
+  const step2Desc =
+    sandboxMode === "shuru"
+      ? [
+          "  - Runs inside a Shuru sandbox (Debian 13 trixie, aarch64/ARM64) with full network access.",
+          "  - The sandbox has NOTHING pre-installed unless bootstrapCommands in the manifest already ran during checkpoint creation.",
+        ]
+      : ["  - Runs on the local host.", "  - Network is unrestricted."];
+
   return [
     "Verify this project locally. Follow these steps in order using the `task` tool:",
     "",
@@ -391,15 +448,14 @@ export function buildVerifyPrompt(cwd: string): string {
     "```",
     "",
     "- Tell the sub-agent: Review this draft recipe against package.json and key config files. Adjust if needed, then write .muonroi-cli/environment.json. If the draft looks correct, write it as-is. Do not over-research.",
-    "- IMPORTANT: The Shuru sandbox is Debian 13 trixie on aarch64 (ARM64) with NOTHING pre-installed. bootstrapCommands MUST install every runtime from scratch (e.g. nodejs, npm, python3, go, cargo).",
+    sandboxNote,
     "",
     "Step 2: After the manifest is written, run the `verify` sub-agent.",
     "- agent: verify",
     '- description: "Run local verification"',
     "- Tell it to use `.muonroi-cli/environment.json` as the source of truth.",
     "- Include these execution instructions:",
-    "  - Runs inside a Shuru sandbox (Debian 13 trixie, aarch64/ARM64) with full network access.",
-    "  - The sandbox has NOTHING pre-installed unless bootstrapCommands in the manifest already ran during checkpoint creation.",
+    ...step2Desc,
     "  - Ephemeral installs allowed.",
     "  - Probe for runtimes first (`command -v node`, etc), only install what is missing.",
     "  - agent-browser runs on the HOST, not the sandbox. It WILL work.",

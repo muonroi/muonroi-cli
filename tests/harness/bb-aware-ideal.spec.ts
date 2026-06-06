@@ -11,17 +11,18 @@
  * DO NOT call production EE — all network goes to the local mock server.
  */
 
-import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { createServer } from "node:http";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  BB_INFER_SCORE_FLOOR,
   _resetBBRetrievalState,
+  BB_INFER_SCORE_FLOOR,
   bbContextMarker,
   fetchBBContext,
   inferBBFromPrompt,
   renderBBContextBlock,
 } from "../../src/ee/bb-retrieval.js";
+import * as settingsModule from "../../src/utils/settings.js";
 
 // ---------------------------------------------------------------------------
 // Mock EE server
@@ -76,7 +77,9 @@ beforeAll(async () => {
     mockServer = createServer((req, res) => {
       if (req.method === "POST" && req.url === "/api/search") {
         let body = "";
-        req.on("data", (chunk) => { body += chunk; });
+        req.on("data", (chunk) => {
+          body += chunk;
+        });
         req.on("end", () => {
           try {
             const parsed = JSON.parse(body) as { collections?: string[] };
@@ -101,6 +104,16 @@ beforeAll(async () => {
       resolve();
     });
   });
+});
+
+beforeEach(() => {
+  vi.spyOn(settingsModule, "loadUserSettings").mockReturnValue({
+    eeBBContext: true,
+  } as any);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 afterAll(() => {
@@ -155,7 +168,9 @@ describe("fetchBBContext feature flag", () => {
     _resetBBRetrievalState();
     // Mock loadUserSettings to return eeBBContext: false
     const settingsModule = await import("../../src/utils/settings.js");
-    const spy = vi.spyOn(settingsModule, "loadUserSettings").mockReturnValue({ eeBBContext: false } as ReturnType<typeof settingsModule.loadUserSettings>);
+    const spy = vi
+      .spyOn(settingsModule, "loadUserSettings")
+      .mockReturnValue({ eeBBContext: false } as ReturnType<typeof settingsModule.loadUserSettings>);
     try {
       const ctx = await fetchBBContext("anything", { eeBaseUrl: mockBaseUrl, eeAuthToken: "tok" });
       expect(ctx.recipes).toHaveLength(0);
@@ -249,7 +264,9 @@ describe("fetchBBContext graceful degrade", () => {
   it("returns empty result when EE base URL is not configured", async () => {
     _resetBBRetrievalState();
     const settingsModule = await import("../../src/utils/settings.js");
-    const spy = vi.spyOn(settingsModule, "loadUserSettings").mockReturnValue({} as ReturnType<typeof settingsModule.loadUserSettings>);
+    const spy = vi
+      .spyOn(settingsModule, "loadUserSettings")
+      .mockReturnValue({} as ReturnType<typeof settingsModule.loadUserSettings>);
     const authModule = await import("../../src/ee/auth.js");
     // Ensure no cached server base URL leaks through
     const authSpy = vi.spyOn(authModule, "getCachedServerBaseUrl").mockReturnValue(null);
@@ -299,7 +316,9 @@ describe("inferBBFromPrompt", () => {
   it("returns false when feature flag eeBBContext is false", async () => {
     _resetBBRetrievalState();
     const settingsModule = await import("../../src/utils/settings.js");
-    const spy = vi.spyOn(settingsModule, "loadUserSettings").mockReturnValue({ eeBBContext: false } as ReturnType<typeof settingsModule.loadUserSettings>);
+    const spy = vi
+      .spyOn(settingsModule, "loadUserSettings")
+      .mockReturnValue({ eeBBContext: false } as ReturnType<typeof settingsModule.loadUserSettings>);
     try {
       const inferred = await inferBBFromPrompt("build a CQRS service with Muonroi", {
         eeBaseUrl: mockBaseUrl,
