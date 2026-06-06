@@ -6,6 +6,7 @@ import {
   hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
+  hasSelfContainedComputationScope,
   hasWholeRepoScope,
   shouldAutoPass,
 } from "../clarity-gate.js";
@@ -47,6 +48,66 @@ describe("hasWholeRepoScope()", () => {
     // Control: same shape but NOT repo-wide still fails on the scope gap.
     const narrow = "review the system — goal: a report of strengths and weaknesses";
     expect(shouldAutoPass({ confidence: 0.9, taskType: "analyze", complexity: "low" }, narrow)).toBe(false);
+  });
+});
+
+describe("hasSelfContainedComputationScope()", () => {
+  it("detects an inline-data computation prompt (the operand is in the prompt, not the codebase)", () => {
+    // Live drive (deepseek-vs-grok A/B, session probe 2026-06-05): "Compute
+    // f([3,1,2]) where f sorts the list ascending then returns the sum of the
+    // first two elements." classified taskType=analyze (regex:read matched the
+    // bare word "list") fired the codebase-scope askcard "Which part of the
+    // codebase should this target?" — nonsensical for a self-contained math
+    // problem whose input data is supplied inline. Symmetric to image/web/
+    // operational scope guards.
+    expect(
+      hasSelfContainedComputationScope(
+        "Compute f([3,1,2]) where f sorts the list ascending then returns the sum of the first two elements.",
+      ),
+    ).toBe(true);
+    expect(
+      hasSelfContainedComputationScope("Given the array [5, 2, 8, 1, 9], what is the second largest element?"),
+    ).toBe(true);
+    expect(hasSelfContainedComputationScope("What is the median of [10, 4, 7]?")).toBe(true);
+    expect(hasSelfContainedComputationScope('Reverse the list ["a", "b", "c"] and return it.')).toBe(true);
+  });
+
+  it("does NOT fire without an inline data literal", () => {
+    // The framing verb alone is not enough — a codebase task can say "compute"
+    // ("compute the hash in the auth module"). Only an inline operand qualifies.
+    expect(hasSelfContainedComputationScope("compute the cache key in the auth module")).toBe(false);
+    expect(hasSelfContainedComputationScope("sort the users table by created_at")).toBe(false);
+    expect(hasSelfContainedComputationScope("what is the second largest element of the array")).toBe(false);
+  });
+
+  it("does NOT fire on a real codebase task that merely contains an array literal (no compute framing)", () => {
+    // Narrowness guard: the literal alone is not enough. A feature/debug task
+    // that embeds a literal but is scoped to the codebase must KEEP its scope
+    // askcard. Requires BOTH an inline literal AND computation framing.
+    expect(hasSelfContainedComputationScope("add the items [1, 2, 3] to the cart in the checkout flow")).toBe(false);
+    expect(hasSelfContainedComputationScope("fix the bug where parseRange([1, 5]) returns the wrong values")).toBe(
+      false,
+    );
+    expect(hasSelfContainedComputationScope("set the default retry delays to [100, 200, 400] in the config")).toBe(
+      false,
+    );
+  });
+
+  it("does NOT fire on bracketed file-name lists (those are codebase-scoped)", () => {
+    // [a.ts, b.ts] is a list of files, not data — must stay codebase-scoped.
+    expect(hasSelfContainedComputationScope("compare the exports of [auth.ts, session.ts]")).toBe(false);
+  });
+
+  it("self-contained computation no longer blocks auto-pass (was: scope-gap → false)", () => {
+    // With an inferable outcome ("return the result"), the ONLY remaining blocker
+    // for an inline-data computation prompt was the scope gap.
+    // hasSelfContainedComputationScope clears it.
+    const prompt = "Compute the sum of the first two sorted elements of [3, 1, 2] and return the result.";
+    expect(shouldAutoPass({ confidence: 0.9, taskType: "analyze", complexity: "low" }, prompt)).toBe(true);
+    // Control: same outcome-inferable shape but NO inline literal still fails on
+    // the scope gap (a real codebase computation must still be scoped).
+    const codeTask = "Compute the largest element of the users array and return it.";
+    expect(shouldAutoPass({ confidence: 0.9, taskType: "analyze", complexity: "low" }, codeTask)).toBe(false);
   });
 });
 

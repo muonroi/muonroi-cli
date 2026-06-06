@@ -120,6 +120,41 @@ describe("detectClarityGaps()", () => {
     expect(gaps.find((g) => g.dimension === "scope")).toBeUndefined();
     expect(gaps).toHaveLength(0);
   });
+
+  it("does NOT detect a scope gap for a self-contained computation prompt (data is inline)", () => {
+    // Live drive (deepseek-vs-grok A/B, session 17fc23f0): "Compute f([3,1,2])
+    // where f sorts the list ascending then returns the sum of the first two
+    // elements." classified taskType=analyze (regex:read matched the bare word
+    // "list", conf 0.80 → skipped the brain) fired BOTH the pil-interview scope
+    // askcard ("Which part of the codebase should this target?" → auto "Entire
+    // project") AND the pil-acceptance card. The operand [3,1,2] is supplied
+    // inline — the task has no codebase dimension to scope. Symmetric to the
+    // image / web / operational scope guards.
+    const gaps = detectClarityGaps(
+      "Compute f([3,1,2]) where f sorts the list ascending then returns the sum of the first two elements.",
+      "analyze",
+      0.8,
+      EMPTY_PROJECT,
+    );
+    expect(gaps.find((g) => g.dimension === "scope")).toBeUndefined();
+    // analyze autofills outcome, so with scope suppressed there are zero gaps →
+    // no interview, no acceptance card.
+    expect(gaps).toHaveLength(0);
+  });
+
+  it("STILL detects a scope gap for a code task that embeds a literal but no compute framing", () => {
+    // Narrowness guard: the inline-literal suppression must not swallow real
+    // codebase tasks. "set the default retry delays to [100, 200, 400] in the
+    // config" carries a literal but is scoped to the codebase (no compute verb),
+    // so the scope askcard stays.
+    const gaps = detectClarityGaps(
+      "set the default retry delays to [100, 200, 400] in the config",
+      "generate",
+      0.7,
+      EMPTY_PROJECT,
+    );
+    expect(gaps.find((g) => g.dimension === "scope")).toBeDefined();
+  });
 });
 
 describe("buildInterviewQuestion()", () => {
