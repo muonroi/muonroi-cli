@@ -41,6 +41,7 @@ export class BashTool {
   private sandboxSettings: SandboxSettings;
   private shellSettings: ShellSettings;
   private resolvedShell: ResolvedShell;
+  private sandboxUnsupportedWarned = false;
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
     this.cwd = initialCwd;
@@ -474,6 +475,30 @@ export class BashTool {
     this.sandboxMode = mode;
   }
 
+  /**
+   * The sandbox mode that actually takes effect. When "shuru" is configured but
+   * the current platform cannot run Shuru (non-macOS/arm64), the sandbox is
+   * inert: every wrapped command would fail with the macOS-only error, and the
+   * tool description would still advertise a `/workspace` mount that does not
+   * exist — so the model `cd`s into a phantom dir and abandons verification.
+   * Degrade to "off" (host execution) with a one-time warning so bash keeps
+   * working and the description reflects reality. A stale checked-in project
+   * `sandboxMode: "shuru"` therefore no longer bricks the shell off-platform.
+   */
+  private effectiveSandboxMode(): SandboxMode {
+    if (this.sandboxMode === "shuru" && getSandboxUnsupportedReason() !== null) {
+      if (!this.sandboxUnsupportedWarned) {
+        this.sandboxUnsupportedWarned = true;
+        console.error(
+          `[bash] sandboxMode "shuru" is configured but ${getSandboxUnsupportedReason()} ` +
+            'Falling back to host execution for this platform. Set sandboxMode to "off" to silence this.',
+        );
+      }
+      return "off";
+    }
+    return this.sandboxMode;
+  }
+
   getSandboxSettings(): SandboxSettings {
     return this.sandboxSettings;
   }
@@ -483,7 +508,7 @@ export class BashTool {
   }
 
   getToolDescription(): string {
-    if (this.sandboxMode === "shuru") {
+    if (this.effectiveSandboxMode() === "shuru") {
       const s = this.sandboxSettings;
       const netStatus = s.allowNet
         ? s.allowedHosts?.length
@@ -525,7 +550,7 @@ export class BashTool {
   }
 
   private prepareCommand(command: string): { ok: true; command: string } | { ok: false; error: string } {
-    if (this.sandboxMode !== "shuru") {
+    if (this.effectiveSandboxMode() !== "shuru") {
       return { ok: true, command };
     }
     if (shouldRunOnHostInSandboxMode(command, this.sandboxSettings)) {
@@ -543,7 +568,7 @@ export class BashTool {
   }
 
   private formatSandboxRuntimeError(output: string, fallbackMessage: string): string | null {
-    if (this.sandboxMode !== "shuru") {
+    if (this.effectiveSandboxMode() !== "shuru") {
       return null;
     }
     if (output.includes("shuru: command not found") || output.includes("sh: shuru: not found")) {
