@@ -33,6 +33,20 @@ describe("detectTextEmittedToolCall", () => {
     expect(detectTextEmittedToolCall("<function_calls>...").detected).toBe(true);
   });
 
+  it("detects the DeepSeek-native DSML leak (｜｜DSML｜｜invoke …) and extracts the tool name", () => {
+    // Live: storyflow_ui explore-A/B, deepseek T3 (session 799f0508e830) emitted
+    // this as text and made no real tool call → empty, silent turn. The generic
+    // <invoke matcher misses it because `<` is followed by the U+FF5C sentinel.
+    const text = `<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="read_file">
+<｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.html</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>`;
+    const r = detectTextEmittedToolCall(text);
+    expect(r.detected).toBe(true);
+    expect(r.tool).toBe("read_file");
+  });
+
   it("does NOT fire on a bare inline mention of a tool name (no invocation shape)", () => {
     // Precision: a prose mention must not be flagged — it would wrongly mark a
     // legitimate final answer as a broken tool call.

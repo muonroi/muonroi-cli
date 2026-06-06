@@ -85,6 +85,17 @@ const PARAM_ALTERNATION = PARAM_TAGS.join("|");
 const GENERIC_WRAPPER_RE =
   /<\/?(?:tool_call|function_calls|tool_use)\b|<invoke\b[^>]*\bname\s*=|<function\b[^>]*\bname\s*=/i;
 
+// DeepSeek native tool-call markup leaking into text content. Signature is the
+// fullwidth-bar sentinel `｜｜DSML｜｜` (U+FF5C, NOT ASCII pipes) wrapping
+// invoke/tool_calls/parameter tokens, e.g. `<｜｜DSML｜｜invoke name="read_file">`.
+// Live: storyflow_ui explore-A/B, deepseek T3 (session 799f0508e830) emitted a
+// full `<｜｜DSML｜｜invoke name="read_file">…` block as text and made no real tool
+// call → empty, silent turn. The generic `<invoke` matcher misses it because the
+// `<` is followed by the sentinel, not `invoke`. (BUG-A telemetry already flags
+// the `｜｜DSML｜｜` substring; this wires it into detect → re-steer/surface.)
+const DSML_WRAPPER_RE = /｜｜DSML｜｜\s*(?:invoke|tool_calls?|parameter)\b/i;
+const DSML_INVOKE_NAME_RE = /｜｜DSML｜｜\s*invoke\s+name\s*=\s*"([^"]+)"/i;
+
 /** Build a per-tool detector: `<tool>` then (within a small gap) a `<param>` or `</tool>`. */
 function buildToolRegexes(): RegExp[] {
   return TOOL_TAGS.map(
@@ -111,6 +122,11 @@ export function detectTextEmittedToolCall(text: string): TextToolCallDetection {
   if (!text || text.length === 0) return { detected: false, tool: null };
   // Cap the scan — pathological inputs shouldn't cost more than a glance.
   const scan = text.length > 200_000 ? text.slice(0, 200_000) : text;
+
+  if (DSML_WRAPPER_RE.test(scan)) {
+    const nameMatch = scan.match(DSML_INVOKE_NAME_RE);
+    return { detected: true, tool: nameMatch ? nameMatch[1]! : "dsml" };
+  }
 
   if (GENERIC_WRAPPER_RE.test(scan)) {
     const m = scan.match(GENERIC_WRAPPER_RE);
