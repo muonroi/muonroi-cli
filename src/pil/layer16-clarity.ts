@@ -6,6 +6,7 @@ import {
   hasExternalInfoScope,
   hasImageScope,
   hasOperationalScope,
+  hasSelfContainedComputationScope,
   hasWholeRepoScope,
 } from "./clarity-gate.js";
 import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
@@ -75,7 +76,10 @@ export function detectClarityGaps(
     // Whole-repo / eval prompts ("đánh giá repo", "review the entire codebase")
     // are already scoped to everything — asking "which part?" (and recommending
     // a narrow subdir as default) is nonsensical. See hasWholeRepoScope.
-    !hasWholeRepoScope(raw)
+    !hasWholeRepoScope(raw) &&
+    // Self-contained computation ("Compute f([3,1,2]) …") supplies its operand
+    // data inline — there is no codebase to scope. See hasSelfContainedComputationScope.
+    !hasSelfContainedComputationScope(raw)
   ) {
     const scopeOptions = buildScopeOptions(raw, projectContext);
     gaps.push({

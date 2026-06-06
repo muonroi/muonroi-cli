@@ -133,6 +133,41 @@ export function hasWholeRepoScope(raw: string): boolean {
   return WHOLE_REPO_SCOPE_RE.test(raw);
 }
 
+/**
+ * A self-contained computation / reasoning prompt supplies its operand data
+ * INLINE ("Compute f([3,1,2]) …", "what is the median of [10, 4, 7]?") — the
+ * task's target is the data in the prompt, not the codebase, so the "Which part
+ * of the codebase should this target?" askcard is nonsensical for it. Symmetric
+ * to hasOperationalScope / hasImageScope / hasExternalInfoScope / hasWholeRepoScope.
+ *
+ * Live: "Compute f([3,1,2]) where f sorts the list ascending then returns the
+ * sum of the first two elements." classified taskType=analyze — the regex
+ * classifier matched the bare word "list" (regex:read, conf 0.80, which also
+ * skips the brain) — and fired BOTH the pil-interview scope askcard (auto
+ * "Entire project") and the pil-acceptance card on a pure math problem.
+ *
+ * Deliberately NARROW — a false positive here SUPPRESSES a legitimate scope
+ * question (quality risk), so it requires BOTH:
+ *   1. an inline DATA literal — a bracketed comma-list of >=2 numeric or quoted
+ *      string values (`[3, 1, 2]`, `["a", "b"]`). A bracketed list of bare
+ *      identifiers (`[auth.ts, session.ts]`) is NOT data — those are file/symbol
+ *      references and stay codebase-scoped; the regex only accepts numbers and
+ *      quoted strings, so it never matches them. Single-element `[0]` (array
+ *      indexing) is excluded by the >=2-element requirement.
+ *   2. computation framing — a compute/evaluate/sort/sum/statistic verb or a
+ *      "what is …" / "given the array …" question frame.
+ * The AND keeps real codebase tasks that merely embed a literal (e.g. "set the
+ * default retry delays to [100, 200, 400] in the config") correctly scoped.
+ */
+const INLINE_DATA_LITERAL_RE =
+  /\[\s*(?:-?\d+(?:\.\d+)?|"[^"]*"|'[^']*')(?:\s*,\s*(?:-?\d+(?:\.\d+)?|"[^"]*"|'[^']*'))+\s*\]/;
+const COMPUTE_FRAMING_RE =
+  /\b(comput(?:e|ing)|calculat(?:e|ing|ion)|evaluat(?:e|ing)|solve|sort(?:s|ed|ing)?|sum|median|mean|average|max(?:imum)?|min(?:imum)?|largest|smallest|reverse[ds]?|result\s+of|what(?:'?s|\s+is|\s+are)|given\s+(?:the\s+)?(?:array|list|sequence|set|matrix|string|numbers?))\b/i;
+
+export function hasSelfContainedComputationScope(raw: string): boolean {
+  return INLINE_DATA_LITERAL_RE.test(raw) && COMPUTE_FRAMING_RE.test(raw);
+}
+
 export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
   if (l1.confidence < getAutoPassThreshold()) return false;
   if (!canInferOutcome(l1.taskType, raw)) return false;
@@ -144,7 +179,8 @@ export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
     !hasOperationalScope(raw) &&
     !hasImageScope(raw) &&
     !hasExternalInfoScope(raw) &&
-    !hasWholeRepoScope(raw)
+    !hasWholeRepoScope(raw) &&
+    !hasSelfContainedComputationScope(raw)
   )
     return false;
   if (l1.complexity === "high") return false;
