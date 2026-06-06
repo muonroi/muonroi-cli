@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { filterMcpServersByMessage } from "../smart-filter.js";
+import { afterEach, describe, expect, it } from "vitest";
+import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../smart-filter.js";
 
 // Minimal shape — the real McpServerConfig has more fields, but the filter only
 // reads `.id`. Using a structural stub keeps the test independent of config.
@@ -84,5 +84,56 @@ describe("filterMcpServersByMessage", () => {
       const out = filterMcpServersByMessage(servers, `please ${word} something`);
       expect(ids(out)).toContain("chrome-devtools");
     }
+  });
+});
+
+describe("dropRedundantFsMcpTools", () => {
+  const fn = () => ({});
+  afterEach(() => {
+    delete process.env.MUONROI_KEEP_REDUNDANT_FS_MCP;
+  });
+
+  it("drops filesystem-MCP read/write/edit tools when the builtin equivalent is present", () => {
+    // Live waste (grok session f5dfab0ce0ca): files re-read via both read_file
+    // and mcp_filesystem__read_text_file.
+    const mcp = {
+      mcp_filesystem__read_text_file: fn,
+      mcp_filesystem__read_file: fn,
+      mcp_filesystem__read_multiple_files: fn,
+      mcp_filesystem__write_file: fn,
+      mcp_filesystem__edit_file: fn,
+      mcp_filesystem__directory_tree: fn, // NOT a builtin dup — keep
+      mcp_filesystem__search_files: fn, // keep
+      mcp_other__read_text_file: fn, // different server — keep
+    };
+    const builtins = new Set(["read_file", "write_file", "edit_file", "bash", "grep", "glob"]);
+    const { tools, dropped } = dropRedundantFsMcpTools(mcp, builtins);
+    expect(dropped.sort()).toEqual(
+      [
+        "mcp_filesystem__edit_file",
+        "mcp_filesystem__read_file",
+        "mcp_filesystem__read_multiple_files",
+        "mcp_filesystem__read_text_file",
+        "mcp_filesystem__write_file",
+      ].sort(),
+    );
+    expect(Object.keys(tools).sort()).toEqual(
+      ["mcp_filesystem__directory_tree", "mcp_filesystem__search_files", "mcp_other__read_text_file"].sort(),
+    );
+  });
+
+  it("keeps the MCP tool when the builtin equivalent is NOT present (no silent capability loss)", () => {
+    const mcp = { mcp_filesystem__read_text_file: fn };
+    const { tools, dropped } = dropRedundantFsMcpTools(mcp, new Set(["bash"])); // no builtin read_file
+    expect(dropped).toEqual([]);
+    expect(Object.keys(tools)).toEqual(["mcp_filesystem__read_text_file"]);
+  });
+
+  it("respects MUONROI_KEEP_REDUNDANT_FS_MCP=1 override", () => {
+    process.env.MUONROI_KEEP_REDUNDANT_FS_MCP = "1";
+    const mcp = { mcp_filesystem__read_text_file: fn };
+    const { tools, dropped } = dropRedundantFsMcpTools(mcp, new Set(["read_file"]));
+    expect(dropped).toEqual([]);
+    expect(Object.keys(tools)).toEqual(["mcp_filesystem__read_text_file"]);
   });
 });

@@ -61,6 +61,57 @@ function hasDocsSignal(message: string): boolean {
   );
 }
 
+/**
+ * Filesystem-MCP tool names that 1:1 duplicate a first-class BUILTIN file tool.
+ * The builtin `read_file`/`write_file`/`edit_file` are strictly better (read-
+ * before-write tracking, LSP sync, CRLF-tolerant matching, per-turn dedup +
+ * read-budget wrappers), so exposing the MCP twins on top is pure redundancy.
+ *
+ * Live waste (storyflow_ui explore-flow A/B, grok session f5dfab0ce0ca): the
+ * model re-read the SAME three files via BOTH `read_file` and
+ * `mcp_filesystem__read_text_file` — a 772-line component was read 6× — because
+ * two interchangeable read tools were on offer. Each re-read re-injects the
+ * whole file into context (large input-token leak) on top of ~150 tok/schema.
+ *
+ * Mapping: bare MCP tool name → the builtin that already covers it. We only drop
+ * the MCP tool when that builtin is actually present in the turn's tool set.
+ */
+const FS_MCP_BUILTIN_EQUIVALENT: Record<string, string> = {
+  read_file: "read_file",
+  read_text_file: "read_file",
+  read_media_file: "read_file",
+  read_multiple_files: "read_file",
+  write_file: "write_file",
+  edit_file: "edit_file",
+};
+
+/**
+ * Drop filesystem-MCP read/write/edit tools that duplicate a present builtin.
+ * Scoped to the `mcp_filesystem__` prefix so non-filesystem MCP tools (and the
+ * filesystem server's NON-duplicate tools — directory_tree, search_files,
+ * get_file_info, …) are never touched. Returns the filtered set plus the list
+ * of dropped names so the caller can log it (no silent capability removal).
+ * Override with MUONROI_KEEP_REDUNDANT_FS_MCP=1.
+ */
+export function dropRedundantFsMcpTools<T extends Record<string, unknown>>(
+  mcpTools: T,
+  builtinToolNames: ReadonlySet<string>,
+): { tools: T; dropped: string[] } {
+  if (process.env.MUONROI_KEEP_REDUNDANT_FS_MCP === "1") return { tools: mcpTools, dropped: [] };
+  const out: Record<string, unknown> = {};
+  const dropped: string[] = [];
+  for (const [name, tool] of Object.entries(mcpTools)) {
+    const m = name.match(/^mcp_filesystem__(.+)$/);
+    const equivalent = m ? FS_MCP_BUILTIN_EQUIVALENT[m[1]!] : undefined;
+    if (equivalent && builtinToolNames.has(equivalent)) {
+      dropped.push(name);
+      continue;
+    }
+    out[name] = tool;
+  }
+  return { tools: out as T, dropped };
+}
+
 export interface SmartFilterOptions {
   /** When true, smart filtering is bypassed and every server passes through. */
   disabled?: boolean;

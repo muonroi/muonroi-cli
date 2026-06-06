@@ -69,7 +69,7 @@ import type {
   UserPromptSubmitHookInput,
 } from "../hooks/types";
 import { buildMcpToolSet } from "../mcp/runtime";
-import { filterMcpServersByMessage } from "../mcp/smart-filter";
+import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
 import { getModelInfo } from "../models/registry.js";
 import {
   cheapModelShellLine,
@@ -1274,7 +1274,29 @@ export class MessageProcessor {
               },
             });
             closeMcp = mcpBundle.close;
-            rawToolSet = { ...rawToolSet, ...mcpBundle.tools };
+            // Drop filesystem-MCP read/write/edit tools that duplicate the
+            // first-class builtin file tools. Without this, models re-read the
+            // SAME file via both `read_file` and `mcp_filesystem__read_text_file`
+            // (live grok session f5dfab0ce0ca: a 772-line file read 6×), wasting
+            // ~150 tok/schema PLUS re-injecting whole files into context. The
+            // builtins are strictly better (read-before-write, LSP, CRLF match,
+            // dedup/read-budget wrappers). Non-duplicate fs tools are untouched.
+            const _builtinToolNames = new Set(Object.keys(rawToolSet));
+            const { tools: _dedupedMcpTools, dropped: _droppedFsMcp } = dropRedundantFsMcpTools(
+              mcpBundle.tools,
+              _builtinToolNames,
+            );
+            rawToolSet = { ...rawToolSet, ..._dedupedMcpTools };
+            if (_droppedFsMcp.length > 0 && deps.session) {
+              try {
+                logInteraction(deps.session.id, "routing", {
+                  model: turnModelId,
+                  data: { droppedRedundantFsMcp: _droppedFsMcp },
+                });
+              } catch {
+                /* telemetry best-effort */
+              }
+            }
             if (mcpBundle.errors.length > 0) {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
