@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectTextEmittedToolCall } from "./text-tool-call-detector.js";
+import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 
 describe("detectTextEmittedToolCall", () => {
   it("detects the Cline/Roo <read_file><path> dialect (live deepseek failure)", () => {
@@ -53,6 +53,27 @@ describe("detectTextEmittedToolCall", () => {
     expect(detectTextEmittedToolCall("Use the <read_file> tool to view the source.").detected).toBe(false);
     expect(detectTextEmittedToolCall("The read_file and edit_file tools handle this.").detected).toBe(false);
     expect(detectTextEmittedToolCall("I edited the file and ran the tests; everything passes.").detected).toBe(false);
+  });
+
+  it("parseDsmlToolCalls extracts name + args from the DSML block (for targeted re-steer)", () => {
+    const text = `<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="read_file">
+<｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.html</｜｜DSML｜｜parameter>
+<｜｜DSML｜｜parameter name="start_line" string="false">25</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>
+</｜｜DSML｜｜tool_calls>`;
+    const calls = parseDsmlToolCalls(text);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe("read_file");
+    expect(calls[0]!.args.file_path).toBe("src/app/foo.html");
+    expect(calls[0]!.args.start_line).toBe("25");
+  });
+
+  it("parseDsmlToolCalls handles multiple invoke blocks and returns [] for non-DSML text", () => {
+    const text = `<｜｜DSML｜｜invoke name="read_file"><｜｜DSML｜｜parameter name="file_path">a.ts</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke><｜｜DSML｜｜invoke name="edit_file"><｜｜DSML｜｜parameter name="path">b.ts</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>`;
+    const calls = parseDsmlToolCalls(text);
+    expect(calls.map((c) => c.name)).toEqual(["read_file", "edit_file"]);
+    expect(parseDsmlToolCalls("just a normal answer")).toEqual([]);
   });
 
   it("does NOT fire on ordinary prose / code answers", () => {

@@ -151,7 +151,7 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
-import { detectTextEmittedToolCall } from "./text-tool-call-detector.js";
+import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { repairToolCallHook } from "./repair-tool-call.js";
 import {
   buildRepetitionReminder,
@@ -2712,13 +2712,24 @@ export class MessageProcessor {
           // MAX_TEXT_TOOL_RESTEER so a persistently-degrading model can't loop.
           if (_textToolCall.detected && streamOk && textToolReSteerCount < MAX_TEXT_TOOL_RESTEER) {
             textToolReSteerCount++;
+            // Recover the model's INTENT from the leaked markup (DeepSeek-native
+            // DSML carries the tool + args) so the corrective restates the exact
+            // call — far more effective than a generic "use the tool" nudge.
+            const _parsedCalls = parseDsmlToolCalls(assistantText);
+            const _intent =
+              _parsedCalls.length > 0
+                ? ` You appear to have intended: ${_parsedCalls
+                    .map((c) => `${c.name}(${Object.entries(c.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})`)
+                    .join("; ")}. Make those exact call(s) via the tool interface now.`
+                : "";
             deps.messages.push({
               role: "user",
               content:
                 `Your previous reply wrote a \`${_textToolCall.tool}\` tool call as XML/text. That is NOT how tools are invoked here — ` +
                 "writing tool calls as text does nothing, so the action did not run. " +
                 "Use the actual tool-calling interface (function/tool calls) to perform the action now. " +
-                "Do NOT output XML tags like <read_file>, <write_to_file>, <execute_command>, or <tool_call> as text.",
+                "Do NOT output XML tags like <read_file>, <write_to_file>, <execute_command>, or <tool_call> (or DSML markup) as text." +
+                _intent,
             });
             if (deps.session) {
               try {

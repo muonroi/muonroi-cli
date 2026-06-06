@@ -146,4 +146,44 @@ function normalizeWrapperName(raw: string): string {
   return m ? m[0].toLowerCase() : "tool_call";
 }
 
+/**
+ * Parse the DeepSeek-native DSML tool-call markup into a structured list so the
+ * re-steer can restate the model's EXACT intent (much more effective than a
+ * generic "use the tool interface" nudge). Pure — no execution. Recognizes:
+ *   <｜｜DSML｜｜invoke name="read_file">
+ *     <｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.ts</｜｜DSML｜｜parameter>
+ *   </｜｜DSML｜｜invoke>
+ * Returns one entry per invoke block; args preserve insertion order. Tolerant of
+ * missing close tags (cheap models truncate) — captures whatever parameters are
+ * present. Returns [] when no parseable invoke block exists.
+ */
+export interface ParsedDsmlCall {
+  name: string;
+  args: Record<string, string>;
+}
+
+const DSML_INVOKE_BLOCK_RE = /｜｜DSML｜｜\s*invoke\s+name\s*=\s*"([^"]+)"([\s\S]*?)(?=｜｜DSML｜｜\s*invoke\s|$)/gi;
+const DSML_PARAM_RE = /｜｜DSML｜｜\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/?｜｜DSML｜｜\s*parameter/gi;
+
+export function parseDsmlToolCalls(text: string): ParsedDsmlCall[] {
+  if (!text || !text.includes("｜｜DSML｜｜")) return [];
+  const calls: ParsedDsmlCall[] = [];
+  DSML_INVOKE_BLOCK_RE.lastIndex = 0;
+  let block: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic regex.exec loop
+  while ((block = DSML_INVOKE_BLOCK_RE.exec(text)) !== null) {
+    const name = block[1]!;
+    const body = block[2] ?? "";
+    const args: Record<string, string> = {};
+    DSML_PARAM_RE.lastIndex = 0;
+    let p: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic regex.exec loop
+    while ((p = DSML_PARAM_RE.exec(body)) !== null) {
+      args[p[1]!] = (p[2] ?? "").trim();
+    }
+    calls.push({ name, args });
+  }
+  return calls;
+}
+
 export const _internals = { TOOL_TAGS, PARAM_TAGS, GENERIC_WRAPPER_RE };
