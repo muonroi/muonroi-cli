@@ -135,6 +135,43 @@ def test_malformed_catalog_rejected(monkeypatch, tmp_path: Path):
     assert r.status_code == 500
 
 
+def test_no_auth_required_when_key_unset(client: TestClient, monkeypatch):
+    monkeypatch.delenv("CATALOG_API_KEY", raising=False)
+    r = client.get("/api/v1/models")
+    assert r.status_code == 200
+
+
+def test_auth_rejects_missing_key(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CATALOG_API_KEY", "s3cret")
+    r = client.get("/api/v1/models")
+    assert r.status_code == 401
+
+
+def test_auth_rejects_wrong_key(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CATALOG_API_KEY", "s3cret")
+    r = client.get("/api/v1/models", headers={"X-API-Key": "nope"})
+    assert r.status_code == 401
+
+
+def test_auth_accepts_x_api_key(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CATALOG_API_KEY", "s3cret")
+    r = client.get("/api/v1/models", headers={"X-API-Key": "s3cret"})
+    assert r.status_code == 200
+    assert len(r.json()["models"]) == 3
+
+
+def test_auth_accepts_bearer(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CATALOG_API_KEY", "s3cret")
+    r = client.get("/api/v1/models", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+
+
+def test_health_open_even_with_key(client: TestClient, monkeypatch):
+    monkeypatch.setenv("CATALOG_API_KEY", "s3cret")
+    r = client.get("/health")
+    assert r.status_code == 200  # health must not require the key
+
+
 def test_real_catalog_validates():
     """The actual shipped catalog.json must satisfy the pydantic schema."""
     real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
