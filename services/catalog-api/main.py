@@ -20,13 +20,14 @@ Design notes
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 
@@ -96,6 +97,42 @@ def _etag(payload: CatalogResponse) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Auth — optional shared API key (anti-spam on the public endpoint)
+# --------------------------------------------------------------------------- #
+API_KEY_ENV = "CATALOG_API_KEY"
+
+
+def require_api_key(
+    x_api_key: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+) -> None:
+    """Reject requests lacking a valid key WHEN a key is configured.
+
+    Behaviour:
+      * ``CATALOG_API_KEY`` unset/empty → auth disabled (local dev / fresh box).
+      * set → require either ``X-API-Key: <key>`` or
+        ``Authorization: Bearer <key>``; constant-time compared.
+
+    ``/health`` deliberately does NOT depend on this so container/monitoring
+    health probes keep working without a key.
+    """
+    expected = os.environ.get(API_KEY_ENV, "").strip()
+    if not expected:
+        return  # auth disabled
+
+    provided = x_api_key
+    if not provided and authorization and authorization.lower().startswith("bearer "):
+        provided = authorization[7:].strip()
+
+    if not provided or not hmac.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid or missing API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+# --------------------------------------------------------------------------- #
 # App
 # --------------------------------------------------------------------------- #
 app = FastAPI(
@@ -119,7 +156,7 @@ def health() -> dict:
     }
 
 
-@app.get("/api/v1/models", response_model=CatalogResponse)
+@app.get("/api/v1/models", response_model=CatalogResponse, dependencies=[Depends(require_api_key)])
 def list_models(
     response: Response,
     tier: Optional[str] = Query(default=None, description="Filter by tier (fast|balanced|premium)"),
