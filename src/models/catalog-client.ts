@@ -4,7 +4,19 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ModelInfo, ModelTier, ReasoningEffort } from "../types/index.js";
 
-const CP_CATALOG_URL = "https://cp.muonroi.com/api/v1/models";
+// Shared catalog API (services/catalog-api, deployed at catalog.muonroi.com).
+// Overridable for self-hosting / local dev via MUONROI_CATALOG_URL.
+// NOTE: the old default (cp.muonroi.com/api/v1/models) never existed server-side
+// — the control-plane only serves a *rule* catalog — so the remote fetch always
+// 404'd and the CLI silently used the bundled static catalog. This points at the
+// real catalog service.
+const DEFAULT_CATALOG_URL = "https://catalog.muonroi.com/api/v1/models";
+
+export function getCatalogUrl(): string {
+  const override = process.env.MUONROI_CATALOG_URL?.trim();
+  return override && override.length > 0 ? override : DEFAULT_CATALOG_URL;
+}
+
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface CatalogModel {
@@ -73,7 +85,7 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(CP_CATALOG_URL, { signal: controller.signal });
+    const res = await fetch(getCatalogUrl(), { signal: controller.signal });
     clearTimeout(timeout);
     if (res.ok) {
       const data = (await res.json()) as CatalogResponse;
