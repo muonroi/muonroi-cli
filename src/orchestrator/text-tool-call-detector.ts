@@ -50,6 +50,17 @@ const TOOL_TAGS = [
   "access_mcp_resource",
   "ask_followup_question",
   "attempt_completion",
+  // muonroi builtin tool names the NON_ANTHROPIC_TOOL_PREAMBLE explicitly
+  // forbids as text. Live: deepseek emitted `<bash>find …</bash>` as text at
+  // turn end (session ab/ds-final) — `bash` was missing here so it slipped the
+  // detector → no re-steer. Match only with a close tag or nested param,
+  // never a bare mention.
+  "bash",
+  "grep",
+  "glob",
+  "read_multiple_files",
+  "delegate",
+  "task",
 ] as const;
 
 // Nested parameter tags that legitimately appear INSIDE a text-dialect tool
