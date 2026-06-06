@@ -286,7 +286,7 @@ export class StreamRunner {
       verifyPreparedRecipe = prepared.profile.recipe;
     }
     const childBash = new BashTool(topBash.getCwd(), {
-      sandboxMode: isVerify ? "shuru" : topBash.getSandboxMode(),
+      sandboxMode: isVerify ? topBash.getSandboxMode() : topBash.getSandboxMode(),
       sandboxSettings: isVerify
         ? (verifyPreparedSettings ?? { ...topBash.getSandboxSettings(), ...verifySandboxOverrides })
         : topBash.getSandboxSettings(),

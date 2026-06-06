@@ -847,6 +847,13 @@ function resolveConfig(options: CliOptions) {
   }
   if (typeof options.model === "string") saveUserSettings({ defaultModel: normalizeModelId(options.model) });
 
+  if (options.sandbox !== undefined) {
+    const resolved = resolveCliSandboxMode(options.sandbox);
+    if (resolved) {
+      saveUserSettings({ sandboxMode: resolved });
+    }
+  }
+
   return { apiKey, baseURL, model, maxToolRounds, sandboxMode, sandboxSettings };
 }
 
@@ -1187,7 +1194,7 @@ program
       }
 
       await runHeadless(
-        buildVerifyPrompt(process.cwd()),
+        buildVerifyPrompt(process.cwd(), config.sandboxMode),
         requireApiKey(config.apiKey),
         config.baseURL,
         config.model,

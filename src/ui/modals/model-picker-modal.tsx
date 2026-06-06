@@ -33,6 +33,8 @@ export interface ApiKeyPromptState {
   provider: ProviderId;
   value: string;
   error: string | null;
+  /** When true the field shows the raw key instead of mask dots (Ctrl+R). */
+  reveal?: boolean;
 }
 
 export type BwSyncState =
@@ -118,30 +120,42 @@ export function ModelPickerModal({
               {"Key is saved to the OS keychain (keytar). Bitwarden sync via `muonroi-cli keys import-bw`."}
             </text>
           </box>
-          <box
-            paddingTop={1}
-            backgroundColor={t.backgroundElement}
-            paddingLeft={1}
-            paddingRight={1}
-            flexDirection="row"
-            justifyContent="space-between"
+          <Semantic
+            id="provider-key-input"
+            role="textbox"
+            name={`${apiKeyPrompt.provider} API key`}
+            focus
+            value={apiKeyPrompt.value}
           >
-            <text fg={t.text}>
-              {apiKeyPrompt.value.length > 0
-                ? "•".repeat(Math.min(apiKeyPrompt.value.length, 40))
-                : "(type or paste key)"}
-            </text>
-            {apiKeyPrompt.value.length > 0 ? (
-              <text fg={t.textMuted}>{` ${apiKeyPrompt.value.length} chars`}</text>
-            ) : null}
-          </box>
+            <box
+              paddingTop={1}
+              backgroundColor={t.backgroundElement}
+              paddingLeft={1}
+              paddingRight={1}
+              flexDirection="row"
+              justifyContent="space-between"
+            >
+              {apiKeyPrompt.value.length > 0 ? (
+                <text fg={t.text}>
+                  {`${apiKeyPrompt.reveal ? apiKeyPrompt.value.slice(0, 40) : "•".repeat(Math.min(apiKeyPrompt.value.length, 40))}▏`}
+                </text>
+              ) : (
+                <text fg={t.textDim}>{"▏(type or paste key)"}</text>
+              )}
+              {apiKeyPrompt.value.length > 0 ? (
+                <text
+                  fg={t.textMuted}
+                >{`${apiKeyPrompt.reveal ? "shown" : "hidden"} · ${apiKeyPrompt.value.length} chars`}</text>
+              ) : null}
+            </box>
+          </Semantic>
           {apiKeyPrompt.error ? (
             <box paddingTop={1}>
               <text fg={t.initFormError}>{apiKeyPrompt.error}</text>
             </box>
           ) : null}
           <box paddingTop={1}>
-            <text fg={t.textMuted}>{"Enter save  Esc cancel"}</text>
+            <text fg={t.textMuted}>{"Enter save · Esc cancel · Ctrl+R reveal · paste works"}</text>
           </box>
         </box>
       </box>
@@ -180,19 +194,29 @@ export function ModelPickerModal({
                   {"Unlocks vault with master password, finds items named 'muonroi-cli/<provider>', imports keys."}
                 </text>
               </box>
-              <box
-                paddingTop={1}
-                backgroundColor={t.backgroundElement}
-                paddingLeft={1}
-                paddingRight={1}
-                flexDirection="row"
-                justifyContent="space-between"
+              <Semantic
+                id="bw-password-input"
+                role="textbox"
+                name="Bitwarden master password"
+                focus
+                value={bwSync.value}
               >
-                <text fg={t.text}>
-                  {bwSync.value.length > 0 ? "•".repeat(Math.min(bwSync.value.length, 40)) : "(master password)"}
-                </text>
-                {bwSync.value.length > 0 ? <text fg={t.textMuted}>{` ${bwSync.value.length} chars`}</text> : null}
-              </box>
+                <box
+                  paddingTop={1}
+                  backgroundColor={t.backgroundElement}
+                  paddingLeft={1}
+                  paddingRight={1}
+                  flexDirection="row"
+                  justifyContent="space-between"
+                >
+                  {bwSync.value.length > 0 ? (
+                    <text fg={t.text}>{`${"•".repeat(Math.min(bwSync.value.length, 40))}▏`}</text>
+                  ) : (
+                    <text fg={t.textDim}>{"▏(master password)"}</text>
+                  )}
+                  {bwSync.value.length > 0 ? <text fg={t.textMuted}>{`${bwSync.value.length} chars`}</text> : null}
+                </box>
+              </Semantic>
               {bwSync.error ? (
                 <box paddingTop={1}>
                   <text fg={t.initFormError}>{bwSync.error}</text>
