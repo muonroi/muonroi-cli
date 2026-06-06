@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { z } from "zod";
 import type { ModelInfo, ModelTier, ReasoningEffort } from "../types/index.js";
 
 // Shared catalog API (services/catalog-api, deployed at catalog.muonroi.com).
@@ -56,6 +57,68 @@ interface CatalogResponse {
   models: CatalogModel[];
 }
 
+// ─── Schema validation (catalog drift / corruption guard) ───────────────────
+// The catalog is the single source of truth for model + provider routing. A
+// silently-malformed catalog (truncated remote response, drifted bundled file,
+// hand-edit dropping a required price field) would otherwise poison every
+// tier→model resolution downstream. Validate the SHAPE we actually depend on;
+// unknown future fields are ignored (forward-compatible), not rejected.
+const CatalogModelSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    provider: z.string().min(1),
+    tier: z.string().min(1),
+    context_window: z.number(),
+    max_output_tokens: z.number(),
+    input_price_per_million: z.number(),
+    output_price_per_million: z.number(),
+    cached_input_price_per_million: z.number().optional(),
+    cache_write_price_per_million: z.number().optional(),
+    reasoning: z.boolean(),
+    thinking_type: z.string().nullable().optional(),
+    supports_effort: z.boolean().optional(),
+    description: z.string(),
+    aliases: z.array(z.string()).optional(),
+    default_reasoning_effort: z.string().nullable().optional(),
+    supports_vision: z.boolean().optional(),
+  })
+  .loose();
+
+const CatalogResponseSchema = z.object({
+  version: z.string(),
+  updated_at: z.string(),
+  models: z.array(CatalogModelSchema).min(1),
+});
+
+/**
+ * Best-effort validation for the REMOTE catalog: a transient bad response must
+ * never break the CLI, so an invalid payload returns null and the caller falls
+ * through to the trusted bundled catalog.
+ */
+export function safeValidateCatalog(raw: unknown): CatalogModel[] | null {
+  const parsed = CatalogResponseSchema.safeParse(raw);
+  return parsed.success ? (parsed.data.models as CatalogModel[]) : null;
+}
+
+/**
+ * Strict validation for a STATIC (bundled) catalog that is present on disk: a
+ * malformed bundled file is a build defect, not a runtime condition, so we
+ * throw loudly with the validation issues rather than silently skipping it
+ * (which would mask the defect as a confusing "cannot find catalog" later).
+ */
+export function validateStaticCatalog(raw: unknown, source: string): CatalogModel[] {
+  const parsed = CatalogResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .slice(0, 5)
+      .map((i) => `${i.path.join(".") || "<root>"}: ${i.message}`)
+      .join("; ");
+    throw new Error(`Malformed catalog at ${source}: ${issues}`);
+  }
+  return parsed.data.models as CatalogModel[];
+}
+
 let cachedModels: CatalogModel[] | null = null;
 let cacheTimestamp = 0;
 
@@ -99,10 +162,15 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
     const res = await fetch(getCatalogUrl(), { signal: controller.signal, headers: getCatalogHeaders() });
     clearTimeout(timeout);
     if (res.ok) {
-      const data = (await res.json()) as CatalogResponse;
-      cachedModels = data.models;
-      cacheTimestamp = Date.now();
-      return cachedModels;
+      const data = await res.json();
+      // Validate the remote payload before trusting it. An invalid/truncated
+      // response falls through to the bundled catalog rather than caching junk.
+      const models = safeValidateCatalog(data);
+      if (models) {
+        cachedModels = models;
+        cacheTimestamp = Date.now();
+        return cachedModels;
+      }
     }
   } catch {
     // CP unreachable — fall through to static
@@ -123,15 +191,16 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
     // Try createRequire first (works in both bundled and module contexts)
     const viaRequire = tryLoadCatalogViaRequire(dir);
     if (viaRequire) {
-      cachedModels = viaRequire.models;
+      cachedModels = validateStaticCatalog(viaRequire, path.join(dir, "catalog.json"));
       cacheTimestamp = Date.now();
       return cachedModels;
     }
 
     // Try direct file read (more reliable in edge cases)
-    const viaFS = tryLoadCatalogViaFS(path.join(dir, "catalog.json"));
+    const filePath = path.join(dir, "catalog.json");
+    const viaFS = tryLoadCatalogViaFS(filePath);
     if (viaFS) {
-      cachedModels = viaFS.models;
+      cachedModels = validateStaticCatalog(viaFS, filePath);
       cacheTimestamp = Date.now();
       return cachedModels;
     }
