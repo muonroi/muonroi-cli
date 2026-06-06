@@ -13,6 +13,7 @@
  * DeepSeek Flash). Timeout 2500ms — bails fast if the model stalls.
  */
 import { streamText } from "ai";
+import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
 import type { OutputStyle, TaskType } from "./types.js";
@@ -26,6 +27,38 @@ export interface LlmClassifyResult {
 export type LlmClassifyFn = (prompt: string, signal?: AbortSignal) => Promise<LlmClassifyResult | null>;
 
 const LLM_CLASSIFY_TIMEOUT_MS = 2500;
+
+// Reasoning models (grok-4.3, deepseek-v4-flash, gpt-5.x) spend their output
+// budget on reasoning tokens BEFORE any visible text. The legacy 16-token cap
+// was consumed entirely by reasoning → zero text-delta → parseResponse("") →
+// null → `llm=fail` on every borderline turn (observed 5/5 live grok sessions).
+// Give reasoning models a real ceiling so the 2-word answer streams back, and a
+// longer timeout because reasoning round-trips take seconds, not ~200ms.
+// The ceiling is a cap, not padding: the model still stops after two words, so a
+// generous headroom costs nothing when reasoning is short.
+const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
+const NONREASONING_MAX_OUTPUT_TOKENS = 16;
+const REASONING_MAX_OUTPUT_TOKENS = 2048;
+
+/**
+ * Per-namespace shallow merge of providerOptions. The base already carries
+ * factory-level defaults folded into the provider namespace (e.g. OAuth
+ * `store:false`); the overlay only overrides specific keys (reasoningEffort)
+ * within the same namespace, so defaults survive.
+ */
+function mergeProviderOptions(
+  base: Record<string, unknown> | undefined,
+  overlay: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!overlay) return base;
+  if (!base) return overlay;
+  const out: Record<string, unknown> = { ...base };
+  for (const [ns, val] of Object.entries(overlay)) {
+    const baseNs = (base[ns] as Record<string, unknown> | undefined) ?? {};
+    out[ns] = { ...baseNs, ...(val as Record<string, unknown>) };
+  }
+  return out;
+}
 
 const VALID_TASK_TYPES = new Set<TaskType>([
   "refactor",
@@ -94,26 +127,65 @@ function parseResponse(raw: string): LlmClassifyResult | null {
 export function createLlmClassifier(factory: ProviderFactory, modelId: string): LlmClassifyFn {
   return async function classify(prompt: string, signal?: AbortSignal): Promise<LlmClassifyResult | null> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), LLM_CLASSIFY_TIMEOUT_MS);
-    const combinedSignal = signal
-      ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
-      : controller.signal;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const runtime = resolveModelRuntime(factory, modelId);
+      const isReasoning = runtime.modelInfo?.reasoning === true;
+
+      // Budget + timeout scale with reasoning: a reasoning model needs room and
+      // time to emit reasoning THEN the answer; a plain model answers in <16
+      // tokens almost instantly.
+      timer = setTimeout(
+        () => controller.abort(),
+        isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS,
+      );
+      const combinedSignal = signal
+        ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
+        : controller.signal;
+
       const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
+      const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
+
+      // Minimize reasoning cost: force the lowest effort the provider exposes for
+      // this throwaway 2-word classification. Only providers with
+      // `supportsReasoningEffort` (openai, xai) honor it; deepseek has no per-call
+      // knob (disable via MUONROI_DEEPSEEK_DISABLE_THINKING at the factory).
+      let providerOptions = runtime.providerOptions;
+      if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
+        const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+          model: runtime.modelInfo,
+          reasoningEffort: "low",
+        });
+        providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+      }
+
       const result = streamText({
         model: runtime.model,
         abortSignal: combinedSignal,
         system: SYSTEM_PROMPT,
         prompt: prompt.slice(0, 600),
-        ...(dropMaxTokens ? {} : { maxOutputTokens: 16 }),
-        ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
+        ...(providerOptions ? { providerOptions } : {}),
       });
       let text = "";
+      let reasoningText = "";
+      const partCounts: Record<string, number> = {};
+      const debug = process.env["MUONROI_DEBUG_PIL_CLASSIFY"] === "1";
       for await (const part of result.fullStream) {
+        if (debug) partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
         if (part.type === "text-delta") text += part.text ?? "";
+        else if (part.type === "reasoning-delta") reasoningText += (part as { text?: string }).text ?? "";
       }
-      return parseResponse(text);
+      if (debug) {
+        console.error(
+          `[pil.llm-classify] raw(${modelId}) maxOut=${dropMaxTokens ? "dropped" : maxOut} ` +
+            `parts=${JSON.stringify(partCounts)} text<<<${text}>>> reasoning<<<${reasoningText.slice(0, 200)}>>>`,
+        );
+      }
+      // Reasoning models occasionally route the entire answer into reasoning
+      // parts (no committed text). Fall back to the reasoning channel so the
+      // 2-word verdict is still recoverable.
+      return parseResponse(text) ?? (reasoningText ? parseResponse(reasoningText) : null);
     } catch (err) {
       console.error(`[pil.llm-classify] classify failed: ${(err as Error)?.message}`, {
         modelId,
@@ -121,7 +193,7 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       });
       return null;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
   };
 }
