@@ -123,6 +123,37 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
   it("returns empty toolset when taskType is null", () => {
     expect(getResponseToolSet(makeCtx(null, null))).toEqual({});
   });
+
+  it("drops respond_<task> on an IMPLEMENTATION-intent prompt (no premature terminal answer)", () => {
+    // Live (grok session 19fa8895c41c): an "Improve … implement these fixes"
+    // prompt classified `debug` got respond_debug; the model called it mid-task
+    // as a plan and the turn ended before the edits completed. Implementation
+    // turns must fall through to markdown OUTPUT RULES, not a terminal tool.
+    const impl = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
+    expect(getResponseToolSet(impl("Improve the story-list screen. Implement these prioritized fixes: …", "debug"))).toEqual(
+      {},
+    );
+    expect(getResponseToolSet(impl("Edit ONLY these two files and fix the empty span", "debug"))).toEqual({});
+    expect(getResponseToolSet(impl("refactor the genre dropdown and wire up keyboard handlers", "analyze"))).toEqual({});
+    expect(getResponseToolSet(impl("triển khai các cải tiến đã đề xuất", "plan"))).toEqual({});
+  });
+
+  it("KEEPS respond_<task> for pure analysis/plan prompts (narrowness guard)", () => {
+    // The deliverable here IS a structured report — must not be suppressed.
+    const ana = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
+    expect(Object.keys(getResponseToolSet(ana("analyze the orchestrator for cost leaks", "analyze")))).toContain(
+      "respond_analyze",
+    );
+    expect(Object.keys(getResponseToolSet(ana("why does the build fail intermittently?", "debug")))).toContain(
+      "respond_debug",
+    );
+    expect(Object.keys(getResponseToolSet(ana("plan the migration to the new auth flow", "plan")))).toContain(
+      "respond_plan",
+    );
+    expect(Object.keys(getResponseToolSet(ana("review the auth module and explain the design", "analyze")))).toContain(
+      "respond_analyze",
+    );
+  });
 });
 
 describe("applyPilSuffix — outputStyle variants", () => {
