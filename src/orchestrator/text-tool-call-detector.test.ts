@@ -27,6 +27,19 @@ describe("detectTextEmittedToolCall", () => {
     expect(detectTextEmittedToolCall("here:\n<read_file></read_file>").detected).toBe(true);
   });
 
+  it("detects builtin tool names emitted as text (<bash>, <grep>) — live deepseek <bash> leak", () => {
+    const r = detectTextEmittedToolCall("Starting:\n<bash>\nfind /workspace -name '*.html'\n</bash>");
+    expect(r.detected).toBe(true);
+    expect(r.tool).toBe("bash");
+    expect(detectTextEmittedToolCall("<grep>\n<pattern>foo</pattern>\n</grep>").detected).toBe(true);
+    expect(detectTextEmittedToolCall("<delegate>\n<agent>explore</agent>\n</delegate>").detected).toBe(true);
+  });
+
+  it("does NOT fire on a bare inline mention of bash (no invocation shape)", () => {
+    expect(detectTextEmittedToolCall("Run the build with the <bash> tool to verify.").detected).toBe(false);
+    expect(detectTextEmittedToolCall("I used bash to run the tests; they pass.").detected).toBe(false);
+  });
+
   it("detects generic native wrappers (Qwen <tool_call>, Anthropic <invoke name=>)", () => {
     expect(detectTextEmittedToolCall('<tool_call>{"name":"read_file"}</tool_call>').detected).toBe(true);
     expect(detectTextEmittedToolCall('<invoke name="read_file"><parameter name="path">a</parameter></invoke>').detected).toBe(true);
