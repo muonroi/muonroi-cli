@@ -106,7 +106,7 @@ export interface StreamRunnerDeps {
   /** Current top-level provider instance (already validated). */
   getProvider(): LegacyProvider;
   /** Resolve a specific task tier's model id (uses Agent's role config). */
-  resolveModelForTask(task: "compact" | "explore" | "general" | "title"): string;
+  resolveModelForTask(task: "compact" | "explore" | "general" | "title" | "verify"): string;
   /** Top-level model id (for routed_from telemetry). */
   getModelId(): string;
   /** Top-level provider id fallback when child runtime has no explicit provider. */
@@ -330,7 +330,9 @@ export class StreamRunner {
           ? COMPUTER_MODEL
           : custom
             ? custom.model
-            : this.deps.resolveModelForTask(isExplore ? "explore" : "general"),
+            : this.deps.resolveModelForTask(
+                isExplore ? "explore" : isVerify || isVerifyDetect || isVerifyManifest ? "verify" : "general",
+              ),
     );
     const topModelId = this.deps.getModelId();
     if (childModelId !== topModelId) {

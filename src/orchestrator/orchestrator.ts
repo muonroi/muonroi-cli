@@ -20,7 +20,7 @@ import type {
 } from "../hooks/types";
 import { shutdownWorkspaceLspManager } from "../lsp/runtime";
 import { ensureDefaultMcpServers } from "../mcp/auto-setup.js";
-import { getModelByTier, getModelInfo, normalizeModelId } from "../models/registry.js";
+import { getModelInfo, normalizeModelId } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { apiBaseFor } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -136,6 +136,7 @@ import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
+import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { setProviderHint } from "./token-counter.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
@@ -1420,18 +1421,8 @@ export class Agent {
     return this._resolveModelForTask("compact");
   }
 
-  private _resolveModelForTask(task: "compact" | "explore" | "general" | "title"): string {
-    const tierPrefs: Record<string, Array<"fast" | "balanced" | "premium">> = {
-      compact: ["fast", "balanced"],
-      title: ["fast", "balanced"],
-      explore: ["balanced", "fast"],
-      general: ["premium", "balanced"],
-    };
-    for (const tier of tierPrefs[task] ?? ["balanced"]) {
-      const m = getModelByTier(tier, this.providerId);
-      if (m?.provider === this.providerId) return m.id;
-    }
-    return this.modelId;
+  private _resolveModelForTask(task: ModelTaskKind): string {
+    return resolveModelForTask(task, this.providerId, this.modelId);
   }
 
   private async compactForContext(
