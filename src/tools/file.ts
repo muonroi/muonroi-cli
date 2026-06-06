@@ -145,7 +145,28 @@ export async function editFile(
       }
     }
 
-    const count = before.split(oldString).length - 1;
+    // Line-ending tolerant matching. LLMs emit old_string with `\n` line
+    // breaks, but Windows-authored files (common in Angular/.NET repos) are
+    // stored with `\r\n`. An exact substring search then never finds any
+    // multi-line old_string, so every edit beyond a single line fails (live:
+    // storyflow_ui A/B — both models failed 8-9/10 edits on CRLF templates).
+    // First try the verbatim match; if that misses, re-match with both sides
+    // EOL-normalized and rebuild old/new with the FILE's dominant EOL so the
+    // replace lands on `before` and the file's line endings are preserved.
+    let searchString = oldString;
+    let replaceString = newString;
+    let count = before.split(searchString).length - 1;
+    if (count === 0 && (before.includes("\r\n") || /\r\n/.test(oldString))) {
+      const fileEol = before.includes("\r\n") ? "\r\n" : "\n";
+      const toFileEol = (s: string): string => s.replace(/\r\n/g, "\n").replace(/\n/g, fileEol);
+      const normalizedOld = toFileEol(oldString);
+      const normalizedCount = before.split(normalizedOld).length - 1;
+      if (normalizedCount >= 1) {
+        searchString = normalizedOld;
+        replaceString = toFileEol(newString);
+        count = normalizedCount;
+      }
+    }
 
     if (count === 0) {
       return {
@@ -160,7 +181,7 @@ export async function editFile(
       };
     }
 
-    const after = before.replace(oldString, newString);
+    const after = before.replace(searchString, replaceString);
     writeFileSync(full, after, "utf-8");
 
     // Refresh tracker so back-to-back edits keep working.
