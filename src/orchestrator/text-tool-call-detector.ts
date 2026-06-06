@@ -1,0 +1,133 @@
+/**
+ * src/orchestrator/text-tool-call-detector.ts
+ *
+ * Detect when a model emitted a TOOL CALL as plain assistant TEXT instead of
+ * using the real tool-calling interface. Some models (esp. cheap ones trained
+ * on other agent harnesses — Cline / Roo / Continue dialects) write tool calls
+ * as XML blocks like:
+ *
+ *     <read_file>
+ *       <path>src/app/foo.ts</path>
+ *     </read_file>
+ *
+ * The OpenAI-compatible layer never recognizes these as tool calls, so the SDK
+ * reports finishReason="stop" with this XML as the final answer — the agentic
+ * loop ends, the intended action never runs, and (live: storyflow_ui A/B,
+ * deepseek-v4-flash session 905d564dbde4) the turn is silently wasted, often
+ * leaving a half-finished edit behind. This detector lets the orchestrator
+ * surface the failure instead of returning the broken text as a "final answer".
+ *
+ * Distinct from tool-args-repair.ts, which repairs the `arguments` JSON of a
+ * tool call the SDK ALREADY recognized. Here there is NO recognized tool call.
+ *
+ * Precision is the priority — a false positive would wrongly flag a legitimate
+ * final answer (e.g. documentation that quotes a tool block). The detector only
+ * fires when a KNOWN tool-name tag appears as a structural invocation: an
+ * opening tag immediately followed (whitespace/newlines allowed) by either a
+ * known nested parameter tag or its own closing tag. A bare inline mention
+ * ("use the <read_file> tool") never matches.
+ */
+
+// Tool-name tags from the common text-dialect agent harnesses (Cline, Roo,
+// Continue, aider-ish) plus the generic wrappers. These are the OPENING tags a
+// model emits when it tries to invoke a tool as text.
+const TOOL_TAGS = [
+  "read_file",
+  "write_to_file",
+  "write_file",
+  "edit_file",
+  "apply_diff",
+  "replace_in_file",
+  "search_and_replace",
+  "insert_content",
+  "search_files",
+  "list_files",
+  "list_code_definition_names",
+  "execute_command",
+  "run_command",
+  "browser_action",
+  "use_mcp_tool",
+  "access_mcp_resource",
+  "ask_followup_question",
+  "attempt_completion",
+] as const;
+
+// Nested parameter tags that legitimately appear INSIDE a text-dialect tool
+// block. An opening tool tag followed shortly by one of these is a strong
+// signal of an actual (mis-formatted) invocation rather than a prose mention.
+const PARAM_TAGS = [
+  "path",
+  "content",
+  "command",
+  "diff",
+  "args",
+  "query",
+  "regex",
+  "file_path",
+  "search",
+  "replace",
+  "line",
+  "operations",
+  "question",
+  "result",
+  "recursive",
+  "uri",
+  "server_name",
+  "tool_name",
+  "arguments",
+];
+
+const PARAM_ALTERNATION = PARAM_TAGS.join("|");
+
+// Generic tool-call wrappers used by other native formats. `<invoke name="...">`
+// is the Anthropic XML style; `<tool_call>` / `<function_calls>` are Qwen/other.
+// These are matched directly (the wrapper itself is the signal).
+const GENERIC_WRAPPER_RE =
+  /<\/?(?:tool_call|function_calls|tool_use)\b|<invoke\b[^>]*\bname\s*=|<function\b[^>]*\bname\s*=/i;
+
+/** Build a per-tool detector: `<tool>` then (within a small gap) a `<param>` or `</tool>`. */
+function buildToolRegexes(): RegExp[] {
+  return TOOL_TAGS.map(
+    (tag) =>
+      // <tag ...> [up to ~400 chars of whitespace/attrs/text] then <param> or </tag>
+      new RegExp(`<${tag}\\b[^>]*>[\\s\\S]{0,400}?(?:<(?:${PARAM_ALTERNATION})\\b[^>]*>|</${tag}>)`, "i"),
+  );
+}
+
+const TOOL_REGEXES = buildToolRegexes();
+
+export interface TextToolCallDetection {
+  detected: boolean;
+  /** The first matched tool/wrapper name, for telemetry. Null when not detected. */
+  tool: string | null;
+}
+
+/**
+ * Detect a tool call emitted as plain text. Returns the first matching tool
+ * name (or generic wrapper label) for telemetry. High precision: requires a
+ * structural invocation shape, not a bare tag mention.
+ */
+export function detectTextEmittedToolCall(text: string): TextToolCallDetection {
+  if (!text || text.length === 0) return { detected: false, tool: null };
+  // Cap the scan — pathological inputs shouldn't cost more than a glance.
+  const scan = text.length > 200_000 ? text.slice(0, 200_000) : text;
+
+  if (GENERIC_WRAPPER_RE.test(scan)) {
+    const m = scan.match(GENERIC_WRAPPER_RE);
+    return { detected: true, tool: m ? normalizeWrapperName(m[0]) : "tool_call" };
+  }
+
+  for (let i = 0; i < TOOL_REGEXES.length; i++) {
+    if (TOOL_REGEXES[i]!.test(scan)) {
+      return { detected: true, tool: TOOL_TAGS[i]! };
+    }
+  }
+  return { detected: false, tool: null };
+}
+
+function normalizeWrapperName(raw: string): string {
+  const m = raw.match(/tool_call|function_calls|tool_use|invoke|function/i);
+  return m ? m[0].toLowerCase() : "tool_call";
+}
+
+export const _internals = { TOOL_TAGS, PARAM_TAGS, GENERIC_WRAPPER_RE };

@@ -151,6 +151,7 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
+import { detectTextEmittedToolCall } from "./text-tool-call-detector.js";
 import { repairToolCallHook } from "./repair-tool-call.js";
 import {
   buildRepetitionReminder,
@@ -2639,6 +2640,14 @@ export class MessageProcessor {
             }
           }
 
+          // Detect a tool call emitted as plain TEXT (wrong dialect) when the
+          // model produced NO real tool call this turn — the action never ran,
+          // so the turn would otherwise end silently with broken/half-done work
+          // (live: storyflow_ui A/B, deepseek session 905d564dbde4 emitted
+          // `<read_file><path>…` as text after a destructive edit and stopped).
+          const _textToolCall =
+            activeToolCalls.length === 0 ? detectTextEmittedToolCall(assistantText) : { detected: false, tool: null };
+
           // Interaction log: agent response complete
           try {
             if (deps.session) {
@@ -2661,6 +2670,8 @@ export class MessageProcessor {
                   compacted: deps.getCompactedThisTurn(),
                   dsmlLeak: _dsmlMatches,
                   bashCodeBlock: _codeBlockBash,
+                  textToolXmlLeak: _textToolCall.detected,
+                  textToolXmlTool: _textToolCall.tool,
                 },
               });
             }
@@ -2683,6 +2694,31 @@ export class MessageProcessor {
                 `Re-run with \`--max-tool-rounds ${deps.maxToolRounds * 2}\` to continue, ` +
                 "or accept the partial result above.]\n",
             };
+          }
+
+          // Surface a tool-call-as-text leak so the turn is not SILENTLY wasted.
+          // When the model wrote a tool invocation as plain text (wrong dialect)
+          // and made no real tool call, the intended action never ran — the
+          // "answer" above is the unexecuted XML. Tell the user plainly instead
+          // of presenting it as a completed result. A toast also flags it so the
+          // failure is visible in the TUI, not just the transcript.
+          if (_textToolCall.detected) {
+            yield {
+              type: "content",
+              content:
+                `\n\n[⚠ The model wrote a \`${_textToolCall.tool}\` tool call as TEXT instead of invoking the tool, ` +
+                "so that action did NOT run and this turn made no real progress. " +
+                "Re-run the request (optionally with a more capable model) — the tool interface was not used.]\n",
+            };
+            const _gar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _gar?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "warn",
+              text: `model emitted a ${_textToolCall.tool} tool call as text — action not executed`,
+            });
           }
 
           const stopInput: StopHookInput = {
