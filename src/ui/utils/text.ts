@@ -5,7 +5,8 @@ export function formatTokenCount(tokens: number): string {
 }
 
 export function trunc(s: string, n: number): string {
-  return s.length <= n ? s : `${s.slice(0, n)}…`;
+  const str = String(s ?? "");
+  return str.length <= n ? str : `${str.slice(0, n)}…`;
 }
 
 export function truncateLine(s: string, n: number): string {

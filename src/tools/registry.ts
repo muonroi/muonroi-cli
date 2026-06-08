@@ -181,8 +181,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       "Execute a shell command. Output is automatically cached — every call returns a " +
       "run_id you can re-query via bash_output_get(run_id, mode=tail|head|grep|lines). " +
       "Do NOT pipe `| tail`, `| head`, `| grep`, or `> file` — that hides output from " +
-      "the cache. Run unpiped and slice via bash_output_get instead. Set background=true " +
-      "for long-running processes (dev servers, watchers).",
+      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers).",
     inputSchema: jsonSchema({
       type: "object",
       properties: {

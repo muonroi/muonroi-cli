@@ -5,6 +5,10 @@
  * Read-only, synchronous. The EE client's search() returns null on any
  * error/timeout (graceful), so ee.query maps null → ee_unavailable.
  *
+ * Anti-mù: ee.query supports explicit "recent task checkpoint" / "Progress DONE" queries
+ * so the agent (or sub-agent) can deliberately confirm finished subtasks after compactions.
+ * collections: prefer "experience-behavioral" for compaction checkpoints (see layer3).
+ *
  * Dependencies are injected (deps) so unit tests never touch the network.
  */
 
@@ -58,7 +62,9 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
     "ee.query",
     {
       description:
-        "Semantic search over the Experience Engine brain (learned warnings/recipes for this codebase). Returns hits, or an ee_unavailable error if EE is down.",
+        "Semantic search over the Experience Engine brain (learned warnings/recipes + task checkpoints for this codebase). " +
+        "Use for anti-mù recall: e.g. query='recent compaction checkpoint Progress DONE for <subtask>' or 'task finished items before last compact'. " +
+        "Returns hits, or an ee_unavailable error if EE is down. collections optional (experience-behavioral for checkpoints).",
       inputSchema: {
         query: z.string().min(1).max(1000),
         collections: z.array(z.string().max(100)).max(10).optional(),

@@ -68,8 +68,8 @@ const GenerateSchema = z.object({
 });
 
 const GeneralSchema = z.object({
-  response: z.string().describe("Direct answer to the user"),
-  reasoning: z.string().optional().describe("Optional brief reasoning"),
+  response: z.string().describe("Complete, full-length answer. Use rich markdown formatting (headings, bullet points, bold text, code blocks) to structure the information clearly. Avoid dense walls of text or long unformatted paragraphs. Ensure the output is highly readable and scannable for a developer. For analysis or meta questions, include all findings and evidence citations (file:line). Truncation defeats the purpose."),
+  reasoning: z.string().optional().describe("Optional brief internal reasoning (not shown as primary answer)"),
 });
 
 const RESPONSE_SCHEMAS: Record<string, z.ZodType> = {

@@ -8,8 +8,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type CostLogEntry, readCostLog } from "../usage/cost-log.js";
+import { readCostLog, type CostLogEntry } from "../usage/cost-log.js";
 import { readProductLedger } from "../usage/product-ledger.js";
+import { listDecisionLogDates, readDecisionLog } from "../usage/decision-log.js";
 
 type GroupBy = "callsite" | "role" | "phase" | "model" | "provider";
 
@@ -261,5 +262,137 @@ export async function runUsageReport(opts: UsageReportOpts = {}): Promise<void> 
       const drift = (r.driftSum / r.driftSamples).toFixed(2);
       console.log(`  ${r.key.padEnd(28)} drift×${drift}  over ${r.driftSamples} calls`);
     }
+  }
+
+  // Native self-assessment for the inner agent (one `usage` call now gives context bloat + comfort signals
+  // instead of 5+ separate bash/read/grep for system info, tool load, and "am I going blind on state?").
+  // This is the actionable output the agent can consume after any turn to self-calibrate.
+  console.log("\n[agent-self] comfort snapshot (run with --breakdown for full per-turn numbers)");
+  console.log("  batch system info in ONE bash with ; or && (uname; node -v; ls -la | head; git status; df -h; ps | head), then bash_output_get(run_id, mode=...) for slices — never re-run.");
+  console.log("  prefer read_file + grep over bash cat/grep/find for source; read-path budget defaults to 0 (unlimited after write/edit thanks to notifyWrite).");
+  console.log("  high avg tools or system chars = use sub-agent compaction or cheaper model for research/verify roles; watch the drift table above.");
+}
+
+export { aggregate, printTable };
+
+function parseRelativeSince(since?: string): number | null {
+  if (!since) return null;
+  const m = since.match(/^(\d+)([dhm])$/i);
+  if (!m) return null;
+  const n = parseInt(m[1], 10);
+  const u = m[2].toLowerCase();
+  const ms = u === "d" ? 86400000 : u === "h" ? 3600000 : 60000;
+  return Date.now() - n * ms;
+}
+
+/**
+ * security-audit (Task 3): yolo/permission overrides + high-risk cmds from decision-log (populated by appendAudit in permission-mode + bash shuru).
+ * Reuses aggregate/printTable. Supports --since <date|7d|1h|30m>
+ */
+export async function runSecurityAudit(opts: { since?: string; json?: boolean; format?: "table" | "json" | "md" } = {}) {
+  const home = muonroiHome();
+  const cutoff = parseRelativeSince(opts.since);
+  let dates = await listDecisionLogDates(home);
+  if (opts.since && /^\d{4}-\d{2}-\d{2}$/.test(opts.since)) {
+    dates = [opts.since];
+  } else if (cutoff) {
+    dates = dates.slice(-10);
+  } else {
+    dates = dates.slice(-3);
+  }
+  let decisions: any[] = [];
+  for (const d of dates) {
+    try { decisions = decisions.concat(await readDecisionLog(d, home)); } catch {}
+  }
+  if (cutoff) {
+    decisions = decisions.filter((d: any) => (d.ts || 0) >= cutoff);
+  }
+  const costDates = cutoff || !opts.since ? (await listCostLogDates(home)).slice(-1) : [opts.since!];
+  let costEntries: CostLogEntry[] = [];
+  for (const d of costDates) {
+    try { costEntries = costEntries.concat(await readCostLog(d, home)); } catch {}
+  }
+  const costRows = aggregate(costEntries, "callsite").slice(0, 8);
+  const taken = decisions.filter((d: any) => d.taken);
+  const overrides = decisions.filter((d: any) => d.kind === "yolo-override" || d.kind === "permission-override");
+  const highRiskCmds: string[] = overrides
+    .map((d: any) => {
+      const ctx = d.meta?.context || {};
+      let cmd = ctx.command ? String(ctx.command) : (ctx.shuru ? "[shuru]" : "");
+      if (cmd && cmd !== "[shuru]") {
+        cmd = cmd.replace(/((?:key|token|secret|pwd|pass|auth|AWS_)[^=]*=)[^\s]+/gi, "$1[REDACTED]");
+        cmd = cmd.replace(/https?:\/\/\S*?(?:key|token|secret)=\S+/gi, "[REDACTED_URL]");
+        cmd = cmd.slice(0, 80);
+      }
+      return cmd;
+    })
+    .filter(Boolean);
+  if (opts.json || opts.format === "json") {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          decisions: decisions.length,
+          taken: taken.length,
+          overrides: overrides.length,
+          highRiskCmds: [...new Set(highRiskCmds)].slice(0, 10),
+          topCost: costRows,
+        },
+        null,
+        2
+      ) + "\n"
+    );
+    return;
+  }
+  console.log(
+    `\n[security-audit] ${decisions.length} decisions (${taken.length} taken) | ${overrides.length} yolo/permission overrides | ${costEntries.length} cost entries (since ${opts.since || "recent"})`
+  );
+  if (overrides.length > 0) {
+    console.log("Yolo / Permission overrides:");
+    overrides.slice(0, 5).forEach((d: any) => {
+      const ctx = d.meta?.context || {};
+      const cmd = ctx.command ? ` cmd=${String(ctx.command).slice(0, 40)}` : ctx.shuru ? " [shuru]" : "";
+      console.log(`  ${new Date(d.ts).toISOString().slice(0, 19)} ${d.kind} tool=${d.tool || ""}${cmd} reason=${d.reason || ""}`);
+    });
+  }
+  if (highRiskCmds.length > 0) {
+    console.log("\nHigh-risk / sandbox cmds (redacted):");
+    [...new Set(highRiskCmds)].slice(0, 5).forEach((c) => console.log(`  ${c}`));
+  }
+  if (taken.length > 0) {
+    console.log("\nOther risky decisions taken:");
+    taken
+      .filter((d: any) => !["yolo-override", "permission-override"].includes(d.kind))
+      .slice(0, 3)
+      .forEach((d: any) => console.log(`  ${d.ts} ${d.kind} ${d.reason || ""}`));
+  }
+  console.log("\nTop spend by callsite (review for bloat/risk):");
+  printTable(costRows, "callsite");
+  if (opts.format === "md") {
+    console.log("\n> Audit events from permission-mode + shuru included; review before prod use.");
+  }
+}
+
+/**
+ * Wave 1: perf-regression subcommand.
+ * Reuses aggregate for cost/drift snapshot. --compare is stub (delta in later phase).
+ */
+export async function runPerfRegression(opts: { compare?: string; json?: boolean; format?: "table" | "json" } = {}) {
+  const home = muonroiHome();
+  const dates = (await listCostLogDates(home)).slice(-2);
+  let entries: CostLogEntry[] = [];
+  for (const d of dates) {
+    try { entries = entries.concat(await readCostLog(d, home)); } catch {}
+  }
+  const rows = aggregate(entries, "callsite");
+  if (opts.json) {
+    process.stdout.write(JSON.stringify({ entries: entries.length, top: rows.slice(0, 5) }, null, 2) + "\n");
+    return;
+  }
+  console.log(`\n[perf-regression] snapshot ${entries.length} entries (compare=${opts.compare || "latest"})`);
+  printTable(rows.slice(0, 8), "callsite");
+  const drifts = rows.filter((r) => r.driftSamples >= 2 && r.driftSum / r.driftSamples > 1.2).slice(0, 3);
+  if (drifts.length > 0) {
+    console.log("\nHigh drift (>1.2x) callsites (potential regression):");
+    drifts.forEach((r) => console.log(`  ${r.key} drift×${(r.driftSum / r.driftSamples).toFixed(2)} over ${r.driftSamples}`));
   }
 }

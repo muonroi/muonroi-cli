@@ -14,7 +14,7 @@ vi.mock("../../ee/health.js", () => ({
 // Mock getDatabase with a minimal SQLite-like interface
 const mockGet = vi.fn().mockReturnValue({ cnt: 0 });
 const mockPrepare = vi.fn().mockReturnValue({ get: mockGet });
-vi.mock("../../storage/db.js", () => ({
+vi.mock("../../storage/db", () => ({
   getDatabase: vi.fn(() => ({ prepare: mockPrepare })),
 }));
 

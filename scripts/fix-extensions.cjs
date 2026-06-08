@@ -35,6 +35,8 @@ if (!fs.existsSync(DIST)) {
 //   group 1: leading keyword + opening quote (e.g. `from "`)
 //   group 2: the specifier
 //   group 3: closing quote
+//
+// Refined to avoid matching inside comments (naive same-line check).
 const STATIC_RE = /(\b(?:from|import)\s+['"])(\.\.?\/[^'"]+)(['"])/g;
 const DYNAMIC_RE = /(\bimport\s*\(\s*['"])(\.\.?\/[^'"]+)(['"]\s*\))/g;
 
@@ -44,7 +46,12 @@ let filesScanned = 0;
 let importsRewritten = 0;
 let unresolved = 0;
 
-function rewriteSpecifier(spec, fromFile) {
+function rewriteSpecifier(spec, fromFile, offset, fullText) {
+  // Naive comment check: skip if preceded by // on the same line.
+  const lineStart = fullText.lastIndexOf("\n", offset) + 1;
+  const linePrefix = fullText.slice(lineStart, offset);
+  if (linePrefix.trim().startsWith("//")) return spec;
+
   const ext = path.extname(spec);
   if (SKIP_EXTS.has(ext)) return spec;
 
@@ -81,8 +88,14 @@ function rewriteSpecifier(spec, fromFile) {
 function processFile(file) {
   const original = fs.readFileSync(file, "utf8");
   let out = original;
-  out = out.replace(STATIC_RE, (_, pre, spec, post) => `${pre}${rewriteSpecifier(spec, file)}${post}`);
-  out = out.replace(DYNAMIC_RE, (_, pre, spec, post) => `${pre}${rewriteSpecifier(spec, file)}${post}`);
+  out = out.replace(
+    STATIC_RE,
+    (_, pre, spec, post, offset) => `${pre}${rewriteSpecifier(spec, file, offset, original)}${post}`,
+  );
+  out = out.replace(
+    DYNAMIC_RE,
+    (_, pre, spec, post, offset) => `${pre}${rewriteSpecifier(spec, file, offset, original)}${post}`,
+  );
   if (out !== original) fs.writeFileSync(file, out, "utf8");
   filesScanned++;
 }

@@ -1509,6 +1509,27 @@ usage
     await runCostForensics({ prefix: sessionPrefix, json: opts.json });
   });
 
+usage
+  .command("security-audit")
+  .description("Security posture: yolo/permission overrides, high-risk cmds, shuru audits + cost (from decision-log events)")
+  .option("--since <date|7d|1h|30m>", "Restrict to UTC date or relative window")
+  .option("--json", "Emit as JSON")
+  .option("--format <fmt>", "table | json | md", "table")
+  .action(async (opts: { since?: string; json?: boolean; format?: string }) => {
+    const { runSecurityAudit } = await import("./cli/usage-report.js");
+    await runSecurityAudit({ since: opts.since, json: opts.json, format: opts.format as any });
+  });
+
+usage
+  .command("perf-regression")
+  .description("Perf snapshot + estimator drift (compare baseline stub for later)")
+  .option("--compare <file>", "Baseline file for delta")
+  .option("--json", "Emit JSON")
+  .action(async (opts: { compare?: string; json?: boolean }) => {
+    const { runPerfRegression } = await import("./cli/usage-report.js");
+    await runPerfRegression({ compare: opts.compare, json: opts.json });
+  });
+
 const mcp = program.command("mcp").description("Manage MCP server configuration");
 
 mcp

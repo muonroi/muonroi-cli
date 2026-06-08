@@ -215,3 +215,16 @@ export function attachReminderToMessages<T>(messages: ReadonlyArray<T>, reminder
   // Fallback path — push a fresh system-role message.
   return [...(messages as ReadonlyArray<T>), { role: "system", content: reminder } as unknown as T];
 }
+
+/**
+ * Companion to buildScopeReminder for anti-mù.
+ * Returns a short note (under SCOPE_REMINDER_MAX_CHARS budget when combined) that
+ * tells the agent to self-check against persisted EE checkpoints.
+ * Used by prepareStep / sub-agent paths after compaction.
+ */
+export function buildCheckpointReminder(iteration: number, hasEECheckpoint: boolean): string {
+  // Enhanced per anti-mù (ideas 3+4): lighter KEEP_TOOL_IDS + on-demand artifact fetch.
+  const base = `[checkpoint status iter=${iteration}${hasEECheckpoint ? " (EE persisted)" : ""}] Task finished? Emit PRESERVE or KEEP_TOOL_IDS: id1,id2. High-value elided? Use ee.query tool with "tool-artifact id=XXX".`;
+  if (base.length <= 220) return base;
+  return base.slice(0, 220);
+}

@@ -7,6 +7,7 @@ import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
+import { appendAudit } from "../utils/permission-mode.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
 
@@ -564,7 +565,15 @@ export class BashTool {
     if (blockedReason) {
       return { ok: false, error: blockedReason };
     }
-    return { ok: true, command: wrapCommandForShuru(this.cwd, command, this.sandboxSettings) };
+    const wrapped = wrapCommandForShuru(this.cwd, command, this.sandboxSettings);
+    appendAudit({
+      kind: "permission-override",
+      tool: "bash",
+      mode: "safe",
+      context: { command, shuru: true, settings: this.sandboxSettings },
+      ts: Date.now(),
+    });
+    return { ok: true, command: wrapped };
   }
 
   private formatSandboxRuntimeError(output: string, fallbackMessage: string): string | null {

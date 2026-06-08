@@ -68,6 +68,21 @@ function extractBBMarkerShas(enriched: string): Set<string> {
 }
 
 /**
+ * Phase 3 full implementation: dedicated extractor for compaction checkpoint markers.
+ * Mirrors BB contract but uses distinct marker so checkpoints can be deduped independently
+ * of principles/behavioral and BB-injected context.
+ */
+function extractCheckpointMarkerShas(enriched: string): Set<string> {
+  const shas = new Set<string>();
+  const regex = /<!-- ee-checkpoint-injected:([0-9a-f]{16}) -->/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(enriched)) !== null) {
+    shas.add(m[1]);
+  }
+  return shas;
+}
+
+/**
  * Compute sha16 for a payload text (mirrors bbContextMarker in bb-retrieval.ts).
  * Used to check whether an EE hit payload was already injected by the BB path.
  */
@@ -89,7 +104,10 @@ function extractPointText(p: EEPoint): string {
       solution?: string;
       principle?: string;
       judgment?: string;
+      progress?: string;
+      summary?: string;
     };
+    if (parsed.progress || parsed.summary) return (parsed.progress ?? parsed.summary ?? "") as string;
     return parsed.solution ?? parsed.principle ?? parsed.judgment ?? "";
   } catch {
     return "";
@@ -102,6 +120,7 @@ function isT1Proven(p: EEPoint): boolean {
       tier?: string;
       hitCount?: number;
     };
+    // Checkpoints from compaction (ee-anti-mu) are injected via formatTaskCheckpoints regardless of T1 tier.
     return parsed.tier === "proven" || (parsed.hitCount ?? 0) >= T1_HIT_THRESHOLD;
   } catch {
     return false;
@@ -112,6 +131,7 @@ interface BridgeResult {
   principlePoints: EEPoint[];
   behavioralPoints: EEPoint[];
   t1Rules: string[];
+  checkpointPoints: EEPoint[];
   error?: string;
   filtered?: number;
 }
@@ -121,14 +141,18 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
     // Parallel queries: T0 principles (lower floor, pre-validated abstractions)
     // and T1/T2 behavioral (standard floor, contextual patterns). Running both
     // concurrently keeps total latency at ~1500ms rather than ~3000ms.
+    // Phase 3 (ee-anti-mu): third arm for compaction checkpoints so PIL can surface
+    // prior "Progress ✔ DONE / elided" without the agent having to ask "task finished?".
     const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
-    const [principleRaw, behavioralRaw] = await Promise.all([
+    const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
       searchByText(raw, ["experience-principles"], 3, signal),
       searchByText(raw, ["experience-behavioral"], 4, signal),
+      searchByText("Context checkpoint summary OR \"compaction checkpoint\" recent Progress DONE elided OR tool-artifact OR \"tool result id=\"", ["experience-behavioral"], 3, signal).catch(() => []),
     ]);
 
     const principlePoints = principleRaw.filter((p) => (p.score ?? 0) >= PIL_PRINCIPLES_FLOOR);
     const behavioralPoints = behavioralRaw.filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR);
+    const checkpointPoints = (checkpointRaw as EEPoint[]).filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR * 0.7); // lowered for anti-mù: force surface 1-2 recent "Context checkpoint summary" ✔ DONE even on marginal scores for sessions with prior compacts (proxy via sessionId in caller)
     const filtered = principleRaw.length - principlePoints.length + (behavioralRaw.length - behavioralPoints.length);
 
     // T1 rules = proven-tier points from either collection. These get stored on
@@ -136,10 +160,10 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
     // reflexes, not hints.
     const t1Rules = [...principlePoints, ...behavioralPoints].filter(isT1Proven).map(extractPointText).filter(Boolean);
 
-    return { principlePoints, behavioralPoints, t1Rules, filtered };
+    return { principlePoints, behavioralPoints, t1Rules, checkpointPoints, filtered };
   } catch (err) {
     logEeFailure("pil.layer3.queryEeBridge", classifyEeError(err), err, { budgetMs: PIL_SEARCH_TIMEOUT_MS });
-    return { principlePoints: [], behavioralPoints: [], t1Rules: [], error: String(err) };
+    return { principlePoints: [], behavioralPoints: [], t1Rules: [], checkpointPoints: [], error: String(err) };
   }
 }
 
@@ -155,6 +179,26 @@ function formatExperienceHints(points: EEPoint[]): string {
   const lines = points.map((p) => `- ${extractPointText(p)} [id:${p.id}]`).filter((l) => l !== "- ");
   if (lines.length === 0) return "";
   return `[experience: Relevant patterns from past work]\n${lines.join("\n")}`;
+}
+
+/**
+ * Format compaction/task checkpoints surfaced by Layer 3 search.
+ * These are the structured summaries persisted by orchestrator compactForContext (ee-anti-mu Phase 3).
+ * Injected so the agent (and sub-agents) can answer "task đã xong chưa?", "đã compact được chưa?" from EE memory
+ * without relying only on the ephemeral top-of-context summary that may be further compacted later.
+ */
+function formatTaskCheckpoints(points: EEPoint[]): string {
+  if (points.length === 0) return "";
+  const lines = points.map((p) => {
+    const t = extractPointText(p);
+    // Idea 4: surface tool-artifact refs so agent sees "elided high-value, query for full"
+    if (/tool-artifact|tool result id=|elided.*id=/.test(t.toLowerCase())) {
+      return `- [artifact] ${t.slice(0, 160)} [id:${p.id}]`;
+    }
+    return `- ${t.slice(0, 180)} [id:${p.id}]`;
+  }).filter((l) => l !== "- ");
+  if (lines.length === 0) return "";
+  return `[task checkpoints — prior compactions: use to answer "task finished?", "compacted yet?". Artifacts: use ee.query tool with "tool-artifact id=XXX" for full elided tool output.] \n${lines.join("\n")}`;
 }
 
 export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineContext> {
@@ -272,7 +316,17 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         })
       : behavioralPoints;
 
-  const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral];
+  // Checkpoint dedup — now uses dedicated marker (full Phase 3 implementation).
+  const checkpointMarkerShas = extractCheckpointMarkerShas(ctx.enriched);
+  const deduplicatedCheckpoints =
+    checkpointMarkerShas.size > 0
+      ? (result.checkpointPoints || []).filter((p) => {
+          const text = extractPointText(p);
+          return text.length === 0 || !checkpointMarkerShas.has(payloadSha16(text));
+        })
+      : (result.checkpointPoints || []);
+
+  const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral, ...deduplicatedCheckpoints];
 
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
@@ -282,7 +336,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     const injectedChunk = {
       type: "experience_injected" as const,
       experienceInjected: {
-        pointCount: totalPoints,
+        pointCount: totalPoints + deduplicatedCheckpoints.length,
         pointIds: allPoints.map((p) => String(p.id)),
         scoreFloor: PIL_SCORE_FLOOR,
         taskType: ctx.taskType ?? undefined,
@@ -306,6 +360,12 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   if (rulesText) parts.push(truncateToBudget(rulesText, principlesBudget));
   const hintsText = formatExperienceHints(deduplicatedBehavioral);
   if (hintsText) parts.push(truncateToBudget(hintsText, behavioralBudget));
+  const cpText = formatTaskCheckpoints(deduplicatedCheckpoints);
+  if (cpText) {
+    const marker = `<!-- ee-checkpoint-injected:${payloadSha16(cpText)} -->`;
+    // Idea 5: raised from 0.08 to 0.12 for higher fidelity on critical progress + artifact refs.
+    parts.push(truncateToBudget(cpText + "\n" + marker, Math.floor(ctx.tokenBudget * 0.12)));
+  }
   const injected = parts.join("\n");
 
   try {
@@ -317,6 +377,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           role: "knowledge_retriever",
           principleCount: principlePoints.length,
           behavioralCount: behavioralPoints.length,
+          checkpointCount: deduplicatedCheckpoints.length,
           t1RuleCount: t1Rules.length,
           pointIds: allPoints.map((p) => String(p.id)),
           injectedChars: injected.length,
@@ -338,7 +399,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
       {
         name: "ee-experience-injection",
         applied: true,
-        delta: `principles=${deduplicatedPrinciples.length} behavioral=${deduplicatedBehavioral.length} t1=${t1Rules.length} chars=${injected.length}${bbMarkerShas.size > 0 ? ` bb-dedup=${bbMarkerShas.size}` : ""}`,
+        delta: `principles=${deduplicatedPrinciples.length} behavioral=${deduplicatedBehavioral.length} checkpoints=${deduplicatedCheckpoints.length} t1=${t1Rules.length} chars=${injected.length}${bbMarkerShas.size > 0 ? ` bb-dedup=${bbMarkerShas.size}` : ""}`,
       },
     ],
   };

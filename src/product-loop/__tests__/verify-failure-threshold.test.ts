@@ -16,11 +16,11 @@ import type { PostToolPayload } from "../../ee/types.js";
 import { pushFailureToEE, recordVerifyFailureAndMaybePush } from "../verify-failure-tracking.js";
 
 // P3.6: mock storage to capture logInteraction calls
-vi.mock("../../storage/index.js", () => ({
+vi.mock("../../storage/index", () => ({
   logInteraction: vi.fn(),
 }));
 
-import { logInteraction } from "../../storage/index.js";
+import { logInteraction } from "../../storage/index";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

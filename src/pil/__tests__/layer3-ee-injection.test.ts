@@ -131,7 +131,15 @@ describe("layer3EeInjection (bridge-based)", () => {
       expect.any(Number),
       expect.any(Object),
     );
-    expect(vi.mocked(searchByText)).toHaveBeenCalledTimes(2);
+    // Phase 3 ee-anti-mu + upgrade: third call for compaction checkpoints (targeted query on behavioral collection).
+    // Now lower score floor (0.7) + explicit PRESERVE/ee.query in contract/playbook + unconditional layer1 enrichment for sessionId turns.
+    expect(vi.mocked(searchByText)).toHaveBeenCalledWith(
+      expect.stringContaining("Context checkpoint summary"),
+      ["experience-behavioral"],
+      expect.any(Number),
+      expect.any(Object),
+    );
+    expect(vi.mocked(searchByText)).toHaveBeenCalledTimes(3);
   });
 });
 

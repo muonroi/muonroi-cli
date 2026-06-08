@@ -8,11 +8,11 @@
  * 4. synthesis contains evidence signals from research output
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { appendSystemMessage, logInteraction } from "../../storage/index.js";
+import { appendSystemMessage, logInteraction } from "../../storage/index";
 
 // ── Module-level mocks — declared before any dynamic import ─────────────────
 
-vi.mock("../../storage/index.js", () => ({
+vi.mock("../../storage/index", () => ({
   appendSystemMessage: vi.fn(),
   appendMessages: vi.fn(),
   loadTranscript: vi.fn().mockReturnValue([]),

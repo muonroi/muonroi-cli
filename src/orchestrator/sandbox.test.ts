@@ -39,7 +39,7 @@ async function importAgentModule() {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.resetModules();
-  vi.doUnmock("../storage/index");
+  vi.doUnmock("../storage/index.js");
 });
 
 describe("Agent sandbox mode", { timeout: 30_000 }, () => {

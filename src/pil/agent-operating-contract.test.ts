@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AGENT_OPERATING_CONTRACT, buildContractSection } from "./agent-operating-contract.js";
 
 describe("AGENT_OPERATING_CONTRACT", () => {
-  it("covers all five work phases", () => {
+  it("covers core work phases + anti-mù compaction contract (upgrade)", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/BEFORE ACTING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/READING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/EXECUTING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/WHEN UNSURE/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/REPORTING/i);
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/ANTI-MÙ \/ COMPACTION/i);
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/PRESERVE_FULL_CONTEXT/i);
   });
 
   it("carries the anti-hallucination / grounding rule in the REPORTING phase", () => {
@@ -48,8 +50,8 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/END CONTRACT/i);
   });
 
-  it("stays compact (under 1200 chars) to preserve attention budget on every turn", () => {
-    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(1200);
+  it("stays compact (under 1800 chars) to preserve attention budget on every turn (anti-mù section added)", () => {
+    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(1800);
   });
 });
 

@@ -112,7 +112,7 @@ import {
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
   type SessionStore,
-} from "../storage/index";
+} from "../storage/index.js";
 import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
@@ -120,7 +120,7 @@ import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../type
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
-import { type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
+import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
@@ -170,12 +170,14 @@ import {
 import {
   attachReminderToMessages,
   buildScopeReminder,
+  buildCheckpointReminder,
   type ComplexitySize,
   cadenceForSize,
   shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
@@ -573,6 +575,7 @@ export class MessageProcessor {
           interactionHandler: discoveryHandler,
           llmFallback,
           clarificationProposer,
+          recentTurnsSummary: deps.buildRecentTurnsSummary(),
         });
       } catch (err) {
         pilCtxResolved = {
@@ -666,7 +669,13 @@ export class MessageProcessor {
     // skip the MCP tool catalog, which dominates input tokens (~20K) and is
     // useless for "hi" / "ok" / "thanks".
     const isChitchat = pilCtx.intentKind === "chitchat";
-    const enrichedMessage = pilCtx.enriched;
+    let enrichedMessage = pilCtx.enriched;
+    if (pilCtx.fallbackReason) {
+      // Surface PIL degradation to the model so it can calibrate trust in
+      // routing, taskType, and any injected directives. Without this the
+      // agent has no idea the 200ms fast-path or discovery timeout fired.
+      enrichedMessage = `[PIL fallback: ${pilCtx.fallbackReason} — classification/routing may be inaccurate or layers skipped; using raw input.]\n\n${enrichedMessage}`;
+    }
     deps.setPilActive(pilCtx.taskType !== null);
     deps.setPilEnrichmentDelta(
       pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4),
@@ -1279,21 +1288,37 @@ export class MessageProcessor {
             const filteredServers = filterMcpServersByMessage(loadMcpServers(), userMessage, {
               disabled: process.env.MUONROI_DISABLE_SMART_MCP === "1",
             });
-            const mcpBundle = await buildMcpToolSet(filteredServers, {
-              onOAuthRequired: (_serverId, url) => {
-                const urlStr = url.toString();
-                import("child_process").then(({ exec }) => {
-                  const cmd =
-                    process.platform === "win32"
-                      ? `start "" "${urlStr}"`
-                      : process.platform === "darwin"
-                        ? `open "${urlStr}"`
-                        : `xdg-open "${urlStr}"`;
-                  exec(cmd);
-                });
-              },
-            });
-            closeMcp = mcpBundle.close;
+            // MCP non-blocking: race the build against a 2500ms cap so a slow
+            // stdio MCP server spawn (or many optional servers) does not block
+            // the main turn's first token / streamText indefinitely. On timeout
+            // or error we fall back to builtins only (domain servers like fs/tools
+            // are still valuable but the optional ones can be skipped for this turn).
+            let mcpBundle: any = null;
+            try {
+              mcpBundle = await Promise.race([
+                buildMcpToolSet(filteredServers, {
+                  onOAuthRequired: (_serverId, url) => {
+                    const urlStr = url.toString();
+                    import("child_process").then(({ exec }) => {
+                      const cmd =
+                        process.platform === "win32"
+                          ? `start "" "${urlStr}"`
+                          : process.platform === "darwin"
+                            ? `open "${urlStr}"`
+                            : `xdg-open "${urlStr}"`;
+                      exec(cmd);
+                    });
+                  },
+                }),
+                new Promise((_, reject) =>
+                  setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500),
+                ),
+              ]);
+            } catch (err) {
+              console.error("[MCP] buildMcpToolSet timed out or failed, proceeding with builtins only", err);
+            }
+            if (mcpBundle) {
+              closeMcp = mcpBundle.close;
             // Drop filesystem-MCP read/write/edit tools that duplicate the
             // first-class builtin file tools. Without this, models re-read the
             // SAME file via both `read_file` and `mcp_filesystem__read_text_file`
@@ -1321,6 +1346,7 @@ export class MessageProcessor {
               yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
             }
           }
+        }
 
           // PIL response tools: inject structured output tool when taskType detected
           if (_hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo)) {
@@ -1653,6 +1679,32 @@ export class MessageProcessor {
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
+
+              // Agent-controlled veto (PRESERVE) or lighter selective keep (KEEP_TOOL_IDS) for this turn's B4 compaction.
+              // PRESERVE_FULL_CONTEXT skips the compactor entirely (full history).
+              // KEEP_TOOL_IDS: id1,id2 (from prior stub " (id=...) ") protects only those specific tool results
+              // without the cost of a full veto. Parsed from reasoning or assistant note.
+              let keepToolIds: string[] = [];
+              const hasPreserve = stripped.some((m: any) => {
+                const c = m?.content;
+                const texts: string[] = [];
+                if (typeof c === "string") texts.push(c);
+                if (Array.isArray(c)) {
+                  for (const p of c) if (typeof p?.text === "string") texts.push(p.text);
+                }
+                const joined = texts.join(" ");
+                if (joined.includes("PRESERVE_FULL_CONTEXT")) return true;
+                // Idea 3: parse lighter token
+                const mKeep = joined.match(/KEEP_TOOL_IDS\s*[:=]\s*([a-z0-9_, -]+)/i);
+                if (mKeep) {
+                  keepToolIds = mKeep[1].split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+                }
+                return false;
+              });
+              if (hasPreserve) {
+                return { messages: stripped };
+              }
+
               // F2 — envelope = system prompt + JSON-Schema of every tool
               // re-sent on every step. Without this the threshold check
               // ignored 20-50K of fixed prompt overhead and the compactor
@@ -1662,13 +1714,46 @@ export class MessageProcessor {
               // can pick a token-aware threshold and shrink keepLastTurns
               // when the window is approaching its ceiling.
               const contextWindowTokens = runtime.modelInfo?.contextWindow ?? 0;
+              // Idea 4: fire-and-forget persist of elided tool outputs to EE (source=tool-artifact)
+              // so later layer3/ee.query "tool-artifact id=xxx" or "full tool result id=..." can re-hydrate.
+              // Use process-level fallbacks (prepareStep closure does not directly expose outer cwd/session in this scope).
+              const _cwd = process.cwd();
+              const _sess: string | undefined = undefined; // best-effort; EE artifact still indexable by content + meta.toolCallId
+              const persistArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
+                try {
+                  getDefaultEEClient()
+                    .extract(
+                      {
+                        transcript: fullContent.slice(0, 8000),
+                        projectPath: _cwd,
+                        meta: { source: "tool-artifact", toolCallId, toolName, reason, sessionId: _sess, elidedAtStep: sn },
+                      },
+                      AbortSignal.timeout(700),
+                    )
+                    .catch(() => {});
+                } catch {
+                  /* fail-open, no silent swallow of the decision */
+                }
+              };
               const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
                 keepLastTurns: topLevelCompactKeepLast,
                 label: "top-level",
                 envelopeChars,
                 contextWindowTokens,
+                keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+                persistArtifact,
               });
+              // Pre-compaction visibility: give the agent one step of notice
+              // before B4 actually rewrites history into stubs. This is the
+              // advance warning that was missing — agent can now decide to
+              // summarize, finish, or request preservation.
+              const _preCompactWarnAt = Math.floor(topLevelCompactThreshold * 0.78);
+              if (stripped.length > _preCompactWarnAt && compacted === stripped) {
+                const _cp = buildCheckpointReminder(sn, true);
+                const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible.]`;
+                return { messages: attachReminderToMessages(stripped, _pre) };
+              }
               // Phase 4A — scope reminder injection (REQ-005).
               // Cadence K = 3/5/8 for small/medium/large. Soft-warn fires
               // ONCE per session at floor(ceiling*0.7). Reminder lives in
@@ -1733,6 +1818,17 @@ export class MessageProcessor {
                 return { messages: withReminder };
               }
               if (compacted === stripped && stripped === stepMessages) return {};
+              // Self-awareness note: tell the model compaction happened so it
+              // knows earlier context was elided and can adjust its behavior.
+              // Enhanced per EE anti-mù plan (docs/ee-anti-mu-compaction-plan.md Phase 2): include proactive
+              // "task finished?", "compacted yet?", "EE checkpoint" so agent can self-assess and avoid mù
+              // even when the top-level summary is not in its immediate focus (sub-agents, long loops).
+              const _compactNote = compacted !== stripped
+                ? `[context compacted at step ${sn} — older or low-value tool results rewritten to stubs to fit budget. High-value evidence (file reads, bash, your previous responses) is kept verbatim. ${buildCheckpointReminder(sn, true)}]`
+                : null;
+              if (_compactNote) {
+                return { messages: attachReminderToMessages(compacted, _compactNote) };
+              }
               return { messages: compacted };
             },
             ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
@@ -1791,8 +1887,8 @@ export class MessageProcessor {
                   totalChars: assistantText.length,
                   finishReason: finishReason ?? "stop",
                 });
-              } catch {
-                /* best-effort */
+              } catch (err) {
+                console.error("[Agent:onFinish] failed to emit llm-done", err);
               }
               deps.setCurrentCallId("");
             },
@@ -2014,8 +2110,8 @@ export class MessageProcessor {
                     };
                     yield { type: "content", content: `[Vision Bridge: image → text for ${turnModelId}]\n` };
                   }
-                } catch {
-                  /* fail-open */
+                } catch (err) {
+                  console.error("[Agent:visionBridge] failed to process image for tool result", err);
                 }
 
                 // Capture into the stall-rescue digest before any further
@@ -2049,7 +2145,9 @@ export class MessageProcessor {
                     session_id: deps.session?.id,
                     cwd: deps.bash.getCwd(),
                   };
-                  await deps.fireHook(postInput, signal).catch(() => {});
+                  await deps.fireHook(postInput, signal).catch((err) => {
+                    console.error("[Agent:PostToolUse hook] failed", err);
+                  });
                 }
 
                 // Response tool: yield as structured_response instead of tool_result.
@@ -2266,9 +2364,22 @@ export class MessageProcessor {
                 // Plan 03-01: check permission mode before yielding approval request to UI.
                 // auto-edit auto-approves file ops; yolo auto-approves everything.
                 const toolName = approvalPart.toolCall?.toolName ?? "";
-                if (!toolNeedsApproval(toolName, deps.permissionMode)) {
+                const input = approvalPart.toolCall?.input ?? {};
+                const context = toolName === "bash"
+                  ? { command: String((input as any).command ?? "") }
+                  : (toolName === "write_file" || toolName === "edit_file" || toolName === "read_file" || toolName === "grep"
+                      ? { path: String((input as any).path ?? (input as any).file_path ?? "") }
+                      : undefined);
+                if (!toolNeedsApproval(toolName, deps.permissionMode, context)) {
                   // Auto-approve: respond directly without surfacing to UI.
                   deps.respondToToolApproval(approvalPart.approvalId, true);
+                  appendAudit({
+                    kind: deps.permissionMode === "yolo" ? "yolo-override" : "permission-override",
+                    tool: toolName,
+                    mode: deps.permissionMode,
+                    context,
+                    ts: Date.now(),
+                  });
                   break;
                 }
 

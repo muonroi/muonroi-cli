@@ -122,6 +122,10 @@ const VI_PREFIX_PHRASES: ReadonlyArray<string> = [
   "vay thi",
   "thế thì",
   "the thi",
+  "vậy bạn",
+  "vay ban",
+  "vậy hãy",
+  "vay hay",
   "nó ",
   "no ",
   "cái đó",
@@ -142,6 +146,9 @@ export function isLikelyFollowUp(raw: string): boolean {
   for (const phrase of VI_PREFIX_PHRASES) {
     if (lower === phrase.trim() || lower.startsWith(phrase)) return true;
   }
+  // Generic 'so' / 'vậy' check — often used as 'so do X' or 'vậy làm X'
+  if (lower.startsWith("vậy ") || lower.startsWith("vay ")) return true;
+
   // Pronoun-only path requires the prompt to be quite short (no concrete
   // file/module name anywhere). "fix the auth flow" is NOT a follow-up;
   // "fix it" IS. Bound at 40 chars to avoid false positives.

@@ -2,7 +2,7 @@
 
 import type { ModelMessage, ToolSet } from "ai";
 import { extractSession } from "../ee/extract-session.js";
-import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState } from "../ee/intercept.js";
+import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState, updateLastSurfacedState } from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
@@ -45,7 +45,7 @@ import {
   markMessageCompleted,
   recordUsageEvent,
   SessionStore,
-} from "../storage/index";
+} from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
@@ -1532,6 +1532,29 @@ export class Agent {
     this.messages = [createCompactionSummaryMessage(summary), ...pinnedReinjections, ...preparation.keptMessages];
     this.messageSeqs = [null, ...pinnedReinjectionSeqs, ...keptSeqs];
 
+    // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
+    // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
+    // (and sub-agents) even after further B3/B4 rewrites. Uses same client + fail-open pattern as promptStale above (1449).
+    // Transcript is the summary itself (not full history) to keep it small and focused on task state.
+    getDefaultEEClient()
+      .extract(
+        {
+          transcript: `[Context checkpoint summary]\n${summary}`,
+          projectPath: this.bash.getCwd(),
+          meta: {
+            source: "cli-compact-checkpoint",
+            sessionId: this.session?.id ?? undefined,
+            iteration: this._compactionStats.count + 1,
+            tokensBefore: preparation.tokensBefore,
+          },
+        },
+        AbortSignal.timeout(1500),
+      )
+      .catch(() => {});
+
+    // Mark as surfaced for prompt-stale reconciliation (per plan Phase 1).
+    updateLastSurfacedState([`compact-checkpoint-${this._compactionStats.count + 1}`]);
+
     // Track compaction stats — net of the tokens spent ON compaction itself.
     const tokensAfter = estimateConversationTokens(system, this.messages);
     const grossSaved = Math.max(0, preparation.tokensBefore - tokensAfter);
@@ -2532,7 +2555,8 @@ export class Agent {
         if (!h) return "stop";
         try {
           return await h(info);
-        } catch {
+        } catch (err) {
+          console.error(`[Agent] askToolLoopContinue crashed: ${(err as Error)?.message ?? err}`);
           return "stop";
         }
       },

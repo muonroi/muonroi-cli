@@ -33,11 +33,13 @@ import { setPilLastResult } from "./store.js";
 import { resolveAfter } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
 
-const PIPELINE_TIMEOUT_FAST_MS = 200;
+const PIPELINE_TIMEOUT_FAST_MS = 1500;
 // Sized from measured /api/pil-context distribution after server-side
 // classify+embed parallelization (commit 5b77bab in experience-engine).
 // 120-call sample: p50=1155ms, p95=2171ms, p99=2734ms, max=3105ms. 3500ms
-// gives ~800ms margin over p99. Drop further only after another infra win.
+// gives ~800ms margin over p99. Raised FAST from 200→1500 for agent comfort
+// on turns where no EE serverBaseUrl is configured (brain path already uses 3500
+// via getCachedServerBaseUrl() or getCachedEEClientMode()).
 const PIPELINE_TIMEOUT_BRAIN_MS = 3500;
 
 function pipelineTimeoutMs(): number {
@@ -138,6 +140,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
         options?.interactionHandler ?? null,
         ctx.sessionId ?? null,
         options?.clarificationProposer ?? null,
+        options?.recentTurnsSummary ?? null,
       );
       ctx = { ...ctx, _discoveryResult: discovery };
       if (discovery.interviewed && discovery.accepted) {
@@ -156,8 +159,8 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       if (!discovery.accepted) {
         return { ...ctx, enriched: ctx.raw, fallbackReason: "discovery-cancelled" };
       }
-    } catch {
-      // Discovery failure — continue with existing enrichment (fail-open)
+    } catch (err) {
+      console.error("[Agent:discovery] runDiscovery failed — continuing with L1 result only", err);
     }
     timings.push({ name: "discovery", ms: Date.now() - discoveryStart });
   }
@@ -252,6 +255,12 @@ export interface PipelineOptions {
    * Mirrors the llmFallback closure pattern so PIL stays ignorant of provider wiring.
    */
   clarificationProposer?: import("./discovery-types.js").ModelClarificationProposer;
+  /**
+   * Summary of recent conversation history. Passed to the model-driven clarification
+   * proposer so it can semantically detect follow-up intents and avoid asking for
+   * context that was already established in prior turns.
+   */
+  recentTurnsSummary?: string | null;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {
