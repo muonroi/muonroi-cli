@@ -26,7 +26,7 @@ import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
-import { layer6Output } from "./layer6-output.js";
+import { isMetaAnalysisPrompt, layer6Output } from "./layer6-output.js";
 import { PipelineContextSchema } from "./schema.js";
 import { bumpSessionTurn } from "./session-state.js";
 import { setPilLastResult } from "./store.js";
@@ -137,6 +137,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
         process.cwd(),
         options?.interactionHandler ?? null,
         ctx.sessionId ?? null,
+        options?.clarificationProposer ?? null,
       );
       ctx = { ...ctx, _discoveryResult: discovery };
       if (discovery.interviewed && discovery.accepted) {
@@ -163,9 +164,15 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
 
   if (ctx.taskType !== null) {
     await timed("layer2-personality", layer2Personality);
-    await timed("layer3-ee-injection", layer3EeInjection);
-    await timed("layer4-gsd-structuring", layer4Gsd);
-    await timed("layer5-context-enrichment", layer5Context);
+    if (isMetaAnalysisPrompt(ctx.raw)) {
+      // FIX: skip heavy EE (layer3) + context (layer5) for meta-analysis turns
+      // to reduce PIL overhead on evaluation/improvement questions (as intended).
+      await timed("layer4-gsd-structuring", layer4Gsd);
+    } else {
+      await timed("layer3-ee-injection", layer3EeInjection);
+      await timed("layer4-gsd-structuring", layer4Gsd);
+      await timed("layer5-context-enrichment", layer5Context);
+    }
   } else {
     for (const { timingName } of SKIPPED_LAYERS) {
       timings.push({ name: timingName, ms: 0 });
@@ -238,6 +245,13 @@ export interface PipelineOptions {
    * PIL stays ignorant of provider-factory wiring.
    */
   llmFallback?: import("./llm-classify.js").LlmClassifyFn;
+  /**
+   * Optional model-driven clarification proposer for interactive discovery.
+   * When provided (by orchestrator), runDiscovery will ask the actual task model
+   * to generate the interview questions based on raw + CLI enrichment so far.
+   * Mirrors the llmFallback closure pattern so PIL stays ignorant of provider wiring.
+   */
+  clarificationProposer?: import("./discovery-types.js").ModelClarificationProposer;
 }
 
 export async function runPipeline(raw: string, options?: PipelineOptions): Promise<PipelineContext> {

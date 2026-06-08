@@ -1,4 +1,5 @@
 import { generateText, type ModelMessage } from "ai";
+import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { requireRuntimeProvider, resolveModelRuntime } from "../providers/runtime.js";
@@ -518,6 +519,14 @@ async function summarizeConversation(
   const serialized = serializeConversation(messages);
   const promptParts = [serialized];
 
+  // Improvement from session df2dbb878984 analysis: detect meta-analysis (self-evaluation of agent/PIL)
+  // and force tighter maxOutputTokens to prevent 14k+ char summaries (see DB compaction at seq 52, 73k tokens -> 14k chars).
+  const userText = messages.map((m) => extractUserContent(m.content)).join("\n");
+  const isMeta = isMetaAnalysisPrompt(userText);
+  const effectiveMax = isMeta
+    ? Math.min(1024, Math.max(512, Math.floor(reserveTokens * 0.5)))
+    : Math.min(COMPACTION_MAX_OUTPUT_TOKENS, Math.max(512, Math.floor(reserveTokens * 0.8)));
+
   if (previousSummary) {
     promptParts.push(`Existing summary:\n${previousSummary}`);
   }
@@ -538,9 +547,7 @@ async function summarizeConversation(
     abortSignal: signal,
     maxRetries: 0,
     temperature: 0.2,
-    ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
-      ? {}
-      : { maxOutputTokens: Math.min(COMPACTION_MAX_OUTPUT_TOKENS, Math.max(512, Math.floor(reserveTokens * 0.8))) }),
+    ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: effectiveMax }),
     ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
   });
 

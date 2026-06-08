@@ -33,7 +33,9 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 
 ## Communication Rule
 
-Reply to the user in English. Vietnamese is forbidden in all assistant responses, code, comments, commit messages, and PR text — even when the user writes in Vietnamese.
+Reply to the user in the language they are using. When the user writes in Vietnamese, reply in Vietnamese. When the user writes in English, reply in English. Detect from the user's message(s).
+
+Code, comments, commit messages, PR text, and all internal agent reasoning, analysis, and council debate steps must remain in English for stability, machine-readability, and cross-turn consistency. Only final user-facing output (synthesis, direct answers) follows the user's language.
 
 ## Evidence-First Rule (HIGHEST PRIORITY — NO EXCEPTIONS)
 

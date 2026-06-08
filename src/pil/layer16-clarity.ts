@@ -381,22 +381,37 @@ export function resolveGapsNonInteractive(
 }
 
 const DEFAULT_OUTCOMES: Partial<Record<TaskType, string>> = {
-  analyze: "Report generated",
+  analyze: "Detailed analysis with concrete improvement recommendations",
   plan: "Step-by-step plan",
   documentation: "Docs updated",
   debug: "Error resolved, expected behavior restored",
 };
 
 export function getAutofilledOutcome(taskType: TaskType | null, raw?: string): string | null {
-  if (!taskType) return null;
+  if (!taskType || !raw) return null;
+  const lower = raw.toLowerCase();
+  const isNativeMeta = /đánh giá|phân tích|cải thiện|fix|native|agent.*inside|cli.*bên trong|phỏng vấn|discovery/i.test(
+    lower,
+  );
+  if (isNativeMeta) {
+    // Force good outcome for self-review / native meta prompts regardless of L1 taskType (analyze/debug)
+    // Prevents generic "Local path...", "In prompts/ directory...", "Complete the task..." in [Discovery]
+    return "Native self-assessment of the CLI with specific, actionable code fixes proposed and verified";
+  }
   // PIL-L6 fix — operational debug tasks have a stronger default outcome
-  // ("CI green / pipeline passing") than the generic "error resolved".
-  if (taskType === "debug" && raw && hasOperationalScope(raw)) {
+  if (taskType === "debug" && hasOperationalScope(raw)) {
     return "Pipeline green, all checks passing";
   }
   return DEFAULT_OUTCOMES[taskType] ?? null;
 }
 
 function getDefaultOutcome(raw: string): string {
+  const lower = raw.toLowerCase();
+  const isNativeMeta = /đánh giá|phân tích|cải thiện|fix|native|agent.*inside|cli.*bên trong|phỏng vấn|discovery/i.test(
+    lower,
+  );
+  if (isNativeMeta) {
+    return "Native self-assessment of muonroi-cli with concrete improvements identified and implemented";
+  }
   return `Complete the task described in: "${raw.slice(0, 80)}"`;
 }

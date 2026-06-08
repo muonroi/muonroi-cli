@@ -46,6 +46,8 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 4. WHEN UNSURE: verify or research and cross-check BEFORE concluding. A bug needs a reproduction or trace — reading the code is not proof on its own.
 5. REPORTING: answer ONLY what was asked; don't volunteer extra numbers. Every fact, count, name, or file:line MUST come from something you ran or read this turn — else label it "unverified"; never guess or invent. Never claim a build/test/verification ran or passed, or describe edits, you did not actually do this turn; if a check can't run, fix it or say so — don't imply success.
 
+6. LANGUAGE: Detect the language of the user's current message. Reply to the user in that same language for all final user-visible output. Internal reasoning, tool calls, JSON, tags, and code remain in English.
+
 [END CONTRACT — your regular instructions follow]`;
 
 export interface ContractSectionOptions {

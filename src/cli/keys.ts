@@ -2,8 +2,12 @@
  * `muonroi-cli keys` subcommand group.
  *
  * Manages provider API keys via the OS keychain (Windows Credential Manager,
- * macOS Keychain, libsecret on Linux). Keys are read by the CLI through the
+ * macOS Keychain, libsecret on Linux via keytar). Keys are read by the CLI through the
  * keychain → env → settings.json priority chain in providers/keychain.ts.
+ *
+ * On Linux without libsecret + an active secret service (gnome-keyring etc.),
+ * or in headless sessions, keychain writes return false and callers fall back
+ * to advising environment variables (which are still honored at runtime).
  *
  * Subcommands:
  *   keys set <provider>           — interactive prompt, stores in keychain
@@ -147,8 +151,12 @@ export async function runKeysSet(provider: string, options: KeysSetOptions = {})
   try {
     const ok = await setKeyForProvider(provider, key);
     if (!ok) {
-      console.error("OS keychain unavailable on this platform (keytar failed to load).");
-      console.error("Falling back: set environment variable instead, e.g.");
+      console.error("OS keychain unavailable (keytar failed to load or secret service backend unavailable).");
+      console.error("Common on Linux: install the runtime library, e.g.");
+      console.error("  Fedora:   sudo dnf install libsecret");
+      console.error("  Ubuntu:   sudo apt-get install libsecret-1-0");
+      console.error("Then ensure you have an active graphical session or keyring daemon (gnome-keyring).");
+      console.error("Falling back: set environment variable instead (still works at runtime):");
       console.error(`  export ${provider.toUpperCase()}_API_KEY='<your key>'`);
       process.exit(2);
     }
@@ -184,8 +192,11 @@ export async function runMcpKeysSet(id: string, options: KeysSetOptions = {}): P
   try {
     const ok = await setMcpKey(id, key);
     if (!ok) {
-      console.error("OS keychain unavailable on this platform (keytar failed to load).");
-      console.error(`Falling back: set environment variable: export ${id.toUpperCase()}_API_KEY='<your key>'`);
+      console.error("OS keychain unavailable (keytar failed to load or secret service backend unavailable).");
+      console.error("Common on Linux: install the runtime library, e.g.");
+      console.error("  Fedora:   sudo dnf install libsecret");
+      console.error("  Ubuntu:   sudo apt-get install libsecret-1-0");
+      console.error(`Falling back: export ${id.toUpperCase()}_API_KEY='<your key>' (still picked up at runtime).`);
       process.exit(2);
     }
     console.log(`Stored MCP key '${id}' in OS keychain.`);
@@ -437,11 +448,16 @@ export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void>
     try {
       const ok = await setKeyForProvider(provider, key);
       if (!ok) {
-        console.error("OS keychain unavailable. Aborting import.");
-        process.exit(2);
+        console.warn(`! ${provider} — OS keychain unavailable (keytar or secret service backend).`);
+        console.warn(
+          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
+        );
+        console.warn(`  Fallback (works at runtime): export ${provider.toUpperCase()}_API_KEY=...`);
+        skipped++;
+      } else {
+        console.log(`Imported ${provider} → keychain.`);
+        imported++;
       }
-      console.log(`Imported ${provider} → keychain.`);
-      imported++;
     } catch (e) {
       console.warn(`Failed ${provider}: ${(e as Error).message}`);
       skipped++;
@@ -522,11 +538,16 @@ export async function runMcpImportBw(opts: McpBwImportOptions = {}): Promise<voi
     try {
       const ok = await setMcpKey(id, key);
       if (!ok) {
-        console.error("OS keychain unavailable. Aborting import.");
-        process.exit(2);
+        console.warn(`! ${id} — OS keychain unavailable (keytar or secret service backend).`);
+        console.warn(
+          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
+        );
+        console.warn(`  Fallback (works at runtime): export ${id.toUpperCase()}_API_KEY=...`);
+        skipped++;
+      } else {
+        console.log(`Imported MCP key '${id}' → keychain.`);
+        imported++;
       }
-      console.log(`Imported MCP key '${id}' → keychain.`);
-      imported++;
     } catch (e) {
       console.warn(`Failed ${id}: ${(e as Error).message}`);
       skipped++;
@@ -544,9 +565,12 @@ export async function runChatKeySet(id: ChatSecretId, value: string): Promise<vo
   try {
     const ok = await setChatSecret(id, value);
     if (!ok) {
-      console.error("OS keychain unavailable on this platform (keytar failed to load).");
+      console.error("OS keychain unavailable (keytar failed to load or secret service backend unavailable).");
       console.error(
-        `Falling back: set environment variable: export ${id.includes("token") ? "MUONROI_" : "MUONROI_"}${id.replace("-", "_").toUpperCase()}='<your value>'`,
+        "Common on Linux: install the runtime library, e.g. sudo dnf install libsecret (Fedora) or apt libsecret-1-0 (Ubuntu).",
+      );
+      console.error(
+        `Falling back: export ${id.includes("token") ? "MUONROI_" : "MUONROI_"}${id.replace("-", "_").toUpperCase()}='<your value>'`,
       );
       process.exit(2);
     }
@@ -627,11 +651,18 @@ export async function runChatImportBw(opts: ChatBwImportOptions = {}): Promise<v
     try {
       const ok = await setChatSecret(id, value);
       if (!ok) {
-        console.error("OS keychain unavailable. Aborting import.");
-        process.exit(2);
+        console.warn(`! ${id} — OS keychain unavailable (keytar or secret service backend).`);
+        console.warn(
+          "  Linux fix: sudo dnf install libsecret   (Fedora)  or  sudo apt-get install libsecret-1-0 (Ubuntu)",
+        );
+        console.warn(
+          `  Fallback (works at runtime): export ${id.includes("token") ? "MUONROI_" : "MUONROI_"}${id.replace("-", "_").toUpperCase()}=...`,
+        );
+        skipped++;
+      } else {
+        console.log(`Imported chat secret '${id}' → keychain.`);
+        imported++;
       }
-      console.log(`Imported chat secret '${id}' → keychain.`);
-      imported++;
     } catch (e) {
       console.warn(`Failed ${id}: ${(e as Error).message}`);
       skipped++;
@@ -685,6 +716,9 @@ export async function runKeysLogin(provider: string): Promise<void> {
         console.log(`  User code: ${codeOrUrl}`);
       }
       console.log("\n  Waiting for authorization...");
+      if (provider === "xai") {
+        console.log("  (If the xAI page shows a code instead of redirecting, paste it when the terminal prompts.)");
+      }
     },
   });
 

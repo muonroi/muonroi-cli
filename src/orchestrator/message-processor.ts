@@ -151,7 +151,6 @@ import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
-import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { repairToolCallHook } from "./repair-tool-call.js";
 import {
   buildRepetitionReminder,
@@ -181,6 +180,7 @@ import { attemptStallRescue, pushStallToolResult, type StallToolResult } from ".
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
+import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
@@ -554,12 +554,25 @@ export class MessageProcessor {
         } catch (err) {
           console.error(`[pil] LLM fallback wiring failed: ${(err as Error)?.message}`);
         }
+
+        // Model-driven clarification proposer (for discovery interview).
+        // The actual task model (via the same provider + modelId) generates the
+        // questions based on raw + CLI enrichment. Then discovery asks user.
+        let clarificationProposer: import("../pil/discovery-types.js").ModelClarificationProposer | undefined;
+        try {
+          const { createModelClarificationProposer } = await import("../pil/discovery.js");
+          clarificationProposer = createModelClarificationProposer(deps.requireProvider(), deps.modelId);
+        } catch (err) {
+          console.error(`[pil] clarification proposer wiring failed: ${(err as Error)?.message}`);
+        }
+
         pilCtxResolved = await runPipeline(userMessage, {
           resumeDigest: deps.getResumeDigest(),
           activeRunId: deps.getActiveRunId(),
           sessionId: deps.session?.id ?? null,
           interactionHandler: discoveryHandler,
           llmFallback,
+          clarificationProposer,
         });
       } catch (err) {
         pilCtxResolved = {
@@ -2746,7 +2759,12 @@ export class MessageProcessor {
             const _intent =
               _parsedCalls.length > 0
                 ? ` You appear to have intended: ${_parsedCalls
-                    .map((c) => `${c.name}(${Object.entries(c.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ")})`)
+                    .map(
+                      (c) =>
+                        `${c.name}(${Object.entries(c.args)
+                          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                          .join(", ")})`,
+                    )
                     .join("; ")}. Make those exact call(s) via the tool interface now.`
                 : "";
             deps.messages.push({

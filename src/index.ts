@@ -345,8 +345,10 @@ async function firstRunWizard(currentModel?: string): Promise<string | null> {
         }
       } else {
         process.stderr.write(
-          "\nOS keychain unavailable on this platform. Key will be used for this session only.\n" +
-            `For persistence, set env var: ${provider.toUpperCase()}_API_KEY\n`,
+          "\nOS keychain unavailable (keytar or secret service backend).\n" +
+            "Linux: sudo dnf install libsecret (Fedora) or sudo apt-get install libsecret-1-0 (Ubuntu).\n" +
+            "Key will be used for this session only. For persistence across runs:\n" +
+            `  export ${provider.toUpperCase()}_API_KEY=...\n`,
         );
       }
     } catch (err) {

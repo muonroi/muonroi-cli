@@ -27,6 +27,7 @@
 
 import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import * as readline from "node:readline";
 import type { OAuthCallbackServer } from "../../mcp/oauth-callback.js";
 import { startOAuthCallbackServer } from "../../mcp/oauth-callback.js";
 import { exchangeBrowserCode, generatePKCE, refreshBrowserTokens } from "./browser-flow.js";
@@ -164,7 +165,11 @@ export class GrokOAuthProvider implements ProviderOAuth {
     let receivedState = "";
 
     try {
-      authCode = await new Promise<string>((resolve, reject) => {
+      // We race the normal loopback HTTP callback against a manual code paste.
+      // xAI's current auth page for this client_id sometimes shows a "Could not
+      // establish connection" screen + a code to copy (instead of redirecting
+      // to the loopback URI). Supporting manual paste makes the flow robust.
+      const httpCodePromise = new Promise<string>((resolve, reject) => {
         const loginTimeout = setTimeout(() => {
           reject(new Error("OAuth browser callback timed out"));
         }, CALLBACK_TIMEOUT_MS);
@@ -190,12 +195,29 @@ export class GrokOAuthProvider implements ProviderOAuth {
             });
             opts.onUserCode?.(authorizeUrl, authorizeUrl);
             this.openBrowserFn(authorizeUrl);
+
+            // Simple manual token/code input fallback (when redirect fails and xAI page shows a code)
+            if (process.stdin.isTTY) {
+              const rl = readline.createInterface({ input: process.stdin });
+              console.log('  If the xAI page shows a code ("Could not establish connection") instead of redirecting,');
+              console.log("  copy the code and paste it here then press Enter:");
+              rl.on("line", (line: string) => {
+                const c = line.trim();
+                if (c.length > 30) {
+                  rl.close();
+                  clearTimeout(loginTimeout);
+                  resolve(c);
+                }
+              });
+            }
           })
           .catch((err) => {
             clearTimeout(loginTimeout);
             reject(err);
           });
       });
+
+      authCode = await httpCodePromise;
     } catch (err) {
       callbackServer?.close();
       throw new OAuthLoginError("xai", String(err));

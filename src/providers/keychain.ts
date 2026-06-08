@@ -91,8 +91,19 @@ export async function setKeyForProvider(provider: ProviderId, key: string): Prom
   const kt = await loadKeytar();
   if (!kt?.setPassword) return false;
   redactor.enrollSecret(key);
-  await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider], key);
-  return true;
+  try {
+    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider], key);
+    return true;
+  } catch (err: any) {
+    // Runtime backend failure is common on Linux when libsecret / secret service
+    // (gnome-keyring, kwallet/ksecretd, etc.) is not installed, the collection is
+    // locked, or no D-Bus session/keyring is active for this user.
+    // The caller (e.g. keys import-bw / keys set) will print the friendly message.
+    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
+      console.error(`[keychain] setPassword backend error for ${provider}:`, err?.message || err);
+    }
+    return false;
+  }
 }
 
 /**

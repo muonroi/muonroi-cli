@@ -56,12 +56,15 @@ function probeKeytar() {
     process.stderr.write(
       "\n  ⚠ keytar (OS keychain) failed to build/load.\n" +
         `    Reason: ${e.message.split("\n")[0]}\n` +
-        "    muonroi-cli will fall back to environment variables for API keys.\n" +
-        "    To enable secure keychain storage, install build tools:\n" +
-        "      Windows: npm install -g windows-build-tools (or install VS Build Tools)\n" +
-        "      Linux:   sudo apt-get install libsecret-1-dev\n" +
-        "      Mac:     xcode-select --install\n" +
-        "    Then re-run: npm install -g muonroi-cli\n\n",
+        "    muonroi-cli will fall back to environment variables for API keys (still works).\n" +
+        "    To enable secure keychain storage, install the required libraries:\n" +
+        "      Linux (runtime):   Fedora: sudo dnf install libsecret\n" +
+        "                         Ubuntu/Debian: sudo apt-get install libsecret-1-0\n" +
+        "      Linux (build):     Also install the -devel package if building from source.\n" +
+        "      Windows:           npm install -g windows-build-tools or VS Build Tools\n" +
+        "      macOS:             xcode-select --install\n" +
+        "    Then re-run: npm install -g muonroi-cli\n" +
+        "    In headless/SSH/CI environments without a keyring daemon, env vars are recommended.\n\n",
     );
   }
 }
