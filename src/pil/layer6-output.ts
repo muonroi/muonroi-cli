@@ -28,6 +28,15 @@ const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
 // Users complained about end-of-turn summaries and rambling debug responses.
 // "balanced" pads with rationale prose the user can read from the diff/code
 // already. "detailed" is reserved for explicit user request ("explain").
+
+// Broad detector for self-referential / meta / evaluation prompts about the CLI,
+// prior turns, or the agent's own behavior. Used to relax brevity rules so full
+// answers (with evidence, bullets, file:line) are not suppressed by low budgets
+// or NO_PREAMBLE. No model/provider hardcodes — only prompt content signals.
+// Exported for early detection in pipeline / orchestrator.
+export function isMetaAnalysisPrompt(raw: string): boolean {
+  return /đánh giá|phân tích|cải thiện|fix|debug|nhận xét|đánh giá tổng thể|evaluate.*(cli|system|repo)|improve.*(cli|repo)|your assessment|how would you improve|trả lời tự nhiên|natural response|sau fix|phỏng vấn|discovery|native|agent.*inside|cli.*bên trong|context|previous turn|input.*vừa rồi|mù context/i.test(raw);
+}
 const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
   debug: "concise", // root cause + fix; no padding
   plan: "balanced", // plans genuinely need a brief rationale per step
@@ -78,7 +87,11 @@ const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
   analyze: 600,
   documentation: 900,
   generate: 1200,
-  general: 200,
+  // general is user-facing prose (not a code artifact). Higher budget + relaxed
+  // style rules so the final answer reads naturally for humans instead of
+  // machine-optimized telegraphic lists. See user report on over-constrained
+  // freetext after Layer 6.
+  general: 650,
 };
 
 // PIL-04 Tier 1.3 + PIL-L6 verbosity fix: ban preamble AND end-of-turn summary.
@@ -121,9 +134,11 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
     detailed: `\nOUTPUT RULES (generate): Complete, runnable code with full explanation. Include all imports. Inline comments for logic and decisions. Explain design choices, alternatives considered, and trade-offs before the code.`,
   },
   general: {
-    concise: `\nAnswer directly. No preamble.`,
-    balanced: `\nAnswer with brief context.`,
-    detailed: `\nAnswer thoroughly.`,
+    // General answers should be highly readable. Encourage rich markdown
+    // (bullets, headings, bold text) instead of forcing dense prose.
+    concise: `\nAnswer directly. Use markdown, bullet points, and code blocks to make the output highly readable and scannable. Avoid dense paragraphs.`,
+    balanced: `\nAnswer with helpful context. Structure your response using markdown headings, bullet points, and code blocks for excellent readability. Avoid dense walls of text.`,
+    detailed: `\nAnswer thoroughly. Use rich markdown structure (headings, lists, bold text, code blocks) to organize complex information so it is easy to scan and read.`,
   },
 };
 
@@ -139,9 +154,14 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   if (!ctx.taskType || !SUFFIXES[ctx.taskType]) return systemPrompt;
 
   if (responseToolsActive) {
+    const isMeta = isMetaAnalysisPrompt(ctx.raw);
+    const metaNote = isMeta ? " This is a meta/evaluation question about the system or prior turns — the `response` field MUST contain the complete, unshortened answer with all evidence and detail." : "";
+    const finalAnswerNote = ctx.taskType === "general"
+      ? " Structure your `response` with rich markdown formatting (headings, bullet points, bold text, code blocks). Make it highly readable, scannable, and clearly organized. Avoid dense walls of text (freetext)."
+      : "";
     return (
       systemPrompt +
-      `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then summarize your result via respond_${ctx.taskType}.`
+      `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then deliver the COMPLETE, FULL answer (do not summarize, shorten, or truncate for token budgets) via respond_${ctx.taskType}.${metaNote}${finalAnswerNote}`
     );
   }
 
@@ -162,28 +182,29 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   const baseSuffix = SUFFIXES[ctx.taskType][style];
 
   // PIL-04 Tier 1.2: output-budget hint.
-  const budget = TASK_OUTPUT_BUDGET[ctx.taskType as TaskType] ?? 600;
-  const budgetHint = `\nOUTPUT BUDGET: aim for ≤${budget} tokens. Stop when the answer is complete; do not pad.`;
+  // For response-tool turns or meta-analysis (self-eval of CLI, prior context, "mù context" etc.),
+  // raise budget and skip aggressive "do not pad / no summary" so full evidence-rich answers
+  // reach the respond_* payload and the user. Before: meta follow-ups often produced only
+  // short "**Đã trả lời xong**" confirmations even when detailed analysis was prepared in the tool.
+  // After: explicit "COMPLETE, FULL" instruction + higher budget + isMetaAnalysisPrompt gate.
+  const isMetaAnalysis = isMetaAnalysisPrompt(ctx.raw);
+  const useHighBudget = responseToolsActive || isMetaAnalysis;
+  const budget = useHighBudget ? 1800 : (TASK_OUTPUT_BUDGET[ctx.taskType as TaskType] ?? 600);
+  const budgetHint = useHighBudget
+    ? `\nOUTPUT BUDGET: provide the complete answer required by the task (analysis/meta may legitimately need 800-1500+ tokens for evidence and bullets). Stop only when the full user-visible content is delivered; do not artificially shorten.`
+    : `\nOUTPUT BUDGET: aim for ≤${budget} tokens. Stop when the answer is complete; do not pad.`;
 
   // PIL-04 Tier 1.3: ban preamble (~30 tokens saved/turn).
-  // Improvement: relax strict NO_PREAMBLE for meta-analysis / evaluation requests
-  // (e.g. "đánh giá", "cải thiện CLI"). This addresses the gò bó observed when
-  // asking for assessment of the system itself. Evidence rule (contract) still applies.
-  const isMetaAnalysis =
-    /đánh giá|cải thiện|nhận xét|đánh giá tổng thể|evaluate.*(cli|system)|improve.*cli|your assessment|how would you improve|trả lời tự nhiên|natural response/i.test(
-      ctx.raw,
-    );
-
-  // For meta-analysis on general/analyze, use "balanced" instead of forced "concise"
-  // so evaluation + recommendations can be given naturally (while still requiring evidence).
-  let effectiveStyle = style;
-  if (isMetaAnalysis && (ctx.taskType === "general" || ctx.taskType === "analyze")) {
-    effectiveStyle = "balanced";
-  }
+  // Relax for meta-analysis / evaluation (including follow-ups about previous turns or CLI behavior).
+  // The isMetaAnalysisPrompt (hoisted early) is the single source of truth and already includes
+  // signals like "cli.*bên trong", "mù context", "input.*vừa rồi", "previous turn".
+  const effectiveStyle = (isMetaAnalysis && (ctx.taskType === "general" || ctx.taskType === "analyze"))
+    ? "balanced"
+    : style;
   const effectiveSuffix = SUFFIXES[ctx.taskType]?.[effectiveStyle] || baseSuffix;
 
   let result = systemPrompt + effectiveSuffix + budgetHint;
-  if (!isMetaAnalysis) {
+  if (!isMetaAnalysis && !responseToolsActive) {
     result += NO_PREAMBLE_RULE;
   }
 
@@ -326,15 +347,5 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
   }
 }
 
-/**
- * Exported so other layers / message-processor can detect meta-analysis turns early
- * and potentially skip heavy enrichment (layer4/5) or use lighter contract sections.
- * This helps reduce PIL overhead for reflective/self-evaluation questions.
- */
-export function isMetaAnalysisPrompt(raw: string): boolean {
-  // Broader mixed-lang + debug/self-eval detection (unifies with native meta cases).
-  // Code-side only — no keywords leaked into model prompts.
-  return /đánh giá|phân tích|cải thiện|fix|debug|nhận xét|đánh giá tổng thể|evaluate.*(cli|system|repo)|improve.*(cli|repo)|your assessment|how would you improve|trả lời tự nhiên|natural response|sau fix|phỏng vấn|discovery|native|agent.*inside|cli.*bên trong/i.test(
-    raw,
-  );
-}
+// isMetaAnalysisPrompt is defined early (near top) and exported for use by
+// pipeline, orchestrator, and other layers to relax rules for reflective turns.

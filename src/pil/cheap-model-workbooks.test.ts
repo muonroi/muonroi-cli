@@ -77,8 +77,9 @@ describe("getCheapModelWorkbook", () => {
 
   it("stays compact (under 1300 chars) to preserve attention budget", () => {
     // Bumped 900 → 1000 when the A4 completion-line rule was added; 1000 → 1300
-    // when the universal grounding (anti-hallucination) rule was added.
-    expect(getCheapModelWorkbook("debug").length).toBeLessThan(1300);
+    // when the universal grounding (anti-hallucination) rule was added,
+    // and 1300 -> 1600 when anti-mù compaction recovery was added.
+    expect(getCheapModelWorkbook("debug").length).toBeLessThan(1600);
   });
 });
 

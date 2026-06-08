@@ -6,6 +6,8 @@
  *             shell execution and computer tools still require confirmation.
  * yolo      - All tool calls auto-approve without any prompting.
  */
+import { appendDecisionLog } from "../usage/decision-log.js";
+
 export type PermissionMode = "safe" | "auto-edit" | "yolo";
 
 /**
@@ -27,11 +29,66 @@ export const AUTO_EDIT_ALLOWED: ReadonlySet<string> = new Set([
  *
  * @param toolName - The name of the tool being invoked.
  * @param mode     - The active PermissionMode.
+ * @param context  - Optional context (command string for bash, path, isNetwork).
+ *                   Backward compatible: old callers passing 2 args unchanged.
  * @returns true if the tool needs user approval, false if it should auto-approve.
  */
-export function toolNeedsApproval(toolName: string, mode: PermissionMode): boolean {
-  if (mode === "yolo") return false;
-  if (mode === "auto-edit") return !AUTO_EDIT_ALLOWED.has(toolName);
-  // "safe" — always confirm
+export function toolNeedsApproval(
+  toolName: string,
+  mode: PermissionMode,
+  context?: { command?: string; path?: string; isNetwork?: boolean }
+): boolean {
+  const dangerous = (cmd?: string): boolean => {
+    if (!cmd) return false;
+    const patterns: RegExp[] = [
+      /rm\s+-rf?\s+\/(?!tmp|var\/tmp)/i,
+      /curl\s+https?:\/\/(?!127\.0\.0\.1|localhost)/i,
+      /wget\s+https?:\/\/(?!127\.0\.0\.1|localhost)/i,
+      /chmod\s+777/i,
+      /eval\s*\(/i,
+      /exec\s*\(/i,
+    ];
+    return patterns.some((p) => p.test(cmd));
+  };
+
+  if (mode === "yolo") {
+    if (dangerous(context?.command)) {
+      appendAudit({
+        kind: "yolo-override",
+        tool: toolName,
+        mode,
+        context,
+        ts: Date.now(),
+      });
+    }
+    return false;
+  }
+  if (mode === "auto-edit") {
+    if (toolName === "bash" && dangerous(context?.command)) return true;
+    return !AUTO_EDIT_ALLOWED.has(toolName);
+  }
+  // "safe" — always confirm; dangerous patterns explicitly require (no bypass)
+  if (dangerous(context?.command)) return true;
   return true;
+}
+
+type AuditEvent = {
+  kind: "permission-override" | "yolo-override";
+  tool: string;
+  mode: PermissionMode;
+  context?: any;
+  ts: number;
+};
+
+export function appendAudit(event: AuditEvent): void {
+  // fire-and-forget; must not block sync approval decision path
+  appendDecisionLog({
+    ts: event.ts,
+    kind: event.kind as any,
+    taken: true,
+    reason: `${event.kind} for ${event.tool} under ${event.mode}`,
+    meta: { context: event.context },
+  }).catch(() => {
+    // swallow per decision-log contract
+  });
 }

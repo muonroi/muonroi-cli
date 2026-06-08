@@ -75,6 +75,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
 
   it("compacts when cumulative chars exceed threshold", () => {
     const msgs = buildHistory(10, 10); // ~100kb of tool output
+    // Neutralize to test pure size-based elision (high-value keep would reduce savings).
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
     const before = cumulativeMessageChars(msgs);
     const out = compactSubAgentMessages(msgs);
     const after = cumulativeMessageChars(out);
@@ -100,6 +106,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
 
   it("rewrites older tool-result parts with elision stub", () => {
     const msgs = buildHistory(10, 10);
+    // Neutralize tool so the basic elision test is not affected by high-value auto-keep (idea 1).
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
     const out = compactSubAgentMessages(msgs);
     // First tool message is at index 3 (system, user, asst, tool, ...).
     const firstToolMsg = out[3]!;
@@ -107,7 +119,7 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     const parts = firstToolMsg.content as unknown as ReadonlyArray<Record<string, unknown>>;
     const tr = parts[0] as { type: string; output: { type: string; value: string } };
     expect(tr.type).toBe("tool-result");
-    expect(tr.output.value).toMatch(/earlier tool_result for tool=read_file/);
+    expect(tr.output.value).toMatch(/earlier tool_result for tool=other_tool/);
     expect(tr.output.value).toMatch(/elided by sub-agent compactor/);
   });
 
@@ -124,6 +136,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
 
   it("keepLastTurns=0 compacts every tool turn (no trailing window preserved)", () => {
     const msgs = buildHistory(10, 10);
+    // Neutralize so high-value (idea 1) does not override keep=0 for this test's intent.
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
     const out = compactSubAgentMessages(msgs, { keepLastTurns: 0 });
     // Every tool message in the output is a compacted stub.
     for (let i = 0; i < out.length; i++) {
@@ -150,7 +168,13 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     expect(cumulativeMessageChars(noEnv)).toBe(cumulativeMessageChars(msgs));
     // With 100K envelope: total > 80K → compactor fires (but only 2 turns
     // means everything is in the keep window, so still no-op).
-    const withEnv = compactSubAgentMessages(buildHistory(10, 5), {
+    const withEnvInput = buildHistory(10, 5);
+    for (const m of withEnvInput) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
+    const withEnv = compactSubAgentMessages(withEnvInput, {
       thresholdChars: 80_000,
       envelopeChars: 100_000,
     });
@@ -212,6 +236,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     // Build 30K of messages — char-threshold 80K would NOT fire, but the
     // tiny window MUST trigger compaction.
     const msgs = buildHistory(6, 5); // ~30K chars
+    // Neutral tool name so high-value heuristic (idea 1) does not force-keep everything.
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
     const out = compactSubAgentMessages(msgs, {
       thresholdChars: 80_000, // would normally skip
       contextWindowTokens: 8_000,
@@ -237,6 +267,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     // Window 8K, message+envelope chars ≈ 7K tokens × 4 = 28K → 0.875 fill.
     // keepLastTurns starts at 5; should drop to 1 → more turns get stubbed.
     const msgs = buildHistory(10, 3); // ~30K chars ≈ 7.5K tokens
+    // Neutral tool so high-value (idea 1) does not interfere with dynamic keepLast count.
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool";
+      }
+    }
     const out = compactSubAgentMessages(msgs, {
       thresholdChars: 10_000,
       keepLastTurns: 5,
@@ -257,5 +293,40 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     }
     // Effective keepLast was 1 (not 5) → only 1 tool result kept verbatim.
     expect(kept).toBe(1);
+  });
+
+  // Idea 1: high-value tool results kept verbatim even when older than keepLast
+  it("keeps high-value tool results (read_file/grep on src + error/PLAN) verbatim (idea 1)", () => {
+    const msgs = buildHistory(8, 4);
+    // Force a high-value marker in an early turn (index ~3-4)
+    const earlyTool = msgs[3] as any;
+    if (earlyTool?.content?.[0]) {
+      earlyTool.content[0].output = { type: "text", value: "PLAN.md\nsrc/index.ts\nerror: critical" };
+    }
+    const out = compactSubAgentMessages(msgs, { thresholdChars: 10_000, keepLastTurns: 2 });
+    // The early high-value one should not be stubbed.
+    const earlyOut = out[3] as any;
+    const val = earlyOut?.content?.[0]?.output?.value || "";
+    expect(val).not.toMatch(/elided by .* compactor/);
+  });
+
+  // Idea 3: explicit keepToolIds bypasses elision
+  it("respects keepToolIds (idea 3) — specific ids kept even if old", () => {
+    const msgs = buildHistory(6, 5);
+    const targetId = "call_2"; // early turn
+    const out = compactSubAgentMessages(msgs, {
+      thresholdChars: 10_000,
+      keepLastTurns: 1,
+      keepToolIds: [targetId],
+    });
+    let keptExplicit = false;
+    for (const m of out) {
+      if (m.role !== "tool" || !Array.isArray(m.content)) continue;
+      const tr = (m.content as any)[0];
+      if (tr?.toolCallId === targetId && typeof tr.output?.value === "string" && !/elided/.test(tr.output.value)) {
+        keptExplicit = true;
+      }
+    }
+    expect(keptExplicit).toBe(true);
   });
 });

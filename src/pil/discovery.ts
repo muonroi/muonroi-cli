@@ -52,6 +52,7 @@ export async function runDiscovery(
   handler: DiscoveryInteractionHandler | null,
   sessionId: string | null = null,
   clarificationProposer: ModelClarificationProposer | null = null,
+  recentTurnsSummary: string | null = null,
 ): Promise<DiscoveryResult> {
   const start = Date.now();
 
@@ -131,6 +132,7 @@ export async function runDiscovery(
           ? `Bounded contexts: ${projectContext.boundedContexts.map((b) => `${b.name} (${b.path})`).join(", ")}`
           : "",
         projectContext.eePatterns?.length ? `EE patterns: ${projectContext.eePatterns.slice(0, 3).join(" | ")}` : "",
+        recentTurnsSummary ? `\nRecent Conversation History:\n${recentTurnsSummary}` : "",
       ]
         .filter(Boolean)
         .join("\n");
@@ -350,8 +352,7 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
         ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
         : "";
       const special = isMetaAnalysisPrompt(input.raw)
-        ? `
-If the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
+        ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
         : "";
       const prompt = `You are the AI agent executing inside muonroi-cli.
 User request: "${input.raw}"
@@ -359,6 +360,7 @@ Task type from CLI: ${input.l1.taskType}
 ${contextStr}
 
 Based on the above, output 1-3 specific, concise questions you (the model) still need the user to answer right now so you have all the information required to complete the task accurately, without guessing.
+If the User request is a follow-up or continuation of the recent conversation history (if provided above), do NOT ask for new project details; assume the context is already established and return an empty array [] unless there is a critical new ambiguity.
 Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — only ask what is missing from this context.${special}
 For each question also provide 1-2 short concrete recommendations the user can pick from (model-backed choices).
 Return ONLY valid JSON array, nothing else:

@@ -21,7 +21,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 
 const recordUsageEventSpy = vi.fn();
 
-vi.mock("../../storage/index", () => ({
+vi.mock("../../storage/index.js", () => ({
   appendCompaction: vi.fn(),
   appendMessages: vi.fn(() => []),
   appendSystemMessage: vi.fn(() => 0),

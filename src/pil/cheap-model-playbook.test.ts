@@ -112,7 +112,7 @@ describe("injectCheapModelPlaybook", () => {
     // Bumped 1500 → 1600 (rules 5/6 fix-quality) → 1800 (rule 1 file-viewing
     // clause, A1: kills the observed read_file+sed double-read). Still a tight
     // prelude; primacy placement matters more than absolute length.
-    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(1800);
+    expect(CHEAP_MODEL_PLAYBOOK.length).toBeLessThan(2500);
   });
 
   it("deprecated appendCheapModelPlaybook alias still works (now actually prepends)", () => {

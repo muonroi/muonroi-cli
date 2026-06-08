@@ -1,5 +1,9 @@
 # Roadmap — muonroi-cli
 
+## Phase 6: 4 Upgrades — Security, Performance, Reporting, UI — 📝 PLAN
+**Status:** Wave 0 (foundations) executed. See `.planning/phases/06-4-upgrades-security-perf-report-ui/PLAN.md` for full evidence-based gaps (e.g. permission-mode.ts:34, bash.ts:598, usage-report.ts:220, subagent-compactor.ts:297), 4 upgrade sections, waves, and mandatory pre-push gates (tsc + vitest + harness + self-verify).
+Wave 0 items: STATE/ROADMAP/CHANGELOG updated; smoke passed.
+
 ## Phase 5: Post-Phase-4 Cleanup + UX Bugs — 🟢 SHIPPED (2026-05-25)
 
 **Goal:** Close 4 deferred/new items surfaced by Phase 4 closure: PIL discovery

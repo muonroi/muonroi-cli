@@ -3,6 +3,8 @@
 **Last updated:** 2026-05-25 (Phase 5 SHIPPED — all 5 fixes deployed, awaiting user verify)
 
 **Phase 5 status: 🟢 SHIPPED.** All 5 fixes landed:
+
+**Phase 06 (planning):** 4 upgrades (Security, Performance, Reporting, UI) — PLAN created at `.planning/phases/06-4-upgrades-security-perf-report-ui/PLAN.md`. Wave 0 foundations pending. See that PLAN for objectives, evidence-based gaps, verification gates.
 - F4 (commit `f5640c4`): scope module-suggestions ranked by mtime, not alpha
 - F5 (commit `f5640c4`): EE judge writes gated behind hadWarnings — ~95% noise cut
 - F6 (commit `8b186a6`): auto-forcedFinalize when stream ends without text — "tiếp tục" bug eliminated

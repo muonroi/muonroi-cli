@@ -91,6 +91,9 @@ Use this exact format:
 - **Error messages**: [copy verbatim any error messages]
 - **Key numbers/results**: [list important numbers, query results, or metrics]
 
+## Kept Artifacts (high-fidelity tool outputs preserved verbatim across B3/B4 compaction per anti-mù; agent can query the ee.query tool with "tool-artifact id=..." or "full tool result id=..." for full content later)
+- toolCallId | toolName | first120chars | reason (high-value|KEEP_TOOL_IDS|recent-turn|error)
+
 Keep it concise, but preserve exact file paths, function names, and error messages.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are new conversation messages to incorporate into the existing summary provided below.
@@ -106,6 +109,9 @@ Update the existing structured summary with new information. Rules:
 
 ## Critical Data
 - Preserve exact file paths, function names, error messages (verbatim), and key numbers/results
+
+## Kept Artifacts
+- (carry forward or add new high-fidelity toolCallId | tool | reason from this increment)
 
 Use the exact same section structure as the existing summary format.`;
 

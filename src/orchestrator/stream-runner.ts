@@ -93,6 +93,7 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
@@ -588,10 +589,35 @@ export class StreamRunner {
         // compactor can use a token-aware threshold and shrink the keep
         // window when the prompt is near the ceiling.
         const childCtxWindow = childRuntime.modelInfo?.contextWindow ?? 0;
+        // Idea 3: support KEEP_TOOL_IDS even in sub-agent loops (if the token
+        // reached the child history via injected reminder or prior context).
+        let subKeepToolIds: string[] = [];
+        for (const m of stripped as any[]) {
+          const c = m?.content;
+          const texts: string[] = [];
+          if (typeof c === "string") texts.push(c);
+          if (Array.isArray(c)) for (const p of c) if (typeof p?.text === "string") texts.push(p.text);
+          const joined = texts.join(" ");
+          const mKeep = joined.match(/KEEP_TOOL_IDS\s*[:=]\s*([a-z0-9_, -]+)/i);
+          if (mKeep) {
+            subKeepToolIds = mKeep[1].split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+            break;
+          }
+        }
+        // Idea 4 persist for sub-agent elisions (best-effort; may lack full session but EE can still index the artifact content).
+        const persistSubArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
+          try {
+            getDefaultEEClient()
+              .extract({ transcript: fullContent.slice(0, 4000), projectPath: process.cwd(), meta: { source: "tool-artifact", toolCallId, toolName, reason } }, AbortSignal.timeout(600))
+              .catch(() => {});
+          } catch { /* fail-open */ }
+        };
         const compacted = compactSubAgentMessages(stripped, {
           thresholdChars: compactThreshold,
           keepLastTurns: compactKeepLast,
           contextWindowTokens: childCtxWindow,
+          keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
+          persistArtifact: persistSubArtifact,
         });
         // Phase 4A — scope reminder injection for the sub-agent loop.
         // Mirror of the top-level wiring in message-processor.ts:

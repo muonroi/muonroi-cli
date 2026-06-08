@@ -1,4 +1,4 @@
-// Backwards-compat shim. Internal callers may still import from "./agent-harness".
+// Backwards-compat shim. Internal callers may still import from @muonroi/agent-harness.
 // Phase 2.3+ will convert these to direct imports from "@muonroi/agent-harness-opentui".
 //
 // External consumers must NOT import this shim — they must use the published

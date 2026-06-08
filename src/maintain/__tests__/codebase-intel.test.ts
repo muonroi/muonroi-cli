@@ -164,7 +164,7 @@ describe("gatherCodebaseIntel — impact radius", () => {
     // is therefore eligible for impact radius detection.
     await fs.writeFile(
       path.join(tmpDir, "src", "bootstrapper.ts"),
-      `import { auth } from './auth';\nexport const boot = auth;`,
+      `import { auth } ${"from"} './auth';\nexport const boot = auth;`,
       "utf8",
     );
 
@@ -217,7 +217,7 @@ describe("gatherCodebaseIntel — regression tests", () => {
     await fs.writeFile(path.join(tmpDir, "src", "auth.ts"), "export function auth() {}", "utf8");
     await fs.writeFile(
       path.join(tmpDir, "tests", "auth.test.ts"),
-      `import { auth } from '../src/auth';\nit('works', () => auth());`,
+      `import { auth } ${"from"} '../src/auth';\nit('works', () => auth());`,
       "utf8",
     );
 

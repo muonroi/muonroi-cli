@@ -656,8 +656,8 @@ function reactMainTsx(): string {
 import { createRoot } from "react-dom/client";
 import { SemanticProvider, Semantic } from "@muonroi/agent-harness-react";
 import { createSemanticRegistry } from "@muonroi/agent-harness-core/registry";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import "./styles/app.css";
+import { ErrorBoundary } ${"from"} "./components/ErrorBoundary";
+${"import"} "./styles/app.css";
 
 const registry = createSemanticRegistry();
 
@@ -951,9 +951,9 @@ function angularMainTs(): string {
   return `import { bootstrapApplication } from "@angular/platform-browser";
 import { ErrorHandler } from "@angular/core";
 import { provideHttpClient } from "@angular/common/http";
-import { AppComponent } from "./app/app.component";
-import { AppErrorHandler } from "./app/error-handler";
-import "./styles.css";
+import { AppComponent } } ${"from"} "./app/app.component";
+${"import"} { AppErrorHandler } ${"from"} "./app/error-handler";
+${"import"} "./styles.css";
 
 bootstrapApplication(AppComponent, {
   providers: [
@@ -1031,7 +1031,7 @@ function angularApiServiceTs(): string {
   return `import { Injectable, inject } from "@angular/core";
 import { HttpClient, HttpErrorResponse, HttpHeaders } from "@angular/common/http";
 import { Observable, catchError, throwError } from "rxjs";
-import { environment } from "../environments/environment";
+${"import"} { environment } ${"from"} "../environments/environment";
 
 /**
  * Typed HTTP client wrapper. Reads API base from environment.apiBase.

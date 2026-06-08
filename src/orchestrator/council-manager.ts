@@ -21,7 +21,7 @@ import {
   shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
-import { appendSystemMessage } from "../storage/index";
+import { appendSystemMessage } from "../storage/index.js";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, StreamChunk } from "../types/index";

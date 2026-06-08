@@ -9,6 +9,7 @@ import {
   serializeConversation,
   shouldCompactContext,
 } from "./compaction";
+import { buildCheckpointReminder } from "./scope-reminder.js";
 import { __forceFallbackForTests } from "./token-counter";
 
 // Pin token counts to the chars/4 fallback so cut-point assertions remain stable.
@@ -177,5 +178,23 @@ describe("compaction helpers", () => {
         ? transcript.messages[0].content
         : "",
     ).toContain(COMPACTION_SUMMARY_HEADER);
+  });
+
+  it("creates compaction summary with EE-extractable checkpoint meta (Progress ✔ DONE shape for pilContext/layer3)", () => {
+    // This is the exact text shape persisted to EE behavioral collection on cli-compact-checkpoint
+    // (orchestrator compactForContext + extract). Layer 3 searches for it; agent uses via "task finished?".
+    const summaryMsg = createCompactionSummaryMessage("Goal: implement anti-mu\nPlan: Phase 1-3\nProgress: ✔ DONE dedup marker\n↻ In Progress: layer1 enrich");
+    const content = typeof summaryMsg.content === "string" ? summaryMsg.content : "";
+    expect(content).toContain("Context checkpoint summary");
+    expect(content).toContain("✔ DONE");
+    expect(content).toContain("Progress");
+    expect(summaryMsg.role).toBe("system");
+  });
+
+  it("buildCheckpointReminder now includes PRESERVE + KEEP_TOOL_IDS + tool-artifact query for anti-mù (ideas 3+4)", () => {
+    const r = buildCheckpointReminder(3, true);
+    expect(r).toContain("PRESERVE");
+    expect(r).toContain("KEEP_TOOL_IDS");
+    expect(r).toContain("tool-artifact");
   });
 });

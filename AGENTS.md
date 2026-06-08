@@ -47,6 +47,7 @@ Code, comments, commit messages, PR text, and all internal agent reasoning, anal
 - When you genuinely don't know: say "I don't know — need to check X" and then check X. Do not fill the gap with a plausible-sounding guess.
 - Every commit message / PR description that explains WHY must cite the evidence (session ID, log line, file:line, test name).
 - The only acceptable "guess" is an explicitly-labelled hypothesis followed by the experiment to test it.
+- **Graceful Reporting:** While you must *base* your answers on evidence, do NOT dump massive blocks of raw tool output (e.g. raw grep results, full directory trees, or unformatted logs) into your final response to the user. Synthesize the findings into highly readable, natural markdown. Cite file names and line numbers concisely (e.g. `[src/file.ts:10]`) without copy-pasting the entire file into the chat.
 
 ## Pre-Push Test Gate (MANDATORY)
 
@@ -65,6 +66,15 @@ Code, comments, commit messages, PR text, and all internal agent reasoning, anal
 
 Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch { return null; }` is forbidden — it swallows errors and makes debugging impossible. For HTTP calls, also log status code and response body. See `CLAUDE.md` "No Silent Catch Rule" for the full pattern.
 
+## Permission Mode Threat Model
+
+- `safe`: every tool call (bash, file, computer, etc.) requires explicit user approval before execution. Dangerous patterns (rm -rf /, external curl/wget, chmod 777, eval/exec, etc.) force approval even under auto-edit. All decisions + context (redacted cmd/path) are written to decision-log via appendAudit (permission-mode.ts:83).
+- `auto-edit`: read/write/edit/grep/list_directory auto-approve; bash + computer tools still require confirmation; any dangerous bash command forces approval.
+- `yolo`: all tools auto-approve (full power, no prompts). However, dangerous commands and every shuru sandbox wrap always emit `yolo-override` / `permission-override` entry with redacted command + effectiveSettings to decision-log (see bash.ts:567 prepareCommand + appendAudit; Task 2 instrumentation).
+- Audit is always-on for privileged paths: `usage security-audit --since 7d --json` (or 1h/30m) surfaces yolo sessions, high-risk cmds (secrets redacted), approval overrides, shuru executions, and other taken decisions. Review `~/.muonroi-cli/usage/decision-log-*.jsonl` before production use.
+- shuru sandbox: when enabled, every command is wrapped + logged (effective net/mounts + redacted cmd); degrades gracefully on non-macOS with warning (bash.ts:489).
+- Recommendation: treat yolo as "audit-then-trust"; never use on untrusted or high-stakes prompts. Cross-refs: 01-security-hardening-PLAN.md:134-150 (Task 4), src/utils/permission-mode.ts:36 (toolNeedsApproval + context), src/tools/bash.ts:598 (wrapCommandForShuru), usage security-audit (reuses decision-log events from Tasks 1-3).
+
 ## Architecture notes
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)
@@ -74,6 +84,7 @@ Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch {
   - `src/ee/bridge.ts:pilContext()` — unified `/api/pil-context` call with circuit breaker
   - Layer 1 calls `pilContext` when flag=1 and local classify confidence < 0.7;
     legacy multi-call path remains as permanent brain-unreachable fallback.
+  - EE compaction checkpoints (Context checkpoint summary with ✔ DONE progress) are persisted on B3/B4, retrievable via layer3 searchByText + ee.query (MCP), and injected into enriched for anti-mù recall. Layer 1 enriches raw for long sessions; layer3 emits `<!-- ee-checkpoint-injected:<sha> -->` dedup markers.
 - Council: `/council` triggers multi-model debate with dynamic prompts and convergence detection
 - Auto-compact: after every turn, context is silently compressed to keep token costs flat
 - Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)

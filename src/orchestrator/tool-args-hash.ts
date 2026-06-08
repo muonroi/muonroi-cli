@@ -209,12 +209,12 @@ export function hashToolArgs(toolName: string, args: unknown): string {
     if (typeof filePath === "string") {
       // Normalize path separators so D:\Personal\... and D:/Personal/... collapse.
       const normalized = filePath.replace(/\\/g, "/");
-      // Content-based (not file_path only): different new_string / content on same file now produce different hashes.
-      // This prevents false-positive "loop stop" on legitimate iterative refinement (e.g. session df2dbb878984 progressive edits).
-      // Only exact same patch repeated will collide (true stuck). Matches "use content-based lookup" principle.
-      const change = (args as { new_string?: unknown }).new_string ?? (args as { content?: unknown }).content ?? "";
-      const contentHash = sha1(typeof change === "string" ? change : stableJson(change));
-      return `${toolName}:${sha1(normalized)}:${contentHash}`;
+      // Phase 5 BUG-F+G: hash by file_path only — fires when the agent re-edits
+      // the same file with different old_string/new_string pairs. Observed in
+      // session 39884b072b5f where the agent edited the same file 7+ times
+      // fighting biome auto-format. Generic JSON hash kept them distinct;
+      // the dedicated file_path hash now collapses them.
+      return `${toolName}:${sha1(normalized)}`;
     }
   }
   return `${toolName}:${sha1(stableJson(args ?? null))}`;

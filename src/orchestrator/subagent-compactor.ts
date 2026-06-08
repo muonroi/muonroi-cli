@@ -86,6 +86,18 @@ export interface SubAgentCompactorOptions {
    * `contextWindowTokens` is not set.
    */
   contextFillRatio?: number;
+  /**
+   * Idea 3 (KEEP_TOOL_IDS lighter veto): explicit list of toolCallIds to keep
+   * verbatim this step (from agent emitting "KEEP_TOOL_IDS: id1,id2" in reasoning).
+   * These bypass age-based elision even if older than keepLastTurns.
+   */
+  keepToolIds?: string[];
+  /**
+   * Idea 4: optional side-effect hook called for tool results we are about to
+   * stub (full raw content available here). Fire-and-forget EE persist under
+   * source:"tool-artifact" so layer3/ee.query can later fetch "full tool result id=xxx".
+   */
+  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
 }
 
 /**
@@ -101,6 +113,33 @@ export const SUBAGENT_COMPACT_DEFAULT_KEEP_LAST = 3;
 const DEFAULT_OUTPUT_PREVIEW_CHARS = 200;
 const DEFAULT_LABEL = "sub-agent";
 
+/** Tools whose full outputs are high-value for anti-mù (idea 1). Keep verbatim even if older than keepLast. */
+export const IMPORTANT_TOOL_NAMES = ["read_file", "grep", "lsp", "bash"] as const;
+
+/**
+ * Heuristic: keep full (no stub) for high-signal tool results.
+ * Signals: allowlist tool + (error/todo/plan/keyfile/large output or explicit keep list).
+ * Brief inline per GSD-quick + evidence-first.
+ */
+export function isHighValueToolResult(toolName: string, preview: string, explicitKeepIds?: Set<string>, toolCallId?: string): boolean {
+  if (explicitKeepIds && toolCallId && explicitKeepIds.has(toolCallId)) return true;
+  const name = (toolName || "").toLowerCase();
+  
+  // Always preserve terminal response tools — this is the agent's own delivered
+  // work/findings. Truncating it causes the agent to think it lost its answer.
+  if (name.startsWith("respond_")) return true;
+
+  if ((IMPORTANT_TOOL_NAMES as readonly string[]).includes(name)) {
+    const p = preview.toLowerCase();
+    if (/error|fail|todo|plan|done|✔|blocked|critical/.test(p)) return true;
+    if (/\.(ts|tsx|js|md|json|test|spec)\b/.test(p) || p.includes("src/") || p.includes("PLAN")) return true;
+    if (preview.length > 1500) return true;
+    return true; // read_file/grep etc on source are presumptively high-value
+  }
+  if (toolCallId && explicitKeepIds?.has(toolCallId)) return true;
+  return false;
+}
+
 interface ResolvedOpts {
   thresholdChars: number;
   keepLastTurns: number;
@@ -109,9 +148,12 @@ interface ResolvedOpts {
   envelopeChars: number;
   contextWindowTokens: number;
   contextFillRatio: number;
+  keepToolIds: Set<string>;
+  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
+  const keepIds = new Set((o?.keepToolIds || []).map((s) => String(s).trim()).filter(Boolean));
   return {
     thresholdChars: o?.thresholdChars ?? SUBAGENT_COMPACT_DEFAULT_THRESHOLD,
     keepLastTurns: Math.max(0, o?.keepLastTurns ?? SUBAGENT_COMPACT_DEFAULT_KEEP_LAST),
@@ -120,6 +162,8 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     envelopeChars: Math.max(0, o?.envelopeChars ?? 0),
     contextWindowTokens: Math.max(0, o?.contextWindowTokens ?? 0),
     contextFillRatio: Math.min(0.95, Math.max(0.1, o?.contextFillRatio ?? 0.5)),
+    keepToolIds: keepIds,
+    persistArtifact: o?.persistArtifact,
   };
 }
 
@@ -268,15 +312,30 @@ function isStubbedToolResult(msg: ModelMessage): boolean {
   return false;
 }
 
-function rewriteOlderToolMessage(msg: ModelMessage, previewChars: number, label: string): ModelMessage {
+function rewriteOlderToolMessage(
+  msg: ModelMessage,
+  previewChars: number,
+  label: string,
+  keepToolIds: Set<string>,
+  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void,
+): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
     if (part.type !== "tool-result") return part;
     const tr = part as unknown as ToolResultPartLike;
     const rawPreview = extractOutputPreview(tr.output);
     const fullLen = rawPreview.length;
+    const toolCallId = tr.toolCallId;
+    // Idea 1 + 3: high-value or explicit KEEP_TOOL_IDS → keep verbatim (no stub).
+    if (isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
+      return part; // preserve full original output
+    }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
     const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
+    // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
+    if (persistArtifact && fullLen > 200) {
+      try { persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor"); } catch { /* fail-open */ }
+    }
     return {
       type: "tool-result",
       toolCallId: tr.toolCallId,
@@ -349,7 +408,7 @@ export function compactSubAgentMessages(
         out.push(msg);
         continue;
       }
-      out.push(rewriteOlderToolMessage(msg, outputPreviewChars, label));
+      out.push(rewriteOlderToolMessage(msg, outputPreviewChars, label, resolved.keepToolIds, resolved.persistArtifact));
       continue;
     }
     if (msg.role === "assistant" && Array.isArray(msg.content)) {

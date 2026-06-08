@@ -125,7 +125,9 @@ describe("wrapToolSetWithReadBudget", () => {
     const r1 = await exec({ path: "/x" });
     const r2 = await exec({ path: "/x" });
     expect(r1).toBe("content of /x");
-    expect(r2).toMatchObject({});
+    // Stub is a string (per ReadPathBudget.checkAndIncrement JSDoc + impl) containing the guidance message.
+    // The wrapper returns it directly so the agent sees the explanation without extra object wrapping.
+    expect(typeof r2).toBe("string");
     expect(String(r2)).toContain("read budget exceeded");
     expect(calls).toEqual(["/x"]); // inner execute only fired once
   });

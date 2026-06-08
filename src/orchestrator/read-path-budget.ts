@@ -133,7 +133,10 @@ export class ReadPathBudget {
 
 export function getReadPathBudgetCap(): number {
   const raw = process.env.MUONROI_MAX_READS_PER_PATH;
-  if (raw === undefined || raw === "") return 3;
+  // Default 0 = disabled. Agent knows when it needs to re-read and should
+  // not be blocked mid-analysis by a per-path cap. Override via env to
+  // re-enable (e.g. MUONROI_MAX_READS_PER_PATH=3).
+  if (raw === undefined || raw === "") return 0;
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return 3;
   return Math.floor(n);

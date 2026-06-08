@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `for await` loops.
 
 ### Added
+- **Phase 06**: 4 upgrades (Security, Performance, Reporting, UI). Wave 0 (ROADMAP/CHANGELOG/STATE) done. See `.planning/phases/06-4-upgrades-security-perf-report-ui/PLAN.md`.
 - **`/ideal` × BB ecosystem**: scaffold flow now injects Experience Engine
   context at CB-1 when the target resolves to `muonroi-building-block`.
   - New EE collections `bb-recipes` (sample + template intents, 9 points)

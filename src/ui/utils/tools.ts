@@ -27,27 +27,27 @@ export function toolArgs(tc?: ToolCall): string {
   if (!tc) return "";
   try {
     const a = JSON.parse(tc.function.arguments);
-    if (tc.function.name === "bash") return (a.command || "").replace(/\n/g, " ").trim();
+    if (tc.function.name === "bash") return String(a.command || "").replace(/\n/g, " ").trim();
     if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
-      return a.file_path || a.path || "";
+      return String(a.file_path || a.path || "");
     if (describeMcpFsTool(tc.function.name)) {
       // Most MCP fs tools take `path`; some take `paths` (read_multiple_files) or `source`/`destination` (move_file).
-      if (Array.isArray(a.paths)) return a.paths.join(", ");
+      if (Array.isArray(a.paths)) return a.paths.map(String).join(", ");
       if (a.source && a.destination) return `${a.source} → ${a.destination}`;
-      return a.path || a.pattern || "";
+      return String(a.path || a.pattern || "");
     }
     if (tc.function.name === "grep") {
       const path = a.path ? ` in ${a.path}` : "";
       return `"${a.pattern || ""}"${path}`;
     }
-    if (tc.function.name === "generate_image" || tc.function.name === "generate_video") return a.prompt || "";
-    if (tc.function.name === "task") return a.description || "";
+    if (tc.function.name === "generate_image" || tc.function.name === "generate_video") return String(a.prompt || "");
+    if (tc.function.name === "task") return String(a.description || "");
     if (tc.function.name === "lsp") return `${a.operation || "query"} ${a.filePath || ""}`.trim();
-    if (tc.function.name === "delegate") return a.description || "";
-    if (tc.function.name === "delegation_read") return a.id || "";
+    if (tc.function.name === "delegate") return String(a.description || "");
+    if (tc.function.name === "delegation_read") return String(a.id || "");
     if (tc.function.name === "process_logs" || tc.function.name === "process_stop")
       return a.id != null ? String(a.id) : "";
-    return a.query || "";
+    return String(a.query || "");
   } catch {
     return "";
   }

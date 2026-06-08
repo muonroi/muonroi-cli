@@ -815,7 +815,18 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
 
     let unifiedFailed = false;
     if (needsBrain) {
-      const resp = await pilContext(ctx.raw, {
+      // Step 8 (ee-anti-mu): enrich the raw passed to pilContext for sessions that may have
+      // experienced compaction (or any sessionId-bearing turn) so the brain sees EE checkpoints
+      // + the PRESERVE_FULL_CONTEXT veto token. Unconditional for any turn with sessionId
+      // (covers _compactionStats.count > 0 or step > K cases even if local conf high).
+      let brainRaw = ctx.raw;
+      if (ctx.sessionId) {
+        brainRaw = ctx.raw +
+          " [EE task checkpoints (\"Context checkpoint summary\" with ✔ DONE) from prior compactions are available via the ee.query tool. " +
+          "To keep full tool history this turn when you see pre-warn or compaction note, emit exact literal PRESERVE_FULL_CONTEXT in reasoning or assistant note. " +
+          "Self-check \"task finished?\" or \"compacted yet this turn?\" using the checkpoints.]";
+      }
+      const resp = await pilContext(brainRaw, {
         projectCtx: domain ? { domain } : undefined,
         budgetMs: 1500,
       });

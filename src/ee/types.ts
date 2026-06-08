@@ -204,8 +204,16 @@ export interface ExtractRequest {
   meta?: {
     sessionId?: string;
     tenantId?: string;
-    source?: "cli-exit" | "cli-clear" | "hook-stop";
+    source?: "cli-exit" | "cli-clear" | "hook-stop" | "cli-compact" | "cli-compact-checkpoint" | "tool-artifact";
     scope?: string;
+    iteration?: number;
+    tokensBefore?: number;
+    // Idea 4: tool-artifact on-demand re-hydrate fields (non-breaking extra)
+    toolCallId?: string;
+    toolName?: string;
+    reason?: string;
+    elidedAtStep?: number;
+    [k: string]: unknown;
   };
 }
 
