@@ -209,7 +209,12 @@ export function hashToolArgs(toolName: string, args: unknown): string {
     if (typeof filePath === "string") {
       // Normalize path separators so D:\Personal\... and D:/Personal/... collapse.
       const normalized = filePath.replace(/\\/g, "/");
-      return `${toolName}:${sha1(normalized)}`;
+      // Content-based (not file_path only): different new_string / content on same file now produce different hashes.
+      // This prevents false-positive "loop stop" on legitimate iterative refinement (e.g. session df2dbb878984 progressive edits).
+      // Only exact same patch repeated will collide (true stuck). Matches "use content-based lookup" principle.
+      const change = (args as { new_string?: unknown }).new_string ?? (args as { content?: unknown }).content ?? "";
+      const contentHash = sha1(typeof change === "string" ? change : stableJson(change));
+      return `${toolName}:${sha1(normalized)}:${contentHash}`;
     }
   }
   return `${toolName}:${sha1(stableJson(args ?? null))}`;

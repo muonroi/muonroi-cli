@@ -58,8 +58,16 @@ export async function setChatSecret(id: ChatSecretId, value: string): Promise<bo
     redactor.enrollSecret(value);
   }
 
-  await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id], value);
-  return true;
+  try {
+    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id], value);
+    return true;
+  } catch (err: any) {
+    // Runtime backend failure (e.g. Linux without libsecret or no active secret service).
+    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
+      console.error(`[chat-keychain] setPassword backend error for ${id}:`, err?.message || err);
+    }
+    return false;
+  }
 }
 
 export async function getChatSecret(id: ChatSecretId): Promise<string | null> {

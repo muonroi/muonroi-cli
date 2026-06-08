@@ -166,7 +166,26 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   const budgetHint = `\nOUTPUT BUDGET: aim for ≤${budget} tokens. Stop when the answer is complete; do not pad.`;
 
   // PIL-04 Tier 1.3: ban preamble (~30 tokens saved/turn).
-  let result = systemPrompt + baseSuffix + budgetHint + NO_PREAMBLE_RULE;
+  // Improvement: relax strict NO_PREAMBLE for meta-analysis / evaluation requests
+  // (e.g. "đánh giá", "cải thiện CLI"). This addresses the gò bó observed when
+  // asking for assessment of the system itself. Evidence rule (contract) still applies.
+  const isMetaAnalysis =
+    /đánh giá|cải thiện|nhận xét|đánh giá tổng thể|evaluate.*(cli|system)|improve.*cli|your assessment|how would you improve|trả lời tự nhiên|natural response/i.test(
+      ctx.raw,
+    );
+
+  // For meta-analysis on general/analyze, use "balanced" instead of forced "concise"
+  // so evaluation + recommendations can be given naturally (while still requiring evidence).
+  let effectiveStyle = style;
+  if (isMetaAnalysis && (ctx.taskType === "general" || ctx.taskType === "analyze")) {
+    effectiveStyle = "balanced";
+  }
+  const effectiveSuffix = SUFFIXES[ctx.taskType]?.[effectiveStyle] || baseSuffix;
+
+  let result = systemPrompt + effectiveSuffix + budgetHint;
+  if (!isMetaAnalysis) {
+    result += NO_PREAMBLE_RULE;
+  }
 
   // T1 behavioral rules (proven-tier EE points set by Layer 3). These are
   // project-specific reflexes the model MUST follow — injected as instructions,
@@ -305,4 +324,17 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
       layers: [...ctx.layers, { name: "output-optimization", applied: false, delta: null }],
     };
   }
+}
+
+/**
+ * Exported so other layers / message-processor can detect meta-analysis turns early
+ * and potentially skip heavy enrichment (layer4/5) or use lighter contract sections.
+ * This helps reduce PIL overhead for reflective/self-evaluation questions.
+ */
+export function isMetaAnalysisPrompt(raw: string): boolean {
+  // Broader mixed-lang + debug/self-eval detection (unifies with native meta cases).
+  // Code-side only — no keywords leaked into model prompts.
+  return /đánh giá|phân tích|cải thiện|fix|debug|nhận xét|đánh giá tổng thể|evaluate.*(cli|system|repo)|improve.*(cli|repo)|your assessment|how would you improve|trả lời tự nhiên|natural response|sau fix|phỏng vấn|discovery|native|agent.*inside|cli.*bên trong/i.test(
+    raw,
+  );
 }

@@ -45,8 +45,16 @@ export async function setMcpKey(id: McpKeyId, key: string): Promise<boolean> {
   const kt = await loadKeytar();
   if (!kt?.setPassword) return false;
   redactor.enrollSecret(key);
-  await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_MCP[id], key);
-  return true;
+  try {
+    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_MCP[id], key);
+    return true;
+  } catch (err: any) {
+    // Runtime backend failure (e.g. Linux without libsecret or no active secret service).
+    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
+      console.error(`[mcp-keychain] setPassword backend error for ${id}:`, err?.message || err);
+    }
+    return false;
+  }
 }
 
 export async function getMcpKey(id: McpKeyId): Promise<string | null> {

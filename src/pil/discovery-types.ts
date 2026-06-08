@@ -38,11 +38,27 @@ export interface ClarityGap {
 }
 
 export interface ClarifiedIntent {
+  intentStatement?: string;
   outcome: string;
   scope: string[];
-  constraints: string[];
-  gaps: Array<ClarityGap & { answer: string | null }>;
+  feasibilityWarnings?: string[];
+  interviewed?: boolean;
+  accepted?: boolean;
+  constraints?: string[];
+  gaps?: Array<{ dimension: string; answer: string | null; options: string[]; defaultIndex: number }>;
+  modelClarifications?: Array<{ question: string; answer: string }>;
 }
+
+export type ModelClarificationProposer = (input: {
+  raw: string;
+  l1: {
+    taskType: TaskType | null;
+    confidence: number;
+    complexity?: "low" | "medium" | "high";
+    domain?: string | null;
+  };
+  additionalContext?: string;
+}) => Promise<string[]>;
 
 export interface FeasibilityResult {
   viable: boolean;

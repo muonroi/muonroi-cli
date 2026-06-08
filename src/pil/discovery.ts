@@ -6,8 +6,10 @@ import type {
   ClarifiedIntent,
   DiscoveryInteractionHandler,
   DiscoveryResult,
+  ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
+import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
 import {
   buildInterviewQuestion,
@@ -49,6 +51,7 @@ export async function runDiscovery(
   cwd: string,
   handler: DiscoveryInteractionHandler | null,
   sessionId: string | null = null,
+  clarificationProposer: ModelClarificationProposer | null = null,
 ): Promise<DiscoveryResult> {
   const start = Date.now();
 
@@ -107,7 +110,78 @@ export async function runDiscovery(
   }
 
   // L1.6: Clarity Interview
-  const gaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
+  let gaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
+
+  // Effective model-driven interview: if a clarificationProposer (the actual task model) is provided,
+  // let the *model* itself generate the questions based on the user request + CLI enrichment so far.
+  // The model decides what it still needs and is missing from the enrich suggestions.
+  // Always generate model gaps when proposer wired (even if no handler for non-interactive resolve).
+  // This ensures model BE recs drive [Discovery] Intent/Outcome/Scope for native meta prompts.
+  // Handler only decides whether to show interactive askcard.
+  if (clarificationProposer) {
+    try {
+      const additionalContext = [
+        projectContext.language ? `Language: ${projectContext.language}` : "",
+        projectContext.framework ? `Framework: ${projectContext.framework}` : "",
+        projectContext.packageManager ? `Package manager: ${projectContext.packageManager}` : "",
+        projectContext.relevantModules?.length
+          ? `Relevant modules: ${projectContext.relevantModules.map((m) => m.path).join(", ")}`
+          : "",
+        projectContext.boundedContexts?.length
+          ? `Bounded contexts: ${projectContext.boundedContexts.map((b) => `${b.name} (${b.path})`).join(", ")}`
+          : "",
+        projectContext.eePatterns?.length ? `EE patterns: ${projectContext.eePatterns.slice(0, 3).join(" | ")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const modelQuestions = await clarificationProposer({
+        raw,
+        l1: { taskType: l1.taskType, confidence: l1.confidence },
+        additionalContext: additionalContext || undefined,
+      });
+      if (modelQuestions.length > 0) {
+        gaps = modelQuestions.slice(0, 3).map((line, idx) => {
+          let q = line;
+          let recs = ["I will provide my own details / constraints"];
+          const m = line.match(/\[MODEL RECS:?\s*(.+?)\]/i) || line.match(/RECS:\s*(.+)$/i);
+          if (m) {
+            recs = m[1]
+              .split(/\s*\|\s*/)
+              .map((r) => r.trim())
+              .filter(Boolean)
+              .slice(0, 3);
+            q = line
+              .replace(/\[MODEL RECS:?.*?\]/i, "")
+              .replace(/RECS:.*$/, "")
+              .trim();
+          }
+          return {
+            dimension: "outcome" as const,
+            description: `Model-generated clarification #${idx + 1}`,
+            suggestedQuestion: q || "What else needs clarification?",
+            options: [...recs, "Other (type free answer)"],
+            defaultIndex: 0,
+          };
+        });
+      }
+    } catch {
+      // fall through to static
+    }
+  }
+
+  if (!clarificationProposer && (l1.taskType === "analyze" || l1.taskType === "debug") && gaps.length > 0) {
+    // Fallback open question (non-model path)
+    gaps = [
+      {
+        dimension: "outcome",
+        description: "Specific outcome and constraints the agent/model needs from the user",
+        suggestedQuestion: `Để tôi (agent/model) thực hiện chính xác và có được thông tin cần thiết cho task này, bạn hãy cho tôi biết: kết quả mong muốn cụ thể, các ràng buộc quan trọng, hoặc bất kỳ chi tiết nào khác mà tôi cần làm rõ trước khi bắt đầu?`,
+        options: ["Tôi sẽ trả lời tự do / cung cấp chi tiết cần thiết"],
+        defaultIndex: 0,
+      },
+    ];
+  }
+
   let clarifiedIntent: ClarifiedIntent;
   let interviewed = false;
 
@@ -132,8 +206,16 @@ export async function runDiscovery(
   }
 
   // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked
+  // Broaden to override bad generics (Local path, In prompts/..., project root literals) that
+  // can leak from detectClarityGaps/resolve when raw contains directory mentions or for native meta.
   const autoOutcome = getAutofilledOutcome(l1.taskType, raw);
-  if (autoOutcome && (!clarifiedIntent.outcome || clarifiedIntent.outcome.startsWith("Complete the task"))) {
+  if (
+    autoOutcome &&
+    (!clarifiedIntent.outcome ||
+      clarifiedIntent.outcome.startsWith("Complete the task") ||
+      /Local path|In prompts|directory as|project root|\/|absolute|local\/repo/i.test(clarifiedIntent.outcome) ||
+      clarifiedIntent.outcome.includes("/"))
+  ) {
     clarifiedIntent = { ...clarifiedIntent, outcome: autoOutcome };
   }
 
@@ -165,7 +247,7 @@ export async function runDiscovery(
       // same "Which part of codebase?" question they had just answered).
       const reGaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
       const priorAnswers = new Map<string, string | null>(
-        clarifiedIntent.gaps.map((g) => [g.dimension, g.answer ?? null]),
+        (clarifiedIntent.gaps ?? []).map((g) => [g.dimension, g.answer ?? null]),
       );
       const reAnswered: Array<(typeof reGaps)[number] & { answer: string | null }> = reGaps.map((g) => ({
         ...g,
@@ -203,8 +285,11 @@ export async function runDiscovery(
     interviewed,
     intentStatement,
     outcome: clarifiedIntent.outcome,
-    scope: feasibility.adjustedScope.length > 0 ? feasibility.adjustedScope : clarifiedIntent.scope,
-    feasibilityWarnings: feasibility.warnings,
+    scope:
+      (feasibility.adjustedScope ?? []).length > 0
+        ? (feasibility.adjustedScope ?? [])
+        : (clarifiedIntent.scope ?? ["project root"]),
+    feasibilityWarnings: feasibility.warnings ?? [],
     accepted,
     taskType: l1.taskType,
     confidence: l1.confidence,
@@ -231,8 +316,12 @@ function buildClarifiedIntentFromAnswers(
   const constraints = constraintGap?.answer ? [constraintGap.answer] : [];
 
   return {
+    intentStatement: outcome,
     outcome,
     scope: scope.length > 0 ? scope : ["project root"],
+    feasibilityWarnings: [],
+    interviewed: false,
+    accepted: false,
     constraints,
     gaps: answeredGaps.map((g) => ({
       dimension: g.dimension as "outcome" | "scope" | "constraint",
@@ -242,5 +331,65 @@ function buildClarifiedIntentFromAnswers(
       defaultIndex: g.defaultIndex,
       answer: g.answer,
     })),
+  };
+}
+
+/**
+ * Create a ModelClarificationProposer backed by the actual task model.
+ * The model receives the user raw + CLI enrichment (l1, project modules, etc.)
+ * and outputs the specific questions *it* needs the user to answer.
+ * This is the effective way to let the model interview based on what is still missing.
+ */
+export function createModelClarificationProposer(providerFactory: any, modelId: string): ModelClarificationProposer {
+  return async (input) => {
+    try {
+      const { resolveModelRuntime } = await import("../providers/runtime.js");
+      const { generateText } = await import("ai");
+      const runtime = resolveModelRuntime(providerFactory, modelId);
+      const contextStr = input.additionalContext
+        ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
+        : "";
+      const special = isMetaAnalysisPrompt(input.raw)
+        ? `
+If the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
+        : "";
+      const prompt = `You are the AI agent executing inside muonroi-cli.
+User request: "${input.raw}"
+Task type from CLI: ${input.l1.taskType}
+${contextStr}
+
+Based on the above, output 1-3 specific, concise questions you (the model) still need the user to answer right now so you have all the information required to complete the task accurately, without guessing.
+Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — only ask what is missing from this context.${special}
+For each question also provide 1-2 short concrete recommendations the user can pick from (model-backed choices).
+Return ONLY valid JSON array, nothing else:
+[{"question":"...","recommends":["rec1","rec2"]}, ...]
+Max 3 items.`;
+
+      const result = await generateText({
+        model: runtime.model,
+        prompt,
+        maxOutputTokens: 256,
+      });
+
+      let items: Array<{ question: string; recommends?: string[] }> = [];
+      try {
+        const txt = result.text
+          .trim()
+          .replace(/```json|```/g, "")
+          .trim();
+        items = JSON.parse(txt);
+      } catch {
+        // degrade: treat whole text as one question with no recs
+        items = [{ question: result.text.trim(), recommends: [] }];
+      }
+      return items.slice(0, 3).map((it) => {
+        const recs = (it.recommends || []).slice(0, 2).join(" | ");
+        const tag = recs ? ` [MODEL RECS: ${recs}]` : "";
+        return `${it.question || "Clarify needed details"}${tag}`;
+      });
+    } catch (err) {
+      // Silent degrade: no model questions, fall back to static
+      return [];
+    }
   };
 }

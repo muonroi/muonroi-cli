@@ -131,23 +131,32 @@ export function createToolLoopCapPredicate(
       const lastStep = steps[sn - 1] as MinimalStep | undefined;
       const stepSig = hashStep(lastStep);
       if (stepSig) {
-        recent.push(stepSig);
-        if (recent.length > patternWindow) recent.shift();
-        const dupCount = recent.filter((r) => r.hash === stepSig.hash).length;
-        if (dupCount >= patternThreshold) {
-          patternAskFired = true; // one-shot regardless of verdict
-          const verdict = await ask({
-            kind: "pattern",
-            toolName: stepSig.toolName,
-            count: dupCount,
-            windowSize: recent.length,
-            stepNumber: sn,
-            naturalCeiling: opts.naturalCeiling,
-          });
-          if (verdict === "stop") return true;
-          // Continue → clear the ring so we don't immediately re-fire on the
-          // next call (user explicitly accepted; give them breathing room).
-          recent.length = 0;
+        // File edits (edit_file / write_file) are normal productive refinement on the same target.
+        // Do not let repeated edits on one file contribute to pattern-loop detection.
+        // This prevents false-positive stop warnings during legitimate iterative work
+        // (e.g. session df2dbb878984 and similar "edit same file 3x" flows).
+        // The max-tool-rounds cap still protects against true runaway loops.
+        if (stepSig.toolName === "edit_file" || stepSig.toolName === "write_file") {
+          // skip pattern accounting for fs edits
+        } else {
+          recent.push(stepSig);
+          if (recent.length > patternWindow) recent.shift();
+          const dupCount = recent.filter((r) => r.hash === stepSig.hash).length;
+          if (dupCount >= patternThreshold) {
+            patternAskFired = true; // one-shot regardless of verdict
+            const verdict = await ask({
+              kind: "pattern",
+              toolName: stepSig.toolName,
+              count: dupCount,
+              windowSize: recent.length,
+              stepNumber: sn,
+              naturalCeiling: opts.naturalCeiling,
+            });
+            if (verdict === "stop") return true;
+            // Continue → clear the ring so we don't immediately re-fire on the
+            // next call (user explicitly accepted; give them breathing room).
+            recent.length = 0;
+          }
         }
       }
     }
