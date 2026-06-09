@@ -53,6 +53,7 @@
 import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import * as phaseTracker from "../ee/phase-tracker.js";
@@ -79,7 +80,14 @@ import {
 } from "../pil/cheap-model-playbook.js";
 import { injectCheapModelWorkbook, shouldInjectCheapModelWorkbook } from "../pil/cheap-model-workbooks.js";
 import type { DiscoveryInteractionHandler } from "../pil/discovery-types.js";
-import { applyPilSuffix, getResponseTaskType, getResponseToolSet, isResponseTool, runPipeline } from "../pil/index.js";
+import {
+  applyPilSuffix,
+  getResponseTaskType,
+  getResponseToolSet,
+  isResponseTool,
+  runPipeline,
+  shouldHaltOnResponseTool,
+} from "../pil/index.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -169,15 +177,14 @@ import {
 } from "./scope-ceiling.js";
 import {
   attachReminderToMessages,
-  buildScopeReminder,
   buildCheckpointReminder,
+  buildScopeReminder,
   type ComplexitySize,
   cadenceForSize,
   shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
-import { getDefaultEEClient } from "../ee/intercept.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
@@ -349,6 +356,17 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
  * Constructed per call (heap allocation is negligible against the streamText
  * cost), matching the StreamRunner / CouncilManager pattern.
  */
+
+/**
+ * Max response-tool (`respond_*`) calls tolerated within a single turn before
+ * the orchestrator finalizes early with the best answer buffered so far. A
+ * well-behaved turn emits the response tool ONCE; a hedge-then-answer emits 2.
+ * Beyond that is degenerate spam (session 8d8f498268ed: 80× identical
+ * respond_general in one generation). Set to 3 so the legitimate ≤2 patterns
+ * are never cut short.
+ */
+const RESPONSE_TOOL_SPAM_CAP = 3;
+
 export class MessageProcessor {
   constructor(private deps: MessageProcessorDeps) {}
 
@@ -1310,43 +1328,41 @@ export class MessageProcessor {
                     });
                   },
                 }),
-                new Promise((_, reject) =>
-                  setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500),
-                ),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500)),
               ]);
             } catch (err) {
               console.error("[MCP] buildMcpToolSet timed out or failed, proceeding with builtins only", err);
             }
             if (mcpBundle) {
               closeMcp = mcpBundle.close;
-            // Drop filesystem-MCP read/write/edit tools that duplicate the
-            // first-class builtin file tools. Without this, models re-read the
-            // SAME file via both `read_file` and `mcp_filesystem__read_text_file`
-            // (live grok session f5dfab0ce0ca: a 772-line file read 6×), wasting
-            // ~150 tok/schema PLUS re-injecting whole files into context. The
-            // builtins are strictly better (read-before-write, LSP, CRLF match,
-            // dedup/read-budget wrappers). Non-duplicate fs tools are untouched.
-            const _builtinToolNames = new Set(Object.keys(rawToolSet));
-            const { tools: _dedupedMcpTools, dropped: _droppedFsMcp } = dropRedundantFsMcpTools(
-              mcpBundle.tools,
-              _builtinToolNames,
-            );
-            rawToolSet = { ...rawToolSet, ..._dedupedMcpTools };
-            if (_droppedFsMcp.length > 0 && deps.session) {
-              try {
-                logInteraction(deps.session.id, "routing", {
-                  model: turnModelId,
-                  data: { droppedRedundantFsMcp: _droppedFsMcp },
-                });
-              } catch {
-                /* telemetry best-effort */
+              // Drop filesystem-MCP read/write/edit tools that duplicate the
+              // first-class builtin file tools. Without this, models re-read the
+              // SAME file via both `read_file` and `mcp_filesystem__read_text_file`
+              // (live grok session f5dfab0ce0ca: a 772-line file read 6×), wasting
+              // ~150 tok/schema PLUS re-injecting whole files into context. The
+              // builtins are strictly better (read-before-write, LSP, CRLF match,
+              // dedup/read-budget wrappers). Non-duplicate fs tools are untouched.
+              const _builtinToolNames = new Set(Object.keys(rawToolSet));
+              const { tools: _dedupedMcpTools, dropped: _droppedFsMcp } = dropRedundantFsMcpTools(
+                mcpBundle.tools,
+                _builtinToolNames,
+              );
+              rawToolSet = { ...rawToolSet, ..._dedupedMcpTools };
+              if (_droppedFsMcp.length > 0 && deps.session) {
+                try {
+                  logInteraction(deps.session.id, "routing", {
+                    model: turnModelId,
+                    data: { droppedRedundantFsMcp: _droppedFsMcp },
+                  });
+                } catch {
+                  /* telemetry best-effort */
+                }
+              }
+              if (mcpBundle.errors.length > 0) {
+                yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
               }
             }
-            if (mcpBundle.errors.length > 0) {
-              yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
-            }
           }
-        }
 
           // PIL response tools: inject structured output tool when taskType detected
           if (_hasResponseTools && turnCaps.supportsClientTools(runtime.modelInfo)) {
@@ -1369,6 +1385,19 @@ export class MessageProcessor {
           );
           captureToolSchemas(tools);
           let responseToolCalled = false;
+          // A turn must surface exactly ONE final structured answer. Cheap
+          // models sometimes emit the response tool MORE THAN ONCE in a single
+          // step (session 9b1b39bf4dc6: grok emitted respond_general twice —
+          // a 278-char "I must read the code" hedge, then the 3782-char real
+          // answer — both in one step). Yielding each inline appends two
+          // stacked structured_response blocks and shows the hedge first.
+          // Instead we BUFFER the response-tool payloads and yield only the
+          // most complete one (longest serialized data) after the stream
+          // drains — robust to either ordering (hedge-then-answer or
+          // answer-then-summary).
+          let _pendingStructuredResponse: { taskType: string; data: Record<string, unknown> } | null = null;
+          let _pendingStructuredResponseLen = -1;
+          let _responseToolEmitCount = 0;
 
           // G3: providerOptions assembly is owned by the capability layer
           // (src/providers/capabilities.ts). buildTurnProviderOptions feeds
@@ -1589,6 +1618,26 @@ export class MessageProcessor {
           // _ceilingHit and _ceilingHitAtStep are kept for telemetry: a
           // crossing event is logged for forensics, but no action is taken.
           const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+            // Terminal response tool: a `respond_*` call IS the model's final
+            // structured answer (its `execute` is identity — the payload lives
+            // in the tool-call args). `shouldHaltOnResponseTool` decides if the
+            // emission is terminal vs a premature "blind" announce:
+            //  - response tool AFTER real tool work (read/grep/bash) → terminal,
+            //    halt now (kills d95113d3be09 seq=27: 7 reads → 87× respond loop
+            //    at call #1, no extra round-trip for the common case).
+            //  - a single blind response (no prior investigation) → do NOT halt;
+            //    give the model the step it announced it would use to read code
+            //    (session e4a9d97a90: lone blind respond_general was force-stopped
+            //    by the old halt-on-first rule and the agent never investigated).
+            //  - a 2nd blind response with still no real work → narration loop,
+            //    halt. In-step spam (80× in one generation) is bounded separately
+            //    by RESPONSE_TOOL_SPAM_CAP — stopWhen only runs BETWEEN steps.
+            // Read from `state.steps` (the SDK's own per-step record) rather than
+            // the for-await consumer's `responseToolCalled` flag — stopWhen runs
+            // between steps and may evaluate before our consumer processed the
+            // tool-result part, so the flag would race.
+            const _steps = state.steps as ReadonlyArray<{ toolCalls?: ReadonlyArray<{ toolName?: string }> }>;
+            if (shouldHaltOnResponseTool(_steps)) return true;
             const base = await _baseDynamicStopWhen(state);
             if (base) return true;
             const next = incSessionStep(_ceilingSessionId);
@@ -1697,7 +1746,10 @@ export class MessageProcessor {
                 // Idea 3: parse lighter token
                 const mKeep = joined.match(/KEEP_TOOL_IDS\s*[:=]\s*([a-z0-9_, -]+)/i);
                 if (mKeep) {
-                  keepToolIds = mKeep[1].split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+                  keepToolIds = mKeep[1]
+                    .split(/[,\s]+/)
+                    .map((s) => s.trim())
+                    .filter(Boolean);
                 }
                 return false;
               });
@@ -1726,7 +1778,14 @@ export class MessageProcessor {
                       {
                         transcript: fullContent.slice(0, 8000),
                         projectPath: _cwd,
-                        meta: { source: "tool-artifact", toolCallId, toolName, reason, sessionId: _sess, elidedAtStep: sn },
+                        meta: {
+                          source: "tool-artifact",
+                          toolCallId,
+                          toolName,
+                          reason,
+                          sessionId: _sess,
+                          elidedAtStep: sn,
+                        },
                       },
                       AbortSignal.timeout(700),
                     )
@@ -1823,9 +1882,10 @@ export class MessageProcessor {
               // Enhanced per EE anti-mù plan (docs/ee-anti-mu-compaction-plan.md Phase 2): include proactive
               // "task finished?", "compacted yet?", "EE checkpoint" so agent can self-assess and avoid mù
               // even when the top-level summary is not in its immediate focus (sub-agents, long loops).
-              const _compactNote = compacted !== stripped
-                ? `[context compacted at step ${sn} — older or low-value tool results rewritten to stubs to fit budget. High-value evidence (file reads, bash, your previous responses) is kept verbatim. ${buildCheckpointReminder(sn, true)}]`
-                : null;
+              const _compactNote =
+                compacted !== stripped
+                  ? `[context compacted at step ${sn} — older or low-value tool results rewritten to stubs to fit budget. High-value evidence (file reads, bash, your previous responses) is kept verbatim. ${buildCheckpointReminder(sn, true)}]`
+                  : null;
               if (_compactNote) {
                 return { messages: attachReminderToMessages(compacted, _compactNote) };
               }
@@ -1959,6 +2019,74 @@ export class MessageProcessor {
                 activeToolCalls.push(tc);
                 // SAMR: track that Phase 1 produced tool calls → transition to Phase 2
                 if (stepRouterPhase === "phase1") phase1HadToolCalls = true;
+
+                // Response tool = the terminal final answer (identity execute;
+                // the payload lives in the call args). Buffer it (longest-wins)
+                // straight from the args and gate UI/DB/exec spam: cheap models
+                // sometimes emit the response tool MANY times in ONE generation
+                // (session 8d8f498268ed: 80× identical respond_general hedge in
+                // one step). stopWhen only halts BETWEEN steps, so it can't stop
+                // an in-step spam — this does. Surface only the first indicator;
+                // if the model spams past the cap, finalize NOW with the
+                // buffered answer instead of streaming out the degenerate step.
+                if (isResponseTool(tc.function.name)) {
+                  _responseToolEmitCount += 1;
+                  try {
+                    const _payload = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+                    const _len = JSON.stringify(_payload).length;
+                    if (_len > _pendingStructuredResponseLen) {
+                      _pendingStructuredResponseLen = _len;
+                      _pendingStructuredResponse = {
+                        taskType: getResponseTaskType(tc.function.name) ?? tc.function.name,
+                        data: _payload,
+                      };
+                    }
+                  } catch {
+                    /* keep the prior buffered payload */
+                  }
+                  responseToolCalled = true;
+                  // Only the first response-tool call gets a UI indicator.
+                  if (_responseToolEmitCount === 1) {
+                    yield { type: "tool_calls", toolCalls: [tc] };
+                  }
+                  if (_responseToolEmitCount >= RESPONSE_TOOL_SPAM_CAP && _pendingStructuredResponse) {
+                    if (deps.session) {
+                      try {
+                        logInteraction(deps.session.id, "f6_synthesis", {
+                          eventSubtype: "response_tool_spam_abort",
+                          data: { emitted: _responseToolEmitCount, keptChars: _pendingStructuredResponseLen },
+                        });
+                      } catch {
+                        /* telemetry best-effort */
+                      }
+                    }
+                    // Persist a clean turn (user + the single buffered answer)
+                    // so history stays usable; the spam is dropped. Mirrors the
+                    // tool-repetition abort: yield + done + return (do NOT await
+                    // result.response — the stream is still spewing calls).
+                    const _data = _pendingStructuredResponse.data as { response?: unknown };
+                    const _answerText =
+                      typeof _data.response === "string"
+                        ? _data.response
+                        : JSON.stringify(_pendingStructuredResponse.data);
+                    try {
+                      deps.appendCompletedTurn(userModelMessage, [
+                        { role: "assistant", content: _answerText } as ModelMessage,
+                      ]);
+                    } catch (persistErr) {
+                      console.error(
+                        `[message-processor] response-tool-spam persist failed: ${(persistErr as Error)?.message}`,
+                      );
+                    }
+                    yield {
+                      type: "structured_response" as StreamChunk["type"],
+                      structuredResponse: _pendingStructuredResponse,
+                    };
+                    yield { type: "done" };
+                    return;
+                  }
+                  break; // response tools skip write-ahead/hooks/normal tool_calls yield
+                }
 
                 // EE PreToolUse hook: fire intercept before tool execution.
                 {
@@ -2155,19 +2283,24 @@ export class MessageProcessor {
                 // to expose the schema-shaped payload to the UI renderer.
                 if (isResponseTool(part.toolName)) {
                   responseToolCalled = true;
+                  // Payload was already buffered (longest-wins) from the
+                  // tool-CALL args above; re-buffer from the executed result as
+                  // a fallback (unwraps the AI-SDK `{type:"json",value}` shape).
+                  // Counting + the spam cap live in the tool-call branch.
                   const taskType = getResponseTaskType(part.toolName);
                   const rawOutput = part.output as unknown;
                   const unwrapped =
                     rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
                       ? ((rawOutput as { value?: unknown }).value ?? {})
                       : (rawOutput ?? {});
-                  yield {
-                    type: "structured_response" as StreamChunk["type"],
-                    structuredResponse: {
+                  const _len = JSON.stringify(unwrapped ?? {}).length;
+                  if (_len > _pendingStructuredResponseLen) {
+                    _pendingStructuredResponseLen = _len;
+                    _pendingStructuredResponse = {
                       taskType: taskType ?? part.toolName,
                       data: unwrapped as Record<string, unknown>,
-                    },
-                  };
+                    };
+                  }
                   notifyObserver(observer?.onToolFinish, { toolCall: tc, toolResult: tr, timestamp: Date.now() });
                   break;
                 }
@@ -2365,11 +2498,15 @@ export class MessageProcessor {
                 // auto-edit auto-approves file ops; yolo auto-approves everything.
                 const toolName = approvalPart.toolCall?.toolName ?? "";
                 const input = approvalPart.toolCall?.input ?? {};
-                const context = toolName === "bash"
-                  ? { command: String((input as any).command ?? "") }
-                  : (toolName === "write_file" || toolName === "edit_file" || toolName === "read_file" || toolName === "grep"
+                const context =
+                  toolName === "bash"
+                    ? { command: String((input as any).command ?? "") }
+                    : toolName === "write_file" ||
+                        toolName === "edit_file" ||
+                        toolName === "read_file" ||
+                        toolName === "grep"
                       ? { path: String((input as any).path ?? (input as any).file_path ?? "") }
-                      : undefined);
+                      : undefined;
                 if (!toolNeedsApproval(toolName, deps.permissionMode, context)) {
                   // Auto-approve: respond directly without surfacing to UI.
                   deps.respondToToolApproval(approvalPart.approvalId, true);
@@ -2436,6 +2573,40 @@ export class MessageProcessor {
                 // looks like a silent freeze.
                 if (stallTriggered) {
                   stall.dispose();
+                  // A response tool already produced the terminal structured
+                  // answer (buffered from its call args) before the provider
+                  // stalled on a LATER step. Surface it and finish cleanly —
+                  // never bury the model's actual answer behind a "not
+                  // responding" error. Root cause of the "respond_* indicator
+                  // shows but no answer block renders" report: this stall-abort
+                  // path returned before the post-loop structured_response yield,
+                  // dropping the captured answer. A response tool is terminal,
+                  // so there is nothing to rescue — just emit what we have.
+                  if (_pendingStructuredResponse) {
+                    if (!streamOk) {
+                      try {
+                        const _d = _pendingStructuredResponse.data as { response?: unknown };
+                        const _ans =
+                          typeof _d.response === "string"
+                            ? _d.response
+                            : JSON.stringify(_pendingStructuredResponse.data);
+                        deps.appendCompletedTurn(userModelMessage, [
+                          { role: "assistant", content: _ans } as ModelMessage,
+                        ]);
+                        streamOk = true;
+                      } catch (persistErr) {
+                        console.error(
+                          `[message-processor] stall+response-tool persist failed: ${(persistErr as Error)?.message}`,
+                        );
+                      }
+                    }
+                    yield {
+                      type: "structured_response" as StreamChunk["type"],
+                      structuredResponse: _pendingStructuredResponse,
+                    };
+                    yield { type: "done" };
+                    return;
+                  }
                   // Best-effort answer rescue: a turn that already ran tools but
                   // stalled before the final synthesis would otherwise return
                   // ONLY "Model not responding", discarding all that work (live
@@ -2529,7 +2700,15 @@ export class MessageProcessor {
           // assistant message to deps.messages and restart the loop with
           // the fast execution model. Phase 2's streamText call will see
           // the pending tool calls and execute them automatically.
-          if (stepRouterPhase === "phase1" && phase1HadToolCalls) {
+          //
+          // EXCEPT when Phase 1 emitted a response tool: a `respond_*` call IS
+          // the terminal structured answer (identity execute), not work to hand
+          // to Phase 2. Transitioning here would (a) skip the structured_response
+          // yield below — the answer never reaches the TUI — and (b) append a
+          // dangling assistant tool-call WITHOUT its tool-result (only assistant
+          // msgs are pushed), corrupting Phase 2's history. Fall through instead
+          // so the buffered answer is yielded + persisted on this turn.
+          if (stepRouterPhase === "phase1" && phase1HadToolCalls && !responseToolCalled) {
             try {
               const phase1Response = await result.response;
               // Append only new messages (assistant message with tool calls)
@@ -2544,6 +2723,28 @@ export class MessageProcessor {
             }
             stepRouterPhase = "phase2";
             continue; // Re-enter while loop with Phase 2 (fast) model
+          }
+
+          // Surface the single most-complete response-tool answer buffered
+          // during the stream (see _pendingStructuredResponse). Yielding here —
+          // once, after the stream drained and after the Phase 1 transition —
+          // collapses any duplicate response-tool emissions in the turn into a
+          // single structured_response block for the UI.
+          if (_pendingStructuredResponse) {
+            yield {
+              type: "structured_response" as StreamChunk["type"],
+              structuredResponse: _pendingStructuredResponse,
+            };
+            if (_responseToolEmitCount > 1 && deps.session) {
+              try {
+                logInteraction(deps.session.id, "f6_synthesis", {
+                  eventSubtype: "response_tool_deduped",
+                  data: { emitted: _responseToolEmitCount, keptChars: _pendingStructuredResponseLen },
+                });
+              } catch {
+                /* telemetry best-effort */
+              }
+            }
           }
 
           if (signal.aborted) {
@@ -2576,12 +2777,25 @@ export class MessageProcessor {
               let _f6SynthesisText: string | null = null;
               const _f6LastMsg = scrubbed[scrubbed.length - 1] as { role?: string; content?: unknown } | undefined;
               const _f6LastRole = _f6LastMsg?.role ?? "none";
-              let _f6Outcome: "skip_ceiling" | "skip_has_text" | "fired_empty" | "fired_text" | "error" =
-                "skip_ceiling";
+              let _f6Outcome:
+                | "skip_ceiling"
+                | "skip_has_text"
+                | "skip_response_tool"
+                | "fired_empty"
+                | "fired_text"
+                | "error" = "skip_ceiling";
               let _f6Elapsed = 0;
               let _f6ChunkChars = 0;
               let _f6Error: string | null = null;
-              if (!_ceilingHit) {
+              // A response tool already produced the final structured answer —
+              // F6 synthesis would duplicate it as prose. Skip entirely. With
+              // the stopWhen terminal-halt above, the turn now ends right after
+              // the response tool (last scrubbed message is the response
+              // tool-result, role "tool"), which would otherwise trip the
+              // _needsSynthesis "ended on a tool" branch and double-respond.
+              if (responseToolCalled) {
+                _f6Outcome = "skip_response_tool";
+              } else if (!_ceilingHit) {
                 const _needsSynthesis = (() => {
                   if (!_f6LastMsg) return false;
                   if (_f6LastMsg.role === "tool") return true;

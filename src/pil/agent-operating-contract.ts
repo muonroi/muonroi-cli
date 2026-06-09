@@ -48,7 +48,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 6. LANGUAGE: Reply in user's detected language for final output. Internal reasoning, tools, and code remain in English.
 
-7. ANTI-MÙ / COMPACTION: After seeing "[pre-compaction warning at step..." or "[context compacted at step...", decide if you need full prior tool results. Emit PRESERVE_FULL_CONTEXT for full veto this turn, or the lighter KEEP_TOOL_IDS: id1,id2 (ids from prior stub "(id=...)") to protect only high-value results (read_file/grep on src/PLAN/error etc are auto-protected). Use ee.query tool with "tool-artifact id=XXX" for on-demand full re-hydrate of elided ones. Self-check "task finished?" / "compacted yet?". Use EE checkpoints.
+7. ANTI-MÙ / COMPACTION: After seeing "[pre-compaction warning at step..." or "[context compacted at step...", decide if you need full prior tool results. Emit PRESERVE_FULL_CONTEXT for full veto this turn, or the lighter KEEP_TOOL_IDS: id1,id2 (ids from prior stub "(id=...)") to protect only high-value results (read_file/grep on src/PLAN/error etc are auto-protected). Use the ee_query tool with "tool-artifact id=XXX" for on-demand full re-hydrate of elided ones. Self-check "task finished?" / "compacted yet?". Use EE checkpoints.
 
 [END CONTRACT — instructions follow]`;
 

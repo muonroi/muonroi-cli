@@ -14,13 +14,11 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { healthEE, searchEE } from "../ee/search.js";
 import type { EESearchResponse } from "../ee/types.js";
 
 export interface EEToolDeps {
-  search?: (
-    query: string,
-    opts: { limit?: number; collections?: string[] },
-  ) => Promise<EESearchResponse | null>;
+  search?: (query: string, opts: { limit?: number; collections?: string[] }) => Promise<EESearchResponse | null>;
   health?: () => Promise<{ ok: boolean; status: number }>;
 }
 
@@ -34,29 +32,12 @@ function fail(error: string, message: string) {
   };
 }
 
-/** Build a real EE client lazily (token + base URL from ~/.experience/config.json). */
-async function realSearch(
-  query: string,
-  opts: { limit?: number; collections?: string[] },
-): Promise<EESearchResponse | null> {
-  const { createEEClient } = await import("../ee/client.js");
-  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("../ee/auth.js");
-  const authToken = (await loadEEAuthToken()) ?? undefined;
-  const baseUrl = getCachedServerBaseUrl() ?? undefined;
-  return createEEClient({ baseUrl, authToken }).search(query, opts);
-}
-
-async function realHealth(): Promise<{ ok: boolean; status: number }> {
-  const { createEEClient } = await import("../ee/client.js");
-  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("../ee/auth.js");
-  const authToken = (await loadEEAuthToken()) ?? undefined;
-  const baseUrl = getCachedServerBaseUrl() ?? undefined;
-  return createEEClient({ baseUrl, authToken }).health();
-}
-
 export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void {
-  const search = deps.search ?? realSearch;
-  const health = deps.health ?? realHealth;
+  // Default to the shared EE search/health helpers (src/ee/search.ts) so the
+  // MCP tools and the in-CLI builtin `ee_query` tool resolve auth/baseUrl the
+  // same way. Tests inject `deps` to avoid the network.
+  const search = deps.search ?? ((q, o) => searchEE(q, o));
+  const health = deps.health ?? (() => healthEE());
 
   server.registerTool(
     "ee.query",

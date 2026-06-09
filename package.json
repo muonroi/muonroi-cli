@@ -49,7 +49,8 @@
     "pre-commit": "lint-staged",
     "prepare": "husky",
     "postinstall": "node scripts/postinstall.cjs || exit 0",
-    "ee:ingest-bb": "bun run scripts/ingest-bb-to-ee.mts"
+    "ee:ingest-bb": "bun run scripts/ingest-bb-to-ee.mts",
+    "clean:meta": "git clean -fdX -- .scratch chat-export-*.txt .ee-ingest-state.json .brain-*.tmp 2>/dev/null || echo 'clean:meta: no matching untracked ignored files or git unavailable'"
   },
   "lint-staged": {
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"

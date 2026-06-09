@@ -11,7 +11,14 @@ import {
   PlanSchema,
   RESPONSE_TOOL_PREFIX,
   RefactorSchema,
+  shouldHaltOnResponseTool,
+  stepEmittedResponseTool,
 } from "../response-tools";
+
+type Step = { toolCalls?: ReadonlyArray<{ toolName?: string }> };
+const step = (...names: Array<string | undefined>): Step => ({
+  toolCalls: names.map((toolName) => ({ toolName })),
+});
 
 describe("isResponseTool", () => {
   it("returns true for response tool names", () => {
@@ -74,6 +81,64 @@ describe("buildResponseTools", () => {
       expect(Object.keys(tools)).toHaveLength(1);
       expect(Object.keys(tools)[0]).toBe(`${RESPONSE_TOOL_PREFIX}${taskType}`);
     }
+  });
+});
+
+describe("stepEmittedResponseTool", () => {
+  it("returns true when a step emitted a response tool", () => {
+    expect(stepEmittedResponseTool({ toolCalls: [{ toolName: "respond_general" }] })).toBe(true);
+    expect(stepEmittedResponseTool({ toolCalls: [{ toolName: "read_file" }, { toolName: "respond_analyze" }] })).toBe(
+      true,
+    );
+  });
+
+  it("returns false for action-only steps", () => {
+    expect(stepEmittedResponseTool({ toolCalls: [{ toolName: "bash" }, { toolName: "read_file" }] })).toBe(false);
+  });
+
+  it("returns false for steps with no tool calls", () => {
+    expect(stepEmittedResponseTool({ toolCalls: [] })).toBe(false);
+    expect(stepEmittedResponseTool({})).toBe(false);
+    expect(stepEmittedResponseTool(undefined)).toBe(false);
+  });
+
+  it("ignores malformed entries without a toolName", () => {
+    expect(stepEmittedResponseTool({ toolCalls: [{}, { toolName: undefined }] })).toBe(false);
+  });
+});
+
+describe("shouldHaltOnResponseTool", () => {
+  it("does not halt when the last step did not emit a response tool", () => {
+    expect(shouldHaltOnResponseTool([step("read_file"), step("grep")])).toBe(false);
+    expect(shouldHaltOnResponseTool([])).toBe(false);
+    expect(shouldHaltOnResponseTool(undefined)).toBe(false);
+  });
+
+  it("halts on a response tool emitted AFTER real tool work (terminal answer)", () => {
+    // d95113d3 seq=27: 7 grep/read calls, THEN respond_general → halt at call #1.
+    expect(
+      shouldHaltOnResponseTool([step("grep"), step("read_file"), step("read_file"), step("respond_general")]),
+    ).toBe(true);
+    // Real work + response in the SAME step also counts as investigated.
+    expect(shouldHaltOnResponseTool([step("read_file", "respond_analyze")])).toBe(true);
+    // d95113d3 seq=3: deep investigation → single respond_analyze.
+    expect(shouldHaltOnResponseTool([step("bash"), step("read_file"), step("respond_analyze")])).toBe(true);
+  });
+
+  it("does NOT halt on a single blind response tool (no prior investigation)", () => {
+    // e4a9d97a90: lone blind respond_general at step 0 — give the model the
+    // step it announced it would use to read code instead of force-stopping.
+    expect(shouldHaltOnResponseTool([step("respond_general")])).toBe(false);
+  });
+
+  it("halts on a 2nd blind response tool with still no real work (narration loop)", () => {
+    // 9b1b3: 2× blind respond_general, zero investigation → bounded at 2.
+    expect(shouldHaltOnResponseTool([step("respond_general"), step("respond_general")])).toBe(true);
+  });
+
+  it("treats a blind response then real work then response as terminal (investigated)", () => {
+    // Announce → investigate → answer: the final response is after real work.
+    expect(shouldHaltOnResponseTool([step("respond_general"), step("read_file"), step("respond_general")])).toBe(true);
   });
 });
 

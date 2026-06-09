@@ -91,7 +91,7 @@ Use this exact format:
 - **Error messages**: [copy verbatim any error messages]
 - **Key numbers/results**: [list important numbers, query results, or metrics]
 
-## Kept Artifacts (high-fidelity tool outputs preserved verbatim across B3/B4 compaction per anti-mù; agent can query the ee.query tool with "tool-artifact id=..." or "full tool result id=..." for full content later)
+## Kept Artifacts (high-fidelity tool outputs preserved verbatim across B3/B4 compaction per anti-mù; agent can query the ee_query tool with "tool-artifact id=..." or "full tool result id=..." for full content later)
 - toolCallId | toolName | first120chars | reason (high-value|KEEP_TOOL_IDS|recent-turn|error)
 
 Keep it concise, but preserve exact file paths, function names, and error messages.`;

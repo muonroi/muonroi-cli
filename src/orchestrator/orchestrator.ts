@@ -2,7 +2,12 @@
 
 import type { ModelMessage, ToolSet } from "ai";
 import { extractSession } from "../ee/extract-session.js";
-import { bootstrapEEClient, getDefaultEEClient, getLastSurfacedState, updateLastSurfacedState } from "../ee/intercept.js";
+import {
+  bootstrapEEClient,
+  getDefaultEEClient,
+  getLastSurfacedState,
+  updateLastSurfacedState,
+} from "../ee/intercept.js";
 import { getTenantId } from "../ee/tenant.js";
 import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
@@ -734,6 +739,21 @@ export class Agent {
 
     this.sessionStore = new SessionStore(this.bash.getCwd());
     this.workspace = this.sessionStore.getWorkspace();
+    // Collapse double startNewSession() calls into a single row. The current
+    // session is REUSED (not orphaned with a fresh createSession) when it is
+    // brand-new and empty — no persisted messages in memory AND no title.
+    // Root cause of ~60% orphaned session rows (1187/1966): the /clear slash
+    // path calls clearHistory() — which already starts a new session — and then
+    // resetToNewSession(), which started ANOTHER. The first session never
+    // received any work and was left title-less and empty. The first call here
+    // still sees the prior conversation in `this.messages` (non-empty → new
+    // row, correct); the immediate second call sees the just-cleared empty
+    // session and reuses it instead of creating a twin.
+    const cur = this.session;
+    if (cur && this.messages.length === 0 && !cur.title) {
+      this.messageSeqs = [];
+      return this.getSessionSnapshot();
+    }
     this.session = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
     this.messages = [];
     this.messageSeqs = [];

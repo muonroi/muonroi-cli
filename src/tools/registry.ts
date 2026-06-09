@@ -470,6 +470,60 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         },
       });
     }
+
+    // ee_query — semantic recall over the Experience Engine brain. This is the
+    // in-CLI counterpart of the MCP `ee.query` tool (src/mcp/ee-tools.ts):
+    // without it, the Agent Operating Contract + checkpoint reminders instruct
+    // the agent to "Use ee_query tool with 'tool-artifact id=XXX'" to rehydrate
+    // compaction-elided tool outputs, but the in-CLI agent had no such tool in
+    // its loop (session d95113d3be09: the anti-mù rehydrate path was a dead
+    // reference). Elided outputs are persisted to EE (message-processor.ts,
+    // source="tool-artifact"); this tool retrieves them. Degrades gracefully:
+    // returns an ee_unavailable note when EE is down/unconfigured.
+    tools.ee_query = dynamicTool({
+      description:
+        "Semantic recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
+        "compaction-elided tool outputs for this codebase). Primary anti-mù use: rehydrate an elided tool " +
+        'result by querying its id, e.g. query="tool-artifact id=<id from a [... elided ...] stub>" or ' +
+        '"full tool result id=<id>". Also: query="recent compaction checkpoint Progress DONE" to confirm ' +
+        "finished work after a compaction. Returns hits, or an ee_unavailable note when EE is down/unconfigured.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Natural-language recall query (or 'tool-artifact id=<id>')" },
+          collections: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional EE collections to scope (e.g. ['experience-behavioral'] for checkpoints)",
+          },
+          limit: { type: "number", description: "Max hits to return (1-50, default server-side)" },
+        },
+        required: ["query"],
+      }),
+      execute: async (input: any) => {
+        const query = typeof input?.query === "string" ? input.query.trim() : "";
+        if (!query) {
+          return 'ERROR: ee_query requires a non-empty "query" string (e.g. {"query":"tool-artifact id=abc123"}).';
+        }
+        try {
+          const { searchEE } = await import("../ee/search.js");
+          const resp = await searchEE(query, {
+            ...(Array.isArray(input?.collections) ? { collections: input.collections } : {}),
+            ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
+          });
+          if (resp === null) {
+            return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
+          }
+          return truncateOutput(JSON.stringify(resp));
+        } catch (err) {
+          console.error(`[tools:ee_query] EE search failed: ${(err as Error)?.message}`, {
+            query: query.slice(0, 120),
+            stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+          });
+          return `[ee_unavailable] EE search threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
+        }
+      },
+    });
   }
 
   // Vision proxy tools — only for text-only models (DeepSeek, etc.)

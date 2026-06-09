@@ -262,6 +262,43 @@ export function isContinuationPhrase(raw: string): boolean {
   return CONTINUATION_FULL_RE.test(t);
 }
 
+// Status / meta follow-up questions — "do you have it yet?", "are you done?",
+// "bạn đã có plan chưa nhỉ". These ask ABOUT the state of work already produced
+// earlier in the thread; they are NOT a request to start a fresh task.
+//
+// Session c6387d2c6e1b: after the agent produced a cleanup plan (respond_plan),
+// the user asked "bạn đã có plan chưa nhỉ". Pass 2's `plan` keyword matched the
+// word "plan" → taskType=plan, kind=task → the GSD "state a NEW 2-3 line plan +
+// implement + verify" scaffold + a degenerate generic discovery scope
+// ("Intent: plan: Step-by-step plan / Scope: project root") were injected. That
+// overrode the conversational intent and the model went off-topic (asked about
+// a plan for a different project) instead of answering "yes — here is the plan
+// I just gave you". History was NOT compacted (compactions=0), so the prior
+// plan was present; the defect was purely the misclassification + scaffold.
+//
+// Route these like a continuation → chitchat → answer from context, no scaffold.
+//
+// VI: anchored to the END so a trailing imperative ("…, nếu chưa thì sửa đi")
+// cannot match — a pure status question ends with the interrogative marker
+// "chưa" (optionally + rồi/nhỉ/vậy/ạ/punct), never with a directive verb.
+// EN: yes/no question opening with an auxiliary and ending on a status word.
+const STATUS_CHECK_VI_RE = /\bch[ưu]a\b\s*(r[ồo]i)?\s*(nh[ỉi]|v[ậa]y|[ạa]|nha|nhé|nhe)?\s*[?.!…]*\s*$/i;
+const STATUS_CHECK_EN_RE =
+  /^(so\s+)?(do|did|have|has|are|is|was)\s+(you|it|that|the|there)\b[^?.!\n]{0,60}\b(yet|done|ready|finish(?:ed)?|complete[d]?|ready|available)\b[?.!]*\s*$/i;
+
+/**
+ * True when the prompt is a conversational STATUS/META question about work
+ * already discussed (not a fresh task request). Guarded: short prompts only,
+ * and never when an explicit tool/command intent is present (those must keep
+ * the toolset). See the regex comment above for the originating session.
+ */
+export function isStatusCheckQuestion(raw: string): boolean {
+  const t = raw.trim();
+  if (!t || t.length > 80) return false;
+  if (hasActionableToolIntent(t)) return false;
+  return STATUS_CHECK_VI_RE.test(t) || STATUS_CHECK_EN_RE.test(t);
+}
+
 // Keyword patterns for task types the classifier doesn't natively handle.
 // Applied when classifier abstains OR matches the low-signal "general" path.
 // Patterns are bilingual (EN + VN) — Vietnamese cues use accent-insensitive
@@ -617,6 +654,57 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         ],
       };
     }
+    if (isStatusCheckQuestion(ctx.raw)) {
+      // A meta question about prior work → conversational continuation. Route to
+      // chitchat so layer4-gsd skips the "make a NEW plan + implement" scaffold
+      // and the agent answers from the existing thread context (session
+      // c6387d2c6e1b root cause). Mirrors the continuation branch above.
+      const { complexity, score: complexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: "general",
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      const intentTrace: IntentDetectionTrace = {
+        pass1Reason: "pass0:status-check",
+        pass1Confidence: 0.9,
+        pass1TaskType: "general",
+        pass1Hit: true,
+        pass2Hit: false,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: "chitchat-default",
+        finalTaskType: "general",
+        finalConfidence: 0.9,
+        complexity,
+        complexityScore,
+      };
+      return {
+        ...ctx,
+        taskType: "general",
+        domain: null,
+        confidence: 0.9,
+        outputStyle: "concise",
+        intentKind: "chitchat",
+        _brainData: null,
+        _intentTrace: intentTrace,
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: true,
+            delta: "taskType=general,kind=chitchat,conf=0.90,domain=none,style=concise,pass0=status-check",
+          },
+        ],
+      };
+    }
     if (isTestGenerationTask(ctx.raw)) {
       const domainPass0 = extractDomain("", ctx.raw);
       const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
@@ -821,10 +909,11 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       // (covers _compactionStats.count > 0 or step > K cases even if local conf high).
       let brainRaw = ctx.raw;
       if (ctx.sessionId) {
-        brainRaw = ctx.raw +
-          " [EE task checkpoints (\"Context checkpoint summary\" with ✔ DONE) from prior compactions are available via the ee.query tool. " +
+        brainRaw =
+          ctx.raw +
+          ' [EE task checkpoints ("Context checkpoint summary" with ✔ DONE) from prior compactions are available via the ee.query tool. ' +
           "To keep full tool history this turn when you see pre-warn or compaction note, emit exact literal PRESERVE_FULL_CONTEXT in reasoning or assistant note. " +
-          "Self-check \"task finished?\" or \"compacted yet this turn?\" using the checkpoints.]";
+          'Self-check "task finished?" or "compacted yet this turn?" using the checkpoints.]';
       }
       const resp = await pilContext(brainRaw, {
         projectCtx: domain ? { domain } : undefined,
