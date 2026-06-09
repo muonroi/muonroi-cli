@@ -14,6 +14,11 @@ export type {
 } from "./discovery-types.js";
 export { applyPilSuffix, getResponseToolSet } from "./layer6-output.js";
 export { type PipelineOptions, runPipeline } from "./pipeline.js";
-export { getResponseTaskType, isResponseTool } from "./response-tools.js";
+export {
+  getResponseTaskType,
+  isResponseTool,
+  shouldHaltOnResponseTool,
+  stepEmittedResponseTool,
+} from "./response-tools.js";
 export { getPilLastResult, setPilLastResult } from "./store.js";
 export type { LayerResult, OutputStyle, PipelineContext, PipelineMetrics, TaskType } from "./types.js";

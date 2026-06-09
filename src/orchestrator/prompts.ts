@@ -1,5 +1,6 @@
 import { getModelInfo } from "../models/registry";
 import { buildContractSection } from "../pil/agent-operating-contract.js";
+import { buildNativeCapabilitiesSection } from "../pil/native-capabilities-workbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
@@ -349,7 +350,13 @@ export function buildSystemPromptParts(
   // chitchat (no tools, no factual claims). See agent-operating-contract.ts.
   const contractSection = buildContractSection({ chitchat });
 
-  const staticPrefix = `${contractSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
+  // Native capability manifest (agent mode only) — gives the in-CLI agent a
+  // self-model of the tools, sub-agents, and CLI subsystems it has, so it
+  // wields them instead of reconstructing its own runtime by grepping source.
+  // See native-capabilities-workbook.ts (session d95113d3be09 motivation).
+  const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
+
+  const staticPrefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
 
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`

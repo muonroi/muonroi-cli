@@ -16,7 +16,7 @@ vi.mock("./config.js", () => ({
 
 import { classifyViaBrain } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { hasActionableToolIntent, isSocialPleasantry, layer1Intent } from "./layer1-intent";
+import { hasActionableToolIntent, isSocialPleasantry, isStatusCheckQuestion, layer1Intent } from "./layer1-intent";
 import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);
@@ -408,6 +408,43 @@ describe("intentKind guard — a tool/command request must never route as chitch
       llmFallback: generalFallback,
     });
     expect(result.intentKind).toBe("chitchat");
+  });
+});
+
+describe("isStatusCheckQuestion — meta follow-ups about prior work (session c6387d2c6e1b)", () => {
+  it("detects Vietnamese 'đã … chưa' status questions", () => {
+    expect(isStatusCheckQuestion("bạn đã có plan chưa nhỉ")).toBe(true);
+    expect(isStatusCheckQuestion("xong chưa")).toBe(true);
+    expect(isStatusCheckQuestion("đã fix chưa vậy")).toBe(true);
+    expect(isStatusCheckQuestion("plan xong chưa?")).toBe(true);
+  });
+
+  it("detects English status questions", () => {
+    expect(isStatusCheckQuestion("are you done")).toBe(true);
+    expect(isStatusCheckQuestion("did you finish")).toBe(true);
+    expect(isStatusCheckQuestion("is it ready?")).toBe(true);
+    expect(isStatusCheckQuestion("do you have the plan ready")).toBe(true);
+  });
+
+  it("does NOT fire on fresh task requests or trailing imperatives", () => {
+    expect(isStatusCheckQuestion("lên plan fix cho tôi nhé")).toBe(false);
+    // Trailing imperative — ends with the directive, not the interrogative.
+    expect(isStatusCheckQuestion("đã có plan chưa, nếu chưa thì viết đi")).toBe(false);
+    expect(isStatusCheckQuestion("explain how the router works")).toBe(false);
+    expect(isStatusCheckQuestion("refactor this function")).toBe(false);
+  });
+
+  it("defers to actionable-tool intent (keeps the toolset)", () => {
+    // "chạy lệnh … chưa" still carries an explicit run-command intent.
+    expect(isStatusCheckQuestion("chạy lệnh test xong chưa")).toBe(false);
+  });
+
+  it("routes a status question to general/chitchat (skips GSD scaffold)", async () => {
+    const result = await layer1Intent(makeCtx("bạn đã có plan chưa nhỉ"));
+    expect(result.taskType).toBe("general");
+    expect(result.intentKind).toBe("chitchat");
+    expect(result._intentTrace?.pass1Reason).toBe("pass0:status-check");
+    expect(mockedClassify).not.toHaveBeenCalled();
   });
 });
 

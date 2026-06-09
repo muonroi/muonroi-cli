@@ -48,3 +48,11 @@ chat-export-*.txt
 docs/phase-g-snapshots/
 .npmrc
 
+# npm lockfile (this repo uses bun; package-lock.json appears from accidental npm install)
+package-lock.json
+
+# Local debug / one-off artifacts (mcp server state, council debug dumps, brain channel tests)
+.mcp.json
+council.json
+.brain-*.tmp
+

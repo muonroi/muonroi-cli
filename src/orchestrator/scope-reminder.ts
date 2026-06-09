@@ -224,7 +224,7 @@ export function attachReminderToMessages<T>(messages: ReadonlyArray<T>, reminder
  */
 export function buildCheckpointReminder(iteration: number, hasEECheckpoint: boolean): string {
   // Enhanced per anti-mù (ideas 3+4): lighter KEEP_TOOL_IDS + on-demand artifact fetch.
-  const base = `[checkpoint status iter=${iteration}${hasEECheckpoint ? " (EE persisted)" : ""}] Task finished? Emit PRESERVE or KEEP_TOOL_IDS: id1,id2. High-value elided? Use ee.query tool with "tool-artifact id=XXX".`;
+  const base = `[checkpoint status iter=${iteration}${hasEECheckpoint ? " (EE persisted)" : ""}] Task finished? Emit PRESERVE or KEEP_TOOL_IDS: id1,id2. High-value elided? Use ee_query tool with "tool-artifact id=XXX".`;
   if (base.length <= 220) return base;
   return base.slice(0, 220);
 }
