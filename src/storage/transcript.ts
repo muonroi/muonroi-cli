@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
+import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
 import { getDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
@@ -505,6 +506,37 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     if (message.role === "tool" && Array.isArray(message.content)) {
       for (const part of message.content) {
         if (part.type !== "tool-result") continue;
+        // Response tools (respond_general/analyze/plan/...) are the model's
+        // TERMINAL structured answer (identity execute — the payload lives in
+        // the call args and is echoed in the result). The live stream yields
+        // them as a `structured_response` chunk (message-processor.ts:2733),
+        // which the UI renders as the answer block. Persisted history MUST
+        // rebuild the SAME entry: finalizeActiveTurn (app.tsx) replaces the
+        // live message list with getChatEntries() on every normal turn, so if
+        // we rebuilt a respond_* result as a bare tool_result the rendered
+        // answer would be silently dropped the instant streaming ended (live
+        // repro session 9d3d371ca1bd: grok investigated, emitted a 10K-char
+        // respond_general, the answer flashed then vanished on turn finalize —
+        // the user saw only the "→ respond_general" indicator). AI SDK v5/v6
+        // wraps tool outputs as `{type:"json", value:{...}}`; unwrap to expose
+        // the schema-shaped payload to the renderer.
+        if (isResponseTool(part.toolName)) {
+          const rawOutput = part.output as unknown;
+          const unwrapped =
+            rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+              ? ((rawOutput as { value?: unknown }).value ?? {})
+              : (rawOutput ?? {});
+          entries.push({
+            type: "structured_response",
+            content: "",
+            timestamp,
+            structuredResponse: {
+              taskType: getResponseTaskType(part.toolName) ?? part.toolName,
+              data: unwrapped as Record<string, unknown>,
+            },
+          });
+          continue;
+        }
         const toolCall = callMap.get(part.toolCallId) ?? toFallbackToolCall(part.toolCallId, part.toolName);
         const toolResult = toolResults.get(part.toolCallId) ??
           extractToolResultFromOutput(part.output) ?? {

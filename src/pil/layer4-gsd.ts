@@ -24,6 +24,7 @@ import { detectGrayAreas } from "../gsd/gray-areas.js";
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
+import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import type { PipelineContext } from "./types.js";
 
 function mapRouteToPhase(route: string): GsdPhase | null {
@@ -87,7 +88,12 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
 
   const complexity = scoreComplexity(ctx.raw);
   const grayAreas = complexity.tier === "heavy" ? detectGrayAreas(ctx.raw).questions : [];
-  const directive = buildDirective({ complexity, phase, grayAreas });
+  // Informational/meta prompts (a question or a self/meta CLI analysis) ask for
+  // an ANSWER, not a code change. The implement/verify directive leaks into the
+  // human-facing reply as a "2-3 line plan" + process narration (session
+  // 829a83888dd2). Route them to the human-facing question directive instead.
+  const informational = isMetaAnalysisPrompt(ctx.raw) || ctx.taskType === "general";
+  const directive = buildDirective({ complexity, phase, grayAreas, informational });
 
   const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);
   const trimmed = truncateToBudget(directive.text, budgetChars);

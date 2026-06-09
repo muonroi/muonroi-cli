@@ -962,9 +962,27 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         const llmRes = await opts.llmFallback!(ctx.raw);
         if (llmRes) {
           pass4LlmSucceeded = true;
-          taskType = llmRes.taskType === "general" ? "general" : llmRes.taskType;
+          taskType = llmRes.taskType;
           confidence = llmRes.confidence;
-          intentKind = llmRes.taskType === "general" ? "chitchat" : "task";
+          // Pass 4 is reached ONLY when intentKind !== "chitchat" (see
+          // llmFallbackEligible above) — every genuine social pleasantry was
+          // already short-circuited upstream by Pass 0 (continuation /
+          // status-check), Pass 2.5 (ultra-short greeting) and Pass 2.6
+          // (isSocialPleasantry). So a taskType="general" result HERE is a
+          // SUBSTANTIVE question that slipped past the greeting detectors —
+          // NOT chitchat. Live repro (session b51ba653e890): "bạn đang được
+          // chạy bên trong CLI này thì ... CLI tác động thế nào đến bạn?" was
+          // mapped general→chitchat, which nuked the entire action toolset
+          // (message-processor.ts:1285 `isChitchat && !_priorTurnHadTools →
+          // {}`). The model announced "Tôi cần điều tra code ... không đoán"
+          // (Evidence-First contract) but had only respond_general — no
+          // read_file/grep/bash to act with → narration → respond_general
+          // spam-abort, zero answer. A general question is tool-capable:
+          // classify it "task" so the toolset survives. Per the established
+          // keep-tools precedent in this file (TOOL_NAME_RE veto), a false
+          // "task" merely re-adds ~1.5K tokens of tool schema, while a false
+          // "chitchat" BREAKS the turn.
+          intentKind = "task";
           if (llmRes.outputStyle) {
             outputStyle = llmRes.outputStyle;
             styleSource = "brain-unified"; // closest existing source — LLM acts in same role

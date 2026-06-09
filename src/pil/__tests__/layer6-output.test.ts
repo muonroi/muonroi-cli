@@ -73,6 +73,19 @@ describe("applyPilSuffix — per-task-type suffixes", () => {
     expect(result).not.toMatch(/OUTPUT BUDGET/);
     expect(result).not.toMatch(/FORBIDDEN OPENERS/);
   });
+
+  it("general response-tool turn appends the human-UX note + no-footer clause (session 9e3fb3e2e0c9)", () => {
+    // A general/question response-tool turn must steer the answer toward a
+    // human reader: lead with the answer, no implementation plan, no process
+    // narration, and crucially NO evidence-provenance footer ("all facts from
+    // this turn / did not infer unopened files") — that compliance bookkeeping
+    // leaked into the user-facing reply.
+    const result = applyPilSuffix("S", makeCtx("general", "concise"), true);
+    expect(result).toContain("respond_general");
+    expect(result).toMatch(/for the HUMAN who asked/);
+    expect(result).toMatch(/do NOT narrate your own process/);
+    expect(result).toMatch(/Do NOT append an evidence-provenance footer/);
+  });
 });
 
 describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
@@ -130,11 +143,13 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     // as a plan and the turn ended before the edits completed. Implementation
     // turns must fall through to markdown OUTPUT RULES, not a terminal tool.
     const impl = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
-    expect(getResponseToolSet(impl("Improve the story-list screen. Implement these prioritized fixes: …", "debug"))).toEqual(
+    expect(
+      getResponseToolSet(impl("Improve the story-list screen. Implement these prioritized fixes: …", "debug")),
+    ).toEqual({});
+    expect(getResponseToolSet(impl("Edit ONLY these two files and fix the empty span", "debug"))).toEqual({});
+    expect(getResponseToolSet(impl("refactor the genre dropdown and wire up keyboard handlers", "analyze"))).toEqual(
       {},
     );
-    expect(getResponseToolSet(impl("Edit ONLY these two files and fix the empty span", "debug"))).toEqual({});
-    expect(getResponseToolSet(impl("refactor the genre dropdown and wire up keyboard handlers", "analyze"))).toEqual({});
     expect(getResponseToolSet(impl("triển khai các cải tiến đã đề xuất", "plan"))).toEqual({});
   });
 

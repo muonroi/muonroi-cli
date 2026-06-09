@@ -403,11 +403,29 @@ describe("intentKind guard — a tool/command request must never route as chitch
   });
 
   it("leaves a genuine chitchat turn as chitchat (no false promotion)", async () => {
+    // "thank you so much for that" is caught by Pass 2.6 (isSocialPleasantry)
+    // UPSTREAM of the LLM fallback — so it stays chitchat regardless of the
+    // Pass 4 mapping. generalFallback is provided but never invoked here.
     mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
     const result = await layer1Intent(makeCtx("thank you so much for that"), {
       llmFallback: generalFallback,
     });
     expect(result.intentKind).toBe("chitchat");
+  });
+
+  it("keeps a SUBSTANTIVE general question tool-capable (session b51ba653e890)", async () => {
+    // "how does this CLI affect you?" — a self/CLI-referential question that
+    // slips past every greeting detector (not ultra-short, not a pleasantry,
+    // not a status-check) and reaches Pass 4. The LLM returns general; the old
+    // code mapped general→chitchat → message-processor dropped the whole
+    // toolset → the model could not investigate → narration + respond spam.
+    // The Pass 4 result must be a tool-capable "task", never chitchat.
+    mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+    const result = await layer1Intent(
+      makeCtx("bạn đang được chạy bên trong CLI này thì bạn xem CLI tác động như thế nào đến bạn?"),
+      { llmFallback: generalFallback },
+    );
+    expect(result.intentKind).toBe("task");
   });
 });
 

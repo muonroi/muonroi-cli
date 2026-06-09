@@ -46,6 +46,28 @@ describe("buildDirective", () => {
     expect(out.text).not.toMatch(/read_file calls before/);
   });
 
+  it("emits a human-facing question directive for informational/meta prompts (session 829a83888dd2)", () => {
+    // A self/meta CLI question routed through GSD must NOT get the
+    // implement/verify scaffold — that leaked a "2-3 line plan" preamble +
+    // process narration into the human-facing answer.
+    const complexity = scoreComplexity("how does this CLI affect you?");
+    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    expect(out.blocking).toBe(false);
+    expect(out.text).toMatch(/QUESTION \/ explanatory/);
+    expect(out.text).toMatch(/written for the HUMAN/);
+    expect(out.text).not.toMatch(/2-3 line plan/);
+    expect(out.text).not.toMatch(/Implement directly/);
+  });
+
+  it("informational overrides even a heavy tier (a question never implements)", () => {
+    const complexity = scoreComplexity("redo the entire architecture and map everything across all repos");
+    expect(complexity.tier).toBe("heavy");
+    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    expect(out.blocking).toBe(false);
+    expect(out.text).toMatch(/QUESTION \/ explanatory/);
+    expect(out.text).not.toMatch(/MANDATORY/);
+  });
+
   it("emits a minimal quick directive", () => {
     const complexity = scoreComplexity("fix typo");
     const out = buildDirective({ complexity, phase: null, grayAreas: [] });
