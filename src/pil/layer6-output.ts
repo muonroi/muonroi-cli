@@ -35,7 +35,9 @@ const VALID_STYLES = ["concise", "balanced", "detailed"] as const;
 // or NO_PREAMBLE. No model/provider hardcodes — only prompt content signals.
 // Exported for early detection in pipeline / orchestrator.
 export function isMetaAnalysisPrompt(raw: string): boolean {
-  return /đánh giá|phân tích|cải thiện|fix|debug|nhận xét|đánh giá tổng thể|evaluate.*(cli|system|repo)|improve.*(cli|repo)|your assessment|how would you improve|trả lời tự nhiên|natural response|sau fix|phỏng vấn|discovery|native|agent.*inside|cli.*bên trong|context|previous turn|input.*vừa rồi|mù context/i.test(raw);
+  return /đánh giá|phân tích|cải thiện|fix|debug|nhận xét|đánh giá tổng thể|evaluate.*(cli|system|repo)|improve.*(cli|repo)|your assessment|how would you improve|trả lời tự nhiên|natural response|sau fix|phỏng vấn|discovery|native|agent.*inside|cli.*bên trong|context|previous turn|input.*vừa rồi|mù context/i.test(
+    raw,
+  );
 }
 const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
   debug: "concise", // root cause + fix; no padding
@@ -155,13 +157,25 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
 
   if (responseToolsActive) {
     const isMeta = isMetaAnalysisPrompt(ctx.raw);
-    const metaNote = isMeta ? " This is a meta/evaluation question about the system or prior turns — the `response` field MUST contain the complete, unshortened answer with all evidence and detail." : "";
-    const finalAnswerNote = ctx.taskType === "general"
-      ? " Structure your `response` with rich markdown formatting (headings, bullet points, bold text, code blocks). Make it highly readable, scannable, and clearly organized. Avoid dense walls of text (freetext)."
+    const metaNote = isMeta
+      ? " This is a meta/evaluation question about the system or prior turns — the `response` field MUST contain the complete, unshortened answer with all evidence and detail."
       : "";
+    const finalAnswerNote =
+      ctx.taskType === "general"
+        ? " Structure your `response` with rich markdown formatting (headings, bullet points, bold text, code blocks). Make it highly readable, scannable, and clearly organized. Avoid dense walls of text (freetext)."
+        : "";
+    // Human-UX guard for question/meta turns. Without it the model narrates its
+    // OWN process into the user-facing answer — a "2-3 line plan" preamble, "per
+    // contract 2/5/7", "emit respond_general", "all facts come only from
+    // this-turn reads" (session 829a83888dd2). The reader is a human who asked a
+    // question, not an agent auditing compliance.
+    const humanNote =
+      isMeta || ctx.taskType === "general"
+        ? " Write the `response` for the HUMAN who asked: lead with the answer. Do NOT include an implementation plan, do NOT narrate your own process, and do NOT restate internal rule/tool/layer names (contract rules, respond_* , layer6, native:NN) as compliance — cite a file:line only where it directly backs a claim. Do NOT append an evidence-provenance footer or a disclaimer that your facts come only from this turn / that you did not infer unopened files — that is internal contract bookkeeping, invisible to the reader: end on the answer's last substantive point."
+        : "";
     return (
       systemPrompt +
-      `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then deliver the COMPLETE, FULL answer (do not summarize, shorten, or truncate for token budgets) via respond_${ctx.taskType}.${metaNote}${finalAnswerNote}`
+      `\nOUTPUT FORMAT: When you finish your work, use the respond_${ctx.taskType} tool to structure your final answer. You may write free-form text to explain your reasoning during the process. Use action tools (bash, read_file, edit_file, etc.) as needed, then deliver the COMPLETE, FULL answer (do not summarize, shorten, or truncate for token budgets) via respond_${ctx.taskType}.${metaNote}${finalAnswerNote}${humanNote}`
     );
   }
 
@@ -198,9 +212,8 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   // Relax for meta-analysis / evaluation (including follow-ups about previous turns or CLI behavior).
   // The isMetaAnalysisPrompt (hoisted early) is the single source of truth and already includes
   // signals like "cli.*bên trong", "mù context", "input.*vừa rồi", "previous turn".
-  const effectiveStyle = (isMetaAnalysis && (ctx.taskType === "general" || ctx.taskType === "analyze"))
-    ? "balanced"
-    : style;
+  const effectiveStyle =
+    isMetaAnalysis && (ctx.taskType === "general" || ctx.taskType === "analyze") ? "balanced" : style;
   const effectiveSuffix = SUFFIXES[ctx.taskType]?.[effectiveStyle] || baseSuffix;
 
   let result = systemPrompt + effectiveSuffix + budgetHint;

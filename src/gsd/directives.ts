@@ -23,6 +23,16 @@ export interface DirectiveInput {
   complexity: ComplexityResult;
   phase: GsdPhase | null;
   grayAreas: GrayAreaQuestion[];
+  /**
+   * True when the prompt is informational/explanatory (a question or a
+   * self/meta analysis) rather than a request to change code. The deliverable
+   * is an ANSWER, not a diff — so the implement/verify flow is nonsensical and
+   * (live repro, session 829a83888dd2) leaks into the user-facing reply as a
+   * "2-3 line plan" preamble + process narration ("per contract 2/5/7", "emit
+   * respond_general"), agent-ifying an answer meant for a human. When set,
+   * buildDirective emits a human-facing question directive instead.
+   */
+  informational?: boolean;
 }
 
 export interface DirectiveOutput {
@@ -95,12 +105,31 @@ function buildStandard(input: DirectiveInput): string {
   ].join("\n");
 }
 
+function buildQuestion(): string {
+  // Informational / question / meta-analysis turns. The deliverable is the
+  // answer itself — there is no code to implement or test. Keep the agent's
+  // process OUT of the reply: a human asked, a human reads the result.
+  return [
+    `${HEADER} QUESTION / explanatory request — no code change is being asked for.`,
+    "Answer it directly and completely, written for the HUMAN who asked:",
+    "  1. Investigate only as needed — read/grep the specific files that ground your answer this turn.",
+    "  2. Lead with the answer. Use clear prose + structure (headings, bullets). Where a claim rests on the code, cite a concise file:line inline.",
+    "  3. Do NOT output an implementation plan, do NOT narrate your own process or restate these instructions, and do NOT name internal layers / contract rules / tools as if the reader were the agent.",
+    "There is no implement/verify step — the answer is the deliverable.",
+  ].join("\n");
+}
+
 function buildQuick(input: DirectiveInput): string {
   const phaseHint = input.phase ? ` phase=${input.phase}` : "";
   return `${HEADER} QUICK task${phaseHint} — handle inline. No plan, no subagents. Make the smallest correct change and report.`;
 }
 
 export function buildDirective(input: DirectiveInput): DirectiveOutput {
+  // Informational/meta prompts answer a human — never apply the
+  // implement/verify scaffold (it agent-ifies the reply), regardless of tier.
+  if (input.informational) {
+    return { text: buildQuestion(), tier: input.complexity.tier, blocking: false };
+  }
   switch (input.complexity.tier) {
     case "heavy":
       return { text: buildHeavy(input), tier: "heavy", blocking: true };

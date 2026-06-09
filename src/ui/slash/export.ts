@@ -121,6 +121,21 @@ function renderEntries(entries: readonly ChatEntry[]): string[] {
         lines.push("");
         break;
       }
+      case "structured_response": {
+        // A respond_* terminal answer rebuilt by buildChatEntries. Print the
+        // primary text field (response/summary/content) so exports carry the
+        // actual answer, not an empty placeholder.
+        const data = (entry.structuredResponse?.data ?? {}) as Record<string, unknown>;
+        const answer =
+          (typeof data.response === "string" && data.response) ||
+          (typeof data.summary === "string" && data.summary) ||
+          (typeof data.content === "string" && data.content) ||
+          JSON.stringify(data, null, 2);
+        lines.push(`[${ts}] Assistant:`);
+        lines.push(answer);
+        lines.push("");
+        break;
+      }
       default:
         lines.push(`[${ts}] ${entry.type}:`);
         lines.push(entry.content);
