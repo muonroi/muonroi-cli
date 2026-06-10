@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \".claude/hooks/self-qa-post-edit.cjs\"",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/self-qa-post-edit.cjs\"",
             "timeout": 5
           }
         ]
