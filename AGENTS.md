@@ -49,6 +49,16 @@ Code, comments, commit messages, PR text, and all internal agent reasoning, anal
 - The only acceptable "guess" is an explicitly-labelled hypothesis followed by the experiment to test it.
 - **Graceful Reporting:** While you must *base* your answers on evidence, do NOT dump massive blocks of raw tool output (e.g. raw grep results, full directory trees, or unformatted logs) into your final response to the user. Synthesize the findings into highly readable, natural markdown. Cite file names and line numbers concisely (e.g. `[src/file.ts:10]`) without copy-pasting the entire file into the chat.
 
+## Experience Recall Rule (recall-first)
+
+The Experience Engine brain holds prior decisions, gotchas, and learned warnings for this codebase. Recalling them *before* acting supports Evidence-First — it surfaces what was already proven so you don't re-derive or repeat a past mistake.
+
+- **Recall-first triggers — call the `ee.query` tool (`mcp__muonroi-tools__ee_query`) BEFORE acting when:** starting work in an unfamiliar area; unsure how something is done in this stack; about to take a risky or hard-to-reverse step; or re-orienting after a compaction (e.g. `query="recent compaction checkpoint Progress DONE for <subtask>"`).
+- **Prefer the MCP tool over the `exp-recall.js` shell hint.** Both hit the same recallMode pipeline (`/api/recall`), but the tool is a first-class action in your tool-set — use it directly.
+- **Close the loop.** Returned entries carry `[id col]` handles; after you act on one, report usefulness with `exp-feedback` (followed / ignored / noise) so recall reinforces and noise is pruned.
+- **Graceful degrade.** If `ee.query` returns `ee_unavailable`, proceed without it — recall is an aid, never a blocker.
+- Recall is an *aid to* Evidence-First, not a substitute: a recalled lesson is point-in-time and can be stale — still verify the actual code/output before acting on it.
+
 ## Pre-Push Test Gate (MANDATORY)
 
 **Before ANY `git push` to ANY repo, the FULL unit test suite MUST pass — 0 failed tests.** No exceptions for "pre-existing" failures, "flaky" tests, or "not my changes". A red test on master is a bug regardless of who wrote it.

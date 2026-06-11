@@ -43,11 +43,14 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
     "ee.query",
     {
       description:
-        "Active recall over the Experience Engine brain (learned warnings/recipes + task checkpoints for this codebase) " +
-        "via the recallMode pipeline — same path as exp-recall.js. Use for anti-mù recall: e.g. " +
-        "query='recent compaction checkpoint Progress DONE for <subtask>' or 'task finished items before last compact'. " +
-        "Returns a formatted index whose entries carry `[id col]` handles (report usefulness with exp-feedback), " +
-        "or an ee_unavailable error if EE is down. Optional project scopes the recall.",
+        "Active recall over the Experience Engine brain — prior decisions, gotchas, learned warnings/recipes, and " +
+        "task checkpoints for this codebase — via the recallMode pipeline (same path as exp-recall.js). " +
+        "CALL THIS PROACTIVELY, before acting: when starting work in an unfamiliar area, when unsure how something " +
+        "is done in this stack, before a risky or hard-to-reverse step, or to recall finished work after a " +
+        "compaction (e.g. query='recent compaction checkpoint Progress DONE for <subtask>'). A deliberate query " +
+        "here is cheaper than re-deriving or repeating a past mistake. Returns a formatted index whose entries " +
+        "carry `[id col]` handles — report usefulness with exp-feedback so recall reinforces. Optional project " +
+        "scopes the recall. Returns ee_unavailable if EE is down (then proceed without it).",
       inputSchema: {
         query: z.string().min(1).max(1000),
         project: z.string().max(200).optional(),
