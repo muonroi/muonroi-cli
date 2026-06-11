@@ -12,7 +12,47 @@
  * so callers map null → an "EE unavailable" outcome rather than throwing.
  */
 
-import type { EERecallResponse, EESearchResponse } from "./types.js";
+import type { EERecallEntry, EERecallResponse, EESearchResponse } from "./types.js";
+
+/**
+ * Mirror an agent-initiated recall as a LOCAL `op:'recall'` activity row, matching
+ * the EE-side buildRecallEvent shape. The server logs recalls into the VPS's
+ * activity.jsonl, but the runbook-candidate nudge (stop-extractor) reads the
+ * CLIENT-local one — so without this, MCP/builtin recalls (which POST straight to
+ * /api/recall) are invisible to the stitch signal, exactly as exp-recall.js was
+ * before its own local-log fix. Best-effort: a failed write must never break recall.
+ *
+ * Exported for unit testing (pass `logPath` to redirect off the real ~/.experience).
+ */
+export async function mirrorRecallLocally(
+  query: string,
+  meta: { sourceSession?: string | null; project?: string | null; entries?: EERecallEntry[] },
+  logPath?: string,
+): Promise<void> {
+  try {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const ids = Array.isArray(meta.entries)
+      ? meta.entries.map((e) => (e && e.id != null ? String(e.id) : "")).filter(Boolean)
+      : [];
+    const row = {
+      ts: new Date().toISOString(),
+      op: "recall",
+      query: String(query || "").slice(0, 200),
+      sourceSession: meta.sourceSession ?? null,
+      project_slug: meta.project ?? null,
+      surfacedIds: ids,
+      count: ids.length,
+    };
+    const target =
+      logPath ?? process.env.EXPERIENCE_ACTIVITY_LOG ?? path.join(os.homedir(), ".experience", "activity.jsonl");
+    await fs.promises.appendFile(target, `${JSON.stringify(row)}\n`);
+  } catch (err) {
+    const { logEeFailure, classifyEeError } = await import("../utils/ee-logger.js");
+    logEeFailure("search.mirrorRecallLocally", classifyEeError(err), err as Error);
+  }
+}
 
 /**
  * Semantic search over the EE brain. Token + base URL are resolved lazily from
@@ -46,12 +86,21 @@ export async function recallEE(
   const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
   const authToken = (await loadEEAuthToken()) ?? undefined;
   const baseUrl = getCachedServerBaseUrl() ?? undefined;
-  return createEEClient({ baseUrl, authToken }).recall(query, {
+  const sourceSession = opts.sourceSession ?? process.env.EXP_SESSION;
+  const cwd = opts.cwd ?? process.cwd();
+  const result = await createEEClient({ baseUrl, authToken }).recall(query, {
     project: opts.project,
-    cwd: opts.cwd ?? process.cwd(),
-    sourceSession: opts.sourceSession ?? process.env.EXP_SESSION,
+    cwd,
+    sourceSession,
     timeoutMs: opts.timeoutMs,
   });
+  // Mirror the recall locally so the session-end runbook-candidate nudge sees
+  // MCP/builtin recalls too (parity with the exp-recall.js CLI path). Only on a
+  // non-null result (a transport failure already returned null to the caller).
+  if (result) {
+    await mirrorRecallLocally(query, { sourceSession, project: opts.project, entries: result.entries });
+  }
+  return result;
 }
 
 /** Reachability probe for the EE server. */
