@@ -1,9 +1,5 @@
 {
   "mcpServers": {
-    "muonroi-tools": {
-      "command": "bun",
-      "args": ["run", "src/index.ts", "tools-mcp"]
-    },
     "muonroi-harness": {
       "command": "bun",
       "args": ["run", "src/index.ts", "mcp-driver"],

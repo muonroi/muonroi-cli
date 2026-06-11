@@ -116,6 +116,17 @@ function formatResult(result: ToolResult): string {
   return truncateOutput(`ERROR: ${result.error ?? result.output ?? "Unknown error"}`);
 }
 
+// ee_query routing: tool-artifact rehydration ("tool-artifact id=<id>" / "full
+// tool result id=<id>") is an exact-lookup of a persisted elided output and
+// must stay on /api/search (raw single-collection vector lookup). Every other
+// query is general recall → /api/recall (recallMode: 3 collections, raw cosine,
+// integrity gates, records a surface for exp-feedback). Splitting on intent
+// keeps the rehydration contract intact while upgrading recall to the fixed,
+// feedback-closing pipeline.
+export function isToolArtifactQuery(query: string): boolean {
+  return /\b(?:tool-artifact|full tool result)\b/i.test(query) && /\bid\s*=/i.test(query);
+}
+
 export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {
   const tools: ToolSet = {};
   // One tracker per tool registry instance — shared across read/write/edit
@@ -482,21 +493,24 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // returns an ee_unavailable note when EE is down/unconfigured.
     tools.ee_query = dynamicTool({
       description:
-        "Semantic recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
-        "compaction-elided tool outputs for this codebase). Primary anti-mù use: rehydrate an elided tool " +
-        'result by querying its id, e.g. query="tool-artifact id=<id from a [... elided ...] stub>" or ' +
-        '"full tool result id=<id>". Also: query="recent compaction checkpoint Progress DONE" to confirm ' +
-        "finished work after a compaction. Returns hits, or an ee_unavailable note when EE is down/unconfigured.",
+        "Active recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
+        "compaction-elided tool outputs for this codebase). General queries run the recallMode pipeline " +
+        "(/api/recall — same path as exp-recall.js) and return a formatted index whose entries carry " +
+        '`[id col]` handles. Anti-mù rehydration: query="tool-artifact id=<id from a [... elided ...] stub>" ' +
+        'or "full tool result id=<id>" does an exact lookup. Also: query="recent compaction checkpoint ' +
+        'Progress DONE" to confirm finished work after a compaction. Returns hits, or an ee_unavailable note ' +
+        "when EE is down/unconfigured.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
           query: { type: "string", description: "Natural-language recall query (or 'tool-artifact id=<id>')" },
+          project: { type: "string", description: "Optional project slug to scope the recall (general queries only)" },
           collections: {
             type: "array",
             items: { type: "string" },
-            description: "Optional EE collections to scope (e.g. ['experience-behavioral'] for checkpoints)",
+            description: "Optional EE collections to scope an artifact lookup (e.g. ['experience-behavioral'])",
           },
-          limit: { type: "number", description: "Max hits to return (1-50, default server-side)" },
+          limit: { type: "number", description: "Max hits for an artifact lookup (1-50, default server-side)" },
         },
         required: ["query"],
       }),
@@ -506,21 +520,33 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           return 'ERROR: ee_query requires a non-empty "query" string (e.g. {"query":"tool-artifact id=abc123"}).';
         }
         try {
-          const { searchEE } = await import("../ee/search.js");
-          const resp = await searchEE(query, {
-            ...(Array.isArray(input?.collections) ? { collections: input.collections } : {}),
-            ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
+          if (isToolArtifactQuery(query)) {
+            // Artifact rehydration → raw /api/search (exact-collection lookup).
+            const { searchEE } = await import("../ee/search.js");
+            const resp = await searchEE(query, {
+              ...(Array.isArray(input?.collections) ? { collections: input.collections } : {}),
+              ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
+            });
+            if (resp === null) {
+              return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
+            }
+            return truncateOutput(JSON.stringify(resp));
+          }
+          // General recall → /api/recall (recallMode, [id col] index + surface).
+          const { recallEE } = await import("../ee/search.js");
+          const resp = await recallEE(query, {
+            ...(typeof input?.project === "string" ? { project: input.project } : {}),
           });
           if (resp === null) {
             return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
           }
           return truncateOutput(JSON.stringify(resp));
         } catch (err) {
-          console.error(`[tools:ee_query] EE search failed: ${(err as Error)?.message}`, {
+          console.error(`[tools:ee_query] EE recall failed: ${(err as Error)?.message}`, {
             query: query.slice(0, 120),
             stack: (err as Error)?.stack?.split("\n").slice(0, 3),
           });
-          return `[ee_unavailable] EE search threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
+          return `[ee_unavailable] EE recall threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
         }
       },
     });
