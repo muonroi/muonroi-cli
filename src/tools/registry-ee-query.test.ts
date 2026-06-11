@@ -12,7 +12,7 @@
 import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { BashTool } from "./bash.js";
-import { createBuiltinTools } from "./registry.js";
+import { createBuiltinTools, isToolArtifactQuery } from "./registry.js";
 
 interface ToolWithExecute {
   execute?: (input: unknown) => Promise<unknown> | unknown;
@@ -36,5 +36,22 @@ describe("ee_query builtin tool", () => {
     const out = String(await t.execute?.({ query: "  " }));
     expect(out).toMatch(/ERROR/);
     expect(out).toMatch(/query/i);
+  });
+});
+
+describe("isToolArtifactQuery — ee_query intent routing", () => {
+  it("matches tool-artifact / full-tool-result id lookups (→ /api/search)", () => {
+    expect(isToolArtifactQuery("tool-artifact id=abc123")).toBe(true);
+    expect(isToolArtifactQuery("full tool result id=9f2c")).toBe(true);
+    expect(isToolArtifactQuery("rehydrate the TOOL-ARTIFACT  ID = xyz")).toBe(true);
+  });
+
+  it("does NOT match general recall queries (→ /api/recall)", () => {
+    expect(isToolArtifactQuery("recent compaction checkpoint Progress DONE")).toBe(false);
+    expect(isToolArtifactQuery("how do we restart the experience-engine server")).toBe(false);
+    // "id=" alone, without the artifact phrase, is not an artifact lookup.
+    expect(isToolArtifactQuery("what is the user id=field convention")).toBe(false);
+    // The artifact phrase without an id= is also not an exact lookup.
+    expect(isToolArtifactQuery("tool-artifact storage design")).toBe(false);
   });
 });

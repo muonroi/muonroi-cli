@@ -355,6 +355,36 @@ export interface EESearchOptions {
   signal?: AbortSignal;
 }
 
+// ─── Active recall (recallMode /api/recall) ──────────────────────────────────
+// Distinct from EESearch* above: /api/search is a raw single-collection vector
+// lookup; /api/recall runs the full recallMode pipeline (3 collections merged
+// by raw cosine, integrity gates kept, records a surface) and returns the
+// formatted [id col] index — the same path exp-recall.js uses.
+export interface EERecallEntry {
+  id: string;
+  collection: string | null;
+}
+
+export interface EERecallResponse {
+  /** Formatted recall index carrying `[id col]` handles (null when nothing matched). */
+  text: string | null;
+  entries: EERecallEntry[];
+  count: number;
+  query?: string;
+}
+
+export interface EERecallOptions {
+  /** Scope hint → body.project_slug (advisory under recallMode). */
+  project?: string;
+  /** Working dir → body.cwd (server derives project_slug + attribution). */
+  cwd?: string;
+  /** Stable session id → body.sourceSession (slice-2 stitch detection). */
+  sourceSession?: string;
+  /** Override per-call timeout. Defaults to 15000ms — server bounds recall at ~8s internally; allow margin for embed + 3-leg search + network. */
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
 // ─── User identity ───────────────────────────────────────────────────────────
 export interface EEUserResponse {
   user: string;
@@ -390,6 +420,8 @@ export interface EEClient {
   // Task routing + search + user
   routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null>;
   search(query: string, opts?: EESearchOptions | number): Promise<EESearchResponse | null>;
+  /** Active recall via /api/recall (recallMode). Returns [id col] index + records a surface. */
+  recall(query: string, opts?: EERecallOptions): Promise<EERecallResponse | null>;
   user(): Promise<EEUserResponse | null>;
   // PIL brain proxy — used by thin clients to reach the VPS LLM router.
   brainProxy(prompt: string, timeoutMs?: number): Promise<string | null>;
