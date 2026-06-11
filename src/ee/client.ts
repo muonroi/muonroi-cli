@@ -584,6 +584,41 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }
     },
 
+    // ─── Active recall (recallMode) ───────────────────────────────────────────
+    // Hits /api/recall (handleRecall), NOT /api/search. This is the fixed
+    // semantic-recall pipeline: 3 collections merged by raw cosine, integrity
+    // gates kept, records a surface so the returned `[id col]` handles can be
+    // reinforced via exp-feedback. Same path exp-recall.js uses. Returns null on
+    // any error/timeout — matches this client's documented circuit-breaker
+    // contract (callers map null → "EE unavailable"; the tool layer surfaces it).
+    async recall(
+      query: string,
+      opts: import("./types.js").EERecallOptions = {},
+    ): Promise<import("./types.js").EERecallResponse | null> {
+      const body: Record<string, unknown> = { query };
+      if (opts.cwd) body.cwd = opts.cwd;
+      if (opts.project) body.project_slug = opts.project;
+      if (opts.sourceSession) body.sourceSession = opts.sourceSession;
+      // Server bounds the recall pipeline at ~8s internally (handleRecall's
+      // AbortSignal.timeout(8000)); embedding + 3-leg search + network push real
+      // wall-time past that (measured ~9.3s on a warm VPS). An 8s client ceiling
+      // races the server and loses → spurious ee_unavailable. 15s gives margin
+      // so a slow-but-valid recall still lands rather than being dropped.
+      const timeoutMs = opts.timeoutMs ?? 15000;
+      try {
+        const resp = await f(`${baseUrl}/api/recall`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(body),
+          signal: opts.signal ?? AbortSignal.timeout(timeoutMs),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as import("./types.js").EERecallResponse;
+      } catch {
+        return null;
+      }
+    },
+
     // ─── User identity ──────────────────────────────────────────────────────
     async user(): Promise<EEUserResponse | null> {
       try {

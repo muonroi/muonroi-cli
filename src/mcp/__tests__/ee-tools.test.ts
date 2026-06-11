@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, expect, it } from "vitest";
 import { registerEETools } from "../ee-tools.js";
 
@@ -24,21 +24,43 @@ function textOf(result: unknown): unknown {
 }
 
 describe("ee-tools", () => {
-  it("ee.query returns hits from the injected search", async () => {
+  it("ee.query returns the recall index from the injected recall", async () => {
     const handlers = collectTools((s) =>
       registerEETools(s, {
-        search: async (q) => ({ points: [{ id: "1", score: 0.9, text: `match:${q}`, collection: "experience-behavioral" }] }),
+        recall: async (q) => ({
+          text: `recall:${q} [id:abc col:experience-behavioral]`,
+          entries: [{ id: "abc", collection: "experience-behavioral" }],
+          count: 1,
+        }),
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
     const out = textOf(await handlers["ee.query"]!({ query: "redactor" }));
     expect((out as { isError?: boolean }).isError).toBeFalsy();
-    expect(JSON.stringify((out as { json: unknown }).json)).toContain("match:redactor");
+    const json = (out as { json: { text: string; entries: unknown[]; count: number } }).json;
+    expect(json.text).toContain("recall:redactor");
+    expect(json.text).toContain("[id:abc col:experience-behavioral]");
+    expect(json.count).toBe(1);
   });
 
-  it("ee.query returns ee_unavailable when search yields null", async () => {
+  it("ee.query forwards the project scope to recall", async () => {
+    let seenProject: string | undefined;
     const handlers = collectTools((s) =>
-      registerEETools(s, { search: async () => null, health: async () => ({ ok: false, status: 0 }) }),
+      registerEETools(s, {
+        recall: async (_q, o) => {
+          seenProject = o.project;
+          return { text: null, entries: [], count: 0 };
+        },
+        health: async () => ({ ok: true, status: 200 }),
+      }),
+    );
+    await handlers["ee.query"]!({ query: "scope filter", project: "storyflow" });
+    expect(seenProject).toBe("storyflow");
+  });
+
+  it("ee.query returns ee_unavailable when recall yields null", async () => {
+    const handlers = collectTools((s) =>
+      registerEETools(s, { recall: async () => null, health: async () => ({ ok: false, status: 0 }) }),
     );
     const out = textOf(await handlers["ee.query"]!({ query: "x" })) as { json: { error?: string }; isError?: boolean };
     expect(out.isError).toBe(true);
@@ -47,7 +69,7 @@ describe("ee-tools", () => {
 
   it("ee.health returns the injected status", async () => {
     const handlers = collectTools((s) =>
-      registerEETools(s, { search: async () => null, health: async () => ({ ok: true, status: 200 }) }),
+      registerEETools(s, { recall: async () => null, health: async () => ({ ok: true, status: 200 }) }),
     );
     const out = textOf(await handlers["ee.health"]!({})) as { json: { ok: boolean; status: number } };
     expect(out.json).toEqual({ ok: true, status: 200 });
@@ -56,8 +78,10 @@ describe("ee-tools", () => {
   it("ee.health returns ee_unavailable when health throws", async () => {
     const handlers = collectTools((s) =>
       registerEETools(s, {
-        search: async () => null,
-        health: async () => { throw new Error("boom"); },
+        recall: async () => null,
+        health: async () => {
+          throw new Error("boom");
+        },
       }),
     );
     const out = textOf(await handlers["ee.health"]!({})) as { json: { error?: string }; isError?: boolean };

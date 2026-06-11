@@ -12,7 +12,7 @@
  * so callers map null → an "EE unavailable" outcome rather than throwing.
  */
 
-import type { EESearchResponse } from "./types.js";
+import type { EERecallResponse, EESearchResponse } from "./types.js";
 
 /**
  * Semantic search over the EE brain. Token + base URL are resolved lazily from
@@ -28,6 +28,30 @@ export async function searchEE(
   const authToken = (await loadEEAuthToken()) ?? undefined;
   const baseUrl = getCachedServerBaseUrl() ?? undefined;
   return createEEClient({ baseUrl, authToken }).search(query, opts);
+}
+
+/**
+ * Active recall over the EE brain via /api/recall (recallMode) — the fixed
+ * pipeline (3 collections merged by raw cosine, integrity gates, records a
+ * surface) that returns the `[id col]` index. This is the recall path the MCP
+ * `ee.query` tool and the in-CLI builtin `ee_query` route through, so the
+ * agent's tool-driven recall is on par with exp-recall.js. Returns null on
+ * unavailability/timeout — never throws for transport errors.
+ */
+export async function recallEE(
+  query: string,
+  opts: { project?: string; cwd?: string; sourceSession?: string; timeoutMs?: number } = {},
+): Promise<EERecallResponse | null> {
+  const { createEEClient } = await import("./client.js");
+  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
+  const authToken = (await loadEEAuthToken()) ?? undefined;
+  const baseUrl = getCachedServerBaseUrl() ?? undefined;
+  return createEEClient({ baseUrl, authToken }).recall(query, {
+    project: opts.project,
+    cwd: opts.cwd ?? process.cwd(),
+    sourceSession: opts.sourceSession ?? process.env.EXP_SESSION,
+    timeoutMs: opts.timeoutMs,
+  });
 }
 
 /** Reachability probe for the EE server. */
