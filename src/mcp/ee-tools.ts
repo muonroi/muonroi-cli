@@ -14,7 +14,7 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { healthEE, recallEE } from "../ee/search.js";
+import { formatRecallForAgent, healthEE, recallEE } from "../ee/search.js";
 import type { EERecallResponse } from "../ee/types.js";
 
 export interface EEToolDeps {
@@ -24,6 +24,9 @@ export interface EEToolDeps {
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+}
+function okText(text: string) {
+  return { content: [{ type: "text" as const, text }] };
 }
 function fail(error: string, message: string) {
   return {
@@ -50,19 +53,24 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
         "compaction (e.g. query='recent compaction checkpoint Progress DONE for <subtask>'). A deliberate query " +
         "here is cheaper than re-deriving or repeating a past mistake. Returns a formatted index whose entries " +
         "carry `[id col]` handles — report usefulness with exp-feedback so recall reinforces. Optional project " +
-        "scopes the recall. Returns ee_unavailable if EE is down (then proceed without it).",
+        "scopes the recall. Returns a compact ranked index (cosine-ranked, strongest first); raise maxChars for " +
+        "more. Returns ee_unavailable if EE is down (then proceed without it).",
       inputSchema: {
         query: z.string().min(1).max(1000),
         project: z.string().max(200).optional(),
+        maxChars: z.number().int().min(500).max(20_000).optional(),
       },
     },
-    async ({ query, project }) => {
+    async ({ query, project, maxChars }) => {
       try {
         const resp = await recall(query, { project });
         if (resp === null) {
           return fail("ee_unavailable", "EE recall returned no response (server down, timeout, or circuit open)");
         }
-        return ok(resp);
+        // Return the compact `[id col]` index (capped) rather than JSON.stringify
+        // of the whole response — the wide-net recall text (~30k) otherwise blows
+        // the MCP per-result token cap and spills to a file. See formatRecallForAgent.
+        return okText(formatRecallForAgent(resp, { query, maxChars }));
       } catch (e) {
         return fail("ee_unavailable", e instanceof Error ? e.message : String(e));
       }

@@ -14,6 +14,53 @@
 
 import type { EERecallEntry, EERecallResponse, EESearchResponse } from "./types.js";
 
+/** Char-budget bounds for the agent-facing recall index. */
+const RECALL_FORMAT_MIN_CHARS = 500;
+const RECALL_FORMAT_MAX_CHARS = 20_000;
+const RECALL_FORMAT_DEFAULT_CHARS = 6_000;
+
+function clampRecallChars(n: number | undefined): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return RECALL_FORMAT_DEFAULT_CHARS;
+  return Math.min(RECALL_FORMAT_MAX_CHARS, Math.max(RECALL_FORMAT_MIN_CHARS, Math.floor(n)));
+}
+
+/**
+ * Render an {@link EERecallResponse} into the compact, inline-readable index the
+ * agent actually consumes — the same ranked `[id col]` text the exp-recall.js
+ * CLI prints, NOT a JSON dump of the whole response.
+ *
+ * Why this exists: the recallMode pipeline casts a wide net (recallBudgetChars
+ * sums to ~30k across the 3 collections), so `resp.text` is routinely ~31k. The
+ * MCP `ee.query` tool used to return `JSON.stringify(resp)` verbatim, which
+ * (a) blew past the MCP per-result token cap → the client spilled it to a file,
+ * and (b) JSON-escaped every newline, making the index unreadable. This caps the
+ * text on a line boundary (recall text is cosine-ranked strongest-first, so the
+ * tail is the safe thing to drop), preserves every `[id col]` handle in the kept
+ * region, and appends a one-line footer with the true count + truncation notice.
+ */
+export function formatRecallForAgent(resp: EERecallResponse, opts: { query?: string; maxChars?: number } = {}): string {
+  const maxChars = clampRecallChars(opts.maxChars);
+  const q = opts.query ? ` for "${String(opts.query).slice(0, 80)}"` : "";
+  if (!resp.text || resp.count === 0) {
+    return `[recall: 0 entries${q} — the brain has nothing here; proceed without it.]`;
+  }
+  const full = resp.text.length;
+  let body = resp.text;
+  let truncated = false;
+  if (full > maxChars) {
+    truncated = true;
+    const slice = resp.text.slice(0, maxChars);
+    const lastNl = slice.lastIndexOf("\n");
+    // Cut on the last newline so a `[id col]` handle is never split — unless that
+    // would discard more than half the budget, in which case keep the hard slice.
+    body = lastNl > maxChars * 0.5 ? slice.slice(0, lastNl) : slice;
+  }
+  const footer = truncated
+    ? `[recall: ${resp.count} entries${q} · truncated ${body.length}/${full} chars — narrow the query or raise maxChars; entries are cosine-ranked, strongest first]`
+    : `[recall: ${resp.count} entries${q}]`;
+  return `${body}\n\n${footer}`;
+}
+
 /**
  * Mirror an agent-initiated recall as a LOCAL `op:'recall'` activity row, matching
  * the EE-side buildRecallEvent shape. The server logs recalls into the VPS's
