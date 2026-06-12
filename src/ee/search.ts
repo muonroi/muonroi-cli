@@ -150,6 +150,105 @@ export async function recallEE(
   return result;
 }
 
+// ─── Recall feedback (parity with exp-feedback.js → POST /api/feedback) ───────
+export type FeedbackVerdict = "followed" | "ignored" | "noise";
+export type NoiseReason = "wrong_repo" | "wrong_language" | "wrong_task" | "stale_rule";
+
+const VERDICT_WIRE: Record<FeedbackVerdict, "FOLLOWED" | "IGNORED" | "IRRELEVANT"> = {
+  followed: "FOLLOWED",
+  ignored: "IGNORED",
+  noise: "IRRELEVANT",
+};
+
+export interface FeedbackResult {
+  ok: boolean;
+  resolvedId?: string;
+  verdict?: string;
+  reason?: string;
+  error?: string;
+}
+
+/**
+ * Record an agent verdict on a recalled `[id col]` entry, byte-for-byte matching
+ * the exp-feedback.js wire shape the server already accepts
+ * (`{pointId, collection, verdict: FOLLOWED|IGNORED|IRRELEVANT, reason?}`). The
+ * server resolves a short pointId prefix and returns the full `resolvedId`. Never
+ * throws (graceful, logged) — returns `{ok:false, error}` on transport failure so
+ * the caller can keep the entry as unrated debt instead of clearing it.
+ */
+export async function feedbackEE(
+  pointId: string,
+  collection: string,
+  verdict: FeedbackVerdict,
+  reason?: NoiseReason,
+): Promise<FeedbackResult> {
+  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
+  const authToken = (await loadEEAuthToken()) ?? undefined;
+  const baseUrl = (getCachedServerBaseUrl() ?? "http://localhost:8082").replace(/\/+$/, "");
+  const wire = VERDICT_WIRE[verdict];
+  const body: Record<string, unknown> = { pointId, collection, verdict: wire };
+  if (wire === "IRRELEVANT") body.reason = reason;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  try {
+    const res = await fetch(`${baseUrl}/api/feedback`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let json: { error?: string; resolvedId?: string; verdict?: string; reason?: string } | null = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      /* non-JSON error body — fall through to status-based handling */
+    }
+    if (!res.ok) {
+      return { ok: false, error: json?.error || text || `HTTP ${res.status}` };
+    }
+    const resolvedId = json?.resolvedId || pointId;
+    await mirrorFeedbackLocally(resolvedId, collection, wire, reason);
+    return { ok: true, resolvedId, verdict: json?.verdict || wire, reason };
+  } catch (err) {
+    const { logEeFailure, classifyEeError } = await import("../utils/ee-logger.js");
+    logEeFailure("search.feedbackEE", classifyEeError(err), err as Error);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Mirror a feedback verdict as a LOCAL `op:'feedback'` activity row (parity with
+ * mirrorRecallLocally's `op:'recall'`). Lets the session-end nudge + forensics
+ * compute unrated-recall debt as recalled ids minus fed-back ids. Best-effort.
+ */
+export async function mirrorFeedbackLocally(
+  pointId: string,
+  collection: string,
+  verdict: string,
+  reason?: string | null,
+  logPath?: string,
+): Promise<void> {
+  try {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const row = {
+      ts: new Date().toISOString(),
+      op: "feedback",
+      pointId: String(pointId),
+      collection: collection ?? null,
+      verdict,
+      ...(reason ? { reason } : {}),
+    };
+    const target =
+      logPath ?? process.env.EXPERIENCE_ACTIVITY_LOG ?? path.join(os.homedir(), ".experience", "activity.jsonl");
+    await fs.promises.appendFile(target, `${JSON.stringify(row)}\n`);
+  } catch (err) {
+    const { logEeFailure, classifyEeError } = await import("../utils/ee-logger.js");
+    logEeFailure("search.mirrorFeedbackLocally", classifyEeError(err), err as Error);
+  }
+}
+
 /** Reachability probe for the EE server. */
 export async function healthEE(): Promise<{ ok: boolean; status: number }> {
   const { createEEClient } = await import("./client.js");
