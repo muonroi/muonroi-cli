@@ -11,6 +11,7 @@ const BASE_SETTINGS: NormalizedLspSettings = {
   tool: true,
   autoInstall: false,
   startupTimeoutMs: 5_000,
+  requestTimeoutMs: 5_000,
   diagnosticsDebounceMs: 0,
   builtins: {
     typescript: {
@@ -112,6 +113,37 @@ describe("createWorkspaceLspManager", () => {
     expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath);
 
     await manager.close();
+  });
+
+  it("times out a hanging request without dropping the client", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "src", "demo.ts");
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, "const demo = 1;\n");
+
+    // sendRequest never resolves — simulates a server still loading its workspace.
+    const client = createFakeClient({ sendRequest: () => new Promise<unknown>(() => {}) });
+
+    const manager = createWorkspaceLspManager(
+      root,
+      { ...BASE_SETTINGS, requestTimeoutMs: 50 },
+      {
+        createClient: async () => client,
+      },
+    );
+
+    const result = await manager.query({
+      operation: "documentSymbol",
+      filePath,
+    });
+
+    // Degrades gracefully instead of hanging forever.
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("No results found");
+
+    // Client is retained (not dropped) so a retry hits the warmed-up server.
+    await manager.close();
+    expect(client.stop).toHaveBeenCalled();
   });
 
   it("reports when no matching server exists", async () => {

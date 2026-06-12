@@ -21,7 +21,8 @@ export type LspBuiltInServerId =
   | "yaml-language-server"
   | "clangd"
   | "jdtls"
-  | "sourcekit-lsp";
+  | "sourcekit-lsp"
+  | "csharp-ls";
 
 export interface LspPosition {
   line: number;
@@ -86,6 +87,7 @@ export interface LspSettings {
   tool?: boolean;
   autoInstall?: boolean;
   startupTimeoutMs?: number;
+  requestTimeoutMs?: number;
   diagnosticsDebounceMs?: number;
   builtins?: Partial<Record<LspBuiltInServerId, LspBuiltInServerSettings>>;
   servers?: LspCustomServerConfig[];
@@ -96,6 +98,7 @@ export interface NormalizedLspSettings {
   tool: boolean;
   autoInstall: boolean;
   startupTimeoutMs: number;
+  requestTimeoutMs: number;
   diagnosticsDebounceMs: number;
   builtins: Partial<Record<LspBuiltInServerId, LspBuiltInServerSettings>>;
   servers: LspCustomServerConfig[];
