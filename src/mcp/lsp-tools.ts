@@ -44,7 +44,9 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
     "lsp.query",
     {
       description:
-        "Semantic code intelligence via language servers. operation is one of: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls. Provide filePath (+ line/character for position-based ops, or query for workspaceSymbol).",
+        "Semantic code intelligence via language servers. operation is one of: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls. " +
+        "filePath: absolute, or relative to the workspace root (cwd). line/character: 1-based (line 1 = first line, like an editor or file:line reference) — required for position-based ops; omit for documentSymbol; use query (not position) for workspaceSymbol. " +
+        'Returns {success, output}: output is a pretty-printed JSON array of LSP results (each {uri, range} with LSP-native 0-based range positions), or "No results found." when empty.',
       inputSchema: {
         operation: z.enum(LSP_TOOL_OPERATIONS),
         filePath: z.string().min(1).max(1000),
