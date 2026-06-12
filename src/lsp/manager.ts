@@ -155,29 +155,56 @@ export function createWorkspaceLspManager(
 
     const lspDiagnostics = await touchFile(normalizedPath, true);
     const params = createOperationParams(input, normalizedPath);
+    const timeoutMs = settings.requestTimeoutMs;
     const results = (
       await Promise.all(
         records.map(async ({ key, client }) => {
+          const onError = (err: unknown): unknown[] => {
+            // Timeout: the server is likely still loading its workspace (e.g. csharp-ls
+            // indexing an MSBuild solution). Return no results for this call but KEEP the
+            // client so a retry hits the warmed-up server instead of cold-starting again.
+            if (err instanceof LspRequestTimeoutError) {
+              console.error(
+                `[lsp:${client.serverId}] ${input.operation} timed out after ${timeoutMs}ms ` +
+                  `(server may still be loading the workspace); returning no results for this client`,
+              );
+              return [];
+            }
+            // Hard error: drop the client so the next query re-spawns it.
+            clients.delete(key);
+            console.error(
+              `[lsp:${client.serverId}] ${input.operation} request failed: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return [];
+          };
+
           if (input.operation === "incomingCalls" || input.operation === "outgoingCalls") {
             try {
-              const items = await client.sendRequest<unknown[]>("textDocument/prepareCallHierarchy", params);
+              const items = await withRequestTimeout(
+                client.sendRequest<unknown[]>("textDocument/prepareCallHierarchy", params),
+                timeoutMs,
+              );
               const firstItem = Array.isArray(items) ? items[0] : undefined;
               if (!firstItem) return [];
-              return client.sendRequest<unknown[]>(
-                input.operation === "incomingCalls" ? "callHierarchy/incomingCalls" : "callHierarchy/outgoingCalls",
-                { item: firstItem },
+              return await withRequestTimeout(
+                client.sendRequest<unknown[]>(
+                  input.operation === "incomingCalls" ? "callHierarchy/incomingCalls" : "callHierarchy/outgoingCalls",
+                  { item: firstItem },
+                ),
+                timeoutMs,
               );
-            } catch {
-              clients.delete(key);
-              return [];
+            } catch (err) {
+              return onError(err);
             }
           }
 
           try {
-            return await client.sendRequest<unknown>(getOperationMethod(input.operation), params);
-          } catch {
-            clients.delete(key);
-            return [];
+            return await withRequestTimeout(
+              client.sendRequest<unknown>(getOperationMethod(input.operation), params),
+              timeoutMs,
+            );
+          } catch (err) {
+            return onError(err);
           }
         }),
       )
@@ -209,6 +236,29 @@ export function createWorkspaceLspManager(
     query,
     close,
   };
+}
+
+class LspRequestTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`LSP request timed out after ${timeoutMs}ms`);
+    this.name = "LspRequestTimeoutError";
+  }
+}
+
+function withRequestTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new LspRequestTimeoutError(timeoutMs)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function getOperationMethod(operation: LspQueryInput["operation"]): string {

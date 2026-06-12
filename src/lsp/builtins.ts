@@ -234,6 +234,33 @@ const BUILT_IN_DEFINITIONS: Record<LspBuiltInServerId, BuiltInDefinition> = {
       };
     },
   },
+  "csharp-ls": {
+    id: "csharp-ls",
+    extensions: [".cs"],
+    languageIds: {
+      ".cs": "csharp",
+    },
+    // csharp-ls auto-discovers a .sln/.csproj from the root; match the fixed-name
+    // files that sit at a .NET repo root (solution/csproj names vary and the root
+    // matcher can't glob), falling back to .git.
+    rootMarkers: ["global.json", "Directory.Build.props", "Directory.Packages.props", ".git"],
+    async resolveLaunch(root, settings) {
+      const override = settings.builtins["csharp-ls"];
+      // csharp-ls is distributed as a dotnet global tool (`dotnet tool install -g csharp-ls`),
+      // resolved from PATH like gopls/clangd/rust-analyzer. Default stdio launch, no args.
+      // Fallback: the dotnet global-tools dir (~/.dotnet/tools) is frequently NOT on
+      // PATH for spawned processes, so probe its well-known location directly.
+      const command =
+        override?.command || (await resolveCommand(root, "csharp-ls")) || (await resolveDotnetGlobalTool("csharp-ls"));
+      if (!command) return null;
+      return {
+        command,
+        args: override?.args ?? [],
+        env: override?.env,
+        initializationOptions: override?.initialization,
+      };
+    },
+  },
   "sourcekit-lsp": {
     id: "sourcekit-lsp",
     extensions: [".swift"],
@@ -315,6 +342,23 @@ async function resolveCommand(root: string, binary: string): Promise<string | nu
   const localBinary = await findLocalBinary(root, binary);
   if (localBinary) return localBinary;
   return findCommandOnPath(binary);
+}
+
+/**
+ * Resolve a dotnet global tool by its well-known install location, independent of
+ * PATH. `dotnet tool install -g <tool>` drops binaries into ~/.dotnet/tools (or
+ * $DOTNET_CLI_HOME/.dotnet/tools), which is often NOT on a spawned process's PATH —
+ * so PATH-only resolution misses tools the user clearly has installed.
+ */
+async function resolveDotnetGlobalTool(binary: string): Promise<string | null> {
+  const os = await import("os");
+  const home = process.env.DOTNET_CLI_HOME || os.homedir();
+  const suffixes = process.platform === "win32" ? [".exe", ".cmd", ""] : [""];
+  for (const suffix of suffixes) {
+    const candidate = path.join(home, ".dotnet", "tools", `${binary}${suffix}`);
+    if (await pathExists(candidate)) return candidate;
+  }
+  return null;
 }
 
 async function resolveTypeScriptServer(root: string): Promise<string | null> {

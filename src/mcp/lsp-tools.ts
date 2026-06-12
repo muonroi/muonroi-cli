@@ -46,7 +46,8 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
       description:
         "Semantic code intelligence via language servers. operation is one of: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls. " +
         "filePath: absolute, or relative to the workspace root (cwd). line/character: 1-based (line 1 = first line, like an editor or file:line reference) — required for position-based ops; omit for documentSymbol; use query (not position) for workspaceSymbol. " +
-        'Returns {success, output}: output is a pretty-printed JSON array of LSP results (each {uri, range} with LSP-native 0-based range positions), or "No results found." when empty.',
+        'Returns {success, output}: output is a pretty-printed JSON array of LSP results (each {uri, range} with LSP-native 0-based range positions), or "No results found." when empty. ' +
+        "A slow server that has not finished loading its workspace returns no results for that call (no hang) — retry once it has warmed up. Note: csharp-ls answers position ops (goToDefinition/hover/references) almost immediately but only returns documentSymbol after the project/solution has been restored and loaded.",
       inputSchema: {
         operation: z.enum(LSP_TOOL_OPERATIONS),
         filePath: z.string().min(1).max(1000),

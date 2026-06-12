@@ -68,6 +68,7 @@ const DEFAULT_LSP_SETTINGS: NormalizedLspSettings = {
   tool: true,
   autoInstall: false,
   startupTimeoutMs: 30_000,
+  requestTimeoutMs: 30_000,
   diagnosticsDebounceMs: 200,
   builtins: {},
   servers: [],
@@ -776,6 +777,10 @@ export function normalizeLspSettings(raw: unknown): NormalizedLspSettings {
       typeof raw.startupTimeoutMs === "number" && raw.startupTimeoutMs > 0
         ? raw.startupTimeoutMs
         : DEFAULT_LSP_SETTINGS.startupTimeoutMs,
+    requestTimeoutMs:
+      typeof raw.requestTimeoutMs === "number" && raw.requestTimeoutMs > 0
+        ? raw.requestTimeoutMs
+        : DEFAULT_LSP_SETTINGS.requestTimeoutMs,
     diagnosticsDebounceMs:
       typeof raw.diagnosticsDebounceMs === "number" && raw.diagnosticsDebounceMs >= 0
         ? raw.diagnosticsDebounceMs
@@ -801,6 +806,7 @@ export function mergeLspSettings(
     tool: override?.tool ?? base?.tool ?? DEFAULT_LSP_SETTINGS.tool,
     autoInstall: override?.autoInstall ?? base?.autoInstall ?? DEFAULT_LSP_SETTINGS.autoInstall,
     startupTimeoutMs: override?.startupTimeoutMs ?? base?.startupTimeoutMs ?? DEFAULT_LSP_SETTINGS.startupTimeoutMs,
+    requestTimeoutMs: override?.requestTimeoutMs ?? base?.requestTimeoutMs ?? DEFAULT_LSP_SETTINGS.requestTimeoutMs,
     diagnosticsDebounceMs:
       override?.diagnosticsDebounceMs ?? base?.diagnosticsDebounceMs ?? DEFAULT_LSP_SETTINGS.diagnosticsDebounceMs,
     builtins: {

@@ -24,6 +24,7 @@ describe("createRuntimeLspDefinitions", () => {
       tool: true,
       autoInstall: false,
       startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
       diagnosticsDebounceMs: 0,
       builtins: {},
       servers: [],
@@ -34,6 +35,25 @@ describe("createRuntimeLspDefinitions", () => {
     expect(ids).toContain("pyright");
     expect(ids).toContain("gopls");
     expect(ids).toContain("rust-analyzer");
+    expect(ids).toContain("csharp-ls");
+  });
+
+  it("maps the .cs extension to the csharp-ls built-in (csharp languageId)", () => {
+    const defs = createRuntimeLspDefinitions("/tmp", {
+      enabled: true,
+      tool: true,
+      autoInstall: false,
+      startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
+      diagnosticsDebounceMs: 0,
+      builtins: {},
+      servers: [],
+    });
+
+    const csharp = defs.find((d) => d.id === "csharp-ls");
+    expect(csharp).toBeDefined();
+    expect(csharp!.extensions).toContain(".cs");
+    expect(csharp!.languageIds[".cs"]).toBe("csharp");
   });
 
   it("excludes a built-in when disabled via settings", () => {
@@ -42,6 +62,7 @@ describe("createRuntimeLspDefinitions", () => {
       tool: true,
       autoInstall: false,
       startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
       diagnosticsDebounceMs: 0,
       builtins: {
         typescript: { enabled: false },
@@ -60,6 +81,7 @@ describe("createRuntimeLspDefinitions", () => {
       tool: true,
       autoInstall: false,
       startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
       diagnosticsDebounceMs: 0,
       builtins: {},
       servers: [
@@ -87,6 +109,7 @@ describe("createRuntimeLspDefinitions", () => {
       tool: true,
       autoInstall: false,
       startupTimeoutMs: 5000,
+      requestTimeoutMs: 5000,
       diagnosticsDebounceMs: 0,
       builtins: {},
       servers: [],
