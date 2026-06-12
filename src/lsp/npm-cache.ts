@@ -42,7 +42,10 @@ export async function lspNpmWhich(pkg: string): Promise<string | null> {
   try {
     await rm(path.join(dir, "package-lock.json"), { force: true });
     await lspNpmAdd(pkg);
-  } catch {
+  } catch (err) {
+    console.error(
+      `[lsp:npm-cache] auto-install of "${pkg}" into ${dir} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
   const resolved = await pick();
