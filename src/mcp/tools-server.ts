@@ -11,10 +11,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
 import { registerEETools } from "./ee-tools.js";
 import { registerForensicsTools } from "./forensics-tools.js";
 import { registerLspTools } from "./lsp-tools.js";
+import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
 
 const LOG_TAIL = 40;
 
@@ -61,10 +61,10 @@ function jobSummary(job: Job): unknown {
 
 export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void {
   server.registerTool(
-    "selfverify.start",
+    "selfverify_start",
     {
       description:
-        "Start a self-verify run (mode=tier1 heuristic, or mode=agentic LLM-driven). Returns { runId } immediately; poll selfverify.status, then selfverify.result.",
+        "Start a self-verify run (mode=tier1 heuristic, or mode=agentic LLM-driven). Returns { runId } immediately; poll selfverify_status, then selfverify_result.",
       inputSchema: {
         mode: z.enum(["tier1", "agentic"]),
         since: z.string().max(200).optional(),
@@ -100,7 +100,7 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
   );
 
   server.registerTool(
-    "selfverify.status",
+    "selfverify_status",
     { description: "Get status + log tail of a self-verify run.", inputSchema: { runId: z.string() } },
     async ({ runId }) => {
       const job = jm.status(runId);
@@ -120,12 +120,12 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
   );
 
   server.registerTool(
-    "selfverify.result",
+    "selfverify_result",
     { description: "Fetch the full report of a completed self-verify run.", inputSchema: { runId: z.string() } },
     async ({ runId }) => {
       const job = jm.status(runId);
       if (!job) return fail("not_found", `runId ${runId} not found`);
-      if (job.status === "running") return fail("still_running", "run not finished; poll selfverify.status first");
+      if (job.status === "running") return fail("still_running", "run not finished; poll selfverify_status first");
       if (job.status === "error") return fail("run_error", job.error ?? "unknown error");
       if (job.status === "cancelled") return fail("cancelled", "run was cancelled");
       // A "done" job always has a report set before status flips, but guard the
@@ -134,19 +134,23 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
     },
   );
 
-  server.registerTool("selfverify.list", { description: "List recent self-verify runs.", inputSchema: {} }, async () => {
-    return ok(
-      jm.list().map((j) => ({
-        runId: j.runId,
-        kind: j.kind,
-        status: j.status,
-        elapsedMs: (j.finishedAt ?? Date.now()) - j.startedAt,
-      })),
-    );
-  });
+  server.registerTool(
+    "selfverify_list",
+    { description: "List recent self-verify runs.", inputSchema: {} },
+    async () => {
+      return ok(
+        jm.list().map((j) => ({
+          runId: j.runId,
+          kind: j.kind,
+          status: j.status,
+          elapsedMs: (j.finishedAt ?? Date.now()) - j.startedAt,
+        })),
+      );
+    },
+  );
 
   server.registerTool(
-    "selfverify.cancel",
+    "selfverify_cancel",
     { description: "Cancel a running self-verify run (best-effort).", inputSchema: { runId: z.string() } },
     async ({ runId }) => ok({ cancelled: jm.cancel(runId) }),
   );
