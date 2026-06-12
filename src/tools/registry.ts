@@ -511,6 +511,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             description: "Optional EE collections to scope an artifact lookup (e.g. ['experience-behavioral'])",
           },
           limit: { type: "number", description: "Max hits for an artifact lookup (1-50, default server-side)" },
+          maxChars: {
+            type: "number",
+            description: "Max chars of the recall index to return (500-20000, default 6000; general queries only)",
+          },
         },
         required: ["query"],
       }),
@@ -533,14 +537,21 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             return truncateOutput(JSON.stringify(resp));
           }
           // General recall → /api/recall (recallMode, [id col] index + surface).
-          const { recallEE } = await import("../ee/search.js");
+          const { recallEE, formatRecallForAgent } = await import("../ee/search.js");
           const resp = await recallEE(query, {
             ...(typeof input?.project === "string" ? { project: input.project } : {}),
           });
           if (resp === null) {
             return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
           }
-          return truncateOutput(JSON.stringify(resp));
+          // Compact ranked `[id col]` index, not a JSON dump — the recallMode text
+          // is ~30k (wide net), so JSON.stringify wasted the budget on escaping.
+          return truncateOutput(
+            formatRecallForAgent(resp, {
+              query,
+              ...(typeof input?.maxChars === "number" ? { maxChars: input.maxChars } : {}),
+            }),
+          );
         } catch (err) {
           console.error(`[tools:ee_query] EE recall failed: ${(err as Error)?.message}`, {
             query: query.slice(0, 120),

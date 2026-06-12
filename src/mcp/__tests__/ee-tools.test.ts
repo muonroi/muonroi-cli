@@ -22,9 +22,13 @@ function textOf(result: unknown): unknown {
   const r = result as { content: Array<{ text: string }>; isError?: boolean };
   return { json: JSON.parse(r.content[0]!.text), isError: r.isError };
 }
+function rawTextOf(result: unknown): { text: string; isError?: boolean } {
+  const r = result as { content: Array<{ text: string }>; isError?: boolean };
+  return { text: r.content[0]!.text, isError: r.isError };
+}
 
 describe("ee-tools", () => {
-  it("ee.query returns the recall index from the injected recall", async () => {
+  it("ee.query returns the compact recall index (raw text + count footer, not JSON)", async () => {
     const handlers = collectTools((s) =>
       registerEETools(s, {
         recall: async (q) => ({
@@ -35,12 +39,26 @@ describe("ee-tools", () => {
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
-    const out = textOf(await handlers["ee.query"]!({ query: "redactor" }));
-    expect((out as { isError?: boolean }).isError).toBeFalsy();
-    const json = (out as { json: { text: string; entries: unknown[]; count: number } }).json;
-    expect(json.text).toContain("recall:redactor");
-    expect(json.text).toContain("[id:abc col:experience-behavioral]");
-    expect(json.count).toBe(1);
+    const out = rawTextOf(await handlers["ee.query"]!({ query: "redactor" }));
+    expect(out.isError).toBeFalsy();
+    expect(out.text).toContain("recall:redactor");
+    expect(out.text).toContain("[id:abc col:experience-behavioral]"); // handle preserved for exp-feedback
+    expect(out.text).toContain("[recall: 1 entries"); // count footer
+    expect(() => JSON.parse(out.text)).toThrow(); // no longer a JSON dump
+  });
+
+  it("ee.query caps an oversized recall index so it cannot overflow the MCP token cap", async () => {
+    const handlers = collectTools((s) =>
+      registerEETools(s, {
+        recall: async () => ({ text: "x".repeat(50_000), entries: [], count: 42 }),
+        health: async () => ({ ok: true, status: 200 }),
+      }),
+    );
+    const out = rawTextOf(await handlers["ee.query"]!({ query: "wide", maxChars: 6000 }));
+    expect(out.isError).toBeFalsy();
+    expect(out.text.length).toBeLessThan(7000); // capped, not the full 50k dump
+    expect(out.text).toContain("truncated");
+    expect(out.text).toContain("42 entries");
   });
 
   it("ee.query forwards the project scope to recall", async () => {
