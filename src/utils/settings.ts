@@ -66,7 +66,7 @@ const DEFAULT_PAYMENT_SETTINGS: Required<PaymentSettings> = {
 const DEFAULT_LSP_SETTINGS: NormalizedLspSettings = {
   enabled: true,
   tool: true,
-  autoInstall: false,
+  autoInstall: true,
   startupTimeoutMs: 30_000,
   requestTimeoutMs: 30_000,
   diagnosticsDebounceMs: 200,
