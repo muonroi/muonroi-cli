@@ -53,8 +53,9 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
         "compaction (e.g. query='recent compaction checkpoint Progress DONE for <subtask>'). A deliberate query " +
         "here is cheaper than re-deriving or repeating a past mistake. Returns a formatted index whose entries " +
         "carry `[id col]` handles — report usefulness with exp-feedback so recall reinforces. Optional project " +
-        "scopes the recall. Returns a compact ranked index (cosine-ranked, strongest first); raise maxChars for " +
-        "more. Returns ee_unavailable if EE is down (then proceed without it).",
+        "scopes the recall. Returns a compact ranked index (cosine-ranked, strongest first), capped at " +
+        "maxChars (default 6000, range 500-20000) and truncated from the tail; raise maxChars to see more. " +
+        "Returns ee_unavailable if EE is down (then proceed without it).",
       inputSchema: {
         query: z.string().min(1).max(1000),
         project: z.string().max(200).optional(),
