@@ -38,7 +38,7 @@ export function registerForensicsTools(server: McpServer, deps: ForensicsToolDep
   const collect = deps.collect ?? defaultCollect;
 
   server.registerTool(
-    "usage.forensics",
+    "usage_forensics",
     {
       description:
         "Per-session token-cost forensics by session-id prefix: peak input, cache-hit ratio, per-event breakdown.",
@@ -52,7 +52,8 @@ export function registerForensicsTools(server: McpServer, deps: ForensicsToolDep
         return fail("db_error", e instanceof Error ? e.message : String(e));
       }
       if (ids.length === 0) return fail("not_found", `no session matches prefix '${prefix}'`);
-      if (ids.length > 1) return fail("ambiguous", `prefix '${prefix}' matched ${ids.length} sessions`, { matches: ids });
+      if (ids.length > 1)
+        return fail("ambiguous", `prefix '${prefix}' matched ${ids.length} sessions`, { matches: ids });
       try {
         const summary = await collect(ids[0]!);
         return ok(summary);

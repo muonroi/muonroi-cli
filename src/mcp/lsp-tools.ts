@@ -41,7 +41,7 @@ export function registerLspTools(server: McpServer, deps: LspToolDeps = {}): voi
   const enabled = deps.enabled ?? defaultEnabled;
 
   server.registerTool(
-    "lsp.query",
+    "lsp_query",
     {
       description:
         "Semantic code intelligence via language servers. operation is one of: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, prepareCallHierarchy, incomingCalls, outgoingCalls. " +

@@ -43,7 +43,7 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
   const health = deps.health ?? (() => healthEE());
 
   server.registerTool(
-    "ee.query",
+    "ee_query",
     {
       description:
         "Active recall over the Experience Engine brain — prior decisions, gotchas, learned warnings/recipes, and " +
@@ -79,7 +79,7 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
   );
 
   server.registerTool(
-    "ee.health",
+    "ee_health",
     { description: "Check Experience Engine server reachability.", inputSchema: {} },
     async () => {
       try {

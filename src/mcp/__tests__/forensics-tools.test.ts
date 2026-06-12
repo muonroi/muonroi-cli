@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { describe, expect, it } from "vitest";
 import type { CostForensicsSummary } from "../../cli/cost-forensics.js";
 import { registerForensicsTools } from "../forensics-tools.js";
@@ -35,30 +35,30 @@ const fakeSummary = (id: string): CostForensicsSummary =>
   }) as CostForensicsSummary;
 
 describe("forensics-tools", () => {
-  it("usage.forensics returns the summary for a unique prefix", async () => {
+  it("usage_forensics returns the summary for a unique prefix", async () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => ["sess123"], collect: (id) => fakeSummary(id) }),
     );
-    const out = parse(await handlers["usage.forensics"]!({ prefix: "sess" }));
+    const out = parse(await handlers["usage_forensics"]!({ prefix: "sess" }));
     expect(out.isError).toBeFalsy();
     expect(out.json.sessionId).toBe("sess123");
     expect(out.json.peakSingleCallInput).toBe(100);
   });
 
-  it("usage.forensics returns not_found for zero matches", async () => {
+  it("usage_forensics returns not_found for zero matches", async () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => [], collect: () => fakeSummary("x") }),
     );
-    const out = parse(await handlers["usage.forensics"]!({ prefix: "nope" }));
+    const out = parse(await handlers["usage_forensics"]!({ prefix: "nope" }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("not_found");
   });
 
-  it("usage.forensics returns ambiguous for multiple matches", async () => {
+  it("usage_forensics returns ambiguous for multiple matches", async () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => ["a1", "a2"], collect: () => fakeSummary("a1") }),
     );
-    const out = parse(await handlers["usage.forensics"]!({ prefix: "a" }));
+    const out = parse(await handlers["usage_forensics"]!({ prefix: "a" }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("ambiguous");
     expect(out.json.matches).toEqual(["a1", "a2"]);
