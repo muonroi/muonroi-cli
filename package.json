@@ -56,8 +56,9 @@
     "*.{ts,tsx,js,mjs,cjs,json}": "biome check --write --no-errors-on-unmatched --max-diagnostics=200"
   },
   "files": [
-    "src/",
     "dist/",
+    "!dist/**/*.exe",
+    "!dist/**/*.map",
     "scripts/postinstall.cjs"
   ],
   "keywords": [
