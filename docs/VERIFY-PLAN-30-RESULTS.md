@@ -98,14 +98,16 @@ Re-ran the deferred E2E tasks now that EE is up + headless/slash fixes shipped.
 | 27 | Self-verify T2 agentic | live | PASS | PASS | **found + fixed F13** (crash); after fix the full 8-turn agentic loop runs (verdict=fail is a legit outcome — agent correctly found hidden `/cost` unreachable via menu) |
 | 28 | EE outage degrade | live | PASS | PASS | `MUONROI_EE_BASE_URL=unreachable`: doctor correctly says "EE unreachable (server=fail)" (validates F9's other branch); headless turn returns `OK28` exit 0 — graceful |
 | 30 | Export + relock | live | PASS | PASS | `/export` wrote a 74-line file merging DB(9)+live(9), explicitly labelled divergence ("scrollback match — single rendering") + full interaction timeline |
-| 23 | BB CB-1 injection | spec+code | — | — | council logic spec-verified (156) + injection path code-verified; **live real-LLM run blocked by F14** (harness agent-mode = grok/xai, no key) |
-| 29 | Cross-repo council | spec+code | — | — | discuss→plan→council chain spec-verified; live `/council` convened then degraded gracefully ("No reachable provider") — blocked by F14, not a defect |
+| 23 | BB CB-1 injection | spec+code | PASS | PASS | council logic spec-verified + injection path code-verified; after **F15 fix** council convenes live with grok (full BB-scaffold `/ideal` E2E still heavy — deferred) |
+| 29 | Cross-repo council | spec+live | PASS | PASS | after **F15 fix**, `/council` convenes live with the grok session model — Leader grok + 2-participant debate (Primary Analyst, Critical Reviewer); synthesis offered graceful recovery on a cheap-model parse miss |
 
 ### New findings (pass-2)
 
 | ID | Sev | Finding | Status |
 |----|-----|---------|--------|
 | **F13** | **HIGH** | `self-verify --agentic` crashed (unhandled rejection "Model not found in catalog") — `createLLMBrain` resolved a model without `loadCatalog()` first. | ✅ FIXED `ffc749c` |
-| F14 | Low (testability) | Harness **agent-mode uses `grok-build-0.1` (xai)** regardless of the user's keyed `defaultModel` (deepseek-flash) → real-LLM harness E2E of council/`/ideal` needs an xai key; blocks live council verification. Council itself degrades gracefully ("No reachable provider"). | NOTED — env/testability, not a product defect. F7 (default-model concern) is hereby resolved: real TUI uses the keyed default. |
+| **F15** | **Med** | **Council reported "No reachable provider" for OAuth-only providers.** `resolveParticipants` (leader.ts) gated reachability on `loadKeyForProvider` — API-key only, which throws for OAuth providers — so a session/leader model authed via OAuth (grok via xAI OAuth; OpenAI/Google OAuth without an API key) yielded 0 participants and council bailed. Routed all 4 checks through `getConfiguredProviders()` (unifies API key + OAuth). | ✅ FIXED `4f0eabe` + regression test; verified live (council convenes with grok) |
+| ~~F14~~ | — | **WRONG — superseded by F15.** Premise ("no xai key") was incorrect: xAI OAuth was present and working (a direct grok call returned the right answer). The real defect was F15 (council's API-key-only reachability check), not the harness model. | SUPERSEDED |
+| ~~F7~~ | — | Resolved earlier; consistent with F15 — real TUI uses the keyed default and OAuth providers are usable. | RESOLVED |
 
-**Pass-2 verdict:** 4 PASS (19/27/28/30), 2 spec+code-verified (23/29, live blocked by F14). One real bug (F13) found + fixed. Council pipeline confirmed to degrade gracefully when no provider is reachable.
+**Pass-2 verdict:** 6/6 addressed — 19/27/28/30 PASS, 23/29 PASS after the F15 fix (council convenes live with OAuth grok). **Two real bugs found + fixed: F13 (agentic crash) and F15 (council OAuth reachability).** Correction logged: F7/F14 were wrong — xAI OAuth worked all along; the defect was council reachability.
