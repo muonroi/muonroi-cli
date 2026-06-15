@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // RED phase: import module under test (will fail until doctor.ts is created)
 import { type CheckResult, formatDoctorReport, runDoctor } from "./doctor.js";
 
-describe("doctor — runDoctor returns 9 checks", () => {
+describe("doctor — runDoctor returns 10 checks", () => {
   beforeEach(() => {
     // Mock fetch to avoid real network calls in tests
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
@@ -14,9 +14,9 @@ describe("doctor — runDoctor returns 9 checks", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns exactly 9 CheckResult entries (council_mcp_nudge added in CQ-23)", async () => {
+  it("returns exactly 10 CheckResult entries (dotnet added in VERIFY F1)", async () => {
     const results = await runDoctor();
-    expect(results).toHaveLength(9);
+    expect(results).toHaveLength(10);
   });
 
   it("each CheckResult has valid name, status, and detail fields", async () => {
@@ -38,6 +38,7 @@ describe("doctor — runDoctor returns 9 checks", () => {
     expect(names).toContain("os");
     expect(names).toContain("key_presence");
     expect(names).toContain("ollama");
+    expect(names).toContain("dotnet");
     expect(names).toContain("ee.health");
     expect(names).toContain("ee.brain");
     expect(names).toContain("qdrant");
