@@ -12,10 +12,12 @@
 | PR3 | F9, F1 | ✅ DONE — EE verdict + dotnet probe; verified live | `cfdd869` |
 | PR4 | F2, F3 | ✅ DONE — English catalog + pure stdout | `380a412`, `d308193` |
 | — | F7 | ✅ RESOLVED — env-specific (default derives from configured provider/tier, not a hardcoded xai pin); no code bug |
-| — | F4 | ⏭ DEFERRED — metrics nicety (durationMs for orchestrator.message); needs timing plumbing, low value |
-| — | F8 | ⏭ DEFERRED — widen self-verify Semantic-ID→scenario mapping; involved self-qa change |
-| — | F11 | ⏭ DEFERRED — infra: `Muonroi.BaseTemplate@1.0.0-alpha.3` not published to LocalNuGetFeed; version is pinned + test-asserted, so it needs the artifact published (or a coordinated version bump), not a code edit |
-| — | OAuth `exec()` | 🔖 FLAGGED — pre-existing MCP OAuth-URL opener uses shell `exec()` (injection risk); spun off as a separate task |
+| — | F4 | ❌ WON'T-FIX — `recordUsage(usage, callsite, modelId, shape)` has no duration param; adding it is a cross-cutting API + SQLite-schema change for a low-value single-callsite metric. Not worth the blast radius. |
+| — | F8 | ⏭ DEFERRED — largely works-as-designed: self-verify maps a touched file's own Semantic IDs to scenarios (app.tsx → 4 scenarios). Util/child files (text.ts, message-view.tsx) carry no navigable Semantic root so they fall back to smoke-boot. Transitive import→component mapping is a separate enhancement, not a quick fix. |
+| — | F11 | 🔖 ROUTED — template SOURCE exists in the `Muonroi.BaseTemplate` repo (has `.template.config/template.json`); fix = `dotnet pack` → LocalNuGetFeed there, not a muonroi-cli code edit. Spun off as a task in that repo. |
+| — | OAuth `exec()` | 🔖 FLAGGED — pre-existing MCP OAuth-URL opener uses shell `exec()` (injection risk); spun off as a separate task. |
+
+**Outcome:** every worthwhile fix-plan item is shipped to `master` (`affbef1`). F4 won't-fix, F8 deferred (works-as-designed for the common case), F11 + OAuth routed to their proper homes as tasks.
 
 **Full unit suite after all fixes:** 3830 passed / 11 skipped / 2 todo, 0 failed.
 
