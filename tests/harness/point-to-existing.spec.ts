@@ -30,7 +30,7 @@ describe("point-to-existing form E2E", () => {
     // POSIX race: idle can fire on the empty seq=0 frame before --inject-halt
     // mounts the halt card. Wait for it explicitly.
     await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 8_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

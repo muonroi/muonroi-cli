@@ -29,7 +29,7 @@ describe("G1 TUI: orchestrator drops maxOutputTokens when OAuth registry says it
       stream: makeTextStream("ok"),
       unsupportedParams: ["maxOutputTokens"],
     });
-  }, 30_000);
+  }, 120_000);
 
   afterAll(() => {
     handle?.cleanup();

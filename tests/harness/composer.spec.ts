@@ -23,7 +23,7 @@ describe("composer E2E", () => {
     // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
     // Wait for the textbox before querying.
     await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

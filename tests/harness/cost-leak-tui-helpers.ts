@@ -80,6 +80,13 @@ export interface SpawnCostLeakOptions {
    * intercepts before any auth happens, so any non-empty value works.
    */
   apiKey?: string;
+  /**
+   * Extra env vars forwarded to the spawned child (merged after the helper's
+   * own defaults so callers can override). Use e.g. `{ MUONROI_EE_BASE_URL:
+   * "http://127.0.0.1:1" }` to force EE classification unreachable so PIL
+   * Layer-1 deterministically falls back to the LLM (mock) classifier.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -121,6 +128,8 @@ export async function spawnCostLeakHarness(
       // Disabling discovery is the surgical fix: the specs need streamText
       // round-trips, not gap-elicitation UX.
       MUONROI_PIL_DISCOVERY: "0",
+      // Caller overrides (merged last) — e.g. forcing EE unreachable.
+      ...(opts.env ?? {}),
     },
   });
 

@@ -35,7 +35,7 @@ describe("api-key modal E2E", () => {
     // Wait for the modal to appear (or for idle if already visible in first frame).
     // Use a longer timeout since fresh-boot can be slow in CI.
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

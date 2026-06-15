@@ -50,7 +50,11 @@ async function waitForStable(predicate: () => boolean, timeoutMs = 3_000): Promi
  * Fix: include activeHaltCard / initNewForm / pointToExistingForm /
  * councilProgress in the hasMessages predicate. Spec re-enabled.
  */
-describe("/ideal halt → init-new → BB template picker E2E", () => {
+// retry:0 — this is a stateful sequential walkthrough: each it() advances the
+// form/selection via key presses, so a vitest retry would re-press against the
+// already-advanced state and corrupt the sequence (it can never recover a flake
+// here). Determinism comes from the waitForStable polls in each step instead.
+describe("/ideal halt → init-new → BB template picker E2E", { retry: 0 }, () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
@@ -63,7 +67,7 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
     driver = ctx.driver;
     cleanup = ctx.cleanup;
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();
@@ -153,9 +157,7 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
   });
 
   it("stage 4: BB template labels are user-readable (BaseTemplate / Modular / Microservices)", () => {
-    const labels = driver
-      .queryAll("id=init-new-form >> id^=init-bb-option-")
-      .map((o) => o.name);
+    const labels = driver.queryAll("id=init-new-form >> id^=init-bb-option-").map((o) => o.name);
     expect(labels).toContain("BaseTemplate");
     expect(labels).toContain("Modular");
     expect(labels).toContain("Microservices");
@@ -172,7 +174,14 @@ describe("/ideal halt → init-new → BB template picker E2E", () => {
 
   it("stage 4: Down arrow moves selection BaseTemplate → Modular", async () => {
     driver.press("Down");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // wait_for({idle}) can return before React commits the selection state
+    // setter — poll for the actual flag transfer, matching the sibling arrow
+    // tests below. (Without this, the assert races the re-render: observed
+    // `base.selected` still true / `mod.selected` undefined intermittently.)
+    await waitForStable(
+      () => driver.query("id=init-new-form >> id=init-bb-option-mr-mod-sln")?.selected === true,
+      3_000,
+    );
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-base-sln")?.selected).toBeFalsy();
     expect(driver.query("id=init-new-form >> id=init-bb-option-mr-mod-sln")?.selected).toBe(true);
   });

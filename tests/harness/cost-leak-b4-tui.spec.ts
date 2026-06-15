@@ -105,7 +105,7 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
         buildFinalTextRound(),
       ],
     });
-  }, 30_000);
+  }, 120_000);
 
   afterAll(() => {
     handle?.cleanup();

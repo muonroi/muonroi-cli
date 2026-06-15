@@ -41,7 +41,7 @@ describe("modal focus E2E", () => {
 
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     await driver.wait_for({ selector: "id=composer", timeoutMs: 5_000 });
-  }, 25_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

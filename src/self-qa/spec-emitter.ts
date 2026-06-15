@@ -80,7 +80,10 @@ describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_
     beforeAll(async () => {
       ctx = await spawnHarness();
       await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    }, 20_000);
+      // 120s: cold agent-mode TUI boot under CPU contention can take 25-46s+
+      // (the named-pipe handshake budget alone is 90s). A tighter hook timeout
+      // is the wrong constraint and surfaces as a flaky "Hook timed out".
+    }, 120_000);
 
     afterAll(() => {
       ctx?.cleanup();

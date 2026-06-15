@@ -171,7 +171,7 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
           finalTextRound("done"),
         ],
       });
-    }, 30_000);
+    }, 120_000);
 
     afterAll(() => {
       handle?.cleanup();

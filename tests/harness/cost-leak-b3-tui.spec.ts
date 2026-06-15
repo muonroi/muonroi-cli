@@ -111,7 +111,7 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
         buildFinalTextRound("all done"),
       ],
     });
-  }, 30_000);
+  }, 120_000);
 
   afterAll(() => {
     handle?.cleanup();

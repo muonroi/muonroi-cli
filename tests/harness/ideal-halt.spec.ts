@@ -31,7 +31,7 @@ describe("ideal halt recovery card E2E", () => {
     // POSIX race: idle can fire on the empty seq=0 frame before the halt card
     // mounts. Wait for it explicitly so subsequent tests can query it.
     await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 8_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();
