@@ -16,6 +16,8 @@
 
 ## Findings log (severity-ranked)
 
+> **Fix status (2026-06-15, branch `fix/verify-pass1`):** F10, F12, F5, F6, F9, F1, F2, F3 → **fixed + verified**. F7 → resolved (env-specific, no code bug). F4, F8, F11 → deferred. OAuth `exec()` → flagged as separate task. See [VERIFY-PLAN-30-FIXPLAN.md](VERIFY-PLAN-30-FIXPLAN.md) for commits + rationale. Full suite after fixes: 3830 passed, 0 failed.
+
 | ID | Sev | Task | Finding |
 |----|-----|------|---------|
 | **F10** | **HIGH** | 5 | **Headless `-p` never exits after a tool-using turn.** ROOT-CAUSED via `--format json` diag: the turn **completes correctly** (read_file 34ms → final answer `"version is 1.4.1. Evidence: [package.json:6]"`, finishReason=stop, ~15s) but the **process then idles ~255s until killed**. A lingering open handle keeps the event loop alive; no forced exit after `agent.cleanup()`. No-tool/chitchat (PONG) exits fine — the tool path opens a resource that isn't torn down. CI/scripting path → still HIGH, but cheap fix (close handles + exit). |

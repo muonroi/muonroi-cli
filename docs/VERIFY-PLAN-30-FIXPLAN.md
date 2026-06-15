@@ -3,6 +3,22 @@
 > Source: [VERIFY-PLAN-30-RESULTS.md](VERIFY-PLAN-30-RESULTS.md). Acceptance criterion: **best solution at cheapest cost.**
 > Each item is a small, independently-verifiable change. Blockers first. Branch fixes off **master** (clean) — not `feat/council-derobotize` (carries AbortSignal WIP).
 
+## Status — updated 2026-06-15 (branch `fix/verify-pass1`)
+
+| PR | Findings | Status | Commit |
+|----|----------|--------|--------|
+| PR1 | F10, F12 | ✅ DONE — headless exits ~19s (was hang); tsc + 569 tests | `36e50a1` |
+| PR2 | F5, F6 | ✅ DONE — exact-name ranking; verified live (harness) | `cc93a86` |
+| PR3 | F9, F1 | ✅ DONE — EE verdict + dotnet probe; verified live | `cfdd869` |
+| PR4 | F2, F3 | ✅ DONE — English catalog + pure stdout | `380a412`, `d308193` |
+| — | F7 | ✅ RESOLVED — env-specific (default derives from configured provider/tier, not a hardcoded xai pin); no code bug |
+| — | F4 | ⏭ DEFERRED — metrics nicety (durationMs for orchestrator.message); needs timing plumbing, low value |
+| — | F8 | ⏭ DEFERRED — widen self-verify Semantic-ID→scenario mapping; involved self-qa change |
+| — | F11 | ⏭ DEFERRED — infra: `Muonroi.BaseTemplate@1.0.0-alpha.3` not published to LocalNuGetFeed; version is pinned + test-asserted, so it needs the artifact published (or a coordinated version bump), not a code edit |
+| — | OAuth `exec()` | 🔖 FLAGGED — pre-existing MCP OAuth-URL opener uses shell `exec()` (injection risk); spun off as a separate task |
+
+**Full unit suite after all fixes:** 3830 passed / 11 skipped / 2 todo, 0 failed.
+
 ## PR1 — BLOCKER: headless clean exit (F10 + F12)
 
 - **Problem:** `mu -p "<any tool-using prompt>"` produces correct, evidence-first output then **never exits** (~255s idle until killed). Breaks the entire CI/scripting use case.
