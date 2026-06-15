@@ -1342,11 +1342,27 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
   // query we widen the search to ALL items (including hidden ones) so power
   // users can still discover commands that were intentionally dehoisted.
   const filteredSlashItems = slashSearchQuery
-    ? SLASH_MENU_ITEMS.filter(
-        (item) =>
-          item.label.toLowerCase().includes(slashSearchQuery.toLowerCase()) ||
-          item.description.toLowerCase().includes(slashSearchQuery.toLowerCase()),
-      )
+    ? (() => {
+        const q = slashSearchQuery.toLowerCase();
+        // Rank by exactness so the command the user TYPED wins: exact label/id
+        // (0) > label/id prefix (1) > label substring (2) > description
+        // substring (3). Without ranking, a command whose DESCRIPTION contains
+        // the query (e.g. /ee "…status…") sorts above the exact match the user
+        // typed (/status) and Enter runs the wrong command. See VERIFY F5/F6.
+        const rank = (item: SlashMenuItem): number => {
+          const label = item.label.toLowerCase();
+          const id = item.id.toLowerCase();
+          if (label === q || id === q) return 0;
+          if (label.startsWith(q) || id.startsWith(q)) return 1;
+          if (label.includes(q)) return 2;
+          if (item.description.toLowerCase().includes(q)) return 3;
+          return 99;
+        };
+        return SLASH_MENU_ITEMS.map((item, i) => ({ item, r: rank(item), i }))
+          .filter((x) => x.r < 99)
+          .sort((a, b) => a.r - b.r || a.i - b.i)
+          .map((x) => x.item);
+      })()
     : VISIBLE_SLASH_MENU_ITEMS;
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
