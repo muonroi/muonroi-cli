@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildStackLockSection,
   detectOutOfStackProposals,
+  extractStackFromSpec,
   prependDecisionsLock,
   readDecisionsLock,
   renderDecisionsLock,
@@ -94,6 +95,25 @@ describe("C1: buildStackLockSection", () => {
     });
     const section = buildStackLockSection(spec);
     expect(section).toBe("");
+  });
+});
+
+// ── extractStackFromSpec: mediatr keyword (Cyrillic-char regression) ──────────
+
+describe("extractStackFromSpec — mediatr keyword", () => {
+  it("detects the BB/.NET backend from a 'MediatR' mention alone", () => {
+    // Pre-fix the keyword used a Cyrillic 'р' (U+0440), so ASCII "mediatr" could
+    // never match. A spec mentioning ONLY MediatR (no BaseTemplate / building-block)
+    // must still resolve the backend.
+    const spec = makeSpec({ problemStatement: "Wire up CQRS handlers with MediatR", constraints: [], scope: "" });
+    const stack = extractStackFromSpec(spec);
+    expect(stack).not.toBeNull();
+    expect(stack?.backend ?? "").toContain("MediatR");
+  });
+
+  it("returns null when no BB/.NET/Muonroi keyword is present", () => {
+    const spec = makeSpec({ problemStatement: "Build a plain Express API", constraints: [], scope: "" });
+    expect(extractStackFromSpec(spec)).toBeNull();
   });
 });
 

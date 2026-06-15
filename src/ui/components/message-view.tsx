@@ -3,7 +3,7 @@ import type { ChatEntry } from "../../types/index";
 import { Markdown } from "../markdown.js";
 import { PlanView } from "../plan.js";
 import type { Theme } from "../theme.js";
-import { trunc } from "../utils/text.js";
+import { stripStrayModelMacros, trunc } from "../utils/text.js";
 import { describeMcpFsTool, toolArgs, toolLabel, tryParseArg } from "../utils/tools.js";
 import { DiffView, ReadFilePreviewView } from "./diff-view.js";
 import { LspDiagnosticsView, LspResultView } from "./lsp-views.js";
@@ -51,6 +51,9 @@ export function AssistantMessageContent({
   expanded: boolean;
   isFinal?: boolean;
 }) {
+  // Strip stray model self-annotation macros (e.g. grok's trailing
+  // `\confidence{85}`) that leak into the answer — not instructed in the prompt.
+  content = stripStrayModelMacros(content);
   const lines = content.split("\n");
   const isLong = lines.length > ASSISTANT_MSG_COLLAPSED_LINES;
   // Phase 5 F7 — the FINAL assistant message in a turn IS the answer the

@@ -67,6 +67,43 @@ describe("applyPilSuffix — per-task-type suffixes", () => {
     }
   });
 
+  it("de-robotized: NO_PREAMBLE bans only openers, not end-of-turn summary or inter-tool narration", () => {
+    // The summary + inter-tool bans were removed because they stripped natural
+    // connective tissue (the "máy móc" feel). Inter-tool spam is still removed
+    // structurally by stripInterToolNarration() in reasoning.ts. This guards
+    // against the bans silently creeping back into the system prompt.
+    const result = applyPilSuffix("S", makeCtx("debug", "concise"));
+    expect(result).toMatch(/FORBIDDEN OPENERS/);
+    expect(result).not.toMatch(/FORBIDDEN END-OF-TURN SUMMARY/);
+    expect(result).not.toMatch(/FORBIDDEN INTER-TOOL NARRATION/);
+  });
+
+  it("de-robotized: debug suffix is guidance, not a rigid arrow skeleton", () => {
+    // "Format = Hypothesis → Root cause → Fix → Verify" produced stilted,
+    // label-prefixed answers. It must read as guidance now.
+    const result = applyPilSuffix("S", makeCtx("debug", "concise"));
+    expect(result).toContain("OUTPUT RULES (debug)");
+    expect(result).not.toMatch(/Format = Hypothesis/);
+  });
+
+  it("E: appends the anti-bookkeeping note on the natural path for non-question turns", () => {
+    // The contract's REPORTING rule leaks as a provenance footer ("evidence only
+    // from this turn") on imperative answer turns; the natural path now guards it.
+    const result = applyPilSuffix("S", makeCtx("analyze", "concise"));
+    expect(result).toMatch(/WRITE FOR THE READER/);
+    expect(result).toMatch(/provenance/i);
+  });
+
+  it("E: skips the anti-bookkeeping note for question turns (L4 QUESTION directive covers them)", () => {
+    const ctx: PipelineContext = { ...makeCtx("analyze", "concise"), raw: "why does the enrichment layer fail?" };
+    expect(applyPilSuffix("S", ctx)).not.toMatch(/WRITE FOR THE READER/);
+  });
+
+  it("E: response-tools path does not add the natural-path bookkeeping note", () => {
+    const result = applyPilSuffix("S", makeCtx("analyze", "balanced"), true);
+    expect(result).not.toMatch(/WRITE FOR THE READER/);
+  });
+
   it("PIL-04: response-tools path skips budget+preamble (tool already enforces structure)", () => {
     const result = applyPilSuffix("S", makeCtx("analyze", "balanced"), true);
     expect(result).toContain("respond_analyze");
@@ -88,15 +125,23 @@ describe("applyPilSuffix — per-task-type suffixes", () => {
   });
 });
 
-describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
-  it("returns response tool for analyze (list-shaped, JSON wins)", () => {
-    const tools = getResponseToolSet(makeCtx("analyze", null));
+describe("getResponseToolSet — narrow gating (de-robotizing)", () => {
+  // Override raw on a typed ctx so the report/question discriminator is exercised.
+  const ctxRaw = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
+
+  it("returns response tool for analyze on an explicit report/list request", () => {
+    const tools = getResponseToolSet(ctxRaw("audit the orchestrator and list all cost-leak findings", "analyze"));
     expect(Object.keys(tools)).toContain("respond_analyze");
   });
 
-  it("returns response tool for plan (list-shaped, JSON wins)", () => {
-    const tools = getResponseToolSet(makeCtx("plan", null));
+  it("returns response tool for plan on an explicit plan request", () => {
+    const tools = getResponseToolSet(ctxRaw("plan the migration to the new auth flow step by step", "plan"));
     expect(Object.keys(tools)).toContain("respond_plan");
+  });
+
+  it("returns response tool for debug only on an explicit report request", () => {
+    const tools = getResponseToolSet(ctxRaw("audit the failing suite and list each root cause", "debug"));
+    expect(Object.keys(tools)).toContain("respond_debug");
   });
 
   it("returns empty toolset for generate (code-heavy, markdown wins)", () => {
@@ -107,16 +152,13 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     expect(getResponseToolSet(makeCtx("refactor", null))).toEqual({});
   });
 
-  it("returns response tool for debug (bounded schema, structural enforcement wins)", () => {
-    const tools = getResponseToolSet(makeCtx("debug", null));
-    expect(Object.keys(tools)).toContain("respond_debug");
-  });
-
   it("returns empty toolset for documentation (prose-heavy)", () => {
     expect(getResponseToolSet(makeCtx("documentation", null))).toEqual({});
   });
 
-  it("returns response tool for general when no providerId is passed (back-compat)", () => {
+  it("returns response tool for general regardless of report signal (renders as plain markdown)", () => {
+    // general is exempt from the report/question gate: GeneralSchema is pure text
+    // and its renderer shows plain markdown, so respond_general is never robotic.
     const tools = getResponseToolSet(makeCtx("general", null));
     expect(Object.keys(tools)).toContain("respond_general");
   });
@@ -137,11 +179,48 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
     expect(getResponseToolSet(makeCtx(null, null))).toEqual({});
   });
 
+  it("gates the response tool for chitchat turns", () => {
+    const ctx: PipelineContext = { ...makeCtx("general", null), intentKind: "chitchat" };
+    expect(getResponseToolSet(ctx)).toEqual({});
+  });
+
+  it("DROPS respond_<task> for question-style debug/analyze/plan (natural markdown path)", () => {
+    // The de-robotizing change: a plain QUESTION must not be forced into the
+    // rigid respond_* schema + labeled renderer. It falls through to the softened
+    // markdown OUTPUT RULES so the answer reads as natural prose.
+    expect(getResponseToolSet(ctxRaw("why does the build fail intermittently?", "debug"))).toEqual({});
+    expect(getResponseToolSet(ctxRaw("analyze how the enrichment function works", "analyze"))).toEqual({});
+    expect(getResponseToolSet(ctxRaw("what is the cleanest way to structure this module?", "plan"))).toEqual({});
+  });
+
+  it("KEEPS respond_<task> for explicit report / list / plan requests (EN + VI)", () => {
+    const keep = (raw: string, t: TaskType) => Object.keys(getResponseToolSet(ctxRaw(raw, t)));
+    expect(keep("list all cost leaks in the orchestrator", "analyze")).toContain("respond_analyze");
+    expect(keep("review the module and report each finding by severity", "analyze")).toContain("respond_analyze");
+    expect(keep("lập kế hoạch migration sang auth flow mới", "plan")).toContain("respond_plan");
+  });
+
+  it("DROPS respond_<task> for a QUESTION that merely mentions plan/list (narrow-gate fix)", () => {
+    // Live bug (grok interview): a question that QUOTED the phrase "state a 2-3
+    // line plan" matched the bare word 'plan' in STRUCTURED_REPORT_RE and forced
+    // respond_plan, cramming an introspective answer into a rigid plan schema. A
+    // question-shaped prompt must stay on the natural markdown path even when it
+    // contains plan/list words.
+    expect(
+      getResponseToolSet(ctxRaw("what rules constrain you, e.g. the 'state a 2-3 line plan' directive?", "plan")),
+    ).toEqual({});
+    expect(getResponseToolSet(ctxRaw("can you list the main points?", "analyze"))).toEqual({});
+    expect(getResponseToolSet(ctxRaw("how would you plan the rollout?", "plan"))).toEqual({});
+    // Imperative delivery requests are NOT question-shaped → still structured.
+    expect(Object.keys(getResponseToolSet(ctxRaw("plan the rollout step by step", "plan")))).toContain("respond_plan");
+  });
+
   it("drops respond_<task> on an IMPLEMENTATION-intent prompt (no premature terminal answer)", () => {
     // Live (grok session 19fa8895c41c): an "Improve … implement these fixes"
     // prompt classified `debug` got respond_debug; the model called it mid-task
     // as a plan and the turn ended before the edits completed. Implementation
     // turns must fall through to markdown OUTPUT RULES, not a terminal tool.
+    // Implementation intent takes precedence over a report signal.
     const impl = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
     expect(
       getResponseToolSet(impl("Improve the story-list screen. Implement these prioritized fixes: …", "debug")),
@@ -151,23 +230,6 @@ describe("getResponseToolSet — PIL-04 Tier 1.1 gating", () => {
       {},
     );
     expect(getResponseToolSet(impl("triển khai các cải tiến đã đề xuất", "plan"))).toEqual({});
-  });
-
-  it("KEEPS respond_<task> for pure analysis/plan prompts (narrowness guard)", () => {
-    // The deliverable here IS a structured report — must not be suppressed.
-    const ana = (raw: string, t: TaskType) => ({ ...makeCtx(t, null), raw });
-    expect(Object.keys(getResponseToolSet(ana("analyze the orchestrator for cost leaks", "analyze")))).toContain(
-      "respond_analyze",
-    );
-    expect(Object.keys(getResponseToolSet(ana("why does the build fail intermittently?", "debug")))).toContain(
-      "respond_debug",
-    );
-    expect(Object.keys(getResponseToolSet(ana("plan the migration to the new auth flow", "plan")))).toContain(
-      "respond_plan",
-    );
-    expect(Object.keys(getResponseToolSet(ana("review the auth module and explain the design", "analyze")))).toContain(
-      "respond_analyze",
-    );
   });
 });
 

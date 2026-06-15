@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { getModelInfo } from "../models/registry";
 import { buildContractSection } from "../pil/agent-operating-contract.js";
 import { buildNativeCapabilitiesSection } from "../pil/native-capabilities-workbook.js";
@@ -45,6 +46,68 @@ export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
  * changes (MUONROI_SHELL override, shell.kind config) are reflected
  * without a CLI restart.
  */
+/**
+ * Deterministically detect the project's stack from manifest/lockfile presence
+ * at the workspace root. Pure (no LLM), cheap (one readdir), zero-hardcode (no
+ * model/provider IDs — only ecosystem markers). Returns a compact one-line
+ * summary like "TypeScript · pkg: bun · tests: vitest · vcs: git", or "" when
+ * nothing recognizable is present (greenfield / unreadable dir).
+ *
+ * Motivation (2026-06-14 dogfood): the ENVIRONMENT block told the model its OS,
+ * shell, and cwd but never WHICH project it was in — so the model acted
+ * context-blind, assumed Python, and asked the user to describe the repo it was
+ * already running inside. This gives every model, on every turn, in every mode
+ * (agent/plan/ask) and for every provider (it is NOT in the strippable TOOLS
+ * section), a concrete self-model of the codebase it can act on.
+ */
+export function detectProjectStack(cwd: string): string {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(cwd);
+  } catch (err) {
+    // Best-effort enrichment: a missing/unreadable cwd simply omits the stack
+    // line (the ENVIRONMENT cwd line already surfaces "<unknown>"). Debug-gated
+    // so prompt assembly never corrupts the TUI at startup.
+    if (process.env.MUONROI_DEBUG === "1") {
+      console.error(`[orchestrator/prompts] detectProjectStack failed for ${cwd}: ${(err as Error)?.message}`);
+    }
+    return "";
+  }
+
+  const has = (name: string): boolean => entries.includes(name);
+  const hasExt = (ext: string): boolean => entries.some((e) => e.toLowerCase().endsWith(ext));
+
+  let lang = "";
+  if (has("tsconfig.json")) lang = "TypeScript";
+  else if (has("package.json")) lang = "JavaScript/Node";
+  else if (has("Cargo.toml")) lang = "Rust";
+  else if (has("go.mod")) lang = "Go";
+  else if (has("pyproject.toml") || has("requirements.txt") || has("setup.py")) lang = "Python";
+  else if (hasExt(".csproj") || hasExt(".sln") || has("Directory.Build.props")) lang = ".NET/C#";
+  else if (has("pom.xml")) lang = "Java (Maven)";
+  else if (has("build.gradle") || has("build.gradle.kts")) lang = "Java/Kotlin (Gradle)";
+
+  let pkg = "";
+  if (has("bun.lockb") || has("bun.lock")) pkg = "bun";
+  else if (has("pnpm-lock.yaml")) pkg = "pnpm";
+  else if (has("yarn.lock")) pkg = "yarn";
+  else if (has("package-lock.json")) pkg = "npm";
+
+  let tests = "";
+  if (entries.some((e) => /^vitest\.([\w.-]+\.)?config\.(ts|js|mjs|cjs|cts|mts)$/i.test(e))) tests = "vitest";
+  else if (entries.some((e) => /^jest\.config\./i.test(e))) tests = "jest";
+  else if (has("pytest.ini") || has("tox.ini")) tests = "pytest";
+
+  const vcs = has(".git") ? "git" : "";
+
+  const segs: string[] = [];
+  if (lang) segs.push(lang);
+  if (pkg) segs.push(`pkg: ${pkg}`);
+  if (tests) segs.push(`tests: ${tests}`);
+  if (vcs) segs.push(`vcs: ${vcs}`);
+  return segs.join(" · ");
+}
+
 function buildEnvironmentBlock(): string {
   const platform = process.platform;
   const osName =
@@ -97,11 +160,15 @@ function buildEnvironmentBlock(): string {
     );
   }
 
+  const projectStack = cwd === "<unknown>" ? "" : detectProjectStack(cwd);
+
   return [
     "ENVIRONMENT:",
     `- OS: ${osName} (${platform})`,
     `- Shell available via bash tool: ${shellKindLabel} (kind=${shell.kind})`,
     `- Working directory: ${cwd}`,
+    ...(projectStack ? [`- Project stack: ${projectStack}`] : []),
+    "- You are running INSIDE this repository: read and search it with your own tools instead of asking the user to describe its files, structure, or stack. You can act on what you find here directly.",
     "",
     "Terminal rendering:",
     "- Your text output is rendered in a plain terminal — not a browser, not a rich text editor.",
