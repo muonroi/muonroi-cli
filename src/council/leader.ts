@@ -1,5 +1,5 @@
 import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
-import { loadKeyForProvider } from "../providers/keychain.js";
+import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
@@ -117,6 +117,24 @@ export interface LeaderResolution {
  *      from the session provider.
  *   4. Fall back to the session model itself.
  */
+/**
+ * A provider is reachable when it has an API key OR a stored OAuth token.
+ * `loadKeyForProvider` only knows API keys (it throws for OAuth-only
+ * providers), so without the OAuth fallback an OAuth-authed provider — e.g.
+ * grok via xAI OAuth, or OpenAI/Google OAuth without an API key — was wrongly
+ * treated as unreachable, making council bail "No reachable provider" even
+ * though the model answers fine. VERIFY F15.
+ */
+async function isProviderReachable(provider: ProviderId): Promise<boolean> {
+  // getConfiguredProviders() is the authoritative cred check — it unifies API
+  // keys (keychain/env/settings) AND stored OAuth tokens across every provider
+  // in the OAuth registry. The old loadKeyForProvider-only check saw API keys
+  // but not OAuth, so an OAuth-only provider (e.g. grok via xAI OAuth) was
+  // wrongly unreachable and council bailed "No reachable provider". VERIFY F15.
+  const configured = await getConfiguredProviders();
+  return configured.includes(provider);
+}
+
 export async function resolveLeaderModelDetailed(sessionModelId: string): Promise<LeaderResolution> {
   const sessionProviderId = detectProviderForModel(sessionModelId);
   const configured = getRoleModel("leader");
@@ -124,11 +142,7 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
   const configuredTier = configured ? tierOf(configured) : undefined;
 
   const sessionDisabled = isProviderDisabled(sessionProviderId as ProviderId);
-  const sessionReachable =
-    !sessionDisabled &&
-    (await loadKeyForProvider(sessionProviderId)
-      .then(() => true)
-      .catch(() => false));
+  const sessionReachable = !sessionDisabled && (await isProviderReachable(sessionProviderId));
   if (!sessionReachable) {
     return { modelId: configured ?? sessionModelId };
   }
@@ -214,9 +228,7 @@ export async function resolveParticipants(
       if (!modelId) continue;
       const provider = detectProviderForModel(modelId);
       if (isProviderDisabled(provider as ProviderId)) continue;
-      const canReach = await loadKeyForProvider(provider)
-        .then(() => true)
-        .catch(() => false);
+      const canReach = await isProviderReachable(provider);
       if (canReach) candidates.push({ role, model: modelId });
     }
     if (candidates.length >= 2) return candidates;
@@ -230,11 +242,7 @@ export async function resolveParticipants(
   }
 
   const providerDisabled = isProviderDisabled(detectProviderForModel(sessionModelId) as ProviderId);
-  const canReach =
-    !providerDisabled &&
-    (await loadKeyForProvider(detectProviderForModel(sessionModelId))
-      .then(() => true)
-      .catch(() => false));
+  const canReach = !providerDisabled && (await isProviderReachable(detectProviderForModel(sessionModelId)));
   if (canReach) {
     return ALL_ROLES.map((role) => ({ role, model: sessionModelId }));
   }
@@ -248,9 +256,7 @@ async function resolveSameProviderCandidates(
   roles: ModelRole[],
 ): Promise<Array<{ role: ModelRole; model: string }>> {
   if (isProviderDisabled(providerId)) return [];
-  const canReach = await loadKeyForProvider(providerId)
-    .then(() => true)
-    .catch(() => false);
+  const canReach = await isProviderReachable(providerId);
   if (!canReach) return [];
 
   const providerModels = getModelsForProvider(providerId);
