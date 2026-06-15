@@ -128,6 +128,7 @@ import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../type
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
+import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   getAutoCouncilConfidence,
@@ -1319,16 +1320,10 @@ export class MessageProcessor {
             // hangs headless `-p` after the turn finishes. See VERIFY F10/F12.
             const mcpBuildPromise = buildMcpToolSet(filteredServers, {
               onOAuthRequired: (_serverId, url) => {
-                const urlStr = url.toString();
-                import("child_process").then(({ exec }) => {
-                  const cmd =
-                    process.platform === "win32"
-                      ? `start "" "${urlStr}"`
-                      : process.platform === "darwin"
-                        ? `open "${urlStr}"`
-                        : `xdg-open "${urlStr}"`;
-                  exec(cmd);
-                });
+                // Server-supplied URL is untrusted — openUrl validates the
+                // scheme and spawns via execFile (no shell), closing the
+                // command-injection vector the old exec() opener had.
+                openUrl(url);
               },
             });
             try {

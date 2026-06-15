@@ -28,6 +28,7 @@
 //   - siliconflow reasoning-strip           — taskCaps.sanitizeHistory
 
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { getDefaultEEClient } from "../ee/intercept.js";
 import { buildMcpToolSet } from "../mcp/runtime";
 import { normalizeModelId } from "../models/registry.js";
 import {
@@ -56,6 +57,7 @@ import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
 import { statusBarStore } from "../ui/status-bar/store.js";
+import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
   getProviderStallTimeoutMs,
@@ -93,7 +95,6 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
-import { getDefaultEEClient } from "../ee/intercept.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
@@ -397,16 +398,10 @@ export class StreamRunner {
     if (childMode === "agent" && taskCaps.supportsClientTools(childRuntime.modelInfo)) {
       const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
         onOAuthRequired: (_serverId, url) => {
-          const urlStr = url.toString();
-          import("child_process").then(({ exec }) => {
-            const cmd =
-              process.platform === "win32"
-                ? `start "" "${urlStr}"`
-                : process.platform === "darwin"
-                  ? `open "${urlStr}"`
-                  : `xdg-open "${urlStr}"`;
-            exec(cmd);
-          });
+          // Server-supplied URL is untrusted — openUrl validates the scheme
+          // and spawns via execFile (no shell), closing the command-injection
+          // vector the old exec() opener had.
+          openUrl(url);
         },
       });
       closeMcp = mcpBundle.close;
@@ -600,7 +595,10 @@ export class StreamRunner {
           const joined = texts.join(" ");
           const mKeep = joined.match(/KEEP_TOOL_IDS\s*[:=]\s*([a-z0-9_, -]+)/i);
           if (mKeep) {
-            subKeepToolIds = mKeep[1].split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
+            subKeepToolIds = mKeep[1]
+              .split(/[,\s]+/)
+              .map((s) => s.trim())
+              .filter(Boolean);
             break;
           }
         }
@@ -608,9 +606,18 @@ export class StreamRunner {
         const persistSubArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
           try {
             getDefaultEEClient()
-              .extract({ transcript: fullContent.slice(0, 4000), projectPath: process.cwd(), meta: { source: "tool-artifact", toolCallId, toolName, reason } }, AbortSignal.timeout(600))
+              .extract(
+                {
+                  transcript: fullContent.slice(0, 4000),
+                  projectPath: process.cwd(),
+                  meta: { source: "tool-artifact", toolCallId, toolName, reason },
+                },
+                AbortSignal.timeout(600),
+              )
               .catch(() => {});
-          } catch { /* fail-open */ }
+          } catch {
+            /* fail-open */
+          }
         };
         const compacted = compactSubAgentMessages(stripped, {
           thresholdChars: compactThreshold,
