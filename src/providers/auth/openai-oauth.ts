@@ -23,10 +23,10 @@
  * the MCP server-discovery OAuth dance.
  */
 
-import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import type { OAuthCallbackServer } from "../../mcp/oauth-callback.js";
 import { startOAuthCallbackServer } from "../../mcp/oauth-callback.js";
+import { openUrl } from "../../utils/open-url.js";
 import { exchangeBrowserCode, generatePKCE, refreshBrowserTokens } from "./browser-flow.js";
 import type { FetchFn } from "./device-flow.js";
 import type { OAuthTokens, ProviderOAuth, UserInfo } from "./types.js";
@@ -77,18 +77,11 @@ export type CallbackServerFn = (opts: {
 export type OpenBrowserFn = (url: string) => void;
 
 function defaultOpenBrowser(url: string): void {
-  const platform = process.platform;
-  let cmd: string;
-  if (platform === "win32") {
-    cmd = `start "" "${url}"`;
-  } else if (platform === "darwin") {
-    cmd = `open "${url}"`;
-  } else {
-    cmd = `xdg-open "${url}"`;
-  }
-  exec(cmd, () => {
-    // fire-and-forget — errors non-fatal (user can open manually)
-  });
+  // Delegate to the centralized, injection-safe opener: it validates the scheme
+  // and spawns via execFile (no shell), so metacharacters in the authorization
+  // URL cannot be interpreted as commands. Fire-and-forget — failures are
+  // non-fatal (the user can open the URL manually).
+  openUrl(url);
 }
 
 // ---------------------------------------------------------------------------
