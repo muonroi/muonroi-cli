@@ -25,6 +25,7 @@ import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidec
 import { generateObject, generateText } from "ai";
 import { z } from "zod";
 import { spawnAgentTui } from "../agent-harness/test-spawn.js";
+import { loadCatalog } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { type AgenticContextBlock, buildAgenticContext } from "./agentic-context.js";
@@ -190,6 +191,11 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   if (process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] === undefined) {
     process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] = "1";
   }
+
+  // Resolve the catalog before any model lookup — resolveModelRuntime needs it
+  // loaded or it throws "not found in catalog". self-verify --agentic is a
+  // standalone entrypoint that never ran the main boot's loadCatalog(). F13.
+  await loadCatalog();
 
   const provider = detectProviderForModel(opts.modelId);
   if (!provider) throw new Error(`No provider detected for model '${opts.modelId}'`);
