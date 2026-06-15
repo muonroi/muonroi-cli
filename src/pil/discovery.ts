@@ -15,6 +15,9 @@ import {
   buildInterviewQuestion,
   detectClarityGaps,
   getAutofilledOutcome,
+  isProvideOwnDetailsSentinel,
+  PROVIDE_OWN_DETAILS_OPTION_EN,
+  PROVIDE_OWN_DETAILS_OPTION_VI,
   resolveGapsNonInteractive,
 } from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
@@ -144,7 +147,7 @@ export async function runDiscovery(
       if (modelQuestions.length > 0) {
         gaps = modelQuestions.slice(0, 3).map((line, idx) => {
           let q = line;
-          let recs = ["I will provide my own details / constraints"];
+          let recs = [PROVIDE_OWN_DETAILS_OPTION_EN];
           const m = line.match(/\[MODEL RECS:?\s*(.+?)\]/i) || line.match(/RECS:\s*(.+)$/i);
           if (m) {
             recs = m[1]
@@ -178,7 +181,7 @@ export async function runDiscovery(
         dimension: "outcome",
         description: "Specific outcome and constraints the agent/model needs from the user",
         suggestedQuestion: `Để tôi (agent/model) thực hiện chính xác và có được thông tin cần thiết cho task này, bạn hãy cho tôi biết: kết quả mong muốn cụ thể, các ràng buộc quan trọng, hoặc bất kỳ chi tiết nào khác mà tôi cần làm rõ trước khi bắt đầu?`,
-        options: ["Tôi sẽ trả lời tự do / cung cấp chi tiết cần thiết"],
+        options: [PROVIDE_OWN_DETAILS_OPTION_VI],
         defaultIndex: 0,
       },
     ];
@@ -207,17 +210,15 @@ export async function runDiscovery(
     clarifiedIntent = resolveGapsNonInteractive(gaps, projectContext, raw);
   }
 
-  // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked
-  // Broaden to override bad generics (Local path, In prompts/..., project root literals) that
-  // can leak from detectClarityGaps/resolve when raw contains directory mentions or for native meta.
+  // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked.
+  // Override only when the resolved outcome is a raw-derived generic ("Complete: …" /
+  // "Complete the task …") or a genuine filesystem-path leak (Local path, project root,
+  // "src/foo.ts" scope-option shapes). It must NOT clobber a legitimate user answer that
+  // merely contains a slash ("support REST/GraphQL", "input/output") — see looksLikePathLeak.
   const autoOutcome = getAutofilledOutcome(l1.taskType, raw);
-  if (
-    autoOutcome &&
-    (!clarifiedIntent.outcome ||
-      clarifiedIntent.outcome.startsWith("Complete the task") ||
-      /Local path|In prompts|directory as|project root|\/|absolute|local\/repo/i.test(clarifiedIntent.outcome) ||
-      clarifiedIntent.outcome.includes("/"))
-  ) {
+  const currentOutcome = clarifiedIntent.outcome ?? "";
+  const isGenericComplete = /^Complete(?::| the task)/i.test(currentOutcome);
+  if (autoOutcome && (!currentOutcome || isGenericComplete || looksLikePathLeak(currentOutcome))) {
     clarifiedIntent = { ...clarifiedIntent, outcome: autoOutcome };
   }
 
@@ -301,6 +302,30 @@ export async function runDiscovery(
   };
 }
 
+/**
+ * True only for outcomes that are genuine filesystem-path leakage — known
+ * leaked-scope phrases ("Local path", "project root", …) or a real path segment
+ * ("src/foo.ts", a "src/cli (cli)" scope-option shape) that also carries a
+ * path-ish signal (file extension, path keyword, or trailing "(name)").
+ *
+ * A bare "/" is NOT sufficient: "support REST/GraphQL", "validate input/output",
+ * and "details / constraints" use the slash as an "or" separator and must be
+ * preserved. The previous implementation matched any "/" and silently clobbered
+ * such legitimate answers with the generic taskType default.
+ */
+function looksLikePathLeak(outcome: string): boolean {
+  // Anchored known leaked-scope phrases (preserves prior override behaviour).
+  if (/(?:\b(?:local path|in prompts|directory as|project root|absolute)\b)|local\/repo/i.test(outcome)) {
+    return true;
+  }
+  // word/word path segment (no spaces around the slash) — e.g. "src/foo.ts".
+  if (!/\b[\w.-]+\/[\w./-]+/.test(outcome)) return false;
+  const hasFileExtension = /\/[\w-]+\.[a-z0-9]{1,5}\b/i.test(outcome); // ".../foo.ts"
+  const hasPathKeyword = /\b(?:path|dir|directory|folder|repo|root|module|src|lib|dist|tests?)\b/i.test(outcome);
+  const hasScopeOptionSuffix = /\([^)]+\)\s*$/.test(outcome); // "src/cli (cli)" scope-option shape
+  return hasFileExtension || hasPathKeyword || hasScopeOptionSuffix;
+}
+
 function buildClarifiedIntentFromAnswers(
   answeredGaps: Array<{ dimension: string; answer: string | null; options: string[]; defaultIndex: number }>,
   raw: string,
@@ -310,7 +335,11 @@ function buildClarifiedIntentFromAnswers(
   const scopeGap = answeredGaps.find((g) => g.dimension === "scope");
   const constraintGap = answeredGaps.find((g) => g.dimension === "constraint");
 
-  const outcome = outcomeGap?.answer ?? `Complete: ${raw.slice(0, 80)}`;
+  // The "provide my own details" meta-option is a no-answer sentinel; treat it
+  // as missing so the raw-derived generic (and downstream inferred outcome) is
+  // used instead of the sentinel string surviving verbatim as the outcome.
+  const outcomeAnswer = isProvideOwnDetailsSentinel(outcomeGap?.answer) ? null : (outcomeGap?.answer ?? null);
+  const outcome = outcomeAnswer ?? `Complete: ${raw.slice(0, 80)}`;
   const scope = (() => {
     if (scopeGap?.answer) return [scopeGap.answer.replace(/\s*\(.*\)\s*$/, "").trim()];
     return projectContext.relevantModules.map((m) => m.path);

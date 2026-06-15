@@ -12,6 +12,24 @@ import {
 import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
 import type { TaskType } from "./types.js";
 
+/**
+ * The default "no specific answer" meta-option offered for a model-generated
+ * clarification when the model supplies no concrete recommendations. Selecting
+ * it means "use your judgment / I have nothing specific to add" — it is a
+ * sentinel, NOT a real outcome, so it must never surface verbatim as the
+ * resolved outcome. Centralised here so discovery.ts (which presents the
+ * option) and the outcome-resolution paths agree on the exact strings.
+ */
+export const PROVIDE_OWN_DETAILS_OPTION_EN = "I will provide my own details / constraints";
+export const PROVIDE_OWN_DETAILS_OPTION_VI = "Tôi sẽ trả lời tự do / cung cấp chi tiết cần thiết";
+
+/** True when an answer is the "I'll provide my own details" meta-option (any locale). */
+export function isProvideOwnDetailsSentinel(answer: string | null | undefined): boolean {
+  if (!answer) return false;
+  const norm = answer.trim().toLowerCase();
+  return norm === PROVIDE_OWN_DETAILS_OPTION_EN.toLowerCase() || norm === PROVIDE_OWN_DETAILS_OPTION_VI.toLowerCase();
+}
+
 export function detectClarityGaps(
   raw: string,
   taskType: TaskType | null,
@@ -353,7 +371,9 @@ export function resolveGapsNonInteractive(
     const defaultAnswer = gap.options[gap.defaultIndex] ?? gap.options[0] ?? "";
     switch (gap.dimension) {
       case "outcome":
-        outcome = defaultAnswer;
+        // The "provide my own details" meta-option is a no-answer sentinel —
+        // leave outcome empty so the inferred/default outcome is used downstream.
+        outcome = isProvideOwnDetailsSentinel(defaultAnswer) ? "" : defaultAnswer;
         break;
       case "scope": {
         const relevant = projectContext.relevantModules.map((m) => m.path);
