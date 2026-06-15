@@ -231,7 +231,7 @@ function shapeFallback(synthesisText: string, debatePlan: DebatePlan): EnhancedC
     let found = false;
     for (const line of synthesisText.split("\n")) {
       const trimmed = line.trim();
-      if (trimmed.match(new RegExp(`^#{1,3}s+${heading.replace(/\s+/g, "s+")}`, "i"))) {
+      if (trimmed.match(new RegExp(`^#{1,3}\\s+${heading.replace(/\s+/g, "\\s+")}`, "i"))) {
         found = true;
         continue;
       }

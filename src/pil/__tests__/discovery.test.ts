@@ -34,6 +34,30 @@ describe("runDiscovery()", () => {
     expect(result.accepted).toBe(true);
   });
 
+  it("skips all discovery when the user explicitly says don't ask (EN + VI)", async () => {
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "x", kind: "choice" }),
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const l1 = {
+      taskType: "analyze" as const,
+      confidence: 0.6, // low enough that discovery would normally interview
+      complexity: "low" as const,
+      domain: null,
+      outputStyle: null,
+      intentKind: "task" as const,
+    };
+    const enResult = await runDiscovery("analyze the orchestrator, just answer, don't ask", l1, process.cwd(), handler);
+    expect(enResult.interviewed).toBe(false);
+    expect(enResult.accepted).toBe(true);
+
+    const viResult = await runDiscovery("phân tích orchestrator, đừng hỏi, trả lời thẳng", l1, process.cwd(), handler);
+    expect(viResult.interviewed).toBe(false);
+    expect(viResult.accepted).toBe(true);
+
+    expect(handler.askQuestion).not.toHaveBeenCalled();
+  });
+
   it("interviews user on vague prompt with handler", async () => {
     const handler: DiscoveryInteractionHandler = {
       askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "Error disappears", kind: "choice" }),

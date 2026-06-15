@@ -96,13 +96,40 @@ const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
   general: 650,
 };
 
-// PIL-04 Tier 1.3 + PIL-L6 verbosity fix: ban preamble AND end-of-turn summary.
-// Old rule only covered openers (~30 tok saved). End-of-turn summaries
-// ("In summary...", "I have completed X, Y, Z", "Tóm tắt: ...") cost
-// 100-300 tokens/turn AND give the user nothing they can't read from the
-// diff. Bilingual EN+VN. Skipped for response-tools path (JSON has no
-// freeform surface).
-const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.\nFORBIDDEN END-OF-TURN SUMMARY: do not append a recap section ("In summary", "To summarize", "Tổng kết", "Tóm tắt", "Tóm lại", "Kết luận", "I have done X, Y, Z", "Now you have…", "Đã hoàn thành…"). The diff and command output already show what changed; the user can read them. End the response when the answer is complete.\nFORBIDDEN INTER-TOOL NARRATION: when chaining tool calls, do NOT emit content text between them. Skip phrases like "Now I'll check…", "Let me look at…", "Next, I need to…", "Tiếp theo tôi sẽ…", "Bây giờ tôi cần…". Emit the next tool call directly. Each round-trip of inter-tool narration costs the user ~100 output tokens that they do not need to read — the tool calls themselves are visible in the UI. Only emit content text for the FINAL answer or when surfacing a decision the user must make.`;
+// PIL-04 Tier 1.3 (de-robotized): ban ONLY wasteful openers.
+//
+// Earlier this rule also banned end-of-turn summaries AND inter-tool narration.
+// Both bans were REMOVED: they stripped the natural connective tissue that makes
+// an answer read like a human wrote it, which is the root of the "máy móc" /
+// telegraphic feel users complained about. Forbidding any recap or any sentence
+// between tool calls forces curt, label-prefixed output even when a connecting
+// line would help.
+//
+// Removing the text bans does NOT re-introduce context bloat or user-invisible
+// spam:
+//   - Inter-tool narration is still removed STRUCTURALLY from message history by
+//     stripInterToolNarration() / NARRATION_PREFIX_REGEX in
+//     src/orchestrator/reasoning.ts. That runs unconditionally on every assistant
+//     message that has both text and a following tool-call, so it is far more
+//     reliable than a text directive budget models ignore (session 7dcf8fd7d6a4:
+//     57/100 messages violated the text ban anyway).
+//   - OUTPUT BUDGET (below) remains the guard against padding, so a freed-up
+//     summary cannot balloon the answer.
+//
+// Openers ("I'll", "Let me", "Sure", "Tôi sẽ") stay banned: pure ~30-tok padding
+// with zero conversational value. Bilingual EN+VN. Skipped for the response-tools
+// path (JSON has no freeform surface).
+const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will", "Let me", "Here's", "Sure", "Of course", "Tôi sẽ", "Để tôi", "Vâng". Start directly with the answer content.`;
+
+// Anti-bookkeeping note for the NATURAL (non-response-tool) path — the response-
+// tool path has the equivalent baked into humanNote. The Agent Operating Contract's
+// REPORTING rule ("every fact must come from THIS turn; do not infer unopened
+// files") is the model's operating discipline, but budget models RESTATE it as a
+// user-facing provenance footer ("evidence only from this turn", "did not infer
+// unopened files", "≤600 tokens"). That is invisible-to-the-reader compliance
+// noise. Applied only to non-question turns — question turns already get the same
+// guidance from the Layer 4 QUESTION directive (buildQuestion).
+const NO_BOOKKEEPING_NOTE = `\nWRITE FOR THE READER: the answer is for the human who asked. Do NOT append a provenance / compliance footer (e.g. "evidence only from this turn", "did not infer unopened files", token-budget notes) and do NOT restate internal rule / contract / layer / tool names as compliance — those are your operating rules, invisible to the reader. End on the answer's last substantive point.`;
 
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
@@ -111,19 +138,19 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
     detailed: `\nOUTPUT RULES (refactor): Show changed code with full rationale. Explain why each change improves the code. Include before/after comparison when helpful. Unified diff preferred.`,
   },
   debug: {
-    concise: `\nOUTPUT RULES (debug): Format = Hypothesis → Root cause (1 line) → Fix (code only) → Verify command. No preamble. No "I think" hedging.`,
-    balanced: `\nOUTPUT RULES (debug): Format = Hypothesis → Root cause → Fix (code) → Verify command. Brief explanation of why the bug occurs. Keep prose minimal.`,
-    detailed: `\nOUTPUT RULES (debug): Format = Hypothesis → Root cause analysis → Fix (code) → Verify command → Prevention. Explain the underlying mechanism and why this fix is correct.`,
+    concise: `\nOUTPUT RULES (debug): Lead with the root cause and the fix (code). Bring in the hypothesis and a verify command where they add value — you don't have to label every part or follow a fixed template. Be direct; skip "I think"/"maybe" hedging.`,
+    balanced: `\nOUTPUT RULES (debug): Give the root cause and the fix (code), with a short note on why the bug happens and how to verify it. Write it naturally — no rigid section labels needed.`,
+    detailed: `\nOUTPUT RULES (debug): Walk through the root cause, the fix (code), how to verify, and how to prevent recurrence. Explain the underlying mechanism so the reader understands why the fix is correct.`,
   },
   plan: {
-    concise: `\nOUTPUT RULES (plan): Numbered steps only. Each step: action verb + acceptance criterion. No prose paragraphs. Add "Assumptions:" section only if needed.`,
-    balanced: `\nOUTPUT RULES (plan): Numbered steps with brief rationale per step. Each step: action verb + acceptance criterion + why. Add "Assumptions:" and "Risks:" sections if applicable.`,
-    detailed: `\nOUTPUT RULES (plan): Numbered steps with full rationale. Each step: action verb + acceptance criterion + why + alternatives considered. Include "Assumptions:", "Risks:", and "Trade-offs:" sections.`,
+    concise: `\nOUTPUT RULES (plan): Use numbered steps; each step should make the action and its done-criterion clear. A short framing sentence is fine when it helps — just skip filler. Note key assumptions if any matter.`,
+    balanced: `\nOUTPUT RULES (plan): Use numbered steps, each with its action, done-criterion, and a brief why. Add "Assumptions:" or "Risks:" notes when they matter. A short lead-in sentence is welcome.`,
+    detailed: `\nOUTPUT RULES (plan): Numbered steps with full rationale — action, done-criterion, why, and alternatives considered. Include "Assumptions:", "Risks:", and "Trade-offs:" where relevant.`,
   },
   analyze: {
-    concise: `\nOUTPUT RULES (analyze): Bullet findings with evidence (file:line or direct quote). Add severity label (High/Med/Low) when applicable. No filler sentences.`,
-    balanced: `\nOUTPUT RULES (analyze): Bullet findings with evidence (file:line or direct quote). Add severity label and brief explanation. Context for each finding.`,
-    detailed: `\nOUTPUT RULES (analyze): Bullet findings with evidence (file:line or direct quote). Add severity label, root cause analysis, and recommended action. Provide context and impact assessment.`,
+    concise: `\nOUTPUT RULES (analyze): Present findings as bullets, each backed by evidence (file:line or a direct quote). Add a severity label (High/Med/Low) where it helps prioritize. A brief lead-in is fine — just avoid padding.`,
+    balanced: `\nOUTPUT RULES (analyze): Present findings as bullets with evidence (file:line or quote), a severity label, and a brief explanation. Give enough context for each finding to stand on its own.`,
+    detailed: `\nOUTPUT RULES (analyze): Present findings as bullets with evidence (file:line or quote), severity, root-cause, and a recommended action. Include context and impact for each finding.`,
   },
   documentation: {
     concise: `\nOUTPUT RULES (documentation): Markdown only. Lead with a code example, then explanation. No "This function..." openers. All examples in fenced code blocks.`,
@@ -220,6 +247,12 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   if (!isMetaAnalysis && !responseToolsActive) {
     result += NO_PREAMBLE_RULE;
   }
+  // E — keep the contract's REPORTING discipline from leaking into the answer as a
+  // provenance/compliance footer. Skip question turns (the L4 QUESTION directive
+  // already says it) to avoid duplicate steering.
+  if (!isQuestionLike(ctx.raw)) {
+    result += NO_BOOKKEEPING_NOTE;
+  }
 
   // T1 behavioral rules (proven-tier EE points set by Layer 3). These are
   // project-specific reflexes the model MUST follow — injected as instructions,
@@ -256,8 +289,55 @@ export function isImplementationIntent(raw: string): boolean {
   return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);
 }
 
+/**
+ * Narrow response-tool gating (user-directed de-robotizing).
+ *
+ * For debug / analyze / plan the structured respond_* tool forces the answer into
+ * a rigid JSON schema (DebugSchema {hypothesis, root_cause, fix, verify}, etc.)
+ * which the UI then stamps with fixed labels ("hypothesis:", "root cause:",
+ * "[HIGH]", "done when:") in structured-response-view.tsx. For an ordinary
+ * QUESTION ("why does X fail?", "analyze the auth design") that reads robotic and
+ * even forces fabricated fields (DebugSchema.fix.file is required, so a
+ * non-codebase debug question must invent a file). So these task types now
+ * default to the NATURAL markdown path (softened OUTPUT RULES + openers-only
+ * NO_PREAMBLE) and only opt INTO the structured tool when the prompt's DELIVERABLE
+ * is genuinely a report / list / plan.
+ *
+ * Conservative positive gate (defaults to natural): only an explicit
+ * report/list/plan signal keeps respond_*. EN + VI. `general` is exempt — its
+ * renderer already shows plain markdown, so respond_general carries no robotic
+ * cost while still giving budget models a structural anchor.
+ */
+const STRUCTURED_REPORT_RE =
+  /\b(lists?|enumerate|table|report|audit|checklist|inventory|rank(?:ed|ing)?|prioriti[sz]e[ds]?|roadmap|step[-\s]?by[-\s]?step|milestones?|plan(?:s|ning)?)\b|liệt\s*kê|danh\s*sách|bảng|báo\s*cáo|kiểm\s*toán|rà\s*soát|lộ\s*trình|từng\s*bước|các\s*bước|kế\s*hoạch|xếp\s*hạng|ưu\s*tiên/i;
+
+// Question-shape detector — shared by Layer 4 (GSD directive selection) and the
+// narrow response-tool gate below. True when the prompt reads as a question or
+// explanatory request rather than an imperative deliverable. Interrogative words
+// only count at sentence start (so "list the steps" is NOT a question), plus
+// "can/could/would/should + pronoun", a trailing "?", and VI markers. EN + VI.
+const QUESTION_SHAPE_RE =
+  /^\s*(?:why|how|what|when|where|who|whom|whose|which|explain|describe)\b|\b(?:can|could|would|should)\s+(?:you|i|we|it|they)\b|\?\s*$|tại\s*sao|vì\s*sao|(?:như\s*)?thế\s*nào|là\s*gì|ra\s*sao|ở\s*đâu|khi\s*nào|bao\s*nhiêu|có\s*phải|giải\s*thích|mô\s*tả/i;
+
+export function isQuestionLike(raw: string): boolean {
+  return !!raw && QUESTION_SHAPE_RE.test(raw);
+}
+
+export function prefersStructuredReport(raw: string): boolean {
+  if (!raw) return false;
+  // A question that merely mentions "plan"/"list" — e.g. an interview quoting the
+  // phrase "state a 2-3 line plan" — must NOT be treated as a report request; it
+  // stays on the natural markdown path. Genuine delivery requests ("plan the
+  // migration", "list all X") are imperative, not question-shaped.
+  if (isQuestionLike(raw)) return false;
+  return STRUCTURED_REPORT_RE.test(raw);
+}
+
 export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId): ToolSet {
   if (!ctx.taskType) return {};
+  // Chitchat: greetings/small-talk never want a structured answer block. Mirrors
+  // the chitchat short-circuits in applyPilSuffix / layer6Output.
+  if (ctx.intentKind === "chitchat") return {};
   // PIL-04 Tier 1.1: gate JSON-structured output to list-shaped tasks where it
   // wins on tokens. Code-heavy tasks fall through to markdown OUTPUT RULES.
   if (!RESPONSE_TOOL_TASK_TYPES.has(ctx.taskType)) return {};
@@ -265,6 +345,10 @@ export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId
   // report. A terminal respond_<task> tool lets the model "answer" (state a plan)
   // and end the turn before the edits complete — drop it for clear edit intent.
   if (isImplementationIntent(ctx.raw)) return {};
+  // Narrow gating (de-robotizing): debug/analyze/plan QUESTIONS use the natural
+  // markdown path; reserve the labeled respond_* tool for explicit report/list/
+  // plan requests. `general` keeps its (naturally-rendered) response tool.
+  if (ctx.taskType !== "general" && !prefersStructuredReport(ctx.raw)) return {};
   // Provider-aware gating: a provider may report it can't reliably emit
   // valid JSON tool input for this task type (e.g. DeepSeek leaks special
   // tokens into `general` responses). Drop the tool to avoid retry storms.

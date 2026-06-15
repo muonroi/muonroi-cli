@@ -122,4 +122,17 @@ describe("parseOutcome — raw log + shape-based fallback (CQ-20)", () => {
     expect(result?.outcome?.summary).toBe("We should go with option A because it is simpler.");
     expect(errorSpy).not.toHaveBeenCalled();
   });
+
+  it("Test 6: shape fallback EXTRACTS section content from markdown headings (regex regression)", async () => {
+    // Pre-fix the heading regex used a literal "s+" instead of "\\s+" (and
+    // replaced spaces with "s+"), so it never matched a real "## Heading" line —
+    // every section came back empty even when the synthesis clearly contained them.
+    const md =
+      "Here is the evaluation summary line that is plenty long enough.\n\n" +
+      "## Strengths\n- Fast startup\n- Low cost\n\n" +
+      "## Summary\nThe approach is solid overall.";
+    const result = await runPlanningWith(md, sampleDebatePlan);
+    expect(result?.outcome?.sections?.strengths).toEqual(["- Fast startup", "- Low cost"]);
+    expect(result?.outcome?.sections?.summary_text).toContain("The approach is solid overall.");
+  });
 });

@@ -88,6 +88,29 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(["review", "discuss", "execute"]).toContain(result.gsdPhase);
   });
 
+  it("routes a question-shaped analyze/debug prompt to the QUESTION directive (no 'state a plan')", async () => {
+    // De-robotizing: a plain question must not get the STANDARD "state a 2-3 line
+    // plan" scaffold even when L1 classifies it analyze/debug (not "general").
+    const q = "why does the build fail intermittently?";
+    const result = await layer4Gsd(makeCtx({ raw: q, enriched: q, taskType: "debug", intentKind: "task" }));
+    expect(result.enriched).toContain("QUESTION / explanatory");
+    expect(result.enriched).not.toContain("State a 2-3 line plan");
+  });
+
+  it("treats a genuine general question (general + task) as informational", async () => {
+    const q = "what does the enrichment layer do?";
+    const result = await layer4Gsd(makeCtx({ raw: q, enriched: q, taskType: "general", intentKind: "task" }));
+    expect(result.enriched).toContain("QUESTION / explanatory");
+  });
+
+  it("does NOT treat an implementation request as informational even if phrased as a question", async () => {
+    // isImplementationIntent guards the question clause: "can you refactor … and
+    // wire up …" is a real edit task → STANDARD scaffold, not the QUESTION directive.
+    const q = "can you refactor the dropdown and wire up the keyboard handlers?";
+    const result = await layer4Gsd(makeCtx({ raw: q, enriched: q, taskType: "refactor", intentKind: "task" }));
+    expect(result.enriched).not.toContain("QUESTION / explanatory");
+  });
+
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
     const { routeTask } = await import("../../ee/bridge.js");
     vi.mocked(routeTask).mockClear();

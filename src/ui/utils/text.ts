@@ -30,3 +30,19 @@ export function sanitizeContent(raw: string): string {
   s = s.replace(/\{"success"\s*:\s*(true|false)\s*,\s*"output"\s*:\s*"[\s\S]*$/m, "");
   return s.trim();
 }
+
+/**
+ * Strip stray model self-annotation macros that leak into the user-facing answer
+ * but are NOT instructed anywhere in the prompt. Currently: a trailing
+ * `\confidence{NN}` macro emitted intermittently by grok-build. Conservative —
+ * only the `\confidence{...}` form is removed, so legitimate LaTeX/code in an
+ * answer (e.g. `\frac{a}{b}`) is untouched. Fast-pathed: no work when absent.
+ */
+export function stripStrayModelMacros(text: string): string {
+  if (!text || !text.includes("\\confidence")) return text;
+  // Trailing form (most common) — also swallow the whitespace/newline before it.
+  let out = text.replace(/\s*\\confidence\s*\{[^}]*\}\s*$/i, "");
+  // Any remaining mid-text occurrences.
+  out = out.replace(/\\confidence\s*\{[^}]*\}/gi, "");
+  return out;
+}
