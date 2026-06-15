@@ -1,4 +1,7 @@
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
@@ -12,11 +15,19 @@ describe("ideal E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
+  let greenfield: string;
 
   beforeAll(async () => {
+    // Spawn in a FRESH greenfield dir, not the repo root. The /ideal discover
+    // phase scans the cwd; on the large muonroi-cli repo that scan dominates
+    // wall-clock and is highly variable (28s..>40s) — the exact reason the
+    // status-card assertion below was skipped. In an empty dir discover is
+    // instant, so product_status_card emits in <1s, deterministically.
+    greenfield = mkdtempSync(join(tmpdir(), "muonroi-ideal-e2e-"));
     const ctx = await spawnHarness({
       extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
       env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
+      cwd: greenfield,
     });
     proc = ctx.proc;
     driver = ctx.driver;
@@ -30,6 +41,11 @@ describe("ideal E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
+    try {
+      rmSync(greenfield, { recursive: true, force: true });
+    } catch {
+      /* best-effort temp cleanup */
+    }
   });
 
   it("typing /ideal surfaces the slash menu", async () => {
@@ -41,38 +57,29 @@ describe("ideal E2E", () => {
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
   });
 
-  // Blocker (2026-05-14): same root cause as council-flow.spec.ts — slash dispatch fixed,
-  // mock-llm hook wired (Wave 2.5), but product_status_card chunk does not arrive within
-  // 30s. Likely cause: src/product-loop/loop-driver.ts gates the emit behind a phase the
-  // mock fixture doesn't satisfy (discover → spec → sprint protocol — needs deeper RE).
-  // Next step: instrument loop-driver.ts to log which phase rejects the mock JSON.
-  // SKIP: product_status_card chunk does not arrive within 30s under mock-llm — blocker: src/product-loop/loop-driver.ts phase gating rejects mock JSON; track in CLAUDE.md known caveats
-  it.skip("ideal status card renders after starting a run", async () => {
-    // loop-driver.ts emits product_status_card after the discover phase
-    // (before gather blocks on user input), so id=ideal-status appears without
-    // needing to drive the full gather/research/sprint flow.
-    //
-    // Type the full command including the topic. The slash menu opens on "/"
-    // but once the filter has no matching item, Enter closes the menu and lets
-    // the textarea submit the full "/ideal <topic>" text (app.tsx fix: when
-    // filteredSlashItems is empty, Enter falls through without preventDefault).
-    // Wait for idle after type() so React commits the slashSearchQuery state
-    // updates before Enter arrives (avoids stale filteredSlashItems issue).
-    driver.type("/ideal build a counter --max-sprints 1");
+  it("ideal status card renders after starting a run", async () => {
+    // `--force-council` forces the full council/loop path (runStart) regardless
+    // of complexity / existing-repo bypass. The loop-driver emits an initial
+    // product_status_card right after the (instant, in greenfield) discover
+    // phase — before the gather askcard blocks — so id=ideal-status appears
+    // without driving the rest of the flow. This is also the end-to-end smoke
+    // for a greenfield "build X" prompt flowing through /ideal.
+    driver.type("/ideal build a counter --max-sprints 1 --force-council");
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");
-    await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 30_000 });
+    // Observed ~0.5s in greenfield; 25s is a generous robustness margin.
+    await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 25_000 });
     expect(driver.query("id=ideal-status")).toBeTruthy();
-  });
+  }, 35_000);
 
-  // Blocker (2026-05-14): depends on "ideal status card renders" above — same skip reason.
-  // SKIP: depends on ideal-status card above — blocker: src/product-loop/loop-driver.ts; track in CLAUDE.md known caveats
-  it.skip("can advance through ideal phases", async () => {
-    // ProductStatusCard renders <Semantic id="ideal-phase-sprint" role="listitem">
-    // and <Semantic id="ideal-phase-cost" role="listitem"> as children of id=ideal-status.
-    // The card is visible once product_status_card chunk fires (discover stage).
+  it("status card exposes per-stage listitems", async () => {
+    // ProductStatusCard renders <Semantic id="ideal-phase-sprint" role="listitem">,
+    // id="ideal-phase-cost", and id="ideal-phase-criteria" as children of
+    // id=ideal-status (visible once product_status_card fired in the prev test).
     await driver.wait_for({ selector: "id=ideal-status", timeoutMs: 10_000 });
+    expect(driver.query("id=ideal-phase-sprint")).toBeTruthy();
+    expect(driver.query("id=ideal-phase-cost")).toBeTruthy();
     const phases = driver.queryAll("role=listitem");
     expect(phases.length).toBeGreaterThan(0);
-  });
+  }, 15_000);
 });

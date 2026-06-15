@@ -1,38 +1,8 @@
 [
   {
-    "path": "tests/harness/askcard.spec.ts",
-    "line": 34,
-    "reason": "council_question chunk doesn't reach app.tsx within 30s under mock-llm",
-    "issue": "src/council/orchestrator.ts phase pipeline rejects mock fixture JSON"
-  },
-  {
-    "path": "tests/harness/askcard.spec.ts",
-    "line": 53,
-    "reason": "same council orchestrator phase rejection as askcard:34",
-    "issue": "src/council/orchestrator.ts phase pipeline rejects mock fixture JSON"
-  },
-  {
-    "path": "tests/harness/council-flow.spec.ts",
-    "line": 70,
-    "reason": "runCouncilV2 phase chunk emission doesn't fire within 30s under mock-llm",
-    "issue": "src/council/orchestrator.ts preflight/debate-planner generateObject rejects mock JSON"
-  },
-  {
-    "path": "tests/harness/ideal.spec.ts",
-    "line": 50,
-    "reason": "product_status_card chunk does not arrive within 30s under mock-llm",
-    "issue": "src/product-loop/loop-driver.ts phase gating rejects mock JSON"
-  },
-  {
-    "path": "tests/harness/ideal.spec.ts",
-    "line": 70,
-    "reason": "depends on ideal-status card above",
-    "issue": "src/product-loop/loop-driver.ts phase gating"
-  },
-  {
     "path": "tests/harness/cost-leak-f1-tui.spec.ts",
-    "line": 48,
-    "reason": "openai.promptCacheKey branch not exercised under deepseek model",
+    "line": 34,
+    "reason": "openai.promptCacheKey branch not exercised under deepseek model (describe.skip)",
     "issue": "src/agent-harness/mock-llm.ts needs provider-id override threaded through --mock-llm"
   },
   {

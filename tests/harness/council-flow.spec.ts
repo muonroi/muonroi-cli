@@ -1,4 +1,7 @@
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
@@ -17,14 +20,20 @@ describe("council flow E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
+  let greenfield: string;
 
   beforeAll(async () => {
+    // Greenfield cwd → the council's conversationContext snapshot is instant
+    // (no large-repo scan), so the Clarification council_phase chunk reaches
+    // app.tsx deterministically rather than racing the old 30s timeout.
+    greenfield = mkdtempSync(join(tmpdir(), "muonroi-council-e2e-"));
     const ctx = await spawnHarness({
       extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
       // loadKeyForProvider reads SILICONFLOW_API_KEY (>= 20 chars) to decide if
       // the provider is reachable. Without it, resolveParticipants returns [] and
       // runCouncil exits early before emitting any council_phase chunks.
       env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
+      cwd: greenfield,
     });
     proc = ctx.proc;
     driver = ctx.driver;
@@ -38,6 +47,11 @@ describe("council flow E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
+    try {
+      rmSync(greenfield, { recursive: true, force: true });
+    } catch {
+      /* best-effort temp cleanup */
+    }
   });
 
   it("typing /council surfaces the slash menu", async () => {
@@ -57,17 +71,13 @@ describe("council flow E2E", () => {
   // NOTE: /council with no topic returns the help string (not __COUNCIL__). The topic must be
   // included in the command so app.tsx dispatches runCouncilV2.
   //
-  // Blocker (2026-05-14): the slash + Enter dispatch chain is now resolving correctly
-  // (see f5fe26b "dispatchSlash returns true to block processMessage" + 416c7f1 "Enter
-  // submits full command when filter has no matches"), but runCouncilV2 is not reaching
-  // the phase chunk emission within 30s even with mock-llm hooked via Wave 2.5 hook into
-  // createCouncilLLM. Likely cause: one of the council orchestrator phases (preflight /
-  // debate-planner via generateObject) still fails Zod parse on the mock fixture's JSON,
-  // OR a follow-up askcard step blocks on user-input that the harness doesn't auto-answer.
-  // Next step: instrument src/council/orchestrator.ts to log which phase rejects, then
-  // refine tests/harness/fixtures/llm/council.json sequence entries to match.
-  // SKIP: runCouncilV2 phase chunk emission doesn't fire within 30s under mock-llm — blocker: src/council/orchestrator.ts preflight/debate-planner generateObject rejects mock JSON; track in CLAUDE.md known caveats
-  it.skip("full council flow reaches Phase/Status renders", async () => {
+  // Un-skipped (2026-06-15): the prior 30s timeout was the council's
+  // conversationContext repo snapshot scanning the large muonroi-cli repo —
+  // variable and slow. Spawning in a greenfield cwd makes that snapshot
+  // instant, so the Clarification council_phase chunk reaches app.tsx in <1s.
+  // The mock-model now also implements doGenerate (debate-planner generateObject
+  // no longer throws "Not implemented"; it falls through to the fallback plan).
+  it("full council flow reaches Phase/Status renders", async () => {
     // Type the full command including the topic. The slash menu opens on "/" and
     // the filter narrows as we type — once the query is "council analyze..." no
     // item matches. app.tsx now falls through on Enter when filteredSlashItems

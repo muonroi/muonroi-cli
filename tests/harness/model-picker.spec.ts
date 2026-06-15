@@ -110,10 +110,19 @@ describe("model-picker E2E", () => {
     const filled = driver.query("id=provider-key-input");
     expect(filled?.value).toBe(fakeKey);
 
-    // Cleanup: dismiss the key prompt. (Final test — nothing depends on the
-    // picker state afterwards, so a back-to-back picker Escape is not needed.)
+    // Cleanup: dismiss the key prompt. Poll until the modal actually unmounts —
+    // under full-suite load `idle` can fire before the close render commits, so
+    // a single wait_for({idle}) + immediate assert raced the modal teardown
+    // (pre-existing flake surfaced on the 40-process harness run).
     driver.press("Escape");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
-    expect(driver.query("id=provider-key-prompt")).toBeNull();
+    let promptGone = false;
+    for (let i = 0; i < 40; i++) {
+      if (!driver.query("id=provider-key-prompt")) {
+        promptGone = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    expect(promptGone).toBe(true);
   });
 });

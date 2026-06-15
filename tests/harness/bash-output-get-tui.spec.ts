@@ -31,7 +31,7 @@
  * the playbook actually steers DeepSeek toward proactive use.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,6 +41,19 @@ import { loadDumpedRecordings } from "./recording.js";
 
 let scriptPath = "";
 let workDir = "";
+
+/**
+ * True when a recorded doStream call is a MAIN-agent call (system prompt starts
+ * with "You are muonroi-cli in Agent mode"), as opposed to PIL Layer 1's
+ * classifier call. Shared by the completion poll and the final assertion.
+ */
+function isAgentCall(c: { options?: { prompt?: unknown } } | null | undefined): boolean {
+  const p = c?.options?.prompt;
+  if (!Array.isArray(p) || p.length === 0) return false;
+  const sys = p[0] as { content?: unknown };
+  const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
+  return sysText.includes("muonroi-cli in Agent mode");
+}
 
 /**
  * Build the bash command that prints ~150KB of deterministic output with a
@@ -169,10 +182,22 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     handle.driver.press("Enter");
 
     await handle.driver.wait_for({ selector: "role=log", timeoutMs: 20_000 });
-    // 3 streamText rounds + 2 real tool executions (node -e 3000-iter loop is
-    // a few hundred ms; bash_output_get is instant cache lookup). Generous
-    // sleep so the dump is written before /exit.
-    await new Promise((r) => setTimeout(r, 25_000));
+    // Wait for the 3 main-agent rounds to actually be RECORDED before exiting.
+    // The H3 hook (src/index.ts) rewrites the dump after every doStream call, so
+    // polling it directly tracks round completion — the exact thing the
+    // assertion below needs. This replaces a fixed 25s sleep that flaked under
+    // full-suite load (the spawned child is CPU-starved, so the 3rd round had
+    // not been recorded yet when the dump was taken). 70s budget (280×250ms).
+    for (let i = 0; i < 280; i++) {
+      if (existsSync(handle.dumpPath)) {
+        try {
+          if (loadDumpedRecordings(handle.dumpPath).filter(isAgentCall).length >= 3) break;
+        } catch {
+          // dump mid-rotation — atomic rename means the next read is clean
+        }
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
 
     await exitTuiAndWaitForDump(handle, 20_000);
 
@@ -180,16 +205,9 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
 
     // PIL Layer 1 runs its own classifier call before the main agent, so we
     // expect 4 dumped calls: [pil-classifier, agent#1 user-only, agent#2
-    // after-bash, agent#3 after-bog]. Filter to main-agent calls (system
-    // prompt starts with "You are muonroi-cli in Agent mode") to make the
+    // after-bash, agent#3 after-bog]. Filter to main-agent calls to make the
     // spec robust to upstream PIL changes.
-    const agentCalls = calls.filter((c) => {
-      const p = c?.options?.prompt;
-      if (!Array.isArray(p) || p.length === 0) return false;
-      const sys = p[0];
-      const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-      return sysText.includes("muonroi-cli in Agent mode");
-    });
+    const agentCalls = calls.filter(isAgentCall);
     expect(agentCalls.length).toBeGreaterThanOrEqual(3);
 
     // Agent call #2 (after bash returned) must carry the bash_run_id footer
@@ -227,5 +245,5 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     const joined = agentSystems.join("\n");
     expect(joined).toContain("bash_output_get");
     expect(joined).toMatch(/EVERY bash call/);
-  }, 90_000);
+  }, 120_000);
 });

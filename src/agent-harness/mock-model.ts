@@ -37,6 +37,17 @@ export interface MockModelFixture {
    *   entry repeats (so multi-round loops don't crash if the fixture is short).
    */
   stream: StreamChunks | StreamChunks[];
+  /**
+   * JSON text returned per `doGenerate` call — the path `generateObject` uses
+   * (council `debate-planner` plans the debate via `generateObject`, research
+   * classifiers via `generateText`, etc.). Without this the mock's `doGenerate`
+   * returns `"{}"`, which `generateObject` schema-validates → throws → the
+   * caller's retry/fallback path runs. Supply the exact object JSON to exercise
+   * the happy path.
+   * - Single string → same JSON on every call.
+   * - Array → one entry consumed per call; last entry repeats when exhausted.
+   */
+  generate?: string | string[];
   /** Reported provider id. Default "mock". */
   provider?: string;
   /** Reported model id. Default "mock-model". */
@@ -70,7 +81,9 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
  */
 export function createMockModel(fx: MockModelFixture): MockModelHandle {
   const streams: StreamChunks[] = isNestedArray(fx.stream) ? fx.stream : [fx.stream];
+  const generates: string[] = fx.generate === undefined ? [] : Array.isArray(fx.generate) ? fx.generate : [fx.generate];
   let callIdx = 0;
+  let genIdx = 0;
   const provider = fx.provider ?? "mock";
   const modelId = fx.modelId ?? "mock-model";
 
@@ -95,6 +108,24 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
         }),
       };
     },
+    // doGenerate backs `generateObject` / non-streaming `generateText`. The AI
+    // SDK reads the first text content part as the object JSON (generateObject)
+    // or the completion text (generateText). Default "{}" keeps the mock from
+    // throwing "Not implemented" — generateObject then schema-rejects it and the
+    // caller's retry/fallback runs. Supply `generate` to drive the happy path.
+    doGenerate: async () => {
+      const text = generates.length > 0 ? generates[Math.min(genIdx, generates.length - 1)]! : "{}";
+      genIdx += 1;
+      if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+        process.stderr.write(`[mock-model] doGenerate #${genIdx} → ${text.length} chars\n`);
+      }
+      return {
+        content: [{ type: "text" as const, text }],
+        finishReason: { unified: "stop" as const, raw: undefined },
+        usage: buildUsage(10, text.length),
+        warnings: [],
+      };
+    },
   });
 
   return {
@@ -105,6 +136,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
     reset() {
       model.doStreamCalls.length = 0;
       callIdx = 0;
+      genIdx = 0;
     },
   };
 }

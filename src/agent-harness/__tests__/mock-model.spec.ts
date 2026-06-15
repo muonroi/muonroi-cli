@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
-import { stepCountIs, streamText, tool } from "ai";
+import { generateObject, stepCountIs, streamText, tool } from "ai";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
@@ -104,6 +104,42 @@ describe("createMockModel", () => {
     expect(handle.calls.length).toBe(1);
   });
 
+  it("doGenerate backs generateObject with the configured JSON (council debate-planner path)", async () => {
+    const handle = createMockModel({
+      stream: textOnlyStream("unused"),
+      generate: JSON.stringify({ name: "counter", count: 3 }),
+    });
+    const { object } = await generateObject({
+      model: handle.model,
+      schema: z.object({ name: z.string(), count: z.number() }),
+      prompt: "plan the build",
+    });
+    expect(object).toEqual({ name: "counter", count: 3 });
+  });
+
+  it("doGenerate sequences across calls and repeats the last entry when exhausted", async () => {
+    const handle = createMockModel({
+      stream: textOnlyStream("unused"),
+      generate: [JSON.stringify({ n: 1 }), JSON.stringify({ n: 2 })],
+    });
+    const schema = z.object({ n: z.number() });
+    const a = await generateObject({ model: handle.model, schema, prompt: "1" });
+    const b = await generateObject({ model: handle.model, schema, prompt: "2" });
+    const c = await generateObject({ model: handle.model, schema, prompt: "3" });
+    expect(a.object.n).toBe(1);
+    expect(b.object.n).toBe(2);
+    expect(c.object.n).toBe(2); // exhausted → last entry repeats
+  });
+
+  it("doGenerate defaults to {} when no generate fixture is supplied (caller retry/fallback runs)", async () => {
+    const handle = createMockModel({ stream: textOnlyStream("unused") });
+    // An empty object fails a required-field schema → generateObject rejects,
+    // which is exactly what lets debate-planner fall through to its retry path.
+    await expect(
+      generateObject({ model: handle.model, schema: z.object({ required: z.string() }), prompt: "x" }),
+    ).rejects.toBeTruthy();
+  });
+
   it("textOnlyStream emits a well-formed finish chunk", () => {
     const chunks = textOnlyStream("hi");
     const finish = chunks.find((c): c is Extract<LanguageModelV3StreamPart, { type: "finish" }> => c.type === "finish");
@@ -163,6 +199,23 @@ describe("loadMockModelFromDir", () => {
     const handle = await loadMockModelFromDir(dir);
     expect(handle).not.toBeNull();
     expect(handle?.defaultProviderOptions).toEqual({ openai: { store: false } });
+  });
+
+  it("propagates generate (doGenerate JSON) from the fixture file for generateObject", async () => {
+    const dir = mkFixtureDir({
+      provider: "mock",
+      modelId: "mock-gpt",
+      stream: textOnlyStream("unused"),
+      generate: JSON.stringify({ ok: true, label: "built" }),
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+    const { object } = await generateObject({
+      model: handle!.model,
+      schema: z.object({ ok: z.boolean(), label: z.string() }),
+      prompt: "go",
+    });
+    expect(object).toEqual({ ok: true, label: "built" });
   });
 
   it("supports multi-round stream arrays from the fixture file", async () => {
