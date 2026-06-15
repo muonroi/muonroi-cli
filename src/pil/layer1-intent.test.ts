@@ -16,7 +16,13 @@ vi.mock("./config.js", () => ({
 
 import { classifyViaBrain } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { hasActionableToolIntent, isSocialPleasantry, isStatusCheckQuestion, layer1Intent } from "./layer1-intent";
+import {
+  hasActionableToolIntent,
+  isGreenfieldBuildTask,
+  isSocialPleasantry,
+  isStatusCheckQuestion,
+  layer1Intent,
+} from "./layer1-intent";
 import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);
@@ -124,7 +130,11 @@ describe("layer1Intent", () => {
     mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
     mockedClassifyViaBrain.mockResolvedValue("generate, concise");
 
-    const result = await layer1Intent(makeCtx("make me a new service"));
+    // No leading creation verb + no artifact noun → misses Pass 0 greenfield-build
+    // and the Pass 2 keyword rules, so the brain (Pass 3) decides. (A prompt with
+    // an explicit creation verb like "make me a new service" is now pinned to
+    // generate by Pass 0 and never reaches the brain.)
+    const result = await layer1Intent(makeCtx("work on the onboarding flow"));
 
     expect(mockedClassifyViaBrain).toHaveBeenCalled();
     expect(result.taskType).toBe("generate");
@@ -354,6 +364,59 @@ describe("layer1Intent", () => {
       expect(mockedClassify).toHaveBeenCalled();
       expect(result.taskType).toBe("analyze");
     });
+
+    // Greenfield CREATE/BUILD intent → generate (live `/ideal` verify regression).
+    // "build a … microservice …" fell through to the brain → refactor, and
+    // "build a … validator with vitest tests" was hijacked by the Pass 2
+    // `analyze` keyword (the word "tests"). The verb "build" is recognized by no
+    // deterministic pass (Pass 1 create-file regex only fires on the literal
+    // nouns file/component/module/class/function; Pass 2 generate keyword only
+    // has generate/scaffold/bootstrap). Pin greenfield creation to generate in
+    // Pass 0 — before the classifier + brain.
+    const greenfieldCases = [
+      "build a muonroi-building-block microservice with a fraud-detection rule engine, multi-tenancy, and auth",
+      "build a Node TypeScript ISO-4217 currency code validator with vitest tests",
+      "build a small Node TS lib",
+      "create a REST API in Express",
+      "make a React dashboard component",
+      "implement a rate limiter middleware",
+      "develop a chat application with websockets",
+      "i want to build a todo app",
+    ];
+
+    for (const phrase of greenfieldCases) {
+      it(`Pass 0 greenfield '${phrase.slice(0, 36)}…' → generate/task, skips classifier`, async () => {
+        const result = await layer1Intent(makeCtx(phrase));
+        expect(result.taskType).toBe("generate");
+        expect(result.intentKind).toBe("task");
+        expect(result.confidence).toBe(0.85);
+        expect(mockedClassify).not.toHaveBeenCalled();
+        expect(mockedClassifyViaBrain).not.toHaveBeenCalled();
+        expect(result._intentTrace?.pass1Reason).toBe("pass0:greenfield-build");
+      });
+    }
+
+    it("Pass 0 greenfield defers to cascade for build-FAILURE prompts (debug, not generate)", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      const result = await layer1Intent(makeCtx("the build is failing after the merge"));
+      expect(mockedClassify).toHaveBeenCalled();
+      expect(result.taskType).not.toBe("generate");
+    });
+
+    it("Pass 0 greenfield defers to cascade for explanation prompts (analyze, not generate)", async () => {
+      mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
+      mockedClassifyViaBrain.mockResolvedValue("analyze,balanced");
+      const result = await layer1Intent(makeCtx("explain how to build a parser"));
+      expect(mockedClassify).toHaveBeenCalled();
+      expect(result.taskType).not.toBe("generate");
+    });
+
+    it("Pass 0 greenfield does NOT fire on refactor of an existing artifact", async () => {
+      mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:refactor", confidence: 0.75 });
+      const result = await layer1Intent(makeCtx("refactor the user service"));
+      expect(mockedClassify).toHaveBeenCalled();
+      expect(result.taskType).toBe("refactor");
+    });
   });
 
   it("fails open on error — returns ctx unchanged with applied=false", async () => {
@@ -426,6 +489,63 @@ describe("intentKind guard — a tool/command request must never route as chitch
       { llmFallback: generalFallback },
     );
     expect(result.intentKind).toBe("task");
+  });
+});
+
+describe("isGreenfieldBuildTask — greenfield create/build intent (Pass 0 pin)", () => {
+  const positives = [
+    "build a muonroi-building-block microservice with a fraud-detection rule engine, multi-tenancy, and auth",
+    "build a Node TypeScript ISO-4217 currency code validator with vitest tests",
+    "build a small Node TS lib",
+    "create a REST API in Express",
+    "create a CLI tool for managing tasks",
+    "make a React dashboard component",
+    "implement a rate limiter middleware",
+    "develop a chat application with websockets",
+    "scaffold a new CLI tool",
+    "build me a currency converter",
+    "Build a GraphQL server",
+    "please create an authentication service",
+    "can you build a parser for ISO-8601 dates",
+    "set up a CI pipeline for the repo",
+    "build a faster JSON parser",
+    "i want to build a todo app",
+  ];
+
+  const negatives = [
+    "the build is failing",
+    "fix the build",
+    "build broke after the merge",
+    "why is the build red?",
+    "the CI pipeline is broken",
+    "explain how to build a parser",
+    "how would you build a microservice?",
+    "should I build this as a monolith or microservices?",
+    "review the auth service I built",
+    "refactor the user service",
+    "rename the build function",
+    "analyze the rule engine",
+    "make it faster",
+    "make the tests pass",
+    "create a branch and commit",
+    "update the readme",
+    "optimize the database queries",
+    "what does the validator do?",
+    "add a button to the form",
+    "the server crashed",
+  ];
+
+  it("matches greenfield creation requests", () => {
+    for (const p of positives) expect(isGreenfieldBuildTask(p), p).toBe(true);
+  });
+
+  it("does NOT match debug / analyze / refactor / question prompts", () => {
+    for (const n of negatives) expect(isGreenfieldBuildTask(n), n).toBe(false);
+  });
+
+  it("returns false on empty / whitespace input", () => {
+    expect(isGreenfieldBuildTask("")).toBe(false);
+    expect(isGreenfieldBuildTask("   ")).toBe(false);
   });
 });
 

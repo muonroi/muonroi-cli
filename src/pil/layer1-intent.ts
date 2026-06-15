@@ -255,6 +255,54 @@ export function isPerformanceRefactor(raw: string): boolean {
   return true;
 }
 
+// Greenfield CREATE/BUILD intent → generate.
+//
+// Live `/ideal` E2E verify (fix/council-oauth-reachable): greenfield BUILD
+// prompts were misclassified at the pil-acceptance card —
+//   "build a muonroi-building-block microservice …"           → refactor
+//   "build a Node TS ISO-4217 currency validator w/ vitest tests" → analyze
+// Root cause: the verb "build" (and bare "create X" where X is not one of the
+// literal nouns file/component/module/class/function) is recognized by NO
+// deterministic pass. Pass 1's create-file regex only fires on those literal
+// nouns; Pass 2's `generate` keyword only has generate/scaffold/bootstrap. So
+// greenfield "build/create/implement X" prompts fall through to the brain/LLM
+// — documented to bias toward `refactor` for any code touch (see Pass 3 legacy
+// prompt, 4P-2) — and worse, a build prompt that merely mentions "test(s)" is
+// hijacked by the Pass 2 `analyze` keyword. Pin greenfield creation to
+// `generate` deterministically here, before the classifier + brain.
+//
+// VERB must be the LEADING action (after an optional polite/intent prefix) so
+// "explain how to build X", "the build is failing", "rename the build fn" never
+// match. A concrete software-artifact noun must be the object of creation, and
+// build-FAILURE / debug context vetoes the match (those are bug reports).
+const GREENFIELD_BUILD_PREFIX = String.raw`(?:please\s+|pls\s+|plz\s+|can\s+you\s+|could\s+you\s+|would\s+you\s+(?:please\s+)?|help\s+me\s+(?:to\s+)?|let'?s\s+|i\s+(?:want|need)\s+(?:you\s+)?to\s+|i'?d\s+like\s+(?:you\s+)?to\s+|go\s+ahead\s+and\s+|now\s+|then\s+|just\s+)*`;
+const GREENFIELD_BUILD_VERB = String.raw`build|create|make|implement|develop|scaffold|bootstrap|generate|code\s+up|spin\s+up|stand\s+up|set\s+up|put\s+together`;
+const GREENFIELD_BUILD_LEAD_RE = new RegExp(`^\\s*${GREENFIELD_BUILD_PREFIX}(?:${GREENFIELD_BUILD_VERB})\\b`, "i");
+// Concrete software artifacts (the thing being created). Deliberately excludes
+// "test"/"branch"/"commit" — test-generation is handled by isTestGenerationTask
+// and git verbs route elsewhere — so "make the tests pass" / "create a branch"
+// do not trip this.
+const GREENFIELD_BUILD_TARGET_RE =
+  /\b(app|application|web\s*app|webapp|service|micro[-\s]?service|api|endpoint|server|backend|frontend|cli|tool|utility|library|lib|sdk|package|module|component|widget|page|screen|view|dashboard|website|site|portal|platform|system|engine|parser|validator|formatter|serializer|converter|calculator|generator|linter|compiler|interpreter|middleware|pipeline|workflow|daemon|worker|queue|cache|store|database|schema|model|migration|script|bot|game|simulator|prototype|mvp|poc|demo|feature|function|class|hook|wrapper|adapter|plugin|extension|proxy|gateway|router|handler|controller|resolver|crawler|scraper|client)\b/i;
+// Failure / debug context — a "build" that is FAILING / BROKEN is a bug report,
+// not greenfield creation. Cascade to the debug classifier instead.
+const GREENFIELD_BUILD_FAILURE_GUARD_RE =
+  /\b(fail(?:s|ed|ing|ure)?|broken|broke|crash(?:es|ed|ing)?|not\s+working|doesn'?t\s+work|won'?t\s+(?:build|compile|run)|hỏng)\b/i;
+
+/**
+ * Detect a greenfield CREATE/BUILD request whose correct taskType is `generate`.
+ * Tight by construction: requires a LEADING creation verb + a software-artifact
+ * object, and vetoes build-failure/debug context. When unsure it returns false
+ * so the prompt cascades to the classifier + brain (no wrong deterministic pin).
+ */
+export function isGreenfieldBuildTask(raw: string): boolean {
+  const t = raw.trim();
+  if (!t || t.length > 400) return false;
+  if (!GREENFIELD_BUILD_LEAD_RE.test(t)) return false;
+  if (GREENFIELD_BUILD_FAILURE_GUARD_RE.test(t)) return false;
+  return GREENFIELD_BUILD_TARGET_RE.test(t);
+}
+
 /** Detect short continuation prompts ("tiếp tục", "ok", "continue", …). */
 export function isContinuationPhrase(raw: string): boolean {
   const t = raw.trim();
@@ -799,6 +847,55 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
             name: "intent-detection",
             applied: true,
             delta: `taskType=refactor,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=performance`,
+          },
+        ],
+      };
+    }
+    if (isGreenfieldBuildTask(ctx.raw)) {
+      const domainPass0 = extractDomain("", ctx.raw);
+      const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
+      const { complexity, score: complexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: "generate",
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      const intentTrace: IntentDetectionTrace = {
+        pass1Reason: "pass0:greenfield-build",
+        pass1Confidence: 0.85,
+        pass1TaskType: "generate",
+        pass1Hit: true,
+        pass2Hit: false,
+        pass25ChitchatHit: false,
+        pass3UnifiedAttempted: false,
+        pass3UnifiedSucceeded: false,
+        pass3LegacyTaskAttempted: false,
+        pass3LegacyTaskSucceeded: false,
+        pass3LegacyStyleAttempted: false,
+        pass3LegacyStyleSucceeded: false,
+        pass4LlmAttempted: false,
+        pass4LlmSucceeded: false,
+        styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
+        finalTaskType: "generate",
+        finalConfidence: 0.85,
+        complexity,
+        complexityScore,
+      };
+      return {
+        ...ctx,
+        taskType: "generate",
+        domain: domainPass0,
+        confidence: 0.85,
+        outputStyle: styleFromText,
+        intentKind: "task",
+        _brainData: null,
+        _intentTrace: intentTrace,
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: true,
+            delta: `taskType=generate,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=greenfield-build`,
           },
         ],
       };
