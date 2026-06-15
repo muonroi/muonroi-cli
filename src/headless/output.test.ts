@@ -34,10 +34,11 @@ describe("headless output helpers", () => {
     expect(isHeadlessOutputFormat("xml")).toBe(false);
   });
 
-  it("renders the text prelude with session metadata", () => {
+  it("renders the text prelude with status on stderr (stdout stays pure for piping)", () => {
+    // VERIFY F3: spinner + session id are progress UX, not the reply — both go
+    // to stderr so `--format text` stdout contains only the model's answer.
     expect(renderHeadlessPrelude("text", "session-123")).toEqual({
-      stdout: "\u001b[36m⏳ Processing...\u001b[0m\n",
-      stderr: "\u001b[2mSession: session-123\u001b[0m\n",
+      stderr: "[36m⏳ Processing...[0m\n[2mSession: session-123[0m\n",
     });
   });
 
