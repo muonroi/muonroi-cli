@@ -111,3 +111,21 @@ Re-ran the deferred E2E tasks now that EE is up + headless/slash fixes shipped.
 | ~~F7~~ | — | Resolved earlier; consistent with F15 — real TUI uses the keyed default and OAuth providers are usable. | RESOLVED |
 
 **Pass-2 verdict:** 6/6 addressed — 19/27/28/30 PASS, 23/29 PASS after the F15 fix (council convenes live with OAuth grok). **Two real bugs found + fixed: F13 (agentic crash) and F15 (council OAuth reachability).** Correction logged: F7/F14 were wrong — xAI OAuth worked all along; the defect was council reachability.
+
+## Pass-2 extended — 22/21/25 full E2E (2026-06-15, after F11 template published)
+
+| # | Subject | Method | C | M | Outcome |
+|---|---------|--------|---|---|---------|
+| 25 | Forensics under load | live | PASS | PASS | 24 tool calls reading control-plane; cumulative 224K input but **peakSingleCallInput=44,089 ≤ 80K** — B3/B4 caps held under genuine load (no anomaly) |
+| 22 | BB scaffold + quality gate | live | PASS | PASS | template installs from feed (F11 resolved) → `dotnet new mr-base-sln` scaffolds full BB clean-arch solution → `dotnet build` **0 Errors** (70 MBB010 guard-warnings on template sample code). `/ideal` BB build wrapper live-verified (loop starts, resolves keyed deepseek-v4-pro, runs council+discovery) |
+| 21 | Multi-sprint `/ideal` | live(partial)+spec | PARTIAL | PARTIAL | loop starts + council init + discovery clarifier live-verified; **full multi-sprint iteration not driven to completion** — blocked by F17 intent-misclassification papercut. Sprint FSM (route/sprint-stage/done-gate) spec-verified |
+
+### New findings (pass-2 extended)
+
+| ID | Sev | Finding | Status |
+|----|-----|---------|--------|
+| F11b | Low | muonroi-cli pins `Muonroi.BaseTemplate@1.0.0-alpha.3` (init-new.ts:93) but the template source is now **alpha.4** — stale version pin. dotnet itself flags "update available → alpha.4" on scaffold. | NOTED (bump alpha.3→alpha.4 + re-verify scaffold) |
+| F16 | Low | `/ideal --force-council --sprint N <idea>` with **leading flags** prints the `/ideal` help instead of running; `/ideal <idea>` (no leading flags) runs fine. Flag parse/position papercut. | NOTED |
+| F17 | Med? | `/ideal build <X>` greenfield prompts came out **misclassified** — intent confirmed as "refactor" (22) / "analyze: detailed analysis with recommendations" (21), not build/implement — after the discovery clarifier's "I will provide my own details" meta-option flow. Consistent across two runs. Entangled with how the meta-option answer feeds intent → needs root-cause to confirm product-bug vs harness-drive artifact (and whether the unmerged de-robotize L4 work changes it). | FLAGGED — investigation task spawned |
+
+**Pass-2 extended verdict:** 25 + 22 fully live-verified (cost caps; BB scaffold→build E2E). 21 loop-wrapper live-verified + FSM spec-verified; full multi-sprint live-completion blocked by the F17 intent papercut. Total bugs found across all passes: **F10/F12, F5/F6, F9/F1, F2/F3, F13, F15 fixed**; F11 resolved (template published); F11b/F16/F17 newly found.
