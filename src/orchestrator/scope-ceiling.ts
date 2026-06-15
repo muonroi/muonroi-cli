@@ -55,7 +55,12 @@ const KNOWN_TASK_TYPES = new Set<string>(Object.keys(CEILING_MATRIX));
  * graceful when PIL emits an out-of-band label or null.
  */
 export function resolveCeiling(taskType: string, size: ComplexitySize): number {
-  const row: TaskType = taskType && KNOWN_TASK_TYPES.has(taskType) ? (taskType as TaskType) : "general";
+  // `build` (greenfield creation, PIL Pass-0) is not a row in the LOCKED matrix.
+  // It is the highest-effort task — scaffolding many files — so it borrows the
+  // `generate` ceiling (10/18/30) rather than falling back to the tight `general`
+  // row (5/10/20), which would force-finalize a greenfield build far too early.
+  const normalized = taskType === "build" ? "generate" : taskType;
+  const row: TaskType = normalized && KNOWN_TASK_TYPES.has(normalized) ? (normalized as TaskType) : "general";
   return CEILING_MATRIX[row][size];
 }
 

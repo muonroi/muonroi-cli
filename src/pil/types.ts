@@ -8,7 +8,7 @@ import type { ComplexityTier } from "../gsd/complexity.js";
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import type { ComplexitySizeResult } from "./layer1_5-complexity-size.js";
 
-export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "general";
+export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "build" | "general";
 
 export type OutputStyle = "concise" | "detailed" | "balanced";
 

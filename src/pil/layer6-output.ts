@@ -45,6 +45,7 @@ const TASK_TYPE_DEFAULT_STYLE: Record<TaskType, OutputStyle> = {
   analyze: "concise", // bullet findings, no narrative
   documentation: "balanced", // examples + explanation
   generate: "concise", // code speaks for itself
+  build: "concise", // greenfield code artifact — code speaks for itself (mirrors generate)
   refactor: "concise", // diff is the output
   general: "concise", // direct answer, no preamble
 };
@@ -89,6 +90,8 @@ const TASK_OUTPUT_BUDGET: Record<TaskType, number> = {
   analyze: 600,
   documentation: 900,
   generate: 1200,
+  // build (greenfield) emits multiple complete files — same budget as generate.
+  build: 1200,
   // general is user-facing prose (not a code artifact). Higher budget + relaxed
   // style rules so the final answer reads naturally for humans instead of
   // machine-optimized telegraphic lists. See user report on over-constrained
@@ -162,6 +165,11 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
     balanced: `\nOUTPUT RULES (generate): Complete, runnable code with brief explanation. Include all imports. Inline comments for key decisions. Short prose before code block explaining approach.`,
     detailed: `\nOUTPUT RULES (generate): Complete, runnable code with full explanation. Include all imports. Inline comments for logic and decisions. Explain design choices, alternatives considered, and trade-offs before the code.`,
   },
+  build: {
+    concise: `\nOUTPUT RULES (build): Scaffold the minimum runnable project/feature. Emit complete files (all imports), matching existing conventions. Wire it end-to-end; do not leave stubs. State the verify/run command in one line. No speculative extras.`,
+    balanced: `\nOUTPUT RULES (build): Scaffold a runnable project/feature with a short rationale for the structure. Emit complete files, follow existing conventions, wire it end-to-end, and give the build/run command. Avoid speculative features.`,
+    detailed: `\nOUTPUT RULES (build): Scaffold a runnable project/feature with full rationale — layout, key dependencies, and design choices. Emit complete files with all imports, wire everything end-to-end, give the build/run + verify commands. Note trade-offs; skip speculative scope.`,
+  },
   general: {
     // General answers should be highly readable. Encourage rich markdown
     // (bullets, headings, bold text) instead of forcing dense prose.
@@ -212,7 +220,7 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   // CI") just because the prompt looks ambiguous in isolation — session
   // 127140a47b56 hit this and the model spent 275 LLM calls being "thorough"
   // about a one-liner CI fix.
-  const ACTION_TASKS = new Set<TaskType>(["debug", "refactor", "generate"]);
+  const ACTION_TASKS = new Set<TaskType>(["debug", "refactor", "generate", "build"]);
   const DETAIL_KEYWORDS =
     /\b(explain in detail|thorough analysis|walk me through|in depth|deeply|comprehensive)\b|giải thích chi tiết|phân tích kỹ|cặn kẽ|chi tiết hơn/i;
   const requestedStyle: OutputStyle = ctx.outputStyle ?? "concise";
