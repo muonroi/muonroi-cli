@@ -98,6 +98,28 @@ describe("doctor EE health checks (CQ-16c/16d)", () => {
     expect(eeHealth?.detail).toContain("72.61.127.154");
   });
 
+  it("ee.health does NOT report unreachable when server is up but gates degraded (VERIFY F9)", async () => {
+    // Live ee_query works (server reachable) yet the gates sub-check fails —
+    // doctor must not call this "unreachable" (false negative). server.ok is
+    // the reachability signal, not result.ok.
+    healthDetailedMock.mockResolvedValue({
+      ok: false,
+      status: 200,
+      mode: "thin-client",
+      circuit: "closed",
+      components: {
+        server: { ok: true, status: 200 },
+        gates: { ok: false, status: 0 },
+      },
+    });
+    const results = await runDoctor();
+    const eeHealth = results.find((r) => r.name === "ee.health");
+    expect(eeHealth?.status).toBe("warn");
+    expect(eeHealth?.detail).not.toContain("unreachable");
+    expect(eeHealth?.detail).toContain("server=ok");
+    expect(eeHealth?.detail.toLowerCase()).toContain("gates");
+  });
+
   it("ee.health warns gracefully when healthDetailed throws", async () => {
     healthDetailedMock.mockRejectedValue(new Error("network timeout"));
     const results = await runDoctor();

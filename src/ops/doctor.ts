@@ -2,12 +2,14 @@
  * src/ops/doctor.ts
  *
  * Health check runner for muonroi-cli doctor command.
- * Runs 7 named checks and returns pass/warn/fail results.
+ * Runs 10 named checks and returns pass/warn/fail results.
  *
- * Checks: bun_version, os, key_presence, ollama, ee, qdrant, error_rate
+ * Checks: bun_version, os, key_presence, ollama, dotnet, ee.health, ee.brain,
+ *         qdrant, error_rate, council.mcp
  * Never throws — all checks handle errors gracefully (warn, not crash).
  */
 
+import { spawnSync } from "node:child_process";
 import { readFile } from "fs/promises";
 import os from "os";
 import path from "path";
@@ -130,8 +132,6 @@ async function checkEEDetailed(): Promise<CheckResult> {
 
     const serverOk = result.components.server.ok;
     const gatesOk = result.components.gates?.ok ?? true; // null if local mode
-    const isHealthy = result.ok;
-
     const parts = [
       `mode=${result.mode}`,
       `circuit=${result.circuit}`,
@@ -141,7 +141,11 @@ async function checkEEDetailed(): Promise<CheckResult> {
       parts.push(`gates=${gatesOk ? "ok" : `fail(${result.components.gates.status})`}`);
     }
 
-    if (!isHealthy) {
+    // Reachability is the SERVER component, not result.ok. A failing gates
+    // sub-check (e.g. read-token scope in thin-client mode) does NOT mean the
+    // EE server is unreachable — labelling it "unreachable" is a false negative
+    // that contradicts a live ee_query working. See VERIFY F9.
+    if (!serverOk) {
       const hint =
         result.mode === "thin-client"
           ? "Hint: check VPS 72.61.127.154:8082 is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
@@ -150,6 +154,14 @@ async function checkEEDetailed(): Promise<CheckResult> {
         name: "ee.health",
         status: "warn",
         detail: `EE unreachable — ${parts.join(", ")}. ${hint}`,
+      };
+    }
+
+    if (!gatesOk) {
+      return {
+        name: "ee.health",
+        status: "warn",
+        detail: `EE reachable; gates check degraded — ${parts.join(", ")}. Hint: gates needs serverReadAuthToken scope in ~/.experience/config.json`,
       };
     }
 
@@ -216,6 +228,29 @@ async function checkBrainEmptiness(): Promise<CheckResult> {
   } catch {
     // fail-open: DB may not be initialized yet
     return { name: "ee.brain", status: "pass", detail: "brain check skipped (DB unavailable)" };
+  }
+}
+
+async function checkDotnet(): Promise<CheckResult> {
+  // BB-aware scaffolding (muonroi-building-block) needs the .NET SDK for its
+  // restore/build/modular-boundaries quality gate. Doctor previously had no
+  // dotnet probe, so BB tasks had no preflight. See VERIFY F1.
+  try {
+    const res = spawnSync("dotnet", ["--version"], { encoding: "utf8", timeout: 5000 });
+    if (res.status === 0 && typeof res.stdout === "string" && res.stdout.trim().length > 0) {
+      return { name: "dotnet", status: "pass", detail: `dotnet ${res.stdout.trim()} — BB/.NET scaffold ready` };
+    }
+    return {
+      name: "dotnet",
+      status: "warn",
+      detail: "dotnet not found (optional — needed for muonroi-building-block scaffolding + quality gate)",
+    };
+  } catch (err) {
+    return {
+      name: "dotnet",
+      status: "warn",
+      detail: `dotnet probe failed: ${(err as Error).message} (optional — needed for BB scaffolding)`,
+    };
   }
 }
 
@@ -357,6 +392,7 @@ export async function runDoctor(): Promise<CheckResult[]> {
     checkOS(),
     checkKeyPresence(),
     checkOllamaHealth(),
+    checkDotnet(), // NEW — VERIFY F1: BB/.NET scaffold preflight
     checkEEDetailed(), // replaces checkEE() — CQ-16c
     checkBrainEmptiness(), // NEW — CQ-16d
     checkQdrant(),
