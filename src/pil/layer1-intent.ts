@@ -290,10 +290,15 @@ const GREENFIELD_BUILD_FAILURE_GUARD_RE =
   /\b(fail(?:s|ed|ing|ure)?|broken|broke|crash(?:es|ed|ing)?|not\s+working|doesn'?t\s+work|won'?t\s+(?:build|compile|run)|hỏng)\b/i;
 
 /**
- * Detect a greenfield CREATE/BUILD request whose correct taskType is `generate`.
+ * Detect a greenfield CREATE/BUILD request whose correct taskType is `build`.
  * Tight by construction: requires a LEADING creation verb + a software-artifact
  * object, and vetoes build-failure/debug context. When unsure it returns false
  * so the prompt cascades to the classifier + brain (no wrong deterministic pin).
+ *
+ * `build` is a first-class TaskType (greenfield project/feature creation) — it is
+ * the sole producer of that label. It mirrors `generate` for routing (tier/role/
+ * tokens/ceiling) but carries greenfield-specific outcome options + output rules.
+ * This replaces the F17 band-aid that pinned greenfield prompts to `generate`.
  */
 export function isGreenfieldBuildTask(raw: string): boolean {
   const t = raw.trim();
@@ -856,14 +861,14 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       const styleFromText = detectStyleFromText(ctx.raw) ?? "balanced";
       const { complexity, score: complexityScore } = scoreComplexity({
         rawText: ctx.raw,
-        taskType: "generate",
+        taskType: "build",
         t0HitCount: 0,
         hasMaxSprintsOne: false,
       });
       const intentTrace: IntentDetectionTrace = {
         pass1Reason: "pass0:greenfield-build",
         pass1Confidence: 0.85,
-        pass1TaskType: "generate",
+        pass1TaskType: "build",
         pass1Hit: true,
         pass2Hit: false,
         pass25ChitchatHit: false,
@@ -876,14 +881,14 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         pass4LlmAttempted: false,
         pass4LlmSucceeded: false,
         styleSource: detectStyleFromText(ctx.raw) ? "explicit-regex" : "classifier-default",
-        finalTaskType: "generate",
+        finalTaskType: "build",
         finalConfidence: 0.85,
         complexity,
         complexityScore,
       };
       return {
         ...ctx,
-        taskType: "generate",
+        taskType: "build",
         domain: domainPass0,
         confidence: 0.85,
         outputStyle: styleFromText,
@@ -895,7 +900,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           {
             name: "intent-detection",
             applied: true,
-            delta: `taskType=generate,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=greenfield-build`,
+            delta: `taskType=build,kind=task,conf=0.85,domain=${domainPass0 ?? "none"},style=${styleFromText},pass0=greenfield-build`,
           },
         ],
       };

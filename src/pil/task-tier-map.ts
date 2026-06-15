@@ -21,6 +21,7 @@ const MAP: Record<string, EETier> = {
   analyze: "balanced",
   documentation: "fast",
   generate: "balanced",
+  build: "balanced", // greenfield creation — competent coding tier, same as generate
   general: "fast",
 };
 
@@ -56,6 +57,7 @@ export function taskTypeToMaxTokens(taskType: string | null): number {
     case "plan":
       return 5_120;
     case "generate":
+    case "build":
       return 8_192;
     default:
       return 2_048; // conversational — keep short
@@ -73,6 +75,7 @@ export function taskTypeToReasoningEffort(taskType: string | null): "low" | "med
     case "debug":
     case "refactor":
     case "generate":
+    case "build":
       return "medium";
     case "analyze":
     case "documentation":
@@ -86,6 +89,7 @@ const ROLE_MAP: Record<string, ModelRole> = {
   plan: "leader",
   analyze: "leader",
   generate: "implement",
+  build: "implement",
   refactor: "implement",
   debug: "verify",
   documentation: "research",

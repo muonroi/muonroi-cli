@@ -158,6 +158,14 @@ function pickBestOutcomeIndex(taskType: TaskType | null, options: string[], raw:
       }
       return 0; // "Feature implemented and working"
     }
+    case "build": {
+      // "with tests", "vitest", "test coverage" → "Tested and verified"
+      if (has(/\b(test|vitest|jest|pytest|coverage|spec)\b/) || has(/\bviết test\b|\bviet test\b/)) {
+        const idx = find("test");
+        if (idx >= 0) return idx;
+      }
+      return 0; // "Runs end-to-end"
+    }
     case "refactor": {
       // "performance", "speed", "faster" → "Better performance"
       if (has(/\b(performance|speed|fast(er)?|slow|latency|throughput|optimi[zs]e)\b/)) {
@@ -225,6 +233,8 @@ function buildOutcomeOptions(taskType: TaskType | null, ctx: ProjectContext): st
       return ["Code cleaner, same behavior", "Better performance", "Easier to test"];
     case "generate":
       return ["Feature implemented and working", "File created with boilerplate", "Tests added"];
+    case "build":
+      return ["Runs end-to-end", "Project scaffolded and builds", "Tested and verified"];
     case "documentation":
       return ["Docs updated", "README reflects current state", "API docs generated"];
     case "plan":

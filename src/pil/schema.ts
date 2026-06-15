@@ -7,7 +7,16 @@
 
 import { z } from "zod";
 
-export const TaskTypeSchema = z.enum(["refactor", "debug", "plan", "analyze", "documentation", "generate", "general"]);
+export const TaskTypeSchema = z.enum([
+  "refactor",
+  "debug",
+  "plan",
+  "analyze",
+  "documentation",
+  "generate",
+  "build",
+  "general",
+]);
 
 export const OutputStyleSchema = z.enum(["concise", "detailed", "balanced"]);
 

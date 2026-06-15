@@ -133,7 +133,7 @@ describe("layer1Intent", () => {
     // No leading creation verb + no artifact noun → misses Pass 0 greenfield-build
     // and the Pass 2 keyword rules, so the brain (Pass 3) decides. (A prompt with
     // an explicit creation verb like "make me a new service" is now pinned to
-    // generate by Pass 0 and never reaches the brain.)
+    // `build` by Pass 0 and never reaches the brain.)
     const result = await layer1Intent(makeCtx("work on the onboarding flow"));
 
     expect(mockedClassifyViaBrain).toHaveBeenCalled();
@@ -365,14 +365,15 @@ describe("layer1Intent", () => {
       expect(result.taskType).toBe("analyze");
     });
 
-    // Greenfield CREATE/BUILD intent → generate (live `/ideal` verify regression).
+    // Greenfield CREATE/BUILD intent → build (live `/ideal` verify regression).
     // "build a … microservice …" fell through to the brain → refactor, and
     // "build a … validator with vitest tests" was hijacked by the Pass 2
     // `analyze` keyword (the word "tests"). The verb "build" is recognized by no
     // deterministic pass (Pass 1 create-file regex only fires on the literal
     // nouns file/component/module/class/function; Pass 2 generate keyword only
-    // has generate/scaffold/bootstrap). Pin greenfield creation to generate in
-    // Pass 0 — before the classifier + brain.
+    // has generate/scaffold/bootstrap). `build` is now a first-class TaskType
+    // (greenfield project/feature creation); Pass 0 pins it deterministically
+    // before the classifier + brain.
     const greenfieldCases = [
       "build a muonroi-building-block microservice with a fraud-detection rule engine, multi-tenancy, and auth",
       "build a Node TypeScript ISO-4217 currency code validator with vitest tests",
@@ -385,9 +386,9 @@ describe("layer1Intent", () => {
     ];
 
     for (const phrase of greenfieldCases) {
-      it(`Pass 0 greenfield '${phrase.slice(0, 36)}…' → generate/task, skips classifier`, async () => {
+      it(`Pass 0 greenfield '${phrase.slice(0, 36)}…' → build/task, skips classifier`, async () => {
         const result = await layer1Intent(makeCtx(phrase));
-        expect(result.taskType).toBe("generate");
+        expect(result.taskType).toBe("build");
         expect(result.intentKind).toBe("task");
         expect(result.confidence).toBe(0.85);
         expect(mockedClassify).not.toHaveBeenCalled();
@@ -396,19 +397,19 @@ describe("layer1Intent", () => {
       });
     }
 
-    it("Pass 0 greenfield defers to cascade for build-FAILURE prompts (debug, not generate)", async () => {
+    it("Pass 0 greenfield defers to cascade for build-FAILURE prompts (debug, not build)", async () => {
       mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
       const result = await layer1Intent(makeCtx("the build is failing after the merge"));
       expect(mockedClassify).toHaveBeenCalled();
-      expect(result.taskType).not.toBe("generate");
+      expect(result.taskType).not.toBe("build");
     });
 
-    it("Pass 0 greenfield defers to cascade for explanation prompts (analyze, not generate)", async () => {
+    it("Pass 0 greenfield defers to cascade for explanation prompts (analyze, not build)", async () => {
       mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
       mockedClassifyViaBrain.mockResolvedValue("analyze,balanced");
       const result = await layer1Intent(makeCtx("explain how to build a parser"));
       expect(mockedClassify).toHaveBeenCalled();
-      expect(result.taskType).not.toBe("generate");
+      expect(result.taskType).not.toBe("build");
     });
 
     it("Pass 0 greenfield does NOT fire on refactor of an existing artifact", async () => {

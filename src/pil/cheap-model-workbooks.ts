@@ -54,6 +54,10 @@ const TASK_WORKBOOKS: Partial<Record<TaskType, string>> = {
   generate:
     "GENERATE: confirm the target file + the surrounding pattern, write the new code to match it, then stop. " +
     "Do not scaffold extras or restructure unrelated code.",
+  build:
+    "BUILD: scaffold the MINIMUM runnable project/feature that satisfies the request, matching the chosen stack's " +
+    "conventions. Wire it end-to-end and verify it builds/runs before stopping. Do NOT add speculative features, " +
+    "extra files, or config the request did not ask for.",
   refactor: "REFACTOR: change only what was named (rename/extract/move). Preserve behaviour; add nothing new.",
   analyze:
     "ANALYZE: answer from what you have already read — do not read the whole codebase. Bullet findings, no narrative. " +
