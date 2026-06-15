@@ -74,8 +74,7 @@ export function extractStackFromSpec(spec: ClarifiedSpec): ExtractedStack | null
     all.includes("muonroi basetemplate") ||
     all.includes("basetemplate") ||
     all.includes("building-block") ||
-    all.includes("mediatр") ||
-    all.includes("mediatр")
+    all.includes("mediatr")
       ? "Muonroi.BaseTemplate (.NET 9, CQRS/MediatR, MEntity/MRepository pattern)"
       : null;
 
@@ -275,7 +274,11 @@ export async function writeDecisionsLock(input: DecisionsLockInput): Promise<boo
     const filePath = path.join(input.runDir, "decisions.lock.md");
     await atomicWriteText(filePath, content);
     return true;
-  } catch {
+  } catch (err) {
+    console.error(
+      `[council/decisions-lock] failed to write decisions.lock.md to ${input.runDir}: ${(err as Error)?.message}`,
+      { stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+    );
     return false;
   }
 }

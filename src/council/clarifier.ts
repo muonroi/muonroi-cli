@@ -30,10 +30,11 @@ export async function judgeReadiness(
   let raw: string;
   try {
     raw = await llm.generate(judgeModel, system, prompt, 512);
-  } catch {
+  } catch (err) {
     // On LLM failure, default to "not ready" with an empty gaps list so the
     // loop continues rather than breaking on transient errors. Worst case it
     // runs up to MAX_CLARIFY_ROUNDS and exits with ready=false.
+    console.error(`[council/clarifier] readiness judge LLM call failed: ${(err as Error)?.message}`);
     return { ready: false, confidence: 0, gaps: [] };
   }
 
@@ -248,6 +249,13 @@ export async function* runClarification(
     }
 
     if (questions.length === 0) {
+      // The clarifier asking nothing IS the readiness signal — the leader already
+      // decided no gaps remain. Mark the spec ready directly rather than leaving the
+      // gate at its not-ready default (wrong signal on the cleanest topics) or paying
+      // for a redundant readiness-judge LLM call on this break path.
+      gateReady = true;
+      gateConfidence = 1;
+      gateGaps = [];
       yield phaseDone({
         phaseId: roundId,
         kind: "clarification_round",

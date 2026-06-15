@@ -186,3 +186,15 @@ export function shouldAutoPass(l1: L1Signal, raw: string): boolean {
   if (l1.complexity === "high") return false;
   return true;
 }
+
+// The user explicitly told the agent NOT to clarify ("don't ask", "trả lời
+// thẳng"). When present, discovery skips ALL interview + acceptance cards. Narrow
+// on purpose: the idiom "don't ask me why" (seeking an explanation, not a
+// directive to skip questions) is excluded via a negative lookahead. EN + VI
+// (with diacritics + bare-ASCII transliterations).
+const NO_CLARIFY_RE =
+  /\b(?:don'?t|do not)\s+ask(?!\s+me\s+(?:why|how|what))\b|\bno\s+(?:questions?|clarif(?:ication|ying)|interview)\b|\bwithout\s+asking\b|\bjust\s+answer\b|\banswer\s+(?:me\s+)?directly\b|\bstop\s+asking\b|đừng\s+hỏi|không\s+(?:cần\s+)?hỏi|khỏi\s+hỏi|trả\s+lời\s+(?:thẳng|luôn|liền|ngay|trực\s*tiếp)|\bdung\s+hoi\b|\bkhong\s+(?:can\s+)?hoi\b|\btra\s+loi\s+(?:thang|luon|lien|ngay)\b/i;
+
+export function detectNoClarifySignal(raw: string): boolean {
+  return !!raw && NO_CLARIFY_RE.test(raw);
+}

@@ -173,10 +173,13 @@ export async function* runCouncil(
   // to skip — research is the slowest part of council and trivial questions
   // (e.g. "what did we just decide?") should not pay that cost.
   let researchSkipOverride = false;
+  // Hoisted so the leader's research decision can be reused by runDebate instead
+  // of re-running the classifier LLM call (see CouncilConfig.leaderNeedsResearch).
+  // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
+  let leaderNeedsResearch: boolean | undefined;
   try {
     const needGen = evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
     let needStep: IteratorResult<StreamChunk, boolean>;
-    let leaderNeedsResearch = true;
     do {
       needStep = await needGen.next();
       if (!needStep.done && needStep.value) yield needStep.value;
@@ -219,8 +222,9 @@ export async function* runCouncil(
         content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n`,
       };
     }
-  } catch {
-    /* fail-open — fall through to default behavior in runDebate */
+  } catch (err) {
+    // fail-open — leaderNeedsResearch stays undefined so runDebate re-evaluates.
+    console.error(`[council] research-need pre-check failed (fail-open): ${(err as Error)?.message}`);
   }
 
   // Await EE pre-fetch (started in parallel with clarifier — latency already hidden)
@@ -303,6 +307,7 @@ export async function* runCouncil(
       debatePlan,
       signal: options?.signal,
       researchSkipOverride,
+      leaderNeedsResearch,
       internetFirst,
       costAware,
     },
@@ -812,8 +817,10 @@ export async function* runCouncil(
           })),
           synthesisExcerpt: synthesisText.slice(0, 2000),
           rejectedProposals: rejectedProposals.length > 0 ? rejectedProposals : undefined,
-        }).catch(() => {
-          /* non-critical — lock file write failure must never break the council */
+        }).catch((err) => {
+          // writeDecisionsLock logs its own errors and returns false; this guard
+          // only fires on an unexpected throw — log it (No-Silent-Catch), never break council.
+          console.error(`[council] decisions.lock write guard caught: ${(err as Error)?.message}`);
         });
       }
     } catch {

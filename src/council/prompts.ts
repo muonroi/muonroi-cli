@@ -18,36 +18,35 @@ export function buildClarificationPrompt(
   return {
     system:
       `You are a senior technical lead preparing for a multi-expert discussion. ` +
-      `Your job is to identify AMBIGUITIES in the topic that would cause experts to talk past each other or go off-topic.\n\n` +
-      `Analyze the topic and conversation context carefully. Generate targeted clarification questions.\n` +
-      `Focus on:\n` +
-      `- SCOPE: What exactly is in/out of scope?\n` +
-      `- CONSTRAINTS: Technical, time, resource, or business constraints?\n` +
-      `- SUCCESS CRITERIA: How will we know the discussion produced a good result?\n` +
-      `- CONTEXT: What existing decisions, code, or patterns are relevant?\n\n` +
-      `## Minimum-question rule\n` +
-      `Return [] ONLY for topics that are already a precise technical question with a single ` +
-      `expected outcome (e.g. "What does X function return?", "Fix typo in README"). ` +
-      `For ANY topic that describes a feature, project, idea, or design — even if the user ` +
-      `gave several sentences — you MUST ask AT LEAST 2 questions, typically about:\n` +
-      `- Scope boundaries (what's in/out of v1)\n` +
-      `- Success metric (how is "done" measured)\n` +
-      `- Hard constraint (timeline, platform, must-include / must-avoid)\n` +
-      `A 1-paragraph "build me X" topic is NEVER specific enough — there are always implicit ` +
-      `scope, criteria, and constraint gaps. Ask them.\n\n` +
-      `If the topic is already specific enough (single technical Q&A only), return an empty array.\n\n` +
+      `Your job is to surface the FEW genuine ambiguities that would make experts talk past each other — NOT to run a questionnaire.\n\n` +
+      `Read the topic and the conversation context — especially any "## Current Project" section — carefully. ` +
+      `Ask ONLY about things you genuinely cannot infer and that would actually change the plan:\n` +
+      `- SCOPE: what is in/out of scope for THIS change?\n` +
+      `- CONSTRAINTS: hard technical/time/business constraints not already implied by the context.\n` +
+      `- SUCCESS CRITERIA: how "done" is judged, when it isn't already obvious.\n\n` +
+      `## How many questions\n` +
+      `Ask the minimum that unblocks a focused discussion — typically 0-2. A well-scoped topic, or one ` +
+      `whose context already answers the gaps, needs ZERO questions: return []. Do NOT pad to a quota, ` +
+      `and never ask a question whose answer is already in the topic or the project context.\n\n` +
+      `## Existing-repo grounding (IMPORTANT)\n` +
+      `If a "## Current Project" section is present you are working in an EXISTING repository — NOT a ` +
+      `greenfield project. Ground every question and every option in what that snapshot actually shows ` +
+      `(its language, framework, modules, conventions). Do NOT ask generic greenfield questions — product ` +
+      `type, target audience, which language/framework, which database, hosting — when the repo already ` +
+      `answers them; asking those signals you ignored the context and wastes the user's time. Ask only ` +
+      `about intent/scope decisions specific to THIS change, phrased in terms of the real codebase.\n\n` +
       `IMPORTANT — defaults from the workspace:\n` +
       `- If the topic refers to "this project", "current project", "repo này", "dự án hiện tại" or similar, ` +
       `the project IS the one described in the "## Current Project" section of the context. DO NOT ask which project.\n` +
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
-      `- Prefer using the project's package.json name and description as implicit context for follow-up questions.\n\n` +
+      `- Use the project's package.json name and description as implicit context for follow-up questions.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
       `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "recommended": "option A", "isRequired": true}]\n\n` +
-      `Rules for "recommended":\n` +
-      `- Only include "recommended" when, given the topic + context, ONE option is clearly the best default.\n` +
+      `Rules for "recommended" (be decisive — the user should never face an unranked list):\n` +
+      `- ALWAYS include "recommended" — the single option you would choose if the user said "you decide", given the topic + project context.\n` +
       `- Its value MUST be exactly equal to one of the entries in "suggestions".\n` +
-      `- Pick at most ONE recommended option per question. If you cannot confidently single one out, OMIT the field entirely — do not guess.\n` +
-      `Return [] if no clarification needed.`,
+      `- Omit it ONLY in a genuine 50/50 tie where recommending either option would be misleading. A missing recommendation must be the rare exception, not the default.\n` +
+      `Return [] if no clarification is needed.`,
     prompt:
       `## Topic\n${topic}\n\n` +
       (conversationContext ? `## Conversation Context\n${conversationContext}\n` : "") +
@@ -114,8 +113,7 @@ export function buildReadinessJudgePrompt(
       `- "gaps" MUST be empty when "ready" is true.\n` +
       `- Each gap is a single sentence starting with a noun: what info is missing (not a question).\n` +
       `  Example: "Target platform (web, mobile, or both) not specified."\n` +
-      `- "confidence" reflects how sure you are; a ready=true with confidence=0.6 means "probably " +\n` +
-      `  "ready but some ambiguity remains". confidence=1.0 means zero remaining blind spots.\n` +
+      `- "confidence" reflects how sure you are; a ready=true with confidence=0.6 means "probably ready but some ambiguity remains". confidence=1.0 means zero remaining blind spots.\n` +
       `- When the topic is a simple one-answer technical question (no design/scope), set ready=true, ` +
       `  confidence=1.0, gaps=[].`,
     prompt:
@@ -159,16 +157,15 @@ const ENGLISH_ONLY_RULE =
  * and burn the step budget without producing analytical content (the bug
  * that caused session a7a5690d2049 to fail with 4/4 empty turns).
  */
+// Opening turns run tool-free (openingWithRetry → llm.generate, no verification
+// tools wired). The rule must NOT advertise tools the model cannot call, or it
+// hallucinates `[CONFIRMED via grep:...]` tags for searches it never ran.
 const EVIDENCE_RULE_OPENING =
   `\n## Evidence Rule\n` +
-  `Stay analytical. You may optionally call AT MOST ONE verification tool ` +
-  `(grep / read_file / web_fetch / context7) ONLY to verify a SPECIFIC ` +
-  `numerical or factual claim you would otherwise have to invent.\n` +
-  `- Do NOT call tools for exploration or to gather background context.\n` +
-  `- Do NOT chain multiple tool calls — you have one shot, then must produce your full response.\n` +
-  `- If no claim needs verification, skip tool use entirely and answer directly.\n` +
-  `Tag verified facts: \`[CONFIRMED via <tool>:<evidence>]\` or \`[REFUTED via <tool>:<evidence>]\`.\n` +
-  `For uncited numbers / library specs that you cannot verify, mark them \`[UNVERIFIED: <claim>]\`.\n`;
+  `Stay analytical and ground every claim in the brief + context you were given. ` +
+  `You have NO tools in this opening turn — do not claim to have run grep / read_file / web searches.\n` +
+  `- For any number or library spec you cannot support from the provided context, mark it \`[UNVERIFIED: <claim>]\` instead of asserting it.\n` +
+  `- A later round can verify disputed claims; your job now is a clear, honest analysis.\n`;
 const EVIDENCE_RULE_RESPONSE =
   `\n## Evidence Rule\n` +
   `Stay analytical. You may optionally call AT MOST ONE verification tool ` +
@@ -357,9 +354,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       `  "researchQuery": null,\n` +
       `  "shouldContinue": true/false,\n` +
       `  "reason": "one sentence explaining your decision",\n` +
-      `  "evidenceDensity": 0.0,  // citations / total claims ratio (0.0–1.0)\n` +
-      `  "disagreementResolved": 0,  // count of [REFUTED] + [CONFIRMED] tags and explicit concessions\n` +
-      `  "extendRounds": 0  // set to 1-3 ONLY when this is the last planned round AND one critical point is genuinely close to resolving but not yet there. 0 otherwise.\n` +
+      `  "extendRounds": 0  // set to 1-3 ONLY when one critical point is genuinely close to resolving but not yet there; 0 otherwise. The orchestrator applies this only if rounds remain — do not try to track the round count yourself.\n` +
       (stackLock
         ? `  ,\n  "consensusQuality": "full",  // "full" when all positions stay within locked stack; "partial" when out-of-stack violations found\n` +
           `  "outOfStackViolations": []  // list of out-of-stack tech names cited by participants (empty when none)\n`
@@ -387,7 +382,8 @@ export function buildRoundSummaryPrompt(
       `1. Points where participants AGREE\n` +
       `2. Points still in DISPUTE (with each side's core argument)\n` +
       `3. New EVIDENCE or perspectives raised this round\n` +
-      `Be concise — one line per bullet. No preamble.`,
+      `Be concise — one line per bullet. No preamble. ` +
+      `Do NOT write "Round N" or any round-number counter in your bullets — this summary is fed into later turns, where round labels read as robotic noise. Refer to points by their content.`,
     prompt: `Round ${round} discussion on: ${topic}\n\n${allExchanges}`,
   };
 }
@@ -577,6 +573,16 @@ export function buildSynthesisPrompt(ctx: {
     : "";
 
   const stackLockForSynth = buildStackLockSection(ctx.spec);
+  // De-robotize: for choice/plan outputs, force a single decisive recommendation
+  // (mirrors the clarifier's mandatory-default rule). Scoped to decision/plan kinds
+  // so evaluation/investigation/exploration shapes keep their neutral analytical tone.
+  const decisiveness =
+    finalShape.kind === "decision" || finalShape.kind === "implementation_plan"
+      ? `\n## Decisiveness (recommendation/verdict)\n` +
+        `Lead with the single choice you would make if the user said "you decide" — name it in the first sentence of the recommendation. ` +
+        `Do NOT hedge with "it depends", "both have merits", or an unranked list of options. ` +
+        `If the debate genuinely did not converge, say so in one sentence and STILL give your best single recommendation plus the one condition that would change it.\n`
+      : "";
   let system =
     `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
     `## Original Brief\n` +
@@ -586,6 +592,7 @@ export function buildSynthesisPrompt(ctx: {
     intent +
     (stackLockForSynth ? `\n${stackLockForSynth}\n` : "") +
     guardrailBlock +
+    decisiveness +
     `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
     `unless the output shape explicitly asks for actionItems/plan. ` +
     `Stay grounded in the discussion; do not invent facts; mark unverified claims explicitly.\n\n` +

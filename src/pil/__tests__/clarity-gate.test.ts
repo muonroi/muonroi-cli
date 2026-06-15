@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canInferOutcome,
   countFileReferences,
+  detectNoClarifySignal,
   hasExplicitScope,
   hasExternalInfoScope,
   hasImageScope,
@@ -10,6 +11,27 @@ import {
   hasWholeRepoScope,
   shouldAutoPass,
 } from "../clarity-gate.js";
+
+describe("detectNoClarifySignal()", () => {
+  it("detects explicit no-clarify directives (EN)", () => {
+    expect(detectNoClarifySignal("just answer, don't ask me anything")).toBe(true);
+    expect(detectNoClarifySignal("answer directly without asking")).toBe(true);
+    expect(detectNoClarifySignal("no questions please, just do it")).toBe(true);
+    expect(detectNoClarifySignal("stop asking and give me the result")).toBe(true);
+  });
+
+  it("detects explicit no-clarify directives (VI + transliteration)", () => {
+    expect(detectNoClarifySignal("Đừng hỏi lại. Trả lời thẳng 3 câu hỏi.")).toBe(true);
+    expect(detectNoClarifySignal("không cần hỏi, trả lời luôn")).toBe(true);
+    expect(detectNoClarifySignal("tra loi thang dung hoi")).toBe(true);
+  });
+
+  it("does NOT match the explanation idiom 'don't ask me why'", () => {
+    expect(detectNoClarifySignal("it just works, don't ask me why")).toBe(false);
+    expect(detectNoClarifySignal("explain the auth flow")).toBe(false);
+    expect(detectNoClarifySignal("which part of the code should I read?")).toBe(false);
+  });
+});
 
 describe("hasWholeRepoScope()", () => {
   it("detects whole-repo / whole-project intent (EN + VI)", () => {
