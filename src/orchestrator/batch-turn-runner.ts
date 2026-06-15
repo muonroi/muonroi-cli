@@ -33,6 +33,7 @@ import { getProviderCapabilities } from "../providers/capabilities.js";
 import { requireRuntimeProvider, type resolveModelRuntime } from "../providers/runtime.js";
 import type { BashTool } from "../tools/bash";
 import type { AgentMode, StreamChunk, TaskRequest, ToolCall, ToolResult } from "../types/index";
+import { openUrl } from "../utils/open-url";
 import { loadMcpServers } from "../utils/settings";
 import type {
   BatchClientOptions,
@@ -203,16 +204,10 @@ export class BatchTurnRunner {
         if (deps.mode === "agent" && batchCaps.supportsClientTools(runtime.modelInfo)) {
           const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
             onOAuthRequired: (_serverId, url) => {
-              const urlStr = url.toString();
-              import("child_process").then(({ exec }) => {
-                const cmd =
-                  process.platform === "win32"
-                    ? `start "" "${urlStr}"`
-                    : process.platform === "darwin"
-                      ? `open "${urlStr}"`
-                      : `xdg-open "${urlStr}"`;
-                exec(cmd);
-              });
+              // Server-supplied URL is untrusted — openUrl validates the scheme
+              // and spawns via execFile (no shell), closing the command-injection
+              // vector the old exec() opener had.
+              openUrl(url);
             },
           });
           closeMcp = mcpBundle.close;
