@@ -139,3 +139,91 @@ describe("runDiscovery()", () => {
     expect(result.accepted).toBe(true);
   });
 });
+
+describe("runDiscovery() — outcome autofill override (path-leak vs legit slash)", () => {
+  const analyzeL1 = {
+    taskType: "analyze" as const,
+    confidence: 0.6,
+    complexity: "low" as const,
+    domain: null,
+    outputStyle: null,
+    intentKind: "task" as const,
+  };
+
+  // A handler that always picks `text` for both the interview answer and the
+  // acceptance card (any non-"cancel"/"adjust" text accepts).
+  const pickAnswer = (text: string): DiscoveryInteractionHandler => ({
+    askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text, kind: "choice" }),
+    showAcceptance: vi.fn().mockResolvedValue("accept"),
+  });
+
+  it("preserves a user outcome answer containing '/' (does not clobber with the autofilled default)", async () => {
+    // Regression: the override matched ANY '/' (bare `\/` regex alt +
+    // `.includes("/")`), silently replacing a legit answer like
+    // "support both REST/GraphQL endpoints" with the analyze default.
+    const userAnswer = "support both REST/GraphQL endpoints";
+    const proposer = vi
+      .fn()
+      .mockResolvedValue([
+        "Which API surface should the analysis target? [MODEL RECS: support both REST/GraphQL endpoints | REST only]",
+      ]);
+    const result = await runDiscovery(
+      "review the API layer",
+      analyzeL1,
+      process.cwd(),
+      pickAnswer(userAnswer),
+      null,
+      proposer,
+    );
+    expect(result.outcome).toBe(userAnswer);
+    expect(result.outcome).not.toBe("Detailed analysis with concrete improvement recommendations");
+  });
+
+  it("preserves another 'or'-style slash answer (validate input/output schemas)", async () => {
+    const userAnswer = "validate input/output schemas";
+    const proposer = vi.fn().mockResolvedValue(["What should the analysis verify?"]);
+    const result = await runDiscovery(
+      "review the API layer",
+      analyzeL1,
+      process.cwd(),
+      pickAnswer(userAnswer),
+      null,
+      proposer,
+    );
+    expect(result.outcome).toBe(userAnswer);
+  });
+
+  it("still overwrites a genuinely path-leaked outcome with the autofilled default", async () => {
+    // Guard against over-correction: a real filesystem-path leak (scope-option
+    // shape "src/cli (cli)") must STILL be replaced by the inferred outcome.
+    const proposer = vi.fn().mockResolvedValue(["What scope? [MODEL RECS: src/cli (cli)]"]);
+    const result = await runDiscovery(
+      "review the API layer",
+      analyzeL1,
+      process.cwd(),
+      pickAnswer("src/cli (cli)"),
+      null,
+      proposer,
+    );
+    expect(result.outcome).toBe("Detailed analysis with concrete improvement recommendations");
+  });
+
+  it("treats the 'provide my own details' meta-option as no-answer, not a literal outcome", async () => {
+    // The default meta-option ("I will provide my own details / constraints")
+    // is a 'no specific answer' sentinel — it must not survive verbatim as the
+    // outcome. With no inferred default available (generate), it falls back to
+    // the raw-derived intent rather than the sentinel string.
+    const sentinel = "I will provide my own details / constraints";
+    const proposer = vi.fn().mockResolvedValue(["What outcome do you expect?"]);
+    const result = await runDiscovery(
+      "build the user dashboard widget",
+      { ...analyzeL1, taskType: "generate" },
+      process.cwd(),
+      pickAnswer(sentinel),
+      null,
+      proposer,
+    );
+    expect(result.outcome).not.toBe(sentinel);
+    expect(result.outcome.toLowerCase()).toContain("dashboard");
+  });
+});
