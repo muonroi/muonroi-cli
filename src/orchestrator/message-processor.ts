@@ -1312,26 +1312,39 @@ export class MessageProcessor {
             // or error we fall back to builtins only (domain servers like fs/tools
             // are still valuable but the optional ones can be skipped for this turn).
             let mcpBundle: any = null;
+            // Hoisted so the catch can still close a late-resolving bundle: when the
+            // 2500ms race times out, buildMcpToolSet keeps running and eventually
+            // resolves with open MCP clients (StdioClientTransport child processes).
+            // Left unclosed they leak per-turn and keep the event loop alive, which
+            // hangs headless `-p` after the turn finishes. See VERIFY F10/F12.
+            const mcpBuildPromise = buildMcpToolSet(filteredServers, {
+              onOAuthRequired: (_serverId, url) => {
+                const urlStr = url.toString();
+                import("child_process").then(({ exec }) => {
+                  const cmd =
+                    process.platform === "win32"
+                      ? `start "" "${urlStr}"`
+                      : process.platform === "darwin"
+                        ? `open "${urlStr}"`
+                        : `xdg-open "${urlStr}"`;
+                  exec(cmd);
+                });
+              },
+            });
             try {
               mcpBundle = await Promise.race([
-                buildMcpToolSet(filteredServers, {
-                  onOAuthRequired: (_serverId, url) => {
-                    const urlStr = url.toString();
-                    import("child_process").then(({ exec }) => {
-                      const cmd =
-                        process.platform === "win32"
-                          ? `start "" "${urlStr}"`
-                          : process.platform === "darwin"
-                            ? `open "${urlStr}"`
-                            : `xdg-open "${urlStr}"`;
-                      exec(cmd);
-                    });
-                  },
+                mcpBuildPromise,
+                new Promise((_, reject) => {
+                  const t = setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500);
+                  // Don't let the race's loser timer keep the event loop alive.
+                  t.unref?.();
                 }),
-                new Promise((_, reject) => setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500)),
               ]);
             } catch (err) {
               console.error("[MCP] buildMcpToolSet timed out or failed, proceeding with builtins only", err);
+              // Close the abandoned build when it eventually resolves so its MCP
+              // child processes don't leak / keep the process alive (VERIFY F10/F12).
+              void mcpBuildPromise.then((late: any) => late?.close?.()).catch(() => {});
             }
             if (mcpBundle) {
               closeMcp = mcpBundle.close;
