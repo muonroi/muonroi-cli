@@ -270,6 +270,7 @@ export async function* runDebate(
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
   const researchSkipOverride = config.researchSkipOverride === true;
+  const leaderNeedsResearch = config.leaderNeedsResearch;
   const internetFirst = config.internetFirst === true;
   const costAware = config.costAware === true;
   const active: CouncilParticipant[] = [];
@@ -287,9 +288,12 @@ export async function* runDebate(
   const announcedDisabled = new Set<string>();
 
   // ── Leader decides: research needed? (skipped if user overrode upstream) ──
+  // Reuse the leader's upstream research decision (computed once in runCouncil)
+  // when available; only run the classifier here for direct callers that did not
+  // pre-compute it. Avoids a duplicate leader-tier LLM call per council run.
   const needsResearch = researchSkipOverride
     ? false
-    : yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware);
+    : (leaderNeedsResearch ?? (yield* evaluateResearchNeed(spec, leaderModelId, conversationContext, llm, costAware)));
 
   if (researchSkipOverride) {
     yield {

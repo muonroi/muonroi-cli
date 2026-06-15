@@ -215,6 +215,13 @@ export interface CouncilConfig {
   userModelMessage?: ModelMessage;
   /** When true, runDebate skips the research phase even if the leader requested it (user override). */
   researchSkipOverride?: boolean;
+  /**
+   * Leader's pre-computed "is research needed?" decision from runCouncil. When set,
+   * runDebate reuses it instead of re-running the classifier LLM call — avoids a
+   * duplicate leader-tier call per run plus a possible contradiction with the
+   * user-facing skip card. Undefined for direct runDebate callers/tests (they re-evaluate).
+   */
+  leaderNeedsResearch?: boolean;
   /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
   internetFirst?: boolean;
   /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type L1Signal, shouldAutoPass } from "./clarity-gate.js";
+import { detectNoClarifySignal, type L1Signal, shouldAutoPass } from "./clarity-gate.js";
 import { getMaxInterviewQuestions, isDiscoveryEnabled } from "./config.js";
 import { getCachedProjectContext, setCachedProjectContext } from "./discovery-cache.js";
 import type {
@@ -79,6 +79,10 @@ export async function runDiscovery(
 
   if (!isDiscoveryEnabled()) return baseResult();
   if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
+  // The user explicitly told the agent not to clarify ("don't ask" / "trả lời
+  // thẳng"). Honour it: skip the entire interview + acceptance ceremony. Placed
+  // before gap detection and the model proposer so no question card is generated.
+  if (detectNoClarifySignal(raw)) return baseResult();
 
   // Session-continuation guard: when the user is on turn >= 2 of an ongoing
   // session AND the new prompt looks like a continuation (short, modal verb
@@ -383,15 +387,25 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
       const special = isMetaAnalysisPrompt(input.raw)
         ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
         : "";
+      // Environment/self header — the main system prompt has buildEnvironmentBlock,
+      // but THIS discovery question-generator is a separate LLM call that lacked it,
+      // so it assumed Python and asked the user to paste the directory tree despite
+      // running inside the repo (live grok session). Escape hatch:
+      // MUONROI_DISCOVERY_SKIP_ENV_CONTEXT=1.
+      const osLabel = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux";
+      const envHeader =
+        process.env.MUONROI_DISCOVERY_SKIP_ENV_CONTEXT === "1"
+          ? ""
+          : `Runtime: ${osLabel} (${process.platform}); \`bash\` is POSIX. The project's language/framework is in the context below — do NOT assume Python or a POSIX-only layout. Do NOT ask the user to paste the directory tree, file list, or project structure: you run INSIDE the repository and can inspect it with your own tools. Ask only about genuine intent / scope ambiguities.\n`;
       const prompt = `You are the AI agent executing inside muonroi-cli.
-User request: "${input.raw}"
+${envHeader}User request: "${input.raw}"
 Task type from CLI: ${input.l1.taskType}
 ${contextStr}
 
-Based on the above, output 1-3 specific, concise questions you (the model) still need the user to answer right now so you have all the information required to complete the task accurately, without guessing.
-If the User request is a follow-up or continuation of the recent conversation history (if provided above), do NOT ask for new project details; assume the context is already established and return an empty array [] unless there is a critical new ambiguity.
-Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — only ask what is missing from this context.${special}
-For each question also provide 1-2 short concrete recommendations the user can pick from (model-backed choices).
+Based on the above, output the FEW specific, concise questions you (the model) genuinely still need answered to complete the task accurately — ask only what is genuinely blocking, not a quota. Most well-scoped requests need 0-1 questions. If everything you need is already inferable from the request + context above, return an empty array [].
+If the User request is a follow-up or continuation of the recent conversation history (if provided above), do NOT ask for new project details; assume the context is already established and return [] unless there is a critical new ambiguity.
+Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — never ask something the context above already answers.${special}
+For each question provide 1-2 short concrete recommendations the user can pick from, and ALWAYS list the ONE you would choose FIRST — it becomes the default the user can accept with a single keypress. Be decisive; do not hand back an unranked list.
 Return ONLY valid JSON array, nothing else:
 [{"question":"...","recommends":["rec1","rec2"]}, ...]
 Max 3 items.`;

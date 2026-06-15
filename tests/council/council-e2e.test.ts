@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { runCouncil } from "../../src/council/index.js";
 import type { CouncilLLM } from "../../src/council/types.js";
 import type { StreamChunk } from "../../src/types/index.js";
@@ -15,11 +15,14 @@ function createMockLLM(responses: Record<string, string>): CouncilLLM {
         if (system.includes(key) || prompt.includes(key)) return value;
       }
       // Fallback: return generic response based on phase detection
-      if (system.includes("identify AMBIGUITIES") || system.includes("clarification")) {
+      if (system.includes("preparing for a multi-expert discussion") || system.includes("clarification")) {
         return responses._clarify ?? "[]";
       }
       if (system.includes("synthesizing a discussion brief")) {
-        return responses._spec ?? '{"problemStatement":"test","constraints":[],"successCriteria":["resolve topic"],"scope":"test"}';
+        return (
+          responses._spec ??
+          '{"problemStatement":"test","constraints":[],"successCriteria":["resolve topic"],"scope":"test"}'
+        );
       }
       if (system.includes("entering a discussion")) {
         return responses._opening ?? "I think we should consider approach A because of X, Y, Z. What do you think?";
@@ -31,13 +34,21 @@ function createMockLLM(responses: Record<string, string>): CouncilLLM {
         return responses._followup ?? "Good point. I've updated my thinking on Y. Are we aligned now?";
       }
       if (system.includes("evaluating whether")) {
-        return responses._evaluation ?? '{"allCriteriaMet":true,"criteriaStatus":[{"criterion":"test","met":true,"evidence":"agreed"}],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"All criteria addressed"}';
+        return (
+          responses._evaluation ??
+          '{"allCriteriaMet":true,"criteriaStatus":[{"criterion":"test","met":true,"evidence":"agreed"}],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"All criteria addressed"}'
+        );
       }
       if (system.includes("research phase is needed")) {
-        return responses._researchNeed ?? '{"needsResearch":false,"reason":"General discussion, no codebase data needed"}';
+        return (
+          responses._researchNeed ?? '{"needsResearch":false,"reason":"General discussion, no codebase data needed"}'
+        );
       }
       if (system.includes("team lead")) {
-        return responses._synthesis ?? '{"type":"decision","summary":"Team agreed on approach A","agreed":["point 1"],"tradeoffs":["trade 1"],"recommendation":"Go with A","plan":{"steps":[{"description":"Implement A","priority":"high"}],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## AGREED\n- Point 1\n## RECOMMENDATION\nGo with A';
+        return (
+          responses._synthesis ??
+          '{"type":"decision","summary":"Team agreed on approach A","agreed":["point 1"],"tradeoffs":["trade 1"],"recommendation":"Go with A","plan":{"steps":[{"description":"Implement A","priority":"high"}],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## AGREED\n- Point 1\n## RECOMMENDATION\nGo with A'
+        );
       }
       if (system.includes("Summarize this discussion")) {
         return "- Agreed on X\n- Disputed: Y\n- New evidence: Z";
@@ -45,29 +56,30 @@ function createMockLLM(responses: Record<string, string>): CouncilLLM {
       return `[Mock response #${callCount}]`;
     },
     async research(_modelId: string, _topic: string, _ctx: string): Promise<string> {
-      return responses._research ?? "## Research Findings\n- Found relevant code in src/foo.ts\n## Key Evidence\n- Function bar() handles this\n## Gaps\n- None";
+      return (
+        responses._research ??
+        "## Research Findings\n- Found relevant code in src/foo.ts\n## Key Evidence\n- Function bar() handles this\n## Gaps\n- None"
+      );
     },
     async debate(modelId: string, system: string, prompt: string) {
       // Route debate calls through `generate` so the same keyword-based
       // response table drives them (e.g. "continuing a discussion").
-      const text = await (
-        async () => {
-          // Match same keyword logic as `generate`
-          for (const [key, value] of Object.entries(responses)) {
-            if (system.includes(key) || prompt.includes(key)) return value;
-          }
-          if (system.includes("entering a discussion")) {
-            return responses._opening ?? "I think we should consider approach A because of X, Y, Z. What do you think?";
-          }
-          if (system.includes("responding to")) {
-            return responses._response ?? "I agree on X but disagree on Y. Here's my reasoning...";
-          }
-          if (system.includes("continuing a discussion")) {
-            return responses._followup ?? "Good point. I've updated my thinking on Y. Are we aligned now?";
-          }
-          return `[Mock debate response]`;
+      const text = await (async () => {
+        // Match same keyword logic as `generate`
+        for (const [key, value] of Object.entries(responses)) {
+          if (system.includes(key) || prompt.includes(key)) return value;
         }
-      )();
+        if (system.includes("entering a discussion")) {
+          return responses._opening ?? "I think we should consider approach A because of X, Y, Z. What do you think?";
+        }
+        if (system.includes("responding to")) {
+          return responses._response ?? "I agree on X but disagree on Y. Here's my reasoning...";
+        }
+        if (system.includes("continuing a discussion")) {
+          return responses._followup ?? "Good point. I've updated my thinking on Y. Are we aligned now?";
+        }
+        return `[Mock debate response]`;
+      })();
       callCount++;
       return { text, toolCalls: [] };
     },
@@ -138,9 +150,7 @@ function getContent(chunks: StreamChunk[]): string {
 function getQuestions(chunks: StreamChunk[]): StreamChunk[] {
   // Only count clarification-phase questions — post-debate prompts are a
   // separate UX surface and should not be conflated with clarification.
-  return chunks.filter(
-    (c) => c.type === "council_question" && c.councilQuestion?.phase === "clarify",
-  );
+  return chunks.filter((c) => c.type === "council_question" && c.councilQuestion?.phase === "clarify");
 }
 
 function getPreflights(chunks: StreamChunk[]): StreamChunk[] {
@@ -158,7 +168,7 @@ function hasPhaseKind(chunks: StreamChunk[], kind: string): boolean {
 // ── Mock infrastructure ──────────────────────────────────────────────────────
 
 vi.mock("../../src/utils/settings.js", () => ({
-  getRoleModel: (role: string) => role === "leader" ? "mock-premium" : undefined,
+  getRoleModel: (role: string) => (role === "leader" ? "mock-premium" : undefined),
   getRoleModels: () => ({ leader: "mock-premium" }),
   isCouncilMultiProviderPreferred: () => false,
   loadUserSettings: () => ({}),
@@ -210,7 +220,12 @@ describe("Council E2E", () => {
     it("should ask clarification questions instead of hallucinating", async () => {
       const llm = createMockLLM({
         _clarify: JSON.stringify([
-          { question: "Bạn muốn thảo luận về vấn đề gì cụ thể?", why: "Topic quá mơ hồ", suggestions: ["Bug fix", "Architecture", "Feature mới"], isRequired: true },
+          {
+            question: "Bạn muốn thảo luận về vấn đề gì cụ thể?",
+            why: "Topic quá mơ hồ",
+            suggestions: ["Bug fix", "Architecture", "Feature mới"],
+            isRequired: true,
+          },
           { question: "Scope là gì? Ảnh hưởng file/module nào?", why: "Cần xác định phạm vi", isRequired: true },
         ]),
         _spec: JSON.stringify({
@@ -229,7 +244,7 @@ describe("Council E2E", () => {
         return Promise.resolve(
           questionCount === 1
             ? "EE status bar đang hiển thị sai — healthy nhưng báo đỏ"
-            : "Scope: src/ui/status-bar/ và src/ee/client.ts"
+            : "Scope: src/ui/status-bar/ và src/ee/client.ts",
         );
       };
 
@@ -276,12 +291,21 @@ describe("Council E2E", () => {
     it("should clarify constraints then run focused debate", async () => {
       const llm = createMockLLM({
         _clarify: JSON.stringify([
-          { question: "Team size? Có kinh nghiệm gRPC không?", why: "gRPC learning curve cao", suggestions: ["< 5 người", "5-15", "> 15"], isRequired: true },
+          {
+            question: "Team size? Có kinh nghiệm gRPC không?",
+            why: "gRPC learning curve cao",
+            suggestions: ["< 5 người", "5-15", "> 15"],
+            isRequired: true,
+          },
           { question: "Latency requirement? P99 target?", why: "gRPC nhanh hơn nhưng phức tạp hơn", isRequired: true },
         ]),
         _spec: JSON.stringify({
           problemStatement: "Chọn protocol cho internal microservice communication: REST vs gRPC",
-          constraints: ["Team 8 người, 2 có kinh nghiệm gRPC", "P99 < 100ms", "Cần backward compat với existing REST clients 6 tháng"],
+          constraints: [
+            "Team 8 người, 2 có kinh nghiệm gRPC",
+            "P99 < 100ms",
+            "Cần backward compat với existing REST clients 6 tháng",
+          ],
           successCriteria: [
             "Chọn được protocol phù hợp với team size và skill",
             "Đánh giá performance vs complexity trade-off",
@@ -290,14 +314,20 @@ describe("Council E2E", () => {
           scope: "Internal service-to-service communication only, không ảnh hưởng public API",
         }),
         _researchNeed: '{"needsResearch":false,"reason":"Architecture discussion, no codebase data needed"}',
-        _opening: "From an implementation perspective, I recommend starting with gRPC for new services while keeping REST for existing ones. The binary protocol gives us 2-5x throughput improvement, and protobuf schemas enforce contracts. However, the team needs training...",
-        _response: "I partially agree. The performance benefits are real, but with only 2/8 members knowing gRPC, the ramp-up cost is significant. I'd suggest a phased approach: REST-first for the next quarter, then pilot gRPC on one low-risk service...",
+        _opening:
+          "From an implementation perspective, I recommend starting with gRPC for new services while keeping REST for existing ones. The binary protocol gives us 2-5x throughput improvement, and protobuf schemas enforce contracts. However, the team needs training...",
+        _response:
+          "I partially agree. The performance benefits are real, but with only 2/8 members knowing gRPC, the ramp-up cost is significant. I'd suggest a phased approach: REST-first for the next quarter, then pilot gRPC on one low-risk service...",
         _evaluation: JSON.stringify({
           allCriteriaMet: true,
           criteriaStatus: [
             { criterion: "Chọn protocol phù hợp", met: true, evidence: "Both agree on phased approach" },
             { criterion: "Performance vs complexity", met: true, evidence: "Quantified: 2-5x gain vs 2-month ramp-up" },
-            { criterion: "Migration plan", met: true, evidence: "Phase 1: REST, Phase 2: gRPC pilot, Phase 3: full migration" },
+            {
+              criterion: "Migration plan",
+              met: true,
+              evidence: "Phase 1: REST, Phase 2: gRPC pilot, Phase 3: full migration",
+            },
           ],
           unresolvedPoints: [],
           needsResearch: false,
@@ -317,7 +347,9 @@ describe("Council E2E", () => {
         llm,
         (_qid) => Promise.resolve(answers[questionIndex++] ?? "N/A"),
         (_pid) => Promise.resolve(true),
-        async function* () { yield { type: "content" as const, content: "ok" }; },
+        async function* () {
+          yield { type: "content" as const, content: "ok" };
+        },
       );
 
       const { chunks } = await collectChunks(gen);
@@ -346,10 +378,15 @@ describe("Council E2E", () => {
       const llm = createMockLLM({
         _clarify: JSON.stringify([
           { question: "Lỗi cụ thể là gì? Error message?", why: "Cần biết chính xác lỗi", isRequired: true },
-          { question: "Từ khi nào bắt đầu lỗi? Có thay đổi gì gần đây không?", why: "Xác định regression", isRequired: false },
+          {
+            question: "Từ khi nào bắt đầu lỗi? Có thay đổi gì gần đây không?",
+            why: "Xác định regression",
+            isRequired: false,
+          },
         ]),
         _spec: JSON.stringify({
-          problemStatement: "EE (Experience Engine) core không hoạt động — send() fails với 'undefined', ECONNREFUSED trên port 9876",
+          problemStatement:
+            "EE (Experience Engine) core không hoạt động — send() fails với 'undefined', ECONNREFUSED trên port 9876",
           constraints: ["Không thay đổi EE protocol", "Must maintain backward compat với existing brain data"],
           successCriteria: [
             "EE send() hoạt động không lỗi",
@@ -359,10 +396,14 @@ describe("Council E2E", () => {
           ],
           scope: "src/ee/ directory, src/ui/status-bar/store.ts",
         }),
-        _researchNeed: '{"needsResearch":true,"reason":"Need to check actual error in src/ee/client.ts and status-bar/store.ts"}',
-        _research: "## Research Findings\n- src/ee/client.ts:42 — send() called before transport ready\n- src/ee/intercept.ts:15 — leftover TCP config on port 9876\n- Status bar checks getCircuitState() which returns 'open' (error state)\n\n## Key Evidence\n- `transport.send is not a function` at client.ts:42\n- Config still references port 9876 but IPC is on stdio now\n\n## Gaps\n- Need to verify if version mismatch between CLI and EE core",
-        _opening: "Based on the research, I see 3 issues: (1) race condition in send() — transport not initialized, (2) leftover TCP config causing ECONNREFUSED, (3) status bar reads circuit breaker state which is 'open' due to errors. I propose fixing in order: config cleanup → readiness handshake → status bar fix.",
-        _response: "Agree on the diagnosis but I'd prioritize differently. The version mismatch should be checked FIRST — if versions are incompatible, the other fixes won't help. My order: version check → config cleanup → send() race condition → status bar.",
+        _researchNeed:
+          '{"needsResearch":true,"reason":"Need to check actual error in src/ee/client.ts and status-bar/store.ts"}',
+        _research:
+          "## Research Findings\n- src/ee/client.ts:42 — send() called before transport ready\n- src/ee/intercept.ts:15 — leftover TCP config on port 9876\n- Status bar checks getCircuitState() which returns 'open' (error state)\n\n## Key Evidence\n- `transport.send is not a function` at client.ts:42\n- Config still references port 9876 but IPC is on stdio now\n\n## Gaps\n- Need to verify if version mismatch between CLI and EE core",
+        _opening:
+          "Based on the research, I see 3 issues: (1) race condition in send() — transport not initialized, (2) leftover TCP config causing ECONNREFUSED, (3) status bar reads circuit breaker state which is 'open' due to errors. I propose fixing in order: config cleanup → readiness handshake → status bar fix.",
+        _response:
+          "Agree on the diagnosis but I'd prioritize differently. The version mismatch should be checked FIRST — if versions are incompatible, the other fixes won't help. My order: version check → config cleanup → send() race condition → status bar.",
         _evaluation: JSON.stringify({
           allCriteriaMet: false,
           criteriaStatus: [
@@ -418,11 +459,13 @@ describe("Council E2E", () => {
           return Promise.resolve(
             qIdx === 1
               ? "send() fails với undefined, ECONNREFUSED port 9876"
-              : "Sau khi update lên version mới, trước đó hoạt động bình thường"
+              : "Sau khi update lên version mới, trước đó hoạt động bình thường",
           );
         },
         (_pid) => Promise.resolve(true),
-        async function* () { yield { type: "content" as const, content: "Implementing fixes..." }; },
+        async function* () {
+          yield { type: "content" as const, content: "Implementing fixes..." };
+        },
       );
 
       const { chunks } = await collectChunks(gen);
@@ -460,7 +503,9 @@ describe("Council E2E", () => {
         llm,
         (_qid) => Promise.resolve("N/A"),
         (_pid) => Promise.resolve(true),
-        async function* () { yield { type: "content" as const, content: "ok" }; },
+        async function* () {
+          yield { type: "content" as const, content: "ok" };
+        },
         { skipClarification: true },
       );
 
@@ -496,7 +541,7 @@ describe("Council E2E", () => {
       // Override clarify to track calls
       const origGenerate = llm.generate.bind(llm);
       llm.generate = async (modelId, system, prompt, maxTokens) => {
-        if (system.includes("identify AMBIGUITIES")) {
+        if (system.includes("preparing for a multi-expert discussion")) {
           clarifyCallCount++;
           if (clarifyCallCount === 1) {
             return JSON.stringify([{ question: "What's the scope?", why: "Need scope", isRequired: true }]);
@@ -518,7 +563,9 @@ describe("Council E2E", () => {
           // Reject first time, approve second
           return Promise.resolve(preflightCallCount >= 2);
         },
-        async function* () { yield { type: "content" as const, content: "ok" }; },
+        async function* () {
+          yield { type: "content" as const, content: "ok" };
+        },
       );
 
       const { chunks } = await collectChunks(gen);

@@ -24,7 +24,7 @@ import { detectGrayAreas } from "../gsd/gray-areas.js";
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
-import { isMetaAnalysisPrompt } from "./layer6-output.js";
+import { isImplementationIntent, isMetaAnalysisPrompt, isQuestionLike } from "./layer6-output.js";
 import type { PipelineContext } from "./types.js";
 
 function mapRouteToPhase(route: string): GsdPhase | null {
@@ -92,7 +92,20 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   // an ANSWER, not a code change. The implement/verify directive leaks into the
   // human-facing reply as a "2-3 line plan" + process narration (session
   // 829a83888dd2). Route them to the human-facing question directive instead.
-  const informational = isMetaAnalysisPrompt(ctx.raw) || ctx.taskType === "general";
+  //
+  // Three signals, any of which makes the turn informational:
+  //   1. isMetaAnalysisPrompt — self/CLI evaluation, prior-turn reflection.
+  //   2. taskType "general" classified as a real task by L1 (a genuine question;
+  //      fallback/ambiguous "general" stays intentKind=null → STANDARD scaffold).
+  //   3. question-shaped prompt that is NOT an implementation request — covers
+  //      analyze/debug/plan QUESTIONS ("why does X fail?", "how does the pipeline
+  //      work?") that L1 does not label "general" but which still want an answer,
+  //      not a "state a 2-3 line plan" preamble. (Live: a PIL-flow question
+  //      classified `analyze` was getting the STANDARD plan directive.)
+  const informational =
+    isMetaAnalysisPrompt(ctx.raw) ||
+    (ctx.taskType === "general" && ctx.intentKind === "task") ||
+    (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
   const directive = buildDirective({ complexity, phase, grayAreas, informational });
 
   const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);

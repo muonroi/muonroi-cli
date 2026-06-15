@@ -170,6 +170,48 @@ describe("P5 ready-gate: Test C — hard cap at MAX_CLARIFY_ROUNDS", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Test E: clarifier asks ZERO questions → spec.ready=true, judge NOT called
+// (de-robotized prompt now commonly returns [] — the gate must reflect that,
+//  not stay at its not-ready default, and must not pay for a judge LLM call.)
+// ---------------------------------------------------------------------------
+describe("P5 ready-gate: Test E — zero questions ⇒ ready without a judge call", () => {
+  it("marks spec.ready=true and skips the readiness judge when the clarifier asks nothing", async () => {
+    let callCount = 0;
+    const generate = vi.fn().mockImplementation(async () => {
+      callCount++;
+      if (callCount === 1) return "[]"; // clarify round 0: nothing to ask
+      // spec synthesis (if reached) — no judge call should occur on this path
+      return JSON.stringify({
+        problemStatement: "Add a retry to the EE bridge",
+        constraints: [],
+        successCriteria: ["Retries once on transient failure"],
+        scope: "EE bridge only",
+      });
+    });
+    const mockLLM: CouncilLLM = { generate } as any;
+
+    const gen = runClarification(
+      "Add a retry to the EE bridge",
+      "leader-model",
+      "## Current Project\nTypeScript CLI",
+      alwaysAnswer,
+      mockLLM,
+    );
+    const spec = await _drain(gen);
+
+    expect(spec.ready).toBe(true);
+    expect(spec.confidenceScore).toBe(1);
+    expect(spec.remainingGaps).toEqual([]);
+    expect(spec.clarifyHistory).toEqual([]);
+    // The readiness judge ("debate facilitator" system prompt) must NOT fire.
+    const judgeCalled = generate.mock.calls.some(
+      ([, system]: any[]) => typeof system === "string" && system.includes("debate facilitator"),
+    );
+    expect(judgeCalled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Test D: judgeReadiness unit tests
 // ---------------------------------------------------------------------------
 describe("P5 ready-gate: Test D — judgeReadiness unit", () => {

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runCouncil } from "../../src/council/index.js";
 import type { CouncilLLM } from "../../src/council/types.js";
 import type { StreamChunk } from "../../src/types/index.js";
@@ -94,14 +94,18 @@ describe("Council Edge Cases", () => {
             reason: "Done",
           });
         }
-        if (system.includes("identify AMBIGUITIES")) return "[]";
-        if (system.includes("synthesizing")) return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
+        if (system.includes("preparing for a multi-expert discussion")) return "[]";
+        if (system.includes("synthesizing"))
+          return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
         if (system.includes("research phase")) return '{"needsResearch":false}';
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\n## AGREED\nDone';
+        if (system.includes("team lead"))
+          return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\n## AGREED\nDone';
         if (system.includes("Summarize")) return "- Summary";
         return "I think approach A is better because of performance.";
       },
-      async research() { return "## Research\n- N/A"; },
+      async research() {
+        return "## Research\n- N/A";
+      },
       async debate(modelId, system, prompt) {
         const text = await llm.generate(modelId, system, prompt);
         return { text, toolCalls: [] };
@@ -116,7 +120,9 @@ describe("Council Edge Cases", () => {
       llm,
       () => Promise.resolve("session cache, ~10k keys"),
       () => Promise.resolve(true),
-      async function* () { yield { type: "content" as const, content: "ok" }; },
+      async function* () {
+        yield { type: "content" as const, content: "ok" };
+      },
       { skipClarification: true },
     );
 
@@ -145,10 +151,12 @@ describe("Council Edge Cases", () => {
             reason: "Not resolved yet",
           });
         }
-        if (system.includes("identify AMBIGUITIES")) return "[]";
-        if (system.includes("synthesizing")) return '{"problemStatement":"infinite debate","constraints":[],"successCriteria":["never met"],"scope":"test"}';
+        if (system.includes("preparing for a multi-expert discussion")) return "[]";
+        if (system.includes("synthesizing"))
+          return '{"problemStatement":"infinite debate","constraints":[],"successCriteria":["never met"],"scope":"test"}';
         if (system.includes("research phase")) return '{"needsResearch":false}';
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Forced stop","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\n## Done';
+        if (system.includes("team lead"))
+          return '{"type":"decision","summary":"Forced stop","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\n## Done';
         if (system.includes("Summarize")) return "- Still debating";
         if (system.includes("continuing a discussion")) {
           roundsSeen++;
@@ -156,7 +164,9 @@ describe("Council Edge Cases", () => {
         }
         return "My analysis...";
       },
-      async research() { return "## Research\n- N/A"; },
+      async research() {
+        return "## Research\n- N/A";
+      },
       async debate(modelId, system, prompt) {
         const text = await llm.generate(modelId, system, prompt);
         return { text, toolCalls: [] };
@@ -171,7 +181,9 @@ describe("Council Edge Cases", () => {
       llm,
       () => Promise.resolve("N/A"),
       () => Promise.resolve(true),
-      async function* () { yield { type: "content" as const, content: "ok" }; },
+      async function* () {
+        yield { type: "content" as const, content: "ok" };
+      },
       { skipClarification: true },
     );
 
@@ -213,10 +225,12 @@ describe("Council Edge Cases", () => {
             reason: "Research resolved the open question",
           });
         }
-        if (system.includes("identify AMBIGUITIES")) return "[]";
-        if (system.includes("synthesizing")) return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
+        if (system.includes("preparing for a multi-expert discussion")) return "[]";
+        if (system.includes("synthesizing"))
+          return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
         if (system.includes("research phase")) return '{"needsResearch":false}';
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\nDone';
+        if (system.includes("team lead"))
+          return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\nDone';
         if (system.includes("Summarize")) return "- Summary";
         return "My analysis based on what we know...";
       },
@@ -238,7 +252,9 @@ describe("Council Edge Cases", () => {
       llm,
       () => Promise.resolve("N/A"),
       () => Promise.resolve(true),
-      async function* () { yield { type: "content" as const, content: "ok" }; },
+      async function* () {
+        yield { type: "content" as const, content: "ok" };
+      },
       { skipClarification: true },
     );
 
@@ -256,10 +272,8 @@ describe("Council Edge Cases", () => {
     let specPromptReceived = "";
     const llm: CouncilLLM = {
       async generate(_modelId, system, prompt, _max) {
-        if (system.includes("identify AMBIGUITIES")) {
-          return JSON.stringify([
-            { question: "Dùng database nào?", why: "Ảnh hưởng query pattern", isRequired: true },
-          ]);
+        if (system.includes("preparing for a multi-expert discussion")) {
+          return JSON.stringify([{ question: "Dùng database nào?", why: "Ảnh hưởng query pattern", isRequired: true }]);
         }
         if (system.includes("synthesizing a discussion brief")) {
           specPromptReceived = prompt;
@@ -271,12 +285,16 @@ describe("Council Edge Cases", () => {
           });
         }
         if (system.includes("research phase")) return '{"needsResearch":false}';
-        if (system.includes("evaluating")) return '{"allCriteriaMet":true,"criteriaStatus":[],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"Done"}';
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\nDone';
+        if (system.includes("evaluating"))
+          return '{"allCriteriaMet":true,"criteriaStatus":[],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"Done"}';
+        if (system.includes("team lead"))
+          return '{"type":"decision","summary":"Done","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\nDone';
         if (system.includes("Summarize")) return "- ok";
         return "Analysis...";
       },
-      async research() { return "N/A"; },
+      async research() {
+        return "N/A";
+      },
       async debate(modelId, system, prompt) {
         const text = await llm.generate(modelId, system, prompt);
         return { text, toolCalls: [] };
@@ -291,7 +309,9 @@ describe("Council Edge Cases", () => {
       llm,
       (_qid) => Promise.resolve("PostgreSQL 15, cần < 200ms"),
       () => Promise.resolve(true),
-      async function* () { yield { type: "content" as const, content: "ok" }; },
+      async function* () {
+        yield { type: "content" as const, content: "ok" };
+      },
     );
 
     const { chunks } = await collectChunks(gen);
@@ -313,17 +333,22 @@ describe("Council Edge Cases", () => {
 
     const llm: CouncilLLM = {
       async generate(_modelId, system, _prompt, _max) {
-        if (system.includes("identify AMBIGUITIES")) return "[]";
+        if (system.includes("preparing for a multi-expert discussion")) return "[]";
         // Order matters: "team lead synthesizing..." also contains "synthesizing",
         // so the team-lead check has to win before the spec-synth check.
-        if (system.includes("team lead")) return '{"type":"decision","summary":"Use approach A","agreed":["speed"],"tradeoffs":["complexity"],"recommendation":"A","plan":{"steps":[],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## Done\nUse A';
-        if (system.includes("synthesizing")) return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
+        if (system.includes("team lead"))
+          return '{"type":"decision","summary":"Use approach A","agreed":["speed"],"tradeoffs":["complexity"],"recommendation":"A","plan":{"steps":[],"estimatedComplexity":"moderate","prerequisites":[]}}\n---READABLE---\n## Done\nUse A';
+        if (system.includes("synthesizing"))
+          return '{"problemStatement":"test","constraints":[],"successCriteria":["test"],"scope":"test"}';
         if (system.includes("research phase")) return '{"needsResearch":false}';
-        if (system.includes("evaluating")) return '{"allCriteriaMet":true,"criteriaStatus":[],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"Done"}';
+        if (system.includes("evaluating"))
+          return '{"allCriteriaMet":true,"criteriaStatus":[],"unresolvedPoints":[],"needsResearch":false,"shouldContinue":false,"reason":"Done"}';
         if (system.includes("Summarize")) return "ok";
         return "Analysis...";
       },
-      async research() { return "N/A"; },
+      async research() {
+        return "N/A";
+      },
       async debate(modelId, system, prompt) {
         const text = await llm.generate(modelId, system, prompt);
         return { text, toolCalls: [] };
@@ -338,7 +363,9 @@ describe("Council Edge Cases", () => {
       llm,
       () => Promise.resolve("N/A"),
       () => Promise.resolve(true),
-      async function* () { yield { type: "content" as const, content: "ok" }; },
+      async function* () {
+        yield { type: "content" as const, content: "ok" };
+      },
       { skipClarification: true },
     );
 
