@@ -87,3 +87,25 @@
 - **FAIL:** 1 — **5 (F10 headless hang)**
 - **Deferred (cost/env):** 6 — 19,23,27,28,29,30 (the most expensive real-LLM/E2E; deferring honors "cheapest cost")
 - **Findings:** 11 (1 HIGH, 5 Med, 1 Low-Med, 3 Low, 1 Info)
+
+## Pass-2 (the 6 deferred tasks, 2026-06-15)
+
+Re-ran the deferred E2E tasks now that EE is up + headless/slash fixes shipped.
+
+| # | Subject | Method | C | M | Outcome |
+|---|---------|--------|---|---|---------|
+| 19 | Pin survives compaction | spec | PASS | PASS | pin/compact/expand specs 13 passed |
+| 27 | Self-verify T2 agentic | live | PASS | PASS | **found + fixed F13** (crash); after fix the full 8-turn agentic loop runs (verdict=fail is a legit outcome — agent correctly found hidden `/cost` unreachable via menu) |
+| 28 | EE outage degrade | live | PASS | PASS | `MUONROI_EE_BASE_URL=unreachable`: doctor correctly says "EE unreachable (server=fail)" (validates F9's other branch); headless turn returns `OK28` exit 0 — graceful |
+| 30 | Export + relock | live | PASS | PASS | `/export` wrote a 74-line file merging DB(9)+live(9), explicitly labelled divergence ("scrollback match — single rendering") + full interaction timeline |
+| 23 | BB CB-1 injection | spec+code | — | — | council logic spec-verified (156) + injection path code-verified; **live real-LLM run blocked by F14** (harness agent-mode = grok/xai, no key) |
+| 29 | Cross-repo council | spec+code | — | — | discuss→plan→council chain spec-verified; live `/council` convened then degraded gracefully ("No reachable provider") — blocked by F14, not a defect |
+
+### New findings (pass-2)
+
+| ID | Sev | Finding | Status |
+|----|-----|---------|--------|
+| **F13** | **HIGH** | `self-verify --agentic` crashed (unhandled rejection "Model not found in catalog") — `createLLMBrain` resolved a model without `loadCatalog()` first. | ✅ FIXED `ffc749c` |
+| F14 | Low (testability) | Harness **agent-mode uses `grok-build-0.1` (xai)** regardless of the user's keyed `defaultModel` (deepseek-flash) → real-LLM harness E2E of council/`/ideal` needs an xai key; blocks live council verification. Council itself degrades gracefully ("No reachable provider"). | NOTED — env/testability, not a product defect. F7 (default-model concern) is hereby resolved: real TUI uses the keyed default. |
+
+**Pass-2 verdict:** 4 PASS (19/27/28/30), 2 spec+code-verified (23/29, live blocked by F14). One real bug (F13) found + fixed. Council pipeline confirmed to degrade gracefully when no provider is reachable.
