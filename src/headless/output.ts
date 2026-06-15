@@ -70,10 +70,11 @@ export function renderHeadlessPrelude(format: HeadlessOutputFormat, sessionId?: 
     return {};
   }
 
-  return {
-    stdout: "\x1b[36m⏳ Processing...\x1b[0m\n",
-    stderr: sessionId ? `\x1b[2mSession: ${sessionId}\x1b[0m\n` : undefined,
-  };
+  // Status indicator + session id are progress UX, not the reply. Keep stdout
+  // pure (only the model's answer) so `--format text` pipes cleanly. VERIFY F3.
+  const statusLines = ["\x1b[36m⏳ Processing...\x1b[0m"];
+  if (sessionId) statusLines.push(`\x1b[2mSession: ${sessionId}\x1b[0m`);
+  return { stderr: `${statusLines.join("\n")}\n` };
 }
 
 /**
