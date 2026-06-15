@@ -324,7 +324,7 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "Flagship model mạnh nhất hiện tại của xAI. Agentic tool-calling xuất sắc, hallucination thấp, hỗ trợ reasoning + non-reasoning mode. Context 1M tokens. Model mặc định khuyến nghị cho Grok CLI.",
+      "description": "xAI's current flagship. Excellent agentic tool-calling, low hallucination, supports reasoning + non-reasoning mode. 1M token context. Recommended default for Grok CLI.",
       "aliases": ["grok-4.3", "grok-latest", "grok-4"],
       "supports_vision": true
     },
@@ -341,7 +341,7 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Model coding chuyên biệt, nhanh, tối ưu cho agentic coding workflows. Chính là model powering Grok Build CLI. Rất phù hợp cho lập trình, debug, multi-step tasks.",
+      "description": "Specialized fast coding model optimized for agentic coding workflows. The model powering Grok Build CLI. Well-suited for programming, debugging, and multi-step tasks.",
       "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
       "supports_vision": true
     }
