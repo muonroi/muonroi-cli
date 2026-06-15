@@ -27,6 +27,20 @@ export type SpawnHarnessOptions = {
   idleTimeoutMs?: number;
   /** Handshake timeout for the named-pipe transport (Windows). Default: 5 000 ms. */
   handshakeTimeoutMs?: number;
+  /**
+   * Override the mock-llm fixtures directory. Defaults to the shared
+   * `tests/harness/fixtures/llm`. Council/ideal specs pass a dedicated dir so
+   * their tailored model fixture (DebatePlan via `generate`, etc.) does not
+   * perturb the shared cost-leak fixtures.
+   */
+  fixturesDir?: string;
+  /**
+   * Working directory for the spawned child. Defaults to the repo root.
+   * Council/ideal E2E specs pass a fresh greenfield temp dir so the discover
+   * phase does not scan the real (large) repo — that scan is the dominant,
+   * variable cost that made the council E2E flaky.
+   */
+  cwd?: string;
 };
 
 const DEFAULT_FIXTURES = resolve("tests/harness/fixtures/llm");
@@ -37,7 +51,8 @@ const ENTRY = resolve("src/index.ts");
  * Does NOT call wait_for — callers decide when the TUI is ready.
  */
 export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<HarnessContext> {
-  const args = [ENTRY, "--agent-mode", "--mock-llm", DEFAULT_FIXTURES, ...(opts.extraArgs ?? [])];
+  const fixtures = opts.fixturesDir ?? DEFAULT_FIXTURES;
+  const args = [ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -49,7 +64,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   };
 
   const result: SpawnResult = await spawnAgentTui(args, {
-    spawnOpts: { env },
+    spawnOpts: { env, ...(opts.cwd ? { cwd: opts.cwd } : {}) },
     handshakeTimeoutMs: opts.handshakeTimeoutMs,
   });
 

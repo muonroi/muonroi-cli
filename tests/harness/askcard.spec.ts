@@ -1,16 +1,28 @@
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
+
+const MOCK_PROVIDER_KEY = ["test", "mock", "provider", "noop"].join("-");
 
 describe("askcard E2E", () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
+  let greenfield: string;
 
   beforeAll(async () => {
+    // Greenfield cwd → the /ideal discover phase is instant, so the council
+    // gather askcard surfaces deterministically in <1s (vs. the repo-scan
+    // variance that previously made this flow time out — see ideal.spec.ts).
+    greenfield = mkdtempSync(join(tmpdir(), "muonroi-askcard-e2e-"));
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
+      cwd: greenfield,
     });
     proc = ctx.proc;
     driver = ctx.driver;
@@ -24,50 +36,37 @@ describe("askcard E2E", () => {
   afterAll(() => {
     proc?.kill();
     cleanup?.();
+    try {
+      rmSync(greenfield, { recursive: true, force: true });
+    } catch {
+      /* best-effort temp cleanup */
+    }
   });
 
   it("composer accepts input on startup", () => {
     expect(driver.query("role=textbox")?.role).toBe("textbox");
   });
 
-  // SKIP: council_question chunk doesn't reach app.tsx within 30s — blocker: src/council/orchestrator.ts phase pipeline rejects mock fixture JSON; track in CLAUDE.md known caveats
-  it.skip("council question modal appears and is observable", async () => {
-    // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
-    // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council
-    // fixture exists at tests/harness/fixtures/llm-council-question/ that returns
-    // a non-empty AMBIGUITIES array. But end-to-end the council_question chunk
-    // does not reach app.tsx within 30s, mirroring the pre-existing blocker
-    // documented in tests/harness/council-flow.spec.ts:60–68 ("runCouncilV2 is
-    // not reaching the phase chunk emission within 30s even with mock-llm hooked
-    // via Wave 2.5"). Root cause is in the council orchestrator's phase pipeline
-    // (preflight / debate-planner generateObject) rejecting mock fixture JSON,
-    // OR a downstream askcard step blocking on input the harness doesn't
-    // auto-answer. Fix requires instrumenting the council orchestrator and
-    // expanding fixture coverage — out of scope for the mock-llm error/sequence
-    // work in this commit.
+  it("council question modal appears and is observable", async () => {
+    // Force the council/loop path; the gather phase emits a council_question
+    // chunk → app.tsx renders CouncilQuestionCard wrapped in
+    // <Semantic id="askcard" role="dialog" isModal>. Drive via the askcard-open
+    // event (fires ~0.4s in greenfield) for a deterministic wait.
+    driver.type("/ideal build a counter --max-sprints 1 --force-council");
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
+    driver.press("Enter");
+    await driver.wait_for({ event: "askcard-open", timeoutMs: 25_000 });
     await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
     expect(driver.query("id=askcard")?.role).toBe("dialog");
-  });
+  }, 35_000);
 
-  // SKIP: same council orchestrator phase rejection as above — blocker: src/council/orchestrator.ts; track in CLAUDE.md known caveats
-  it.skip("can navigate askcard options with arrow keys", async () => {
-    // BLOCKED (verified 2026-05-18): mock-llm sequence mode IS now implemented
-    // (see src/agent-harness/mock-llm.ts sequence-fixture support) and a council
-    // fixture exists at tests/harness/fixtures/llm-council-question/ that returns
-    // a non-empty AMBIGUITIES array. But end-to-end the council_question chunk
-    // does not reach app.tsx within 30s, mirroring the pre-existing blocker
-    // documented in tests/harness/council-flow.spec.ts:60–68 ("runCouncilV2 is
-    // not reaching the phase chunk emission within 30s even with mock-llm hooked
-    // via Wave 2.5"). Root cause is in the council orchestrator's phase pipeline
-    // (preflight / debate-planner generateObject) rejecting mock fixture JSON,
-    // OR a downstream askcard step blocking on input the harness doesn't
-    // auto-answer. Fix requires instrumenting the council orchestrator and
-    // expanding fixture coverage — out of scope for the mock-llm error/sequence
-    // work in this commit.
-    await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
+  it("can navigate askcard options with arrow keys", async () => {
+    // The card from the previous test is still pending (unanswered). Navigate
+    // its options and assert the selection moves.
+    await driver.wait_for({ selector: "id=askcard", timeoutMs: 10_000 });
     driver.press("Down");
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     const selected = driver.queryAll("role=button").find((n) => n.selected);
     expect(selected).toBeDefined();
-  });
+  }, 15_000);
 });
