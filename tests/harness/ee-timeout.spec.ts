@@ -62,7 +62,7 @@ describe("ee-timeout E2E (Phase 21 / Plan 02)", () => {
 
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
-  }, 25_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

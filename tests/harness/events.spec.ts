@@ -43,7 +43,15 @@ function makeRouteDecision(path: "hot-path" | "council" = "hot-path"): Extract<L
 }
 
 function makeCouncilStep(state = "active"): Extract<LiveEvent, { kind: "council-step" }> {
-  return { t: "event", kind: "council-step", phaseId: "ph-1", phaseKind: "debate", state, label: "Debate", elapsedMs: 100 };
+  return {
+    t: "event",
+    kind: "council-step",
+    phaseId: "ph-1",
+    phaseKind: "debate",
+    state,
+    label: "Debate",
+    elapsedMs: 100,
+  };
 }
 
 function makeCouncilSpeaker(status: "start" | "done" = "start"): Extract<LiveEvent, { kind: "council-speaker" }> {
@@ -51,7 +59,15 @@ function makeCouncilSpeaker(status: "start" | "done" = "start"): Extract<LiveEve
 }
 
 function makeAskcardOpen(): Extract<LiveEvent, { kind: "askcard-open" }> {
-  return { t: "event", kind: "askcard-open", questionId: "q-1", question: "Choose tech stack", phase: "clarify", optionCount: 3, defaultIndex: 0 };
+  return {
+    t: "event",
+    kind: "askcard-open",
+    questionId: "q-1",
+    question: "Choose tech stack",
+    phase: "clarify",
+    optionCount: 3,
+    defaultIndex: 0,
+  };
 }
 
 function makeAskcardAnswered(): Extract<LiveEvent, { kind: "askcard-answered" }> {
@@ -62,7 +78,9 @@ function makeAskcardCancel(): Extract<LiveEvent, { kind: "askcard-cancel" }> {
   return { t: "event", kind: "askcard-cancel", questionId: "q-1" };
 }
 
-function makeSprintStage(stage: "planning" | "implementation" | "verification" | "judgment" = "planning"): Extract<LiveEvent, { kind: "sprint-stage" }> {
+function makeSprintStage(
+  stage: "planning" | "implementation" | "verification" | "judgment" = "planning",
+): Extract<LiveEvent, { kind: "sprint-stage" }> {
   return { t: "event", kind: "sprint-stage", sprintIndex: 1, stage, runId: "run-001" };
 }
 
@@ -231,7 +249,10 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
 
   describe("sprint-stage — all four stages", () => {
     const stages: Array<"planning" | "implementation" | "verification" | "judgment"> = [
-      "planning", "implementation", "verification", "judgment",
+      "planning",
+      "implementation",
+      "verification",
+      "judgment",
     ];
 
     for (const stage of stages) {
@@ -312,8 +333,11 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
       d2._ingest({ kind: "event", event: makeLlmDone("call-xyz") });
 
       const iter = d2.events(
-        (e) => e.t === "event" && (e.kind === "llm-token" || e.kind === "llm-done") &&
-          "correlationId" in e && e.correlationId === "call-xyz",
+        (e) =>
+          e.t === "event" &&
+          (e.kind === "llm-token" || e.kind === "llm-done") &&
+          "correlationId" in e &&
+          e.correlationId === "call-xyz",
       );
 
       const collected: LiveEvent[] = [];
@@ -381,7 +405,9 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
       let exited = false;
 
       const loop = (async () => {
-        for await (const _e of iter) { /* intentionally never breaks */ }
+        for await (const _e of iter) {
+          /* intentionally never breaks */
+        }
         exited = true;
       })();
 
@@ -398,15 +424,20 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
       let exited1 = false;
       let exited2 = false;
 
-      const loop1 = (async () => { for await (const _e of iter1) {} exited1 = true; })();
-      const loop2 = (async () => { for await (const _e of iter2) {} exited2 = true; })();
+      const loop1 = (async () => {
+        for await (const _e of iter1) {
+        }
+        exited1 = true;
+      })();
+      const loop2 = (async () => {
+        for await (const _e of iter2) {
+        }
+        exited2 = true;
+      })();
 
       await Promise.resolve();
       d2._closeAllSubscribers();
-      await Promise.race([
-        Promise.all([loop1, loop2]),
-        new Promise((r) => setTimeout(r, 500)),
-      ]);
+      await Promise.race([Promise.all([loop1, loop2]), new Promise((r) => setTimeout(r, 500))]);
       expect(exited1).toBe(true);
       expect(exited2).toBe(true);
     });
@@ -436,7 +467,7 @@ describe("harness spawn — sidechannel + driver integration", () => {
     driver = ctx.driver;
     cleanup = ctx.cleanup;
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();
@@ -460,9 +491,12 @@ describe("harness spawn — sidechannel + driver integration", () => {
     // No assertion needed — if this throws, the iterable contract is broken.
   });
 
-  it("driver.wait_for({idle}) resolves immediately (already idle)", async () => {
-    // TUI is already idle from beforeAll — should resolve in < 100ms
-    await driver.wait_for({ idle: true, timeoutMs: 1_000 });
+  it("driver.wait_for({idle}) resolves quickly (idle already settled)", async () => {
+    // TUI is already idle from beforeAll — resolves in <100ms on an unloaded
+    // box. 5s (was 1s) absorbs CPU contention on a heavily-loaded host, where
+    // the idle quiescence cycle runs slower than 1s (observed an all-3-retries
+    // timeout on a box saturated with leaked background processes).
+    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
   });
 
   it("typing a message does not throw and driver remains functional", async () => {

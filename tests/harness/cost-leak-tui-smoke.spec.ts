@@ -85,7 +85,7 @@ describe("cost-leak TUI smoke — fixture + dump path works end-to-end", () => {
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
     await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
-  }, 25_000);
+  }, 120_000);
 
   afterAll(() => {
     try {

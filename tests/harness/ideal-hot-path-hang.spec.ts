@@ -50,7 +50,7 @@ describe("ideal hot-path hang diagnostic", () => {
     cleanup = ctx.cleanup;
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
-  }, 20_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();
@@ -110,5 +110,5 @@ describe("ideal hot-path hang diagnostic", () => {
     const haltCard = driver.query("id=ideal-halt-card");
     expect(haltCard).toBeTruthy();
     expect(haltCard?.role).toBe("dialog");
-  }, 20_000);
+  }, 120_000);
 });

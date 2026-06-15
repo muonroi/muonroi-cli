@@ -32,8 +32,27 @@ export default defineConfig({
   test: {
     include: ["tests/harness/**/*.spec.ts"],
     exclude: ["dist/**", "node_modules/**", "tmp/**", ".claude/**", ".cursor/**"],
-    setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
-    testTimeout: 60_000,
+    setupFiles: ["src/__test-stubs__/vitest-setup.ts", "tests/harness/harness-env-isolation.ts"],
+    // Every harness spec spawns a REAL agent-mode TUI child (`bun run
+    // src/index.ts`), whose cold boot imports the entire CLI graph. Under
+    // CPU contention (serial spawns + ambient load) that boot — and the
+    // first agentic round-trips — routinely measure 25–46s, occasionally
+    // more. The named-pipe handshake budget is already 90s
+    // (test-spawn.ts:resolveHandshakeTimeoutMs). For the OUTER vitest
+    // hook/test timeouts to not be the binding (and wrong) constraint, they
+    // must comfortably exceed handshake(90s) + idle(15s) + textbox(5s).
+    // Measured: 60s testTimeout was marginal (the error-states "toast" test
+    // legitimately takes ~46s under load).
+    testTimeout: 120_000,
+    hookTimeout: 120_000,
+    // Real-subprocess E2E under CPU starvation is inherently transient:
+    // a child can be momentarily starved and miss a round/render within an
+    // attempt's window. `retry` re-runs the failed test on a fresh attempt
+    // (when load may be lower). It does NOT mask deterministic regressions —
+    // a real logic bug fails all attempts and the suite still goes red.
+    // Generalizes the per-describe `retry: 2` that error-states.spec.ts
+    // already relied on, to every spec.
+    retry: 2,
     fileParallelism: false,
     env: {
       // Suppress the agent-harness shim deprecation warning for in-repo runs.

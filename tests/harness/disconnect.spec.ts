@@ -38,7 +38,7 @@ describe("disconnect E2E", () => {
     cleanup = ctx.cleanup;
 
     await driver.wait_for({ idle: true, timeoutMs: 5000 });
-  }, 10_000);
+  }, 120_000);
 
   afterAll(() => {
     proc?.kill();

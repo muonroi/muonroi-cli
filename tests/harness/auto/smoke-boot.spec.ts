@@ -9,7 +9,7 @@
  * To rebuild: `muonroi-cli self-verify --since HEAD~1`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { spawnHarness, type HarnessContext } from "../helpers.js";
+import { type HarnessContext, spawnHarness } from "../helpers.js";
 
 describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_PIPE"] === "1")(
   "self-qa auto: smoke-boot",
@@ -19,7 +19,10 @@ describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_
     beforeAll(async () => {
       ctx = await spawnHarness();
       await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    }, 20_000);
+      // 120s: cold agent-mode TUI boot under CPU contention can take 25-46s+
+      // (the named-pipe handshake budget alone is 90s). A tighter hook timeout
+      // is the wrong constraint and surfaces as a flaky "Hook timed out".
+    }, 120_000);
 
     afterAll(() => {
       ctx?.cleanup();
@@ -27,8 +30,8 @@ describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_
 
     it("CLI boots and reaches idle within budget", async () => {
       const { driver } = ctx;
-      await driver.wait_for({"idle":true,"timeoutMs":15000});
-      
+      await driver.wait_for({ idle: true, timeoutMs: 15000 });
+
       // expect: idle reached within budget (enforced by test timeout)
       // expect: no error toast
       expect(driver.last_event("toast")?.level).not.toBe("error");

@@ -104,7 +104,13 @@ function buildFinalTextRound(text: string): unknown[] {
   ];
 }
 
-describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running", () => {
+// retry:0 — this spec drives a SEQUENCE fixture (the mock advances a monotonic
+// round index in the child, spawned once in beforeAll). A vitest retry re-runs
+// the it() against the same child with the index already advanced, so a retry
+// cannot reproduce the 3-round sequence — it would only confuse the result.
+// Determinism instead comes from forcing EE unreachable in beforeAll (see the
+// MUONROI_EE_BASE_URL env below), which pins the classifier's round consumption.
+describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running", { retry: 0 }, () => {
   let handle: CostLeakHarness | null = null;
 
   beforeAll(async () => {
@@ -122,41 +128,59 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     scriptPath = scriptPath.replace(/\\/g, "/");
     writeFileSync(
       scriptPath,
-      // ~150 KB output: 3000 lines × ~50 chars, with iter=42 carrying MARKER-42.
-      "for(let i=0;i<3000;i++)console.log('iter='+i+' filler='+'x'.repeat(40)+(i===42?' MARKER-42-hit':''));\n",
+      // ~60 KB output: 1200 lines × ~50 chars — above the 32K truncation cap
+      // (so the bash_run_id footer still fires) but ~2.5× lighter than 3000
+      // lines. bash-output-get has TWO independent flake factors under CPU
+      // contention: (1) classifier round-alignment — fixed by the EE-down env
+      // above; (2) the real bash exec + 3 agentic rounds being slow. A lighter
+      // payload makes each round faster so all 3 complete within the poll window.
+      "for(let i=0;i<1200;i++)console.log('iter='+i+' filler='+'x'.repeat(40)+(i===42?' MARKER-42-hit':''));\n",
       "utf8",
     );
 
-    handle = await spawnCostLeakHarness({
-      provider: "siliconflow",
-      modelId: "deepseek-ai/DeepSeek-V4-Flash",
-      stream: [
-        // Round 0: ABSORBER for PIL Layer 1's classifier call (PIL fires
-        // before the main agent and consumes one doStream from the queue).
-        // Returning a JSON classification matches what the unified PIL
-        // brain expects; PIL parses it, sets task_type, and routing
-        // continues normally to the main agent. A plain-text response
-        // (e.g. "debug") confuses the chitchat detector and short-circuits
-        // the whole turn — verified empirically while wiring this spec.
-        buildFinalTextRound('{"task_type":"debug","confidence":0.9}'),
-        // Round 1: main-agent first turn → bash with big output.
-        buildToolCallRound("bash-1", "bash", { command: bigOutputCmd() }),
-        // Round 2: after bash returns, model picks bash_output_get with the
-        // run_id the registry handed back. The mock fixture hard-codes
-        // "bash-1" because BashTool's runId counter resets per process.
-        buildToolCallRound("bog-1", "bash_output_get", {
-          run_id: "bash-1",
-          mode: "grep",
-          pattern: "MARKER-42",
-        }),
-        // Round 3: final stop.
-        buildFinalTextRound("done"),
-      ],
-    });
-    // 90s (was 30s): the harness spawn + handshake intermittently exceeded 30s
-    // under CI load, surfacing as a beforeAll "Hook timed out" flake unrelated
-    // to the assertions below.
-  }, 90_000);
+    handle = await spawnCostLeakHarness(
+      {
+        provider: "siliconflow",
+        modelId: "deepseek-ai/DeepSeek-V4-Flash",
+        stream: [
+          // Round 0: ABSORBER for PIL Layer 1's classifier call (PIL fires
+          // before the main agent and consumes one doStream from the queue).
+          // Returning a JSON classification matches what the unified PIL
+          // brain expects; PIL parses it, sets task_type, and routing
+          // continues normally to the main agent. A plain-text response
+          // (e.g. "debug") confuses the chitchat detector and short-circuits
+          // the whole turn — verified empirically while wiring this spec.
+          buildFinalTextRound('{"task_type":"debug","confidence":0.9}'),
+          // Round 1: main-agent first turn → bash with big output.
+          buildToolCallRound("bash-1", "bash", { command: bigOutputCmd() }),
+          // Round 2: after bash returns, model picks bash_output_get with the
+          // run_id the registry handed back. The mock fixture hard-codes
+          // "bash-1" because BashTool's runId counter resets per process.
+          buildToolCallRound("bog-1", "bash_output_get", {
+            run_id: "bash-1",
+            mode: "grep",
+            pattern: "MARKER-42",
+          }),
+          // Round 3: final stop.
+          buildFinalTextRound("done"),
+        ],
+      },
+      {
+        // Force EE classification unreachable so PIL Layer-1 deterministically
+        // falls back to the LLM (mock) classifier, which consumes the round-0
+        // JSON absorber. Without this, the classifier's EE /api/classify call
+        // non-deterministically succeeds (no mock doStream) → the MAIN agent eats
+        // the absorber (finishReason=stop) → the turn ends after 1 round →
+        // "expected 1 to be >= 3". Proven: 6/6 green with EE unreachable vs ~33%
+        // flake without. ECONNREFUSED to 127.0.0.1:1 is instant (no boot delay).
+        env: { MUONROI_EE_BASE_URL: "http://127.0.0.1:1" },
+      },
+    );
+    // 120s (was 30s→90s): the harness spawn + handshake intermittently exceeded
+    // the budget under CI load, surfacing as a beforeAll "Hook timed out" flake
+    // unrelated to the assertions below. 120s matches the suite-wide standard
+    // and sits above the 90s named-pipe handshake budget.
+  }, 120_000);
 
   afterAll(() => {
     handle?.cleanup();
@@ -187,8 +211,12 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     // polling it directly tracks round completion — the exact thing the
     // assertion below needs. This replaces a fixed 25s sleep that flaked under
     // full-suite load (the spawned child is CPU-starved, so the 3rd round had
-    // not been recorded yet when the dump was taken). 70s budget (280×250ms).
-    for (let i = 0; i < 280; i++) {
+    // not been recorded yet when the dump was taken). 110s budget (440×250ms):
+    // under full-suite CPU contention the 3 real-bash rounds are slow (observed
+    // only 2/3 rounds recorded at 72s with the old 70s window) — 110s plus the
+    // lighter payload above give them room. (EE-down env removes the separate
+    // 1-round abort; this window covers factor #2, the round slowness.)
+    for (let i = 0; i < 440; i++) {
       if (existsSync(handle.dumpPath)) {
         try {
           if (loadDumpedRecordings(handle.dumpPath).filter(isAgentCall).length >= 3) break;
@@ -245,5 +273,5 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     const joined = agentSystems.join("\n");
     expect(joined).toContain("bash_output_get");
     expect(joined).toMatch(/EVERY bash call/);
-  }, 120_000);
+  }, 180_000);
 });
