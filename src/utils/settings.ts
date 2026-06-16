@@ -365,6 +365,50 @@ function writeJson(filePath: string, data: unknown): void {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
 }
 
+/**
+ * Ensure the CLI's own project-local footprint (`.muonroi-cli/`) is gitignored
+ * in `cwd`, so it is never swept into a commit by `git add -A`. The directory
+ * can hold provider API keys and sandbox secrets in `settings.json` /
+ * `environment.json`; a real session committed it to a public repo. We add the
+ * entry only inside an actual git repo (a `.git` dir/file present) to avoid
+ * littering `.gitignore` into arbitrary directories. Idempotent and silent on
+ * any I/O error — protection is best-effort and must never break the workflow.
+ */
+export function ensureFootprintGitignored(cwd: string = process.cwd()): void {
+  const ENTRY = ".muonroi-cli/";
+  try {
+    if (!fs.existsSync(path.join(cwd, ".git"))) return; // not a git repo — skip
+    const gitignorePath = path.join(cwd, ".gitignore");
+    let content = "";
+    if (fs.existsSync(gitignorePath)) {
+      content = fs.readFileSync(gitignorePath, "utf-8");
+      // Already covered by an exact or directory entry (`.muonroi-cli` or
+      // `.muonroi-cli/`). Avoid matching unrelated lines via line-exact test.
+      const lines = content.split(/\r?\n/).map((l) => l.trim());
+      if (lines.includes(ENTRY) || lines.includes(".muonroi-cli")) return;
+    }
+    const comment = "# muonroi-cli local state (may contain API keys) — auto-added";
+    let block: string;
+    if (content.length === 0) {
+      // Fresh file — no leading blank line.
+      block = `${comment}\n${ENTRY}\n`;
+    } else {
+      const sep = content.endsWith("\n") ? "\n" : "\n\n";
+      block = `${sep}${comment}\n${ENTRY}\n`;
+    }
+    fs.appendFileSync(gitignorePath, block);
+  } catch (err) {
+    // best-effort: permission denied / read-only fs — never break the caller.
+    // Log at debug level only (No Silent Catch Rule) so a failure is diagnosable
+    // without spamming normal runs.
+    if (process.env.MUONROI_DEBUG) {
+      console.error(
+        `[settings] ensureFootprintGitignored failed for ${cwd}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+}
+
 export function loadUserSettings(): UserSettings {
   return readJson<UserSettings>(USER_SETTINGS_PATH) || {};
 }
@@ -453,6 +497,9 @@ export function loadProjectSettings(): ProjectSettings {
 
 export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
   const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
+  // Protect the footprint BEFORE the first write so the secrets-bearing file is
+  // gitignored from the moment it exists.
+  ensureFootprintGitignored(process.cwd());
   const current = loadProjectSettings();
   writeJson(projectPath, {
     ...current,

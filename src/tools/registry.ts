@@ -15,6 +15,13 @@ import type { BashTool } from "./bash.js";
 import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
+import {
+  analyzeGitCommand,
+  checkPushGate,
+  pushBlockedMessage,
+  recordCommandOutcome,
+  stagingWarning,
+} from "./git-safety.js";
 import { executeGrep } from "./grep.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 
@@ -187,6 +194,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // user turns / askcards no longer wipes it. See getBashRepeatState().
   const repeatState = getBashRepeatState();
   const repeatKey = resolveBashRepeatKey(opts?.sessionId);
+  // Git-safety state key. MUST be stable across createBuiltinTools() rebuilds
+  // within one process — otherwise a failed-test record made before a registry
+  // rebuild (askcard answer, sub-agent turn) would be invisible to the push
+  // gate after the rebuild. Unlike resolveBashRepeatKey's anon fallback (which
+  // intentionally generates a fresh key per instance to isolate repeat-reminder
+  // state), we want the gate to PERSIST: use the real sessionId when present,
+  // else a single process-stable key. Over-sharing here is the safe direction
+  // (it can only over-block a push, never wrongly allow one).
+  const gitSafetyKey =
+    opts?.sessionId && opts.sessionId.length > 0 ? opts.sessionId : `__proc_default__:${process.pid}`;
   tools.bash = dynamicTool({
     description:
       "Execute a shell command. Output is automatically cached — every call returns a " +
@@ -213,13 +230,31 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       if (typeof input.command !== "string" || input.command.trim() === "") {
         return 'ERROR: the `bash` tool requires a non-empty "command" string, but the call had empty arguments. Provide the shell command to run, e.g. {"command":"ls -la"}.';
       }
+
+      const cmd = typeof input.command === "string" ? input.command : "";
+
+      // Git safety (pre-execution). Block `git push` while a verification
+      // command failed this session and was not re-run green; warn on broad
+      // `git add -A` / `git commit -a` when sensitive paths exist. Applied to
+      // BOTH foreground and background paths. See git-safety.ts for the audit
+      // motivation (session 18285908637a). gitSafetyKey is STABLE per process
+      // (or the real sessionId) — unlike repeatKey, whose anon fallback changes
+      // on every registry rebuild and would silently drop the gate across turns.
+      const gitShape = analyzeGitCommand(cmd);
+      const stageWarn = gitShape.isBroadStage ? stagingWarning(bash.getCwd()) : "";
+      if (gitShape.isPush) {
+        const gate = checkPushGate(gitSafetyKey);
+        if (gate.blocked) {
+          return `${pushBlockedMessage(gate.failed)}${stageWarn}`;
+        }
+      }
+
       if (input.background) {
         const result = await bash.startBackground(input.command);
-        return formatResult(result);
+        return `${formatResult(result)}${stageWarn}`;
       }
       // 3-3: compute canonical form BEFORE running so we can attach an
       // inline reminder if it matches the previous bash call.
-      const cmd = typeof input.command === "string" ? input.command : "";
       const canonical = cmd ? canonicalizeBashCommand(cmd) : "";
       const entry = repeatState.get(repeatKey) ?? { lastCanonical: null, lastRunId: null };
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
@@ -227,6 +262,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       const result = await bash.execute(input.command, input.timeout ?? 30000);
       const formatted = formatResult(result);
+
+      // Record verification outcome so a later `git push` can be gated on it.
+      recordCommandOutcome(gitSafetyKey, canonical, result.success);
 
       // Update last-canonical state AFTER we compared, so the current call's
       // runId becomes the comparison target for the next one. Session-scoped
@@ -254,9 +292,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           chars >= 4_000
             ? ` — ${chars} chars cached; use bash_output_get(run_id, mode=tail|head|grep|lines) to re-query`
             : "";
-        return `${formatted}\n\n[bash_run_id: ${result.bashRunId}${hint}]${reminder}`;
+        return `${formatted}\n\n[bash_run_id: ${result.bashRunId}${hint}]${reminder}${stageWarn}`;
       }
-      return formatted;
+      return `${formatted}${stageWarn}`;
     },
   });
 

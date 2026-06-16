@@ -1,7 +1,12 @@
 import * as fs from "fs";
 import * as path from "path";
 import type { VerifyEnvironmentManifest, VerifyRecipe } from "../types/index";
-import { mergeSandboxSettings, normalizeSandboxSettings, type SandboxSettings } from "../utils/settings";
+import {
+  ensureFootprintGitignored,
+  mergeSandboxSettings,
+  normalizeSandboxSettings,
+  type SandboxSettings,
+} from "../utils/settings";
 import { normalizeVerifyRecipe } from "./recipes";
 
 export interface LoadedVerifyEnvironment {
@@ -90,6 +95,7 @@ export function saveVerifyEnvironment(
   sandboxSettings: SandboxSettings = {},
 ): string {
   const filePath = path.join(cwd, GENERATED_VERIFY_ENVIRONMENT);
+  ensureFootprintGitignored(cwd);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   const payload: VerifyEnvironmentManifest = {
     recipe: {
