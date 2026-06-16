@@ -16,7 +16,14 @@ const mockHandler: DiscoveryInteractionHandler = {
 };
 
 describe("runDiscovery()", () => {
-  it("auto-passes on high-confidence specific prompt", async () => {
+  it("proceeds without interview when the model proposes no questions", async () => {
+    // Phase 2: the model is the sole ask-decider. An empty proposer result means
+    // "no gray area" → no interview, no fabricated [Discovery] outcome.
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "x", kind: "choice" }),
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const proposer = vi.fn().mockResolvedValue([]);
     const result = await runDiscovery(
       "fix TypeError in src/auth/login.ts:42",
       {
@@ -28,10 +35,76 @@ describe("runDiscovery()", () => {
         intentKind: "task",
       },
       process.cwd(),
+      handler,
       null,
+      proposer,
+    );
+    expect(proposer).toHaveBeenCalled();
+    expect(result.interviewed).toBe(false);
+    expect(result.accepted).toBe(true);
+    expect(handler.askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("does NOT interview (and never fabricates regex questions) when no proposer is wired", async () => {
+    // Phase 2 fail-loud: an interactive turn missing a proposer logs and proceeds
+    // WITHOUT an interview — it must never fall back to keyword-generated gaps.
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "x", kind: "choice" }),
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const result = await runDiscovery(
+      "fix auth", // vague — old regex gate would have asked a scope question
+      {
+        taskType: "debug",
+        confidence: 0.6,
+        complexity: "low",
+        domain: "typescript",
+        outputStyle: null,
+        intentKind: "task",
+      },
+      process.cwd(),
+      handler,
+      null,
+      null, // no proposer
     );
     expect(result.interviewed).toBe(false);
     expect(result.accepted).toBe(true);
+    expect(handler.askQuestion).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the model's reason + recommends in the interview askcard", async () => {
+    const askQuestion = vi.fn().mockResolvedValue({ questionId: "q1", text: "OAuth", kind: "choice" });
+    const handler: DiscoveryInteractionHandler = {
+      askQuestion,
+      showAcceptance: vi.fn().mockResolvedValue("accept"),
+    };
+    const proposer = vi
+      .fn()
+      .mockResolvedValue(["Which auth method? [MODEL RECS: OAuth | API keys] [WHY: changes the whole token flow]"]);
+    await runDiscovery(
+      "add authentication",
+      {
+        taskType: "generate",
+        confidence: 0.6,
+        complexity: "low",
+        domain: null,
+        outputStyle: null,
+        intentKind: "task",
+      },
+      process.cwd(),
+      handler,
+      null,
+      proposer,
+    );
+    expect(askQuestion).toHaveBeenCalled();
+    const card = askQuestion.mock.calls[0]![0];
+    // Model's WHY drives the askcard context; recommends drive the options.
+    expect(card.context).toBe("changes the whole token flow");
+    expect(card.question).toBe("Which auth method?");
+    const labels = (card.options ?? []).map((o: { label: string }) => o.label);
+    expect(labels).toContain("OAuth");
+    expect(labels).toContain("API keys");
+    expect(card.defaultIndex).toBe(0); // first recommend = recommended default
   });
 
   it("skips all discovery when the user explicitly says don't ask (EN + VI)", async () => {
@@ -58,11 +131,12 @@ describe("runDiscovery()", () => {
     expect(handler.askQuestion).not.toHaveBeenCalled();
   });
 
-  it("interviews user on vague prompt with handler", async () => {
+  it("interviews user when the model proposes a question", async () => {
     const handler: DiscoveryInteractionHandler = {
       askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "Error disappears", kind: "choice" }),
       showAcceptance: vi.fn().mockResolvedValue("accept"),
     };
+    const proposer = vi.fn().mockResolvedValue(["What's the expected fix outcome? [MODEL RECS: Error disappears]"]);
     const result = await runDiscovery(
       "fix auth",
       {
@@ -75,6 +149,8 @@ describe("runDiscovery()", () => {
       },
       process.cwd(),
       handler,
+      null,
+      proposer,
     );
     expect(result.interviewed).toBe(true);
     expect(result.accepted).toBe(true);
@@ -101,14 +177,14 @@ describe("runDiscovery()", () => {
 
   it("sets accepted=false when user cancels", async () => {
     const handler: DiscoveryInteractionHandler = {
-      // PIL-L6 fix — debug now autofills outcome, so only the scope gap is
-      // asked. First call = scope gap, second call = acceptance card.
+      // First askQuestion = the model's interview question, second = acceptance card.
       askQuestion: vi
         .fn()
         .mockResolvedValueOnce({ questionId: "q1", text: "done", kind: "choice" })
         .mockResolvedValue({ questionId: "q-acc", text: "cancel", kind: "choice" }),
       showAcceptance: vi.fn().mockResolvedValue("cancel"),
     };
+    const proposer = vi.fn().mockResolvedValue(["What's the expected outcome? [MODEL RECS: Error disappears]"]);
     const result = await runDiscovery(
       "fix auth",
       {
@@ -121,18 +197,21 @@ describe("runDiscovery()", () => {
       },
       process.cwd(),
       handler,
+      null,
+      proposer,
     );
     expect(result.accepted).toBe(false);
   });
 
   it("does not swallow the original request into a generic outcome for a general prompt (B2)", async () => {
-    // B2 — answering the (now-skipped) generic outcome askcard used to collapse
-    // the intent to "general: Task completed", discarding the user's prompt.
-    // The scope gap may still fire; the outcome must derive from the raw text.
+    // B2 — the old generic outcome askcard collapsed intent to "general: Task
+    // completed", discarding the user's prompt. With the model proposing no
+    // questions, the outcome must derive from the raw text (no fabrication).
     const handler: DiscoveryInteractionHandler = {
       askQuestion: vi.fn().mockResolvedValue({ questionId: "q1", text: "Task completed", kind: "choice" }),
       showAcceptance: vi.fn().mockResolvedValue("accept"),
     };
+    const proposer = vi.fn().mockResolvedValue([]);
     const result = await runDiscovery(
       "make the dashboard feel less cluttered",
       {
@@ -145,6 +224,8 @@ describe("runDiscovery()", () => {
       },
       process.cwd(),
       handler,
+      null,
+      proposer,
     );
     expect(result.intentStatement).not.toBe("general: Task completed");
     expect(result.outcome).not.toBe("Task completed");

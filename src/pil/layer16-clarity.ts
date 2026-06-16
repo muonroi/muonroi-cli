@@ -1,15 +1,21 @@
+/**
+ * src/pil/layer16-clarity.ts
+ *
+ * Phase 2 (2026-06-16): `detectClarityGaps` and its keyword option-builders
+ * (`buildOutcomeOptions` / `buildScopeOptions` / `pickBest*` / recency ranking)
+ * were removed. The configured chat model now decides every clarification —
+ * its questions, options, recommended default, and reason — in
+ * `proposeModelGaps` (`discovery.ts`). There is no regex gap synthesis.
+ *
+ * What remains here is gap RENDERING + RESOLUTION (consumed by the model path):
+ *   - the "provide my own details" no-answer sentinel,
+ *   - `buildInterviewQuestion` (ClarityGap → askcard),
+ *   - `resolveGapsNonInteractive` (default-answer resolution when headless),
+ *   - `getAutofilledOutcome` / `getDefaultOutcome` (outcome-label polish).
+ */
 import type { CouncilQuestionData, CouncilQuestionOption } from "../types/index.js";
-import {
-  canInferOutcome,
-  countFileReferences,
-  hasExplicitScope,
-  hasExternalInfoScope,
-  hasImageScope,
-  hasOperationalScope,
-  hasSelfContainedComputationScope,
-  hasWholeRepoScope,
-} from "./clarity-gate.js";
-import type { ClarifiedIntent, ClarityDimension, ClarityGap, ProjectContext } from "./discovery-types.js";
+import { hasOperationalScope } from "./clarity-gate.js";
+import type { ClarifiedIntent, ClarityGap, ProjectContext } from "./discovery-types.js";
 import type { TaskType } from "./types.js";
 
 /**
@@ -28,320 +34,6 @@ export function isProvideOwnDetailsSentinel(answer: string | null | undefined): 
   if (!answer) return false;
   const norm = answer.trim().toLowerCase();
   return norm === PROVIDE_OWN_DETAILS_OPTION_EN.toLowerCase() || norm === PROVIDE_OWN_DETAILS_OPTION_VI.toLowerCase();
-}
-
-export function detectClarityGaps(
-  raw: string,
-  taskType: TaskType | null,
-  confidence: number,
-  projectContext: ProjectContext,
-): ClarityGap[] {
-  const gaps: ClarityGap[] = [];
-
-  // PIL-L6 fix — debug joins the autofill set. For "fix ci fail" the outcome
-  // is trivially "error resolved / pipeline green" and forcing an askcard
-  // there produces noise (the user already said "goal: ci green").
-  const AUTOFILL_OUTCOME_TYPES: Set<TaskType> = new Set(["analyze", "plan", "documentation", "debug"]);
-  if (!canInferOutcome(taskType, raw)) {
-    if (taskType && AUTOFILL_OUTCOME_TYPES.has(taskType)) {
-      // These task types have predictable outcomes — auto-fill without asking
-    } else if (!taskType || taskType === "general") {
-      // B2 intent-swallow fix — a `general` (or unclassified) prompt has no
-      // task-specific outcome options, so `buildOutcomeOptions` falls back to
-      // the tautological ["Task completed", "Issue resolved"]. Asking that
-      // askcard adds zero signal, and its default answer overwrites the intent
-      // → "general: Task completed", discarding the user's original request.
-      // Skip it; the outcome defaults to the raw prompt downstream
-      // (buildClarifiedIntentFromAnswers / getDefaultOutcome), preserving intent.
-    } else {
-      const outcomeOptions = buildOutcomeOptions(taskType, projectContext);
-      gaps.push({
-        dimension: "outcome",
-        description: "Cannot infer the expected outcome from the prompt",
-        suggestedQuestion: `What's the expected outcome? ${taskType === "debug" ? "(e.g., error gone, test passes, behavior fixed)" : "(e.g., feature works, file updated, test passes)"}`,
-        options: outcomeOptions,
-        defaultIndex: pickBestOutcomeIndex(taskType, outcomeOptions, raw),
-      });
-    }
-  }
-
-  // PIL-L6 fix — operational scope (CI / build / deploy / lint) is enough
-  // even without a file path. The task's target is the pipeline itself.
-  //
-  // B2-symmetric scope guard — the scope detector assumes EVERY prompt is a
-  // codebase task: any prompt lacking a file/module/operational reference gets
-  // asked "Which part of the codebase should this target?". For a general or
-  // unclassified prompt that has no codebase dimension at all (e.g. a pure
-  // chat / generation request like "Reply with one word: PONG", live session
-  // 8a87aa060c6a) this question is nonsensical, and because it is the only gap
-  // it also drags in a downstream acceptance card. Skip it for general/null —
-  // the same population the B2 outcome guard above protects. Scope then falls
-  // back to project-root in resolveGapsNonInteractive. Classified code tasks
-  // (debug/generate/refactor/…) still get the scope-narrowing askcard.
-  // Image-scope guard — an image-analysis task (e.g. "analyze diagram.png",
-  // "take a screenshot and describe it") is scoped to the IMAGE, not the
-  // codebase, so the "Which part of the codebase?" askcard is nonsensical for
-  // it. Symmetric to hasOperationalScope (pipeline-scoped). hasImageScope is
-  // deliberately narrow so it never swallows a real codebase task.
-  const scopeAppliesToCodebase = !!taskType && taskType !== "general";
-  if (
-    scopeAppliesToCodebase &&
-    countFileReferences(raw) === 0 &&
-    !hasExplicitScope(raw) &&
-    !hasOperationalScope(raw) &&
-    !hasImageScope(raw) &&
-    !hasExternalInfoScope(raw) &&
-    // Whole-repo / eval prompts ("đánh giá repo", "review the entire codebase")
-    // are already scoped to everything — asking "which part?" (and recommending
-    // a narrow subdir as default) is nonsensical. See hasWholeRepoScope.
-    !hasWholeRepoScope(raw) &&
-    // Self-contained computation ("Compute f([3,1,2]) …") supplies its operand
-    // data inline — there is no codebase to scope. See hasSelfContainedComputationScope.
-    !hasSelfContainedComputationScope(raw)
-  ) {
-    const scopeOptions = buildScopeOptions(raw, projectContext);
-    gaps.push({
-      dimension: "scope",
-      description: "No specific file or module referenced",
-      suggestedQuestion: "Which part of the codebase should this target?",
-      options: scopeOptions,
-      defaultIndex: pickBestScopeIndex(raw, scopeOptions),
-    });
-  }
-
-  const hasConstraint = /\b(\d+\s*ms|\d+\s*%|faster|slower|before|deadline|limit|max|min)\b/i.test(raw);
-  const isPerformanceTask = /\b(optimi[zs]e|performance|speed|fast|slow|latency|throughput)\b/i.test(raw);
-  if (isPerformanceTask && !hasConstraint) {
-    gaps.push({
-      dimension: "constraint",
-      description: "Performance target not specified",
-      suggestedQuestion: "Any specific performance target? (e.g., <200ms response, 50% faster)",
-      options: ["General improvement", "Specific latency target", "Reduce bundle size"],
-      defaultIndex: 0,
-    });
-  }
-
-  return gaps;
-}
-
-/**
- * Phase 5 F8 — context-aware default option for outcome askcards.
- *
- * The askcard's "Recommended" badge previously pinned to options[0]
- * regardless of prompt content. For prompts like "improve test coverage"
- * (generate options: Feature implemented / File created / Tests added),
- * defaulting to "Feature implemented" was wrong — the user explicitly
- * mentioned tests. This picks a more relevant option based on prompt
- * keywords, with a fallback to 0 when nothing matches.
- *
- * Keep this list short — overengineering breaks predictability. We only
- * encode the keyword→index pairs we've actually seen mismatch in the
- * 5-baseline + sanity sessions.
- */
-function pickBestOutcomeIndex(taskType: TaskType | null, options: string[], raw: string): number {
-  if (options.length <= 1) return 0;
-  const lower = raw.toLowerCase();
-  const has = (re: RegExp): boolean => re.test(lower);
-  const find = (substring: string): number => options.findIndex((o) => o.toLowerCase().includes(substring));
-
-  switch (taskType) {
-    case "generate": {
-      // "improve coverage", "add tests", "viết test" → "Tests added"
-      if (has(/\b(coverage|unit test|viết test|viet test|spec|jest|vitest|pytest)\b/) || has(/\btest(?:s|ing)?\b/)) {
-        const idx = find("test");
-        if (idx >= 0) return idx;
-      }
-      // "scaffold", "boilerplate", "tạo file mới" → "File created with boilerplate"
-      if (has(/\b(scaffold|boilerplate|template|skeleton)\b/) || has(/\btạo file\b|\btao file\b/)) {
-        const idx = find("file created");
-        if (idx >= 0) return idx;
-      }
-      return 0; // "Feature implemented and working"
-    }
-    case "build": {
-      // "with tests", "vitest", "test coverage" → "Tested and verified"
-      if (has(/\b(test|vitest|jest|pytest|coverage|spec)\b/) || has(/\bviết test\b|\bviet test\b/)) {
-        const idx = find("test");
-        if (idx >= 0) return idx;
-      }
-      return 0; // "Runs end-to-end"
-    }
-    case "refactor": {
-      // "performance", "speed", "faster" → "Better performance"
-      if (has(/\b(performance|speed|fast(er)?|slow|latency|throughput|optimi[zs]e)\b/)) {
-        const idx = find("performance");
-        if (idx >= 0) return idx;
-      }
-      // "test", "testable" → "Easier to test"
-      if (has(/\b(testable|easier to test|unit test)\b/)) {
-        const idx = find("test");
-        if (idx >= 0) return idx;
-      }
-      return 0; // "Code cleaner, same behavior"
-    }
-    case "debug": {
-      // "test fail", "test pass" → "Test passes"
-      if (has(/\btest(?:s|ing)? (?:fail|pass)/) || has(/\bspec fail/)) {
-        const idx = find("test passes");
-        if (idx >= 0) return idx;
-      }
-      return 0; // "Error disappears"
-    }
-    case "documentation": {
-      if (has(/\b(readme)\b/)) {
-        const idx = find("readme");
-        if (idx >= 0) return idx;
-      }
-      if (has(/\b(api docs|api documentation|openapi|swagger)\b/)) {
-        const idx = find("api docs");
-        if (idx >= 0) return idx;
-      }
-      return 0;
-    }
-    case "plan": {
-      if (has(/\b(trade-?offs?|alternative|compare)\b/)) {
-        const idx = find("trade");
-        if (idx >= 0) return idx;
-      }
-      if (has(/\b(step.?by.?step|phase|roadmap)\b/)) {
-        const idx = find("step-by-step");
-        if (idx >= 0) return idx;
-      }
-      return 0;
-    }
-    case "analyze": {
-      if (has(/\b(root cause|why|tại sao|tai sao|crash|stack trace)\b/)) {
-        const idx = find("root cause");
-        if (idx >= 0) return idx;
-      }
-      if (has(/\b(recommend|suggest|đề xuất|de xuat)\b/)) {
-        const idx = find("recommendations");
-        if (idx >= 0) return idx;
-      }
-      return 0;
-    }
-    default:
-      return 0;
-  }
-}
-
-function buildOutcomeOptions(taskType: TaskType | null, ctx: ProjectContext): string[] {
-  switch (taskType) {
-    case "debug":
-      return ["Error disappears", "Test passes", "Feature works correctly"];
-    case "refactor":
-      return ["Code cleaner, same behavior", "Better performance", "Easier to test"];
-    case "generate":
-      return ["Feature implemented and working", "File created with boilerplate", "Tests added"];
-    case "build":
-      return ["Runs end-to-end", "Project scaffolded and builds", "Tested and verified"];
-    case "documentation":
-      return ["Docs updated", "README reflects current state", "API docs generated"];
-    case "plan":
-      return ["Architecture decided", "Step-by-step plan", "Trade-offs documented"];
-    case "analyze":
-      return ["Root cause identified", "Report generated", "Recommendations listed"];
-    default:
-      return ["Task completed", "Issue resolved"];
-  }
-}
-
-/**
- * Pick the "Recommended" default index for the scope askcard.
- *
- * Bug fixed (live obs 2026-06-04, deepseek session): the scope gap hardcoded
- * defaultIndex 0, but buildScopeOptions lists recency-ranked (NOT prompt-matched)
- * bounded contexts first when nothing matched — so the card recommended an
- * arbitrary subdir (e.g. "src/cli") for a repo-wide prompt while "Entire project"
- * was demoted to last. Only recommend a specific bounded context when the prompt
- * literally names it (same word-overlap test buildScopeOptions uses); otherwise
- * recommend "Entire project".
- */
-export function pickBestScopeIndex(raw: string, options: string[]): number {
-  const entireIdx = options.findIndex((o) => /entire project/i.test(o));
-  const fallback = entireIdx >= 0 ? entireIdx : Math.max(0, options.length - 1);
-  const words = raw
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
-  for (let i = 0; i < options.length; i++) {
-    const opt = options[i] ?? "";
-    if (/entire project/i.test(opt)) continue;
-    const nameMatch = opt.match(/\(([^)]+)\)\s*$/);
-    const name = (nameMatch?.[1] ?? opt).toLowerCase();
-    if (words.some((w) => name.includes(w) || w.includes(name))) return i;
-  }
-  return fallback;
-}
-
-function buildScopeOptions(raw: string, ctx: ProjectContext): string[] {
-  const words = raw
-    .toLowerCase()
-    .split(/\s+/)
-    .filter((w) => w.length > 2);
-  const matching = ctx.boundedContexts.filter((bc) => {
-    const name = bc.name.toLowerCase();
-    return words.some((w) => name.includes(w) || w.includes(name));
-  });
-  const options = matching.map((bc) => `${bc.path} (${bc.name})`);
-  if (options.length === 0 && ctx.boundedContexts.length > 0) {
-    // Phase 5 F4 — when no keyword matches a module name, the previous
-    // fallback returned the first 3 alphabetically (which on muonroi-cli
-    // surfaced `agent-harness`, `billing`, `chat` — three OLD scaffolding
-    // folders that almost never match a fresh prompt). Rank by recency
-    // signal instead: most recently modified module dir comes first.
-    const ranked = rankModulesByRecency(ctx.boundedContexts, ctx.cwd);
-    options.push(...ranked.slice(0, 3).map((bc) => `${bc.path} (${bc.name})`));
-  }
-  options.push("Entire project");
-  return options.slice(0, 4);
-}
-
-/**
- * F4 — rank bounded contexts by recency-of-modification of any tracked file
- * inside. Falls back to alphabetical order when stat() throws for the dir.
- * The 4-level depth cap + 50-entry-per-level cap keeps the walk under 200ms
- * even on huge monorepos.
- */
-function rankModulesByRecency(
-  contexts: ReadonlyArray<{ path: string; name: string }>,
-  cwd: string,
-): Array<{ path: string; name: string }> {
-  const fs = require("node:fs") as typeof import("node:fs");
-  const path = require("node:path") as typeof import("node:path");
-  const scored = contexts.map((bc) => {
-    const dirPath = path.join(cwd, bc.path);
-    let maxMtime = 0;
-    try {
-      // walk up to 4 levels deep, cap entries per level
-      const walk = (dir: string, depth: number): void => {
-        if (depth > 4) return;
-        let entries: string[] = [];
-        try {
-          entries = fs.readdirSync(dir).slice(0, 50);
-        } catch {
-          return;
-        }
-        for (const e of entries) {
-          if (e.startsWith(".") || e === "node_modules" || e === "dist") continue;
-          try {
-            const full = path.join(dir, e);
-            const st = fs.statSync(full);
-            if (st.mtimeMs > maxMtime) maxMtime = st.mtimeMs;
-            if (st.isDirectory()) walk(full, depth + 1);
-          } catch {
-            /* skip unreadable entries */
-          }
-        }
-      };
-      walk(dirPath, 0);
-    } catch {
-      /* fall back to mtime=0 — keeps the entry at the bottom of the ranked list */
-    }
-    return { bc, mtime: maxMtime };
-  });
-  scored.sort((a, b) => b.mtime - a.mtime);
-  return scored.map((s) => s.bc);
 }
 
 export function buildInterviewQuestion(gap: ClarityGap, questionId: string): CouncilQuestionData {
@@ -428,7 +120,7 @@ export function getAutofilledOutcome(taskType: TaskType | null, raw?: string): s
     // Prevents generic "Local path...", "In prompts/ directory...", "Complete the task..." in [Discovery]
     return "Native self-assessment of the CLI with specific, actionable code fixes proposed and verified";
   }
-  // PIL-L6 fix — operational debug tasks have a stronger default outcome
+  // Operational debug tasks (CI/build/deploy) have a stronger default outcome.
   if (taskType === "debug" && hasOperationalScope(raw)) {
     return "Pipeline green, all checks passing";
   }
