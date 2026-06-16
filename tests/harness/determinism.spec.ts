@@ -66,12 +66,28 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
   ];
   if (useFakeClock) args.push("--agent-fake-clock");
 
-  const { proc, inWrite, outRead, cleanup } = await spawnAgentTui(args);
+  const { proc, inWrite, outRead, cleanup } = await spawnAgentTui(args, {
+    // Force EE unreachable so the PIL Layer-1 classifier deterministically falls
+    // back to the LLM mock instead of racing a real /api/classify round-trip. A
+    // reachable EE makes the classifier fire (or not) on network timing, which
+    // changes whether the assistant reply (msg-1) renders at all — the run-to-run
+    // divergence this test catches must come from the UI, not EE flakiness.
+    spawnOpts: {
+      env: { ...process.env, MUONROI_EE_BASE_URL: "http://127.0.0.1:1" } as Record<string, string>,
+    },
+  });
 
   return new Promise<FrameTrace>((resolve, reject) => {
     const frames: LiveFrame[] = [];
-    let idleCount = 0;
+    // React-mount guard: an idle can fire on the empty seq=0 frame BEFORE React
+    // mounts (POSIX/load race, documented in the model-picker beforeAll). Driving
+    // "hello"+Enter on that premature idle sends input to an unmounted app where
+    // the keyboard handler isn't wired yet → keystrokes dropped → no msg frames →
+    // empty trace → cross-run mismatch. We only treat an idle as "boot complete"
+    // once a live frame containing the composer has been seen (= React mounted).
+    let mountedSeen = false;
     let inputSent = false;
+    let awaitingReply = false;
     let settled = false;
 
     function settle() {
@@ -104,40 +120,62 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
       resolve([normalized]);
     }
 
-    // Safety timeout — settle with whatever frames we have. Reject would
-    // mark the whole run as flaky; the determinism check then validates
-    // whether all runs converge to the same (potentially empty) state.
-    const safetyTimer = setTimeout(() => {
+    // Boot under full-suite contention is the dominant variable: cold agent-mode
+    // boot has been measured at 25-46s when the box is loaded (see harness
+    // flakiness notes). An 8s flat safety timer fired BEFORE idle#1 on a slow
+    // boot → input was never sent → empty trace → cross-run mismatch. Split the
+    // budget: a generous BOOT window until idle#1, then a short REPLY window for
+    // the assistant turn. The timer is reset at idle#1 so a late boot does not
+    // eat into the reply budget (which would risk capturing a mid-stream
+    // partial). settle() (not reject) keeps the determinism check authoritative.
+    const BOOT_BUDGET_MS = 60_000;
+    const REPLY_BUDGET_MS = 15_000;
+    let safetyTimer = setTimeout(() => {
       if (!settled) settle();
-    }, 8_000);
+    }, BOOT_BUDGET_MS);
     void reject; // safety timer no longer rejects
 
     const splitter = createLineSplitter((line) => {
       try {
         const msg = JSON.parse(line) as Record<string, unknown>;
         if (msg["mode"] === "live") {
+          // React has mounted once a frame carries the composer node. Use that
+          // as the mount signal before honoring a boot-complete idle.
+          if (!mountedSeen && line.includes('"id":"composer"')) {
+            mountedSeen = true;
+          }
           if (inputSent) {
             frames.push(msg as unknown as LiveFrame);
           }
         } else if (msg["t"] === "idle") {
-          idleCount += 1;
-          if (idleCount === 1) {
-            // First idle = boot steady state. Drive the fixed interaction.
+          if (!inputSent) {
+            // Ignore any idle that fires before React has mounted — it is the
+            // premature seq=0 idle, and driving input now would be dropped.
+            if (!mountedSeen) return;
+            // Boot complete AND mounted = drive the fixed interaction. Hand the
+            // safety budget over to the (much shorter) reply window — boot is
+            // done, so the remaining wait is just the mock assistant turn.
+            clearTimeout(safetyTimer);
             inWrite.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
             inWrite.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
             inputSent = true;
-          } else if (idleCount === 2) {
-            // Second idle = the assistant turn has FULLY completed and the loop
-            // is quiet again (input markActivity in Phase 8 suppresses a spurious
-            // idle between Enter and the reply). This is the only deterministic
-            // settle point: anchoring on idle — a real lifecycle boundary —
-            // instead of "200ms after msg-1's id first appears" guarantees every
-            // captured trailing frame is POST-completion (msg-1 fully rendered),
-            // never a mid-stream partial. The short grace lets the final
-            // post-process tick flush; any frames within it are
-            // steady-state-identical, so capturing the last is reproducible
-            // across runs. Falls back to the safety timer if idle #2 never comes
-            // (e.g. mock-model never replied).
+            awaitingReply = true;
+            safetyTimer = setTimeout(() => {
+              if (!settled) settle();
+            }, REPLY_BUDGET_MS);
+          } else if (awaitingReply) {
+            // First idle AFTER input = the assistant turn has FULLY completed and
+            // the loop is quiet again (input markActivity in Phase 8 suppresses a
+            // spurious idle between Enter and the reply). This is the only
+            // deterministic settle point: anchoring on idle — a real lifecycle
+            // boundary — instead of "200ms after msg-1's id first appears"
+            // guarantees every captured trailing frame is POST-completion (msg-1
+            // fully rendered), never a mid-stream partial. The short grace lets
+            // the final post-process tick flush; any frames within it are
+            // steady-state-identical, so capturing the last is reproducible across
+            // runs. Falls back to the safety timer if this idle never comes (e.g.
+            // mock-model never replied).
+            awaitingReply = false;
             clearTimeout(safetyTimer);
             setTimeout(settle, 250);
           }
