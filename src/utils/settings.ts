@@ -254,6 +254,8 @@ export interface UserSettings {
   councilCostAware?: boolean;
   /** Set true after the user has been prompted (or skipped) the web-research onboarding. */
   webResearchPrompted?: boolean;
+  /** Set true after the user has been prompted (or skipped) the first-run Experience Engine setup. */
+  eeSetupPrompted?: boolean;
   /**
    * Unix ms timestamp of the last npm-registry update check. Used to throttle
    * checkForUpdate to once per day so the CLI never spams the registry on
