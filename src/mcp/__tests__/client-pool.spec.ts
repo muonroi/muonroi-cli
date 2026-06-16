@@ -17,6 +17,7 @@ import {
   __resetMcpClientPoolForTests,
   acquireMcpTools,
   closeAllMcpClients,
+  warmMcpClients,
 } from "../client-pool.js";
 
 const srv = (id: string) =>
@@ -93,6 +94,26 @@ describe("acquireMcpTools — cross-turn client pool", () => {
       { id: "fs", label: "fs", enabled: true, transport: "stdio", command: "b", args: [] } as never,
     ]);
     expect(connectOneServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("warmMcpClients pre-connects so the first real turn reuses (no extra spawn)", async () => {
+    let resolveConnect: () => void = () => {};
+    connectOneServer.mockImplementation(
+      (s: { id: string }) =>
+        new Promise((res) => {
+          resolveConnect = () => res(connected(s.id));
+        }),
+    );
+    // Warm starts the connect in the background.
+    warmMcpClients([srv("fs")]);
+    expect(connectOneServer).toHaveBeenCalledTimes(1);
+    expect(__mcpClientPoolSize()).toBe(1);
+    // Let the warm connect finish, then a real turn reuses it.
+    resolveConnect();
+    await new Promise((r) => setTimeout(r, 0));
+    const b = await acquireMcpTools([srv("fs")]);
+    expect(Object.keys(b.tools)).toContain("mcp_fs__ping");
+    expect(connectOneServer).toHaveBeenCalledTimes(1); // warmed, not re-spawned
   });
 
   it("closeAllMcpClients tears down every pooled client", async () => {

@@ -204,6 +204,25 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
   };
 }
 
+/**
+ * Fire-and-forget pre-connect: start connecting `servers` in the background so
+ * they are pooled BEFORE the first turn needs them. npx stdio servers
+ * (filesystem/memory) cold-start >2.5s and would otherwise miss the first turn's
+ * build deadline — warming them at startup means they're usually ready by the
+ * first prompt. No deadline, no return; per-turn acquireMcpTools reuses whatever
+ * has connected. Idempotent (cached entries are reused); a failed connect is
+ * evicted by getOrConnect so a real turn retries.
+ */
+export function warmMcpClients(servers: McpServerConfig[]): void {
+  for (const s of servers) {
+    if (!s.enabled) continue;
+    if (!validateMcpServerConfig(s).ok) continue;
+    void getOrConnect(s).catch(() => {
+      /* warm is best-effort — the eviction in getOrConnect lets a real turn retry */
+    });
+  }
+}
+
 /** Tear down every pooled client. Call on orchestrator/process shutdown. */
 export async function closeAllMcpClients(): Promise<void> {
   const entries = [...pool.values()];

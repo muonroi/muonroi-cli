@@ -395,6 +395,26 @@ export class Agent {
     this.pendingCalls = options.pendingCalls ?? null;
     this.permissionMode = options.permissionMode ?? "safe";
     ensureDefaultMcpServers();
+    // Pre-warm the always-on MCP servers in the BACKGROUND so they're pooled
+    // before the first user turn. npx stdio servers (filesystem/memory)
+    // cold-start >2.5s and would otherwise miss the first turn's build deadline
+    // (shown as "MCP unavailable: ... still connecting — available next turn").
+    // Empty-message smart-filter keeps only the baseline (drops browser/web
+    // categories) so we don't speculatively spawn playwright/tavily. Fire-and-
+    // forget; the pool handles errors and the per-turn acquire still connects on
+    // demand if this is skipped.
+    void (async () => {
+      try {
+        const [{ warmMcpClients }, { loadMcpServers }, { filterMcpServersByMessage }] = await Promise.all([
+          import("../mcp/client-pool.js"),
+          import("../utils/settings.js"),
+          import("../mcp/smart-filter.js"),
+        ]);
+        warmMcpClients(filterMcpServersByMessage(loadMcpServers(), ""));
+      } catch (err) {
+        console.error(`[orchestrator] MCP pre-warm skipped: ${(err as Error)?.message}`);
+      }
+    })();
 
     if (options.persistSession !== false) {
       this.sessionStore = new SessionStore(this.bash.getCwd());
