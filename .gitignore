@@ -56,3 +56,6 @@ package-lock.json
 council.json
 .brain-*.tmp
 
+
+# Visual Studio workspace state (IDE-local, never versioned)
+.vs/
