@@ -21,6 +21,7 @@ import {
   shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
+  shouldPreWarnCompaction,
 } from "./scope-reminder.js";
 
 describe("cadenceForSize", () => {
@@ -228,5 +229,31 @@ describe("attachReminderToMessages", () => {
     const messages = [{ role: "user", content: "hi" }];
     const out = attachReminderToMessages(messages, "");
     expect(out).toEqual(messages);
+  });
+});
+
+describe("shouldPreWarnCompaction (regression: session 2b7a10219499 dead pre-warning)", () => {
+  const THRESHOLD = 200_000; // MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS default
+
+  it("fires when prompt chars reach >=78% of the threshold (approaching compaction)", () => {
+    expect(shouldPreWarnCompaction(Math.floor(THRESHOLD * 0.78), THRESHOLD)).toBe(true);
+    expect(shouldPreWarnCompaction(190_000, THRESHOLD)).toBe(true);
+  });
+
+  it("does NOT fire while comfortably below the threshold", () => {
+    expect(shouldPreWarnCompaction(100_000, THRESHOLD)).toBe(false);
+    expect(shouldPreWarnCompaction(0, THRESHOLD)).toBe(false);
+  });
+
+  it("guards against the original bug: a message COUNT can never trip a char threshold", () => {
+    // The dead wiring compared stripped.length (a message count, ~tens) to the
+    // char-scaled threshold. With chars it crosses; with a count it never does.
+    const messageCount = 60; // plausible long-session message count
+    expect(shouldPreWarnCompaction(messageCount, THRESHOLD)).toBe(false);
+    expect(shouldPreWarnCompaction(170_000, THRESHOLD)).toBe(true);
+  });
+
+  it("is inert for a zero/negative threshold (no compaction configured)", () => {
+    expect(shouldPreWarnCompaction(999_999, 0)).toBe(false);
   });
 });

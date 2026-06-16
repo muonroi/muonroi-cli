@@ -185,11 +185,12 @@ import {
   shouldInjectCeilingCrossing,
   shouldInjectReminder,
   shouldInjectSoftWarn,
+  shouldPreWarnCompaction,
 } from "./scope-reminder.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { compactSubAgentMessages } from "./subagent-compactor.js";
+import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -1835,9 +1836,14 @@ export class MessageProcessor {
               // Pre-compaction visibility: give the agent one step of notice
               // before B4 actually rewrites history into stubs. This is the
               // advance warning that was missing — agent can now decide to
-              // summarize, finish, or request preservation.
-              const _preCompactWarnAt = Math.floor(topLevelCompactThreshold * 0.78);
-              if (stripped.length > _preCompactWarnAt && compacted === stripped) {
+              // summarize, finish, or request preservation. Fires when we did
+              // NOT compact this step (compacted === stripped, restored by the
+              // compactSubAgentMessages no-op ref contract) AND the prompt is
+              // approaching the threshold. Must compare CHARS (messages +
+              // envelope), not stripped.length (a message count that never
+              // exceeds a char-scaled threshold) — session 2b7a10219499.
+              const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
+              if (compacted === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
                 const _cp = buildCheckpointReminder(sn, true);
                 const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible.]`;
                 return { messages: attachReminderToMessages(stripped, _pre) };

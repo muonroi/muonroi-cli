@@ -73,6 +73,26 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     expect(out[3]).toBe(msgs[3]);
   });
 
+  it("returns the SAME array reference on a no-op below threshold (compacted===input contract)", () => {
+    // Callers (message-processor B4 prepareStep:1840/1908/1914) detect "did NOT
+    // compact this step" via `compacted === stripped`. The docstring promises the
+    // original ref on a no-op; returning a fresh slice silently broke that —
+    // making the pre-compaction warning dead and the compaction note fire every
+    // step. Lock the identity contract.
+    const msgs = buildHistory(2, 5); // below threshold
+    expect(compactSubAgentMessages(msgs)).toBe(msgs);
+  });
+
+  it("returns a NEW array when compaction actually elides (compacted!==input)", () => {
+    const msgs = buildHistory(10, 10); // ~100kb > threshold
+    for (const m of msgs) {
+      if (m.role === "tool" && Array.isArray(m.content)) {
+        (m.content as any)[0].toolName = "other_tool"; // force low-value so it elides
+      }
+    }
+    expect(compactSubAgentMessages(msgs)).not.toBe(msgs);
+  });
+
   it("compacts when cumulative chars exceed threshold", () => {
     const msgs = buildHistory(10, 10); // ~100kb of tool output
     // Neutralize to test pure size-based elision (high-value keep would reduce savings).

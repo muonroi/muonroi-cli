@@ -228,3 +228,19 @@ export function buildCheckpointReminder(iteration: number, hasEECheckpoint: bool
   if (base.length <= 220) return base;
   return base.slice(0, 220);
 }
+
+/**
+ * Pre-compaction "advance warning" gate. Fires when the prompt is approaching
+ * (default ≥78% of) the compaction threshold but compaction has NOT yet run this
+ * step — giving the agent one step to PRESERVE / finish before B3/B4 rewrites
+ * older tool results into stubs.
+ *
+ * `promptChars` MUST be the same quantity the compactor thresholds on (cumulative
+ * message chars + envelope chars), NOT the message COUNT. The original B4 wiring
+ * compared `stripped.length` (a message count, ~tens) against a char-scaled
+ * threshold (~156000), so the warning could never fire — session 2b7a10219499.
+ */
+export function shouldPreWarnCompaction(promptChars: number, thresholdChars: number, ratio = 0.78): boolean {
+  if (thresholdChars <= 0 || promptChars <= 0) return false;
+  return promptChars >= Math.floor(thresholdChars * ratio);
+}
