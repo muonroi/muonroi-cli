@@ -113,18 +113,36 @@ export const SUBAGENT_COMPACT_DEFAULT_KEEP_LAST = 3;
 const DEFAULT_OUTPUT_PREVIEW_CHARS = 200;
 const DEFAULT_LABEL = "sub-agent";
 
-/** Tools whose full outputs are high-value for anti-mù (idea 1). Keep verbatim even if older than keepLast. */
-export const IMPORTANT_TOOL_NAMES = ["read_file", "grep", "lsp", "bash"] as const;
+/** Tools whose full outputs are high-value for anti-mù (idea 1). Keep verbatim even if older than keepLast.
+ * Extended for meta self-eval: ee_query / usage_forensics / selfverify_* are the exact artifacts
+ * the native contract + native-capabilities tell the agent to rely on for "task finished?" and
+ * rehydrate during long meta conversations about CLI/PIL/compaction/EE. */
+export const IMPORTANT_TOOL_NAMES = [
+  "read_file",
+  "grep",
+  "lsp",
+  "bash",
+  "ee_query",
+  "usage_forensics",
+  "selfverify_start",
+  "selfverify_result",
+  "selfverify_status",
+] as const;
 
 /**
  * Heuristic: keep full (no stub) for high-signal tool results.
  * Signals: allowlist tool + (error/todo/plan/keyfile/large output or explicit keep list).
  * Brief inline per GSD-quick + evidence-first.
  */
-export function isHighValueToolResult(toolName: string, preview: string, explicitKeepIds?: Set<string>, toolCallId?: string): boolean {
+export function isHighValueToolResult(
+  toolName: string,
+  preview: string,
+  explicitKeepIds?: Set<string>,
+  toolCallId?: string,
+): boolean {
   if (explicitKeepIds && toolCallId && explicitKeepIds.has(toolCallId)) return true;
   const name = (toolName || "").toLowerCase();
-  
+
   // Always preserve terminal response tools — this is the agent's own delivered
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
@@ -334,7 +352,11 @@ function rewriteOlderToolMessage(
     const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
     // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
     if (persistArtifact && fullLen > 200) {
-      try { persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor"); } catch { /* fail-open */ }
+      try {
+        persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor");
+      } catch {
+        /* fail-open */
+      }
     }
     return {
       type: "tool-result",
