@@ -9,7 +9,7 @@ import type {
   ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
-import { isMetaAnalysisPrompt } from "./layer6-output.js";
+import { isImplementationIntent, isMetaAnalysisPrompt, isQuestionLike } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
 import {
   buildInterviewQuestion,
@@ -83,6 +83,15 @@ export async function runDiscovery(
   // thẳng"). Honour it: skip the entire interview + acceptance ceremony. Placed
   // before gap detection and the model proposer so no question card is generated.
   if (detectNoClarifySignal(raw)) return baseResult();
+
+  // Pure-question guard: a question's deliverable is an ANSWER, not a code
+  // change. Running the clarity interview on one fabricates a build outcome —
+  // live repro session f6f7881a5fae: the yes/no question "dùng được mcp
+  // muonroi-docs không" became Intent "A subcommand/script in muonroi-cli for
+  // muonroi-docs", which then drove the implement/verify scaffold and a 40-call
+  // code hunt. Skip discovery entirely so no [Discovery] build-intent prefix is
+  // injected. Mirrors the `informational` gate in layer4-gsd (same predicates).
+  if (isQuestionLike(raw) && !isImplementationIntent(raw)) return baseResult();
 
   // Session-continuation guard: when the user is on turn >= 2 of an ongoing
   // session AND the new prompt looks like a continuation (short, modal verb

@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { applyPilSuffix, getResponseToolSet, layer6Output } from "../layer6-output.js";
+import {
+  applyPilSuffix,
+  getResponseToolSet,
+  isImplementationIntent,
+  isQuestionLike,
+  layer6Output,
+} from "../layer6-output.js";
 import type { OutputStyle, PipelineContext, TaskType } from "../types.js";
 
 // Mock bridge for PIL-03 classifyViaBrain tests
@@ -420,5 +426,38 @@ describe("layer6Output", () => {
     const ctx = makeCtx("generate");
     const result = await layer6Output(ctx);
     expect(result.enriched).toBe(ctx.enriched);
+  });
+});
+
+describe("isQuestionLike — Vietnamese yes/no question frames (regression: session f6f7881a5fae)", () => {
+  it("detects the live miss: 'check ... dùng được mcp ... không nhé'", () => {
+    // The exact prompt that was mis-routed to the implement/verify scaffold.
+    expect(isQuestionLike("bạn check xem dùng được mcp muonroi-docs không nhé")).toBe(true);
+    // It is NOT an implementation intent, so layer4-gsd's informational gate fires.
+    expect(isImplementationIntent("bạn check xem dùng được mcp muonroi-docs không nhé")).toBe(false);
+  });
+
+  it("detects common VI yes/no tails", () => {
+    expect(isQuestionLike("dùng được không")).toBe(true);
+    expect(isQuestionLike("cái này chạy được không vậy")).toBe(true);
+    expect(isQuestionLike("đúng không")).toBe(true);
+    expect(isQuestionLike("phải không nhỉ")).toBe(true);
+    expect(isQuestionLike("test đã pass chưa")).toBe(true);
+    expect(isQuestionLike("xong chưa ạ")).toBe(true);
+    expect(isQuestionLike("có chạy được không?")).toBe(true);
+  });
+
+  it("does NOT treat a mid-sentence negation as a question", () => {
+    // "không là hỏng" = "or it breaks" — 'không' is not the clause-final particle.
+    expect(isQuestionLike("đừng commit file .env không là lộ key")).toBe(false);
+    // Plain imperative with a 'nhé' softener (no 'không'/'chưa' tail) stays a task.
+    expect(isQuestionLike("sửa giúp tôi cái này nhé")).toBe(false);
+    expect(isQuestionLike("triển khai tính năng login")).toBe(false);
+  });
+
+  it("still detects the pre-existing EN/VI question shapes", () => {
+    expect(isQuestionLike("why does the build fail?")).toBe(true);
+    expect(isQuestionLike("tại sao build lỗi")).toBe(true);
+    expect(isQuestionLike("explain the pipeline")).toBe(true);
   });
 });
