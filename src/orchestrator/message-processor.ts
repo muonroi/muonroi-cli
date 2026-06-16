@@ -51,6 +51,7 @@
 //   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
 
 import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
@@ -1802,6 +1803,10 @@ export class MessageProcessor {
               const _cwd = process.cwd();
               const _sess: string | undefined = undefined; // best-effort; EE artifact still indexable by content + meta.toolCallId
               const persistArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
+                // Local-first: record the FULL output in-process so ee_query can
+                // rehydrate it even if EE is down (the EE extract below caps at 8k
+                // and needs the network; the cache keeps up to 200k, no network).
+                recordArtifact(toolCallId, toolName, fullContent);
                 try {
                   getDefaultEEClient()
                     .extract(

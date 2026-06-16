@@ -10,7 +10,8 @@
  */
 
 import os from "node:os";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { __resetArtifactCacheForTests, recordArtifact } from "../ee/artifact-cache.js";
 import { BashTool } from "./bash.js";
 import { createBuiltinTools, isToolArtifactQuery } from "./registry.js";
 
@@ -53,5 +54,25 @@ describe("isToolArtifactQuery — ee_query intent routing", () => {
     expect(isToolArtifactQuery("what is the user id=field convention")).toBe(false);
     // The artifact phrase without an id= is also not an exact lookup.
     expect(isToolArtifactQuery("tool-artifact storage design")).toBe(false);
+  });
+});
+
+describe("ee_query — anti-mù rehydrate (local-first, durable when EE is down)", () => {
+  afterEach(() => __resetArtifactCacheForTests());
+
+  it("rehydrates a tool-artifact from the in-session cache with NO EE/network call", async () => {
+    // Simulates: the compactor elided this output earlier (recordArtifact), EE is
+    // now down. The agent's ee_query("tool-artifact id=X") must still return the
+    // full content from the local cache rather than an [ee_unavailable] note.
+    recordArtifact("call_42", "read_file", "FULL ELIDED CONTENT — line A\nline B\nline C");
+    const tools = createBuiltinTools(new BashTool(os.tmpdir()), "agent");
+    const t = tools.ee_query as ToolWithExecute;
+
+    const out = String(await t.execute?.({ query: "tool-artifact id=call_42" }));
+
+    expect(out).toContain("rehydrated from in-session cache");
+    expect(out).toContain("tool=read_file");
+    expect(out).toContain("FULL ELIDED CONTENT");
+    expect(out).not.toMatch(/ee_unavailable/);
   });
 });
