@@ -7,6 +7,9 @@ vi.mock("../../router/classifier/index.js", () => ({
 
 vi.mock("../config.js", () => ({
   isUnifiedPilEnabled: vi.fn(() => false),
+  // OFF here so these cascade tests exercise the regex passes (the model-first
+  // gate is covered in src/pil/layer1-intent.test.ts).
+  isLlmFirstClassifyEnabled: vi.fn(() => false),
 }));
 
 vi.mock("../../ee/bridge.js", () => ({

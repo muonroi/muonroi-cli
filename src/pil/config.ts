@@ -10,6 +10,18 @@ export function isUnifiedPilEnabled(): boolean {
   return false;
 }
 
+/**
+ * MUONROI_LLM_FIRST_CLASSIFY: model-first Layer-1 classification. When enabled
+ * (default), the configured model classifies taskType/intentKind/style at the
+ * top of the turn and the brittle keyword-regex cascade becomes the OFFLINE
+ * fallback (used only when the model call fails / is not wired). Set to "0" to
+ * revert to the regex-first cascade. Requires opts.llmFallback to be wired
+ * (the orchestrator does this on the main path); without it, the cascade runs.
+ */
+export function isLlmFirstClassifyEnabled(): boolean {
+  return process.env.MUONROI_LLM_FIRST_CLASSIFY !== "0";
+}
+
 export function isDiscoveryEnabled(): boolean {
   return process.env.MUONROI_PIL_DISCOVERY !== "0";
 }

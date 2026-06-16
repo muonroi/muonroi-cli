@@ -12,10 +12,14 @@ vi.mock("../ee/bridge.js", () => ({
 
 vi.mock("./config.js", () => ({
   isUnifiedPilEnabled: vi.fn(() => false),
+  // Default OFF so the existing cascade tests below exercise the regex passes.
+  // The model-first gate has its own describe block that flips this to true.
+  isLlmFirstClassifyEnabled: vi.fn(() => false),
 }));
 
 import { classifyViaBrain } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
+import { isLlmFirstClassifyEnabled } from "./config.js";
 import {
   hasActionableToolIntent,
   isGreenfieldBuildTask,
@@ -27,6 +31,7 @@ import type { PipelineContext } from "./types";
 
 const mockedClassify = vi.mocked(classify);
 const mockedClassifyViaBrain = vi.mocked(classifyViaBrain);
+const mockedLlmFirst = vi.mocked(isLlmFirstClassifyEnabled);
 
 function makeCtx(raw: string): PipelineContext {
   return {
@@ -647,5 +652,75 @@ describe("Pass 2.6 — social pleasantries route to chitchat (drop the tool-sche
       }),
     });
     expect(result.intentKind).toBe("task");
+  });
+});
+
+describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () => {
+  beforeEach(() => {
+    mockedLlmFirst.mockReturnValue(true);
+    // Make the regex cascade obviously WRONG so passing tests prove the model won.
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:create-file", confidence: 0.9 });
+  });
+
+  it("uses the model's verdict and never runs the regex classifier", async () => {
+    const result = await layer1Intent(makeCtx("bạn thử call tool setup_guide xem được không"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+      }),
+    });
+    expect(result.taskType).toBe("general"); // NOT the regex 'create-file' → generate
+    expect(result.intentKind).toBe("task");
+    expect(result._intentTrace?.pass1Reason).toBe("llm-first");
+    expect(mockedClassify).not.toHaveBeenCalled();
+  });
+
+  it("marks chitchat from the model for a pure greeting", async () => {
+    const result = await layer1Intent(makeCtx("cảm ơn bạn nhé"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "chitchat" as const,
+      }),
+    });
+    expect(result.intentKind).toBe("chitchat");
+  });
+
+  it("safety net: an actionable command never routes to chitchat even if the model says chat", async () => {
+    const result = await layer1Intent(makeCtx("run the build: npm run build"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "chitchat" as const,
+      }),
+    });
+    expect(result.intentKind).toBe("task");
+  });
+
+  it("falls back to the regex cascade when the model call returns null (offline)", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:debug", confidence: 0.85 });
+    const result = await layer1Intent(makeCtx("fix the failing build"), {
+      llmFallback: async () => null,
+    });
+    expect(mockedClassify).toHaveBeenCalled();
+    expect(result.taskType).toBe("debug");
+  });
+
+  it("falls back to the cascade when the flag is OFF even with llmFallback wired", async () => {
+    mockedLlmFirst.mockReturnValue(false);
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:debug", confidence: 0.85 });
+    const llm = vi.fn(async () => ({
+      taskType: "general" as const,
+      outputStyle: null,
+      confidence: 0.9,
+      intentKind: "task" as const,
+    }));
+    const result = await layer1Intent(makeCtx("fix the failing build"), { llmFallback: llm });
+    expect(llm).not.toHaveBeenCalled();
+    expect(result.taskType).toBe("debug");
   });
 });
