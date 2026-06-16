@@ -12,7 +12,7 @@
 
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { isUnifiedPilEnabled } from "./config.js";
+import { isLlmFirstClassifyEnabled, isUnifiedPilEnabled } from "./config.js";
 import type { LlmClassifyFn } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -654,6 +654,84 @@ export function isSocialPleasantry(raw: string): boolean {
 
 export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {}): Promise<PipelineContext> {
   try {
+    // Pass −1 — MODEL-FIRST classification (MUONROI_LLM_FIRST_CLASSIFY, default ON).
+    //
+    // The configured model classifies taskType/intentKind/style at the very top
+    // of the turn; the keyword-regex cascade below becomes the OFFLINE fallback,
+    // used only when the model is not wired (opts.llmFallback absent) or its call
+    // fails. This is the structural fix for "classifying tasks via keyword regex
+    // misses billions of natural-language cases" — regex no longer DECIDES intent,
+    // it only catches the model-offline case. The EE brain still enriches
+    // downstream (layer3 retrieval) as before. Trivial turns ("ok", greetings)
+    // also go through the model so chitchat is a semantic decision, not a regex
+    // whitelist; the model returns intentKind="chat" for pure pleasantries.
+    if (isLlmFirstClassifyEnabled() && opts.llmFallback) {
+      const llmRes = await opts.llmFallback(ctx.raw).catch((err) => {
+        console.error(`[pil.layer1] model-first classify failed: ${(err as Error)?.message}`);
+        return null;
+      });
+      if (llmRes) {
+        let intentKind: "task" | "chitchat" = llmRes.intentKind;
+        // Safety net (never weakens the model): an explicit command/tool-exec
+        // request must never be chitchat — chitchat drops the whole toolset and
+        // breaks the turn. Only ever upgrades chitchat → task.
+        if (intentKind === "chitchat" && hasActionableToolIntent(ctx.raw)) intentKind = "task";
+        const outputStyle = llmRes.outputStyle ?? detectStyleFromText(ctx.raw);
+        const domain = extractDomain("", ctx.raw);
+        const { complexity, score: complexityScore } = scoreComplexity({
+          rawText: ctx.raw,
+          taskType: llmRes.taskType,
+          t0HitCount: 0,
+          hasMaxSprintsOne: false,
+        });
+        const intentTrace: IntentDetectionTrace = {
+          pass1Reason: "llm-first",
+          pass1Confidence: llmRes.confidence,
+          pass1TaskType: llmRes.taskType,
+          pass1Hit: false,
+          pass2Hit: false,
+          pass2Pattern: undefined,
+          pass25ChitchatHit: false,
+          pass3UnifiedAttempted: false,
+          pass3UnifiedSucceeded: false,
+          pass3LegacyTaskAttempted: false,
+          pass3LegacyTaskSucceeded: false,
+          pass3LegacyStyleAttempted: false,
+          pass3LegacyStyleSucceeded: false,
+          pass4LlmAttempted: true,
+          pass4LlmSucceeded: true,
+          styleSource: llmRes.outputStyle ? "brain-unified" : outputStyle ? "explicit-regex" : "none",
+          finalTaskType: llmRes.taskType,
+          finalConfidence: llmRes.confidence,
+          complexity,
+          complexityScore,
+        };
+        return {
+          ...ctx,
+          taskType: llmRes.taskType,
+          domain,
+          confidence: llmRes.confidence,
+          outputStyle,
+          intentKind,
+          // null lets L6 run its cheap style-rescue if outputStyle is still null;
+          // EE retrieval enrichment happens downstream in layer3 as usual.
+          _brainData: null,
+          _intentTrace: intentTrace,
+          layers: [
+            ...ctx.layers,
+            {
+              name: "intent-detection",
+              applied: true,
+              delta: `taskType=${llmRes.taskType},kind=${intentKind},conf=${llmRes.confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},source=llm-first`,
+            },
+          ],
+        };
+      }
+      // llmRes null → model offline/garbled → fall through to the regex cascade
+      // (the deterministic safety net). This is the ONLY path that still lets
+      // regex decide intent.
+    }
+
     // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
     // Two narrow patterns short-circuit the whole pipeline:
     //  - continuation phrase → general/chitchat

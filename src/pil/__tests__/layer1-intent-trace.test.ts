@@ -5,19 +5,25 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { mockClassify, mockClassifyViaBrain, mockPilContext, mockIsUnifiedPilEnabled } = vi.hoisted(() => ({
-  mockClassify: vi.fn(),
-  mockClassifyViaBrain: vi.fn(),
-  mockPilContext: vi.fn(),
-  mockIsUnifiedPilEnabled: vi.fn(),
-}));
+const { mockClassify, mockClassifyViaBrain, mockPilContext, mockIsUnifiedPilEnabled, mockIsLlmFirstClassifyEnabled } =
+  vi.hoisted(() => ({
+    mockClassify: vi.fn(),
+    mockClassifyViaBrain: vi.fn(),
+    mockPilContext: vi.fn(),
+    mockIsUnifiedPilEnabled: vi.fn(),
+    // OFF so these trace tests exercise the regex cascade passes.
+    mockIsLlmFirstClassifyEnabled: vi.fn(() => false),
+  }));
 
 vi.mock("../../router/classifier/index.js", () => ({ classify: mockClassify }));
 vi.mock("../../ee/bridge.js", () => ({
   classifyViaBrain: mockClassifyViaBrain,
   pilContext: mockPilContext,
 }));
-vi.mock("../config.js", () => ({ isUnifiedPilEnabled: mockIsUnifiedPilEnabled }));
+vi.mock("../config.js", () => ({
+  isUnifiedPilEnabled: mockIsUnifiedPilEnabled,
+  isLlmFirstClassifyEnabled: mockIsLlmFirstClassifyEnabled,
+}));
 
 import { layer1Intent } from "../layer1-intent.js";
 import type { PipelineContext } from "../types.js";
