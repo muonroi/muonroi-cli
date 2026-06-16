@@ -50,8 +50,14 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/END CONTRACT/i);
   });
 
-  it("stays compact (under 1800 chars) to preserve attention budget on every turn (anti-mù section added)", () => {
-    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(1800);
+  it("carries the git-safety rule (never push on red; no broad git add of secrets)", () => {
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/GIT SAFETY/i);
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/push on red|never push/i);
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/git add -A|stage explicitly/i);
+  });
+
+  it("stays compact (under 1900 chars) to preserve attention budget on every turn (git-safety rule added)", () => {
+    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(1900);
   });
 });
 
