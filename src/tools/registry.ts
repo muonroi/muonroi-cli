@@ -564,14 +564,25 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
         try {
           if (isToolArtifactQuery(query)) {
-            // Artifact rehydration → raw /api/search (exact-collection lookup).
+            // Local-first (anti-mù durability): the compactor records each elided
+            // output in-process by toolCallId. For an exact "tool-artifact id=X"
+            // lookup this is the authoritative full content for THIS session and
+            // works even when EE is down — the failure window long sessions hit.
+            const { findArtifactByQuery } = await import("../ee/artifact-cache.js");
+            const local = findArtifactByQuery(query);
+            if (local) {
+              return truncateOutput(
+                `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from in-session cache]\n${local.content}`,
+              );
+            }
+            // EE fallback (cross-session / post-restart) → raw /api/search exact lookup.
             const { searchEE } = await import("../ee/search.js");
             const resp = await searchEE(query, {
               ...(Array.isArray(input?.collections) ? { collections: input.collections } : {}),
               ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
             });
             if (resp === null) {
-              return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
+              return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured) and the artifact is not in this session's local cache. Proceed without EE recall — re-read the source directly if you need the elided content.";
             }
             return truncateOutput(JSON.stringify(resp));
           }

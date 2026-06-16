@@ -110,11 +110,13 @@ export async function searchEE(
   query: string,
   opts: { limit?: number; collections?: string[] } = {},
 ): Promise<EESearchResponse | null> {
-  const { createEEClient } = await import("./client.js");
-  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
-  const authToken = (await loadEEAuthToken()) ?? undefined;
-  const baseUrl = getCachedServerBaseUrl() ?? undefined;
-  return createEEClient({ baseUrl, authToken }).search(query, opts);
+  // Route through the shared injectable default client (same one the WRITE leg
+  // persistArtifact → getDefaultEEClient().extract uses), NOT a fresh per-call
+  // client. This unifies the anti-mù seam: setDefaultEEClient now intercepts BOTH
+  // the artifact write and the artifact READ leg, and the default client carries
+  // the boot-loaded token + 401 refresh maintained by intercept.ts.
+  const { getDefaultEEClient } = await import("./intercept.js");
+  return getDefaultEEClient().search(query, opts);
 }
 
 /**

@@ -28,6 +28,7 @@
 //   - siliconflow reasoning-strip           — taskCaps.sanitizeHistory
 
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { normalizeModelId } from "../models/registry.js";
@@ -604,6 +605,8 @@ export class StreamRunner {
         }
         // Idea 4 persist for sub-agent elisions (best-effort; may lack full session but EE can still index the artifact content).
         const persistSubArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
+          // Local-first durable cache so ee_query rehydrates even when EE is down.
+          recordArtifact(toolCallId, toolName, fullContent);
           try {
             getDefaultEEClient()
               .extract(
