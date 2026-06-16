@@ -22,6 +22,15 @@ export interface LlmClassifyResult {
   taskType: TaskType;
   outputStyle: OutputStyle | null;
   confidence: number;
+  /**
+   * Whether the prompt is a real request (task) or pure social chitchat
+   * (greeting / thanks / ack). Decided by the model so the regex chitchat
+   * shortcuts (isSocialPleasantry, ultra-short heuristic) are no longer the
+   * authority. Defaults to "task" when the model omits the signal — the
+   * keep-tools safe direction (a false "task" wastes ~1.5K tokens of tool
+   * schema; a false "chitchat" strips bash/read and BREAKS the turn).
+   */
+  intentKind: "task" | "chitchat";
 }
 
 export type LlmClassifyFn = (prompt: string, signal?: AbortSignal) => Promise<LlmClassifyResult | null>;
@@ -73,9 +82,10 @@ const VALID_TASK_TYPES = new Set<TaskType>([
 const VALID_STYLES = new Set<OutputStyle>(["concise", "balanced", "detailed"]);
 
 const SYSTEM_PROMPT =
-  "You classify user prompts for a coding assistant. Reply with ONE line of two lowercase words separated by a comma: <taskType>,<style>\n\n" +
+  "You classify user prompts for a coding assistant. Reply with ONE line of THREE lowercase words separated by commas: <taskType>,<style>,<intent>\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
-  "style ∈ { concise | balanced | detailed }\n\n" +
+  "style ∈ { concise | balanced | detailed }\n" +
+  "intent ∈ { task | chat } — 'chat' ONLY for a pure greeting, thanks, or acknowledgement with NO work request (e.g. 'hi', 'cảm ơn nhé', 'ok great'). EVERYTHING else is 'task', including questions about code or the CLI, 'are you done?', and requests to call a tool. When unsure, choose 'task'.\n\n" +
   "Rules (read carefully — Phase 4 4P-2 disambiguation):\n" +
   "- debug — fix a bug, CI/build/test failure, error, exception, crash, or any 'why is X broken' question.\n" +
   "- generate — create new code, scaffold, write a new file, add a feature from scratch, ADD A NEW TEST, CHANGE A DEFAULT VALUE, modify configuration, improve coverage.\n" +
@@ -100,7 +110,12 @@ const SYSTEM_PROMPT =
   "- documentation → balanced (examples + explanation)\n" +
   "- general → concise\n" +
   "Only output 'detailed' if the user prompt LITERALLY contains words like 'explain in detail', 'thorough analysis', 'walk me through', 'giải thích chi tiết', 'phân tích kỹ'.\n\n" +
-  "Prompts may be Vietnamese, English, or mixed. Reply with exactly two words separated by one comma. No other text.";
+  "Intent examples:\n" +
+  "- 'hi' → general,concise,chat\n" +
+  "- 'cảm ơn bạn nhé' → general,concise,chat\n" +
+  "- 'bạn thử call tool setup_guide xem được không' → general,concise,task (wants a tool called — NOT chat)\n" +
+  "- 'bạn xong chưa' → general,concise,task (a question — NOT chat)\n\n" +
+  "Prompts may be Vietnamese, English, or mixed. Reply with exactly three words separated by commas. No other text.";
 
 function parseResponse(raw: string): LlmClassifyResult | null {
   const cleaned = raw.trim().toLowerCase().replace(/[`*"]/g, "");
@@ -114,7 +129,12 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   if (!VALID_TASK_TYPES.has(taskWord)) return null;
   const styleWord = parts[1] as OutputStyle | undefined;
   const style = styleWord && VALID_STYLES.has(styleWord) ? styleWord : null;
-  return { taskType: taskWord, outputStyle: style, confidence: 0.75 };
+  // Third word is the chitchat-vs-task intent. Only an explicit "chat" marks
+  // chitchat; anything else (including a missing/garbled word) defaults to
+  // "task" — the keep-tools safe direction.
+  const intentWord = parts.find((p) => p === "chat" || p === "chitchat" || p === "task");
+  const intentKind: "task" | "chitchat" = intentWord === "chat" || intentWord === "chitchat" ? "chitchat" : "task";
+  return { taskType: taskWord, outputStyle: style, confidence: 0.75, intentKind };
 }
 
 /**
