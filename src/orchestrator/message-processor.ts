@@ -1365,7 +1365,20 @@ export class MessageProcessor {
                 }
               }
               if (mcpBundle.errors.length > 0) {
-                yield { type: "content", content: `MCP unavailable: ${mcpBundle.errors.join(" | ")}\n\n` };
+                // A pooled server that is still cold-starting is NOT "unavailable"
+                // — it's warming up and will be ready next turn. Only surface
+                // GENUINE failures as "unavailable"; show warming servers as a
+                // soft, non-alarming note (and only the first time, since the
+                // pool connects them in the background).
+                const warming = mcpBundle.errors.filter((e: string) => /still connecting/.test(e));
+                const failed = mcpBundle.errors.filter((e: string) => !/still connecting/.test(e));
+                if (failed.length > 0) {
+                  yield { type: "content", content: `MCP unavailable: ${failed.join(" | ")}\n\n` };
+                }
+                if (warming.length > 0) {
+                  const names = warming.map((e: string) => e.split(":")[0]).join(", ");
+                  yield { type: "content", content: `MCP warming up (${names}) — ready from the next turn.\n\n` };
+                }
               }
             }
           }
