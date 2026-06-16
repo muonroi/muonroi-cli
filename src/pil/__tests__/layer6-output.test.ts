@@ -239,6 +239,45 @@ describe("getResponseToolSet — narrow gating (de-robotizing)", () => {
   });
 });
 
+describe("getResponseToolSet — Phase 2b deliverableKind consume (model overrides regex)", () => {
+  const ctxD = (raw: string, t: TaskType, deliverableKind: "answer" | "code" | "report") => ({
+    ...makeCtx(t, null),
+    raw,
+    deliverableKind,
+  });
+
+  it("deliverableKind='code' DROPS respond_* even when the prompt reads as a report/list", () => {
+    // Legacy regex (prefersStructuredReport) would KEEP the tool on "list all …".
+    // The model said the deliverable is code → drop it (edits, not a report).
+    expect(getResponseToolSet(ctxD("list all cost leaks in the orchestrator", "analyze", "code"))).toEqual({});
+  });
+
+  it("deliverableKind='report' KEEPS respond_* even when the prompt is question-shaped", () => {
+    // Legacy regex (isQuestionLike) would DROP the tool on "why does …?". The
+    // model said the deliverable is a structured report → keep it.
+    const tools = getResponseToolSet(ctxD("why does the suite fail — break it down by cause", "analyze", "report"));
+    expect(Object.keys(tools)).toContain("respond_analyze");
+  });
+
+  it("deliverableKind='answer' DROPS respond_* for non-general even on a report-shaped request", () => {
+    expect(getResponseToolSet(ctxD("plan the migration step by step", "plan", "answer"))).toEqual({});
+  });
+
+  it("deliverableKind='answer' KEEPS respond_general (general is exempt — renders as plain markdown)", () => {
+    const tools = getResponseToolSet(ctxD("what does the enrichment layer do?", "general", "answer"));
+    expect(Object.keys(tools)).toContain("respond_general");
+  });
+
+  it("falls back to the legacy regex when deliverableKind is absent (null)", () => {
+    // No model signal → legacy path: question-shaped analyze drops the tool.
+    expect(getResponseToolSet({ ...makeCtx("analyze", null), raw: "why does the build fail?" })).toEqual({});
+    // …and an explicit report request keeps it.
+    expect(Object.keys(getResponseToolSet({ ...makeCtx("analyze", null), raw: "list all cost leaks" }))).toContain(
+      "respond_analyze",
+    );
+  });
+});
+
 describe("applyPilSuffix — outputStyle variants", () => {
   const styles: OutputStyle[] = ["concise", "detailed", "balanced"];
 

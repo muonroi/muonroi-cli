@@ -257,8 +257,10 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   }
   // E — keep the contract's REPORTING discipline from leaking into the answer as a
   // provenance/compliance footer. Skip question turns (the L4 QUESTION directive
-  // already says it) to avoid duplicate steering.
-  if (!isQuestionLike(ctx.raw)) {
+  // already says it) to avoid duplicate steering. Phase 2b: consume the model's
+  // deliverable (answer = a question turn) when present; legacy regex otherwise.
+  const isQuestionTurn = ctx.deliverableKind ? ctx.deliverableKind === "answer" : isQuestionLike(ctx.raw);
+  if (!isQuestionTurn) {
     result += NO_BOOKKEEPING_NOTE;
   }
 
@@ -364,14 +366,22 @@ export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId
   // PIL-04 Tier 1.1: gate JSON-structured output to list-shaped tasks where it
   // wins on tokens. Code-heavy tasks fall through to markdown OUTPUT RULES.
   if (!RESPONSE_TOOL_TASK_TYPES.has(ctx.taskType)) return {};
-  // Implementation/edit turns: the deliverable is file changes, not a structured
-  // report. A terminal respond_<task> tool lets the model "answer" (state a plan)
-  // and end the turn before the edits complete — drop it for clear edit intent.
-  if (isImplementationIntent(ctx.raw)) return {};
-  // Narrow gating (de-robotizing): debug/analyze/plan QUESTIONS use the natural
-  // markdown path; reserve the labeled respond_* tool for explicit report/list/
-  // plan requests. `general` keeps its (naturally-rendered) response tool.
-  if (ctx.taskType !== "general" && !prefersStructuredReport(ctx.raw)) return {};
+  // Phase 2b: when the model classified the deliverable, CONSUME it to decide
+  // structured-vs-natural output instead of re-deriving intent via regex:
+  //   - code   → file changes, not a report. A terminal respond_* lets the model
+  //              "answer" (state a plan) and end the turn before edits finish.
+  //   - answer → debug/analyze/plan QUESTIONS read robotic as labeled JSON →
+  //              natural markdown path (general keeps its naturally-rendered tool).
+  //   - report → keep the structured tool (its value IS the structure).
+  // Only when the model didn't emit a deliverable (null → legacy cascade / model
+  // omitted the word) do we fall back to the legacy regex predicates.
+  if (ctx.deliverableKind) {
+    if (ctx.deliverableKind === "code") return {};
+    if (ctx.taskType !== "general" && ctx.deliverableKind !== "report") return {};
+  } else {
+    if (isImplementationIntent(ctx.raw)) return {};
+    if (ctx.taskType !== "general" && !prefersStructuredReport(ctx.raw)) return {};
+  }
   // Provider-aware gating: a provider may report it can't reliably emit
   // valid JSON tool input for this task type (e.g. DeepSeek leaks special
   // tokens into `general` responses). Drop the tool to avoid retry storms.

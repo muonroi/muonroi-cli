@@ -463,6 +463,7 @@ describe("intentKind guard — a tool/command request must never route as chitch
     outputStyle: null,
     confidence: 0.75,
     intentKind: "task" as const,
+    deliverableKind: null,
   });
 
   it("flips chitchat → task when the LLM fallback returns 'general' but the prompt is a command request", async () => {
@@ -649,6 +650,7 @@ describe("Pass 2.6 — social pleasantries route to chitchat (drop the tool-sche
         outputStyle: null,
         confidence: 0.8,
         intentKind: "task" as const,
+        deliverableKind: "code" as const,
       }),
     });
     expect(result.intentKind).toBe("task");
@@ -669,10 +671,12 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         outputStyle: "concise" as const,
         confidence: 0.9,
         intentKind: "task" as const,
+        deliverableKind: "answer" as const,
       }),
     });
     expect(result.taskType).toBe("general"); // NOT the regex 'create-file' → generate
     expect(result.intentKind).toBe("task");
+    expect(result.deliverableKind).toBe("answer"); // Phase 2b: model deliverable threads onto ctx
     expect(result._intentTrace?.pass1Reason).toBe("llm-first");
     expect(mockedClassify).not.toHaveBeenCalled();
   });
@@ -684,6 +688,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         outputStyle: "concise" as const,
         confidence: 0.9,
         intentKind: "chitchat" as const,
+        deliverableKind: "answer" as const,
       }),
     });
     expect(result.intentKind).toBe("chitchat");
@@ -696,6 +701,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
         outputStyle: "concise" as const,
         confidence: 0.9,
         intentKind: "chitchat" as const,
+        deliverableKind: "answer" as const,
       }),
     });
     expect(result.intentKind).toBe("task");
@@ -732,6 +738,7 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
       outputStyle: null,
       confidence: 0.9,
       intentKind: "task" as const,
+      deliverableKind: null,
     }));
     const result = await layer1Intent(makeCtx("fix the failing build"), { llmFallback: llm });
     expect(llm).not.toHaveBeenCalled();

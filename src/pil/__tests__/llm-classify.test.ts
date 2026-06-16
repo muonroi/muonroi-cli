@@ -155,7 +155,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.outputStyle).toBe("concise");
   });
 
-  it("keeps the tiny 16-token budget for non-reasoning models", async () => {
+  it("keeps a tiny output budget for non-reasoning models (24 — four comma words)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("generate,concise") } });
     cleanup = handle.uninstall;
 
@@ -164,6 +164,30 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     await classify("add a new endpoint");
 
     const call = handle.calls[0] as { maxOutputTokens?: number };
-    expect(call.maxOutputTokens).toBe(16);
+    expect(call.maxOutputTokens).toBe(24);
+  });
+
+  it("parses the fourth word as the output deliverable (Phase 2b)", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const result = await classify("fix the crash in src/auth/login.ts");
+    expect(result?.taskType).toBe("debug");
+    expect(result?.deliverableKind).toBe("code");
+  });
+
+  it("recovers the deliverable position-independently and defaults to null when absent", async () => {
+    const reportHandle = installMockModel({ fixture: { stream: textOnlyStream("analyze,concise,task,report") } });
+    cleanup = reportHandle.uninstall;
+    const reportClassify = createLlmClassifier((() => reportHandle.model) as never, "deepseek-v4-flash");
+    expect((await reportClassify("list every env var the CLI reads"))?.deliverableKind).toBe("report");
+    reportHandle.uninstall();
+
+    // Model omits the 4th word → deliverableKind null (consumers fall back to regex).
+    const bareHandle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
+    cleanup = bareHandle.uninstall;
+    const bareClassify = createLlmClassifier((() => bareHandle.model) as never, "deepseek-v4-flash");
+    expect((await bareClassify("fix it"))?.deliverableKind).toBeNull();
   });
 });

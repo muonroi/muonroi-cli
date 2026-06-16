@@ -716,6 +716,10 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           confidence: llmRes.confidence,
           outputStyle,
           intentKind,
+          // Phase 2b: model-decided deliverable drives layer4/layer6 output
+          // routing instead of keyword regex. null → those layers fall back to
+          // their legacy regex predicates for this turn.
+          deliverableKind: llmRes.deliverableKind,
           // null lets L6 run its cheap style-rescue if outputStyle is still null;
           // EE retrieval enrichment happens downstream in layer3 as usual.
           _brainData: null,
@@ -725,7 +729,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
             {
               name: "intent-detection",
               applied: true,
-              delta: `taskType=${llmRes.taskType},kind=${intentKind},conf=${llmRes.confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},source=llm-first`,
+              delta: `taskType=${llmRes.taskType},kind=${intentKind},deliverable=${llmRes.deliverableKind ?? "none"},conf=${llmRes.confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},source=llm-first`,
             },
           ],
         };
