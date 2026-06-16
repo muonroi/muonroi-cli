@@ -568,11 +568,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             // output in-process by toolCallId. For an exact "tool-artifact id=X"
             // lookup this is the authoritative full content for THIS session and
             // works even when EE is down — the failure window long sessions hit.
-            const { findArtifactByQuery } = await import("../ee/artifact-cache.js");
-            const local = findArtifactByQuery(query);
+            const { findArtifactByQuery, findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            const mem = findArtifactByQuery(query);
+            const local = mem ?? (await findArtifactOnDisk(query));
             if (local) {
+              const src = mem ? "in-session cache" : "local disk cache";
               return truncateOutput(
-                `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from in-session cache]\n${local.content}`,
+                `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
               );
             }
             // EE fallback (cross-session / post-restart) → raw /api/search exact lookup.

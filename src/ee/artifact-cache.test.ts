@@ -1,16 +1,31 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   __artifactCacheSize,
   __resetArtifactCacheForTests,
+  __setArtifactCacheDiskPathForTests,
   __setArtifactCacheMaxForTests,
+  appendArtifactToDisk,
   findArtifactByQuery,
+  findArtifactOnDisk,
+  flushArtifactDiskWrites,
   getArtifact,
   recordArtifact,
 } from "./artifact-cache.js";
 
-describe("artifact-cache (anti-mù durability — local rehydrate fallback)", () => {
-  afterEach(() => __resetArtifactCacheForTests());
+// Redirect the disk spill to a temp file for EVERY test so recordArtifact never
+// writes the real ~/.muonroi-cli/artifact-cache.jsonl.
+const diskFile = path.join(os.tmpdir(), `muonroi-artifact-cache-test-${process.pid}.jsonl`);
+beforeEach(() => __setArtifactCacheDiskPathForTests(diskFile));
+afterEach(async () => {
+  __resetArtifactCacheForTests();
+  delete process.env.MUONROI_ARTIFACT_CACHE_DISK;
+  await rm(diskFile, { force: true });
+});
 
+describe("artifact-cache (in-memory tier — durable rehydrate when EE is down)", () => {
   it("records and retrieves an elided output by toolCallId", () => {
     recordArtifact("call_7", "read_file", "FULL CONTENT of src/auth.ts");
     expect(getArtifact("call_7")).toEqual({ toolName: "read_file", content: "FULL CONTENT of src/auth.ts" });
@@ -42,5 +57,32 @@ describe("artifact-cache (anti-mù durability — local rehydrate fallback)", ()
     expect(getArtifact("c")?.content).toBe("C");
     expect(getArtifact("b")).toBeNull();
     expect(__artifactCacheSize()).toBe(2);
+  });
+});
+
+describe("artifact-cache (disk spill — survives a process restart)", () => {
+  it("rehydrates from disk after the in-memory tier is gone (simulated restart)", async () => {
+    recordArtifact("call_disk", "read_file", "PERSISTED CONTENT");
+    await flushArtifactDiskWrites();
+
+    // Simulate a restart: in-memory tier cleared, but the disk file persists.
+    __resetArtifactCacheForTests();
+    __setArtifactCacheDiskPathForTests(diskFile);
+    expect(findArtifactByQuery("tool-artifact id=call_disk")).toBeNull(); // memory gone
+    const onDisk = await findArtifactOnDisk("tool-artifact id=call_disk");
+    expect(onDisk?.content).toBe("PERSISTED CONTENT");
+    expect(onDisk?.toolName).toBe("read_file");
+  });
+
+  it("newest record for an id wins on disk", async () => {
+    await appendArtifactToDisk("dup", "t", "OLD");
+    await appendArtifactToDisk("dup", "t", "NEW");
+    expect((await findArtifactOnDisk("tool-artifact id=dup"))?.content).toBe("NEW");
+  });
+
+  it("respects MUONROI_ARTIFACT_CACHE_DISK=0 (no disk read)", async () => {
+    await appendArtifactToDisk("x", "t", "C");
+    process.env.MUONROI_ARTIFACT_CACHE_DISK = "0";
+    expect(await findArtifactOnDisk("tool-artifact id=x")).toBeNull();
   });
 });
