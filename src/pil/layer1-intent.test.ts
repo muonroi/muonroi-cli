@@ -453,7 +453,12 @@ describe("hasActionableToolIntent — explicit run/tool requests are never chitc
 });
 
 describe("intentKind guard — a tool/command request must never route as chitchat", () => {
-  const generalFallback = async () => ({ taskType: "general" as const, outputStyle: null, confidence: 0.75 });
+  const generalFallback = async () => ({
+    taskType: "general" as const,
+    outputStyle: null,
+    confidence: 0.75,
+    intentKind: "task" as const,
+  });
 
   it("flips chitchat → task when the LLM fallback returns 'general' but the prompt is a command request", async () => {
     // Reproduces 817e508f57ee: classify abstains, LLM fallback returns
@@ -634,7 +639,12 @@ describe("Pass 2.6 — social pleasantries route to chitchat (drop the tool-sche
   it("does NOT route a thanks-then-task prompt to chitchat", async () => {
     mockedClassify.mockReturnValue({ tier: "abstain", reason: "regex:no-match", confidence: 0.1 });
     const result = await layer1Intent(makeCtx("thanks, now fix the bug in src/auth/login.ts"), {
-      llmFallback: async () => ({ taskType: "debug" as const, outputStyle: null, confidence: 0.8 }),
+      llmFallback: async () => ({
+        taskType: "debug" as const,
+        outputStyle: null,
+        confidence: 0.8,
+        intentKind: "task" as const,
+      }),
     });
     expect(result.intentKind).toBe("task");
   });

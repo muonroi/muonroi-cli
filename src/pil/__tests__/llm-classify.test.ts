@@ -29,6 +29,35 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.confidence).toBeGreaterThan(0.5);
   });
 
+  it("parses the three-word reply and marks chitchat from the intent word", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("general,concise,chat") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const result = await classify("cảm ơn bạn nhé");
+    expect(result?.taskType).toBe("general");
+    expect(result?.intentKind).toBe("chitchat");
+  });
+
+  it("treats a general QUESTION as task, not chitchat (keep-tools)", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("general,concise,task") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const result = await classify("bạn thử call tool setup_guide xem được không");
+    expect(result?.intentKind).toBe("task");
+  });
+
+  it("defaults intentKind to task when the model omits the third word (backward compatible)", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    const result = await classify("fix the failing build");
+    expect(result?.taskType).toBe("debug");
+    expect(result?.intentKind).toBe("task");
+  });
+
   it("returns null when the reply cannot be parsed", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("¯\\_(ツ)_/¯") } });
     cleanup = handle.uninstall;
