@@ -1307,39 +1307,25 @@ export class MessageProcessor {
             const filteredServers = filterMcpServersByMessage(loadMcpServers(), userMessage, {
               disabled: process.env.MUONROI_DISABLE_SMART_MCP === "1",
             });
-            // MCP non-blocking: race the build against a 2500ms cap so a slow
-            // stdio MCP server spawn (or many optional servers) does not block
-            // the main turn's first token / streamText indefinitely. On timeout
-            // or error we fall back to builtins only (domain servers like fs/tools
-            // are still valuable but the optional ones can be skipped for this turn).
+            // MCP non-blocking: buildMcpToolSet now SELF-BOUNDS — it connects
+            // servers in parallel and returns PARTIAL results at its internal
+            // deadline (fast servers included; slow ones reported in .errors and
+            // closed late so child processes don't leak — VERIFY F10/F12). No
+            // outer race here: the old race discarded the WHOLE bundle on timeout,
+            // so one slow stdio spawn starved a fast HTTP server and left the
+            // agent blind to reachable MCP tools (Phase 1c — session f6f7881a5fae).
             let mcpBundle: any = null;
-            // Hoisted so the catch can still close a late-resolving bundle: when the
-            // 2500ms race times out, buildMcpToolSet keeps running and eventually
-            // resolves with open MCP clients (StdioClientTransport child processes).
-            // Left unclosed they leak per-turn and keep the event loop alive, which
-            // hangs headless `-p` after the turn finishes. See VERIFY F10/F12.
-            const mcpBuildPromise = buildMcpToolSet(filteredServers, {
-              onOAuthRequired: (_serverId, url) => {
-                // Server-supplied URL is untrusted — openUrl validates the
-                // scheme and spawns via execFile (no shell), closing the
-                // command-injection vector the old exec() opener had.
-                openUrl(url);
-              },
-            });
             try {
-              mcpBundle = await Promise.race([
-                mcpBuildPromise,
-                new Promise((_, reject) => {
-                  const t = setTimeout(() => reject(new Error("MCP build timeout (2500ms)")), 2500);
-                  // Don't let the race's loser timer keep the event loop alive.
-                  t.unref?.();
-                }),
-              ]);
+              mcpBundle = await buildMcpToolSet(filteredServers, {
+                onOAuthRequired: (_serverId, url) => {
+                  // Server-supplied URL is untrusted — openUrl validates the
+                  // scheme and spawns via execFile (no shell), closing the
+                  // command-injection vector the old exec() opener had.
+                  openUrl(url);
+                },
+              });
             } catch (err) {
-              console.error("[MCP] buildMcpToolSet timed out or failed, proceeding with builtins only", err);
-              // Close the abandoned build when it eventually resolves so its MCP
-              // child processes don't leak / keep the process alive (VERIFY F10/F12).
-              void mcpBuildPromise.then((late: any) => late?.close?.()).catch(() => {});
+              console.error("[MCP] buildMcpToolSet failed, proceeding with builtins only", err);
             }
             if (mcpBundle) {
               closeMcp = mcpBundle.close;

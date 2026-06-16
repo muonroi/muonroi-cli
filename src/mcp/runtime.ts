@@ -100,75 +100,156 @@ export interface McpBuildOptions {
   onOAuthRequired?: (serverId: string, url: URL) => void;
 }
 
+/**
+ * Total wall-clock budget for building the MCP tool set. Servers connect in
+ * PARALLEL and whatever has connected by the deadline is returned; slower
+ * servers are reported in `.errors` (and closed if they connect late) instead
+ * of sinking the whole bundle. Default 2500ms; override with
+ * MUONROI_MCP_BUILD_DEADLINE_MS (500–20000).
+ *
+ * Phase 1c — the OLD design built servers SEQUENTIALLY under an outer race
+ * (message-processor) that discarded EVERYTHING on timeout, so one slow `npx`
+ * stdio spawn starved a fast HTTP server and left the agent blind to MCP tools
+ * that were actually reachable (live: muonroi-docs ~300ms dropped behind slow
+ * npx servers, session f6f7881a5fae). Parallel + partial-at-deadline fixes it.
+ */
+function getMcpBuildDeadlineMs(): number {
+  const v = Number(process.env.MUONROI_MCP_BUILD_DEADLINE_MS);
+  if (Number.isFinite(v) && v >= 500 && v <= 20_000) return v;
+  return 2500;
+}
+
+interface ConnectedServer {
+  tools: ToolSet;
+  client: MCPClient;
+  /** OAuth provider teardown, when one was created for this server. */
+  cleanup?: () => void;
+}
+
+/**
+ * Connect ONE server and build its prefixed, output-capped tool set. Throws on
+ * any failure; the caller owns lifecycle of the returned client/cleanup.
+ */
+async function connectOneServer(rawServer: McpServerConfig, opts?: McpBuildOptions): Promise<ConnectedServer> {
+  // Hydrate env vars from the OS keychain before spawning — e.g. inject
+  // TAVILY_API_KEY for the tavily MCP if stored via the research-onboarding wizard.
+  const server = await hydrateServerEnv(rawServer);
+
+  let authProvider: OAuthClientProvider | undefined;
+  let cleanup: (() => void) | undefined;
+  if (server.transport !== "stdio" && opts?.onOAuthRequired) {
+    const oauthResult = await createOAuthProviderWithCallback({
+      serverId: server.id,
+      onAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url),
+    });
+    authProvider = oauthResult.provider;
+    cleanup = oauthResult.close;
+  }
+
+  const client = await createMCPClient({
+    transport: toTransport(server, authProvider),
+    name: `muonroi-cli-${server.id}`,
+    version: "1.0.0",
+  });
+
+  const mcpTools = await client.tools();
+  const prefix = mcpToolPrefix(server);
+  const tools: ToolSet = {};
+  for (const [name, tool] of Object.entries(mcpTools)) {
+    // OpenAI/DeepSeek function-name regex: ^[a-zA-Z0-9_-]+$. MCP spec does not
+    // restrict server-side tool names, so we sanitize here. The tool's execute()
+    // closure still calls the MCP server with the original name.
+    const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const prefixedName = `${prefix}__${safeName}`;
+    const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
+    // Cap MCP tool output the same way built-in tools are capped so the raw
+    // server payload doesn't stream into context uncapped. See cap-tool-result.ts.
+    const baseExecute = (stripped as { execute?: (args: unknown, options: unknown) => Promise<unknown> }).execute;
+    tools[prefixedName] = {
+      ...(stripped as object),
+      description: `[MCP ${server.label}] ${tool.description ?? name}`,
+      ...(typeof baseExecute === "function"
+        ? { execute: async (args: unknown, options: unknown) => capMcpToolResult(await baseExecute(args, options)) }
+        : {}),
+    } as ToolSet[string];
+  }
+  return { tools, client, cleanup };
+}
+
 export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuildOptions): Promise<McpToolBundle> {
   const tools: ToolSet = {};
   const errors: string[] = [];
   const clients: MCPClient[] = [];
   const cleanups: (() => void)[] = [];
 
-  for (const rawServer of servers) {
-    if (!rawServer.enabled) continue;
+  // One slot per enabled server, filled synchronously as each connect settles —
+  // so at the deadline we can tell ready (merge) from still-pending (report+late-close).
+  interface Slot {
+    label: string;
+    done: boolean;
+    result?: ConnectedServer;
+    error?: string;
+  }
+  const enabled = servers.filter((s) => s.enabled);
+  const slots: Slot[] = enabled.map((s) => ({ label: s.label, done: false }));
 
+  const attempts = enabled.map((rawServer, i) => {
     const validation = validateMcpServerConfig(rawServer);
     if (!validation.ok) {
-      errors.push(`${rawServer.label}: ${validation.error}`);
-      continue;
+      slots[i] = { label: rawServer.label, done: true, error: validation.error };
+      return Promise.resolve();
     }
+    return connectOneServer(rawServer, opts).then(
+      (result) => {
+        slots[i] = { label: rawServer.label, done: true, result };
+      },
+      (error: unknown) => {
+        slots[i] = {
+          label: rawServer.label,
+          done: true,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      },
+    );
+  });
 
-    try {
-      // Hydrate env vars from the OS keychain before spawning — e.g. inject
-      // TAVILY_API_KEY for the tavily MCP if the user stored it via the
-      // research-onboarding wizard.
-      const server = await hydrateServerEnv(rawServer);
+  const deadlineMs = getMcpBuildDeadlineMs();
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    deadlineTimer = setTimeout(resolve, deadlineMs);
+    deadlineTimer.unref?.();
+  });
+  await Promise.race([Promise.allSettled(attempts), deadline]);
+  if (deadlineTimer) clearTimeout(deadlineTimer);
 
-      let authProvider: OAuthClientProvider | undefined;
-
-      if (server.transport !== "stdio" && opts?.onOAuthRequired) {
-        const oauthResult = await createOAuthProviderWithCallback({
-          serverId: server.id,
-          onAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url),
-        });
-        authProvider = oauthResult.provider;
-        cleanups.push(oauthResult.close);
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i]!;
+    if (slot.done) {
+      if (slot.error) {
+        errors.push(`${slot.label}: ${slot.error}`);
+      } else if (slot.result) {
+        Object.assign(tools, slot.result.tools);
+        clients.push(slot.result.client);
+        if (slot.result.cleanup) cleanups.push(slot.result.cleanup);
       }
-
-      const client = await createMCPClient({
-        transport: toTransport(server, authProvider),
-        name: `muonroi-cli-${server.id}`,
-        version: "1.0.0",
+    } else {
+      // Still connecting at the deadline: report it and close it if/when it
+      // eventually connects so the child process / socket doesn't leak.
+      errors.push(`${slot.label}: not ready within ${deadlineMs}ms (slow MCP server — excluded this turn)`);
+      void attempts[i]?.then(() => {
+        const late = slots[i]?.result;
+        if (late) {
+          late.cleanup?.();
+          void late.client.close().catch(() => {});
+        }
       });
-      clients.push(client);
-
-      const mcpTools = await client.tools();
-      const prefix = mcpToolPrefix(server);
-
-      for (const [name, tool] of Object.entries(mcpTools)) {
-        // OpenAI/DeepSeek function-name regex: ^[a-zA-Z0-9_-]+$. MCP spec
-        // does not restrict server-side tool names, so we sanitize here.
-        // The tool's execute() closure still calls the MCP server with the
-        // original name — we only rename what the LLM sees.
-        const safeName = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-        const prefixedName = `${prefix}__${safeName}`;
-        const stripped = stripMcpInputSchema(tool as { inputSchema?: unknown; description?: string });
-        // Cap MCP tool output the same way built-in tools are capped
-        // (`truncateOutput` / MAX_TOOL_OUTPUT_CHARS). Without this wrap the raw
-        // server payload streams into the model context uncapped — a cost leak
-        // that hits cheap models hardest. See cap-tool-result.ts.
-        const baseExecute = (stripped as { execute?: (args: unknown, options: unknown) => Promise<unknown> }).execute;
-        tools[prefixedName] = {
-          ...(stripped as object),
-          description: `[MCP ${server.label}] ${tool.description ?? name}`,
-          ...(typeof baseExecute === "function"
-            ? {
-                execute: async (args: unknown, options: unknown) => capMcpToolResult(await baseExecute(args, options)),
-              }
-            : {}),
-        } as ToolSet[string];
-      }
-    } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      errors.push(`${rawServer.label}: ${message}`);
     }
+  }
+
+  // Surface (not swallow) any server that didn't make it — never silently
+  // degrade to "builtins only" without a trace.
+  if (errors.length > 0) {
+    console.error(`[MCP] ${errors.length} server(s) unavailable this turn: ${errors.join(" | ")}`);
   }
 
   return {
