@@ -155,7 +155,7 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
-import { applyModelConstraints, buildSystemPromptParts } from "./prompts";
+import { applyModelConstraints, buildMcpCapabilityBlock, buildSystemPromptParts } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
@@ -1485,6 +1485,16 @@ export class MessageProcessor {
               )
             : systemWithPlaybook;
 
+          // Append the LIVE MCP tool roster so the agent calls connected MCP
+          // tools by their exact mcp_<server>__<tool> name instead of shelling
+          // out (session f6f7881a5fae). Built from the FINAL toolset for this
+          // iteration (post smart-filter + fs-dedup), so it never names a tool
+          // the model can't actually call. Dynamic per turn → must live OUTSIDE
+          // the cached staticPrefix; for claude it lands in the second
+          // (non-cached) system message via the slice below.
+          const mcpCapabilityBlock = buildMcpCapabilityBlock(Object.keys(tools));
+          const systemWithCaps = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
+
           const systemForModel = runtime.modelId.startsWith("claude")
             ? [
                 {
@@ -1494,10 +1504,10 @@ export class MessageProcessor {
                 },
                 {
                   role: "system" as const,
-                  content: systemWithShell.slice(systemParts.staticPrefix.length),
+                  content: systemWithCaps.slice(systemParts.staticPrefix.length),
                 },
               ]
-            : systemWithShell;
+            : systemWithCaps;
 
           // Capture prompt-size breakdown so recordUsage can attach it to the
           // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
