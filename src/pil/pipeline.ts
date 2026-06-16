@@ -167,18 +167,21 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
 
   if (ctx.taskType !== null) {
     await timed("layer2-personality", layer2Personality);
+    // Issue #2: meta-analysis turns used to skip layer3 (EE recall) + layer5
+    // (context) to cut overhead — but that starved exactly the self-evaluation
+    // turns where behavioral/principle recall matters most. Run the full
+    // sequence for every taskType-bearing turn now. In the live (interactive)
+    // path there is no pipeline timeout (see runPipeline), and each EE layer is
+    // internally timeout-bounded, so meta turns just carry the same EE budget as
+    // a normal turn.
+    await timed("layer3-ee-injection", layer3EeInjection);
+    await timed("layer4-gsd-structuring", layer4Gsd);
+    await timed("layer5-context-enrichment", layer5Context);
     if (isMetaAnalysisPrompt(ctx.raw)) {
-      // FIX: skip heavy EE (layer3) + context (layer5) for meta-analysis turns
-      // to reduce PIL overhead on evaluation/improvement questions (as intended).
-      await timed("layer4-gsd-structuring", layer4Gsd);
-      // Issue #4: full Layer 3 is skipped here, but a self-evaluating agent still
-      // needs the elided high-value tool-artifacts surfaced so it doesn't have to
-      // guess one exists and hand-call ee_query. One cheap, fail-open EE arm.
+      // Issue #4 (targeted complement): surface the elided tool-artifacts
+      // RELEVANT to this meta question. Defers to layer3 — it only fires when
+      // layer3's fixed-query checkpoint arm surfaced no checkpoint block.
       await timed("ee-meta-artifacts", surfaceCompactionArtifacts);
-    } else {
-      await timed("layer3-ee-injection", layer3EeInjection);
-      await timed("layer4-gsd-structuring", layer4Gsd);
-      await timed("layer5-context-enrichment", layer5Context);
     }
   } else {
     for (const { timingName } of SKIPPED_LAYERS) {

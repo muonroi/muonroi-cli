@@ -422,21 +422,22 @@ const CHECKPOINT_LIKE_RE =
   /context checkpoint summary|compaction checkpoint|tool-artifact|tool result id=|elided|progress[^a-z]*done|✔/i;
 
 /**
- * Issue #4 — meta-turn auto-surface of compaction tool-artifacts.
+ * Issue #4 — meta-turn TARGETED complement to Layer 3's checkpoint arm.
  *
- * The full Layer 3 is skipped on the meta-analysis path (pipeline.ts) to keep
- * PIL overhead low. But that path is exactly where a self-evaluating agent most
- * needs to SEE which high-value tool outputs B3/B4 elided — otherwise it must
- * guess an artifact exists and hand-call `ee_query`. This runs ONLY the cheap
- * checkpoint/artifact arm (one timeout-bounded round-trip), keeps just the
- * records that genuinely look like checkpoints/artifacts (so generic behavioral
- * hits aren't mislabelled), and injects them via the same `formatTaskCheckpoints`
- * renderer Layer 3 uses — so the `[artifact] … id=X` refs appear in the enriched
- * prompt automatically instead of waiting on the agent to ask for them.
+ * Since issue #2, Layer 3 now runs on the meta-analysis path too, so its
+ * checkpoint arm already surfaces recent checkpoints/artifacts for the agent.
+ * That arm uses a FIXED recency query, though — it isn't biased toward the
+ * current meta question. This arm fills that gap: it searches by `ctx.raw` so a
+ * self-evaluating agent sees the elided tool-artifacts RELEVANT to what it's
+ * analyzing, rendered via the same `formatTaskCheckpoints` so the `[artifact]
+ * … id=X` refs appear automatically instead of waiting on a manual `ee_query`.
  *
- * Gated on `sessionId` (no session ⇒ no prior compaction to rehydrate). Strictly
- * additive and fail-open: any error / no-session / no-match returns ctx with the
- * original `enriched` plus an `ee-meta-artifacts` layer marker for forensics.
+ * Defers to Layer 3: if a checkpoint block was already injected this turn (any
+ * `ee-checkpoint-injected` marker present) it skips entirely — no duplicate
+ * block and no second EE round-trip. Gated on `sessionId` (no session ⇒ no prior
+ * compaction to rehydrate). Strictly additive and fail-open: any error /
+ * no-session / no-match / already-surfaced returns ctx with the original
+ * `enriched` plus an `ee-meta-artifacts` layer marker for forensics.
  */
 export async function surfaceCompactionArtifacts(ctx: PipelineContext): Promise<PipelineContext> {
   const markLayer = (applied: boolean, delta: string): PipelineContext => ({
@@ -445,6 +446,10 @@ export async function surfaceCompactionArtifacts(ctx: PipelineContext): Promise<
   });
 
   if (!ctx.sessionId) return markLayer(false, "no-session");
+  // Defer to Layer 3: a checkpoint/artifact block is already present this turn,
+  // so don't duplicate it or pay a second EE round-trip. This arm only fills the
+  // gap when Layer 3's fixed-query checkpoint arm surfaced nothing.
+  if (extractCheckpointMarkerShas(ctx.enriched).size > 0) return markLayer(false, "already-surfaced");
 
   let points: EEPoint[] = [];
   try {
@@ -467,17 +472,9 @@ export async function surfaceCompactionArtifacts(ctx: PipelineContext): Promise<
   const cpText = formatTaskCheckpoints(points);
   if (!cpText) return markLayer(false, "no-artifacts");
 
-  // Block-level dedup / idempotency: if this exact checkpoint block was already
-  // injected this turn (its content-sha marker is present), don't append it
-  // twice. A re-run of the meta arm — or another layer that injected the same
-  // block — then stays stable instead of growing the prompt each pass.
-  const blockSha = payloadSha16(cpText);
-  if (extractCheckpointMarkerShas(ctx.enriched).has(blockSha)) {
-    return markLayer(false, "already-injected");
-  }
-
   // Append the marker AFTER truncation so it always survives into `enriched`
-  // (truncating it away would defeat the dedup check above on the next pass).
+  // — that marker is what makes the defer-check above fire on any later pass.
+  const blockSha = payloadSha16(cpText);
   const body = truncateToBudget(cpText, Math.floor(ctx.tokenBudget * 0.12));
   const block = `${body}\n<!-- ee-checkpoint-injected:${blockSha} -->`;
 
