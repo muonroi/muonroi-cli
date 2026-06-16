@@ -19,7 +19,35 @@ import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
 
-describe("model-picker E2E", () => {
+/**
+ * Poll a predicate until it holds (or the deadline passes), then return.
+ *
+ * Used instead of `wait_for({ idle: true })` for input/teardown assertions.
+ * The idle sentinel uses a 50ms quiescence that the child resets on every
+ * emitted frame AND every incoming command (agent-mode.ts). Under full-suite
+ * CPU contention the idle scheduled after a PRIOR frame can fire before the
+ * child reads the next command, so `wait_for({ idle: true })` resolves against
+ * a stale frame — the typed value is still "" or a closing modal hasn't torn
+ * down yet. Polling the concrete Semantic state is immune to that timing race.
+ * `wait_for` also only waits for selector PRESENCE, never absence, so closes
+ * must be polled regardless. On timeout we return quietly and let the caller's
+ * expect(...) fail with a meaningful value.
+ */
+async function waitForStable(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+// retry:0 — this is a stateful sequential spec: the picker opened in test 1
+// stays open for tests 2-3, and test 4 reopens it. A vitest retry re-runs only
+// the failed it() body (not beforeAll), so it would re-press against whatever
+// modal state the failure left open — e.g. typing "/" into a still-open key
+// prompt instead of opening the slash menu, which then times out waiting for
+// id=slash-menu. Determinism comes from the waitForStable polls below.
+describe("model-picker E2E", { retry: 0 }, () => {
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
@@ -52,7 +80,10 @@ describe("model-picker E2E", () => {
     driver.type("e");
     driver.type("l");
     driver.type("s");
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Gate Enter on the composer reflecting the full typed query — NOT on
+    // wait_for({idle}), which a stale idle can resolve before all chars are
+    // processed, firing Enter against an incomplete command under load.
+    await waitForStable(() => (driver.query("id=composer")?.value ?? "").includes("models"), 5_000);
     driver.press("Enter");
 
     await driver.wait_for({ selector: "id=model-picker", timeoutMs: 10_000 });
@@ -71,7 +102,10 @@ describe("model-picker E2E", () => {
 
   it("closes model picker on Escape", async () => {
     driver.press("Escape");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
+    // Poll for ABSENCE — wait_for only waits for selector presence, and a bare
+    // wait_for({idle}) can resolve before the close render commits under load
+    // (same teardown race as the provider-key-prompt cleanup below).
+    await waitForStable(() => driver.query("id=model-picker") === null, 5_000);
 
     const picker = driver.query("id=model-picker");
     expect(picker).toBeNull();
@@ -83,7 +117,8 @@ describe("model-picker E2E", () => {
     driver.type("/");
     await driver.wait_for({ selector: "id=slash-menu", timeoutMs: 5_000 });
     for (const ch of "models") driver.type(ch);
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Gate Enter on the composer reflecting the full typed query (see test 1).
+    await waitForStable(() => (driver.query("id=composer")?.value ?? "").includes("models"), 5_000);
     driver.press("Enter");
     await driver.wait_for({ selector: "id=model-picker", timeoutMs: 10_000 });
 
@@ -105,24 +140,22 @@ describe("model-picker E2E", () => {
     // After both fixes the value must equal exactly what was typed.
     const fakeKey = "sktestkey1234567890";
     driver.type(fakeKey);
-    await driver.wait_for({ idle: true, timeoutMs: 3_000 });
+    // Poll the actual input value rather than wait_for({idle}). The idle
+    // sentinel uses a 50ms quiescence reset per-frame AND per-command; under
+    // full-suite CPU contention the idle scheduled after the prompt-open frame
+    // can fire BEFORE the child reads this type() command, resolving
+    // wait_for({idle}) against a stale frame where value is still "". The
+    // functional-updater append (app.tsx) is burst-safe, so the value reaches
+    // fakeKey within a frame or two — polling it is immune to the idle race.
+    await waitForStable(() => (driver.query("id=provider-key-input")?.value ?? "") === fakeKey, 5_000);
 
     const filled = driver.query("id=provider-key-input");
     expect(filled?.value).toBe(fakeKey);
 
-    // Cleanup: dismiss the key prompt. Poll until the modal actually unmounts —
-    // under full-suite load `idle` can fire before the close render commits, so
-    // a single wait_for({idle}) + immediate assert raced the modal teardown
-    // (pre-existing flake surfaced on the 40-process harness run).
+    // Cleanup: dismiss the key prompt and poll until the modal actually
+    // unmounts (same teardown race — wait_for only waits for presence).
     driver.press("Escape");
-    let promptGone = false;
-    for (let i = 0; i < 40; i++) {
-      if (!driver.query("id=provider-key-prompt")) {
-        promptGone = true;
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 250));
-    }
-    expect(promptGone).toBe(true);
+    await waitForStable(() => driver.query("id=provider-key-prompt") === null, 10_000);
+    expect(driver.query("id=provider-key-prompt")).toBeNull();
   });
 });
