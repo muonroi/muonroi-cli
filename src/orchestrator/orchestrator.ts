@@ -666,6 +666,11 @@ export class Agent {
       this.bash.cleanup(),
       shutdownWorkspaceLspManager(this.bash.getCwd()),
       extractSession(this.messages, this.bash.getCwd(), "cli-exit", this.getSessionId()),
+      // Tear down pooled MCP clients (client-pool.ts). They persist across turns
+      // by design (no per-turn cold-spawn), so the only real teardown is here at
+      // session end. Stdio children would die with the process anyway, but close
+      // them gracefully on a clean exit.
+      import("../mcp/client-pool.js").then((m) => m.closeAllMcpClients()),
     ]);
   }
 

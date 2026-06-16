@@ -69,7 +69,7 @@ import type {
   StopHookInput,
   UserPromptSubmitHookInput,
 } from "../hooks/types";
-import { buildMcpToolSet } from "../mcp/runtime";
+import { acquireMcpTools } from "../mcp/client-pool";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
 import { getModelInfo } from "../models/registry.js";
 import {
@@ -1307,16 +1307,16 @@ export class MessageProcessor {
             const filteredServers = filterMcpServersByMessage(loadMcpServers(), userMessage, {
               disabled: process.env.MUONROI_DISABLE_SMART_MCP === "1",
             });
-            // MCP non-blocking: buildMcpToolSet now SELF-BOUNDS — it connects
-            // servers in parallel and returns PARTIAL results at its internal
-            // deadline (fast servers included; slow ones reported in .errors and
-            // closed late so child processes don't leak — VERIFY F10/F12). No
-            // outer race here: the old race discarded the WHOLE bundle on timeout,
-            // so one slow stdio spawn starved a fast HTTP server and left the
-            // agent blind to reachable MCP tools (Phase 1c — session f6f7881a5fae).
+            // MCP non-blocking: acquireMcpTools self-bounds — it connects servers
+            // in parallel and returns PARTIAL results at its internal deadline
+            // (fast/cached servers included; slow first-connects reported in
+            // .errors and available next turn). Clients are POOLED across turns
+            // (client-pool.ts), so a server cold-spawns at most once per session
+            // instead of every turn. No outer race: the old race discarded the
+            // WHOLE bundle on timeout (Phase 1c — session f6f7881a5fae).
             let mcpBundle: any = null;
             try {
-              mcpBundle = await buildMcpToolSet(filteredServers, {
+              mcpBundle = await acquireMcpTools(filteredServers, {
                 onOAuthRequired: (_serverId, url) => {
                   // Server-supplied URL is untrusted — openUrl validates the
                   // scheme and spawns via execFile (no shell), closing the

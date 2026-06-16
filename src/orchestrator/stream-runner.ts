@@ -29,7 +29,7 @@
 
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { getDefaultEEClient } from "../ee/intercept.js";
-import { buildMcpToolSet } from "../mcp/runtime";
+import { acquireMcpTools } from "../mcp/client-pool";
 import { normalizeModelId } from "../models/registry.js";
 import {
   cheapModelShellLine,
@@ -396,7 +396,7 @@ export class StreamRunner {
     onActivity?.(initialDetail);
 
     if (childMode === "agent" && taskCaps.supportsClientTools(childRuntime.modelInfo)) {
-      const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+      const mcpBundle = await acquireMcpTools(loadMcpServers(), {
         onOAuthRequired: (_serverId, url) => {
           // Server-supplied URL is untrusted — openUrl validates the scheme
           // and spawns via execFile (no shell), closing the command-injection

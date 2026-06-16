@@ -113,13 +113,13 @@ export interface McpBuildOptions {
  * that were actually reachable (live: muonroi-docs ~300ms dropped behind slow
  * npx servers, session f6f7881a5fae). Parallel + partial-at-deadline fixes it.
  */
-function getMcpBuildDeadlineMs(): number {
+export function getMcpBuildDeadlineMs(): number {
   const v = Number(process.env.MUONROI_MCP_BUILD_DEADLINE_MS);
   if (Number.isFinite(v) && v >= 500 && v <= 20_000) return v;
   return 2500;
 }
 
-interface ConnectedServer {
+export interface ConnectedServer {
   tools: ToolSet;
   client: MCPClient;
   /** OAuth provider teardown, when one was created for this server. */
@@ -129,8 +129,10 @@ interface ConnectedServer {
 /**
  * Connect ONE server and build its prefixed, output-capped tool set. Throws on
  * any failure; the caller owns lifecycle of the returned client/cleanup.
+ * Exported so the cross-turn client pool (client-pool.ts) can reuse it as its
+ * connect primitive.
  */
-async function connectOneServer(rawServer: McpServerConfig, opts?: McpBuildOptions): Promise<ConnectedServer> {
+export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBuildOptions): Promise<ConnectedServer> {
   // Hydrate env vars from the OS keychain before spawning — e.g. inject
   // TAVILY_API_KEY for the tavily MCP if stored via the research-onboarding wizard.
   const server = await hydrateServerEnv(rawServer);
