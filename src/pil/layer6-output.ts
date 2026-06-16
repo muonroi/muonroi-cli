@@ -287,13 +287,17 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
  * OUTPUT RULES (graceful — exactly what code-heavy tasks already do), so a false
  * positive on an analysis turn only forgoes structured JSON, never breaks output.
  *
- * High-signal verbs only (implement/edit/wire/rewrite/rename/scaffold/refactor,
- * "make the change", "apply the fix/patch", VI equivalents). Bare "fix"/"replace"
- * are excluded — too common in analysis ("explain the fix") — so pure
- * analyze/plan/debug-investigation turns keep their structured output.
+ * High-signal verbs only (implement/edit/wire/rewrite/rename/scaffold/refactor/
+ * improve, "make the change", "apply the fix/patch", VI equivalents incl. "cải
+ * thiện"). Bare "fix"/"replace" are excluded — too common in analysis ("explain
+ * the fix") — so pure analyze/plan/debug-investigation turns keep their
+ * structured output. "improve(ment)" / "cải thiện" added after session
+ * 2b7a10219499: "lên plan rồi improvement … cải thiện Compaction" was an
+ * implement turn the model mis-classified as a `report`, so a terminal
+ * respond_plan ended it on a plan (edits done but uncommitted/unreported).
  */
 const IMPLEMENTATION_INTENT_RE =
-  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten)\b/i;
+  /\b(implement|edit|wire(?:\s+up)?|rewrite|rename|scaffold|refactor)\b|\bimprove(?:ment)?\b|\bmake\s+(the\s+)?(change|edit|modification)s?\b|\bapply\s+(the\s+)?(fix|change|patch|edit|diff)\b|(?:^|\s)(triển\s*khai|trien\s*khai|chỉnh\s*sửa|chinh\s*sua|viết\s*lại|viet\s*lai|đổi\s*tên|doi\s*ten|cải\s*thiện|cai\s*thien)\b/i;
 
 export function isImplementationIntent(raw: string): boolean {
   return !!raw && IMPLEMENTATION_INTENT_RE.test(raw);
@@ -375,11 +379,18 @@ export function getResponseToolSet(ctx: PipelineContext, providerId?: ProviderId
   //   - report → keep the structured tool (its value IS the structure).
   // Only when the model didn't emit a deliverable (null → legacy cascade / model
   // omitted the word) do we fall back to the legacy regex predicates.
+  // Implementation intent ALWAYS suppresses a terminal respond_* — checked
+  // BEFORE the deliverable branch so a mis-classified `report` can't bypass it
+  // (session 2b7a10219499: a "plan rồi improvement" implement turn got
+  // deliverable=report → the report-exception below kept respond_plan → the
+  // model stated a plan and ended the turn with edits done but uncommitted).
+  // A respond_* tool lets the model "answer" and stop before edits land, so any
+  // implement turn must fall through to the markdown OUTPUT RULES instead.
+  if (isImplementationIntent(ctx.raw)) return {};
   if (ctx.deliverableKind) {
     if (ctx.deliverableKind === "code") return {};
     if (ctx.taskType !== "general" && ctx.deliverableKind !== "report") return {};
   } else {
-    if (isImplementationIntent(ctx.raw)) return {};
     if (ctx.taskType !== "general" && !prefersStructuredReport(ctx.raw)) return {};
   }
   // Provider-aware gating: a provider may report it can't reliably emit
