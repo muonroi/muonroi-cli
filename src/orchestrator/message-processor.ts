@@ -1342,14 +1342,17 @@ export class MessageProcessor {
                 _builtinToolNames,
               );
               rawToolSet = { ...rawToolSet, ..._dedupedMcpTools };
-              // muonroi-tools is THIS CLI self-spawned, so its ee_query is a
-              // duplicate of the native builtin — which additionally supports
-              // tool-artifact rehydration ("tool-artifact id=…") the MCP twin
-              // lacks. Keep native, drop the twin. The rest of muonroi-tools
-              // (ee_feedback/ee_health/forensics/lsp/selfverify/setup_guide) is
-              // NOT native, so it stays — that's the point of self-spawning it.
-              if (rawToolSet.ee_query && rawToolSet["mcp_muonroi-tools__ee_query"]) {
-                delete rawToolSet["mcp_muonroi-tools__ee_query"];
+              // muonroi-tools is THIS CLI: every tool it exposes (ee_query,
+              // ee_feedback, ee_health, usage_forensics, lsp_query, setup_guide,
+              // selfverify_*) is now a NATIVE in-process builtin (src/tools/
+              // native-tools.ts) — strictly better (no subprocess, no cold-start).
+              // If an external/legacy config still self-spawns muonroi-tools, drop
+              // any MCP twin whose native equivalent is present so the model never
+              // sees two interchangeable copies. (The CLI no longer self-spawns it
+              // by default — see auto-setup.ts.)
+              for (const key of Object.keys(rawToolSet)) {
+                const twin = key.match(/^mcp_muonroi-tools__(.+)$/);
+                if (twin && rawToolSet[twin[1]!]) delete rawToolSet[key];
               }
               if (_droppedFsMcp.length > 0 && deps.session) {
                 try {

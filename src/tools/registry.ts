@@ -23,6 +23,7 @@ import {
   stagingWarning,
 } from "./git-safety.js";
 import { executeGrep } from "./grep.js";
+import { registerNativeMuonroiTools } from "./native-tools.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 
 interface ToolRegistryOpts {
@@ -599,6 +600,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
       },
     });
+
+    // Native muonroi-tools builtins — ee_health, ee_feedback, usage_forensics,
+    // lsp_query, setup_guide, selfverify_*. These run IN-PROCESS; the CLI no
+    // longer self-spawns itself as an MCP server to expose them to its own inner
+    // agent (that self-spawn cold-started 2-3.5s and overran the build deadline,
+    // and a seed-time bug once persisted a crashing vitest-worker command). The
+    // muonroi-tools MCP server stays only for EXTERNAL agents. See native-tools.ts.
+    registerNativeMuonroiTools(tools, { cwd: bash.getCwd() });
   }
 
   // Vision proxy tools — only for text-only models (DeepSeek, etc.)

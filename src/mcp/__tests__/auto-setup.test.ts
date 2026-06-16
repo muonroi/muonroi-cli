@@ -4,25 +4,17 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const tmpHome = path.join(os.tmpdir(), `muonroi-cli-auto-setup-${process.pid}`);
-// A trustworthy self-spawn command injected via the override env. Without it,
-// resolveToolsMcpCommand() correctly returns null under vitest (argv[1] is a
-// vitest worker, NOT the CLI entry) — which is the whole point of the fix:
-// a test must never derive (and persist) the worker command.
-const FAKE_CLI = path.join(os.tmpdir(), "muonroi-cli-fake");
 
 describe("ensureDefaultMcpServers — research servers", () => {
   let origHome: string | undefined;
   let origUserProfile: string | undefined;
-  let origToolsCmd: string | undefined;
 
   beforeEach(() => {
     fs.mkdirSync(tmpHome, { recursive: true });
     origHome = process.env.HOME;
     origUserProfile = process.env.USERPROFILE;
-    origToolsCmd = process.env.MUONROI_TOOLS_MCP_COMMAND;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
-    process.env.MUONROI_TOOLS_MCP_COMMAND = FAKE_CLI;
     vi.resetModules();
   });
 
@@ -32,8 +24,6 @@ describe("ensureDefaultMcpServers — research servers", () => {
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
-    if (origToolsCmd === undefined) delete process.env.MUONROI_TOOLS_MCP_COMMAND;
-    else process.env.MUONROI_TOOLS_MCP_COMMAND = origToolsCmd;
   });
 
   it("registers context7 + fetch + tavily for a fresh user", async () => {
@@ -55,31 +45,17 @@ describe("ensureDefaultMcpServers — research servers", () => {
     expect(docs?.url).toContain("docs-mcp.muonroi.com");
   });
 
-  it("registers muonroi-tools as a default self-spawned stdio server (tools-mcp)", async () => {
-    const { ensureDefaultMcpServers } = await import("../auto-setup.js");
-    const merged = ensureDefaultMcpServers();
-    const tools = merged.find((s) => s.id === "muonroi-tools");
-    expect(tools).toBeDefined();
-    expect(tools?.enabled).toBe(true);
-    expect(tools?.transport).toBe("stdio");
-    // Re-invokes THIS CLI in tools-mcp mode (command = resolved runtime/override, args end with the subcommand).
-    expect(tools?.args?.at(-1)).toBe("tools-mcp");
-    expect(tools?.command).toBe(FAKE_CLI);
-  });
-
-  it("does NOT derive a self-spawn command from a test-runner argv (returns no muonroi-tools)", async () => {
-    // The root cause of the live bug: under vitest, process.argv[1] is a fork
-    // worker, NOT the CLI entry. Without the override, resolveToolsMcpCommand
-    // must REFUSE (return null) rather than persist `<node> <worker> tools-mcp`,
-    // which crashes on spawn → permanent timeout. So muonroi-tools is simply not
-    // registered in this (untrustworthy) process.
-    delete process.env.MUONROI_TOOLS_MCP_COMMAND;
+  it("does NOT register muonroi-tools (its tools are native in-process builtins now)", async () => {
+    // The CLI no longer self-spawns itself as an MCP server. ee_query/ee_feedback/
+    // ee_health/usage_forensics/lsp_query/setup_guide/selfverify_* are native
+    // builtins (src/tools/native-tools.ts) — strictly better than a per-turn
+    // subprocess cold-start. So muonroi-tools must NOT be seeded.
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();
     expect(merged.find((s) => s.id === "muonroi-tools")).toBeUndefined();
   });
 
-  it("self-heals a poisoned muonroi-tools entry that points at a vitest worker", async () => {
+  it("removes an existing self-spawned muonroi-tools entry (incl. an old vitest-worker-poisoned one)", async () => {
     const settingsPath = path.join(tmpHome, ".muonroi-cli", "user-settings.json");
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(
@@ -104,16 +80,12 @@ describe("ensureDefaultMcpServers — research servers", () => {
     );
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();
-    const tools = merged.find((s) => s.id === "muonroi-tools");
-    expect(tools).toBeDefined();
-    // Healed to the trustworthy override; no vitest worker path survives.
-    expect(tools?.command).toBe(FAKE_CLI);
-    expect(tools?.args).toEqual(["tools-mcp"]);
-    expect(JSON.stringify(tools)).not.toMatch(/vitest|forks\.js/);
+    // Deprecated self-spawn stripped; no vitest worker path survives.
+    expect(merged.find((s) => s.id === "muonroi-tools")).toBeUndefined();
+    expect(JSON.stringify(merged)).not.toMatch(/vitest|forks\.js/);
   });
 
-  it("drops a poisoned muonroi-tools entry when no trustworthy command can be resolved", async () => {
-    delete process.env.MUONROI_TOOLS_MCP_COMMAND; // force resolveToolsMcpCommand → null under vitest
+  it("removes a self-spawned muonroi-tools entry even with a valid bun-source command", async () => {
     const settingsPath = path.join(tmpHome, ".muonroi-cli", "user-settings.json");
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
     fs.writeFileSync(
@@ -126,8 +98,15 @@ describe("ensureDefaultMcpServers — research servers", () => {
               label: "muonroi-tools",
               enabled: true,
               transport: "stdio",
-              command: "node",
-              args: ["/x/vitest/dist/workers/forks.js", "tools-mcp"],
+              command: "bun",
+              args: ["/repo/src/index.ts", "tools-mcp"],
+            },
+            {
+              id: "context7",
+              label: "Context7",
+              enabled: true,
+              transport: "http",
+              url: "https://mcp.context7.com/mcp",
             },
           ],
         },
@@ -135,8 +114,9 @@ describe("ensureDefaultMcpServers — research servers", () => {
     );
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();
-    // Broken entry removed rather than left in place (re-seeds cleanly on a real run).
     expect(merged.find((s) => s.id === "muonroi-tools")).toBeUndefined();
+    // Unrelated user server preserved.
+    expect(merged.find((s) => s.id === "context7")).toBeDefined();
   });
 
   it("context7 and fetch default to enabled", async () => {

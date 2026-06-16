@@ -6,6 +6,12 @@
  * immediately; poll with selfverify.status; fetch selfverify.result when done.
  *
  * Lives at the app layer (NOT agent-harness-core) so it may import src/self-qa.
+ *
+ * NOTE: this server is for EXTERNAL agents (Claude Code etc.). The CLI's OWN
+ * inner agent now exposes the same capabilities as NATIVE in-process builtins
+ * (src/tools/native-tools.ts) — it no longer self-spawns this server. The two
+ * surfaces share their cores (self-verify-runner.ts, setup-guide-text.ts, the
+ * ee/forensics/lsp modules) so behaviour is identical.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -15,31 +21,10 @@ import { registerEETools } from "./ee-tools.js";
 import { registerForensicsTools } from "./forensics-tools.js";
 import { registerLspTools } from "./lsp-tools.js";
 import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
+import { defaultRunner } from "./self-verify-runner.js";
+import { SETUP_GUIDE_TEXT } from "./setup-guide-text.js";
 
 const LOG_TAIL = 40;
-
-/** Default runner: drives the real self-verify functions in-process. */
-const defaultRunner: Runner = {
-  async tier1(opts, log) {
-    // signal intentionally not forwarded: runSelfVerify/runAgenticLoop do not yet
-    // accept an AbortSignal. cancel() marks the job and discards the late result.
-    const { runSelfVerify } = await import("../self-qa/index.js");
-    return runSelfVerify({
-      baseRef: opts.since,
-      maxScenarios: opts.max,
-      emitSpecs: opts.emit,
-      specOutDir: opts.out,
-      log,
-    });
-  },
-  async agentic(opts, log) {
-    // signal intentionally not forwarded: runSelfVerify/runAgenticLoop do not yet
-    // accept an AbortSignal. cancel() marks the job and discards the late result.
-    const { createLLMBrain, runAgenticLoop } = await import("../self-qa/agentic-loop.js");
-    const brain = await createLLMBrain({ modelId: opts.llm });
-    return runAgenticLoop({ goal: opts.goal, brain, maxTurns: opts.turns ?? 20, log });
-  },
-};
 
 function ok(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data) }] };
@@ -167,84 +152,7 @@ export function registerSetupGuideTool(server: McpServer): void {
       inputSchema: {},
     },
     async () => {
-      const text = `# muonroi-cli Setup Guide (native via tools-mcp)
-
-## Install (zero runtime deps — recommended)
-Linux / macOS:
-  curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.sh | bash
-
-Windows PowerShell:
-  irm https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.ps1 | iex
-
-Bun (requires Bun >= 1.3):
-  bun add -g muonroi-cli
-  # (npm install -g is NOT supported — TUI engine uses Bun-only ESM features)
-
-The installers fetch a pre-compiled single binary from GitHub Releases.
-
-## First run
-- Wizard appears automatically.
-- Lists supported providers (DeepSeek + SiliconFlow ready; others via BYOK).
-- Four credential options: paste key, Bitwarden sync (B in /providers), keys export/import (encrypted bundle), or skip for later.
-- Keys land in OS keychain (keytar). Settings written to ~/.muonroi-cli/user-settings.json.
-- Role routing (leader/implement/verify/research) is configured for you.
-
-After setup: run \`muonroi-cli doctor\` to validate.
-
-## Essential commands
-- Interactive TUI: \`muonroi-cli\` (or \`node dist/index.js\` after build)
-- Headless one-shot: \`muonroi-cli --prompt "your task" --max-tool-rounds 8\`
-- Health + MCP nudge: \`muonroi-cli doctor\`
-- Update: \`muonroi-cli update\` (or set "autoUpdate": true in user-settings)
-- Keys move between machines: \`muonroi-cli keys export file.json\` then import on target
-- Native tools MCP (this server): \`muonroi-cli tools-mcp\` (stdio)
-- Harness driver MCP: \`muonroi-cli mcp-driver\`
-
-## MCP integration (for Claude Desktop, Cursor, other agents)
-Add to your MCP client config:
-
-{
-  "mcpServers": {
-    "muonroi-tools": {
-      "command": "bun",
-      "args": ["run", "/absolute/path/to/muonroi-cli/src/index.ts", "tools-mcp"]
-    }
-  }
-}
-
-(Use absolute path. After \`bun run build\`: "node", "dist/index.js", "tools-mcp")
-
-Exposed tools on this server:
-- setup_guide (this document)
-- ee_query / ee_health / ee_feedback — Experience Engine semantic recall + compaction checkpoints + feedback for learning
-- usage_forensics <id-prefix> — per-session cost/token forensics (peak input, cache hits, anomalies)
-- lsp_query — goToDefinition, findReferences, hover, symbols, call hierarchy etc.
-- selfverify_* — Tier-1 heuristic + Tier-2 agentic self-QA harness runs (start/poll/result/cancel/list)
-
-For BB/.NET template recipes and package docs, also connect an external "muonroi-docs" MCP server if available (provides docs_search + setup_guide for the templates).
-
-## Development
-git clone https://github.com/muonroi/muonroi-cli.git
-cd muonroi-cli && bun install
-
-bun run dev                 # run from source (TUI)
-bun run typecheck           # tsc --noEmit
-bun run test                # vitest (unit + headless)
-bunx vitest -c vitest.harness.config.ts run tests/harness/   # TUI E2E (named-pipes on Win, fd3/4 on POSIX)
-bun run build               # or build:binary for standalone exe
-
-See AGENTS.md (quick ref + rules), CLAUDE.md (harness verification), README.md.
-
-## Verify
-muonroi-cli doctor
-# Checks runtimes, catalog load, keychain, MCP servers enabled, council research MCP nudge, EE reachability, recent error rate.
-# Any "warn" entries tell you exactly what to enable (e.g. tavily for web research in council).
-
-For BB-aware scaffolding (/ideal on a muonroi-building-block target): ensure dotnet SDK + the three Muonroi.*.Template packages are installed via NuGet; doctor surfaces missing feed/template cases.
-
-`;
-
-      return { content: [{ type: "text" as const, text }] };
+      return { content: [{ type: "text" as const, text: SETUP_GUIDE_TEXT }] };
     },
   );
 }
