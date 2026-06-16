@@ -35,6 +35,28 @@ describe("ensureDefaultMcpServers — research servers", () => {
     expect(ids).toContain("tavily");
   });
 
+  it("registers muonroi-docs as a default, enabled, http ecosystem source", async () => {
+    const { ensureDefaultMcpServers } = await import("../auto-setup.js");
+    const merged = ensureDefaultMcpServers();
+    const docs = merged.find((s) => s.id === "muonroi-docs");
+    expect(docs).toBeDefined();
+    expect(docs?.enabled).toBe(true);
+    expect(docs?.transport).toBe("http");
+    expect(docs?.url).toContain("docs-mcp.muonroi.com");
+  });
+
+  it("registers muonroi-tools as a default self-spawned stdio server (tools-mcp)", async () => {
+    const { ensureDefaultMcpServers } = await import("../auto-setup.js");
+    const merged = ensureDefaultMcpServers();
+    const tools = merged.find((s) => s.id === "muonroi-tools");
+    expect(tools).toBeDefined();
+    expect(tools?.enabled).toBe(true);
+    expect(tools?.transport).toBe("stdio");
+    // Re-invokes THIS CLI in tools-mcp mode (command = current runtime, args end with the subcommand).
+    expect(tools?.args?.at(-1)).toBe("tools-mcp");
+    expect(tools?.command && tools.command.length > 0).toBe(true);
+  });
+
   it("context7 and fetch default to enabled", async () => {
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();

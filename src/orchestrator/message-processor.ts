@@ -1342,6 +1342,15 @@ export class MessageProcessor {
                 _builtinToolNames,
               );
               rawToolSet = { ...rawToolSet, ..._dedupedMcpTools };
+              // muonroi-tools is THIS CLI self-spawned, so its ee_query is a
+              // duplicate of the native builtin — which additionally supports
+              // tool-artifact rehydration ("tool-artifact id=…") the MCP twin
+              // lacks. Keep native, drop the twin. The rest of muonroi-tools
+              // (ee_feedback/ee_health/forensics/lsp/selfverify/setup_guide) is
+              // NOT native, so it stays — that's the point of self-spawning it.
+              if (rawToolSet.ee_query && rawToolSet["mcp_muonroi-tools__ee_query"]) {
+                delete rawToolSet["mcp_muonroi-tools__ee_query"];
+              }
               if (_droppedFsMcp.length > 0 && deps.session) {
                 try {
                   logInteraction(deps.session.id, "routing", {
