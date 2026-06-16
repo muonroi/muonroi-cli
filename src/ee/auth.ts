@@ -49,6 +49,28 @@ export async function refreshAuthToken(opts: { home?: string } = {}): Promise<st
   return await loadEEAuthToken(opts);
 }
 
+/**
+ * Merge a partial config into ~/.experience/config.json (creating the file +
+ * directory if absent), preserving any fields the EE installer or the user
+ * already wrote. Used by the first-run EE setup step. Throws on write failure so
+ * the caller can surface it (never silently swallow — the user asked to set this up).
+ */
+export async function writeExperienceConfig(
+  patch: Partial<ExperienceConfig>,
+  opts: { home?: string } = {},
+): Promise<void> {
+  const p = configPath(opts.home);
+  let existing: ExperienceConfig = {};
+  try {
+    existing = JSON.parse(await fs.readFile(p, "utf8")) as ExperienceConfig;
+  } catch {
+    // No existing config (or unreadable) — start fresh.
+  }
+  const merged = { ...existing, ...patch };
+  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.writeFile(p, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
+}
+
 export function getCachedAuthToken(): string | null {
   return _token;
 }

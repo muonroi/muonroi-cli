@@ -1098,8 +1098,26 @@ program
     }
 
     // Bootstrap EE auth (loads serverBaseUrl + token from ~/.experience/config.json)
-    const { loadEEAuthToken } = await import("./ee/auth.js");
+    const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./ee/auth.js");
     await loadEEAuthToken().catch(() => {});
+
+    // First-run EE setup (interactive, once per install): if no EE server is
+    // configured, offer to connect one + write ~/.experience/config.json so the
+    // agent's record/recall/feedback loop has a brain. One-time, flag-gated.
+    if (isInteractive) {
+      try {
+        const { loadUserSettings, saveUserSettings } = await import("./utils/settings.js");
+        if (loadUserSettings().eeSetupPrompted !== true && !getCachedServerBaseUrl()) {
+          const { firstRunEESetup } = await import("./ee/ee-onboarding.js");
+          const wrote = await firstRunEESetup();
+          if (wrote) await loadEEAuthToken().catch(() => {});
+          saveUserSettings({ eeSetupPrompted: true });
+        }
+      } catch (err) {
+        if (process.env.MUONROI_DEBUG)
+          console.error(`[muonroi-cli] EE first-run setup skipped: ${(err as Error)?.message}`);
+      }
+    }
 
     // Auto-detect EE client mode (thin / thin-degraded / fat / disabled).
     // Result is cached for downstream callsites (PIL layers, bridge.searchByText)
@@ -1511,7 +1529,9 @@ usage
 
 usage
   .command("security-audit")
-  .description("Security posture: yolo/permission overrides, high-risk cmds, shuru audits + cost (from decision-log events)")
+  .description(
+    "Security posture: yolo/permission overrides, high-risk cmds, shuru audits + cost (from decision-log events)",
+  )
   .option("--since <date|7d|1h|30m>", "Restrict to UTC date or relative window")
   .option("--json", "Emit as JSON")
   .option("--format <fmt>", "table | json | md", "table")
