@@ -371,9 +371,15 @@ function rewriteOlderToolMessage(
 }
 
 /**
- * Compact a sub-agent message array in place-like fashion. Returns a NEW
- * array; the input is not mutated. Below the threshold the original array
- * reference is returned for cheap identity comparison in tests.
+ * Compact a sub-agent message array in place-like fashion. The input is never
+ * mutated. When compaction actually elides something a NEW array is returned.
+ * On a no-op (below threshold, or too few tool turns to skip) the ORIGINAL input
+ * array is returned BY REFERENCE so callers can detect "did not compact this
+ * step" via identity (`compacted === input`). The B4 wiring in
+ * message-processor.ts (pre-compaction warning + compaction note gating) and the
+ * sub-agent wiring in stream-runner.ts both rely on this contract — returning a
+ * fresh slice on a no-op silently made the warning dead and the note fire every
+ * step.
  */
 export function compactSubAgentMessages(
   messages: ReadonlyArray<ModelMessage>,
@@ -391,10 +397,11 @@ export function compactSubAgentMessages(
   // window utilization. Falls back to static char threshold + keepLast
   // when no contextWindowTokens supplied (preserves old behaviour).
   const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
-  if (total < effectiveThresholdChars) return messages.slice();
+  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
+  if (total < effectiveThresholdChars) return messages as ModelMessage[];
 
   const keepFrom = findKeepFromIndex(messages, effectiveKeepLastTurns);
-  if (keepFrom <= 0) return messages.slice();
+  if (keepFrom <= 0) return messages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink
   // already-stubbed results (F1), and strip args off older assistant
