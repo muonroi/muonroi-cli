@@ -62,6 +62,32 @@ function hasDocsSignal(message: string): boolean {
 }
 
 /**
+ * Explicit "use a tool / MCP tool" intent. The filter only sees server *ids*,
+ * not their tool lists (MCP tools are fetched lazily at build time), so when the
+ * user asks to call a specific tool by name we cannot tell which server owns it.
+ * Dropping any optional server then risks stripping the exact tool requested.
+ *
+ * Live miss (session f6f7881a5fae): "bạn thử call tool setup_guide ... ( call
+ * tool chứ không phải đọc code )" carried no docs keyword, so `muonroi-docs`
+ * (id matches /docs/) was dropped — the model had no `setup_guide` tool and
+ * resorted to driving the server by hand over bash JSON-RPC, fabricating output.
+ *
+ * When this fires we keep ALL optional servers for the turn. Over-keeping costs
+ * tokens but never removes capability — this module's documented safe direction.
+ * EN + VI: "call/use/invoke/run the X tool", "tool call", "gọi/dùng/chạy tool".
+ */
+function hasExplicitToolIntent(message: string): boolean {
+  return (
+    /\b(?:call|use|invoke|run|exercise|trigger|try)\s+(?:the\s+)?(?:mcp\s+)?(?:[a-z0-9_.-]+\s+)?tool(?:s)?\b/i.test(
+      message,
+    ) ||
+    /\btool[\s_-]?call\b/i.test(message) ||
+    /\bmcp\b[^\n]*\btool/i.test(message) ||
+    /\b(?:gọi|dùng|chạy|thử)\s+(?:tool|mcp)\b/i.test(message)
+  );
+}
+
+/**
  * Filesystem-MCP tool names that 1:1 duplicate a first-class BUILTIN file tool.
  * The builtin `read_file`/`write_file`/`edit_file` are strictly better (read-
  * before-write tracking, LSP sync, CRLF-tolerant matching, per-turn dedup +
@@ -128,9 +154,17 @@ export function filterMcpServersByMessage<T extends { id: string }>(
   opts: SmartFilterOptions = {},
 ): T[] {
   if (opts.disabled) return servers;
+  // Explicit "call the X tool" intent → keep every server this turn. We can't map
+  // a named tool back to its server from config alone (tool lists load lazily),
+  // so dropping any optional server risks stripping the exact tool requested.
+  if (hasExplicitToolIntent(userMessage)) return servers;
   const browser = hasBrowserSignal(userMessage);
   const docs = hasDocsSignal(userMessage);
+  const lower = userMessage.toLowerCase();
   return servers.filter((s) => {
+    // A server named outright in the message ("check the muonroi-docs MCP") is
+    // always relevant — never let a category skip override an explicit mention.
+    if (s.id && lower.includes(s.id.toLowerCase())) return true;
     if (!browser && SKIP_WHEN_NO_BROWSER.test(s.id)) return false;
     if (!docs && SKIP_WHEN_NO_DOCS.test(s.id)) return false;
     return true;

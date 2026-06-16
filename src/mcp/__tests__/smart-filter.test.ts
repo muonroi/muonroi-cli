@@ -85,6 +85,47 @@ describe("filterMcpServersByMessage", () => {
       expect(ids(out)).toContain("chrome-devtools");
     }
   });
+
+  // Regression: session f6f7881a5fae. The user asked "bạn thử call tool
+  // setup_guide ... ( call tool chứ không phải đọc code )". `muonroi-docs` (id
+  // matches /docs/) carried no docs-lookup keyword, so the category skip dropped
+  // it — the model had no `setup_guide` tool and drove the server by hand over
+  // bash JSON-RPC. An explicit tool-invocation intent (or an outright server
+  // mention) must keep the owning server.
+  const docsServers = [{ id: "filesystem" }, { id: "muonroi-docs" }, { id: "context7" }, { id: "tavily" }];
+
+  it("keeps an optional server when the user explicitly asks to CALL a tool by name", () => {
+    const msg =
+      "bạn thử call tool setup_guide xem có được thông tin gì không nhé ( call tool chứ không phải đọc code nhé )";
+    expect(ids(filterMcpServersByMessage(docsServers, msg))).toContain("muonroi-docs");
+  });
+
+  it("recognises explicit tool-invocation intent (EN + VI)", () => {
+    for (const msg of [
+      "please call the setup_guide tool and report",
+      "use the docs_search tool",
+      "invoke the mcp tool",
+      "do a tool call to setup_guide",
+      "dùng tool docs_search giúp tôi",
+      "gọi tool setup_guide",
+      "thử mcp tool xem sao",
+    ]) {
+      expect(ids(filterMcpServersByMessage(docsServers, msg)), msg).toContain("muonroi-docs");
+    }
+  });
+
+  it("keeps a server named outright in the message even without a category signal", () => {
+    // "check the muonroi-docs MCP" — no docs-lookup verb, but the server is named.
+    const out = filterMcpServersByMessage(docsServers, "bạn check xem dùng được mcp muonroi-docs không nhé");
+    expect(ids(out)).toContain("muonroi-docs");
+  });
+
+  it("still drops optional servers on a pure code prompt (token savings preserved)", () => {
+    // The fix must NOT defeat the filter: no tool-intent, no server mention, no
+    // docs signal → muonroi-docs/context7/tavily still dropped.
+    const out = filterMcpServersByMessage(docsServers, "fix the off-by-one in parseRange()");
+    expect(ids(out)).toEqual(["filesystem"]);
+  });
 });
 
 describe("dropRedundantFsMcpTools", () => {
