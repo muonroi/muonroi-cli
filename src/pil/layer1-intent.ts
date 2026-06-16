@@ -13,7 +13,7 @@
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
 import { isLlmFirstClassifyEnabled, isUnifiedPilEnabled } from "./config.js";
-import type { LlmClassifyFn } from "./llm-classify.js";
+import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -666,10 +666,13 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     // also go through the model so chitchat is a semantic decision, not a regex
     // whitelist; the model returns intentKind="chat" for pure pleasantries.
     if (isLlmFirstClassifyEnabled() && opts.llmFallback) {
-      const llmRes = await opts.llmFallback(ctx.raw).catch((err) => {
-        console.error(`[pil.layer1] model-first classify failed: ${(err as Error)?.message}`);
-        return null;
-      });
+      let llmRes: LlmClassifyResult | null = null;
+      let classifyError: string | null = null;
+      try {
+        llmRes = await opts.llmFallback(ctx.raw);
+      } catch (err) {
+        classifyError = (err as Error)?.message ?? String(err);
+      }
       if (llmRes) {
         let intentKind: "task" | "chitchat" = llmRes.intentKind;
         // Safety net (never weakens the model): an explicit command/tool-exec
@@ -727,12 +730,72 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           ],
         };
       }
-      // llmRes null → model offline/garbled → fall through to the regex cascade
-      // (the deterministic safety net). This is the ONLY path that still lets
-      // regex decide intent.
+      // NO fallback. The configured chat model is the SOLE classifier — it is
+      // the model the turn talks to, so it cannot be "offline". A null/failed
+      // result is a real problem: log it loudly and surface it, NEVER paper over
+      // it with a regex guess (which would be confidently wrong — the whole
+      // reason we moved off keyword regex). Return an UNKNOWN classification
+      // (taskType=null): no PIL scaffold is imposed and the chat model still
+      // answers the turn directly — but nothing pretends to know the intent.
+      console.error(
+        "[pil.layer1] model-first classify produced no usable result — NOT falling back to regex. " +
+          `reason=${classifyError ?? "null/unparseable model response"} ` +
+          `model-classifier=wired rawPreview=${JSON.stringify(ctx.raw.slice(0, 120))}`,
+      );
+      const { complexity: failComplexity, score: failComplexityScore } = scoreComplexity({
+        rawText: ctx.raw,
+        taskType: null,
+        t0HitCount: 0,
+        hasMaxSprintsOne: false,
+      });
+      return {
+        ...ctx,
+        taskType: null,
+        domain: null,
+        confidence: 0,
+        outputStyle: null,
+        // keep-tools: a classify failure must never strip the toolset.
+        intentKind: "task",
+        _brainData: null,
+        _intentTrace: {
+          pass1Reason: "llm-first-failed",
+          pass1Confidence: 0,
+          pass1TaskType: null,
+          pass1Hit: false,
+          pass2Hit: false,
+          pass2Pattern: undefined,
+          pass25ChitchatHit: false,
+          pass3UnifiedAttempted: false,
+          pass3UnifiedSucceeded: false,
+          pass3LegacyTaskAttempted: false,
+          pass3LegacyTaskSucceeded: false,
+          pass3LegacyStyleAttempted: false,
+          pass3LegacyStyleSucceeded: false,
+          pass4LlmAttempted: true,
+          pass4LlmSucceeded: false,
+          styleSource: "none",
+          finalTaskType: null,
+          finalConfidence: 0,
+          complexity: failComplexity,
+          complexityScore: failComplexityScore,
+        },
+        layers: [
+          ...ctx.layers,
+          {
+            name: "intent-detection",
+            applied: false,
+            delta: `llm-first=FAIL (${classifyError ?? "no-result"}) — surfaced, NO regex fallback`,
+          },
+        ],
+      };
     }
 
     // Pass 0 — deterministic full-prompt overrides (Phase 5 BUG-B / BUG-D).
+    // LEGACY regex cascade — reached ONLY when no model classifier is wired
+    // (opts.llmFallback absent) or the model-first flag is off. On the main chat
+    // path the model classifier is always wired, so this never decides intent in
+    // production. It is NOT a runtime fallback for a failed model call (that path
+    // returns above with a logged failure).
     // Two narrow patterns short-circuit the whole pipeline:
     //  - continuation phrase → general/chitchat
     //  - performance/optimization verbs → refactor/task
