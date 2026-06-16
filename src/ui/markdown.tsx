@@ -1,49 +1,16 @@
-import { RGBA, SyntaxStyle } from "@opentui/core";
-import { useMemo } from "react";
+import { renderMarkdown } from "./markdown-render.js";
 import type { Theme } from "./theme";
 
-function buildSyntaxStyle(t: Theme): SyntaxStyle {
-  return SyntaxStyle.fromStyles({
-    default: { fg: RGBA.fromHex(t.text) },
-    "markup.heading": { fg: RGBA.fromHex(t.mdHeading), bold: true },
-    "markup.heading.1": { fg: RGBA.fromHex(t.mdHeading), bold: true },
-    "markup.heading.2": { fg: RGBA.fromHex(t.mdHeading), bold: true },
-    "markup.heading.3": { fg: RGBA.fromHex(t.mdHeading), bold: true },
-    "markup.bold": { fg: RGBA.fromHex(t.mdBold), bold: true },
-    "markup.italic": { fg: RGBA.fromHex(t.mdItalic), italic: true },
-    "markup.raw": { fg: RGBA.fromHex(t.mdCode) },
-    "markup.link": { fg: RGBA.fromHex(t.mdLink), underline: true },
-    "markup.link.label": { fg: RGBA.fromHex(t.mdLinkText) },
-    "markup.list": { fg: RGBA.fromHex(t.mdListBullet) },
-    "markup.quote": { fg: RGBA.fromHex(t.mdItalic), italic: true },
-    "markup.separator": { fg: RGBA.fromHex(t.mdHr) },
-    code: { fg: RGBA.fromHex(t.mdCodeBlockFg), bg: RGBA.fromHex(t.mdCodeBlockBg) },
-  });
-}
-
-const TABLE_OPTIONS = {
-  widthMode: "full" as const,
-  columnFitter: "balanced" as const,
-  wrapMode: "word" as const,
-  cellPadding: 1,
-  borders: true,
-  outerBorder: true,
-  borderStyle: "rounded" as const,
-  borderColor: "#333333",
-};
-
+/**
+ * Render markdown to themed TUI text.
+ *
+ * Historically this delegated to opentui's `<markdown>` renderable with
+ * `conceal`, but the bundled @opentui/core (0.1.107) ignores `conceal` and
+ * leaves `**`/`###`/`` ` `` markers visible (and frequently fails to load the
+ * tree-sitter wasm for highlighting). We now render markdown ourselves via
+ * `renderMarkdown`, which strips markers and applies theme colors. See
+ * markdown-render.tsx for the construct coverage.
+ */
 export function Markdown({ content, t }: { content: string; t: Theme }) {
-  const syntaxStyle = useMemo(() => buildSyntaxStyle(t), [t]);
-
-  return (
-    <markdown
-      content={content}
-      syntaxStyle={syntaxStyle}
-      conceal={true}
-      // @ts-expect-error MarkdownProps omits inherited Renderable.selectable; needed for TUI text selection
-      selectable={true}
-      tableOptions={TABLE_OPTIONS}
-      flexShrink={0}
-    />
-  );
+  return renderMarkdown(content, t);
 }

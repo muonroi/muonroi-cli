@@ -487,10 +487,18 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     }
 
     if (message.role === "system") {
-      const content =
-        getCompactionSummaryText(message) ?? (typeof message.content === "string" ? message.content.trim() : "");
+      const summaryText = getCompactionSummaryText(message);
+      const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
       if (content && !isInternalCouncilMarker(content)) {
-        entries.push({ type: "assistant", content, timestamp });
+        // A compaction checkpoint is internal context-management, NOT the
+        // assistant's answer. Tag it with a source label so the UI renders it
+        // as a clearly-marked, collapsible checkpoint instead of dumping the
+        // raw "## Goal / ## Context For Suffix" scaffolding as a chat reply.
+        entries.push(
+          summaryText !== null
+            ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
+            : { type: "assistant", content, timestamp },
+        );
       }
       continue;
     }
