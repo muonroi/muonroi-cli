@@ -23,7 +23,7 @@ import { isDiscoveryEnabled } from "./config.js";
 import { scoreComplexitySize } from "./layer1_5-complexity-size.js";
 import { layer1Intent } from "./layer1-intent.js";
 import { layer2Personality } from "./layer2-personality.js";
-import { layer3EeInjection } from "./layer3-ee-injection.js";
+import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
 import { isMetaAnalysisPrompt, layer6Output } from "./layer6-output.js";
@@ -171,6 +171,10 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       // FIX: skip heavy EE (layer3) + context (layer5) for meta-analysis turns
       // to reduce PIL overhead on evaluation/improvement questions (as intended).
       await timed("layer4-gsd-structuring", layer4Gsd);
+      // Issue #4: full Layer 3 is skipped here, but a self-evaluating agent still
+      // needs the elided high-value tool-artifacts surfaced so it doesn't have to
+      // guess one exists and hand-call ee_query. One cheap, fail-open EE arm.
+      await timed("ee-meta-artifacts", surfaceCompactionArtifacts);
     } else {
       await timed("layer3-ee-injection", layer3EeInjection);
       await timed("layer4-gsd-structuring", layer4Gsd);
