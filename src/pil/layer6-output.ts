@@ -327,8 +327,23 @@ const STRUCTURED_REPORT_RE =
 const QUESTION_SHAPE_RE =
   /^\s*(?:why|how|what|when|where|who|whom|whose|which|explain|describe)\b|\b(?:can|could|would|should)\s+(?:you|i|we|it|they)\b|\?\s*$|tại\s*sao|vì\s*sao|(?:như\s*)?thế\s*nào|là\s*gì|ra\s*sao|ở\s*đâu|khi\s*nào|bao\s*nhiêu|có\s*phải|giải\s*thích|mô\s*tả/i;
 
+// Vietnamese yes/no question frames — the most common VI question shape, and
+// entirely absent from QUESTION_SHAPE_RE above (no "?" and no leading
+// interrogative word). Live miss: session f6f7881a5fae — "bạn check xem dùng
+// được mcp muonroi-docs không nhé" ("can you check whether the muonroi-docs MCP
+// works?") was NOT seen as a question, so layer4-gsd emitted the STANDARD
+// "implement directly" directive and discovery fabricated a build outcome,
+// driving a 40-call code hunt instead of a one-line answer.
+// Two interrogative tails:
+//   1. "(được|đúng|phải) không" anywhere — "is it OK / right?".
+//   2. a clause-final "không"/"chưa" (the yes/no particle), optionally trailed
+//      by a softener (nhé/vậy/à/…) or punctuation. Anchored to end so a
+//      mid-sentence negation ("không là hỏng" = "or it breaks") does NOT match.
+const VI_YESNO_RE =
+  /\b(?:được|đúng|phải)\s*không\b|\b(?:không|chưa)\s*(?:nhé|nhỉ|vậy|thế|ạ|à|hả|ko|nha)?\s*[?.…]*\s*$/i;
+
 export function isQuestionLike(raw: string): boolean {
-  return !!raw && QUESTION_SHAPE_RE.test(raw);
+  return !!raw && (QUESTION_SHAPE_RE.test(raw) || VI_YESNO_RE.test(raw));
 }
 
 export function prefersStructuredReport(raw: string): boolean {
