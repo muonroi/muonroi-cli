@@ -26,10 +26,10 @@ export function isDiscoveryEnabled(): boolean {
   return process.env.MUONROI_PIL_DISCOVERY !== "0";
 }
 
-export function getAutoPassThreshold(): number {
-  const v = Number(process.env.MUONROI_PIL_AUTOPASS_THRESHOLD);
-  return Number.isFinite(v) && v >= 0.5 && v <= 1.0 ? v : 0.85;
-}
+// Phase 2 (2026-06-16): getAutoPassThreshold() was removed with the regex
+// auto-pass gate (shouldAutoPass). The model now decides whether a turn needs
+// clarification, so there is no confidence threshold to tune. The
+// MUONROI_PIL_AUTOPASS_THRESHOLD env var is therefore inert.
 
 export function getMaxInterviewQuestions(): number {
   const v = Number(process.env.MUONROI_PIL_MAX_QUESTIONS);

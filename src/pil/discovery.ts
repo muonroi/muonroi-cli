@@ -1,28 +1,27 @@
 import { randomUUID } from "node:crypto";
-import { detectNoClarifySignal, type L1Signal, shouldAutoPass } from "./clarity-gate.js";
+import { detectNoClarifySignal } from "./clarity-gate.js";
 import { getMaxInterviewQuestions, isDiscoveryEnabled } from "./config.js";
 import { getCachedProjectContext, setCachedProjectContext } from "./discovery-cache.js";
 import type {
   ClarifiedIntent,
+  ClarityGap,
   DiscoveryInteractionHandler,
   DiscoveryResult,
   ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
-import { isImplementationIntent, isMetaAnalysisPrompt, isQuestionLike } from "./layer6-output.js";
+import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
 import {
   buildInterviewQuestion,
-  detectClarityGaps,
   getAutofilledOutcome,
   isProvideOwnDetailsSentinel,
   PROVIDE_OWN_DETAILS_OPTION_EN,
-  PROVIDE_OWN_DETAILS_OPTION_VI,
   resolveGapsNonInteractive,
 } from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
 import { buildAcceptanceCard, buildAcceptanceQuestion } from "./layer18-acceptance.js";
-import { getSessionState, isLikelyFollowUp, markDiscoveryAccepted } from "./session-state.js";
+import { markDiscoveryAccepted } from "./session-state.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
 export interface L1Result {
@@ -80,36 +79,38 @@ export async function runDiscovery(
   if (!isDiscoveryEnabled()) return baseResult();
   if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
   // The user explicitly told the agent not to clarify ("don't ask" / "trả lời
-  // thẳng"). Honour it: skip the entire interview + acceptance ceremony. Placed
-  // before gap detection and the model proposer so no question card is generated.
+  // thẳng"). This is the USER's consent decision, not a classification heuristic,
+  // so it stays: skip the entire interview + acceptance ceremony.
   if (detectNoClarifySignal(raw)) return baseResult();
 
-  // Pure-question guard: a question's deliverable is an ANSWER, not a code
-  // change. Running the clarity interview on one fabricates a build outcome —
-  // live repro session f6f7881a5fae: the yes/no question "dùng được mcp
-  // muonroi-docs không" became Intent "A subcommand/script in muonroi-cli for
-  // muonroi-docs", which then drove the implement/verify scaffold and a 40-call
-  // code hunt. Skip discovery entirely so no [Discovery] build-intent prefix is
-  // injected. Mirrors the `informational` gate in layer4-gsd (same predicates).
-  if (isQuestionLike(raw) && !isImplementationIntent(raw)) return baseResult();
-
-  // Session-continuation guard: when the user is on turn >= 2 of an ongoing
-  // session AND the new prompt looks like a continuation (short, modal verb
-  // or context pronoun), skip the interview entirely. The prior turn already
-  // established context; asking "Which part of the codebase?" on "Can you
-  // fix it?" forces the user to re-type their intent as a freetext answer,
-  // which PIL then mis-routes through gap-resolution + acceptance, producing
-  // duplicate askcards (evidence: session 1f29e238a816 timeline).
-  const sessionState = getSessionState(sessionId);
-  if (sessionState && sessionState.turnCount > 1 && isLikelyFollowUp(raw)) {
+  // ── Model-driven clarification gate (Phase 2) ──────────────────────────────
+  // The configured chat model — NOT a regex/keyword heuristic — is the sole
+  // decider of whether this turn has a genuine gray area, what to ask, which
+  // options to offer, why, and which option is recommended (user directive
+  // 2026-06-16: "các askcard bắt buộc xuất phát từ model muốn hỏi"). The CLI only
+  // injects the proposer prompt to open the path.
+  //
+  // There is deliberately NO regex fallback. The old path ran shouldAutoPass() +
+  // detectClarityGaps() keyword heuristics and fabricated questions/outcomes from
+  // them — the exact "phân loại task qua regex từ khoá ... bad bad bad UX, miss
+  // hàng tỷ case" behaviour this phase removes (it also fabricated a build outcome
+  // for a yes/no question — live repro f6f7881a5fae). If the model cannot propose
+  // questions (no proposer wired, or it throws), we log loudly and proceed WITHOUT
+  // an interview; we never invent a question from keywords ("không bao giờ hardcode
+  // fallback... có vấn đề = fail = ghi logs"). The agent can still clarify inline.
+  if (!clarificationProposer) {
+    // Interactive turns always wire a proposer (orchestrator/message-processor).
+    // A missing one there is a wiring bug — surface it, never paper over with regex.
+    if (handler) {
+      console.error(
+        "[Agent:discovery] interactive turn has no model clarification proposer — skipping interview (no regex fallback by design)",
+      );
+    }
     return baseResult();
   }
 
-  const l1Signal: L1Signal = { confidence: l1.confidence, taskType: l1.taskType, complexity: l1.complexity };
-
-  if (shouldAutoPass(l1Signal, raw)) return baseResult();
-
-  // L1.5: Context Discovery (cacheable)
+  // L1.5: Context Discovery (cacheable) — gives the model real project facts so
+  // it never asks for something it can inspect itself (language/framework/modules).
   let projectContext: ProjectContext;
   const cached = getCachedProjectContext(cwd);
   if (cached) {
@@ -126,79 +127,25 @@ export async function runDiscovery(
     }
   }
 
-  // L1.6: Clarity Interview
-  let gaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
-
-  // Effective model-driven interview: if a clarificationProposer (the actual task model) is provided,
-  // let the *model* itself generate the questions based on the user request + CLI enrichment so far.
-  // The model decides what it still needs and is missing from the enrich suggestions.
-  // Always generate model gaps when proposer wired (even if no handler for non-interactive resolve).
-  // This ensures model BE recs drive [Discovery] Intent/Outcome/Scope for native meta prompts.
-  // Handler only decides whether to show interactive askcard.
-  if (clarificationProposer) {
-    try {
-      const additionalContext = [
-        projectContext.language ? `Language: ${projectContext.language}` : "",
-        projectContext.framework ? `Framework: ${projectContext.framework}` : "",
-        projectContext.packageManager ? `Package manager: ${projectContext.packageManager}` : "",
-        projectContext.relevantModules?.length
-          ? `Relevant modules: ${projectContext.relevantModules.map((m) => m.path).join(", ")}`
-          : "",
-        projectContext.boundedContexts?.length
-          ? `Bounded contexts: ${projectContext.boundedContexts.map((b) => `${b.name} (${b.path})`).join(", ")}`
-          : "",
-        projectContext.eePatterns?.length ? `EE patterns: ${projectContext.eePatterns.slice(0, 3).join(" | ")}` : "",
-        recentTurnsSummary ? `\nRecent Conversation History:\n${recentTurnsSummary}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-      const modelQuestions = await clarificationProposer({
-        raw,
-        l1: { taskType: l1.taskType, confidence: l1.confidence },
-        additionalContext: additionalContext || undefined,
-      });
-      if (modelQuestions.length > 0) {
-        gaps = modelQuestions.slice(0, 3).map((line, idx) => {
-          let q = line;
-          let recs = [PROVIDE_OWN_DETAILS_OPTION_EN];
-          const m = line.match(/\[MODEL RECS:?\s*(.+?)\]/i) || line.match(/RECS:\s*(.+)$/i);
-          if (m) {
-            recs = m[1]
-              .split(/\s*\|\s*/)
-              .map((r) => r.trim())
-              .filter(Boolean)
-              .slice(0, 3);
-            q = line
-              .replace(/\[MODEL RECS:?.*?\]/i, "")
-              .replace(/RECS:.*$/, "")
-              .trim();
-          }
-          return {
-            dimension: "outcome" as const,
-            description: `Model-generated clarification #${idx + 1}`,
-            suggestedQuestion: q || "What else needs clarification?",
-            options: [...recs, "Other (type free answer)"],
-            defaultIndex: 0,
-          };
-        });
-      }
-    } catch {
-      // fall through to static
-    }
+  // L1.6: Ask the MODEL what (if anything) it still needs. The model owns the
+  // gray-area decision, the questions, the options, the "why", and the
+  // recommended default. An empty result means it sees nothing worth asking →
+  // no interview, no fabricated [Discovery] outcome.
+  let gaps: ClarityGap[];
+  try {
+    gaps = await proposeModelGaps(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
+  } catch (err) {
+    // No Silent Catch + fail-loud: log with context, then proceed WITHOUT an
+    // interview. We do NOT fall back to regex-generated questions.
+    console.error(
+      `[Agent:discovery] model clarification proposer threw — proceeding without interview (no regex fallback): ${(err as Error)?.message}`,
+      { stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+    );
+    return baseResult();
   }
 
-  if (!clarificationProposer && (l1.taskType === "analyze" || l1.taskType === "debug") && gaps.length > 0) {
-    // Fallback open question (non-model path)
-    gaps = [
-      {
-        dimension: "outcome",
-        description: "Specific outcome and constraints the agent/model needs from the user",
-        suggestedQuestion: `Để tôi (agent/model) thực hiện chính xác và có được thông tin cần thiết cho task này, bạn hãy cho tôi biết: kết quả mong muốn cụ thể, các ràng buộc quan trọng, hoặc bất kỳ chi tiết nào khác mà tôi cần làm rõ trước khi bắt đầu?`,
-        options: [PROVIDE_OWN_DETAILS_OPTION_VI],
-        defaultIndex: 0,
-      },
-    ];
-  }
+  // Model decided there is no gray area worth asking about → proceed directly.
+  if (gaps.length === 0) return baseResult();
 
   let clarifiedIntent: ClarifiedIntent;
   let interviewed = false;
@@ -255,36 +202,33 @@ export async function runDiscovery(
     if (decision === "cancel") {
       accepted = false;
     } else if (decision === "adjust") {
-      // Re-run interview once — but ONLY for gaps where the user's prior
-      // freetext answer was empty, identical to the raw prompt itself, or
-      // a continuation phrase. Re-asking gaps the user already answered
-      // (with non-trivial text) just produces duplicate askcards (evidence:
-      // session 1f29e238a816 — user picked "adjust", re-interview fired the
-      // same "Which part of codebase?" question they had just answered).
-      const reGaps = detectClarityGaps(raw, l1.taskType, l1.confidence, projectContext);
-      const priorAnswers = new Map<string, string | null>(
-        (clarifiedIntent.gaps ?? []).map((g) => [g.dimension, g.answer ?? null]),
-      );
-      const reAnswered: Array<(typeof reGaps)[number] & { answer: string | null }> = reGaps.map((g) => ({
-        ...g,
-        answer: priorAnswers.get(g.dimension) ?? null,
-      }));
-      const maxRe = Math.min(reGaps.length, getMaxInterviewQuestions());
-      for (let i = 0; i < maxRe; i++) {
-        const gap = reAnswered[i]!;
-        const prior = gap.answer?.trim() ?? "";
-        const isTrivialPriorAnswer =
-          prior === "" || prior.toLowerCase() === raw.trim().toLowerCase() || isLikelyFollowUp(prior);
-        if (!isTrivialPriorAnswer) {
-          // User already gave a substantive answer for this gap. Keep it.
-          continue;
-        }
-        const q = buildInterviewQuestion(gap, randomUUID());
-        const ans = await handler.askQuestion(q);
-        reAnswered[i] = { ...gap, answer: ans.text };
+      // The user asked to change something — let the MODEL re-propose questions
+      // given the same context (it owns the gray-area decision, exactly like the
+      // initial pass). On a proposer failure we keep the already-resolved intent
+      // rather than fabricate regex questions.
+      let reGaps: ClarityGap[] = [];
+      try {
+        reGaps = await proposeModelGaps(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
+      } catch (err) {
+        console.error(
+          `[Agent:discovery] re-interview proposer threw — keeping prior intent: ${(err as Error)?.message}`,
+        );
       }
-      clarifiedIntent = buildClarifiedIntentFromAnswers(reAnswered, raw, projectContext);
-      feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => feasibility);
+      if (reGaps.length > 0) {
+        const reAnswered: Array<(typeof reGaps)[number] & { answer: string | null }> = reGaps.map((g) => ({
+          ...g,
+          answer: null,
+        }));
+        const maxRe = Math.min(reGaps.length, getMaxInterviewQuestions());
+        for (let i = 0; i < maxRe; i++) {
+          const gap = reAnswered[i]!;
+          const q = buildInterviewQuestion(gap, randomUUID());
+          const ans = await handler.askQuestion(q);
+          reAnswered[i] = { ...gap, answer: ans.text };
+        }
+        clarifiedIntent = buildClarifiedIntentFromAnswers(reAnswered, raw, projectContext);
+        feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => feasibility);
+      }
       accepted = true;
     }
   }
@@ -379,6 +323,79 @@ function buildClarifiedIntentFromAnswers(
 }
 
 /**
+ * Build the enrichment context the model sees, call the proposer, and map each
+ * returned line into a ClarityGap. This is the SINGLE place discovery turns a
+ * model response into askcard gaps — the model owns the question, the options
+ * (recommends), the recommended default (first option), and the "why" (threaded
+ * into the gap description → askcard context). No regex/keyword gap synthesis.
+ *
+ * Throws on proposer error so the caller can decide how to degrade (initial pass
+ * proceeds without interview; the "adjust" pass keeps the prior intent).
+ */
+async function proposeModelGaps(
+  proposer: ModelClarificationProposer,
+  raw: string,
+  l1: L1Result,
+  projectContext: ProjectContext,
+  recentTurnsSummary: string | null,
+): Promise<ClarityGap[]> {
+  const additionalContext = [
+    projectContext.language ? `Language: ${projectContext.language}` : "",
+    projectContext.framework ? `Framework: ${projectContext.framework}` : "",
+    projectContext.packageManager ? `Package manager: ${projectContext.packageManager}` : "",
+    projectContext.relevantModules?.length
+      ? `Relevant modules: ${projectContext.relevantModules.map((m) => m.path).join(", ")}`
+      : "",
+    projectContext.boundedContexts?.length
+      ? `Bounded contexts: ${projectContext.boundedContexts.map((b) => `${b.name} (${b.path})`).join(", ")}`
+      : "",
+    projectContext.eePatterns?.length ? `EE patterns: ${projectContext.eePatterns.slice(0, 3).join(" | ")}` : "",
+    recentTurnsSummary ? `\nRecent Conversation History:\n${recentTurnsSummary}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const modelQuestions = await proposer({
+    raw,
+    l1: { taskType: l1.taskType, confidence: l1.confidence },
+    additionalContext: additionalContext || undefined,
+  });
+  return modelQuestions.slice(0, 3).map(parseModelQuestionToGap);
+}
+
+/**
+ * Parse one proposer line ("question [MODEL RECS: a | b] [WHY: reason]") into a
+ * ClarityGap. The recommends become the askcard options (first = recommended
+ * default); the WHY clause becomes the askcard context so the user sees the
+ * model's own reason for asking.
+ */
+function parseModelQuestionToGap(line: string, idx: number): ClarityGap {
+  let recs = [PROVIDE_OWN_DETAILS_OPTION_EN];
+  const recMatch = line.match(/\[MODEL RECS:?\s*(.+?)\]/i) || line.match(/RECS:\s*(.+)$/i);
+  if (recMatch) {
+    const parsed = recMatch[1]
+      .split(/\s*\|\s*/)
+      .map((r) => r.trim())
+      .filter(Boolean)
+      .slice(0, 3);
+    if (parsed.length > 0) recs = parsed;
+  }
+  const whyMatch = line.match(/\[WHY:\s*(.+?)\]/i);
+  const why = whyMatch ? whyMatch[1].trim() : "";
+  const question = line
+    .replace(/\[WHY:.*?\]/i, "")
+    .replace(/\[MODEL RECS:?.*?\]/i, "")
+    .replace(/RECS:.*$/, "")
+    .trim();
+  return {
+    dimension: "outcome",
+    description: why || `Model-generated clarification #${idx + 1}`,
+    suggestedQuestion: question || "What else needs clarification?",
+    options: [...recs, "Other (type free answer)"],
+    defaultIndex: 0,
+  };
+}
+
+/**
  * Create a ModelClarificationProposer backed by the actual task model.
  * The model receives the user raw + CLI enrichment (l1, project modules, etc.)
  * and outputs the specific questions *it* needs the user to answer.
@@ -411,38 +428,54 @@ ${envHeader}User request: "${input.raw}"
 Task type from CLI: ${input.l1.taskType}
 ${contextStr}
 
-Based on the above, output the FEW specific, concise questions you (the model) genuinely still need answered to complete the task accurately — ask only what is genuinely blocking, not a quota. Most well-scoped requests need 0-1 questions. If everything you need is already inferable from the request + context above, return an empty array [].
+You decide whether this turn has a genuine gray area that BLOCKS you from delivering correctly. Output the FEW specific, concise questions you (the model) genuinely still need answered — ask only what is truly blocking, not a quota. Most well-scoped requests need 0-1 questions. If everything you need is already inferable from the request + context above, OR the request is a plain question you can simply answer, return an empty array [].
 If the User request is a follow-up or continuation of the recent conversation history (if provided above), do NOT ask for new project details; assume the context is already established and return [] unless there is a critical new ambiguity.
 Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — never ask something the context above already answers.${special}
-For each question provide 1-2 short concrete recommendations the user can pick from, and ALWAYS list the ONE you would choose FIRST — it becomes the default the user can accept with a single keypress. Be decisive; do not hand back an unranked list.
+For each question: (1) provide 1-2 short concrete recommendations the user can pick from, ALWAYS listing the ONE you would choose FIRST — it becomes the default the user accepts with one keypress; (2) give a short "reason" clause explaining WHY answering it changes what you do. Be decisive; do not hand back an unranked list.
 Return ONLY valid JSON array, nothing else:
-[{"question":"...","recommends":["rec1","rec2"]}, ...]
+[{"question":"...","recommends":["rec1","rec2"],"reason":"why this matters"}, ...]
 Max 3 items.`;
 
       const result = await generateText({
         model: runtime.model,
         prompt,
-        maxOutputTokens: 256,
+        maxOutputTokens: 320,
       });
 
-      let items: Array<{ question: string; recommends?: string[] }> = [];
+      let items: Array<{ question?: string; recommends?: string[]; reason?: string }>;
       try {
         const txt = result.text
           .trim()
           .replace(/```json|```/g, "")
           .trim();
-        items = JSON.parse(txt);
-      } catch {
-        // degrade: treat whole text as one question with no recs
-        items = [{ question: result.text.trim(), recommends: [] }];
+        const parsed = JSON.parse(txt);
+        items = Array.isArray(parsed) ? parsed : [];
+      } catch (parseErr) {
+        // A malformed (non-JSON) model response must NOT be coerced into a junk
+        // askcard — log and return no questions (proceed without interview).
+        console.error(
+          `[Agent:discovery] clarification proposer returned non-JSON — no questions this turn: ${(parseErr as Error)?.message}`,
+          { sample: result.text.slice(0, 160) },
+        );
+        return [];
       }
-      return items.slice(0, 3).map((it) => {
-        const recs = (it.recommends || []).slice(0, 2).join(" | ");
-        const tag = recs ? ` [MODEL RECS: ${recs}]` : "";
-        return `${it.question || "Clarify needed details"}${tag}`;
-      });
+      return items
+        .filter((it) => it && typeof it.question === "string" && it.question.trim())
+        .slice(0, 3)
+        .map((it) => {
+          const recs = (it.recommends || []).slice(0, 2).join(" | ");
+          const recTag = recs ? ` [MODEL RECS: ${recs}]` : "";
+          const why = (it.reason || "").trim();
+          const whyTag = why ? ` [WHY: ${why}]` : "";
+          return `${it.question!.trim()}${recTag}${whyTag}`;
+        });
     } catch (err) {
-      // Silent degrade: no model questions, fall back to static
+      // No Silent Catch + fail-loud: the model call failed. Log with context and
+      // return no questions — discovery proceeds WITHOUT an interview rather than
+      // fabricating a regex-derived one ("có vấn đề = fail = ghi logs").
+      console.error(`[Agent:discovery] clarification proposer failed (${modelId}): ${(err as Error)?.message}`, {
+        stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+      });
       return [];
     }
   };
