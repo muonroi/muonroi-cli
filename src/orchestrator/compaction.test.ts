@@ -2,9 +2,11 @@ import type { ModelMessage } from "ai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildEffectiveTranscript, type PersistedCompaction } from "../storage/transcript-view";
 import {
+  COMPACTION_META_MAX_OUTPUT_TOKENS,
   COMPACTION_SUMMARY_HEADER,
   createCompactionSummaryMessage,
   findCutPoint,
+  metaCompactionMaxTokens,
   prepareCompaction,
   serializeConversation,
   shouldCompactContext,
@@ -183,7 +185,9 @@ describe("compaction helpers", () => {
   it("creates compaction summary with EE-extractable checkpoint meta (Progress ✔ DONE shape for pilContext/layer3)", () => {
     // This is the exact text shape persisted to EE behavioral collection on cli-compact-checkpoint
     // (orchestrator compactForContext + extract). Layer 3 searches for it; agent uses via "task finished?".
-    const summaryMsg = createCompactionSummaryMessage("Goal: implement anti-mu\nPlan: Phase 1-3\nProgress: ✔ DONE dedup marker\n↻ In Progress: layer1 enrich");
+    const summaryMsg = createCompactionSummaryMessage(
+      "Goal: implement anti-mu\nPlan: Phase 1-3\nProgress: ✔ DONE dedup marker\n↻ In Progress: layer1 enrich",
+    );
     const content = typeof summaryMsg.content === "string" ? summaryMsg.content : "";
     expect(content).toContain("Context checkpoint summary");
     expect(content).toContain("✔ DONE");
@@ -196,5 +200,31 @@ describe("compaction helpers", () => {
     expect(r).toContain("PRESERVE");
     expect(r).toContain("KEEP_TOOL_IDS");
     expect(r).toContain("tool-artifact");
+  });
+});
+
+describe("metaCompactionMaxTokens — meta summary cap (tunable, session 2b7a10219499)", () => {
+  it("defaults to 1536 — looser than the old hard 1024, still well below the 14k-char problem", () => {
+    delete process.env.MUONROI_META_COMPACT_MAX_TOKENS;
+    expect(metaCompactionMaxTokens()).toBe(COMPACTION_META_MAX_OUTPUT_TOKENS);
+    expect(COMPACTION_META_MAX_OUTPUT_TOKENS).toBe(1536);
+    expect(COMPACTION_META_MAX_OUTPUT_TOKENS).toBeGreaterThan(1024);
+  });
+
+  it("honors a valid MUONROI_META_COMPACT_MAX_TOKENS override", () => {
+    process.env.MUONROI_META_COMPACT_MAX_TOKENS = "2048";
+    try {
+      expect(metaCompactionMaxTokens()).toBe(2048);
+    } finally {
+      delete process.env.MUONROI_META_COMPACT_MAX_TOKENS;
+    }
+  });
+
+  it("clamps out-of-range / garbage overrides to the default", () => {
+    for (const bad of ["999999", "100", "-5", "abc", ""]) {
+      process.env.MUONROI_META_COMPACT_MAX_TOKENS = bad;
+      expect(metaCompactionMaxTokens(), bad).toBe(COMPACTION_META_MAX_OUTPUT_TOKENS);
+    }
+    delete process.env.MUONROI_META_COMPACT_MAX_TOKENS;
   });
 });
