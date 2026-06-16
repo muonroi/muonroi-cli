@@ -27,7 +27,7 @@
 // `TurnRunnerDepsBase` hoist is mechanical.
 
 import type { ModelMessage, ToolSet } from "ai";
-import { buildMcpToolSet } from "../mcp/runtime";
+import { acquireMcpTools } from "../mcp/client-pool";
 import type { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { requireRuntimeProvider, type resolveModelRuntime } from "../providers/runtime.js";
@@ -202,7 +202,7 @@ export class BatchTurnRunner {
         });
         let tools: ToolSet = !batchCaps.supportsClientTools(runtime.modelInfo) ? {} : baseTools;
         if (deps.mode === "agent" && batchCaps.supportsClientTools(runtime.modelInfo)) {
-          const mcpBundle = await buildMcpToolSet(loadMcpServers(), {
+          const mcpBundle = await acquireMcpTools(loadMcpServers(), {
             onOAuthRequired: (_serverId, url) => {
               // Server-supplied URL is untrusted — openUrl validates the scheme
               // and spawns via execFile (no shell), closing the command-injection
