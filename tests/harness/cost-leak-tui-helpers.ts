@@ -128,6 +128,14 @@ export async function spawnCostLeakHarness(
       // Disabling discovery is the surgical fix: the specs need streamText
       // round-trips, not gap-elicitation UX.
       MUONROI_PIL_DISCOVERY: "0",
+      // Same determinism reason as discovery: the PIL model-first LLM classifier
+      // (createLlmClassifier) issues its OWN streamText through the mock model,
+      // consuming the FIRST scripted round before the agent loop runs. b3-tui's
+      // fixture round #0 is the top-level `task` tool-call that dispatches the
+      // sub-agent; if the classifier eats it, the agent never dispatches and the
+      // spec sees only top-level calls. Revert to the regex cascade so the first
+      // scripted round deterministically reaches the agent.
+      MUONROI_LLM_FIRST_CLASSIFY: "0",
       // Caller overrides (merged last) — e.g. forcing EE unreachable.
       ...(opts.env ?? {}),
     },
