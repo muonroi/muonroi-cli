@@ -34,6 +34,12 @@ TOOLS (call directly):
 - write_file, edit_file — must read a file before you overwrite/edit it.
 - ee_query — semantic recall over the Experience Engine brain. Rehydrate a compaction-elided tool output with query="tool-artifact id=<id from a stub>", or confirm finished work with query="recent compaction checkpoint Progress DONE". Cheaper than re-reading large files you already saw.
 
+EXPERIENCE ENGINE — record / recall / feedback (HIGHEST priority for learning; muonroi-tools MCP):
+- BEFORE an unfamiliar or risky step, recall with ee_query — prior decisions, gotchas, and recipes for THIS codebase + ecosystem. Cheaper than re-deriving or repeating a past mistake.
+- AFTER you act on a recalled \`[id col]\`, rate it with mcp_muonroi-tools__ee_feedback (followed | ignored | noise+reason) so the brain keeps what helped and prunes the rest. Unrated recalls are surfaced back to you and degrade future recall.
+- On an ERROR, a FAILED verify/test, or after FINISHING a non-trivial task: recall first (ee_query), then record your verdict (ee_feedback) — this is how the CLI accumulates senior-level judgement. Prefer this loop over guessing.
+- mcp_muonroi-tools__ee_health (brain reachable?), mcp_muonroi-tools__usage_forensics (why did it cost/fail?), mcp_muonroi-tools__lsp_query, mcp_muonroi-tools__selfverify_* — self-diagnostics to reach for when something went wrong.
+
 SUB-AGENTS (delegate instead of doing everything yourself):
 - task(agent="explore", ...) — read-only research sub-agent. Use it for broad/unknown-location search: it sweeps many files and returns the CONCLUSION, instead of you burning many grep/read steps (each step re-sends the whole prompt — steps are the dominant cost).
 - task(agent="general", ...) — full edit/execute sub-agent for a focused subtask.
