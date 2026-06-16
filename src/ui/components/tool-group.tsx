@@ -17,6 +17,12 @@ import type { ChatEntry, ToolGroupItem } from "../../types/index";
 import type { Theme } from "../theme.js";
 import { trunc } from "../utils/text.js";
 import { dominantVerb, toolLabel } from "../utils/tools.js";
+import { DiffView } from "./diff-view.js";
+
+// Tools whose result carries a FileDiff worth rendering inline under the item
+// line. Mirrors the per-tool branch in message-view.tsx so grouped edits show
+// the same +/- diff a non-grouped tool_result would.
+const DIFF_TOOLS = new Set(["write_file", "edit_file"]);
 
 // Max items rendered inline while a group is active. Anything beyond gets a
 // "+N more (ctrl+e expand)" affordance — matches Claude Code's overflow line.
@@ -107,12 +113,16 @@ export function ToolGroupView({ entry, t, expanded, modeColor }: ToolGroupViewPr
               const label = trunc(toolLabel(it.toolCall), 90);
               const errSuffix =
                 it.failed && it.result?.error ? `  — ${trunc(it.result.error.replace(/\s+/g, " "), 60)}` : "";
+              const diff = !it.failed && DIFF_TOOLS.has(it.toolCall.function.name) ? it.result?.diff : undefined;
               return (
-                <text key={it.toolCall.id}>
-                  <span style={{ fg: itemColor(it, t) }}>{`${itemGlyph(it)} `}</span>
-                  <span style={{ fg: t.textMuted }}>{label}</span>
-                  {errSuffix && <span style={{ fg: t.diffRemovedFg }}>{errSuffix}</span>}
-                </text>
+                <box key={it.toolCall.id} flexDirection="column">
+                  <text>
+                    <span style={{ fg: itemColor(it, t) }}>{`${itemGlyph(it)} `}</span>
+                    <span style={{ fg: t.textMuted }}>{label}</span>
+                    {errSuffix && <span style={{ fg: t.diffRemovedFg }}>{errSuffix}</span>}
+                  </text>
+                  {diff && <DiffView t={t} diff={diff} />}
+                </box>
               );
             })}
           </box>

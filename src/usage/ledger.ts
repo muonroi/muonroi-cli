@@ -71,27 +71,64 @@ async function ensureUsageFile(filePath: string): Promise<void> {
 }
 
 /**
+ * In-process serialization per usage.json path.
+ *
+ * proper-lockfile guards CROSS-process access, but its FS-mtime staleness
+ * check can admit a second concurrent critical section under CPU starvation:
+ * a holder that is descheduled long enough fails to refresh the lock mtime,
+ * a competitor deems the lock stale and steals it, and two reserve() bodies
+ * run at once. Reproduced under 6-process contention — exactly one extra
+ * reservation slips past a $1.00 cap (6 × $0.18 = $1.08 > cap).
+ *
+ * A JS promise-chain mutex makes same-process reserve/commit/release bursts
+ * strictly serial. This is the dominant real case (10 parallel tool calls in
+ * one CLI process) and closes the in-process overshoot window entirely; the
+ * file lock still handles genuine multi-process access.
+ */
+const pathMutex = new Map<string, Promise<unknown>>();
+
+function withPathMutex<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+  const prev = pathMutex.get(filePath) ?? Promise.resolve();
+  // Run regardless of the prior caller's outcome (success or rejection).
+  const run = prev.then(fn, fn);
+  // Stored tail swallows rejection so one failed caller never rejects queued
+  // ones; prune the map entry when this tail is the last in the chain.
+  const tail = run.then(
+    () => {},
+    () => {},
+  );
+  pathMutex.set(filePath, tail);
+  void tail.then(() => {
+    if (pathMutex.get(filePath) === tail) pathMutex.delete(filePath);
+  });
+  return run;
+}
+
+/**
  * Execute a function under exclusive file lock on usage.json.
- * The lock prevents racing readers/writers across CLI processes.
+ * The lock prevents racing readers/writers across CLI processes; the
+ * in-process mutex serializes concurrent callers within this process.
  */
 async function withLock<T>(
   filePath: string,
   fn: (state: UsageState) => Promise<{ next: UsageState; result: T }>,
 ): Promise<T> {
-  await ensureUsageFile(filePath);
-  const releaseLock = await lockfile.lock(filePath, {
-    retries: { retries: 10, minTimeout: 10, maxTimeout: 100 },
-    stale: 5_000,
-    realpath: false,
+  return withPathMutex(filePath, async () => {
+    await ensureUsageFile(filePath);
+    const releaseLock = await lockfile.lock(filePath, {
+      retries: { retries: 10, minTimeout: 10, maxTimeout: 100 },
+      stale: 5_000,
+      realpath: false,
+    });
+    try {
+      const state = (await atomicReadJSON<UsageState>(filePath)) ?? emptyState();
+      const { next, result } = await fn(state);
+      await atomicWriteJSON(filePath, next);
+      return result;
+    } finally {
+      await releaseLock();
+    }
   });
-  try {
-    const state = (await atomicReadJSON<UsageState>(filePath)) ?? emptyState();
-    const { next, result } = await fn(state);
-    await atomicWriteJSON(filePath, next);
-    return result;
-  } finally {
-    await releaseLock();
-  }
 }
 
 /**
