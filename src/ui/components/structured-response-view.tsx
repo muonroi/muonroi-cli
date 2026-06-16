@@ -1,4 +1,5 @@
 import type { StructuredResponse } from "../../types/index";
+import { renderMarkdown } from "../markdown-render.js";
 import type { Theme } from "../theme.js";
 
 export function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: StructuredResponse; modeColor: string }) {
@@ -122,7 +123,7 @@ export function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Str
       const r = d as { content?: string; examples?: Array<{ code: string; description: string }> };
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>
-          <text>{r.content}</text>
+          {r.content ? renderMarkdown(r.content, t) : null}
           {(r.examples ?? []).map((ex, i) => (
             <box key={`de${i}`} flexDirection="column" marginTop={1}>
               <text fg={t.textMuted}>{ex.description}</text>
@@ -152,17 +153,14 @@ export function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Str
       );
     }
     case "general": {
+      // `reasoning` is the model's internal justification — deliberately NOT
+      // surfaced (it leaked as a "── reasoning:" tail and reads as process
+      // narration). The user-facing answer is `response`, rendered as markdown.
       const g = d as { response?: string; reasoning?: string };
       if (!g.response) return <text fg={t.textMuted}>{JSON.stringify(d, null, 2)}</text>;
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>
-          <text fg={t.text}>{g.response}</text>
-          {g.reasoning ? (
-            <text fg={t.textMuted}>
-              {"  ── reasoning: "}
-              {g.reasoning}
-            </text>
-          ) : null}
+          {renderMarkdown(g.response, t)}
         </box>
       );
     }
@@ -180,7 +178,7 @@ export function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Str
       if (primary) {
         return (
           <box flexDirection="column" paddingLeft={2} marginTop={1}>
-            <text fg={t.text}>{primary}</text>
+            {renderMarkdown(primary, t)}
             <text fg={t.textMuted}>{`  ── (renderer missing for taskType: ${sr.taskType})`}</text>
           </box>
         );
