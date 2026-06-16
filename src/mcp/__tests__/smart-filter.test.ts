@@ -7,6 +7,7 @@ const servers = [
   { id: "filesystem" },
   { id: "muonroi-tools" },
   { id: "muonroi-harness" },
+  { id: "muonroi-docs" },
   { id: "context7" },
   { id: "fetch" },
   { id: "tavily" },
@@ -70,6 +71,28 @@ describe("filterMcpServersByMessage", () => {
     expect(ids(out)).toContain("filesystem");
     expect(ids(out)).toContain("muonroi-tools");
     expect(ids(out)).toContain("muonroi-harness");
+  });
+
+  it("keeps muonroi-docs for an ecosystem question that has no generic docs keyword", () => {
+    // Live miss (session dbe408937a3d turn 1): "bạn hiểu thế nào về hệ sinh thái
+    // muonroi" carries no docs/api keyword and doesn't say "muonroi-docs", so the
+    // authoritative ecosystem source was dropped and the agent guessed from files.
+    for (const msg of [
+      "bạn hiểu thế nào về hệ sinh thái muonroi",
+      "what is the muonroi ecosystem?",
+      "explain the building-block rule engine",
+    ]) {
+      const out = filterMcpServersByMessage(servers, msg);
+      expect(ids(out), msg).toContain("muonroi-docs");
+    }
+  });
+
+  it("keeping muonroi-docs for an ecosystem question does NOT over-keep other docs/web servers", () => {
+    const out = filterMcpServersByMessage(servers, "bạn hiểu thế nào về hệ sinh thái muonroi");
+    expect(ids(out)).toContain("muonroi-docs");
+    expect(ids(out)).not.toContain("context7");
+    expect(ids(out)).not.toContain("fetch");
+    expect(ids(out)).not.toContain("tavily");
   });
 
   it("returns every server unchanged when disabled (MUONROI_DISABLE_SMART_MCP=1)", () => {

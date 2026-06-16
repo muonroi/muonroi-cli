@@ -62,6 +62,19 @@ function hasDocsSignal(message: string): boolean {
 }
 
 /**
+ * Matches a question ABOUT the Muonroi ecosystem — where muonroi-docs (the
+ * authoritative ecosystem source: BB/.NET recipes, package docs, open-core
+ * boundary) is exactly what's needed, even though the message carries no generic
+ * docs/api keyword. Deliberately ecosystem-specific so it only ever KEEPS
+ * muonroi-docs (never other docs servers). EN + VI.
+ */
+function hasEcosystemSignal(message: string): boolean {
+  return /\bmuonroi\b|\becosystem\b|hệ\s*sinh\s*thái|he\s*sinh\s*thai|building[-\s]?block|\bbb\b|open[-\s]?core/i.test(
+    message,
+  );
+}
+
+/**
  * Explicit "use a tool / MCP tool" intent. The filter only sees server *ids*,
  * not their tool lists (MCP tools are fetched lazily at build time), so when the
  * user asks to call a specific tool by name we cannot tell which server owns it.
@@ -160,11 +173,18 @@ export function filterMcpServersByMessage<T extends { id: string }>(
   if (hasExplicitToolIntent(userMessage)) return servers;
   const browser = hasBrowserSignal(userMessage);
   const docs = hasDocsSignal(userMessage);
+  const ecosystem = hasEcosystemSignal(userMessage);
   const lower = userMessage.toLowerCase();
   return servers.filter((s) => {
     // A server named outright in the message ("check the muonroi-docs MCP") is
     // always relevant — never let a category skip override an explicit mention.
     if (s.id && lower.includes(s.id.toLowerCase())) return true;
+    // muonroi-docs is the AUTHORITATIVE ecosystem source. A question about the
+    // Muonroi ecosystem ("hệ sinh thái muonroi", "building-block", "bb rule
+    // engine") matches no generic docs/api keyword, so SKIP_WHEN_NO_DOCS would
+    // wrongly drop it and the agent falls back to guessing from files (live
+    // session dbe408937a3d turn 1). Keep it whenever the turn is ecosystem-about.
+    if (ecosystem && /(^|[-_])docs([-_]|$)/.test(s.id) && /muonroi/i.test(s.id)) return true;
     if (!browser && SKIP_WHEN_NO_BROWSER.test(s.id)) return false;
     if (!docs && SKIP_WHEN_NO_DOCS.test(s.id)) return false;
     return true;
