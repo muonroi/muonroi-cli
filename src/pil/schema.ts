@@ -76,6 +76,8 @@ export const PipelineContextSchema = z.object({
     )
     .optional(),
   fallbackReason: z.string().nullable().optional(),
+  // Phase 2b: model-decided output deliverable consumed by layer4/layer6.
+  deliverableKind: z.enum(["answer", "code", "report"]).nullable().optional(),
   // T1 behavioral rules from EE proven-tier points, injected as mandatory suffix by Layer 6.
   t1Rules: z.array(z.string()).optional(),
   _brainData: z

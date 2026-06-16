@@ -68,6 +68,16 @@ export interface PipelineContext {
    */
   intentKind?: "task" | "chitchat" | null;
   /**
+   * Model-decided output deliverable (Phase 2b): "answer" (explanation / review
+   * / question — no edits), "code" (create/edit files), "report" (structured
+   * list/plan/audit). Set by layer1's model-first classifier. Consumed by
+   * layer4 (`informational` directive) and layer6 (`getResponseToolSet` /
+   * `applyPilSuffix` output-format gating) INSTEAD of re-deriving intent via
+   * keyword regex. null/undefined when the model omitted it or the legacy
+   * cascade ran → those consumers fall back to their regex predicates.
+   */
+  deliverableKind?: "answer" | "code" | "report" | null;
+  /**
    * Diagnostic: when the pipeline returns the fallback context, this records
    * the reason (timeout / schema-reject / exception). Null on the happy path.
    * Helps distinguish "fallback because brain unreachable" from "fallback

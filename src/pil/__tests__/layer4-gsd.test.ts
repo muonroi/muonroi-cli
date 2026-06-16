@@ -111,6 +111,29 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(result.enriched).not.toContain("QUESTION / explanatory");
   });
 
+  it("Phase 2b: deliverableKind='answer' is informational even for an imperative (no '?') prompt", async () => {
+    // The raw text is a plain imperative — the legacy regex (isQuestionLike /
+    // isMetaAnalysisPrompt) would NOT mark it informational. The model's
+    // deliverableKind='answer' must override that and route to the QUESTION
+    // directive — proving L4 consumes the model signal, not the regex.
+    const raw = "go over the auth module and tell me what it does";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "answer" }),
+    );
+    expect(result.enriched).toContain("QUESTION / explanatory");
+  });
+
+  it("Phase 2b: deliverableKind='code' is NOT informational even for a question-shaped prompt", async () => {
+    // The raw text reads as a question — the legacy regex would mark it
+    // informational. The model's deliverableKind='code' must override that so
+    // the STANDARD implement scaffold is used (the deliverable is file edits).
+    const raw = "why not just refactor the dropdown and wire the keyboard handlers?";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "refactor", intentKind: "task", deliverableKind: "code" }),
+    );
+    expect(result.enriched).not.toContain("QUESTION / explanatory");
+  });
+
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
     const { routeTask } = await import("../../ee/bridge.js");
     vi.mocked(routeTask).mockClear();

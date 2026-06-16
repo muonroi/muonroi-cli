@@ -88,24 +88,23 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
 
   const complexity = scoreComplexity(ctx.raw);
   const grayAreas = complexity.tier === "heavy" ? detectGrayAreas(ctx.raw).questions : [];
-  // Informational/meta prompts (a question or a self/meta CLI analysis) ask for
-  // an ANSWER, not a code change. The implement/verify directive leaks into the
-  // human-facing reply as a "2-3 line plan" + process narration (session
-  // 829a83888dd2). Route them to the human-facing question directive instead.
+  // Informational prompts (a question / explanation / self-eval) ask for an
+  // ANSWER, not a code change. The implement/verify directive otherwise leaks
+  // into the human-facing reply as a "2-3 line plan" + process narration
+  // (session 829a83888dd2). Route them to the human-facing question directive.
   //
-  // Three signals, any of which makes the turn informational:
+  // Phase 2b: when the model classified the deliverable, CONSUME it — an
+  // "answer" deliverable IS informational. Only when the model didn't emit one
+  // (deliverableKind null → legacy cascade, or the model omitted the word) do
+  // we fall back to the legacy regex predicates:
   //   1. isMetaAnalysisPrompt — self/CLI evaluation, prior-turn reflection.
-  //   2. taskType "general" classified as a real task by L1 (a genuine question;
-  //      fallback/ambiguous "general" stays intentKind=null → STANDARD scaffold).
-  //   3. question-shaped prompt that is NOT an implementation request — covers
-  //      analyze/debug/plan QUESTIONS ("why does X fail?", "how does the pipeline
-  //      work?") that L1 does not label "general" but which still want an answer,
-  //      not a "state a 2-3 line plan" preamble. (Live: a PIL-flow question
-  //      classified `analyze` was getting the STANDARD plan directive.)
-  const informational =
-    isMetaAnalysisPrompt(ctx.raw) ||
-    (ctx.taskType === "general" && ctx.intentKind === "task") ||
-    (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
+  //   2. taskType "general" classified as a real task by L1.
+  //   3. question-shaped prompt that is NOT an implementation request.
+  const informational = ctx.deliverableKind
+    ? ctx.deliverableKind === "answer"
+    : isMetaAnalysisPrompt(ctx.raw) ||
+      (ctx.taskType === "general" && ctx.intentKind === "task") ||
+      (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
   const directive = buildDirective({ complexity, phase, grayAreas, informational });
 
   const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);

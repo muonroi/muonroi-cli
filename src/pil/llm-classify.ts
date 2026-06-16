@@ -18,6 +18,19 @@ import type { ProviderFactory } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
+/**
+ * What the user wants the turn to PRODUCE — decided by the model (Phase 2b) so
+ * the keyword-regex predicates in Layer 4 (`informational`) and Layer 6
+ * (`getResponseToolSet` / `applyPilSuffix`) are no longer the authority for
+ * output routing.
+ *   - "code"   — create/edit files (implement, fix, build, refactor, scaffold).
+ *   - "report" — a structured list/plan/audit/roadmap is the deliverable.
+ *   - "answer" — an explanation / review / question / meta answer (no edits).
+ * `null` when the model omits/garbles the word → Layer 4/6 fall back to their
+ * legacy regex predicates for that turn (graceful, never a wrong forced route).
+ */
+export type DeliverableKind = "answer" | "code" | "report";
+
 export interface LlmClassifyResult {
   taskType: TaskType;
   outputStyle: OutputStyle | null;
@@ -31,6 +44,11 @@ export interface LlmClassifyResult {
    * schema; a false "chitchat" strips bash/read and BREAKS the turn).
    */
   intentKind: "task" | "chitchat";
+  /**
+   * Model-decided output deliverable (answer | code | report). null when the
+   * model omitted the word — consumers then fall back to their legacy regex.
+   */
+  deliverableKind: DeliverableKind | null;
 }
 
 export type LlmClassifyFn = (prompt: string, signal?: AbortSignal) => Promise<LlmClassifyResult | null>;
@@ -46,7 +64,10 @@ const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 // The ceiling is a cap, not padding: the model still stops after two words, so a
 // generous headroom costs nothing when reasoning is short.
 const REASONING_CLASSIFY_TIMEOUT_MS = 8000;
-const NONREASONING_MAX_OUTPUT_TOKENS = 16;
+// Four comma-separated words now (added <deliverable>) — ~10-14 tokens worst
+// case ("documentation,balanced,task,report"). 24 keeps headroom over the
+// prior 16-token cap without padding (the model still stops after four words).
+const NONREASONING_MAX_OUTPUT_TOKENS = 24;
 const REASONING_MAX_OUTPUT_TOKENS = 2048;
 
 /**
@@ -82,10 +103,15 @@ const VALID_TASK_TYPES = new Set<TaskType>([
 const VALID_STYLES = new Set<OutputStyle>(["concise", "balanced", "detailed"]);
 
 const SYSTEM_PROMPT =
-  "You classify user prompts for a coding assistant. Reply with ONE line of THREE lowercase words separated by commas: <taskType>,<style>,<intent>\n\n" +
+  "You classify user prompts for a coding assistant. Reply with ONE line of FOUR lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
   "style ∈ { concise | balanced | detailed }\n" +
-  "intent ∈ { task | chat } — 'chat' ONLY for a pure greeting, thanks, or acknowledgement with NO work request (e.g. 'hi', 'cảm ơn nhé', 'ok great'). EVERYTHING else is 'task', including questions about code or the CLI, 'are you done?', and requests to call a tool. When unsure, choose 'task'.\n\n" +
+  "intent ∈ { task | chat } — 'chat' ONLY for a pure greeting, thanks, or acknowledgement with NO work request (e.g. 'hi', 'cảm ơn nhé', 'ok great'). EVERYTHING else is 'task', including questions about code or the CLI, 'are you done?', and requests to call a tool. When unsure, choose 'task'.\n" +
+  "deliverable ∈ { answer | code | report } — what the user wants you to PRODUCE this turn:\n" +
+  "- code — CREATE or EDIT files: implement, fix, build, scaffold, refactor, wire, rename, apply a patch. The deliverable is changed code.\n" +
+  "- report — a STRUCTURED list / plan / audit / roadmap / checklist is the deliverable (its value IS the structure).\n" +
+  "- answer — everything else: explain, review, investigate, compare, a question about code or the CLI, a yes/no question, a meta/self-eval. The deliverable is a written answer, NO file edits.\n" +
+  "  Pick by the PRIMARY thing the user asked you to produce. A question that merely mentions code is 'answer'. When unsure between answer and report, choose answer.\n\n" +
   "Rules (read carefully — Phase 4 4P-2 disambiguation):\n" +
   "- debug — fix a bug, CI/build/test failure, error, exception, crash, or any 'why is X broken' question.\n" +
   "- generate — create new code, scaffold, write a new file, add a feature from scratch, ADD A NEW TEST, CHANGE A DEFAULT VALUE, modify configuration, improve coverage.\n" +
@@ -110,12 +136,17 @@ const SYSTEM_PROMPT =
   "- documentation → balanced (examples + explanation)\n" +
   "- general → concise\n" +
   "Only output 'detailed' if the user prompt LITERALLY contains words like 'explain in detail', 'thorough analysis', 'walk me through', 'giải thích chi tiết', 'phân tích kỹ'.\n\n" +
-  "Intent examples:\n" +
-  "- 'hi' → general,concise,chat\n" +
-  "- 'cảm ơn bạn nhé' → general,concise,chat\n" +
-  "- 'bạn thử call tool setup_guide xem được không' → general,concise,task (wants a tool called — NOT chat)\n" +
-  "- 'bạn xong chưa' → general,concise,task (a question — NOT chat)\n\n" +
-  "Prompts may be Vietnamese, English, or mixed. Reply with exactly three words separated by commas. No other text.";
+  "Intent + deliverable examples:\n" +
+  "- 'hi' → general,concise,chat,answer\n" +
+  "- 'cảm ơn bạn nhé' → general,concise,chat,answer\n" +
+  "- 'bạn thử call tool setup_guide xem được không' → general,concise,task,answer (wants info, not file edits)\n" +
+  "- 'bạn xong chưa' → general,concise,task,answer (a question — NOT chat)\n" +
+  "- 'fix CI failing on Windows' → debug,concise,task,code\n" +
+  "- 'rename function shouldInject to needsReminder' → refactor,concise,task,code\n" +
+  "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer (investigate → written answer)\n" +
+  "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report (structured list)\n" +
+  "- 'plan the migration to hooks' → plan,balanced,task,report\n\n" +
+  "Prompts may be Vietnamese, English, or mixed. Reply with exactly four words separated by commas. No other text.";
 
 function parseResponse(raw: string): LlmClassifyResult | null {
   const cleaned = raw.trim().toLowerCase().replace(/[`*"]/g, "");
@@ -134,7 +165,12 @@ function parseResponse(raw: string): LlmClassifyResult | null {
   // "task" — the keep-tools safe direction.
   const intentWord = parts.find((p) => p === "chat" || p === "chitchat" || p === "task");
   const intentKind: "task" | "chitchat" = intentWord === "chat" || intentWord === "chitchat" ? "chitchat" : "task";
-  return { taskType: taskWord, outputStyle: style, confidence: 0.75, intentKind };
+  // Fourth word is the output deliverable. Parsed position-independently so a
+  // reordered/garbled reply still recovers it; null when absent → Layer 4/6 use
+  // their legacy regex predicates for this turn (never a wrong forced route).
+  const deliverableWord = parts.find((p) => p === "answer" || p === "code" || p === "report");
+  const deliverableKind: DeliverableKind | null = (deliverableWord as DeliverableKind | undefined) ?? null;
+  return { taskType: taskWord, outputStyle: style, confidence: 0.75, intentKind, deliverableKind };
 }
 
 /**
