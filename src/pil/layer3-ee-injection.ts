@@ -147,7 +147,12 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
     const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
       searchByText(raw, ["experience-principles"], 3, signal),
       searchByText(raw, ["experience-behavioral"], 4, signal),
-      searchByText("Context checkpoint summary OR \"compaction checkpoint\" recent Progress DONE elided OR tool-artifact OR \"tool result id=\"", ["experience-behavioral"], 3, signal).catch(() => []),
+      searchByText(
+        'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="',
+        ["experience-behavioral"],
+        3,
+        signal,
+      ).catch(() => []),
     ]);
 
     const principlePoints = principleRaw.filter((p) => (p.score ?? 0) >= PIL_PRINCIPLES_FLOOR);
@@ -189,14 +194,16 @@ function formatExperienceHints(points: EEPoint[]): string {
  */
 function formatTaskCheckpoints(points: EEPoint[]): string {
   if (points.length === 0) return "";
-  const lines = points.map((p) => {
-    const t = extractPointText(p);
-    // Idea 4: surface tool-artifact refs so agent sees "elided high-value, query for full"
-    if (/tool-artifact|tool result id=|elided.*id=/.test(t.toLowerCase())) {
-      return `- [artifact] ${t.slice(0, 160)} [id:${p.id}]`;
-    }
-    return `- ${t.slice(0, 180)} [id:${p.id}]`;
-  }).filter((l) => l !== "- ");
+  const lines = points
+    .map((p) => {
+      const t = extractPointText(p);
+      // Idea 4: surface tool-artifact refs so agent sees "elided high-value, query for full"
+      if (/tool-artifact|tool result id=|elided.*id=/.test(t.toLowerCase())) {
+        return `- [artifact] ${t.slice(0, 160)} [id:${p.id}]`;
+      }
+      return `- ${t.slice(0, 180)} [id:${p.id}]`;
+    })
+    .filter((l) => l !== "- ");
   if (lines.length === 0) return "";
   return `[task checkpoints — prior compactions: use to answer "task finished?", "compacted yet?". Artifacts: use ee.query tool with "tool-artifact id=XXX" for full elided tool output.] \n${lines.join("\n")}`;
 }
@@ -324,7 +331,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           const text = extractPointText(p);
           return text.length === 0 || !checkpointMarkerShas.has(payloadSha16(text));
         })
-      : (result.checkpointPoints || []);
+      : result.checkpointPoints || [];
 
   const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral, ...deduplicatedCheckpoints];
 
@@ -401,6 +408,103 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         applied: true,
         delta: `principles=${deduplicatedPrinciples.length} behavioral=${deduplicatedBehavioral.length} checkpoints=${deduplicatedCheckpoints.length} t1=${t1Rules.length} chars=${injected.length}${bbMarkerShas.size > 0 ? ` bb-dedup=${bbMarkerShas.size}` : ""}`,
       },
+    ],
+  };
+}
+
+/**
+ * Records whose text actually reads like a compaction checkpoint or an elided
+ * tool-artifact. Used to keep generic behavioral hits from being mislabelled as
+ * `[artifact]`/checkpoint lines when we search by the meta question (ctx.raw)
+ * rather than the fixed checkpoint-arm query.
+ */
+const CHECKPOINT_LIKE_RE =
+  /context checkpoint summary|compaction checkpoint|tool-artifact|tool result id=|elided|progress[^a-z]*done|✔/i;
+
+/**
+ * Issue #4 — meta-turn auto-surface of compaction tool-artifacts.
+ *
+ * The full Layer 3 is skipped on the meta-analysis path (pipeline.ts) to keep
+ * PIL overhead low. But that path is exactly where a self-evaluating agent most
+ * needs to SEE which high-value tool outputs B3/B4 elided — otherwise it must
+ * guess an artifact exists and hand-call `ee_query`. This runs ONLY the cheap
+ * checkpoint/artifact arm (one timeout-bounded round-trip), keeps just the
+ * records that genuinely look like checkpoints/artifacts (so generic behavioral
+ * hits aren't mislabelled), and injects them via the same `formatTaskCheckpoints`
+ * renderer Layer 3 uses — so the `[artifact] … id=X` refs appear in the enriched
+ * prompt automatically instead of waiting on the agent to ask for them.
+ *
+ * Gated on `sessionId` (no session ⇒ no prior compaction to rehydrate). Strictly
+ * additive and fail-open: any error / no-session / no-match returns ctx with the
+ * original `enriched` plus an `ee-meta-artifacts` layer marker for forensics.
+ */
+export async function surfaceCompactionArtifacts(ctx: PipelineContext): Promise<PipelineContext> {
+  const markLayer = (applied: boolean, delta: string): PipelineContext => ({
+    ...ctx,
+    layers: [...ctx.layers, { name: "ee-meta-artifacts", applied, delta }],
+  });
+
+  if (!ctx.sessionId) return markLayer(false, "no-session");
+
+  let points: EEPoint[] = [];
+  try {
+    const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
+    // Bias toward records relevant to THIS meta question (ctx.raw) while pulling
+    // in checkpoint/artifact vocabulary so the single cheap arm lands on the
+    // compaction records rather than generic behavioral patterns.
+    const query = `${ctx.raw}\nContext checkpoint summary tool-artifact "tool result id=" elided Progress DONE`;
+    const raw = await searchByText(query, ["experience-behavioral"], 5, signal);
+    points = (raw as EEPoint[])
+      .filter((p) => (p.score ?? 0) >= PIL_SCORE_FLOOR * 0.7)
+      .filter((p) => CHECKPOINT_LIKE_RE.test(extractPointText(p)));
+  } catch (err) {
+    logEeFailure("pil.meta.surfaceCompactionArtifacts", classifyEeError(err), err, { budgetMs: PIL_SEARCH_TIMEOUT_MS });
+    return markLayer(false, `error=${String(err)}`);
+  }
+
+  if (points.length === 0) return markLayer(false, "no-artifacts");
+
+  const cpText = formatTaskCheckpoints(points);
+  if (!cpText) return markLayer(false, "no-artifacts");
+
+  // Block-level dedup / idempotency: if this exact checkpoint block was already
+  // injected this turn (its content-sha marker is present), don't append it
+  // twice. A re-run of the meta arm — or another layer that injected the same
+  // block — then stays stable instead of growing the prompt each pass.
+  const blockSha = payloadSha16(cpText);
+  if (extractCheckpointMarkerShas(ctx.enriched).has(blockSha)) {
+    return markLayer(false, "already-injected");
+  }
+
+  // Append the marker AFTER truncation so it always survives into `enriched`
+  // (truncating it away would defeat the dedup check above on the next pass).
+  const body = truncateToBudget(cpText, Math.floor(ctx.tokenBudget * 0.12));
+  const block = `${body}\n<!-- ee-checkpoint-injected:${blockSha} -->`;
+
+  try {
+    if (ctx.sessionId) {
+      logInteraction(ctx.sessionId, "ee_injection", {
+        eventSubtype: "injected",
+        data: {
+          phase: "pil_meta_artifacts",
+          role: "knowledge_retriever",
+          checkpointCount: points.length,
+          pointIds: points.map((p) => String(p.id)),
+          injectedChars: block.length,
+        },
+      });
+    }
+  } catch (err) {
+    // No silent catch: surfacing succeeded; only the audit write failed.
+    console.error(`[pil.meta.surfaceCompactionArtifacts] interaction log failed: ${(err as Error)?.message}`);
+  }
+
+  return {
+    ...ctx,
+    enriched: `${ctx.enriched}\n${block}`,
+    layers: [
+      ...ctx.layers,
+      { name: "ee-meta-artifacts", applied: true, delta: `artifacts=${points.length} chars=${block.length}` },
     ],
   };
 }
