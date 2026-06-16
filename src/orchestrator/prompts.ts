@@ -232,7 +232,7 @@ TOOLS:
 - computer_focus_window: Bring a target window to the front.
 - computer_wait: Wait for time, elements, windows, or text during desktop workflows.
 - computer_get: Read a property from a desktop element ref.
-- MCP tools: Enabled servers appear as tools named like mcp_<server>__<tool>.
+- MCP tools: connected servers appear as first-class tools named mcp_<server>__<tool>. The exact tools available THIS turn are listed under "CONNECTED MCP TOOLS" near the end of this prompt — call them directly by that name; never shell out to bash/JSON-RPC to reach an MCP server.
 
 WORKFLOW:
 1. Understand the request
@@ -373,6 +373,50 @@ export interface SystemPromptOptions {
    * PIL Layer 1 (intentKind === "chitchat").
    */
   chitchat?: boolean;
+}
+
+/**
+ * Render the LIVE per-turn MCP tool roster as a system-prompt block.
+ *
+ * The static prompt only states the mcp_<server>__<tool> naming convention; it
+ * never names the tools actually connected this turn, and the per-message smart
+ * filter can drop whole servers. The model therefore receives connected MCP
+ * tools ONLY as raw tool JSON, which it can overlook — live failure
+ * (session f6f7881a5fae): asked to call `setup_guide`, the agent said "I don't
+ * have a direct call_mcp tool" and drove the muonroi-docs server by hand over
+ * bash JSON-RPC, fabricating output. Surfacing the exact callable names in prose
+ * closes that gap.
+ *
+ * `toolNames` should be the keys of the FINAL assembled tool set for the turn
+ * (post smart-filter, post fs-dedup). Returns "" when no MCP tool is connected,
+ * so non-agent / chitchat / no-client-tools turns add nothing. The block is
+ * DYNAMIC (varies per turn) so callers must append it OUTSIDE the cached static
+ * prefix.
+ */
+export function buildMcpCapabilityBlock(toolNames: readonly string[]): string {
+  const byServer = new Map<string, string[]>();
+  for (const name of toolNames) {
+    if (!name.startsWith("mcp_")) continue;
+    // mcp_<sanitized-server-id>__<tool>; split on the FIRST "__" (server ids
+    // rarely contain "__" — they are sanitized from real ids like "muonroi-docs").
+    const m = name.match(/^mcp_(.+?)__(.+)$/);
+    if (!m) continue;
+    const server = m[1]!;
+    const list = byServer.get(server) ?? [];
+    list.push(name);
+    byServer.set(server, list);
+  }
+  if (byServer.size === 0) return "";
+  const lines: string[] = [];
+  for (const [server, tools] of byServer) {
+    lines.push(`  • ${server}: ${tools.sort().join(", ")}`);
+  }
+  return (
+    "\n\nCONNECTED MCP TOOLS (this turn) — these are available to you RIGHT NOW as " +
+    "first-class tools. Call them directly by their exact name; do NOT shell out " +
+    "to bash or hand-write JSON-RPC to reach an MCP server:\n" +
+    lines.join("\n")
+  );
 }
 
 export function buildSystemPromptParts(
