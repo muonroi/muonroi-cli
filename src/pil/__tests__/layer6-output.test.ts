@@ -276,6 +276,18 @@ describe("getResponseToolSet — Phase 2b deliverableKind consume (model overrid
       "respond_analyze",
     );
   });
+
+  it("DROPS respond_* on an implement turn even when mis-classified as report (session 2b7a10219499)", () => {
+    // "lên plan rồi improvement … cải thiện X" is an implement turn the model
+    // tagged deliverable=report; the report-exception used to KEEP respond_plan,
+    // so the model stated a plan and ended the turn with edits done but
+    // uncommitted/unreported. Implementation intent must suppress the terminal
+    // tool BEFORE the deliverable branch is consulted.
+    expect(
+      getResponseToolSet(ctxD("lên plan rồi improvement nhé, focus cải thiện Compaction", "plan", "report")),
+    ).toEqual({});
+    expect(getResponseToolSet(ctxD("improve the compactor and implement the fix", "plan", "report"))).toEqual({});
+  });
 });
 
 describe("applyPilSuffix — outputStyle variants", () => {
@@ -498,5 +510,19 @@ describe("isQuestionLike — Vietnamese yes/no question frames (regression: sess
     expect(isQuestionLike("why does the build fail?")).toBe(true);
     expect(isQuestionLike("tại sao build lỗi")).toBe(true);
     expect(isQuestionLike("explain the pipeline")).toBe(true);
+  });
+});
+
+describe("isImplementationIntent — improve / cải thiện (regression: session 2b7a10219499)", () => {
+  it("recognises improve/improvement + VI cải thiện as implement turns", () => {
+    expect(isImplementationIntent("improve the compactor")).toBe(true);
+    expect(isImplementationIntent("lên plan rồi improvement nhé")).toBe(true);
+    expect(isImplementationIntent("focus cải thiện Compaction")).toBe(true);
+    expect(isImplementationIntent("cai thien phan compaction")).toBe(true);
+  });
+
+  it("does not over-match analysis questions that merely describe behaviour", () => {
+    expect(isImplementationIntent("what does the enrichment layer do?")).toBe(false);
+    expect(isImplementationIntent("why does the suite fail — break it down")).toBe(false);
   });
 });
