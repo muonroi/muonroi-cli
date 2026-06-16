@@ -35,6 +35,19 @@ export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const POST_TURN_MIN_TOKENS = 2_000;
 export const COMPACTION_MAX_OUTPUT_TOKENS = 4_096;
+// Meta-analysis (agent/PIL self-eval) summaries are capped tighter than normal
+// to prevent runaway summaries (session df2dbb878984: 73k input → 14k-char
+// summary). Default 1536 (was a hard 1024) — modestly more fidelity now that
+// anti-mù recovery (layer3 surfacing + the in-process/disk artifact cache)
+// backstops detail loss, still ~2.3x below the 14k-char problem. Tune per machine
+// with MUONROI_META_COMPACT_MAX_TOKENS (clamped 512..COMPACTION_MAX_OUTPUT_TOKENS).
+export const COMPACTION_META_MAX_OUTPUT_TOKENS = 1_536;
+
+export function metaCompactionMaxTokens(): number {
+  const raw = Number(process.env.MUONROI_META_COMPACT_MAX_TOKENS);
+  if (Number.isFinite(raw) && raw >= 512 && raw <= COMPACTION_MAX_OUTPUT_TOKENS) return Math.floor(raw);
+  return COMPACTION_META_MAX_OUTPUT_TOKENS;
+}
 export const TOOL_RESULT_MAX_CHARS_CONFIGURABLE = 8000;
 export const COMPACTION_SUMMARY_HEADER = "[Context checkpoint summary]";
 
@@ -530,7 +543,7 @@ async function summarizeConversation(
   const userText = messages.map((m) => extractUserContent(m.content)).join("\n");
   const isMeta = isMetaAnalysisPrompt(userText);
   const effectiveMax = isMeta
-    ? Math.min(1024, Math.max(512, Math.floor(reserveTokens * 0.5)))
+    ? Math.min(metaCompactionMaxTokens(), Math.max(512, Math.floor(reserveTokens * 0.5)))
     : Math.min(COMPACTION_MAX_OUTPUT_TOKENS, Math.max(512, Math.floor(reserveTokens * 0.8)));
 
   if (previousSummary) {
