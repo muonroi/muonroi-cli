@@ -32,7 +32,7 @@ jobs:
       - name: Build binary
         run: bun build --compile --target=${{ matrix.target }} ./src/index.ts --outfile dist/${{ matrix.outfile }}
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outfile }}
           path: dist/${{ matrix.outfile }}
@@ -44,7 +44,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: dist/
           merge-multiple: true

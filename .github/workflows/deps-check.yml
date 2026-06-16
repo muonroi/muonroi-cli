@@ -16,7 +16,7 @@ jobs:
           bun-version: ">=1.3.13"
       - name: bun outdated
         run: bun outdated > deps-outdated.txt 2>&1 || true
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: deps-outdated-${{ github.run_id }}
           path: deps-outdated.txt
