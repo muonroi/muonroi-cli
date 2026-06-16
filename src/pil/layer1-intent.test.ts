@@ -701,13 +701,27 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
     expect(result.intentKind).toBe("task");
   });
 
-  it("falls back to the regex cascade when the model call returns null (offline)", async () => {
+  it("does NOT fall back to regex when the model returns null — fails loud, no wrong guess", async () => {
     mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:debug", confidence: 0.85 });
     const result = await layer1Intent(makeCtx("fix the failing build"), {
       llmFallback: async () => null,
     });
-    expect(mockedClassify).toHaveBeenCalled();
-    expect(result.taskType).toBe("debug");
+    expect(mockedClassify).not.toHaveBeenCalled(); // regex cascade never runs
+    expect(result.taskType).toBeNull(); // unknown, not a confidently-wrong regex guess
+    expect(result.intentKind).toBe("task"); // keep-tools on failure
+    expect(result._intentTrace?.pass1Reason).toBe("llm-first-failed");
+  });
+
+  it("does NOT fall back to regex when the model call throws — same fail-loud path", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:debug", confidence: 0.85 });
+    const result = await layer1Intent(makeCtx("fix the failing build"), {
+      llmFallback: async () => {
+        throw new Error("rate limited");
+      },
+    });
+    expect(mockedClassify).not.toHaveBeenCalled();
+    expect(result.taskType).toBeNull();
+    expect(result._intentTrace?.pass1Reason).toBe("llm-first-failed");
   });
 
   it("falls back to the cascade when the flag is OFF even with llmFallback wired", async () => {
