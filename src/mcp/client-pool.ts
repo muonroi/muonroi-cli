@@ -223,6 +223,28 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
   await Promise.race([Promise.allSettled(attempts), deadline]);
   if (deadlineTimer) clearTimeout(deadlineTimer);
 
+  // Critical-server extended wait: a turn that MUST have a specific server (e.g.
+  // muonroi-docs on an ecosystem question) waits for just that server's connect
+  // beyond the normal deadline, so a cold first-connect is included THIS turn
+  // rather than reported "still connecting → next turn". Only the named servers
+  // are awaited; everything already settled is untouched (no added latency for
+  // normal turns, which pass no criticalServerIds).
+  const critical = new Set((opts?.criticalServerIds ?? []).filter(Boolean));
+  if (critical.size > 0) {
+    const pendingIdx = enabled.map((s, i) => ({ s, i })).filter(({ s, i }) => critical.has(s.id) && !slots[i]!.done);
+    if (pendingIdx.length > 0) {
+      const criticalDeadlineMs = Math.max(deadlineMs, opts?.criticalDeadlineMs ?? 8000);
+      const extraMs = Math.max(0, criticalDeadlineMs - deadlineMs);
+      let extraTimer: ReturnType<typeof setTimeout> | undefined;
+      const extraDeadline = new Promise<void>((resolve) => {
+        extraTimer = setTimeout(resolve, extraMs);
+        extraTimer.unref?.();
+      });
+      await Promise.race([Promise.allSettled(pendingIdx.map(({ i }) => attempts[i])), extraDeadline]);
+      if (extraTimer) clearTimeout(extraTimer);
+    }
+  }
+
   for (let i = 0; i < slots.length; i++) {
     const slot = slots[i]!;
     if (slot.done) {
