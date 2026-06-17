@@ -123,6 +123,7 @@ import {
   persistToolCallWriteAhead,
   type SessionStore,
 } from "../storage/index.js";
+import { persistSessionExperience } from "../storage/session-experience-store.js";
 import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
@@ -189,7 +190,12 @@ import {
   shouldInjectSoftWarn,
   shouldPreWarnCompaction,
 } from "./scope-reminder.js";
-import { formatElisionManifest, recordCompaction, recordElision } from "./session-experience.js";
+import {
+  formatElisionManifest,
+  getSessionExperienceCounts,
+  recordCompaction,
+  recordElision,
+} from "./session-experience.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
@@ -2011,6 +2017,15 @@ export class MessageProcessor {
                 console.error("[Agent:onFinish] failed to emit llm-done", err);
               }
               deps.setCurrentCallId("");
+              // Rec #1 persisted forensics: onFinish fires once per top-level turn,
+              // so flush this session's cumulative experience counts here. Readers
+              // take the latest row per session, so the last turn's row is the
+              // session total. No-ops on missing id / all-zero. Fail-open.
+              try {
+                persistSessionExperience(deps.session?.id ?? null, getSessionExperienceCounts());
+              } catch (err) {
+                console.error("[Agent:onFinish] persistSessionExperience failed", err);
+              }
             },
           });
 
