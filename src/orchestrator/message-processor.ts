@@ -1878,7 +1878,11 @@ export class MessageProcessor {
               // messages this step returns. Dedup-by-content makes re-appending
               // idempotent even if a stall-reprompt restart re-reads history.
               const withSteers = (r: { messages?: typeof stepMessages }): { messages?: typeof stepMessages } => {
-                const _drained = steerEnabled ? (deps.drainSteerMessages?.() ?? []) : [];
+                // Guard the drain on !signal.aborted too: planSteerInjection
+                // already refuses to inject on abort, but draining still CLEARS
+                // the UI queue — so on a (programmatic) abort we must not drain,
+                // or a queued-but-uninjected message is lost (spec §143).
+                const _drained = steerEnabled && !signal.aborted ? (deps.drainSteerMessages?.() ?? []) : [];
                 const _newSteers = planSteerInjection({
                   drained: _drained,
                   aborted: signal.aborted,
