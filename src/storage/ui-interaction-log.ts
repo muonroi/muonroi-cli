@@ -164,7 +164,9 @@ export function logUIInteraction(sessionId: string | undefined | null, payload: 
       eventSubtype: payload.subtype,
       data: payload.data as unknown as Record<string, unknown>,
     });
-  } catch {
-    // Fail-open
+  } catch (err) {
+    // Fail-open (logInteraction is itself guarded; this is defensive). Surface
+    // the subtype so a serialization fault here is at least diagnosable.
+    console.error(`[ui-interaction-log] persist failed for subtype=${payload.subtype}: ${(err as Error)?.message}`);
   }
 }
