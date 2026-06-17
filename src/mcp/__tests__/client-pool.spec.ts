@@ -63,7 +63,7 @@ describe("acquireMcpTools — cross-turn client pool", () => {
     expect(connectOneServer).toHaveBeenCalledTimes(2); // retried after eviction
   });
 
-  it("self-heals: a tool hitting a connection error evicts the client so the next turn reconnects", async () => {
+  it("self-heals: a connection error reconnects ONCE in-turn; a permanently-dead server surfaces the error (no loop)", async () => {
     connectOneServer.mockImplementation(async (s: { id: string }) => ({
       tools: {
         [`mcp_${s.id}__boom`]: {
@@ -80,9 +80,63 @@ describe("acquireMcpTools — cross-turn client pool", () => {
       (b1.tools["mcp_fs__boom"] as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute({}, {}),
     ).rejects.toThrow(/transport closed/);
 
-    const b2 = await acquireMcpTools([srv("fs")]);
-    expect(b2).toBeDefined();
-    expect(connectOneServer).toHaveBeenCalledTimes(2); // reconnected after the connection error
+    // Initial connect + exactly ONE in-turn reconnect — the retry is not looped.
+    expect(connectOneServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("in-turn reconnect: a mid-turn transport drop is reconnected and the call retried once — succeeds", async () => {
+    let gen = 0;
+    connectOneServer.mockImplementation(async (s: { id: string }) => {
+      gen += 1;
+      const dead = gen === 1; // first connect drops mid-call; the reconnect is healthy
+      return {
+        tools: {
+          [`mcp_${s.id}__ping`]: {
+            execute: async () => {
+              if (dead) throw new Error("Attempted to send a request from a closed client");
+              return "pong";
+            },
+          },
+        },
+        client: { close: async () => {} },
+      };
+    });
+
+    const b = await acquireMcpTools([srv("docs")]);
+    const result = await (
+      b.tools["mcp_docs__ping"] as { execute: (a: unknown, o: unknown) => Promise<unknown> }
+    ).execute({}, {});
+    expect(result).toBe("pong"); // recovered within the SAME turn
+    expect(connectOneServer).toHaveBeenCalledTimes(2); // drop + one reconnect
+  });
+
+  it("a parallel burst on a dropped client shares ONE reconnect; every call retries and succeeds", async () => {
+    // Repro of session 41ccfeb2ceee: a 14-call burst at muonroi-docs dropped the
+    // HTTP socket after the first calls; previously the rest all threw
+    // "Attempted to send a request from a closed client". They must now share a
+    // single reconnect and all recover.
+    let gen = 0;
+    connectOneServer.mockImplementation(async (s: { id: string }) => {
+      gen += 1;
+      const dead = gen === 1;
+      return {
+        tools: {
+          [`mcp_${s.id}__ping`]: {
+            execute: async () => {
+              if (dead) throw new Error("The socket connection was closed unexpectedly");
+              return "pong";
+            },
+          },
+        },
+        client: { close: async () => {} },
+      };
+    });
+
+    const b = await acquireMcpTools([srv("docs")]);
+    const tool = b.tools["mcp_docs__ping"] as { execute: (a: unknown, o: unknown) => Promise<unknown> };
+    const results = await Promise.all(Array.from({ length: 14 }, () => tool.execute({}, {})));
+    expect(results.every((r) => r === "pong")).toBe(true);
+    expect(connectOneServer).toHaveBeenCalledTimes(2); // 14 failures → exactly ONE shared reconnect
   });
 
   it("keys by cwd/config — a different command reconnects rather than reusing", async () => {

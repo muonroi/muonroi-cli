@@ -15,8 +15,15 @@
  *
  * Self-healing: a server that fails to connect is evicted (not cached as a
  * rejection), so a later turn retries. A live client whose child process dies
- * later is evicted when one of its tool calls hits a transport/connection error,
- * so the next turn reconnects fresh.
+ * later is evicted when one of its tool calls hits a transport/connection error.
+ *
+ * In-turn reconnect: a transport that drops MID-TURN (live: muonroi-docs HTTP
+ * socket closed after 2 of a 14-call parallel burst, session 41ccfeb2ceee —
+ * every remaining call then threw "Attempted to send a request from a closed
+ * client") is reconnected and the failing call is retried ONCE against the fresh
+ * client, instead of only reconnecting on the NEXT turn. Concurrent failures in
+ * the same burst share one reconnect (the pool dedupes by key); eviction is
+ * race-safe so a fresh reconnect is never torn down by a sibling's late failure.
  */
 
 import type { ToolSet } from "ai";
@@ -33,6 +40,12 @@ import { validateMcpServerConfig } from "./validate.js";
 interface PoolEntry {
   key: string;
   promise: Promise<ConnectedServer>;
+  /**
+   * The resolved server, set once `promise` fulfils. Lets the in-turn self-heal
+   * evict ONLY the specific dead client by object identity — never a fresh
+   * reconnect that a sibling failure raced in between (see evictDeadServer).
+   */
+  connected?: ConnectedServer;
 }
 
 const pool = new Map<string, PoolEntry>();
@@ -55,18 +68,19 @@ function serverKey(s: McpServerConfig): string {
   });
 }
 
-/** Tear down one pooled entry (best-effort) and remove it. */
-function evict(key: string): void {
+/**
+ * Tear down a pooled entry ONLY if it still holds `dead` (the specific server a
+ * failing tool call was bound to). Race-safe under a parallel burst: when 14
+ * sibling calls all fail on the same dropped client, the first evicts it and
+ * reconnects; the rest find `entry.connected !== dead` (a fresh client, or no
+ * entry) and leave the reconnect untouched. Best-effort cleanup of the dead one.
+ */
+function evictDeadServer(key: string, dead: ConnectedServer): void {
   const entry = pool.get(key);
-  if (!entry) return;
+  if (!entry || entry.connected !== dead) return;
   pool.delete(key);
-  void entry.promise.then(
-    (cs) => {
-      cs.cleanup?.();
-      void cs.client.close().catch(() => {});
-    },
-    () => {},
-  );
+  dead.cleanup?.();
+  void dead.client.close().catch(() => {});
 }
 
 /** Heuristic: does this error mean the MCP transport/child is gone? */
@@ -91,22 +105,36 @@ function getOrConnect(server: McpServerConfig, opts?: McpBuildOptions): Promise<
   const promise = connectOneServer(server, opts);
   const entry: PoolEntry = { key, promise };
   pool.set(key, entry);
-  // Cache a rejection only transiently: evict so the next turn retries rather
-  // than returning the same failed promise forever.
-  promise.catch(() => {
-    if (pool.get(key) === entry) pool.delete(key);
-  });
+  promise.then(
+    // Record the resolved server so evictDeadServer can match by identity.
+    (cs) => {
+      entry.connected = cs;
+    },
+    // Cache a rejection only transiently: evict so the next turn retries rather
+    // than returning the same failed promise forever.
+    () => {
+      if (pool.get(key) === entry) pool.delete(key);
+    },
+  );
   return promise;
 }
 
 /**
- * Wrap each tool's execute so a transport/connection failure evicts the pooled
- * client (next turn reconnects). The MCP child may die after a successful
- * connect; without this the dead client would be reused on every later turn.
+ * Wrap each tool's execute so a transport/connection failure is recovered
+ * in-turn: evict the dead pooled client (race-safe), reconnect once, and retry
+ * the SAME call against the fresh client. Before this, a mid-turn drop only
+ * reconnected on the NEXT turn, so the rest of the current turn's batch all
+ * failed with "Attempted to send a request from a closed client". The MCP child
+ * may also die after a successful connect; the eviction keeps the pool clean for
+ * later turns either way.
+ *
+ * The retry is fired at most ONCE per call (no loop): if the fresh client also
+ * drops, or the reconnect itself fails, the original transport error propagates
+ * so the model sees a real failure rather than hanging.
  */
-function wrapForSelfHeal(tools: ToolSet, key: string): ToolSet {
+function wrapForSelfHeal(cs: ConnectedServer, key: string, server: McpServerConfig, opts?: McpBuildOptions): ToolSet {
   const out: ToolSet = {};
-  for (const [name, tool] of Object.entries(tools)) {
+  for (const [name, tool] of Object.entries(cs.tools)) {
     const base = (tool as { execute?: (a: unknown, o: unknown) => Promise<unknown> }).execute;
     if (typeof base !== "function") {
       out[name] = tool;
@@ -118,13 +146,30 @@ function wrapForSelfHeal(tools: ToolSet, key: string): ToolSet {
         try {
           return await base(args, options);
         } catch (e) {
-          if (isConnectionError(e)) {
+          if (!isConnectionError(e)) throw e;
+          console.error(
+            `[mcp:pool] '${name}' hit a connection error — reconnecting '${server.id}' in-turn and retrying once: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+          // Evict THIS dead client (no-op if a sibling already reconnected), then
+          // reconnect. getOrConnect dedupes by key, so a burst shares one reconnect.
+          evictDeadServer(key, cs);
+          let fresh: ConnectedServer;
+          try {
+            fresh = await getOrConnect(server, opts);
+          } catch (reconnectErr) {
             console.error(
-              `[mcp:pool] '${name}' hit a connection error — evicting cached client so the next turn reconnects`,
+              `[mcp:pool] in-turn reconnect for '${server.id}' failed; surfacing original error: ${
+                reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr)
+              }`,
             );
-            evict(key);
+            throw e;
           }
-          throw e;
+          const freshTools = fresh.tools as Record<string, { execute?: (a: unknown, o: unknown) => Promise<unknown> }>;
+          const freshExec = freshTools[name]?.execute;
+          if (typeof freshExec !== "function") throw e;
+          return await freshExec(args, options);
         }
       },
     } as ToolSet[string];
@@ -178,12 +223,13 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
   await Promise.race([Promise.allSettled(attempts), deadline]);
   if (deadlineTimer) clearTimeout(deadlineTimer);
 
-  for (const slot of slots) {
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i]!;
     if (slot.done) {
       if (slot.error) {
         errors.push(`${slot.label}: ${slot.error}`);
       } else if (slot.result) {
-        Object.assign(tools, wrapForSelfHeal(slot.result.tools, slot.key));
+        Object.assign(tools, wrapForSelfHeal(slot.result, slot.key, enabled[i]!, opts));
       }
     } else {
       // Still connecting at the deadline (a cold first-connect). It stays in the
