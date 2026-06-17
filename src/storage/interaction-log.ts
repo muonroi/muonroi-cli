@@ -27,7 +27,8 @@ export type InteractionEventType =
   | "grounding_flag"
   | "stall_rescue"
   | "stream_start"
-  | "text_tool_resteer";
+  | "text_tool_resteer"
+  | "session_experience";
 
 // Retention: keep ~14 days of detail logs. Override via env if a workspace
 // needs longer history (e.g. forensic post-mortems).
