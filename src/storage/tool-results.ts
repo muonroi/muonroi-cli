@@ -37,6 +37,33 @@ export function extractToolResultFromOutput(output: unknown): ToolResult | null 
     };
   }
 
+  // MCP tool results: `{ type: "content", value: [{ type: "text", text }, ...] }`
+  // (see cap-tool-result.ts). Before this branch, extraction returned null, so
+  // persisted output_json was the raw envelope with NO `success` field — on
+  // reload the renderer read `toolResult.success` as undefined and displayed
+  // "Error" for a SUCCESSFUL call (session 63f2d542b772: 50 muonroi-docs calls,
+  // 0 DB failures, all shown as "Error"). Flatten the text parts so it round-
+  // trips as a real ToolResult. A genuinely failed MCP call throws → the SDK
+  // records an `error-text` part, handled above, so content == success here.
+  if ("type" in output && output.type === "content" && "value" in output && Array.isArray(output.value)) {
+    const parts = output.value as unknown[];
+    const text = parts
+      .filter(
+        (p): p is { type: "text"; text: string } =>
+          !!p &&
+          typeof p === "object" &&
+          (p as { type?: unknown }).type === "text" &&
+          typeof (p as { text?: unknown }).text === "string",
+      )
+      .map((p) => p.text)
+      .join("\n");
+    const nonText = parts.length - parts.filter((p) => (p as { type?: unknown })?.type === "text").length;
+    return {
+      success: true,
+      output: text || (nonText > 0 ? `[${nonText} non-text MCP part(s)]` : "(empty MCP result)"),
+    };
+  }
+
   return null;
 }
 
