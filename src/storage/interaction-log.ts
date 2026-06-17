@@ -42,6 +42,19 @@ const RETENTION_DAYS = (() => {
 const PRUNE_PROBABILITY = 1 / 200;
 let _pruneInflight = false;
 
+// These writes are fail-open (logging must never break a turn), but a swallowed
+// error still has to be diagnosable — a broken DB was previously invisible here.
+// Log the FIRST failure with context, then stay silent so a persistently-broken
+// DB can't spam the hot path (logInteraction fires ~3-5x/turn).
+let _dbFailureLogged = false;
+function logInteractionDbFailureOnce(op: string, err: unknown): void {
+  if (_dbFailureLogged) return;
+  _dbFailureLogged = true;
+  console.error(
+    `[interaction-log] ${op} failed — interaction logging degraded (further errors suppressed this process): ${(err as Error)?.message}`,
+  );
+}
+
 function maybePruneOld(): void {
   if (_pruneInflight) return;
   if (Math.random() >= PRUNE_PROBABILITY) return;
@@ -49,8 +62,9 @@ function maybePruneOld(): void {
   try {
     const cutoff = new Date(Date.now() - RETENTION_DAYS * 86_400_000).toISOString();
     getDatabase().prepare(`DELETE FROM interaction_logs WHERE created_at < ?`).run(cutoff);
-  } catch {
-    // Fail-open
+  } catch (err) {
+    // Fail-open: a prune failure must not break the write that triggered it.
+    logInteractionDbFailureOnce("prune", err);
   } finally {
     _pruneInflight = false;
   }
@@ -121,7 +135,8 @@ export function logInteraction(
       new Date().toISOString(),
     );
     maybePruneOld();
-  } catch {
-    // Fail-open: logging must never break the main flow
+  } catch (err) {
+    // Fail-open: logging must never break the main flow.
+    logInteractionDbFailureOnce("insert", err);
   }
 }
