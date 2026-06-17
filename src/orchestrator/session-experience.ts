@@ -102,6 +102,39 @@ export function recordEeEvent(kind: "timeout" | "error"): void {
   else state.eeErrors += 1;
 }
 
+/**
+ * Flat scalar counts — the shape persisted per session and aggregated
+ * cross-session by `usage experience` to decide whether compaction friction is
+ * real at a painful rate (no nested arrays, JSON-stable).
+ */
+export interface SessionExperienceCounts {
+  compactions: number;
+  elided: number;
+  totalElidedChars: number;
+  rehydratedCache: number;
+  rehydratedDisk: number;
+  rehydratedEe: number;
+  unavailable: number;
+  eeTimeouts: number;
+  eeErrors: number;
+}
+
+/** Scalar counts for persistence/aggregation (drops the per-elision array). */
+export function getSessionExperienceCounts(): SessionExperienceCounts {
+  const s = getSessionExperience();
+  return {
+    compactions: s.compactions,
+    elided: s.elisions.length,
+    totalElidedChars: s.totalElidedChars,
+    rehydratedCache: s.rehydrations.cache,
+    rehydratedDisk: s.rehydrations.disk,
+    rehydratedEe: s.rehydrations.ee,
+    unavailable: s.rehydrations.unavailable,
+    eeTimeouts: s.eeTimeouts,
+    eeErrors: s.eeErrors,
+  };
+}
+
 /** Immutable snapshot of the session so far. */
 export function getSessionExperience(): SessionExperience {
   return {
