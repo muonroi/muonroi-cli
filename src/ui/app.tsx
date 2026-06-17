@@ -51,6 +51,7 @@ import {
   getApiKey,
   getCatalogDefaultModel,
   getCurrentModel,
+  getSteerInjectionEnabled,
   getTelegramBotToken,
   isModelDisabled,
   isReservedSubagentName,
@@ -640,6 +641,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return;
       }
 
+      if (e.kind === "steer-inject") {
+        const count = typeof e.count === "number" ? e.count : 1;
+        pushToast("info", `↳ steering applied (${count} message${count === 1 ? "" : "s"})`);
+        return;
+      }
+
       if (e.kind === "ee-timeout" || e.kind === "ee-error") {
         const source = typeof e.source === "string" ? e.source : "unknown";
         const kind = e.kind === "ee-timeout" ? "timeout" : "error";
@@ -699,6 +706,22 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     }
     return undefined;
   }, [handleHarnessEvent]);
+
+  // Live-queue steering: expose the mid-turn queue to the running turn so
+  // prepareStep can inject typed-while-busy messages at the next step boundary
+  // instead of deferring them to a new turn. Disabled → callback not wired, so
+  // finishTurnProcessing drains the queue post-turn exactly as before.
+  useEffect(() => {
+    if (!getSteerInjectionEnabled()) return;
+    agent.setSteerDrain(() => {
+      if (queuedMessagesRef.current.length === 0) return [];
+      const drained = queuedMessagesRef.current.map((m) => ({ text: m.text }));
+      queuedMessagesRef.current = [];
+      setQueuedMessages([]);
+      return drained;
+    });
+    return () => agent.setSteerDrain(null);
+  }, [agent]);
 
   const dismissToast = useCallback(() => setActiveToast(null), []);
   // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
