@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   attemptStallRescue,
   buildStallSynthesisMessages,
+  detectReplyLanguageHint,
   pushStallToolResult,
   STALL_RESCUE_MAX_CHARS_PER_RESULT,
   STALL_RESCUE_MAX_RESULTS,
@@ -42,6 +43,40 @@ describe("buildStallSynthesisMessages", () => {
     expect(last.content).toMatch(/Do NOT call any more tools/i);
     // does not mutate the base array
     expect(base.length).toBe(1);
+  });
+
+  it("prepends a Vietnamese reply directive when user wrote in Vietnamese", () => {
+    const out = buildStallSynthesisMessages([], "sửa thêm popup reload không xoá login", [
+      { tool: "grep", text: "found" },
+    ]);
+    const last = out[out.length - 1] as { content: string };
+    expect(last.content).toMatch(/^Reply in Vietnamese/);
+    expect(last.content).toContain("the user wrote in Vietnamese");
+  });
+
+  it("omits the language directive for plain English input", () => {
+    const out = buildStallSynthesisMessages([], "find a bug please", [{ tool: "grep", text: "found" }]);
+    const last = out[out.length - 1] as { content: string };
+    expect(last.content).not.toMatch(/^Reply in /);
+  });
+});
+
+describe("detectReplyLanguageHint", () => {
+  it("detects Vietnamese from any diacritic", () => {
+    expect(detectReplyLanguageHint("tìm")).toBe("Vietnamese");
+    expect(detectReplyLanguageHint("sửa thêm cho tôi")).toBe("Vietnamese");
+    expect(detectReplyLanguageHint("Cập nhật")).toBe("Vietnamese");
+  });
+
+  it("returns null for ASCII / English text", () => {
+    expect(detectReplyLanguageHint("commit and push please")).toBeNull();
+    expect(detectReplyLanguageHint("")).toBeNull();
+  });
+
+  it("returns null for a VN-only word with NO diacritics (the heuristic is conservative)", () => {
+    // 'commit push de auto ci/cd len prod nhe' — VN sans diacritics is indistinguishable
+    // from English under this heuristic. Acceptable: false negative, never false positive.
+    expect(detectReplyLanguageHint("commit push de auto ci/cd len prod nhe")).toBeNull();
   });
 });
 
