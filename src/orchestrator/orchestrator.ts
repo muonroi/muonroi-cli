@@ -266,6 +266,8 @@ export class Agent {
   private messages: ModelMessage[] = [];
   private messageSeqs: Array<number | null> = [];
   private abortController: AbortController | null = null;
+  /** UI-registered live-queue steer drain; see Agent.setSteerDrain. */
+  private steerDrain: (() => { text: string }[]) | null = null;
   private maxToolRounds: number;
   private mode: AgentMode = "agent";
   private modelId: string;
@@ -461,6 +463,15 @@ export class Agent {
 
   getModel(): string {
     return this.modelId;
+  }
+
+  /**
+   * Register (or clear with null) the UI callback that drains messages typed
+   * while a turn is streaming, for mid-turn steering injection. Called from the
+   * TUI when MUONROI_STEER_INJECTION is enabled.
+   */
+  setSteerDrain(fn: (() => { text: string }[]) | null): void {
+    this.steerDrain = fn;
   }
 
   getActiveRunId(): string | null {
@@ -2591,6 +2602,7 @@ export class Agent {
       runDelegation: (request, signal) => self.runDelegation(request, signal),
       readDelegation: (id) => self.readDelegation(id),
       listDelegations: () => self.listDelegations(),
+      drainSteerMessages: () => self.steerDrain?.() ?? [],
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
