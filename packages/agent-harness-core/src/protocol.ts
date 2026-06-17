@@ -231,6 +231,15 @@ export type LiveEvent =
       count: number;
       ts: number;
     }
+  | {
+      t: "event";
+      kind: "steer-inject";
+      /** How many queued messages were injected at this boundary. */
+      count: number;
+      /** The prepareStep step number at which injection occurred (>= 1). */
+      atStep: number;
+      runId: string;
+    }
   | { t: "idle" };
 
 export type StatePatch = { id: string } & Partial<Omit<UINode, "children" | "id">>;

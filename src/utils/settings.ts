@@ -1040,6 +1040,19 @@ export function getProviderStallRetries(): number {
 }
 
 /**
+ * Live-queue steering: when true, a message typed while a turn is streaming is
+ * injected into the running turn at the next prepareStep boundary (as a `user`
+ * interjection) instead of waiting for the turn to finish and running as a new
+ * turn. When false, the legacy deferred-queue behaviour is preserved (the
+ * message runs only after the current turn completes). House convention for a
+ * default-true boolean knob: only an explicit "0" disables; unset/blank/any
+ * other value = enabled. Env override: MUONROI_STEER_INJECTION.
+ */
+export function getSteerInjectionEnabled(): boolean {
+  return process.env.MUONROI_STEER_INJECTION !== "0";
+}
+
+/**
  * Phase B3 — threshold (in chars of cumulative message content) above which
  * the sub-agent `prepareStep` compactor rewrites older tool_result parts
  * into short summary stubs. Below the threshold compaction is a no-op.

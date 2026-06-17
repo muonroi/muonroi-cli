@@ -264,6 +264,25 @@ describe("redactEvent — route-decision", () => {
 });
 
 // ---------------------------------------------------------------------------
+// steer-inject — count/atStep/runId survive; unknown fields stripped
+// ---------------------------------------------------------------------------
+
+describe("redactEvent — steer-inject", () => {
+  it("keeps steer-inject count/atStep/runId and strips unknown fields", () => {
+    const out = redactEvent({
+      t: "event",
+      kind: "steer-inject",
+      count: 2,
+      atStep: 3,
+      runId: "run-xyz",
+      // biome-ignore lint/suspicious/noExplicitAny: testing extra-field stripping
+      extra: "dropme" as any,
+    } as never);
+    expect(out).toEqual({ t: "event", kind: "steer-inject", count: 2, atStep: 3, runId: "run-xyz" });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // idle pseudo-event passthrough
 // ---------------------------------------------------------------------------
 

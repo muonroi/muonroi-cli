@@ -82,12 +82,14 @@ Ephemeral events that occur during a session (separate from frame snapshots).
 type LiveEvent =
   | { t: "event"; kind: "stream.delta"; target: string; text: string }
   | { t: "event"; kind: "toast"; level: "info" | "warn" | "error"; text: string; ttlMs?: number }
+  | { t: "event"; kind: "steer-inject"; count: number; atStep: number; runId: string }
   | { t: "idle" };
 ```
 
 **Semantics:**
 - `stream.delta`: A chunk of text arrived for a node (typically an LLM response being streamed). `target` is the node id, `text` is the new content chunk.
 - `toast`: A transient notification appeared. `level` indicates severity. `ttlMs` is the time-to-live in milliseconds; omit for indefinite.
+- `steer-inject`: A queued mid-turn message was injected into the running turn at a prepareStep boundary (live-queue steering). `count` is the number of messages injected; `atStep` is the `prepareStep` step number (≥ 1); `runId` is the active turn run ID.
 - `idle`: The UI has reached a stable state with no pending renders or timers. Consumers may use this to detect when the TUI is ready for the next interaction.
 
 ## 3. Schema: Design Mode

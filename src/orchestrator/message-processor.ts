@@ -140,6 +140,7 @@ import {
   getProviderStallRetries,
   getProviderStallTimeoutMs,
   getRoleModels,
+  getSteerInjectionEnabled,
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
@@ -205,6 +206,7 @@ import {
   shouldRepromptStall,
   stallRepromptBackoffMs,
 } from "./stall-watchdog.js";
+import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
@@ -342,6 +344,12 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
    * — preserves backward compat for batch / headless paths that have no UI to
    * surface the askcard.
    */
+  /**
+   * Live-queue steering drain (UI-provided). Returns and CLEARS any messages
+   * the user typed while this turn is streaming, so prepareStep can inject them
+   * mid-turn. Undefined / returns [] → no steering (legacy deferred queue).
+   */
+  drainSteerMessages?: () => { text: string }[];
   askToolLoopContinue?: ToolLoopCapAsk;
   runCouncilV2(
     userMessage: string,
@@ -1105,6 +1113,15 @@ export class MessageProcessor {
     let stallRetryCount = 0;
     const maxStallRetries = getProviderStallRetries();
 
+    // Live-queue steering: messages the user typed mid-turn are drained at a
+    // prepareStep boundary and accumulated here, then re-appended (deduped) to
+    // the messages returned for each subsequent step. Loop-persistent so they
+    // survive a stall-reprompt restart of streamText. NOT pushed into
+    // deps.messages in v1 — model-context only; the assistant response captures
+    // the steering effect and is persisted via appendCompletedTurn.
+    const pendingSteers: ModelMessage[] = [];
+    const steerEnabled = getSteerInjectionEnabled();
+
     // Auto-council: route to multi-model debate when EITHER
     //   (a) PIL classified taskType=plan|analyze with high confidence AND the
     //       prompt is complex enough to justify the debate cost, OR
@@ -1855,6 +1872,53 @@ export class MessageProcessor {
             experimental_repairToolCall: repairToolCallHook,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
               if (sn < 1) return {};
+              // --- Live-queue steering injection ---------------------------
+              // Drain the UI steer queue ONCE per prepareStep call (sn >= 1),
+              // accumulate into pendingSteers, and graft pendingSteers onto the
+              // messages this step returns. Dedup-by-content makes re-appending
+              // idempotent even if a stall-reprompt restart re-reads history.
+              const withSteers = (r: { messages?: typeof stepMessages }): { messages?: typeof stepMessages } => {
+                // Guard the drain on !signal.aborted too: planSteerInjection
+                // already refuses to inject on abort, but draining still CLEARS
+                // the UI queue — so on a (programmatic) abort we must not drain,
+                // or a queued-but-uninjected message is lost (spec §143).
+                const _drained = steerEnabled && !signal.aborted ? (deps.drainSteerMessages?.() ?? []) : [];
+                const _newSteers = planSteerInjection({
+                  drained: _drained,
+                  aborted: signal.aborted,
+                  enabled: steerEnabled,
+                });
+                if (_newSteers.length > 0) {
+                  pendingSteers.push(..._newSteers);
+                  try {
+                    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                      | { emitEvent: (e: unknown) => void }
+                      | undefined;
+                    _ar?.emitEvent({
+                      t: "event",
+                      kind: "steer-inject",
+                      count: _newSteers.length,
+                      atStep: sn,
+                      runId: deps.getActiveRunId() ?? "",
+                    });
+                  } catch (emitErr) {
+                    console.error(`[message-processor] steer-inject telemetry failed: ${(emitErr as Error)?.message}`);
+                  }
+                }
+                if (pendingSteers.length === 0) return r;
+                const _base = r.messages ?? stepMessages;
+                const _steerContents = new Set(
+                  pendingSteers.map((s) => (typeof s.content === "string" ? s.content : JSON.stringify(s.content))),
+                );
+                const _deduped = _base.filter(
+                  (m) =>
+                    !(
+                      m.role === "user" &&
+                      _steerContents.has(typeof m.content === "string" ? m.content : JSON.stringify(m.content))
+                    ),
+                );
+                return { ...r, messages: [..._deduped, ...pendingSteers] as typeof stepMessages };
+              };
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
 
               // Agent-controlled veto (PRESERVE) or lighter selective keep (KEEP_TOOL_IDS) for this turn's B4 compaction.
@@ -1882,7 +1946,7 @@ export class MessageProcessor {
                 return false;
               });
               if (hasPreserve) {
-                return { messages: stripped };
+                return withSteers({ messages: stripped });
               }
 
               // F2 — envelope = system prompt + JSON-Schema of every tool
@@ -1958,7 +2022,7 @@ export class MessageProcessor {
               if (compacted === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
                 const _cp = buildCheckpointReminder(sn, true);
                 const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible.]`;
-                return { messages: attachReminderToMessages(stripped, _pre) };
+                return withSteers({ messages: attachReminderToMessages(stripped, _pre) });
               }
               // Phase 4A — scope reminder injection (REQ-005).
               // Cadence K = 3/5/8 for small/medium/large. Soft-warn fires
@@ -2021,9 +2085,9 @@ export class MessageProcessor {
                     : buildRepetitionReminder(_ceilingSessionId)
                   : _scopePart!;
                 const withReminder = attachReminderToMessages(compacted, _reminder);
-                return { messages: withReminder };
+                return withSteers({ messages: withReminder });
               }
-              if (compacted === stripped && stripped === stepMessages) return {};
+              if (compacted === stripped && stripped === stepMessages) return withSteers({});
               // Self-awareness note: tell the model compaction happened so it
               // knows earlier context was elided and can adjust its behavior.
               // Enhanced per EE anti-mù plan (docs/ee-anti-mu-compaction-plan.md Phase 2): include proactive
@@ -2042,9 +2106,9 @@ export class MessageProcessor {
                     })()
                   : null;
               if (_compactNote) {
-                return { messages: attachReminderToMessages(compacted, _compactNote) };
+                return withSteers({ messages: attachReminderToMessages(compacted, _compactNote) });
               }
-              return { messages: compacted };
+              return withSteers({ messages: compacted });
             },
             ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
             ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
