@@ -111,4 +111,44 @@ describe("buildDirective", () => {
       expect(out.text).toMatch(/\[recommended\]/);
     }
   });
+
+  // Language nudge — re-anchors the "reply in user's language" rule INSIDE the
+  // directive so layered brevity / FIX-FIRST directives can't drown it (live
+  // miss: storyflow_ui session 22661c8de9f2).
+  describe("language nudge", () => {
+    it("appends the nudge when replyLanguage is set", () => {
+      const out = buildDirective({
+        complexity: scoreComplexity("fix CI fail"),
+        phase: "debug",
+        grayAreas: [],
+        replyLanguage: "Vietnamese",
+      });
+      expect(out.text).toMatch(/LANGUAGE — the user wrote in Vietnamese/);
+      expect(out.text).toMatch(/Reply in Vietnamese/);
+      expect(out.text).toMatch(/OVERRIDES any brevity/);
+    });
+
+    it("omits the nudge when replyLanguage is undefined", () => {
+      const out = buildDirective({
+        complexity: scoreComplexity("fix CI fail"),
+        phase: "debug",
+        grayAreas: [],
+      });
+      expect(out.text).not.toMatch(/LANGUAGE —/);
+    });
+
+    it("stacks with the ecosystem nudge when both apply", () => {
+      const out = buildDirective({
+        complexity: scoreComplexity("how does the muonroi ecosystem work"),
+        phase: null,
+        grayAreas: [],
+        ecosystem: true,
+        replyLanguage: "Vietnamese",
+      });
+      expect(out.text).toMatch(/ECOSYSTEM SCOPE/);
+      expect(out.text).toMatch(/LANGUAGE —/);
+      // ecosystem nudge precedes language nudge (deterministic order)
+      expect(out.text.indexOf("ECOSYSTEM SCOPE")).toBeLessThan(out.text.indexOf("LANGUAGE —"));
+    });
+  });
 });

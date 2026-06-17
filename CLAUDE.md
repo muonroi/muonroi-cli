@@ -363,6 +363,7 @@ correlation.
 | `stream.delta` | Streaming text chunk | `target`, `text` |
 | `ee-timeout` | Experience Engine call exceeded its budget | `source`, `elapsedMs`, `budgetMs`, `ts` |
 | `ee-error` | Experience Engine call failed with a non-timeout error | `source`, `name`, `message`, `ts` |
+| `steer-inject` | A queued mid-turn message is injected into the running turn at a prepareStep boundary | `count`, `atStep`, `runId` |
 
 ## Selector grammar quick reference
 
@@ -580,6 +581,7 @@ Optional env overrides for the caps:
 | `MUONROI_CROSS_TURN_DEDUP` | `0` / `1` | `1` | Phase C3 — session-scoped dedup of identical tool outputs across user turns. Set to `0` to disable. When enabled, the second time the agent produces an identical tool result (e.g. `read_file` on the same file in turn 2), the content is replaced with `[tool_result identical to earlier turn — dedup ref sha1=..., originally from tool=... turn=...]`. LRU cap 200 entries per session, min 500 chars to qualify. |
 | (ee-anti-mu) checkpoint injection | layer3 8% of tokenBudget + buildCheckpointReminder <180 chars | — | Phase 5 polish: checkpoints use existing attachReminder + layer3 budget; no new caps. Layer 3 + layer1 enrichment + ee.query (MCP) give agent self-managed "task finished?" visibility after B3/B4. |
 | `MUONROI_DEBUG_SUBAGENT` | `0` / `1` | `0` | Emit detailed stderr telemetry from `task` sub-agents: streamText start config, per-part stream counts, finish reason, error parts, full catch-block error shape (name/statusCode/cause/responseBody/stack). Use when diagnosing silent task failures (e.g. "No output generated" with reasoning models). |
+| `MUONROI_STEER_INJECTION` | `0` / `1` | `1` | Live-queue steering — inject a message typed mid-turn into the running turn at the next prepareStep boundary (vs the legacy "run after the turn finishes" queue). `0` restores the deferred queue. |
 
 ## When you finish a feature
 

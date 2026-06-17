@@ -14,6 +14,7 @@ import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
+import { planLoopCapAskcard } from "../orchestrator/tool-loop-askcard.js";
 import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
@@ -51,6 +52,7 @@ import {
   getApiKey,
   getCatalogDefaultModel,
   getCurrentModel,
+  getSteerInjectionEnabled,
   getTelegramBotToken,
   isModelDisabled,
   isReservedSubagentName,
@@ -640,6 +642,12 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         return;
       }
 
+      if (e.kind === "steer-inject") {
+        const count = typeof e.count === "number" ? e.count : 1;
+        pushToast("info", `↳ steering applied (${count} message${count === 1 ? "" : "s"})`);
+        return;
+      }
+
       if (e.kind === "ee-timeout" || e.kind === "ee-error") {
         const source = typeof e.source === "string" ? e.source : "unknown";
         const kind = e.kind === "ee-timeout" ? "timeout" : "error";
@@ -699,6 +707,22 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     }
     return undefined;
   }, [handleHarnessEvent]);
+
+  // Live-queue steering: expose the mid-turn queue to the running turn so
+  // prepareStep can inject typed-while-busy messages at the next step boundary
+  // instead of deferring them to a new turn. Disabled → callback not wired, so
+  // finishTurnProcessing drains the queue post-turn exactly as before.
+  useEffect(() => {
+    if (!getSteerInjectionEnabled()) return;
+    agent.setSteerDrain(() => {
+      if (queuedMessagesRef.current.length === 0) return [];
+      const drained = queuedMessagesRef.current.map((m) => ({ text: m.text }));
+      queuedMessagesRef.current = [];
+      setQueuedMessages([]);
+      return drained;
+    });
+    return () => agent.setSteerDrain(null);
+  }, [agent]);
 
   const dismissToast = useCallback(() => setActiveToast(null), []);
   // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
@@ -2220,42 +2244,32 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         const isPattern = info.kind === "pattern";
         const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
         toolLoopCapResolversRef.current.set(qid, resolve);
-        // Phase 5 BUG-H — context-aware default:
-        //   - Early in the run (step < natural ceiling × 0.5) loops are
-        //     usually a temporary fixation on a single file/cmd; "continue"
-        //     is the right default.
-        //   - Past the soft-warn line (≥ 50% of natural ceiling) we've used
-        //     up the cheap budget — "stop" becomes the safer default.
-        // Falls back to a static stepNumber heuristic (≤ 15) when caller
-        // didn't supply a naturalCeiling.
+        // Tier-aware askcard layout (planLoopCapAskcard) — 4 tiers:
+        //   early (< 0.5× ceiling)       → Default Continue, no warning
+        //   normal (0.5×–2× ceiling)     → Default Stop, no warning
+        //   overBudget (2×–5× ceiling)   → Default Stop, Continue label carries
+        //                                   the overage multiplier so cost is
+        //                                   visible (storyflow_ui 22661c8de9f2:
+        //                                   2.4× hit had no warning before)
+        //   extreme (> 5× ceiling)        → Stop FIRST in the array (Enter=Stop),
+        //                                   Continue labelled "expensive"
+        //                                   (session 1f29e238: 12.8× past ceiling)
         const patternStep = isPattern ? info.stepNumber : 0;
         const patternCeiling = isPattern ? info.naturalCeiling : undefined;
-        const patternEarly =
-          patternCeiling !== undefined
-            ? patternStep < Math.floor(patternCeiling * 0.5)
-            : patternStep > 0 && patternStep <= 15;
-        // Extreme-overage trip: stepNumber > 5× naturalCeiling. Evidence
-        // (session 1f29e238): at step 77/6 = 12.8× ceiling the askcard still
-        // showed Continue as a first-class option and user chose Continue
-        // within 4s. At extreme overage we put Stop FIRST (Enter = Stop) and
-        // label Continue with the explicit overage multiplier so the cost is
-        // visible at decision time.
-        const patternExtreme = patternCeiling !== undefined && patternCeiling > 0 && patternStep > patternCeiling * 5;
-        const overageMultiplier = patternExtreme && patternCeiling ? (patternStep / patternCeiling).toFixed(1) : null;
-        const patternDefaultIdx = patternEarly ? 0 : patternExtreme ? 0 : 1;
-        const patternOptions: CouncilQuestionOption[] = patternExtreme
+        const layout = isPattern
+          ? planLoopCapAskcard({ stepNumber: patternStep, naturalCeiling: patternCeiling })
+          : null;
+        const patternEarly = layout?.tier === "early";
+        const patternOverBudget = layout?.tier === "overBudget";
+        const patternExtreme = layout?.tier === "extreme";
+        const overageMultiplier = layout?.overageMultiplier ?? null;
+        const patternDefaultIdx = layout?.defaultIndex ?? 0;
+        const patternOptions: CouncilQuestionOption[] = layout
           ? [
-              { label: "Stop and answer (recommended)", value: "stop", kind: "choice" },
-              {
-                label: `Continue anyway (⚠ ${overageMultiplier}× over budget — expensive)`,
-                value: "continue",
-                kind: "choice",
-              },
+              { label: layout.optionLabels[0], value: layout.optionValues[0], kind: "choice" },
+              { label: layout.optionLabels[1], value: layout.optionValues[1], kind: "choice" },
             ]
-          : [
-              { label: "Continue (let agent try)", value: "continue", kind: "choice" },
-              { label: "Stop and answer", value: "stop", kind: "choice" },
-            ];
+          : [];
         const question: CouncilQuestionData = isPattern
           ? {
               questionId: qid,
@@ -2264,9 +2278,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
               }) — có thể đang loop. Tiếp tục?`,
               context: patternExtreme
                 ? `EXTREME OVERAGE — ${overageMultiplier}× past natural budget. Continuing has historically not converged in this regime (see session 1f29e238: 8× over budget, still failed). Stop returns the agent's best answer with current context.`
-                : patternEarly
-                  ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
-                  : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
+                : patternOverBudget
+                  ? `Past natural budget — ${overageMultiplier}× the typical step count for this task type. Continuing may still converge but quality often degrades (longer compaction, stale tool results, forced-finalize on stall). Stop returns the agent's best answer with current context.`
+                  : patternEarly
+                    ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
+                    : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
               isRequired: true,
               phase: "tool-loop-cap",
               options: patternOptions,

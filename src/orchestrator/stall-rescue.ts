@@ -35,6 +35,22 @@ export const STALL_RESCUE_MAX_RESULTS = 8;
 export const STALL_RESCUE_MAX_CHARS_PER_RESULT = 1500;
 
 /**
+ * Heuristic: detect the user's reply language from the original request so the
+ * synthesis prompt can carry an EXPLICIT language directive. The base system
+ * prompt's "reply in user's language" rule is normally enough, but after a
+ * stall the rescue path issues a NEW synthesis call whose extra directives
+ * ("use ONLY tool outputs", "no more tools") can crowd out the language rule
+ * — observed live (storyflow_ui session 22661c8de9f2): user wrote Vietnamese,
+ * the rescued answer came back in English. Returns a language name or null
+ * (skip the hint = treat as English-default).
+ */
+const VI_DIACRITIC_RE = /[à-ỹÀ-Ỹ]/;
+export function detectReplyLanguageHint(userText: string): string | null {
+  if (VI_DIACRITIC_RE.test(userText)) return "Vietnamese";
+  return null;
+}
+
+/**
  * Capture a tool result into a capped ring buffer (mutates `buffer`). Keeps the
  * buffer bounded in BOTH count and per-entry size so a long turn can't blow
  * memory or the eventual synthesis prompt.
@@ -56,7 +72,10 @@ export function buildStallSynthesisMessages(
   toolResults: StallToolResult[],
 ): unknown[] {
   const digest = toolResults.map((r, i) => `[${i + 1}] ${r.tool}:\n${r.text}`).join("\n\n");
+  const lang = detectReplyLanguageHint(userText);
+  const langLine = lang ? `Reply in ${lang} (the user wrote in ${lang}).\n\n` : "";
   const content =
+    langLine +
     "The connection to the model stalled before it could finish its answer. " +
     "You already ran the tools below this turn — use ONLY their outputs to give " +
     "your best final answer now. Do NOT call any more tools.\n\n" +

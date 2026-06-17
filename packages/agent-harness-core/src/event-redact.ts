@@ -103,7 +103,12 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     forceCouncil: "pass",
     runId: "pass",
   },
-  "toast": {
+  "steer-inject": {
+    count: "pass",
+    atStep: "pass",
+    runId: "pass",
+  },
+  toast: {
     level: "pass",
     text: 500, // cap to 500 chars, then scrub
     ttlMs: "pass",
@@ -112,7 +117,7 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     target: "pass",
     text: 500, // cap to 500 chars
   },
-  "usage": {
+  usage: {
     source: "pass",
     model: "pass",
     inputTokens: "pass",

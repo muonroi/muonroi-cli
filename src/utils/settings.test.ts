@@ -212,3 +212,27 @@ describe("getProviderStallRetries", () => {
     }
   });
 });
+
+describe("getSteerInjectionEnabled", () => {
+  it("defaults to true when the env var is unset or blank", async () => {
+    vi.unstubAllEnvs();
+    const { getSteerInjectionEnabled } = await import("./settings");
+    expect(getSteerInjectionEnabled()).toBe(true);
+    vi.stubEnv("MUONROI_STEER_INJECTION", "");
+    expect(getSteerInjectionEnabled()).toBe(true);
+  });
+
+  it("returns false only for an explicit '0'", async () => {
+    const { getSteerInjectionEnabled } = await import("./settings");
+    vi.stubEnv("MUONROI_STEER_INJECTION", "0");
+    expect(getSteerInjectionEnabled()).toBe(false);
+  });
+
+  it("returns true for '1' and any other non-'0' value", async () => {
+    const { getSteerInjectionEnabled } = await import("./settings");
+    for (const v of ["1", "true", "yes", "on", "xyz"]) {
+      vi.stubEnv("MUONROI_STEER_INJECTION", v);
+      expect(getSteerInjectionEnabled()).toBe(true);
+    }
+  });
+});
