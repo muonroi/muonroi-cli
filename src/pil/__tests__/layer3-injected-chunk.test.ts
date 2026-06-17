@@ -98,6 +98,44 @@ describe("layer3 experience_injected chunk emission (CQ-16b)", () => {
     expect(typeof chunk?.experienceInjected?.scoreFloor).toBe("number");
   });
 
+  it("experience_injected chunk carries per-point {id, title, tier} so the TUI can show WHAT was injected", async () => {
+    mockSearchByText.mockResolvedValue([
+      {
+        id: "point-1",
+        score: 0.9,
+        payload: { text: "Use dependency injection for testability" },
+        collection: "experience-behavioral",
+      },
+    ]);
+
+    await layer3EeInjection(BASE_CTX);
+    const chunk = capturedSinkCalls.find(
+      (c) => typeof c !== "string" && (c as StreamChunk).type === "experience_injected",
+    ) as StreamChunk | undefined;
+
+    const points = chunk?.experienceInjected?.points;
+    expect(Array.isArray(points)).toBe(true);
+    expect(points!.length).toBeGreaterThan(0);
+    const p = points![0]!;
+    expect(p.id).toBe("point-1");
+    expect(p.title).toContain("dependency injection");
+    expect(["principle", "behavioral", "checkpoint"]).toContain(p.tier);
+  });
+
+  it("appends an ee_feedback nudge to the injected text when rateable experience is present", async () => {
+    mockSearchByText.mockResolvedValue([
+      {
+        id: "p1",
+        score: 0.9,
+        payload: { text: "Prefer composition over inheritance" },
+        collection: "experience-behavioral",
+      },
+    ]);
+
+    const result = await layer3EeInjection(BASE_CTX);
+    expect(result.enriched).toContain("ee_feedback(id, followed|ignored|noise)");
+  });
+
   it("does NOT emit experience_injected when searchByText returns empty array", async () => {
     mockSearchByText.mockResolvedValue([]);
 

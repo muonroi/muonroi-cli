@@ -54,6 +54,17 @@ const PIL_PRINCIPLES_FLOOR = Math.max(0, PIL_SCORE_FLOOR - 0.15);
 const T1_HIT_THRESHOLD = 3;
 
 /**
+ * Inline reminder appended to the injected experience block (when rateable
+ * principles/behavioral are present) so passively-injected recalls carry a
+ * feedback prompt next to their [id:..] handles — the front-loaded
+ * native-capabilities instruction can be compacted away on long sessions, and
+ * unrated recalls degrade future recall (the recall arm of the EE loop is
+ * explicit-feedback-only by design).
+ */
+export const RECALL_FEEDBACK_NUDGE =
+  "↳ Acted on one of the above [id:..]? Rate it: ee_feedback(id, followed|ignored|noise). Unrated recalls degrade future recall.";
+
+/**
  * Extract all sha16 values from `<!-- bb-context-injected:<sha16> -->` markers
  * already present in the enriched context string.
  */
@@ -339,12 +350,23 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
 
   // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block.
+  // Carry per-point {id, title, tier} so the TUI can show WHAT was injected, not
+  // just how many (the data already exists here; previously only the count + ids
+  // reached the client and the title was never serialized).
+  const pointTitle = (p: EEPoint): string =>
+    (extractPointText(p).split("\n")[0] ?? "").replace(/\s+/g, " ").trim().slice(0, 100);
+  const injectedPoints = [
+    ...deduplicatedPrinciples.map((p) => ({ id: String(p.id), title: pointTitle(p), tier: "principle" as const })),
+    ...deduplicatedBehavioral.map((p) => ({ id: String(p.id), title: pointTitle(p), tier: "behavioral" as const })),
+    ...deduplicatedCheckpoints.map((p) => ({ id: String(p.id), title: pointTitle(p), tier: "checkpoint" as const })),
+  ];
   try {
     const injectedChunk = {
       type: "experience_injected" as const,
       experienceInjected: {
         pointCount: totalPoints + deduplicatedCheckpoints.length,
         pointIds: allPoints.map((p) => String(p.id)),
+        points: injectedPoints,
         scoreFloor: PIL_SCORE_FLOOR,
         taskType: ctx.taskType ?? undefined,
         domain: ctx.domain ?? undefined,
@@ -372,6 +394,16 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     const marker = `<!-- ee-checkpoint-injected:${payloadSha16(cpText)} -->`;
     // Idea 5: raised from 0.08 to 0.12 for higher fidelity on critical progress + artifact refs.
     parts.push(truncateToBudget(cpText + "\n" + marker, Math.floor(ctx.tokenBudget * 0.12)));
+  }
+  // Close the recall feedback loop at the injection site: passively-injected
+  // experience (the agent did not ee_query for it) otherwise carries no feedback
+  // prompt, so it goes unrated and EE cannot learn if the injection was gold or
+  // noise. The front-loaded native-capabilities instruction can be compacted away
+  // on long sessions; this nudge rides next to the [id:..] handles it refers to.
+  // Gated on rateable experience (principles/behavioral) — checkpoints are task
+  // artifacts, not recall verdicts.
+  if (deduplicatedPrinciples.length + deduplicatedBehavioral.length > 0) {
+    parts.push(RECALL_FEEDBACK_NUDGE);
   }
   const injected = parts.join("\n");
 

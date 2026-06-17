@@ -209,6 +209,25 @@ import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
+ * Render the EE "experience injected" chunk for the TUI: the count line PLUS a
+ * capped per-point list (tier + title + short id) so the user sees WHAT was
+ * injected, not just how many. Shared by both render sites to avoid drift.
+ */
+function formatExperienceInjectedBlock(d: {
+  pointCount?: number;
+  scoreFloor?: number;
+  points?: Array<{ id: string; title: string; tier: string }>;
+}): string {
+  const head = `\n💡 [Experience Injected] ${d.pointCount ?? 0} point(s) loaded (score ≥ ${d.scoreFloor ?? 0})`;
+  const pts = d.points ?? [];
+  if (pts.length === 0) return `${head}\n`;
+  const MAX = 8;
+  const lines = pts.slice(0, MAX).map((p) => `   • [${p.tier}] ${p.title || "(untitled)"} {id:${p.id.slice(0, 8)}}`);
+  if (pts.length > MAX) lines.push(`   … +${pts.length - MAX} more`);
+  return `${head}\n${lines.join("\n")}\n`;
+}
+
+/**
  * Strip terminal bracketed-paste guards (ESC[200~ / ESC[201~), all control
  * bytes, and DEL from pasted/typed text. Keeps printable characters including
  * spaces (a master password may legitimately contain them).
@@ -3245,9 +3264,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 );
                 break;
               case "experience_injected":
-                applyLocalAssistantDelta(
-                  `\n💡 [Experience Injected] ${chunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${chunk.experienceInjected?.scoreFloor ?? 0})\n`,
-                );
+                applyLocalAssistantDelta(formatExperienceInjectedBlock(chunk.experienceInjected ?? {}));
                 break;
               case "halt":
                 if (chunk.haltChunk) {
@@ -3982,7 +3999,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                         ...prev.slice(0, -1),
                         {
                           ...last,
-                          content: `${last.content ?? ""}\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                          content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
                         },
                       ];
                     }
@@ -4197,7 +4214,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                         ...prev.slice(0, -1),
                         {
                           ...last,
-                          content: `${last.content ?? ""}\n💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s) loaded\n`,
+                          content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
                         },
                       ];
                     }

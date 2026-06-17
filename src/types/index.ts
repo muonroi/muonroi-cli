@@ -369,6 +369,8 @@ export interface ExperienceWarningData {
 export interface ExperienceInjectedData {
   pointCount: number;
   pointIds: string[];
+  /** Per-point detail so the TUI can show WHAT was injected, not just the count. */
+  points?: Array<{ id: string; title: string; tier: "principle" | "behavioral" | "checkpoint" }>;
   scoreFloor: number;
   taskType?: string;
   domain?: string;
