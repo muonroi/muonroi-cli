@@ -3027,9 +3027,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                 `\n⚠ [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
               );
             } else if (eeChunk.type === "experience_injected") {
-              applyLocalAssistantDelta(
-                `\n💡 [Experience Injected] ${eeChunk.experienceInjected?.pointCount ?? 0} point(s) loaded (score ≥ ${eeChunk.experienceInjected?.scoreFloor ?? 0})\n`,
-              );
+              applyLocalAssistantDelta(formatExperienceInjectedBlock(eeChunk.experienceInjected ?? {}));
             }
           });
           for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
@@ -4003,10 +4001,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                         },
                       ];
                     }
-                    return [
-                      ...prev,
-                      buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`),
-                    ];
+                    return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
                   });
                 }
                 if (chunk.type === "halt" && chunk.haltChunk) {
@@ -4218,10 +4213,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
                         },
                       ];
                     }
-                    return [
-                      ...prev,
-                      buildAssistantEntry(`💡 [Experience Injected] ${chunk.experienceInjected!.pointCount} point(s)`),
-                    ];
+                    return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
                   });
                 }
                 if (chunk.type === "done") break;
