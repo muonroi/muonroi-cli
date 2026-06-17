@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createStallWatchdog, STALL_ABORT_REASON } from "./stall-watchdog.js";
+import {
+  createStallWatchdog,
+  STALL_ABORT_REASON,
+  type StallRepromptState,
+  shouldRepromptStall,
+  stallRepromptBackoffMs,
+} from "./stall-watchdog.js";
 
 describe("createStallWatchdog", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -79,5 +85,59 @@ describe("createStallWatchdog", () => {
     wd.pet();
     expect(wd.fired()).toBe(true);
     expect(wd.signal.aborted).toBe(true);
+  });
+});
+
+describe("shouldRepromptStall", () => {
+  // A clean time-to-first-byte stall: watchdog fired, zero chunks, no text,
+  // under the cap, not cancelled — the ONLY case that re-prompts.
+  const ttfb = (over: Partial<StallRepromptState> = {}): StallRepromptState => ({
+    stallTriggered: true,
+    stallRetryCount: 0,
+    maxStallRetries: 1,
+    chunksThisAttempt: 0,
+    assistantTextEmpty: true,
+    aborted: false,
+    ...over,
+  });
+
+  it("re-prompts a time-to-first-byte stall under the cap", () => {
+    expect(shouldRepromptStall(ttfb())).toBe(true);
+  });
+
+  it("does NOT re-prompt when the watchdog never fired", () => {
+    expect(shouldRepromptStall(ttfb({ stallTriggered: false }))).toBe(false);
+  });
+
+  it("does NOT re-prompt once the retry cap is reached", () => {
+    expect(shouldRepromptStall(ttfb({ stallRetryCount: 1, maxStallRetries: 1 }))).toBe(false);
+    // maxStallRetries=0 means the feature is disabled — never re-prompt.
+    expect(shouldRepromptStall(ttfb({ stallRetryCount: 0, maxStallRetries: 0 }))).toBe(false);
+  });
+
+  it("does NOT re-prompt once a real chunk has arrived (mid-stream stall → rescue)", () => {
+    expect(shouldRepromptStall(ttfb({ chunksThisAttempt: 1 }))).toBe(false);
+  });
+
+  it("does NOT re-prompt once assistant text has flowed (output would corrupt)", () => {
+    expect(shouldRepromptStall(ttfb({ assistantTextEmpty: false }))).toBe(false);
+  });
+
+  it("does NOT re-prompt over a genuine user cancel", () => {
+    expect(shouldRepromptStall(ttfb({ aborted: true }))).toBe(false);
+  });
+});
+
+describe("stallRepromptBackoffMs", () => {
+  it("grows exponentially and caps at 4s", () => {
+    expect(stallRepromptBackoffMs(1)).toBe(500);
+    expect(stallRepromptBackoffMs(2)).toBe(1000);
+    expect(stallRepromptBackoffMs(3)).toBe(2000);
+    expect(stallRepromptBackoffMs(4)).toBe(4000);
+    expect(stallRepromptBackoffMs(5)).toBe(4000);
+  });
+
+  it("treats attempt < 1 as the first attempt", () => {
+    expect(stallRepromptBackoffMs(0)).toBe(500);
   });
 });

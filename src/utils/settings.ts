@@ -1019,6 +1019,27 @@ export function getProviderStallTimeoutMs(): number {
 }
 
 /**
+ * Number of times to AUTOMATICALLY re-issue a streaming model call after the
+ * stall watchdog fires WITHOUT any chunk having arrived (a time-to-first-byte
+ * "frozen" stall). Some providers (observed: xai/grok-build-0.1) accept a
+ * request then never send the first byte, yet a fresh request goes through —
+ * a single dead socket, not a down backend. Re-prompting is gated on
+ * zero-chunks-this-attempt so it can NEVER restart a turn that already ran
+ * tools or emitted text (that would corrupt/duplicate output — the partial-
+ * answer rescue path handles those). Each re-prompt waits a short backoff.
+ * Range 0–5; 0 restores the legacy "surface the stall, never retry" behaviour.
+ * Default 1. Env override: MUONROI_PROVIDER_STALL_RETRIES.
+ */
+export function getProviderStallRetries(): number {
+  const envRaw = process.env.MUONROI_PROVIDER_STALL_RETRIES;
+  if (envRaw !== undefined && envRaw !== "") {
+    const n = Number(envRaw);
+    if (Number.isFinite(n) && n >= 0 && n <= 5) return Math.floor(n);
+  }
+  return 1;
+}
+
+/**
  * Phase B3 — threshold (in chars of cumulative message content) above which
  * the sub-agent `prepareStep` compactor rewrites older tool_result parts
  * into short summary stubs. Below the threshold compaction is a no-op.

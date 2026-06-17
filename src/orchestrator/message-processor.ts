@@ -137,6 +137,7 @@ import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/pe
 import {
   getAutoCouncilConfidence,
   getAutoCouncilMinRoles,
+  getProviderStallRetries,
   getProviderStallTimeoutMs,
   getRoleModels,
   getTopLevelCompactKeepLast,
@@ -198,7 +199,12 @@ import {
   recordElision,
 } from "./session-experience.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
-import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
+import {
+  createStallWatchdog,
+  STALL_ERROR_MESSAGE,
+  shouldRepromptStall,
+  stallRepromptBackoffMs,
+} from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
@@ -1088,6 +1094,16 @@ export class MessageProcessor {
     // clear toast and SKIP the transient-retry (a stalled provider just stalls
     // again, wasting another full timeout of silence).
     let stallTriggered = false;
+    // Time-to-first-byte stall RE-PROMPT: some providers (observed:
+    // xai/grok-build-0.1) accept the request then never send the first byte —
+    // a single wedged socket, not a down backend, so a fresh request usually
+    // goes through. When the watchdog fires with ZERO chunks received this
+    // attempt, we re-issue the SAME request up to `maxStallRetries` times
+    // (loop-persistent counter). Gated on zero-chunks so it can NEVER restart a
+    // turn that already ran tools or emitted text — those go to the partial-
+    // answer rescue path instead. maxStallRetries = 0 restores legacy behaviour.
+    let stallRetryCount = 0;
+    const maxStallRetries = getProviderStallRetries();
 
     // Auto-council: route to multi-model debate when EITHER
     //   (a) PIL classified taskType=plan|analyze with high confidence AND the
@@ -1210,7 +1226,7 @@ export class MessageProcessor {
     }
 
     try {
-      while (true) {
+      streamAttempt: while (true) {
         // SAMR Phase 2: switch to fast model for tool-execution steps
         if (stepRouterPhase === "phase2" && phase2Runtime) {
           runtime = phase2Runtime;
@@ -1219,6 +1235,67 @@ export class MessageProcessor {
 
         deps.setCompactedThisTurn(false);
         let assistantText = "";
+        // Count of stream parts received in THIS attempt. Stays 0 only when the
+        // provider never sent a first byte → the safe-to-re-prompt stall case.
+        let chunksThisAttempt = 0;
+        // Decide whether a fired stall watchdog should re-prompt (re-issue the
+        // same request) instead of falling through to rescue/error. Returns the
+        // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
+        // the live per-attempt locals; safe to call only when stallTriggered.
+        const planStallReprompt = (): number | null => {
+          if (
+            !shouldRepromptStall({
+              stallTriggered,
+              stallRetryCount,
+              maxStallRetries,
+              chunksThisAttempt,
+              assistantTextEmpty: assistantText.trim() === "",
+              aborted: signal.aborted,
+            })
+          ) {
+            return null;
+          }
+          stallRetryCount++;
+          const backoffMs = stallRepromptBackoffMs(stallRetryCount);
+          try {
+            const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _ar?.emitEvent({
+              t: "event",
+              kind: "stream-retry",
+              attempt: stallRetryCount,
+              maxAttempts: maxStallRetries + 1,
+              errorName: "TimeoutError",
+              errorMessage: "provider-stall (no first byte) — re-prompting",
+              nextDelayMs: backoffMs,
+            });
+            _ar?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "warning",
+              text: `Model stalled — re-prompting (attempt ${stallRetryCount}/${maxStallRetries})…`,
+            });
+          } catch (emitErr) {
+            console.error(`[message-processor] stall-reprompt telemetry failed: ${(emitErr as Error)?.message}`);
+          }
+          try {
+            if (deps.session) {
+              logInteraction(deps.session.id, "stream_retry", {
+                data: {
+                  attempt: stallRetryCount,
+                  maxAttempts: maxStallRetries + 1,
+                  errorName: "provider-stall",
+                  errorMessage: "no first byte within stall timeout — re-prompted",
+                  nextDelayMs: backoffMs,
+                },
+              });
+            }
+          } catch (logErr) {
+            console.error(`[message-processor] stall-reprompt log failed: ${(logErr as Error)?.message}`);
+          }
+          return backoffMs;
+        };
         // Tracks where `assistantText` was at the previous step boundary so
         // `onStepFinish` can compute the text emitted within the just-finished
         // step (input to the self-repetition detector).
@@ -2045,6 +2122,10 @@ export class MessageProcessor {
           const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
           for await (const part of result.fullStream) {
             stall.pet(); // chunk arrived — reset the stall watchdog
+            // Count only real content parts. The watchdog abort itself surfaces
+            // as an "abort" part — counting it would defeat the TTFB-stall gate
+            // (a frozen-before-first-byte stall yields ONLY the abort part).
+            if (part.type !== "abort") chunksThisAttempt++;
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
               break;
@@ -2659,6 +2740,19 @@ export class MessageProcessor {
                 // instead of a benign "[Cancelled]" so a hung provider no longer
                 // looks like a silent freeze.
                 if (stallTriggered) {
+                  // Time-to-first-byte stall (no real chunk this attempt): the
+                  // socket wedged before any output — re-issue the SAME request
+                  // rather than giving up. Bounded by maxStallRetries; never
+                  // fires once tools ran or text flowed (planStallReprompt gate).
+                  const _stallBackoff = planStallReprompt();
+                  if (_stallBackoff != null) {
+                    stall.dispose();
+                    await new Promise<void>((r) => setTimeout(r, _stallBackoff));
+                    if (!signal.aborted) {
+                      stallTriggered = false;
+                      continue streamAttempt;
+                    }
+                  }
                   stall.dispose();
                   // A response tool already produced the terminal structured
                   // answer (buffered from its call args) before the provider
@@ -3329,6 +3423,21 @@ export class MessageProcessor {
           if (!attemptedOverflowRecovery && !assistantText.trim() && modelInfo && isContextLimitError(err)) {
             attemptedOverflowRecovery = true;
             continue;
+          }
+
+          // Stall surfaced as a throw (rather than an "abort" stream part):
+          // apply the SAME time-to-first-byte re-prompt as the abort-part path.
+          // The watchdog already fired (stallTriggered) so its timer is spent —
+          // no dispose needed; the next attempt arms a fresh watchdog.
+          if (stallTriggered) {
+            const _stallBackoff = planStallReprompt();
+            if (_stallBackoff != null) {
+              await new Promise<void>((r) => setTimeout(r, _stallBackoff));
+              if (!signal.aborted) {
+                stallTriggered = false;
+                continue;
+              }
+            }
           }
 
           // Transient network/server error retry — up to MAX_STREAM_RETRIES extra attempts.

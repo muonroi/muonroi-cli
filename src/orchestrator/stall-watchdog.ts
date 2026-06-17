@@ -38,6 +38,50 @@ export const STALL_ERROR_MESSAGE =
   "The provider may be out of balance, rate-limited, or unreachable. " +
   "Tune MUONROI_PROVIDER_STALL_TIMEOUT_MS (0 disables) or switch model/provider.";
 
+/** Inputs to the stall re-prompt decision — see {@link shouldRepromptStall}. */
+export interface StallRepromptState {
+  /** The watchdog fired for this attempt. */
+  stallTriggered: boolean;
+  /** How many stall re-prompts have already happened this turn. */
+  stallRetryCount: number;
+  /** Configured cap (getProviderStallRetries); 0 disables re-prompt. */
+  maxStallRetries: number;
+  /** Real content parts received this attempt (the abort part is NOT counted). */
+  chunksThisAttempt: number;
+  /** True when no assistant text has flowed this attempt. */
+  assistantTextEmpty: boolean;
+  /** True on genuine user cancel (never re-prompt over a cancel). */
+  aborted: boolean;
+}
+
+/**
+ * Decide whether a fired stall watchdog should trigger a re-prompt (re-issue
+ * the same request) instead of surfacing the stall.
+ *
+ * ONLY a time-to-first-byte stall qualifies: zero real chunks AND no assistant
+ * text this attempt, under the retry cap, and not a user cancel. Re-issuing
+ * after tools ran or text flowed would corrupt/duplicate output — those cases
+ * fall through to the partial-answer rescue path instead. Pure (no side
+ * effects) so it is unit-testable in isolation from the orchestrator loop.
+ */
+export function shouldRepromptStall(s: StallRepromptState): boolean {
+  return (
+    s.stallTriggered &&
+    s.stallRetryCount < s.maxStallRetries &&
+    s.chunksThisAttempt === 0 &&
+    s.assistantTextEmpty &&
+    !s.aborted
+  );
+}
+
+/**
+ * Exponential backoff (ms, capped at 4s) before the Nth stall re-prompt
+ * (1-based): 500 → 1000 → 2000 → 4000 → 4000.
+ */
+export function stallRepromptBackoffMs(attempt: number): number {
+  return Math.min(500 * 2 ** (Math.max(1, attempt) - 1), 4_000);
+}
+
 export function createStallWatchdog(timeoutMs: number, onFire?: () => void): StallWatchdog {
   const controller = new AbortController();
   let firedFlag = false;
