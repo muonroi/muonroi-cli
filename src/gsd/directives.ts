@@ -48,6 +48,15 @@ export interface DirectiveInput {
    * the shipped authoritative source.
    */
   ecosystem?: boolean;
+  /**
+   * User's reply language (heuristic — Vietnamese|undefined). When set, the
+   * directive appends an explicit language nudge so the rule survives the
+   * personality/GSD instructions stacking on top of it (storyflow_ui session
+   * 22661c8de9f2: user wrote Vietnamese, layered directives + a stalled
+   * forced-finalize drowned out the base "reply in user's language" rule and
+   * the agent answered in English).
+   */
+  replyLanguage?: string;
 }
 
 export interface DirectiveOutput {
@@ -83,6 +92,21 @@ export const ECOSYSTEM_DOCS_NUDGE = [
   `${HEADER} ECOSYSTEM SCOPE — this turn concerns the Muonroi ecosystem (platform overview, BB/.NET packages, building-block, open-core boundary, setup).`,
   "If the muonroi-docs MCP is available, it is the AUTHORITATIVE source — call it FIRST (docs_search / setup_guide / bb_recipe_list / bb_package_describe), THEN ground with local files. Do NOT characterize the ecosystem from local repo files alone.",
 ].join("\n");
+
+/**
+ * Appended to any directive when the user's reply language is non-English.
+ * The base system prompt's "reply in user's language" rule normally suffices,
+ * but `concise` / `FIX-FIRST` / GSD-debug directive bodies stack on top of it
+ * with strong "be terse / code over prose" language that crowds the rule out
+ * — observed live (storyflow_ui 22661c8de9f2). This NUDGE re-anchors the rule
+ * inside the directive itself so brevity preferences cannot override it.
+ */
+export function buildLanguageNudge(lang: string): string {
+  return [
+    `${HEADER} LANGUAGE — the user wrote in ${lang}. Reply in ${lang}.`,
+    "This rule OVERRIDES any brevity / concise / code-over-prose directive: terseness is fine, but the response language stays the user's.",
+  ].join("\n");
+}
 
 function renderGrayAreas(qs: GrayAreaQuestion[]): string {
   if (qs.length === 0) return "  (no gray areas detected — confirm the request is fully specified before proceeding)";
@@ -178,8 +202,15 @@ export function buildDirective(input: DirectiveInput): DirectiveOutput {
   // Ecosystem-scoped turns get a docs-first nudge regardless of tier (question
   // OR task): muonroi-docs is the authoritative source and must not be skipped
   // in favour of guessing from local files (session 41ccfeb2ceee turn 1).
+  let text = base.text;
   if (input.ecosystem) {
-    return { ...base, text: `${base.text}\n${ECOSYSTEM_DOCS_NUDGE}` };
+    text = `${text}\n${ECOSYSTEM_DOCS_NUDGE}`;
   }
-  return base;
+  // Language nudge: re-anchor the "reply in user's language" rule INSIDE the
+  // directive when the user wrote in a non-English language, so layered
+  // brevity/concise directives can't drown it (storyflow_ui 22661c8de9f2).
+  if (input.replyLanguage) {
+    text = `${text}\n${buildLanguageNudge(input.replyLanguage)}`;
+  }
+  return { ...base, text };
 }
