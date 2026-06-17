@@ -179,3 +179,36 @@ describe("resolveTelegramAudioInputSettings", () => {
     expect(result.language).toBe("vi");
   });
 });
+
+describe("getProviderStallRetries", () => {
+  it("defaults to 1 when the env var is unset or blank", async () => {
+    vi.unstubAllEnvs();
+    const { getProviderStallRetries } = await import("./settings");
+    expect(getProviderStallRetries()).toBe(1);
+    vi.stubEnv("MUONROI_PROVIDER_STALL_RETRIES", "");
+    expect(getProviderStallRetries()).toBe(1);
+  });
+
+  it("honours an in-range override (0 disables, up to 5)", async () => {
+    const { getProviderStallRetries } = await import("./settings");
+    vi.stubEnv("MUONROI_PROVIDER_STALL_RETRIES", "0");
+    expect(getProviderStallRetries()).toBe(0);
+    vi.stubEnv("MUONROI_PROVIDER_STALL_RETRIES", "3");
+    expect(getProviderStallRetries()).toBe(3);
+    vi.stubEnv("MUONROI_PROVIDER_STALL_RETRIES", "5");
+    expect(getProviderStallRetries()).toBe(5);
+  });
+
+  it("falls back to the default for out-of-range or non-numeric values", async () => {
+    const { getProviderStallRetries } = await import("./settings");
+    for (const bad of ["6", "-1", "abc", "2.5"]) {
+      vi.stubEnv("MUONROI_PROVIDER_STALL_RETRIES", bad);
+      // "2.5" floors to 2 (in range) — only the others fall back.
+      if (bad === "2.5") {
+        expect(getProviderStallRetries()).toBe(2);
+      } else {
+        expect(getProviderStallRetries()).toBe(1);
+      }
+    }
+  });
+});
