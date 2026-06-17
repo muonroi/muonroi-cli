@@ -1528,6 +1528,18 @@ usage
   });
 
 usage
+  .command("experience")
+  .description(
+    "Cross-session anti-mù telemetry: how often compaction elides tool outputs and whether the agent recovers them (gates the deferred auto-protect re-architecture).",
+  )
+  .option("--limit <n>", "Number of most-recent sessions to aggregate", "100")
+  .option("--json", "Emit aggregate as JSON")
+  .action(async (opts: { limit: string; json?: boolean }) => {
+    const { runExperienceReport } = await import("./cli/experience-report.js");
+    await runExperienceReport({ limit: parseInt(opts.limit, 10) || 100, json: opts.json });
+  });
+
+usage
   .command("security-audit")
   .description(
     "Security posture: yolo/permission overrides, high-risk cmds, shuru audits + cost (from decision-log events)",

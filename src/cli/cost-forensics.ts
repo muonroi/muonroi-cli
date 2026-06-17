@@ -9,9 +9,11 @@
  * after the cumulative cap kicks in.
  */
 
+import type { SessionExperienceCounts } from "../orchestrator/session-experience.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { getDatabase } from "../storage/db.js";
+import { selectSessionExperience } from "../storage/session-experience-store.js";
 
 export interface CostForensicsRow {
   id: number;
@@ -41,6 +43,8 @@ export interface CostForensicsSummary {
   cacheHitRatio: number;
   peakSingleCallInput: number;
   events: CostForensicsRow[];
+  /** Anti-mù counters for this session (null when none recorded). */
+  experience: SessionExperienceCounts | null;
 }
 
 interface UsageRow {
@@ -166,6 +170,7 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     cacheHitRatio,
     peakSingleCallInput,
     events,
+    experience: selectSessionExperience(sessionId),
   };
 }
 
@@ -255,6 +260,17 @@ export function printCostForensics(summary: CostForensicsSummary, opts: { json?:
         `despite a cacheable ~${formatNum(cadence.warmPrefixTokens)}-tok prefix ` +
         `(~${formatNum(cadence.estReBilledTokens)} tok re-billed). ` +
         `Likely fast tool-loop latency — fewer/batched tool rounds recover this.`,
+    );
+  }
+  // Anti-mù counters for this session (rec #1 persisted forensics).
+  if (summary.experience) {
+    const x = summary.experience;
+    const rehydrated = x.rehydratedCache + x.rehydratedDisk + x.rehydratedEe;
+    w(
+      `Anti-mù:             ${x.compactions} compaction(s), ${x.elided} tool output(s) elided` +
+        `${x.elided > 0 ? ` (${formatNum(x.totalElidedChars)} chars)` : ""}, ` +
+        `${rehydrated} rehydrated (cache=${x.rehydratedCache} disk=${x.rehydratedDisk} ee=${x.rehydratedEe}), ` +
+        `${x.unavailable} needed-but-unavailable.`,
     );
   }
   w(``);
