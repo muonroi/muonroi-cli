@@ -28,6 +28,7 @@ import { layer4Gsd } from "./layer4-gsd.js";
 import { layer5Context } from "./layer5-context.js";
 import { isMetaAnalysisPrompt, layer6Output } from "./layer6-output.js";
 import { PipelineContextSchema } from "./schema.js";
+import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
 import { bumpSessionTurn } from "./session-state.js";
 import { setPilLastResult } from "./store.js";
 import { resolveAfter } from "./timeout.js";
@@ -182,6 +183,14 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       // RELEVANT to this meta question. Defers to layer3 — it only fires when
       // layer3's fixed-query checkpoint arm surfaced no checkpoint block.
       await timed("ee-meta-artifacts", surfaceCompactionArtifacts);
+    }
+    // Felt-experience routing: a first-person "cảm nhận trong CLI / are you
+    // blind?" question gets the live session-experience snapshot so the agent
+    // answers from what actually happened to it this session — not by reading
+    // the compaction/PIL source. Synchronous, local, narrow (subset of meta) —
+    // gated like surfaceCompactionArtifacts so normal turns add no layer.
+    if (isSelfExperiencePrompt(ctx.raw)) {
+      await timed("session-experience", async (c) => injectSessionExperience(c));
     }
   } else {
     for (const { timingName } of SKIPPED_LAYERS) {
