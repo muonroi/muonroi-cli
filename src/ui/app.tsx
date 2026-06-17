@@ -132,6 +132,7 @@ import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
 import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
 import { useModelPicker } from "./hooks/use-model-picker.js";
+import { useSessionPicker } from "./hooks/use-session-picker.js";
 import { useTypeahead } from "./hooks/useTypeahead.js";
 import { Markdown } from "./markdown";
 import { buildMcpBrowseRows, McpBrowserModal, McpEditorModal } from "./mcp-modal";
@@ -140,6 +141,7 @@ import { ApiKeyModal } from "./modals/api-key-modal.js";
 import { ConnectModal, TelegramPairModal, TelegramTokenModal } from "./modals/connect-modal.js";
 import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
+import { SessionPickerModal } from "./modals/session-picker-modal.js";
 import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
 import { resolvePickerProviders } from "./picker-providers.js";
@@ -151,6 +153,7 @@ import { StatusBar } from "./status-bar/index.js";
 import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark } from "./theme";
+import { relaunchWithSession } from "./utils/relaunch.js";
 import "./slash/route.js";
 import "./slash/optimize.js";
 import "./slash/discuss.js";
@@ -751,6 +754,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     reasoningEffortByModel,
     setReasoningEffortByModel,
   } = useModelPicker(agent.getModel());
+  const {
+    showSessionPicker,
+    setShowSessionPicker,
+    sessionPickerIndex,
+    setSessionPickerIndex,
+    sessions: sessionPickerList,
+    setSessions: setSessionPickerList,
+  } = useSessionPicker();
   const modelRef = useRef(model);
 
   const [providersWithKey, setProvidersWithKey] = useState<ReadonlySet<ProviderId>>(() => new Set());
@@ -3574,6 +3585,26 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         openSandboxPicker();
         return true;
       }
+      if (c === "/sessions" || c === "/session") {
+        try {
+          const { SessionStore } = require("../storage/sessions.js") as typeof import("../storage/sessions.js");
+          const list = new SessionStore(agent.getCwd()).listRecentSessions(20);
+          setSessionPickerList(list);
+          setSessionPickerIndex(0);
+          setShowSessionPicker(true);
+        } catch (err) {
+          console.error(`[session-picker] list failed: ${(err as Error)?.message ?? err}`);
+          setMessages((p) => [
+            ...p,
+            {
+              type: "assistant",
+              content: `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`,
+              timestamp: new Date(),
+            },
+          ]);
+        }
+        return true;
+      }
       if (c === "/wallet") {
         openWalletPicker();
         return true;
@@ -4268,6 +4299,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       model,
       messages.length,
       messages,
+      setSessionPickerList,
+      setSessionPickerIndex,
+      setShowSessionPicker,
     ],
   );
 
@@ -4442,33 +4476,26 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           ]);
           break;
         case "sessions": {
-          // List recent sessions in this workspace so the user can pick one
-          // to resume on next launch (`muonroi-cli --session <id>`).
-          let body = "No prior sessions found in this workspace.";
+          // Open the picker (delegates to the same path as typing `/sessions`)
+          // so the user can pick a session and resume it directly instead of
+          // having to remember the id + relaunch by hand.
           try {
             const { SessionStore } = require("../storage/sessions.js") as typeof import("../storage/sessions.js");
-            const store = new SessionStore(agent.getCwd());
-            const sessions = store.listRecentSessions(15);
-            if (sessions.length > 0) {
-              const lines = sessions.map((s, idx) => {
-                const ts = new Date(s.updatedAt).toLocaleString();
-                const title = s.title?.trim() || "(untitled)";
-                const truncTitle = title.length > 80 ? `${title.slice(0, 77)}...` : title;
-                return `${String(idx + 1).padStart(2)}. [${s.id}] ${ts}  ${s.model}\n    ${truncTitle}`;
-              });
-              body = [
-                "Recent sessions in this workspace:",
-                "",
-                ...lines,
-                "",
-                "Resume on next launch:  muonroi-cli --session <id>",
-                "Or:                     muonroi-cli --session latest",
-              ].join("\n");
-            }
+            const list = new SessionStore(agent.getCwd()).listRecentSessions(20);
+            setSessionPickerList(list);
+            setSessionPickerIndex(0);
+            setShowSessionPicker(true);
           } catch (err) {
-            body = `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`;
+            console.error(`[session-picker] list failed: ${(err as Error)?.message ?? err}`);
+            setMessages((p) => [
+              ...p,
+              {
+                type: "assistant",
+                content: `Failed to list sessions: ${err instanceof Error ? err.message : String(err)}`,
+                timestamp: new Date(),
+              },
+            ]);
           }
-          setMessages((p) => [...p, { type: "assistant", content: body, timestamp: new Date() }]);
           break;
         }
         default: {
@@ -4599,6 +4626,9 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setModelPickerIndex,
       setModelSearchQuery,
       setShowModelPicker,
+      setSessionPickerList,
+      setSessionPickerIndex,
+      setShowSessionPicker,
     ],
   );
 
@@ -4608,6 +4638,7 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
     showTelegramPairModal ||
     showMcpModal ||
     showSandboxPicker ||
+    showSessionPicker ||
     showWalletPicker ||
     !!pendingPaymentApproval ||
     showScheduleModal ||
@@ -5734,6 +5765,42 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         }
         return;
       }
+      if (showSessionPicker) {
+        if (isEscapeKey(key)) {
+          setShowSessionPicker(false);
+          return;
+        }
+        if (key.name === "up") {
+          setSessionPickerIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === "down") {
+          setSessionPickerIndex((i) => Math.min(Math.max(0, sessionPickerList.length - 1), i + 1));
+          return;
+        }
+        if (key.name === "return") {
+          const picked = sessionPickerList[sessionPickerIndex];
+          if (!picked) {
+            setShowSessionPicker(false);
+            return;
+          }
+          // Close the modal first so the toast renders before the spawn.
+          setShowSessionPicker(false);
+          pushToast("info", `Resuming session ${picked.id.slice(-8)}… restarting CLI`);
+          // Defer to the next tick so OpenTUI flushes the toast frame; then
+          // spawn the child (which inherits the TTY) and exit this process.
+          setTimeout(() => {
+            try {
+              relaunchWithSession(picked.id);
+            } catch (err) {
+              console.error(`[session-picker] relaunch failed: ${(err as Error)?.message ?? err}`);
+              pushToast("error", `Resume failed: ${(err as Error)?.message ?? err}`);
+            }
+          }, 50);
+          return;
+        }
+        return;
+      }
       if (showModelPicker) {
         // Sub-modal: BW sync (password + provider picker phases).
         if (bwSync) {
@@ -6346,6 +6413,11 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
       setShowModelPicker,
       setModelPickerIndex,
       setModel,
+      showSessionPicker,
+      sessionPickerList,
+      sessionPickerIndex,
+      setShowSessionPicker,
+      setSessionPickerIndex,
     ],
   );
   useKeyboard(handleKey);
@@ -7031,6 +7103,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
             providersWithKey={providersWithKey}
             apiKeyPrompt={apiKeyPrompt}
             bwSync={bwSync}
+          />
+        )}
+        {showSessionPicker && (
+          <SessionPickerModal
+            t={t}
+            sessions={sessionPickerList}
+            focusIndex={sessionPickerIndex}
+            width={width}
+            height={height}
           />
         )}
         {showWalletPicker && (
