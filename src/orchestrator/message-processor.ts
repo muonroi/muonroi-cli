@@ -188,6 +188,7 @@ import {
   shouldInjectSoftWarn,
   shouldPreWarnCompaction,
 } from "./scope-reminder.js";
+import { formatElisionManifest, recordCompaction, recordElision } from "./session-experience.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
@@ -1807,6 +1808,10 @@ export class MessageProcessor {
                 // rehydrate it even if EE is down (the EE extract below caps at 8k
                 // and needs the network; the cache keeps up to 200k, no network).
                 recordArtifact(toolCallId, toolName, fullContent);
+                // Lived-experience telemetry: count this elision so a later
+                // "cảm nhận trong CLI" question answers from data, and so the
+                // post-compaction note can list what it just stubbed.
+                recordElision(toolCallId, toolName, fullContent.length, sn);
                 try {
                   getDefaultEEClient()
                     .extract(
@@ -1838,6 +1843,7 @@ export class MessageProcessor {
                 keepToolIds: keepToolIds.length ? keepToolIds : undefined,
                 persistArtifact,
               });
+              if (compacted !== stripped) recordCompaction(sn);
               // Pre-compaction visibility: give the agent one step of notice
               // before B4 actually rewrites history into stubs. This is the
               // advance warning that was missing — agent can now decide to
@@ -1924,7 +1930,15 @@ export class MessageProcessor {
               // even when the top-level summary is not in its immediate focus (sub-agents, long loops).
               const _compactNote =
                 compacted !== stripped
-                  ? `[context compacted at step ${sn} — older or low-value tool results rewritten to stubs to fit budget. High-value evidence (file reads, bash, your previous responses) is kept verbatim. ${buildCheckpointReminder(sn, true)}]`
+                  ? (() => {
+                      // Rec #2: turn the generic "high-value elided? use ee_query"
+                      // prose into a concrete, actionable manifest of what was just
+                      // stubbed (id/tool/size) — sourced from the elisions recorded
+                      // by persistArtifact above — so the rehydrate round-trip is
+                      // informed, not blind.
+                      const _m = formatElisionManifest();
+                      return `[context compacted at step ${sn} — older or low-value tool results rewritten to stubs to fit budget. High-value evidence (file reads, bash, your previous responses) is kept verbatim. ${buildCheckpointReminder(sn, true)}${_m ? ` ${_m}` : ""}]`;
+                    })()
                   : null;
               if (_compactNote) {
                 return { messages: attachReminderToMessages(compacted, _compactNote) };
