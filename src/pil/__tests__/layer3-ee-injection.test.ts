@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { layer3EeInjection } from "../layer3-ee-injection";
+import { layer3EeInjection, RECALL_FEEDBACK_NUDGE } from "../layer3-ee-injection";
 import type { PipelineContext } from "../types";
 
 vi.mock("../../ee/bridge.js", () => ({
@@ -108,8 +108,10 @@ describe("layer3EeInjection (bridge-based)", () => {
         const chars = parseInt(charsMatch[1], 10);
         // Two parallel collections, each at 15% of budget: 15% of 100 tokens * 4 chars/token
         // = 60 chars per block + 3 for "..." suffix, joined with newline. Allow generous
-        // ceiling for header text + 2 blocks.
-        expect(chars).toBeLessThanOrEqual(260);
+        // ceiling for header text + 2 blocks, PLUS the fixed ee_feedback nudge appended
+        // when rateable experience is present. The 2000-char input means a truncation
+        // regression would blow well past this bound regardless.
+        expect(chars).toBeLessThanOrEqual(260 + RECALL_FEEDBACK_NUDGE.length + 1);
       }
     }
   });
