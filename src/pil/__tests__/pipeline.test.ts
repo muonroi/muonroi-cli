@@ -78,6 +78,25 @@ describe("runPipeline()", () => {
     }
   });
 
+  it("felt-experience prompt injects the session snapshot even when taskType is null", async () => {
+    // Regression: the felt-experience injection was first placed INSIDE the
+    // `taskType !== null` branch, so a "cảm nhận trong CLI" question that
+    // classifies to null (not a coding task) silently skipped it. It must run
+    // regardless of taskType.
+    mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.2, reason: "low-confidence" });
+    const ctx = await runPipeline("bạn có bị mù context không trong session này, cảm nhận thế nào");
+    expect(ctx.taskType).toBeNull();
+    expect(ctx.layers.find((l) => l.name === "session-experience")?.applied).toBe(true);
+    expect(ctx.enriched).toContain("[session experience —");
+    expect(ctx.enriched).toMatch(/not by reading the CLI source/i);
+  });
+
+  it("plain evaluate-the-CLI prompt does NOT inject the session snapshot", async () => {
+    const ctx = await runPipeline("đánh giá agent bên trong cli và đề xuất cải thiện");
+    expect(ctx.layers.find((l) => l.name === "session-experience")).toBeUndefined();
+    expect(ctx.enriched).not.toContain("[session experience —");
+  });
+
   it("metrics.totalMs is a non-negative number", async () => {
     const ctx = await runPipeline("refactor this");
     expect(ctx.metrics).not.toBeNull();
