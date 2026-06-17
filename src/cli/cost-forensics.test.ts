@@ -68,6 +68,7 @@ function summary(events: CostForensicsRow[]): CostForensicsSummary {
     cacheHitRatio: totalInput > 0 ? totalCacheRead / totalInput : 0,
     peakSingleCallInput: Math.max(0, ...events.map((e) => e.inputTokens)),
     events,
+    experience: null,
   };
 }
 

@@ -32,6 +32,7 @@ const fakeSummary = (id: string): CostForensicsSummary =>
     cacheHitRatio: 0,
     peakSingleCallInput: 100,
     events: [],
+    experience: null,
   }) as CostForensicsSummary;
 
 describe("forensics-tools", () => {
