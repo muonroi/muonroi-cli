@@ -93,15 +93,20 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   // into the human-facing reply as a "2-3 line plan" + process narration
   // (session 829a83888dd2). Route them to the human-facing question directive.
   //
-  // Phase 2b: when the model classified the deliverable, CONSUME it — an
-  // "answer" deliverable IS informational. Only when the model didn't emit one
-  // (deliverableKind null → legacy cascade, or the model omitted the word) do
-  // we fall back to the legacy regex predicates:
+  // Phase 2b: when the model classified the deliverable, CONSUME it. Both an
+  // "answer" AND a "report" deliverable are HUMAN-FACING with no code change, so
+  // both are informational — only "code" routes through the implement/verify (and
+  // heavy discuss/council) scaffold. Treating "report" as non-informational sent
+  // read/summarize/architecture tasks (deliverableKind "report") down the heavy
+  // council + AskUserQuestion path, over-asking on a task that just wanted a
+  // written summary (session 666630479c1a: "Đọc và tóm tắt kiến trúc…" raised 2
+  // askcards + a council loop). Only when the model emitted no deliverable
+  // (deliverableKind null → legacy cascade) do we fall back to regex predicates:
   //   1. isMetaAnalysisPrompt — self/CLI evaluation, prior-turn reflection.
   //   2. taskType "general" classified as a real task by L1.
   //   3. question-shaped prompt that is NOT an implementation request.
   const informational = ctx.deliverableKind
-    ? ctx.deliverableKind === "answer"
+    ? ctx.deliverableKind !== "code"
     : isMetaAnalysisPrompt(ctx.raw) ||
       (ctx.taskType === "general" && ctx.intentKind === "task") ||
       (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
