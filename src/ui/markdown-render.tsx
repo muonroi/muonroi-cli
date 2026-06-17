@@ -111,6 +111,17 @@ export function parseInline(line: string, t: Theme, base: Partial<InlineSegment>
       if (close < 0) continue; // unterminated → treat as literal
       const inner = line.slice(i + m.open.length, close);
       if (inner.length === 0) continue;
+      // CommonMark: underscore does NOT open/close emphasis intra-word, so
+      // identifiers like `mcp_filesystem__list_directory` or `snake_case` keep
+      // their underscores instead of being eaten as italic/bold (session
+      // 584ba476c07a rendered "mcpfilesystemlistdirectory"). Asterisk markers
+      // keep intraword behaviour. Reject when a word char hugs the marker on the
+      // word-internal side.
+      if (m.open[0] === "_") {
+        const before = i > 0 ? line[i - 1]! : "";
+        const after = line[close + m.close.length] ?? "";
+        if (/[A-Za-z0-9]/.test(before) || /[A-Za-z0-9]/.test(after)) continue;
+      }
       flushPlain(i);
       const isBold = "bold" in m && m.bold;
       const isItalic = "italic" in m && m.italic;

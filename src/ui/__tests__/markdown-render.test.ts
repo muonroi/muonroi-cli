@@ -48,6 +48,27 @@ describe("parseInline — marker concealment", () => {
     expect(text(parseInline("trailing `code", t))).toBe("trailing `code");
   });
 
+  it("does NOT treat intra-word underscores as emphasis (identifiers stay intact)", () => {
+    // Session 584ba476c07a rendered `mcp_filesystem__list_directory` as
+    // "mcpfilesystemlistdirectory" — underscores eaten as italic/bold.
+    expect(text(parseInline("mcp_filesystem__list_directory", t))).toBe("mcp_filesystem__list_directory");
+    expect(text(parseInline("a snake_case name", t))).toBe("a snake_case name");
+    expect(text(parseInline("call mcp_muonroi-docs__setup_guide first", t))).toBe(
+      "call mcp_muonroi-docs__setup_guide first",
+    );
+    // None of these should be emphasized.
+    expect(parseInline("mcp_filesystem__list_directory", t).some((s) => s.italic || s.bold)).toBe(false);
+  });
+
+  it("still emphasizes underscores at word boundaries", () => {
+    expect(text(parseInline("an _italic_ word", t))).toBe("an italic word");
+    expect(parseInline("an _italic_ word", t).find((s) => s.text === "italic")?.italic).toBe(true);
+    expect(text(parseInline("a __bold__ word", t))).toBe("a bold word");
+    expect(parseInline("a __bold__ word", t).find((s) => s.text === "bold")?.bold).toBe(true);
+    // Underscore emphasis adjacent to punctuation still works.
+    expect(parseInline("(_em_)", t).find((s) => s.text === "em")?.italic).toBe(true);
+  });
+
   it("never leaves ** ` ### markers in styled segments", () => {
     const sample = "**A** and `b` and ***c*** and [d](http://e) and ~~f~~";
     const out = text(parseInline(sample, t));
