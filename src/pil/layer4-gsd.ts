@@ -111,7 +111,11 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
       (ctx.taskType === "general" && ctx.intentKind === "task") ||
       (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
   const ecosystem = mentionsEcosystemScope(ctx.raw);
-  const directive = buildDirective({ complexity, phase, grayAreas, informational, ecosystem });
+  // Heuristic: VN diacritics → user wrote Vietnamese → re-anchor language rule
+  // inside the directive (storyflow_ui session 22661c8de9f2 — base rule
+  // crowded out by brevity/FIX-FIRST directives).
+  const replyLanguage = /[à-ỹÀ-Ỹ]/.test(ctx.raw) ? "Vietnamese" : undefined;
+  const directive = buildDirective({ complexity, phase, grayAreas, informational, ecosystem, replyLanguage });
 
   const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);
   const trimmed = truncateToBudget(directive.text, budgetChars);
