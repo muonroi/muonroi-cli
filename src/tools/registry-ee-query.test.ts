@@ -12,6 +12,7 @@
 import os from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { __resetArtifactCacheForTests, recordArtifact } from "../ee/artifact-cache.js";
+import { __resetSessionExperienceForTests, getSessionExperience } from "../orchestrator/session-experience.js";
 import { BashTool } from "./bash.js";
 import { createBuiltinTools, isToolArtifactQuery } from "./registry.js";
 
@@ -58,7 +59,10 @@ describe("isToolArtifactQuery — ee_query intent routing", () => {
 });
 
 describe("ee_query — anti-mù rehydrate (local-first, durable when EE is down)", () => {
-  afterEach(() => __resetArtifactCacheForTests());
+  afterEach(() => {
+    __resetArtifactCacheForTests();
+    __resetSessionExperienceForTests();
+  });
 
   it("rehydrates a tool-artifact from the in-session cache with NO EE/network call", async () => {
     // Simulates: the compactor elided this output earlier (recordArtifact), EE is
@@ -74,5 +78,7 @@ describe("ee_query — anti-mù rehydrate (local-first, durable when EE is down)
     expect(out).toContain("tool=read_file");
     expect(out).toContain("FULL ELIDED CONTENT");
     expect(out).not.toMatch(/ee_unavailable/);
+    // Lived-experience telemetry recorded the cache-sourced rehydrate.
+    expect(getSessionExperience().rehydrations.cache).toBe(1);
   });
 });

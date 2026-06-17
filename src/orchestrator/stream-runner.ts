@@ -96,6 +96,7 @@ import {
   shouldInjectReminder,
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
+import { recordCompaction, recordElision } from "./session-experience.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
@@ -607,6 +608,7 @@ export class StreamRunner {
         const persistSubArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
           // Local-first durable cache so ee_query rehydrates even when EE is down.
           recordArtifact(toolCallId, toolName, fullContent);
+          recordElision(toolCallId, toolName, fullContent.length, stepNumber);
           try {
             getDefaultEEClient()
               .extract(
@@ -629,6 +631,7 @@ export class StreamRunner {
           keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
           persistArtifact: persistSubArtifact,
         });
+        if (compacted !== stripped) recordCompaction(stepNumber);
         // Phase 4A — scope reminder injection for the sub-agent loop.
         // Mirror of the top-level wiring in message-processor.ts:
         // K = cadenceForSize(size) where size defaults to "medium" because

@@ -569,10 +569,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             // lookup this is the authoritative full content for THIS session and
             // works even when EE is down — the failure window long sessions hit.
             const { findArtifactByQuery, findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            // Lived-experience telemetry: record where the rehydrate came from so
+            // a "cảm nhận trong CLI" question (and the measure-first instrumentation)
+            // sees cache vs disk vs ee vs needed-but-unavailable.
+            const { recordRehydration } = await import("../orchestrator/session-experience.js");
             const mem = findArtifactByQuery(query);
             const local = mem ?? (await findArtifactOnDisk(query));
             if (local) {
               const src = mem ? "in-session cache" : "local disk cache";
+              recordRehydration(mem ? "cache" : "disk");
               return truncateOutput(
                 `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
               );
@@ -584,8 +589,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
             });
             if (resp === null) {
+              recordRehydration("unavailable");
               return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured) and the artifact is not in this session's local cache. Proceed without EE recall — re-read the source directly if you need the elided content.";
             }
+            recordRehydration("ee");
             return truncateOutput(JSON.stringify(resp));
           }
           // General recall → /api/recall (recallMode, [id col] index + surface).
