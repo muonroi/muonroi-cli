@@ -184,14 +184,6 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       // layer3's fixed-query checkpoint arm surfaced no checkpoint block.
       await timed("ee-meta-artifacts", surfaceCompactionArtifacts);
     }
-    // Felt-experience routing: a first-person "cảm nhận trong CLI / are you
-    // blind?" question gets the live session-experience snapshot so the agent
-    // answers from what actually happened to it this session — not by reading
-    // the compaction/PIL source. Synchronous, local, narrow (subset of meta) —
-    // gated like surfaceCompactionArtifacts so normal turns add no layer.
-    if (isSelfExperiencePrompt(ctx.raw)) {
-      await timed("session-experience", async (c) => injectSessionExperience(c));
-    }
   } else {
     for (const { timingName } of SKIPPED_LAYERS) {
       timings.push({ name: timingName, ms: 0 });
@@ -207,6 +199,17 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
         })),
       ],
     };
+  }
+
+  // Felt-experience routing: a first-person "cảm nhận trong CLI / are you
+  // blind?" question gets the live session-experience snapshot so the agent
+  // answers from what actually happened to it this session — not by reading the
+  // compaction/PIL source. Runs REGARDLESS of taskType: such questions often
+  // classify to null (not a coding task), and gating it behind the taskType
+  // branch silently skipped it on exactly those prompts. Narrow (gated on
+  // isSelfExperiencePrompt) so non-experience turns add no layer.
+  if (isSelfExperiencePrompt(ctx.raw)) {
+    await timed("session-experience", async (c) => injectSessionExperience(c));
   }
 
   await timed("layer6-output", layer6Output);
