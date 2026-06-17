@@ -3,7 +3,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "1.6.1",
+  "version": "1.6.2",
   "description": "BYOK AI coding agent with multi-model council debate, role-based routing, and auto-compact.",
   "repository": {
     "type": "git",
