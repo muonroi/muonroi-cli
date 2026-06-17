@@ -98,6 +98,17 @@ export interface McpToolBundle {
 
 export interface McpBuildOptions {
   onOAuthRequired?: (serverId: string, url: URL) => void;
+  /**
+   * Server ids the CURRENT turn critically needs (e.g. muonroi-docs on an
+   * ecosystem question). acquireMcpTools waits for these specifically beyond the
+   * normal build deadline — up to `criticalDeadlineMs` — so a cold first-connect
+   * is included THIS turn instead of "ready next turn" (session 584ba476c07a:
+   * first ecosystem question missed muonroi-docs while it was still warming).
+   * Other servers are unaffected — only the named ones get the extended wait.
+   */
+  criticalServerIds?: string[];
+  /** Extended ceiling (ms) for criticalServerIds. Default 8000. */
+  criticalDeadlineMs?: number;
 }
 
 /**

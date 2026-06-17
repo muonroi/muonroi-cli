@@ -61,6 +61,7 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { mentionsEcosystemScope } from "../gsd/directives.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -1317,6 +1318,16 @@ export class MessageProcessor {
             const filteredServers = filterMcpServersByMessage(loadMcpServers(), userMessage, {
               disabled: process.env.MUONROI_DISABLE_SMART_MCP === "1",
             });
+            // Ecosystem question → muonroi-docs is the authoritative source the
+            // agent is nudged to consult FIRST. Wait for it specifically beyond the
+            // normal deadline so a cold first-connect lands THIS turn instead of
+            // "ready next turn" (session 584ba476c07a: first ecosystem question
+            // missed docs while warming → agent guessed from local files).
+            const criticalServerIds = mentionsEcosystemScope(userMessage)
+              ? filteredServers
+                  .filter((s) => /(^|[-_])docs([-_]|$)/.test(s.id) && /muonroi/i.test(s.id))
+                  .map((s) => s.id)
+              : undefined;
             // MCP non-blocking: acquireMcpTools self-bounds — it connects servers
             // in parallel and returns PARTIAL results at its internal deadline
             // (fast/cached servers included; slow first-connects reported in
@@ -1333,6 +1344,7 @@ export class MessageProcessor {
                   // command-injection vector the old exec() opener had.
                   openUrl(url);
                 },
+                ...(criticalServerIds && criticalServerIds.length > 0 ? { criticalServerIds } : {}),
               });
             } catch (err) {
               console.error("[MCP] buildMcpToolSet failed, proceeding with builtins only", err);

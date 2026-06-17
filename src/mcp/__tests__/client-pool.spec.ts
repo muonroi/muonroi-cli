@@ -139,6 +139,33 @@ describe("acquireMcpTools — cross-turn client pool", () => {
     expect(connectOneServer).toHaveBeenCalledTimes(2); // 14 failures → exactly ONE shared reconnect
   });
 
+  it("waits for a criticalServerId past the normal deadline so it lands THIS turn (session 584ba476c07a)", async () => {
+    // Normal deadline is 500ms (mock). docs connects at ~700ms — past the normal
+    // deadline but within the critical window → must be included when critical.
+    connectOneServer.mockImplementation(
+      (s: { id: string }) =>
+        new Promise((res) => {
+          if (s.id === "docs") setTimeout(() => res(connected(s.id)), 700);
+          else res(connected(s.id));
+        }),
+    );
+    const b = await acquireMcpTools([srv("docs")], { criticalServerIds: ["docs"], criticalDeadlineMs: 3000 });
+    expect(Object.keys(b.tools)).toContain("mcp_docs__ping");
+    expect(b.errors).toHaveLength(0);
+  });
+
+  it("without criticalServerIds, a slow server is reported still-connecting (available next turn)", async () => {
+    connectOneServer.mockImplementation(
+      (s: { id: string }) =>
+        new Promise((res) => {
+          setTimeout(() => res(connected(s.id)), 700);
+        }),
+    );
+    const b = await acquireMcpTools([srv("docs")]);
+    expect(Object.keys(b.tools)).not.toContain("mcp_docs__ping");
+    expect(b.errors.some((e) => /still connecting/.test(e))).toBe(true);
+  });
+
   it("keys by cwd/config — a different command reconnects rather than reusing", async () => {
     connectOneServer.mockImplementation(async (s: { id: string }) => connected(s.id));
     await acquireMcpTools([
