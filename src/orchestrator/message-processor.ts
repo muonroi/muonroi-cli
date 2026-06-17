@@ -89,6 +89,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
+import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
@@ -1836,7 +1837,12 @@ export class MessageProcessor {
               };
               const compacted = compactSubAgentMessages(stripped, {
                 thresholdChars: topLevelCompactThreshold,
-                keepLastTurns: topLevelCompactKeepLast,
+                // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
+                // trailing tool turns verbatim — those carry the reasoning the
+                // agent is being asked to reflect on, and over-eliding them is
+                // exactly what starves a self-evaluation. One boolean, no new
+                // detection logic (isMetaAnalysisPrompt already gates layer3/5).
+                keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
                 label: "top-level",
                 envelopeChars,
                 contextWindowTokens,
