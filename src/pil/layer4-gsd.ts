@@ -19,7 +19,7 @@
 
 import { routeTask } from "../ee/bridge.js";
 import { scoreComplexity } from "../gsd/complexity.js";
-import { buildDirective } from "../gsd/directives.js";
+import { buildDirective, mentionsEcosystemScope } from "../gsd/directives.js";
 import { detectGrayAreas } from "../gsd/gray-areas.js";
 import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
@@ -105,7 +105,8 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
     : isMetaAnalysisPrompt(ctx.raw) ||
       (ctx.taskType === "general" && ctx.intentKind === "task") ||
       (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
-  const directive = buildDirective({ complexity, phase, grayAreas, informational });
+  const ecosystem = mentionsEcosystemScope(ctx.raw);
+  const directive = buildDirective({ complexity, phase, grayAreas, informational, ecosystem });
 
   const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);
   const trimmed = truncateToBudget(directive.text, budgetChars);

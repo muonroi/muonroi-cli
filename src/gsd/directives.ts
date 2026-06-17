@@ -33,6 +33,21 @@ export interface DirectiveInput {
    * buildDirective emits a human-facing question directive instead.
    */
   informational?: boolean;
+  /**
+   * True when the turn is about the Muonroi ECOSYSTEM (the whole platform, BB/
+   * .NET packages, building-block, open-core boundary, setup/install) rather than
+   * muonroi-cli's own TS internals. When set, buildDirective appends a nudge to
+   * consult the authoritative muonroi-docs MCP first. Computed by the caller via
+   * mentionsEcosystemScope so a CLI-internals question (which merely contains the
+   * word "muonroi") does NOT misfire toward .NET docs.
+   *
+   * Live miss (session 41ccfeb2ceee turn 1): "bạn hiểu thế nào về ecosystem
+   * muonroi…" — muonroi-docs WAS in the toolset (smart-filter kept it) but the
+   * question directive steered the agent to read/grep local files, so it answered
+   * "no comprehensive ecosystem description in the files read" instead of querying
+   * the shipped authoritative source.
+   */
+  ecosystem?: boolean;
 }
 
 export interface DirectiveOutput {
@@ -43,6 +58,31 @@ export interface DirectiveOutput {
 }
 
 const HEADER = "[gsd-native]";
+
+/**
+ * High-precision predicate: is this turn about the Muonroi ECOSYSTEM (where the
+ * muonroi-docs MCP is the right source), as opposed to muonroi-cli internals?
+ * Deliberately TIGHTER than smart-filter's hasEcosystemSignal — that one keeps
+ * the server (over-keeping costs only tokens), but a behavioural "call docs
+ * FIRST" nudge must not fire on every "muonroi" mention or it misdirects
+ * CLI-internals questions toward .NET package docs. EN + VI.
+ */
+const ECOSYSTEM_SCOPE_RE =
+  /\becosystem\b|hệ\s*sinh\s*thái|he\s*sinh\s*thai|building[-\s]?block|open[-\s]?core|rule\s*engine|decision\s*table|\bnuget\b/i;
+
+export function mentionsEcosystemScope(message: string): boolean {
+  return ECOSYSTEM_SCOPE_RE.test(message);
+}
+
+/**
+ * Appended to any directive when the turn is ecosystem-scoped. Phrased
+ * conditionally ("if … available") so it is harmless when muonroi-docs is not
+ * configured — the model simply finds no such tool and falls back to local files.
+ */
+export const ECOSYSTEM_DOCS_NUDGE = [
+  `${HEADER} ECOSYSTEM SCOPE — this turn concerns the Muonroi ecosystem (platform overview, BB/.NET packages, building-block, open-core boundary, setup).`,
+  "If the muonroi-docs MCP is available, it is the AUTHORITATIVE source — call it FIRST (docs_search / setup_guide / bb_recipe_list / bb_package_describe), THEN ground with local files. Do NOT characterize the ecosystem from local repo files alone.",
+].join("\n");
 
 function renderGrayAreas(qs: GrayAreaQuestion[]): string {
   if (qs.length === 0) return "  (no gray areas detected — confirm the request is fully specified before proceeding)";
@@ -127,15 +167,19 @@ function buildQuick(input: DirectiveInput): string {
 export function buildDirective(input: DirectiveInput): DirectiveOutput {
   // Informational/meta prompts answer a human — never apply the
   // implement/verify scaffold (it agent-ifies the reply), regardless of tier.
-  if (input.informational) {
-    return { text: buildQuestion(), tier: input.complexity.tier, blocking: false };
+  const base: DirectiveOutput = input.informational
+    ? { text: buildQuestion(), tier: input.complexity.tier, blocking: false }
+    : input.complexity.tier === "heavy"
+      ? { text: buildHeavy(input), tier: "heavy", blocking: true }
+      : input.complexity.tier === "standard"
+        ? { text: buildStandard(input), tier: "standard", blocking: false }
+        : { text: buildQuick(input), tier: "quick", blocking: false };
+
+  // Ecosystem-scoped turns get a docs-first nudge regardless of tier (question
+  // OR task): muonroi-docs is the authoritative source and must not be skipped
+  // in favour of guessing from local files (session 41ccfeb2ceee turn 1).
+  if (input.ecosystem) {
+    return { ...base, text: `${base.text}\n${ECOSYSTEM_DOCS_NUDGE}` };
   }
-  switch (input.complexity.tier) {
-    case "heavy":
-      return { text: buildHeavy(input), tier: "heavy", blocking: true };
-    case "standard":
-      return { text: buildStandard(input), tier: "standard", blocking: false };
-    default:
-      return { text: buildQuick(input), tier: "quick", blocking: false };
-  }
+  return base;
 }

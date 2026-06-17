@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { scoreComplexity } from "../complexity";
-import { buildDirective } from "../directives";
+import { buildDirective, mentionsEcosystemScope } from "../directives";
 import { detectGrayAreas } from "../gray-areas";
 
 describe("buildDirective", () => {
@@ -74,6 +74,32 @@ describe("buildDirective", () => {
     expect(out.tier).toBe("quick");
     expect(out.blocking).toBe(false);
     expect(out.text.length).toBeLessThan(300);
+  });
+
+  it("appends the muonroi-docs nudge for an ecosystem question (session 41ccfeb2ceee turn 1)", () => {
+    const complexity = scoreComplexity("bạn hiểu thế nào về ecosystem muonroi nói chung");
+    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true, ecosystem: true });
+    expect(out.text).toMatch(/QUESTION \/ explanatory/); // still the human-facing question directive
+    expect(out.text).toMatch(/ECOSYSTEM SCOPE/);
+    expect(out.text).toMatch(/muonroi-docs MCP is the AUTHORITATIVE source|AUTHORITATIVE source/);
+    expect(out.text).toMatch(/call it FIRST/i);
+  });
+
+  it("does NOT append the ecosystem nudge for a plain question", () => {
+    const complexity = scoreComplexity("how does this CLI affect you?");
+    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    expect(out.text).not.toMatch(/ECOSYSTEM SCOPE/);
+  });
+
+  it("mentionsEcosystemScope is tight: ecosystem/BB wording yes, bare CLI-internals no", () => {
+    // Fires on genuine ecosystem scope (the case muonroi-docs exists to serve)…
+    expect(mentionsEcosystemScope("ecosystem muonroi nói chung và muonroi-cli nói riêng")).toBe(true);
+    expect(mentionsEcosystemScope("hệ sinh thái muonroi gồm những gì")).toBe(true);
+    expect(mentionsEcosystemScope("how does the building-block rule engine work")).toBe(true);
+    // …but NOT on a muonroi-cli internals question that merely names the product,
+    // which would wrongly steer toward .NET package docs.
+    expect(mentionsEcosystemScope("how does muonroi-cli compaction work")).toBe(false);
+    expect(mentionsEcosystemScope("fix the off-by-one in the router")).toBe(false);
   });
 
   it("renders the recommended option first in gray-area block", () => {
