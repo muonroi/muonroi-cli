@@ -342,6 +342,12 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
    * — preserves backward compat for batch / headless paths that have no UI to
    * surface the askcard.
    */
+  /**
+   * Live-queue steering drain (UI-provided). Returns and CLEARS any messages
+   * the user typed while this turn is streaming, so prepareStep can inject them
+   * mid-turn. Undefined / returns [] → no steering (legacy deferred queue).
+   */
+  drainSteerMessages?: () => { text: string }[];
   askToolLoopContinue?: ToolLoopCapAsk;
   runCouncilV2(
     userMessage: string,
