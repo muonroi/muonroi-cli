@@ -123,6 +123,19 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(result.enriched).toContain("QUESTION / explanatory");
   });
 
+  it("deliverableKind='report' is informational (no council/discuss scaffold) — session 666630479c1a", async () => {
+    // "Đọc và tóm tắt kiến trúc…" classifies as deliverableKind 'report'. A
+    // report is human-facing with NO code change, so it must route to the
+    // QUESTION directive, not the heavy implement/discuss/council scaffold that
+    // over-asked with askcards on a read/summarize task.
+    const raw = "đọc và tóm tắt kiến trúc src/orchestrator, src/pil, src/mcp kèm file:line";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "report" }),
+    );
+    expect(result.enriched).toContain("QUESTION / explanatory");
+    expect(result.enriched).not.toContain("MANDATORY");
+  });
+
   it("Phase 2b: deliverableKind='code' is NOT informational even for a question-shaped prompt", async () => {
     // The raw text reads as a question — the legacy regex would mark it
     // informational. The model's deliverableKind='code' must override that so
