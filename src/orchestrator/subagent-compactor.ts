@@ -130,6 +130,17 @@ export const IMPORTANT_TOOL_NAMES = [
 ] as const;
 
 /**
+ * MCP tool prefixes whose results are an AUTHORITATIVE source the agent is
+ * explicitly steered to fetch FIRST and ground on (the ECOSYSTEM_DOCS_NUDGE in
+ * src/gsd/directives.ts). Eliding them defeats the nudge — the agent calls the
+ * ecosystem docs, then compaction discards them and it goes blind on the very
+ * source it was told to trust (session 584ba476c07a: mcp_muonroi-docs__setup_guide
+ * + bb_recipe_list elided, ee_unavailable, 0 rehydrated → "partially blind").
+ * Keep their results verbatim so the agent stays grounded across the session.
+ */
+export const HIGH_VALUE_MCP_PREFIXES = ["mcp_muonroi-docs__"] as const;
+
+/**
  * Heuristic: keep full (no stub) for high-signal tool results.
  * Signals: allowlist tool + (error/todo/plan/keyfile/large output or explicit keep list).
  * Brief inline per GSD-quick + evidence-first.
@@ -146,6 +157,10 @@ export function isHighValueToolResult(
   // Always preserve terminal response tools — this is the agent's own delivered
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
+
+  // Authoritative ecosystem-docs MCP results: the agent is nudged to fetch these
+  // FIRST, so eliding them strands it (session 584ba476c07a). Keep verbatim.
+  if (HIGH_VALUE_MCP_PREFIXES.some((p) => name.startsWith(p))) return true;
 
   if ((IMPORTANT_TOOL_NAMES as readonly string[]).includes(name)) {
     const p = preview.toLowerCase();

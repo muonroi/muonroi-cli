@@ -124,6 +124,70 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     }
   });
 
+  it("keeps an OLDER authoritative muonroi-docs MCP result verbatim while eliding low-value peers (session 584ba476c07a)", () => {
+    // History: an early muonroi-docs setup_guide (older than keepLast=3) + many
+    // low-value tool turns. The ecosystem doc must survive compaction so the
+    // agent stays grounded on the source it was nudged to fetch first.
+    const docsValue = bigText("ECOSYSTEM_DOCS", 6); // ~6kb authoritative payload
+    const msgs: ModelMessage[] = [
+      { role: "system", content: "You are the agent." },
+      { role: "user", content: "ecosystem question" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "call_docs",
+            toolName: "mcp_muonroi-docs__setup_guide",
+            input: JSON.stringify({ component: "ecosystem" }),
+          },
+        ],
+      } as unknown as ModelMessage,
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call_docs",
+            toolName: "mcp_muonroi-docs__setup_guide",
+            output: { type: "text", value: docsValue },
+          },
+        ],
+      } as unknown as ModelMessage,
+    ];
+    // Pile on low-value turns to push well past threshold and make the docs turn "old".
+    for (let i = 1; i <= 10; i++) {
+      const t = toolTurn(i, 10);
+      (t[1] as any).content[0].toolName = "mcp_filesystem__list_directory"; // low-value MCP
+      (t[0] as any).content[0].toolName = "mcp_filesystem__list_directory";
+      msgs.push(...t);
+    }
+
+    const out = compactSubAgentMessages(msgs);
+    expect(out).not.toBe(msgs); // compaction fired
+
+    // The muonroi-docs result is kept verbatim (full payload, no stub).
+    const docsMsg = out.find(
+      (m) =>
+        m.role === "tool" &&
+        Array.isArray(m.content) &&
+        (m.content as any)[0]?.toolName === "mcp_muonroi-docs__setup_guide",
+    );
+    const docsOut = (docsMsg?.content as any)[0].output.value as string;
+    expect(docsOut).toBe(docsValue);
+    expect(docsOut).not.toMatch(/elided by/);
+
+    // A low-value filesystem MCP peer from an OLD turn IS stubbed.
+    const stubbed = out.some(
+      (m) =>
+        m.role === "tool" &&
+        Array.isArray(m.content) &&
+        typeof (m.content as any)[0]?.output?.value === "string" &&
+        (m.content as any)[0].output.value.includes("elided by"),
+    );
+    expect(stubbed).toBe(true);
+  });
+
   it("rewrites older tool-result parts with elision stub", () => {
     const msgs = buildHistory(10, 10);
     // Neutralize tool so the basic elision test is not affected by high-value auto-keep (idea 1).
