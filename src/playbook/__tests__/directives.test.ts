@@ -1,37 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { scoreComplexity } from "../complexity";
 import { buildDirective, mentionsEcosystemScope } from "../directives";
-import { detectGrayAreas } from "../gray-areas";
 
 describe("buildDirective", () => {
-  it("emits a blocking heavy directive with mandatory steps", () => {
-    const prompt = "redo the entire architecture and map everything across all repos";
-    const complexity = scoreComplexity(prompt);
-    expect(complexity.tier).toBe("heavy");
-
-    const grayAreas = detectGrayAreas(prompt).questions;
-    const out = buildDirective({ complexity, phase: null, grayAreas });
+  it("emits a blocking heavy directive with discuss → research → plan → check-plan → verify", () => {
+    const out = buildDirective({ tier: "heavy", phase: null });
 
     expect(out.tier).toBe("heavy");
     expect(out.blocking).toBe(true);
-    expect(out.text).toContain("MANDATORY");
+    expect(out.text).toMatch(/HEAVY task/);
+    expect(out.text).toMatch(/DISCUSS/);
+    expect(out.text).toMatch(/RESEARCH/);
+    expect(out.text).toMatch(/CHECK-PLAN/);
     expect(out.text).toMatch(/AskUserQuestion/);
-    expect(out.text).toMatch(/IN PARALLEL/);
-    expect(out.text).toMatch(/research/i);
-    expect(out.text).toMatch(/verify/i);
+    expect(out.text).toMatch(/VERIFY/);
+    // Hybrid: the agent may de-escalate if the task is smaller than it reads.
+    expect(out.text).toMatch(/STANDARD flow/);
   });
 
-  it("emits a non-blocking standard directive", () => {
-    const complexity = scoreComplexity("add a /health endpoint");
-    const out = buildDirective({ complexity, phase: "execute", grayAreas: [] });
+  it("emits a non-blocking standard directive with an explicit plan + check step", () => {
+    const out = buildDirective({ tier: "standard", phase: "execute" });
     expect(out.tier).toBe("standard");
     expect(out.blocking).toBe(false);
-    expect(out.text).toMatch(/GSD-quick/i);
+    expect(out.text).toMatch(/STANDARD task/);
+    expect(out.text).toMatch(/PLAN —/);
+    expect(out.text).toMatch(/CHECK —/);
+    expect(out.text).toMatch(/VERIFY —/);
+    // Hybrid: escalate to HEAVY if it turns out architectural.
+    expect(out.text).toMatch(/escalate to the HEAVY flow/);
   });
 
   it("emits a fix-first debug variant when phase is debug (session 7d56a049e1e3 regression)", () => {
-    const complexity = scoreComplexity("fix CI fail");
-    const out = buildDirective({ complexity, phase: "debug", grayAreas: [] });
+    const out = buildDirective({ tier: "standard", phase: "debug" });
     expect(out.tier).toBe("standard");
     expect(out.text).toMatch(/DEBUG task/);
     expect(out.text).toMatch(/FIX-FIRST/);
@@ -39,9 +38,8 @@ describe("buildDirective", () => {
     expect(out.text).toMatch(/edit_file/);
   });
 
-  it("standard non-debug phases use the generic GSD-quick directive (regression: don't apply fix-first cap to plan/execute)", () => {
-    const complexity = scoreComplexity("add a counter feature");
-    const out = buildDirective({ complexity, phase: "execute", grayAreas: [] });
+  it("standard non-debug phases use the generic plan/check directive (regression: don't apply fix-first cap to plan/execute)", () => {
+    const out = buildDirective({ tier: "standard", phase: "execute" });
     expect(out.text).not.toMatch(/FIX-FIRST/);
     expect(out.text).not.toMatch(/read_file calls before/);
   });
@@ -50,35 +48,32 @@ describe("buildDirective", () => {
     // A self/meta CLI question routed through GSD must NOT get the
     // implement/verify scaffold — that leaked a "2-3 line plan" preamble +
     // process narration into the human-facing answer.
-    const complexity = scoreComplexity("how does this CLI affect you?");
-    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    const out = buildDirective({ tier: "quick", phase: null, informational: true });
     expect(out.blocking).toBe(false);
     expect(out.text).toMatch(/QUESTION \/ explanatory/);
     expect(out.text).toMatch(/written for the HUMAN/);
     expect(out.text).not.toMatch(/2-3 line plan/);
-    expect(out.text).not.toMatch(/Implement directly/);
+    expect(out.text).not.toMatch(/CHECK-PLAN/);
   });
 
   it("informational overrides even a heavy tier (a question never implements)", () => {
-    const complexity = scoreComplexity("redo the entire architecture and map everything across all repos");
-    expect(complexity.tier).toBe("heavy");
-    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    const out = buildDirective({ tier: "heavy", phase: null, informational: true });
     expect(out.blocking).toBe(false);
     expect(out.text).toMatch(/QUESTION \/ explanatory/);
-    expect(out.text).not.toMatch(/MANDATORY/);
+    expect(out.text).not.toMatch(/DISCUSS/);
+    expect(out.text).not.toMatch(/CHECK-PLAN/);
   });
 
-  it("emits a minimal quick directive", () => {
-    const complexity = scoreComplexity("fix typo");
-    const out = buildDirective({ complexity, phase: null, grayAreas: [] });
+  it("emits a quick directive that stays short", () => {
+    const out = buildDirective({ tier: "quick", phase: null });
     expect(out.tier).toBe("quick");
     expect(out.blocking).toBe(false);
-    expect(out.text.length).toBeLessThan(300);
+    expect(out.text).toMatch(/QUICK task/);
+    expect(out.text.length).toBeLessThan(600);
   });
 
   it("appends the muonroi-docs nudge for an ecosystem question (session 41ccfeb2ceee turn 1)", () => {
-    const complexity = scoreComplexity("bạn hiểu thế nào về ecosystem muonroi nói chung");
-    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true, ecosystem: true });
+    const out = buildDirective({ tier: "quick", phase: null, informational: true, ecosystem: true });
     expect(out.text).toMatch(/QUESTION \/ explanatory/); // still the human-facing question directive
     expect(out.text).toMatch(/ECOSYSTEM SCOPE/);
     expect(out.text).toMatch(/muonroi-docs MCP is the AUTHORITATIVE source|AUTHORITATIVE source/);
@@ -86,8 +81,7 @@ describe("buildDirective", () => {
   });
 
   it("does NOT append the ecosystem nudge for a plain question", () => {
-    const complexity = scoreComplexity("how does this CLI affect you?");
-    const out = buildDirective({ complexity, phase: null, grayAreas: [], informational: true });
+    const out = buildDirective({ tier: "quick", phase: null, informational: true });
     expect(out.text).not.toMatch(/ECOSYSTEM SCOPE/);
   });
 
@@ -102,46 +96,26 @@ describe("buildDirective", () => {
     expect(mentionsEcosystemScope("fix the off-by-one in the router")).toBe(false);
   });
 
-  it("renders the recommended option first in gray-area block", () => {
-    const prompt = "redo everything from scratch";
-    const complexity = scoreComplexity(prompt);
-    const grayAreas = detectGrayAreas(prompt).questions;
-    const out = buildDirective({ complexity, phase: null, grayAreas });
-    if (grayAreas.length > 0) {
-      expect(out.text).toMatch(/\[recommended\]/);
-    }
-  });
-
   // Language nudge — re-anchors the "reply in user's language" rule INSIDE the
   // directive so layered brevity / FIX-FIRST directives can't drown it (live
   // miss: storyflow_ui session 22661c8de9f2).
   describe("language nudge", () => {
     it("appends the nudge when replyLanguage is set", () => {
-      const out = buildDirective({
-        complexity: scoreComplexity("fix CI fail"),
-        phase: "debug",
-        grayAreas: [],
-        replyLanguage: "Vietnamese",
-      });
+      const out = buildDirective({ tier: "standard", phase: "debug", replyLanguage: "Vietnamese" });
       expect(out.text).toMatch(/LANGUAGE — the user wrote in Vietnamese/);
       expect(out.text).toMatch(/Reply in Vietnamese/);
       expect(out.text).toMatch(/OVERRIDES any brevity/);
     });
 
     it("omits the nudge when replyLanguage is undefined", () => {
-      const out = buildDirective({
-        complexity: scoreComplexity("fix CI fail"),
-        phase: "debug",
-        grayAreas: [],
-      });
+      const out = buildDirective({ tier: "standard", phase: "debug" });
       expect(out.text).not.toMatch(/LANGUAGE —/);
     });
 
     it("stacks with the ecosystem nudge when both apply", () => {
       const out = buildDirective({
-        complexity: scoreComplexity("how does the muonroi ecosystem work"),
+        tier: "heavy",
         phase: null,
-        grayAreas: [],
         ecosystem: true,
         replyLanguage: "Vietnamese",
       });

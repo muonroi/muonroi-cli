@@ -704,61 +704,61 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           .join("\n");
       },
     });
+  }
 
-    // todo_write — Claude-Code-style task list. Each call REPLACES the agent's
-    // current todo snapshot; the orchestrator post-processes this tool's args
-    // into a task_list_update StreamChunk that the UI renders as a sticky
-    // checklist panel. Status flow: pending → in_progress → completed; only
-    // ONE item should be in_progress at a time. Use this when the user asks
-    // for a multi-step task (≥3 distinct steps) so progress is visible.
-    tools.todo_write = dynamicTool({
-      description:
-        "Write the full current todo list. Replaces the previous list entirely on every call (no partial updates). Use when a user request resolves into ≥3 discrete steps so the UI can show progress. Mark exactly one item as in_progress at a time. Always emit the FULL list, not just the changed items.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          todos: {
-            type: "array",
-            description:
-              "The full ordered list of todo items. Replaces any prior list. Keep order stable across updates so the UI doesn't reshuffle on every call.",
-            items: {
-              type: "object",
-              properties: {
-                id: { type: "string", description: "Stable id across updates (e.g. '1','2', or a slug)." },
-                subject: { type: "string", description: "Short imperative title shown in the list." },
-                activeForm: {
-                  type: "string",
-                  description:
-                    "Present-continuous form shown while in_progress (e.g. 'Reading files'). Falls back to subject when absent.",
-                },
-                status: {
-                  type: "string",
-                  enum: ["pending", "in_progress", "completed"],
-                  description: "Item status. Only ONE item should be in_progress at any time.",
-                },
+  // todo_write — Claude-Code-style task list. Each call REPLACES the agent's
+  // current todo snapshot; the orchestrator post-processes this tool's args
+  // into a task_list_update StreamChunk that the UI renders as a sticky
+  // checklist panel. Status flow: pending → in_progress → completed; only
+  // ONE item should be in_progress at a time. Use this when the user asks
+  // for a multi-step task (≥3 distinct steps) so progress is visible.
+  tools.todo_write = dynamicTool({
+    description:
+      "Write the full current todo list. Replaces the previous list entirely on every call (no partial updates). Use when a user request resolves into ≥3 discrete steps so the UI can show progress. Mark exactly one item as in_progress at a time. Always emit the FULL list, not just the changed items.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          description:
+            "The full ordered list of todo items. Replaces any prior list. Keep order stable across updates so the UI doesn't reshuffle on every call.",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Stable id across updates (e.g. '1','2', or a slug)." },
+              subject: { type: "string", description: "Short imperative title shown in the list." },
+              activeForm: {
+                type: "string",
+                description:
+                  "Present-continuous form shown while in_progress (e.g. 'Reading files'). Falls back to subject when absent.",
               },
-              required: ["id", "subject", "status"],
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "completed"],
+                description: "Item status. Only ONE item should be in_progress at any time.",
+              },
             },
+            required: ["id", "subject", "status"],
           },
         },
-        required: ["todos"],
-      }),
-      execute: async (input: any) => {
-        const todos: Array<{ id?: unknown; subject?: unknown; activeForm?: unknown; status?: unknown }> = Array.isArray(
-          input?.todos,
-        )
-          ? input.todos
-          : [];
-        const counts = { completed: 0, inProgress: 0, pending: 0, total: todos.length };
-        for (const t of todos) {
-          if (t.status === "completed") counts.completed++;
-          else if (t.status === "in_progress") counts.inProgress++;
-          else counts.pending++;
-        }
-        return `Tracking ${counts.total} todo${counts.total !== 1 ? "s" : ""}: ${counts.completed} done · ${counts.inProgress} in progress · ${counts.pending} queued.`;
       },
-    });
-  }
+      required: ["todos"],
+    }),
+    execute: async (input: any) => {
+      const todos: Array<{ id?: unknown; subject?: unknown; activeForm?: unknown; status?: unknown }> = Array.isArray(
+        input?.todos,
+      )
+        ? input.todos
+        : [];
+      const counts = { completed: 0, inProgress: 0, pending: 0, total: todos.length };
+      for (const t of todos) {
+        if (t.status === "completed") counts.completed++;
+        else if (t.status === "in_progress") counts.inProgress++;
+        else counts.pending++;
+      }
+      return `Tracking ${counts.total} todo${counts.total !== 1 ? "s" : ""}: ${counts.completed} done · ${counts.inProgress} in progress · ${counts.pending} queued.`;
+    },
+  });
 
   // Vision-tool gate: drop the 3 vision-proxy tools on turns with no plausible
   // image involvement. Built then deleted (closures are cheap) to avoid

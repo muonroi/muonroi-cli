@@ -720,6 +720,15 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           // routing instead of keyword regex. null → those layers fall back to
           // their legacy regex predicates for this turn.
           deliverableKind: llmRes.deliverableKind,
+          // Agent-first work depth: the model decides the GSD tier in the same
+          // classify call (no extra round-trip). layer4 prefers this over the
+          // regex scorer. null → layer4 defaults to "standard".
+          modelDepthTier: llmRes.depthTier,
+          // Agent-first scope + reply-language (same classify call). Replace the
+          // ecosystem/diacritic regexes: layer4 reads these instead of scanning
+          // the raw prompt.
+          ecosystemScope: llmRes.ecosystemScope,
+          replyLanguage: llmRes.replyLanguage,
           // null lets L6 run its cheap style-rescue if outputStyle is still null;
           // EE retrieval enrichment happens downstream in layer3 as usual.
           _brainData: null,
@@ -729,7 +738,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
             {
               name: "intent-detection",
               applied: true,
-              delta: `taskType=${llmRes.taskType},kind=${intentKind},deliverable=${llmRes.deliverableKind ?? "none"},conf=${llmRes.confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},source=llm-first`,
+              delta: `taskType=${llmRes.taskType},kind=${intentKind},deliverable=${llmRes.deliverableKind ?? "none"},depth=${llmRes.depthTier ?? "none"},conf=${llmRes.confidence.toFixed(2)},domain=${domain ?? "none"},style=${outputStyle ?? "none"},source=llm-first`,
             },
           ],
         };

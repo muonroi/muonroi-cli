@@ -1,28 +1,35 @@
 /**
- * src/gsd/directives.ts
+ * src/playbook/directives.ts
  *
- * Builds the system-prompt directive block injected by layer4-gsd. The directive
- * is what actually changes the agent's behaviour: it lists the GSD-style steps
- * the agent must take before touching code.
+ * Builds the system-prompt directive block injected per turn by layer4
+ * (`src/pil/layer4-gsd.ts`). The directive is what actually changes the agent's
+ * behaviour: it injects a HYBRID rubric for the work-depth tier the model chose
+ * — the system recommends a depth, the agent declares its path and may
+ * escalate/de-escalate. This is the "[playbook]" mindset layer (NOT the real
+ * GSD framework / `/gsd:*` skills — it only borrows the discuss→plan→execute
+ * mindset).
  *
  * Three tiers:
- *   - heavy:    full discuss → research → verify → plan → impl → verify flow,
- *               with mandatory AskUserQuestion + parallel Agent dispatch.
- *   - standard: GSD-quick mindset — short plan, then implement, then verify.
+ *   - heavy:    discuss → research → plan → check-plan → implement → verify.
+ *   - standard: short plan → check → implement → verify.
  *   - quick:    minimal hint, run inline.
  *
  * All directive text is English. The agent is responsible for translating
  * user-facing prompts into the user's language at render time.
  */
 
-import type { ComplexityResult } from "./complexity.js";
-import type { GrayAreaQuestion } from "./gray-areas.js";
-import type { GsdPhase } from "./types.js";
+import type { GsdPhase } from "../gsd/types.js";
+import type { ComplexityTier } from "./complexity.js";
 
 export interface DirectiveInput {
-  complexity: ComplexityResult;
+  /**
+   * Model-decided work depth (agent-first — see layer1 `llm-classify`). Drives
+   * which rubric is injected. The rubric itself is HYBRID: it states the
+   * recommended depth but lets the agent escalate/de-escalate if the task turns
+   * out bigger or smaller than it read.
+   */
+  tier: ComplexityTier;
   phase: GsdPhase | null;
-  grayAreas: GrayAreaQuestion[];
   /**
    * True when the prompt is informational/explanatory (a question or a
    * self/meta analysis) rather than a request to change code. The deliverable
@@ -61,12 +68,12 @@ export interface DirectiveInput {
 
 export interface DirectiveOutput {
   text: string;
-  tier: ComplexityResult["tier"];
+  tier: ComplexityTier;
   /** True when the directive forbids the agent from acting before clarifying. */
   blocking: boolean;
 }
 
-const HEADER = "[gsd-native]";
+const HEADER = "[playbook]";
 
 /**
  * High-precision predicate: is this turn about the Muonroi ECOSYSTEM (where the
@@ -108,64 +115,54 @@ export function buildLanguageNudge(lang: string): string {
   ].join("\n");
 }
 
-function renderGrayAreas(qs: GrayAreaQuestion[]): string {
-  if (qs.length === 0) return "  (no gray areas detected — confirm the request is fully specified before proceeding)";
-  return qs
-    .map((q, idx) => {
-      const opts = q.options.map((o, i) => `${i === 0 ? "[recommended]" : "[alt]"} ${o}`).join(" / ");
-      return `  ${idx + 1}. (${q.dimension}) ${q.question}\n     options: ${opts}`;
-    })
-    .join("\n");
-}
+// All three rubrics are HYBRID + agent-first: the system recommends a depth
+// based on the model's read of the task, but each rubric ends by empowering the
+// agent to escalate or de-escalate if the task turns out bigger/smaller than it
+// looked. Phrased as guidance, not a rigid template (the user prefers natural,
+// senior-engineer reasoning over labeled scaffolds — feedback 12eceab7).
 
 function buildHeavy(input: DirectiveInput): string {
-  const grayBlock = renderGrayAreas(input.grayAreas);
+  const phaseHint = input.phase ? ` (hint: this reads like a "${input.phase}" task)` : "";
   return [
-    `${HEADER} HEAVY task detected (score=${input.complexity.score}, signals=${input.complexity.signals.map((s) => s.tag).join(",") || "none"}).`,
-    "MANDATORY flow before any implementation:",
-    "  1. DISCUSS — call AskUserQuestion with the gray areas below. Each question MUST include the recommended default first so the user can accept by selecting it.",
-    "     Localize question text into the user's language (the language of their last message). Keep options labels English unless they refer to natural-language content.",
-    "  2. RESEARCH + VERIFY — once the user answers, dispatch two Agent calls IN PARALLEL in a single message:",
-    "       (a) a research agent to gather codebase / external facts needed for the task,",
-    "       (b) a verify agent to enumerate acceptance criteria and risks.",
-    "     Wait for both before planning.",
-    "  3. PLAN — produce a short numbered plan grounded in the research + verify outputs. Confirm the plan with the user only if it diverges from their stated intent.",
-    "  4. IMPLEMENT — execute the plan in atomic steps. Prefer parallel Agent dispatch when steps are independent.",
-    "  5. VERIFY — run tests / lints / type checks. Report evidence (command + exit code) before claiming done.",
-    "Gray areas to clarify in step 1:",
-    grayBlock,
-    "Do NOT skip steps. Do NOT begin implementation until step 1 is answered.",
+    `${HEADER} This reads like a HEAVY task${phaseHint} — architectural, cross-cutting, multi-file, or with real unresolved design choices. Don't start editing yet; work through these phases:`,
+    "  1. DISCUSS — surface the decisions/ambiguities that actually change the design. For the ones the prompt doesn't already answer, ask up front with AskUserQuestion (put your recommended option first; write the question text in the user's language). Skip questions the prompt already settles — don't interrogate.",
+    "  2. RESEARCH — gather the codebase facts the task depends on: read/grep the relevant modules, and dispatch parallel research Agents when the areas are independent. When you delegate, give each sub-agent a NON-overlapping scope and tell it the exact return shape you need (findings as file:line + a one-line conclusion) — only the sub's final synthesis re-enters your context. Ground every later decision in what you actually found, not assumptions.",
+    "  3. PLAN — write a concrete, numbered plan: the change per file, the order, and the acceptance criteria (how you'll know it's done). Then record the plan as a todo_write checklist (one item per step) so the user sees a live progress list.",
+    "  4. CHECK-PLAN — review your own plan BEFORE executing: does it cover the acceptance criteria, handle the edge cases, and match what the user actually asked? Revise until it does (update the todo_write list if steps change). Confirm with the user only if the plan diverges from their intent.",
+    "  5. IMPLEMENT — execute in atomic steps; parallelize independent work. Keep the todo_write list accurate: mark each item in_progress before you start it and completed when it lands (exactly ONE item in_progress at a time).",
+    "  6. VERIFY — run the relevant tests / lint / type-check and report evidence (command + result) before claiming done.",
+    "This depth is a recommendation from how the task reads. If, once you look, it's genuinely smaller than it appears, say so and drop to the STANDARD flow rather than over-processing it.",
   ].join("\n");
 }
 
 function buildStandard(input: DirectiveInput): string {
-  const phaseHint = input.phase ? ` (detected phase: ${input.phase})` : "";
+  const phaseHint = input.phase ? ` (hint: this reads like a "${input.phase}" task)` : "";
   // Debug-phase variant: tighten exploration budget. Session 7d56a049e1e3
   // ran 109 tool calls (58 bash + 33 read_file + 16 grep + 2 mcp) over 6
   // minutes WITHOUT a single edit_file / write_file — agent over-researched
-  // the CI failure instead of attempting a fix. Add an explicit exploration
-  // cap and require committing to a hypothesis early.
+  // the CI failure instead of attempting a fix. Keep the FIX-FIRST exploration
+  // cap, but still require a brief check against reality before editing.
   if (input.phase === "debug") {
     return [
-      `${HEADER} DEBUG task${phaseHint} — apply GSD-quick mindset, FIX-FIRST.`,
-      "Flow:",
-      "  1. State a 2-3 line hypothesis (what is failing, your best guess of why) BEFORE reading more than 3 files.",
-      "  2. Apply the smallest plausible fix with edit_file / write_file. Do NOT keep exploring — commit to a hypothesis, ship the diff, iterate on failure.",
-      "  3. Verify the fix (rerun the failing command / test) and report evidence.",
+      `${HEADER} This reads like a DEBUG task${phaseHint} — work FIX-FIRST, but think before you edit:`,
+      "  1. HYPOTHESIS — state a 2-3 line hypothesis (what's failing + your best guess why) BEFORE reading more than 3 files.",
+      "  2. CHECK — confirm the hypothesis against the actual failing code/log (read the key file, re-read the error). Adjust if reality disagrees.",
+      "  3. FIX — apply the smallest plausible fix with edit_file / write_file. Commit to a hypothesis and ship the diff; don't keep exploring.",
+      "  4. VERIFY — rerun the failing command/test and report evidence.",
       "Hard limits — exceed only if a tool result genuinely contradicts your hypothesis:",
       "  - ≤ 8 read_file calls before first edit_file",
       "  - ≤ 5 grep calls before first edit_file",
       "  - ≤ 10 bash log-fetching calls (gh run view, cat log, etc.) before first edit_file",
-      "If hard limits are blown and you still have no fix, STOP and report what you tried + why you're stuck. Do NOT keep searching.",
+      "If the limits are blown and you still have no fix, STOP and report what you tried + why you're stuck.",
     ].join("\n");
   }
   return [
-    `${HEADER} STANDARD task${phaseHint} — apply GSD-quick mindset.`,
-    "Flow:",
-    "  1. State a 2-3 line plan in your reply.",
-    "  2. Implement directly with the appropriate tools.",
-    "  3. Verify (tests / type-check / quick smoke) and report evidence.",
-    "Skip the discuss/research subagent dance unless a real ambiguity blocks step 1.",
+    `${HEADER} This reads like a STANDARD task${phaseHint} — work like a senior engineer, but keep it lightweight:`,
+    "  1. PLAN — state a short, concrete plan: the files/functions you'll touch and in what order. A few bullets in your reply, not an essay. If it breaks into ≥3 steps, also record them with todo_write so the user gets a live checklist.",
+    "  2. CHECK — sanity-check that plan against the real code (read the key files you named) and against the user's intent; fix the plan if reality differs. If a genuine ambiguity blocks you, ask ONE focused question via AskUserQuestion instead of guessing.",
+    "  3. IMPLEMENT — execute the plan in small steps with the appropriate tools. If you made a todo_write checklist, keep it updated as you go (exactly one item in_progress at a time).",
+    "  4. VERIFY — run the relevant tests / type-check / quick smoke and report evidence before claiming done.",
+    "You don't need subagents or a discussion round for this. But if it turns out to be architectural or spans many files, escalate to the HEAVY flow (discuss → research → checked plan) rather than charging ahead.",
   ].join("\n");
 }
 
@@ -184,18 +181,21 @@ function buildQuestion(): string {
 }
 
 function buildQuick(input: DirectiveInput): string {
-  const phaseHint = input.phase ? ` phase=${input.phase}` : "";
-  return `${HEADER} QUICK task${phaseHint} — handle inline. No plan, no subagents. Make the smallest correct change and report.`;
+  const phaseHint = input.phase ? ` (hint: "${input.phase}")` : "";
+  return [
+    `${HEADER} This reads like a QUICK task${phaseHint} — handle it inline. Make the smallest correct change (or give the direct answer) and report what you did. No plan, no subagents.`,
+    "If, as you work, it turns out bigger than it looked — multiple files, unclear requirements — say so and switch to the STANDARD flow (short plan → check → implement → verify) instead of forcing it.",
+  ].join("\n");
 }
 
 export function buildDirective(input: DirectiveInput): DirectiveOutput {
   // Informational/meta prompts answer a human — never apply the
   // implement/verify scaffold (it agent-ifies the reply), regardless of tier.
   const base: DirectiveOutput = input.informational
-    ? { text: buildQuestion(), tier: input.complexity.tier, blocking: false }
-    : input.complexity.tier === "heavy"
+    ? { text: buildQuestion(), tier: input.tier, blocking: false }
+    : input.tier === "heavy"
       ? { text: buildHeavy(input), tier: "heavy", blocking: true }
-      : input.complexity.tier === "standard"
+      : input.tier === "standard"
         ? { text: buildStandard(input), tier: "standard", blocking: false }
         : { text: buildQuick(input), tier: "quick", blocking: false };
 

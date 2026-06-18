@@ -132,7 +132,7 @@ export const IMPORTANT_TOOL_NAMES = [
 /**
  * MCP tool prefixes whose results are an AUTHORITATIVE source the agent is
  * explicitly steered to fetch FIRST and ground on (the ECOSYSTEM_DOCS_NUDGE in
- * src/gsd/directives.ts). Eliding them defeats the nudge — the agent calls the
+ * src/playbook/directives.ts). Eliding them defeats the nudge — the agent calls the
  * ecosystem docs, then compaction discards them and it goes blind on the very
  * source it was told to trust (session 584ba476c07a: mcp_muonroi-docs__setup_guide
  * + bb_recipe_list elided, ee_unavailable, 0 rehydrated → "partially blind").
