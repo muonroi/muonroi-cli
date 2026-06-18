@@ -542,7 +542,13 @@ export class StreamRunner {
     // sub-agent has no PIL ctx of its own; the caller already bounded the
     // work via maxSteps. We compose alongside that hard step cap so a
     // wandering sub-agent loop trips whichever fires first (logical OR).
-    const _subCeiling = resolveCeiling("general", "medium");
+    // Explore sub-agents are READ-ONLY research — a codebase investigation
+    // legitimately needs more grep/read steps than the tight general/medium=10
+    // cell allows. Cutting it early (esp. for reasoning models that front-load
+    // tool calls) leaves no budget to reach the synthesis turn (root cause of
+    // empty "Task completed. Last action: grep" returns). Give explore the
+    // analyze/large cell (15); edit-capable agents keep general/medium (10).
+    const _subCeiling = isExplore ? resolveCeiling("analyze", "large") : resolveCeiling("general", "medium");
     const _subCounterKey = `subagent:${subCallId}`;
     const _subStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
       if (state.steps.length >= maxSteps) return true;
@@ -816,8 +822,49 @@ export class StreamRunner {
       stall.dispose();
     }
 
-    const output = assistantText.trim() || `Task completed. Last action: ${lastActivity}`;
-    return { output, lastActivity, cancelled: false, assistantText };
+    // Forced final synthesis. When the loop ends on a tool-call / step-ceiling
+    // cut (finishReason="tool-calls"), the model never got a turn to write its
+    // findings, so assistantText is empty and the parent would receive the
+    // useless "Task completed. Last action: <tool>" fallback — then redo the
+    // work itself, defeating the whole point of delegation (live root cause:
+    // grok-build-0.1 emitted 277 reasoning-deltas + 19 tool-calls but ZERO
+    // text-deltas across the 10-step ceiling). Give the sub exactly ONE
+    // tool-free turn to synthesize what it already gathered. Tools are removed
+    // so finishReason cannot be "tool-calls" again — the model MUST emit text.
+    let synthesizedText = "";
+    if (!assistantText.trim() && !signal?.aborted && !stallTriggered) {
+      try {
+        const resp = await result.response;
+        const priorMessages = (resp.messages ?? []) as ModelMessage[];
+        const synthResult = streamText({
+          model: childRuntime.model,
+          system: childSystem,
+          messages: [
+            ...childMessages,
+            ...priorMessages,
+            {
+              role: "user",
+              content:
+                "You've reached your investigation budget and have not written your findings yet. Stop now — do NOT call any more tools. Write your final synthesis FOR THE PARENT AGENT: lead with the answer to the delegated task, cite the concrete file:line behind each claim, then note any gaps or the recommended next step. Be concise; the parent only ingests this message.",
+            },
+          ],
+          tools: {},
+          maxRetries: 0,
+          abortSignal: signal,
+          ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
+        });
+        for await (const part of synthResult.fullStream) {
+          if (part.type === "text-delta") synthesizedText += part.text ?? "";
+        }
+        debugLog(`forced-synthesis: textLen=${synthesizedText.length}`);
+      } catch (err) {
+        debugLog(`forced-synthesis failed: ${(err as Error)?.message}`);
+      }
+    }
+
+    const recovered = assistantText.trim() || synthesizedText.trim();
+    const output = recovered || `Task completed. Last action: ${lastActivity}`;
+    return { output, lastActivity, cancelled: false, assistantText: recovered };
   }
 
   /**
