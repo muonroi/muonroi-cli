@@ -285,7 +285,7 @@ IMPORTANT:
 - Use write_file only for new files or when most of the file is changing. For very large files (>500 lines), split into multiple edit_file calls or write smaller chunks.
 - Use read_file instead of cat/head/tail for reading files.
 - When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
-- Commit incrementally: when a cohesive, working chunk is finished (and its checks pass), commit it before starting the next chunk — prefer several small, logically-scoped commits over one large catch-all commit at the end. Group related file changes per commit; keep unrelated changes in separate commits.
+- Commit incrementally (in any git repo, without being asked): the moment a cohesive, working chunk is finished and its checks pass, commit it before starting the next chunk. This is part of doing the work, not a separate request — prefer several small, logically-scoped commits over one large catch-all commit at the end. Group related file changes per commit; keep unrelated changes in separate commits.
 - Every commit message you create MUST end with this attribution line, verbatim, on its own final line: "Coding by - Muonroi-CLI".
 - After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
 
