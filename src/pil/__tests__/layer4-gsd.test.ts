@@ -22,7 +22,7 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   };
 }
 
-describe("layer4Gsd (gsd-native)", () => {
+describe("layer4Gsd (playbook)", () => {
   it("skips directive injection when intentKind === 'chitchat'", async () => {
     const before = "hello";
     const result = await layer4Gsd(makeCtx({ raw: before, enriched: before, intentKind: "chitchat" }));
@@ -32,9 +32,9 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(layer!.delta).toBe("skip:chitchat");
   });
 
-  it("appends a gsd-native directive and records the layer as applied", async () => {
+  it("appends a playbook directive and records the layer as applied", async () => {
     const result = await layer4Gsd(makeCtx({ raw: "implement the login feature" }));
-    expect(result.enriched).toContain("[gsd-native]");
+    expect(result.enriched).toContain("[playbook]");
     const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
     expect(layer).toBeDefined();
     expect(layer!.applied).toBe(true);
@@ -47,19 +47,34 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(layer!.delta).toContain("phase=plan");
   });
 
-  it("emits a HEAVY directive for wholesale, multi-step prompts", async () => {
-    const heavy = "redo the entire architecture and produce a deep-map across all repos, including business rules";
-    const result = await layer4Gsd(makeCtx({ raw: heavy, tokenBudget: 4000 }));
+  it("emits a HEAVY directive when the model classifies depth=heavy (agent-first, not regex)", async () => {
+    // Depth now comes from ctx.modelDepthTier (the model's 5th classify word),
+    // NOT a regex scan of the raw prompt. A plainly-phrased prompt the model
+    // judged heavy still gets the full discuss → research → check-plan flow.
+    const result = await layer4Gsd(
+      makeCtx({ raw: "rework how auth works", tokenBudget: 8000, modelDepthTier: "heavy" }),
+    );
     const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
     expect(layer!.delta).toContain("tier=heavy");
-    expect(result.enriched).toMatch(/MANDATORY/);
+    expect(layer!.delta).toContain("depth=model");
+    expect(result.enriched).toMatch(/HEAVY task/);
+    expect(result.enriched).toMatch(/DISCUSS/);
     expect(result.enriched).toMatch(/AskUserQuestion/);
+    expect(result.enriched).toMatch(/CHECK-PLAN/);
   });
 
-  it("emits a QUICK directive for trivial prompts", async () => {
-    const result = await layer4Gsd(makeCtx({ raw: "fix typo in README" }));
+  it("emits a QUICK directive when the model classifies depth=quick", async () => {
+    const result = await layer4Gsd(makeCtx({ raw: "fix typo in README", modelDepthTier: "quick" }));
     const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
     expect(layer!.delta).toContain("tier=quick");
+    expect(layer!.delta).toContain("depth=model");
+  });
+
+  it("defaults to STANDARD tier when the model supplied no depth (no regex fallback)", async () => {
+    const result = await layer4Gsd(makeCtx({ raw: "do the thing", modelDepthTier: null }));
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("tier=standard");
+    expect(layer!.delta).toContain("depth=default");
   });
 
   it("still records a layer entry even when no phase is detected", async () => {
@@ -70,22 +85,27 @@ describe("layer4Gsd (gsd-native)", () => {
     expect(layer!.delta).toMatch(/phase=(none|discuss|plan|execute|verify|review)/);
   });
 
-  it("respects tokenBudget when truncating the directive", async () => {
-    const result = await layer4Gsd(makeCtx({ raw: "implement this", tokenBudget: 30 }));
-    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
-    if (layer?.applied && layer.delta) {
-      const charsMatch = layer.delta.match(/chars=(\d+)/);
-      if (charsMatch) {
-        // Directive budget is 25% of tokenBudget * 4 chars/token = 30 chars at budget=30.
-        // truncateToBudget returns chars-based budget — accept up to tokenBudget*4.
-        expect(parseInt(charsMatch[1], 10)).toBeLessThanOrEqual(30 * 4);
-      }
-    }
+  it("floors the directive budget so the rubric survives at the default tokenBudget (regression: directive was truncated to ~500 chars)", async () => {
+    // The playbook directive is a critical behavioural instruction and must NOT
+    // be gutted by the tiny pipeline budget. At the production default
+    // tokenBudget=500 the bare 25% fraction was ~500 chars, which cut the HEAVY
+    // rubric after step 1. The floor (DIRECTIVE_MIN_TOKENS) guarantees the full
+    // ~1.7K-char HEAVY rubric reaches the model intact.
+    const result = await layer4Gsd(makeCtx({ raw: "rework auth", tokenBudget: 500, modelDepthTier: "heavy" }));
+    expect(result.enriched).toMatch(/DISCUSS/);
+    expect(result.enriched).toMatch(/CHECK-PLAN/);
+    expect(result.enriched).toMatch(/VERIFY/);
+    expect(result.enriched).toMatch(/todo_write/);
   });
 
-  it("updates gsdPhase on context when keyword detection fires", async () => {
+  it("does NOT keyword-detect a phase from the raw prompt (agent-first, no regex)", async () => {
+    // Phase keyword detection was removed: a regex scan of the prompt would
+    // mislabel the directive. Phase is sourced only from ctx.gsdPhase (L1
+    // unified) or the EE brain route. With neither, it stays null/undefined.
     const result = await layer4Gsd(makeCtx({ raw: "review the pull request" }));
-    expect(["review", "discuss", "execute"]).toContain(result.gsdPhase);
+    expect(result.gsdPhase ?? null).toBeNull();
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("phase=none");
   });
 
   it("routes a question-shaped analyze/debug prompt to the QUESTION directive (no 'state a plan')", async () => {

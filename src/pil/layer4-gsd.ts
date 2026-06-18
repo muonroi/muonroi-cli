@@ -18,10 +18,9 @@
  */
 
 import { routeTask } from "../ee/bridge.js";
-import { scoreComplexity } from "../gsd/complexity.js";
-import { buildDirective, mentionsEcosystemScope } from "../gsd/directives.js";
-import { detectGrayAreas } from "../gsd/gray-areas.js";
-import { detectGsdPhase, type GsdPhase } from "../gsd/types.js";
+import type { GsdPhase } from "../gsd/types.js";
+import type { ComplexityTier } from "../playbook/complexity.js";
+import { buildDirective } from "../playbook/directives.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
 import { isImplementationIntent, isMetaAnalysisPrompt, isQuestionLike } from "./layer6-output.js";
@@ -41,6 +40,15 @@ function mapRouteToPhase(route: string): GsdPhase | null {
 }
 
 const DIRECTIVE_BUDGET_FRACTION = 0.25;
+// The playbook directive is a CRITICAL behavioural instruction, not enrichment
+// context — it must reach the model INTACT. With the pipeline default
+// tokenBudget=500, a 25% share is only ~125 tokens (~500 chars), which silently
+// truncated the HEAVY rubric after the first step (CHECK-PLAN / IMPLEMENT /
+// VERIFY / the todo_write checklist instruction never reached the model). The
+// full HEAVY directive is ~1.7K chars, so floor the directive's own budget at a
+// value that fits it whole (truncateToBudget multiplies by CHARS_PER_TOKEN=4 →
+// 700 tokens ≈ 2.8K chars). The fraction still wins when tokenBudget is large.
+const DIRECTIVE_MIN_TOKENS = 700;
 
 // TODO(WhoAmI-L4): when EE v4.0 Who Am I profile is available:
 //   - work_patterns.delegation_style="autonomous" → bias routeTask toward "direct",
@@ -82,12 +90,25 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   }
 
   if (!phase) {
-    phase = detectGsdPhase(ctx.raw);
-    routeSource = phase ? "keyword" : "none";
+    // Agent-first: phase is a minor hint sourced from the EE brain only. We do
+    // NOT keyword-regex it from the raw prompt — regex misclassification here
+    // would mislabel the directive (no-regex rule, 2026-06-18). null is fine:
+    // the directive reads cleanly without a phase hint.
+    routeSource = "none";
   }
 
-  const complexity = scoreComplexity(ctx.raw);
-  const grayAreas = complexity.tier === "heavy" ? detectGrayAreas(ctx.raw).questions : [];
+  // Work depth is decided by the model in layer1's classify call (the 5th
+  // word → ctx.modelDepthTier). The regex `scoreComplexity` scorer has been
+  // removed from this decision path: depth must reflect what the task actually
+  // entails, not which keywords it contains. When the model classifier is
+  // unwired/failed (modelDepthTier null — rare, since it IS the chat model),
+  // default to the safe middle tier; the injected rubric still lets the agent
+  // self-select up or down.
+  const tier: ComplexityTier = ctx.modelDepthTier ?? "standard";
+  // Gray areas are no longer pre-computed by regex. The HEAVY rubric instructs
+  // the agent to surface its own clarifying questions via AskUserQuestion,
+  // grounded in what it actually finds — far more accurate than keyword guesses.
+  const grayAreas: never[] = [];
   // Informational prompts (a question / explanation / self-eval) ask for an
   // ANSWER, not a code change. The implement/verify directive otherwise leaks
   // into the human-facing reply as a "2-3 line plan" + process narration
@@ -110,20 +131,26 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
     : isMetaAnalysisPrompt(ctx.raw) ||
       (ctx.taskType === "general" && ctx.intentKind === "task") ||
       (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
-  const ecosystem = mentionsEcosystemScope(ctx.raw);
-  // Heuristic: VN diacritics → user wrote Vietnamese → re-anchor language rule
-  // inside the directive (storyflow_ui session 22661c8de9f2 — base rule
-  // crowded out by brevity/FIX-FIRST directives).
-  const replyLanguage = /[à-ỹÀ-Ỹ]/.test(ctx.raw) ? "Vietnamese" : undefined;
-  const directive = buildDirective({ complexity, phase, grayAreas, informational, ecosystem, replyLanguage });
+  // Scope + reply-language are now agent-first (model-decided in layer1's
+  // classify call), NOT regex scans of the raw prompt (no-regex rule,
+  // 2026-06-18). The ecosystem docs-first nudge fires only when the model judged
+  // the turn platform-scoped; the language re-anchor fires for any non-English
+  // language the model detected (the old regex only caught Vietnamese).
+  const ecosystem = ctx.ecosystemScope === true;
+  const replyLanguage = ctx.replyLanguage ?? undefined;
+  const directive = buildDirective({ tier, phase, informational, ecosystem, replyLanguage });
 
-  const budgetChars = Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION);
-  const trimmed = truncateToBudget(directive.text, budgetChars);
+  // truncateToBudget takes a TOKEN budget (×CHARS_PER_TOKEN internally). Floor it
+  // at DIRECTIVE_MIN_TOKENS so the full directive always survives, even at the
+  // default tokenBudget=500 where the bare fraction would gut it.
+  const directiveTokenBudget = Math.max(Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION), DIRECTIVE_MIN_TOKENS);
+  const trimmed = truncateToBudget(directive.text, directiveTokenBudget);
+  const depthSource = ctx.modelDepthTier ? "model" : "default";
 
   return {
     ...ctx,
     gsdPhase: phase,
-    complexityTier: complexity.tier,
+    complexityTier: tier,
     grayAreas,
     enriched: `${ctx.enriched}\n${trimmed}`,
     layers: [
@@ -133,10 +160,9 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
         applied: true,
         delta: [
           `tier=${directive.tier}`,
-          `score=${complexity.score}`,
+          `depth=${depthSource}`,
           `phase=${phase ?? "none"}`,
           `route=${routeSource}`,
-          `gray=${grayAreas.length}`,
           `blocking=${directive.blocking}`,
           `chars=${trimmed.length}`,
         ].join(" "),

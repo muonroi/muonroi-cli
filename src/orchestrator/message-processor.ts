@@ -61,7 +61,6 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { mentionsEcosystemScope } from "../gsd/directives.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -92,6 +91,7 @@ import {
 } from "../pil/index.js";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
+import { mentionsEcosystemScope } from "../playbook/directives.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {

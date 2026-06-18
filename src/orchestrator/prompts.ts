@@ -258,6 +258,12 @@ DEFAULT DELEGATION POLICY:
 - Do not wait for the user to explicitly ask for a sub-agent when delegation would clearly help.
 - Skip delegation only when the task is trivial, single-file, or you already have the exact answer.
 
+WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):
+- GOAL: state the one concrete question or outcome the sub must deliver.
+- CONTEXT: include the specific facts the sub needs (file paths, symbol names, constraints, what you already know) so it doesn't re-derive them blindly.
+- RETURN SHAPE: say exactly what to hand back — e.g. "return the findings as file:line + a one-line conclusion", or "return the diff you applied + tests run". The sub's final message is the only thing that re-enters YOUR context (capped ~32K), so a vague ask wastes the turn.
+- When fanning out several sub-agents in parallel, give each a NON-overlapping scope so their syntheses compose instead of duplicating.
+
 EXAMPLES:
 - "review this change" -> delegate to explore first
 - "research how auth works" -> delegate to explore first
@@ -543,7 +549,10 @@ export function buildSubagentPrompt(
     ? [
         "Do not create, modify, or delete files.",
         "Prefer `read_file` and search commands over broad shell exploration.",
-        "Return concise findings for the parent agent.",
+        // RETURN CONTRACT — the parent only ingests your FINAL message (capped at
+        // ~32K, head+tail), never your tool output. Make that message a tight
+        // synthesis so the parent's context stays clean.
+        "End with a tight synthesis FOR THE PARENT AGENT: lead with the answer to the delegated task, ground each claim in a concrete file:line, then note any gaps or the recommended next step. Do NOT narrate your search process or restate these instructions — the parent needs the conclusion, not the journey.",
       ]
     : isVerifyDetect
       ? [
@@ -619,7 +628,10 @@ export function buildSubagentPrompt(
               : [
                   "Work only on the delegated task below.",
                   "Use tools directly instead of narrating your intent.",
-                  "Return a concise summary for the parent agent with key outcomes and any open risks.",
+                  // RETURN CONTRACT — the parent only ingests your FINAL message
+                  // (capped at ~32K, head+tail), never your tool output. Make that
+                  // message a tight synthesis so the parent's context stays clean.
+                  "End with a tight synthesis FOR THE PARENT AGENT: lead with what you did / what you found, cite the concrete file:line you changed or relied on, then list any open risks, follow-ups, or verification still owed. Do NOT narrate your process or restate these instructions — the parent needs the result, not a transcript.",
                 ];
 
   const instructionLines = custom?.instruction.trim() ? ["", "SUB-AGENT INSTRUCTIONS:", custom.instruction.trim()] : [];

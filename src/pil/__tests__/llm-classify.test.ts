@@ -155,7 +155,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.outputStyle).toBe("concise");
   });
 
-  it("keeps a tiny output budget for non-reasoning models (24 — four comma words)", async () => {
+  it("keeps a tiny output budget for non-reasoning models (48 — seven comma words)", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("generate,concise") } });
     cleanup = handle.uninstall;
 
@@ -164,17 +164,59 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     await classify("add a new endpoint");
 
     const call = handle.calls[0] as { maxOutputTokens?: number };
-    expect(call.maxOutputTokens).toBe(24);
+    expect(call.maxOutputTokens).toBe(48);
+  });
+
+  it("parses the sixth + seventh words as agent-first scope and reply-language", async () => {
+    const eco = installMockModel({
+      fixture: { stream: textOnlyStream("analyze,balanced,task,answer,standard,ecosystem,vietnamese") },
+    });
+    cleanup = eco.uninstall;
+    const ecoClassify = createLlmClassifier((() => eco.model) as never, "deepseek-v4-flash");
+    const r = await ecoClassify("hệ sinh thái muonroi gồm những gì");
+    expect(r?.ecosystemScope).toBe(true);
+    expect(r?.replyLanguage).toBe("Vietnamese");
+    eco.uninstall();
+
+    // English + local → no nudge signals (ecosystemScope false, replyLanguage null).
+    const plain = installMockModel({
+      fixture: { stream: textOnlyStream("debug,concise,task,code,standard,local,english") },
+    });
+    cleanup = plain.uninstall;
+    const plainClassify = createLlmClassifier((() => plain.model) as never, "deepseek-v4-flash");
+    const p = await plainClassify("fix the crash");
+    expect(p?.ecosystemScope).toBe(false);
+    expect(p?.replyLanguage).toBeNull();
   });
 
   it("parses the fourth word as the output deliverable (Phase 2b)", async () => {
-    const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code") } });
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code,standard") } });
     cleanup = handle.uninstall;
     const factory = (() => handle.model) as never;
     const classify = createLlmClassifier(factory, "deepseek-v4-flash");
     const result = await classify("fix the crash in src/auth/login.ts");
     expect(result?.taskType).toBe("debug");
     expect(result?.deliverableKind).toBe("code");
+  });
+
+  it("parses the fifth word as the model-decided work depth (agent-first tier)", async () => {
+    const heavy = installMockModel({ fixture: { stream: textOnlyStream("refactor,concise,task,code,heavy") } });
+    cleanup = heavy.uninstall;
+    const heavyClassify = createLlmClassifier((() => heavy.model) as never, "deepseek-v4-flash");
+    expect((await heavyClassify("rework the auth system"))?.depthTier).toBe("heavy");
+    heavy.uninstall();
+
+    // Position-independent recovery (taskType still leads; depth appears early).
+    const reordered = installMockModel({ fixture: { stream: textOnlyStream("debug,quick,concise,task,code") } });
+    cleanup = reordered.uninstall;
+    const reorderedClassify = createLlmClassifier((() => reordered.model) as never, "deepseek-v4-flash");
+    expect((await reorderedClassify("fix typo"))?.depthTier).toBe("quick");
+    reordered.uninstall();
+
+    const noDepth = installMockModel({ fixture: { stream: textOnlyStream("debug,concise,task,code") } });
+    cleanup = noDepth.uninstall;
+    const noDepthClassify = createLlmClassifier((() => noDepth.model) as never, "deepseek-v4-flash");
+    expect((await noDepthClassify("fix the bug"))?.depthTier).toBeNull();
   });
 
   it("recovers the deliverable position-independently and defaults to null when absent", async () => {

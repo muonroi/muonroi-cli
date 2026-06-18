@@ -4,8 +4,8 @@
  * Core type definitions for the Prompt Intelligence Layer (PIL) pipeline.
  */
 
-import type { ComplexityTier } from "../gsd/complexity.js";
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import type { ComplexityTier } from "../playbook/complexity.js";
 import type { ComplexitySizeResult } from "./layer1_5-complexity-size.js";
 
 export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "build" | "general";
@@ -47,8 +47,33 @@ export interface PipelineContext {
   activeRunId?: string | null;
   digestAgeMs?: number | null;
   sessionId?: string | null;
-  /** GSD-native triage tier (set by layer4). */
+  /** GSD-native triage tier (set by layer4 — sourced from modelDepthTier when present). */
   complexityTier?: ComplexityTier | null;
+  /**
+   * Model-decided work depth (quick | standard | heavy), set by layer1's
+   * model-first classifier (the 5th classify word). This is the agent-first
+   * source of truth for the GSD directive tier; layer4 prefers it over the
+   * legacy regex `scoreComplexity` (which now only runs as the offline fallback
+   * when the model classifier is unwired/failed). null when the model omitted
+   * the word OR the legacy cascade ran → layer4 falls back accordingly.
+   */
+  modelDepthTier?: ComplexityTier | null;
+  /**
+   * Model-decided scope (agent-first replacement for the `mentionsEcosystemScope`
+   * regex): true when the turn is about the Muonroi PLATFORM/ecosystem (BB/.NET,
+   * building-block, rule engine, platform setup) where muonroi-docs is
+   * authoritative. Set by layer1's classifier; consumed by layer4 to gate the
+   * docs-first nudge. null/undefined → treated as not-ecosystem.
+   */
+  ecosystemScope?: boolean | null;
+  /**
+   * Model-decided reply language as a display name ("Vietnamese", "Japanese"),
+   * or null for English. Agent-first replacement for the Vietnamese-only
+   * diacritic regex — generalizes to any language. Set by layer1; consumed by
+   * layer4 to re-anchor the "reply in the user's language" rule inside the
+   * directive when the user did not write in English.
+   */
+  replyLanguage?: string | null;
   /**
    * Layer 1.5 deterministic complexity-size classification.
    * Populated immediately after `layer1Intent` in `runLayers()`. Consumers:
