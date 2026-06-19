@@ -2,8 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
+  // WhoAmI v4.0: L4 reads delegation_style to bias a 'discuss' phase. Default null
+  // = fail-open, so every pre-existing test below behaves exactly as before.
+  getWhoAmIProfile: vi.fn(() => null),
 }));
 
+import { getWhoAmIProfile } from "../../ee/bridge.js";
 import { layer4Gsd } from "../layer4-gsd";
 import type { PipelineContext } from "../types";
 
@@ -165,6 +169,35 @@ describe("layer4Gsd (playbook)", () => {
       makeCtx({ raw, enriched: raw, taskType: "refactor", intentKind: "task", deliverableKind: "code" }),
     );
     expect(result.enriched).not.toContain("QUESTION / explanatory");
+  });
+
+  it("autonomous delegation drops a 'discuss' phase (WhoAmI v4.0 bias toward direct)", async () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValueOnce({
+      level: "standard",
+      dims: { "work_patterns.delegation_style": { value: "autonomous", confidence: 0.68, samples: 19 } },
+    });
+    const result = await layer4Gsd(makeCtx({ gsdPhase: "discuss", raw: "do the thing" }));
+    expect(result.gsdPhase ?? null).toBeNull();
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("phase=none");
+    expect(layer!.delta).toContain("autonomous:skip-discuss");
+  });
+
+  it("collaborative delegation keeps the 'discuss' phase", async () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValueOnce({
+      level: "standard",
+      dims: { "work_patterns.delegation_style": { value: "collaborative", confidence: 0.7, samples: 20 } },
+    });
+    const result = await layer4Gsd(makeCtx({ gsdPhase: "discuss", raw: "do the thing" }));
+    expect(result.gsdPhase).toBe("discuss");
+    const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+    expect(layer!.delta).toContain("phase=discuss");
+  });
+
+  it("absent profile leaves 'discuss' untouched (fail-open default)", async () => {
+    // getWhoAmIProfile defaults to null in the mock — the phase must be unchanged.
+    const result = await layer4Gsd(makeCtx({ gsdPhase: "discuss", raw: "do the thing" }));
+    expect(result.gsdPhase).toBe("discuss");
   });
 
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {

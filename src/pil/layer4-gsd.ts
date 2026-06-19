@@ -17,7 +17,7 @@
  * the agent, into the user's language.
  */
 
-import { routeTask } from "../ee/bridge.js";
+import { getWhoAmIProfile, routeTask } from "../ee/bridge.js";
 import type { GsdPhase } from "../gsd/types.js";
 import type { ComplexityTier } from "../playbook/complexity.js";
 import { buildDirective } from "../playbook/directives.js";
@@ -50,14 +50,16 @@ const DIRECTIVE_BUDGET_FRACTION = 0.25;
 // 700 tokens ≈ 2.8K chars). The fraction still wins when tokenBudget is large.
 const DIRECTIVE_MIN_TOKENS = 700;
 
-// TODO(WhoAmI-L4): deferred — EE slice-1 does NOT emit the dims this needs.
-//   - work_patterns.delegation_style="autonomous" → bias routeTask toward "direct":
-//     `delegation_style` is NOT in EE's emitted set — awaits a later EE slice.
-//   - decision_speed="fast-intuitive" → trim heavy-tier directive: decision_speed IS
-//     available via ../ee/who-am-i.ts (getWhoAmIProfile), but trimming the HEAVY
-//     directive is risky (see DIRECTIVE_MIN_TOKENS below — past truncation dropped
-//     the rubric), so it stays manual pending a measured approach.
-//   - Cache routeTask result per (taskType, domain): unblocked by the provider, future.
+// WhoAmI v4.0 (wired): work_patterns.delegation_style="autonomous" biases the route
+// toward "direct" — a resolved 'discuss' phase is dropped so the agent isn't funnelled
+// into a clarify round the user didn't want (see the phase-resolution block below).
+// Fail-open: absent dim → no change; only 'discuss' is affected (execute is untouched —
+// autonomy is about skipping clarification, not skipping execution).
+// TODO(WhoAmI-L4): still deferred — decision_speed="fast-intuitive" → trim heavy-tier
+// directive: decision_speed IS available via getWhoAmIProfile, but trimming the HEAVY
+// directive is risky (see DIRECTIVE_MIN_TOKENS below — past truncation dropped the
+// rubric), so it stays manual pending a measured approach. Also: cache routeTask result
+// per (taskType, domain) — unblocked by the provider, future.
 
 export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> {
   // Short-circuit: chitchat / pure-greeting inputs (detected by layer1) should
@@ -96,6 +98,16 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
     // would mislabel the directive (no-regex rule, 2026-06-18). null is fine:
     // the directive reads cleanly without a phase hint.
     routeSource = "none";
+  } else if (phase === "discuss") {
+    // WhoAmI v4.0: an autonomous delegator ("cứ làm / just do it / don't ask") does
+    // not want to be funnelled into a clarify-first 'discuss' round. Drop the hint so
+    // the directive reads neutrally (bias toward the 'direct' path). getWhoAmIProfile
+    // is cached + fail-open → absent dim leaves the discuss phase exactly as-is.
+    const delegation = getWhoAmIProfile()?.dims["work_patterns.delegation_style"]?.value;
+    if (delegation === "autonomous") {
+      phase = null;
+      routeSource = `${routeSource}+autonomous:skip-discuss`;
+    }
   }
 
   // Work depth is decided by the model in layer1's classify call (the 5th
