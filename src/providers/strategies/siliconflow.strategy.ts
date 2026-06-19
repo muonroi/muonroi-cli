@@ -11,6 +11,7 @@ import type { ProviderFactory } from "../runtime.js";
 import { createSiliconflowRepairFetch } from "../siliconflow-sse-repair.js";
 import type { ProviderId } from "../types.js";
 import { BaseProviderStrategy, type CreateFactoryOpts } from "./base.strategy.js";
+import { transformThinkingModeBody } from "./thinking-mode.js";
 
 export class SiliconflowStrategy extends BaseProviderStrategy {
   readonly id: ProviderId = "siliconflow";
@@ -22,6 +23,10 @@ export class SiliconflowStrategy extends BaseProviderStrategy {
       baseURL: opts.baseURL ?? OPENAI_COMPATIBLE_BASE_URLS.siliconflow,
       apiKey: opts.apiKey,
       fetch: createSiliconflowRepairFetch(),
+      // Thinking-mode round-trip fix (code 20015): backfill reasoning_content
+      // on every assistant turn, or disable thinking when
+      // MUONROI_DEEPSEEK_DISABLE_THINKING=1. See thinking-mode.ts.
+      transformRequestBody: (body) => transformThinkingModeBody(body),
     });
     return (modelId: string) => p(modelId);
   }
