@@ -28,6 +28,7 @@ describe("selectWhoAmIDims — privacy allowlist + commit/confidence gates", () 
       "work_patterns.energy": rawDim("night-owl", 0.6),
       "work_patterns.multitasking": rawDim("sequential-deep", 0.65),
       "work_patterns.session_length": rawDim("long", 0.55),
+      "work_patterns.delegation_style": rawDim("autonomous", 0.68),
     });
 
   test("minimal exposes only the 4 Tang-1 work dims", () => {
@@ -42,9 +43,14 @@ describe("selectWhoAmIDims — privacy allowlist + commit/confidence gates", () 
     );
   });
 
-  test("standard exposes all 9 committed dims", () => {
+  test("standard exposes all 10 committed dims", () => {
     const dims = selectWhoAmIDims(all(), "standard");
-    expect(Object.keys(dims).length).toBe(9);
+    expect(Object.keys(dims).length).toBe(10);
+  });
+
+  test("delegation_style is standard-only — stripped at minimal (transcript-derived, not Tang-1)", () => {
+    expect(selectWhoAmIDims(all(), "minimal")["work_patterns.delegation_style"]).toBeUndefined();
+    expect(selectWhoAmIDims(all(), "standard")["work_patterns.delegation_style"]).toBeDefined();
   });
 
   test("standard-built profile rendered at minimal strips Tang-2 dims (no stale leak)", () => {

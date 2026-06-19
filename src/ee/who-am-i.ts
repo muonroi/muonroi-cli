@@ -30,7 +30,8 @@ export type WhoAmIDimName =
   | "personality.decision_speed"
   | "work_patterns.energy"
   | "work_patterns.multitasking"
-  | "work_patterns.session_length";
+  | "work_patterns.session_length"
+  | "work_patterns.delegation_style";
 
 export interface WhoAmIDim {
   value: string;
@@ -60,6 +61,9 @@ const TIER_STANDARD: WhoAmIDimName[] = [
   "communication.brevity",
   "personality.conflict_style",
   "personality.risk_tolerance",
+  // delegation_style is `work_patterns.*` by name but transcript-derived, so it commits
+  // only at standard+ (the EE writer skips the transcript at `minimal`). Standard-only.
+  "work_patterns.delegation_style",
 ];
 const ALLOWLIST: Record<PrivacyLevel, WhoAmIDimName[]> = {
   minimal: TIER_MINIMAL,
