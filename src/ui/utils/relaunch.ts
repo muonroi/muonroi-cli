@@ -28,14 +28,20 @@ export function sanitizeArgvForResume(args: ReadonlyArray<string>, sessionId: st
   const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === "-s" || a === "--session") {
+    if (a === "-s" || a === "--session" || a === "--mock-llm") {
       // skip the flag AND its value (if present and not another flag)
       const next = args[i + 1];
       if (next !== undefined && !next.startsWith("-")) i++;
       continue;
     }
-    if (a.startsWith("--session=")) {
+    if (a.startsWith("--session=") || a.startsWith("--mock-llm=")) {
       continue; // skip the combined form
+    }
+    // Transient launch-mode flags must NOT survive a resume — re-entering
+    // agent-mode (named-pipe transport) on a user-driven resume strands the
+    // child with no harness server. Drop them.
+    if (a === "--agent-mode") {
+      continue;
     }
     out.push(a);
   }
@@ -50,6 +56,23 @@ export interface RelaunchOptions {
   onExit?: (code: number) => void;
   /** Injected spawn for tests. Defaults to the real node:child_process spawn. */
   spawnFn?: typeof spawn;
+  /**
+   * Run immediately before the spawn — used to tear down the current TUI
+   * (renderer.destroy, restore raw mode / mouse tracking / alt-screen) so the
+   * child inherits a CLEAN terminal. Without this the child (and the shell, if
+   * the parent exits) inherit a terminal still in mouse-tracking/alt-screen
+   * mode, and stray escape bytes get parsed by the shell as a command
+   * ("'…' is not recognized as an internal or external command").
+   */
+  beforeSpawn?: () => void;
+  /**
+   * When true, the parent stays alive and supervises the child: it exits with
+   * the child's exit code instead of exiting the instant the child spawns.
+   * This keeps any intermediate launcher (a `bun run` wrapper, the bun bin
+   * shim) alive so the shell does NOT regain the terminal foreground while the
+   * child is running. Required for a correct in-terminal restart on Windows.
+   */
+  supervise?: boolean;
 }
 
 /**
@@ -71,11 +94,32 @@ export function relaunchWithSession(sessionId: string, opts: RelaunchOptions = {
   const exit = opts.onExit ?? ((code) => process.exit(code));
   const spawnImpl = opts.spawnFn ?? spawn;
   const args = sanitizeArgvForResume(argv.slice(1), sessionId);
+
+  // Tear down the current TUI and restore the terminal BEFORE spawning so the
+  // child inherits a clean TTY (no raw mode / mouse tracking / alt-screen).
+  if (opts.beforeSpawn) {
+    try {
+      opts.beforeSpawn();
+    } catch (err) {
+      console.error(`[relaunch] beforeSpawn teardown failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
   const child = spawnImpl(exec, args, { stdio: "inherit", detached: false });
   child.once("error", (err) => {
     console.error(`[relaunch] spawn failed: ${(err as Error)?.message ?? err}`);
     exit(1);
   });
-  // Hand the TTY to the child and exit cleanly. The child takes over rendering.
+
+  if (opts.supervise) {
+    // Stay alive until the child exits so any intermediate launcher (bun run
+    // wrapper / bin shim) keeps the terminal foreground for the child instead
+    // of letting the shell reclaim it mid-restart.
+    child.once("exit", (code) => exit(code ?? 0));
+    return;
+  }
+
+  // Legacy fast-handoff: exit the instant the child spawns. Correct only when
+  // there is no intervening launcher waiting on this process.
   child.once("spawn", () => exit(0));
 }

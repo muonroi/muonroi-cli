@@ -457,6 +457,7 @@ async function startInteractive(
   const { createRoot } = await import("@opentui/react");
   const { createElement } = await import("react");
   const { App } = await import("./ui/app");
+  const { relaunchWithSession } = await import("./ui/utils/relaunch");
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
@@ -511,23 +512,94 @@ async function startInteractive(
     process.env.TERM_PROGRAM === "wezterm" ||
     process.env.MUONROI_FORCE_SHELL_HOLD === "1";
 
+  // Restore the terminal to a clean main-screen state: undo Kitty keyboard,
+  // raw mode, mouse tracking, bracketed paste, and alt-screen. Shared by the
+  // /exit path AND the session-resume relaunch — a relaunch that skips this
+  // leaves the child (and, once the parent exits, the shell) with a terminal
+  // still in mouse-tracking/alt-screen mode, so stray escape bytes get parsed
+  // by the shell as a bogus command ("'…' is not recognized … operable
+  // program or batch file").
+  function restoreTerminalForHandoff(): void {
+    // Restore terminal state from JS before the native destroyRenderer runs
+    restoreTerminalSync();
+
+    renderer.destroy();
+
+    // Use synchronous writes to stdout's underlying fd so escape codes flush
+    // before the child inherits stdin — async process.stdout.write() can buffer
+    // past the spawn() boundary, leaving the terminal in mouse-tracking mode.
+    const writeSync = (seq: string) => {
+      try {
+        const fs = require("node:fs") as typeof import("node:fs");
+        fs.writeSync(1, seq);
+      } catch {
+        /* fall back to async */
+        try {
+          process.stdout.write(seq);
+        } catch {
+          /* noop */
+        }
+      }
+    };
+    try {
+      // 1. Take stdin out of raw mode + pause it so no buffered keystrokes
+      //    (or in-flight mouse-event bytes) hit the child.
+      if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+        try {
+          process.stdin.setRawMode(false);
+        } catch {
+          /* noop */
+        }
+      }
+      try {
+        process.stdin.pause();
+      } catch {
+        /* noop */
+      }
+      try {
+        (process.stdin as unknown as { unref?: () => void }).unref?.();
+      } catch {
+        /* noop */
+      }
+      // 2. Disable extended-coords first (1006/1015/1005), then the basic
+      //    tracking modes (1003→1002→1000). Wrong order leaves the terminal
+      //    emitting SGR-formatted events after the base modes are off.
+      writeSync("\x1B[?1006l\x1B[?1015l\x1B[?1005l");
+      writeSync("\x1B[?1003l\x1B[?1002l\x1B[?1000l");
+      writeSync("\x1B[?2004l\x1B[?25h"); // bracketed paste off, cursor on
+      writeSync("\x1B[?1049l\x1B[0m\x1B[!p"); // exit alt-screen, reset SGR, soft reset
+    } catch {
+      // best-effort
+    }
+  }
+
+  // Resume a different session by restarting the CLI bound to --session <id>.
+  // Routes through the SAME teardown as /exit, then supervises the child so the
+  // shell never reclaims the foreground mid-restart (which corrupted the
+  // terminal and dropped the user back to a broken prompt).
+  const onRelaunch = (sessionId: string) => {
+    void agent.cleanup().finally(() => {
+      restoreTerminalForHandoff();
+      // Let the terminal process the restore sequences before the child takes
+      // over stdin (mirrors the /exit shell-hold timing).
+      setTimeout(() => {
+        try {
+          relaunchWithSession(sessionId, { supervise: true });
+        } catch (err) {
+          console.error(`[relaunch] failed: ${(err as Error)?.message ?? err}`);
+          process.exit(1);
+        }
+      }, 80);
+    });
+  };
+
   const onExit = () => {
     void agent.cleanup().finally(() => {
-      // Restore terminal state from JS before the native destroyRenderer runs
-      restoreTerminalSync();
-
-      renderer.destroy();
-
-      // Restore terminal modes BEFORE spawning child shell. Use synchronous
-      // writes to stdout's underlying fd so escape codes flush before the
-      // child inherits stdin — async process.stdout.write() can buffer past
-      // the spawn() boundary, leaving the terminal in mouse-tracking mode.
+      restoreTerminalForHandoff();
       const writeSync = (seq: string) => {
         try {
-          const fs = require("node:fs") as typeof import("node:fs");
-          fs.writeSync(1, seq);
+          (require("node:fs") as typeof import("node:fs")).writeSync(1, seq);
         } catch {
-          /* fall back to async */
           try {
             process.stdout.write(seq);
           } catch {
@@ -535,36 +607,6 @@ async function startInteractive(
           }
         }
       };
-      try {
-        // 1. Take stdin out of raw mode + pause it so no buffered keystrokes
-        //    (or in-flight mouse-event bytes) hit the child shell.
-        if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-          try {
-            process.stdin.setRawMode(false);
-          } catch {
-            /* noop */
-          }
-        }
-        try {
-          process.stdin.pause();
-        } catch {
-          /* noop */
-        }
-        try {
-          (process.stdin as unknown as { unref?: () => void }).unref?.();
-        } catch {
-          /* noop */
-        }
-        // 2. Disable extended-coords first (1006/1015/1005), then the basic
-        //    tracking modes (1003→1002→1000). Wrong order leaves the terminal
-        //    emitting SGR-formatted events after the base modes are off.
-        writeSync("\x1B[?1006l\x1B[?1015l\x1B[?1005l");
-        writeSync("\x1B[?1003l\x1B[?1002l\x1B[?1000l");
-        writeSync("\x1B[?2004l\x1B[?25h"); // bracketed paste off, cursor on
-        writeSync("\x1B[?1049l\x1B[0m\x1B[!p"); // exit alt-screen, reset SGR, soft reset
-      } catch {
-        // best-effort
-      }
 
       // WezTerm (and similar single-pane terminals) closes the window when
       // the foreground process exits. To keep the pane usable after `/exit`,
@@ -615,6 +657,7 @@ async function startInteractive(
       },
       initialMessage,
       onExit,
+      onRelaunch,
     }),
   );
 }

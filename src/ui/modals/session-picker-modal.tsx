@@ -1,3 +1,4 @@
+import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { SessionInfo } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 import { bottomAlignedModalTop } from "../utils/modal.js";
@@ -30,65 +31,79 @@ export function SessionPickerModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <box
-      position="absolute"
-      left={0}
-      top={0}
-      width={width}
-      height={height}
-      alignItems="center"
-      paddingTop={top}
-      backgroundColor={overlayBg}
-    >
+    <Semantic id="session-picker" role="dialog" name="Resume session" isModal>
       <box
-        width={panelWidth}
-        height={panelHeight}
-        backgroundColor={t.backgroundPanel}
-        paddingTop={1}
-        paddingBottom={1}
-        flexDirection="column"
+        position="absolute"
+        left={0}
+        top={0}
+        width={width}
+        height={height}
+        alignItems="center"
+        paddingTop={top}
+        backgroundColor={overlayBg}
       >
-        <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
-          <text fg={t.primary}>
-            <b>{"Resume session"}</b>
-          </text>
-          <text fg={t.textMuted}>{"esc"}</text>
-        </box>
-        <scrollbox flexGrow={1} minHeight={0}>
-          {sessions.length === 0 ? (
-            <box paddingLeft={2} paddingRight={2} paddingTop={1}>
-              <text fg={t.textMuted}>{"No prior sessions in this workspace."}</text>
-            </box>
-          ) : (
-            sessions.map((s, idx) => {
-              const focused = idx === focusIndex;
-              const ts = formatTimestamp(s.updatedAt);
-              const titleRaw = s.title?.trim() || "(untitled)";
-              const titleMax = Math.max(8, panelWidth - 38);
-              const title = titleRaw.length > titleMax ? `${titleRaw.slice(0, titleMax - 1)}…` : titleRaw;
-              const idShort = s.id.slice(-8);
-              return (
-                <box
-                  key={s.id}
-                  backgroundColor={focused ? t.selectedBg : undefined}
-                  paddingLeft={2}
-                  paddingRight={2}
-                  width="100%"
-                  flexDirection="row"
-                  justifyContent="space-between"
-                >
-                  <text fg={focused ? t.selected : t.text}>{`${ts}  ${title}`}</text>
-                  <text fg={focused ? t.primary : t.textMuted}>{`${s.model}  ${idShort}`}</text>
-                </box>
-              );
-            })
-          )}
-        </scrollbox>
-        <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-          <text fg={t.textMuted}>{"↑↓ navigate · enter resume (restarts CLI) · esc cancel"}</text>
+        <box
+          width={panelWidth}
+          height={panelHeight}
+          backgroundColor={t.backgroundPanel}
+          paddingTop={1}
+          paddingBottom={1}
+          flexDirection="column"
+        >
+          <box flexShrink={0} flexDirection="row" justifyContent="space-between" paddingLeft={2} paddingRight={2}>
+            <text fg={t.primary}>
+              <b>{"Resume session"}</b>
+            </text>
+            <text fg={t.textMuted}>{"esc"}</text>
+          </box>
+          <scrollbox flexGrow={1} minHeight={0}>
+            {sessions.length === 0 ? (
+              <box paddingLeft={2} paddingRight={2} paddingTop={1}>
+                <text fg={t.textMuted}>{"No prior sessions in this workspace."}</text>
+              </box>
+            ) : (
+              sessions.map((s, idx) => {
+                const focused = idx === focusIndex;
+                const ts = formatTimestamp(s.updatedAt);
+                const titleRaw = s.title?.trim() || "(untitled)";
+                const titleMax = Math.max(8, panelWidth - 38);
+                const title = titleRaw.length > titleMax ? `${titleRaw.slice(0, titleMax - 1)}…` : titleRaw;
+                // Show the FULL session id (not slice(-8)). The resumed-session
+                // header displays the full id, so a truncated id here made users
+                // think they had resumed a "different" session when it was the
+                // same one shown in two formats.
+                const idLabel = s.id;
+                return (
+                  <Semantic
+                    key={s.id}
+                    id={`session-item-${idx}`}
+                    role="listitem"
+                    name={`${title} ${idLabel}`}
+                    value={s.id}
+                    selected={focused || undefined}
+                  >
+                    <box
+                      backgroundColor={focused ? t.selectedBg : undefined}
+                      paddingLeft={2}
+                      paddingRight={2}
+                      width="100%"
+                      flexDirection="row"
+                      justifyContent="space-between"
+                    >
+                      <text fg={focused ? t.selected : t.text}>{`${ts}  ${title}`}</text>
+                      <text fg={focused ? t.primary : t.textMuted}>{`${s.model}  ${idLabel}`}</text>
+                    </box>
+                  </Semantic>
+                );
+              })
+            )}
+          </scrollbox>
+          <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
+            <text fg={t.textMuted}>{"↑↓ navigate · enter resume (restarts CLI) · esc cancel"}</text>
+          </box>
         </box>
       </box>
-    </box>
+    </Semantic>
   );
 }
 
