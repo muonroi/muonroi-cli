@@ -19,7 +19,10 @@
  */
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { streamText } from "ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { transformThinkingModeBody } from "../strategies/thinking-mode.js";
+
+type WireBody = { messages: Array<Record<string, unknown>>; [k: string]: unknown };
 
 interface CapturedRequest {
   url: string;
@@ -127,6 +130,11 @@ describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
     expect((assistantMsg!.tool_calls as Array<Record<string, unknown>>)[0]?.id).toBe("c1");
   });
 
+  // NOTE: the bare provider correctly omits reasoning_content when a turn has
+  // no reasoning part — but that is exactly the shape SiliconFlow's
+  // thinking-mode validator rejects (code 20015) in a mixed history. The
+  // strategy's transformRequestBody backfills it; see the dedicated describe
+  // block below ("transformThinkingModeBody — backfill / disable").
   it("emits no reasoning_content key when there are no reasoning parts (no false positives)", async () => {
     const capture: { current: CapturedRequest | null } = { current: null };
     const provider = makeStubProvider("siliconflow", capture);
@@ -146,5 +154,71 @@ describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
     const body = capture.current!.body as { messages: Array<Record<string, unknown>> };
     const assistantMsg = body.messages.find((m) => m.role === "assistant");
     expect(assistantMsg!.reasoning_content).toBeUndefined();
+  });
+});
+
+describe("transformThinkingModeBody — backfill / disable (code 20015 fix)", () => {
+  const ENV = "MUONROI_DEEPSEEK_DISABLE_THINKING";
+  let saved: string | undefined;
+  beforeEach(() => {
+    saved = process.env[ENV];
+    delete process.env[ENV];
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env[ENV];
+    else process.env[ENV] = saved;
+  });
+
+  it("A (default): backfills reasoning_content on a tool-call turn that lacks it", () => {
+    const body: WireBody = {
+      messages: [
+        { role: "user", content: "go" },
+        // tool-call turn with NO reasoning (the real bug shape)
+        { role: "assistant", content: null, tool_calls: [{ id: "t1", type: "function" }] },
+      ],
+    };
+    const out = transformThinkingModeBody(body);
+    const asst = out.messages.find((m) => m.role === "assistant")!;
+    expect(asst.reasoning_content).toBe("");
+    expect(Array.isArray(asst.tool_calls)).toBe(true); // tool_calls preserved
+    expect("thinking" in out).toBe(false); // thinking still ON
+  });
+
+  it("A (default): leaves a real reasoning_content untouched and patches only the gap", () => {
+    const body: WireBody = {
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: null, reasoning_content: "real thought", tool_calls: [{ id: "a" }] },
+        { role: "tool", content: "result" },
+        { role: "assistant", content: null, tool_calls: [{ id: "b" }] }, // gap
+      ],
+    };
+    const out = transformThinkingModeBody(body);
+    const asst = out.messages.filter((m) => m.role === "assistant");
+    expect(asst[0]!.reasoning_content).toBe("real thought"); // untouched
+    expect(asst[1]!.reasoning_content).toBe(""); // backfilled
+  });
+
+  it("A (default): does not touch non-assistant messages", () => {
+    const body: WireBody = {
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "tool", content: "r" },
+      ],
+    };
+    const out = transformThinkingModeBody(body);
+    expect("reasoning_content" in out.messages[0]!).toBe(false);
+    expect("reasoning_content" in out.messages[1]!).toBe(false);
+  });
+
+  it("B (env=1): disables thinking and does NOT backfill reasoning_content", () => {
+    process.env[ENV] = "1";
+    const body: WireBody = {
+      messages: [{ role: "assistant", content: null, tool_calls: [{ id: "t1" }] }],
+    };
+    const out = transformThinkingModeBody(body);
+    expect(out.thinking).toEqual({ type: "disabled" });
+    const asst = out.messages.find((m) => m.role === "assistant")!;
+    expect("reasoning_content" in asst).toBe(false);
   });
 });

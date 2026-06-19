@@ -285,15 +285,17 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
     // in src/cli/cost-forensics.ts).
     return { readField: "promptCacheHitTokens", creationSupported: false };
   }
-  // Root-fix (reasoning-roundtrip.test.ts): `@ai-sdk/openai-compatible@2.0.42`
-  // DOES serialize assistant reasoning parts as `reasoning_content` on the
-  // wire (dist/index.js:257-263). The earlier RC#1 workaround that disabled
-  // thinking mode entirely is no longer needed — reasoning round-trips
-  // natively, satisfying the DeepSeek thinking_mode guide requirement that
-  // `reasoning_content` MUST be passed back on subsequent tool turns.
-  //
-  // If a future AI SDK upgrade ever regresses this, the proof test will fail
-  // first; restore the unconditional disable here as a quick safety net.
+  // `@ai-sdk/openai-compatible@2.0.42` serializes assistant reasoning parts as
+  // `reasoning_content` on the wire — BUT only for turns that actually carry a
+  // reasoning part. In a multi-step tool loop some assistant turns make a tool
+  // call with NO reasoning (e.g. a quick todo_write), and those serialize
+  // WITHOUT a `reasoning_content` key. SiliconFlow's thinking-mode validator
+  // then rejects the whole request (HTTP 400 / code 20015, verified on a live
+  // wire body). The native round-trip is therefore necessary but NOT
+  // sufficient. The real fix lives in the provider strategies'
+  // `transformRequestBody` (see strategies/thinking-mode.ts): backfill
+  // `reasoning_content: ""` onto every assistant turn (default), or disable
+  // thinking via MUONROI_DEEPSEEK_DISABLE_THINKING=1 (fallback B).
   //
   // buildProviderOptions/sanitizeHistory inherit reliable no-op defaults.
 }
