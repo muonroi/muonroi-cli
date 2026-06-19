@@ -6,6 +6,7 @@ import path from "path";
 import readline from "readline";
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
+import { fileURLToPath } from "url";
 
 export const GITHUB_REPO = "muonroi/muonroi-cli";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
@@ -167,6 +168,135 @@ export function parseChecksumsFile(contents: string): Map<string, string> {
     result.set(match[2], match[1].toLowerCase());
   }
   return result;
+}
+
+/**
+ * How this muonroi-cli was installed. Drives which update path the built-in
+ * `/update` flow takes:
+ *   - "script"     → install.sh-managed; runScriptManagedUpdate replaces the binary.
+ *   - "bun-global" → `bun add -g muonroi-cli`; update via bun.
+ *   - "npm-global" → `npm install -g muonroi-cli`; update via npm.
+ *   - "compiled"   → standalone single-file binary; re-download / rebuild.
+ *   - "dev-link"   → linked/source build run from a git checkout (bun link,
+ *                    symlinked global bin, or `bun run src/index.ts`); rebuild dist.
+ *   - "unknown"    → can't tell; fall back to generic guidance.
+ */
+export type InstallMethod = "script" | "bun-global" | "npm-global" | "compiled" | "dev-link" | "unknown";
+
+/** Absolute filesystem path of THIS module, normalized to forward slashes. */
+function runningModulePath(): string {
+  try {
+    return fileURLToPath(import.meta.url).replace(/\\/g, "/");
+  } catch {
+    return (process.argv[1] ?? "").replace(/\\/g, "/");
+  }
+}
+
+/** Walk up from `startDir` looking for a `.git` entry; return the repo root or null. */
+function findGitRoot(startDir: string): string | null {
+  let dir = startDir;
+  for (let i = 0; i < 30 && dir; i++) {
+    if (fs.existsSync(path.join(dir, ".git"))) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * Detect how the running muonroi-cli was installed by inspecting the location
+ * of this module on disk plus the runtime. Pure path inspection — no I/O beyond
+ * the install.json check, so it is safe to call on the hot path.
+ */
+export function detectInstallMethod(homeDir = os.homedir()): InstallMethod {
+  if (loadScriptInstallMetadata(homeDir)) return "script";
+
+  const modPath = runningModulePath();
+  const importUrl = (import.meta.url || "").replace(/\\/g, "/");
+
+  // Bun single-file compiled executable embeds modules under a virtual root
+  // (e.g. "/$bunfs/" or "/~BUN/"), so the module path is not a real fs path.
+  if (importUrl.includes("/$bunfs/") || importUrl.includes("/~BUN/") || modPath.includes("/$bunfs/")) {
+    return "compiled";
+  }
+
+  // Bun's global install root: ~/.bun/install/global/node_modules/muonroi-cli/...
+  if (modPath.includes("/.bun/install/global/")) return "bun-global";
+
+  if (/\/node_modules\/muonroi-cli\//.test(modPath)) {
+    return modPath.includes("/.bun/") ? "bun-global" : "npm-global";
+  }
+
+  // Not under node_modules and not launched by node/bun → standalone binary.
+  const exeBase = ((process.execPath || "").replace(/\\/g, "/").split("/").pop() ?? "").toLowerCase();
+  if (!modPath.includes("/node_modules/") && !/^(node|bun)(\.exe)?$/.test(exeBase)) {
+    return "compiled";
+  }
+
+  // Linked/source build run from a git checkout (e.g. `bun link`, a symlinked
+  // global bin pointing at the repo, or `bun run src/index.ts`). The "update"
+  // here is a rebuild, not a package-manager swap.
+  if (modPath && !modPath.includes("/node_modules/") && findGitRoot(path.dirname(modPath))) {
+    return "dev-link";
+  }
+
+  return "unknown";
+}
+
+/** Package-manager command that updates muonroi-cli for the given method, or null. */
+export function getUpdateCommandForMethod(method: InstallMethod): string | null {
+  switch (method) {
+    case "bun-global":
+      return "bun add -g muonroi-cli@latest";
+    case "npm-global":
+      return "npm install -g muonroi-cli@latest";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Top-level update entry point. Routes to the script-managed updater for
+ * install.sh installs, and returns the correct package-manager command for
+ * bun/npm global installs (rather than the misleading "reinstall via install.sh"
+ * dead-end). We do NOT auto-spawn the package manager: on Windows overwriting the
+ * files of the live process is unreliable, so we hand the user an exact command
+ * to run from a fresh terminal.
+ */
+export async function runManagedUpdate(currentVersion: string): Promise<ScriptUpdateRunResult> {
+  const method = detectInstallMethod();
+
+  if (method === "script") return runScriptManagedUpdate(currentVersion);
+
+  const cmd = getUpdateCommandForMethod(method);
+  if (cmd) {
+    const pm = method === "bun-global" ? "bun" : "npm";
+    return {
+      success: true,
+      output: `Installed via ${pm} (global package). To update, run this in a fresh terminal:\n\n  ${cmd}\n\nThen restart muonroi-cli.`,
+    };
+  }
+
+  if (method === "compiled") {
+    const target = getReleaseTargetForPlatform();
+    const asset = target?.assetName ?? "the release asset for your platform";
+    return {
+      success: true,
+      output: `Standalone binary install. Download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary, or rebuild from source.`,
+    };
+  }
+
+  if (method === "dev-link") {
+    const root = findGitRoot(path.dirname(runningModulePath()));
+    const target = root ?? "the muonroi-cli checkout";
+    return {
+      success: true,
+      output: `Running a linked/source build from ${target}. To update, rebuild it:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`,
+    };
+  }
+
+  return notScriptManaged("update");
 }
 
 export async function runScriptManagedUpdate(currentVersion: string): Promise<ScriptUpdateRunResult> {
