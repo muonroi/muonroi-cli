@@ -179,10 +179,12 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   },
 };
 
-// TODO(WhoAmI-L6): when EE v4.0 Who Am I profile is available, skip
-// NO_PREAMBLE_RULE for users with feedback_style="explicit" who prefer
-// preamble. Also source TASK_TYPE_DEFAULT_STYLE from profile communication.brevity
-// instead of the hardcoded heuristic map above.
+// TODO(WhoAmI-L6): partly addressed. The brevity-derived default style now flows in
+// via ctx.outputStyle (layer1-intent.ts → ../ee/who-am-i.ts), so the brevity arm is
+// effectively covered without re-reading the profile here. The feedback_style arm is
+// DEFERRED: EE slice-1 emits feedback_style ∈ {implicit, precise-correction}, NOT the
+// "explicit" value this assumed — there is no committed signal to gate NO_PREAMBLE_RULE
+// on yet. Revisit when a later EE slice adds an explicit-preamble preference.
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
   // Chitchat: layer6Output already skipped suffix work; mirror that here so

@@ -191,7 +191,8 @@ Other modals still in root `src/ui/`:
 | File | Purpose |
 |------|---------|
 | `bb-retrieval.ts` | `fetchBBContext()` — queries EE collections for BB context |
-| `bridge.ts` | PIL bridge — unified `/api/pil-context` call with circuit breaker |
+| `bridge.ts` | PIL bridge — unified `/api/pil-context` call with circuit breaker. Also re-exports the WhoAmI provider (single sanctioned PIL→EE entry point per the `no-network-in-pil` arch guard) |
+| `who-am-i.ts` | "Who Am I" v4.0 profile provider — reads the device-local `~/.experience/profile.yaml` (via EE's installed `loadProfile`/`getPrivacyLevel` through `createRequire`), privacy-gated by a positive per-dim allowlist (defense-in-depth), cached + fail-open. `getWhoAmIProfile()` + pure `selectWhoAmIDims`/`outputStyleFromProfile`. Consumed by the pipeline → L1 outputStyle baseline |
 
 ---
 

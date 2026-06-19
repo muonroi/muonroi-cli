@@ -15,6 +15,7 @@
  */
 
 import { getCachedServerBaseUrl } from "../ee/auth.js";
+import { getWhoAmIProfile, outputStyleFromProfile } from "../ee/bridge.js";
 import { getCachedEEClientMode } from "../ee/client-mode.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
 import { DEFAULT_TOKEN_BUDGET } from "./budget.js";
@@ -98,7 +99,11 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     layerSnapshots.push({ name, charsBefore, charsAfter, charsDelta: charsAfter - charsBefore, durationMs: ms });
   }
 
-  await timed("layer1-intent", (c) => layer1Intent(c, { llmFallback: options?.llmFallback }));
+  // WhoAmI v4.0: derive the output-style baseline once from the device-local profile
+  // (cached, fail-open → null when EE/profile absent or privacy off). Passed into
+  // layer1 so the hot layer stays off the EE/profile import path (arch boundary).
+  const profileStyleBaseline = outputStyleFromProfile(getWhoAmIProfile());
+  await timed("layer1-intent", (c) => layer1Intent(c, { llmFallback: options?.llmFallback, profileStyleBaseline }));
 
   // Layer 1.5: deterministic complexity-size classification. Pure heuristic,
   // no LLM call, no network. Consumed by 4B (step ceiling matrix) and 4A

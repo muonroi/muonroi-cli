@@ -763,3 +763,35 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
     expect(result.taskType).toBe("debug");
   });
 });
+
+describe("layer1Intent — WhoAmI v4.0 output-style baseline (opts.profileStyleBaseline)", () => {
+  // A cheap regex task hit (high conf, unified PIL mocked off) skips the brain and
+  // lands on the classifier-default branch — exactly where the profile baseline now
+  // applies. The pipeline derives the baseline from the profile; layer1 just consumes
+  // the option. The prompt carries no explicit style cue.
+  const REFACTOR_PROMPT = "refactor the authentication module to use the new provider";
+
+  it("uses the profile-derived style baseline when no per-turn signal resolves it", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:refactor", confidence: 0.9 });
+    const result = await layer1Intent(makeCtx(REFACTOR_PROMPT), { profileStyleBaseline: "concise" });
+    expect(result.taskType).toBe("refactor");
+    expect(result.outputStyle).toBe("concise");
+    expect(result._intentTrace?.styleSource).toBe("whoami-profile");
+  });
+
+  it("falls back to balanced when there is no profile baseline (behaviour unchanged)", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:refactor", confidence: 0.9 });
+    const result = await layer1Intent(makeCtx(REFACTOR_PROMPT), { profileStyleBaseline: null });
+    expect(result.outputStyle).toBe("balanced");
+    expect(result._intentTrace?.styleSource).toBe("classifier-default");
+  });
+
+  it("an explicit per-turn style request still overrides the profile baseline", async () => {
+    mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:refactor", confidence: 0.9 });
+    const result = await layer1Intent(makeCtx("refactor the auth module and explain step by step"), {
+      profileStyleBaseline: "concise",
+    });
+    expect(result.outputStyle).toBe("detailed");
+    expect(result._intentTrace?.styleSource).toBe("explicit-regex");
+  });
+});
