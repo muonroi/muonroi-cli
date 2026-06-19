@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createStallWatchdog,
+  type MidLoopStallState,
   STALL_ABORT_REASON,
   type StallRepromptState,
+  shouldContinueAfterMidLoopStall,
   shouldRepromptStall,
   stallRepromptBackoffMs,
 } from "./stall-watchdog.js";
@@ -125,6 +127,48 @@ describe("shouldRepromptStall", () => {
 
   it("does NOT re-prompt over a genuine user cancel", () => {
     expect(shouldRepromptStall(ttfb({ aborted: true }))).toBe(false);
+  });
+});
+
+describe("shouldContinueAfterMidLoopStall", () => {
+  // A clean mid-loop dead socket: watchdog fired AFTER earlier steps ran
+  // (chunksThisAttempt > 0), but the in-flight step produced nothing
+  // (chunksThisStep === 0). The ONLY shape that continues. Distinct from the
+  // TTFB re-prompt, which requires chunksThisAttempt === 0.
+  const midLoop = (over: Partial<MidLoopStallState> = {}): MidLoopStallState => ({
+    stallTriggered: true,
+    chunksThisAttempt: 132, // 66 prior steps' worth of chunks
+    chunksThisStep: 0,
+    retryCount: 0,
+    maxRetries: 1,
+    aborted: false,
+    ...over,
+  });
+
+  it("continues a mid-loop dead-socket stall under the cap", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop())).toBe(true);
+  });
+
+  it("does NOT continue when the watchdog never fired", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop({ stallTriggered: false }))).toBe(false);
+  });
+
+  it("does NOT continue a time-to-first-byte stall (chunksThisAttempt === 0 → TTFB re-prompt owns it)", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop({ chunksThisAttempt: 0 }))).toBe(false);
+  });
+
+  it("does NOT continue when the stalled step already emitted output (would duplicate)", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop({ chunksThisStep: 3 }))).toBe(false);
+  });
+
+  it("does NOT continue once the retry cap is reached", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop({ retryCount: 1, maxRetries: 1 }))).toBe(false);
+    // maxRetries=0 means the feature is disabled — never continue.
+    expect(shouldContinueAfterMidLoopStall(midLoop({ retryCount: 0, maxRetries: 0 }))).toBe(false);
+  });
+
+  it("does NOT continue over a genuine user cancel", () => {
+    expect(shouldContinueAfterMidLoopStall(midLoop({ aborted: true }))).toBe(false);
   });
 });
 
