@@ -203,6 +203,7 @@ import { attemptStallRescue, pushStallToolResult, type StallToolResult } from ".
 import {
   createStallWatchdog,
   STALL_ERROR_MESSAGE,
+  shouldContinueAfterMidLoopStall,
   shouldRepromptStall,
   stallRepromptBackoffMs,
 } from "./stall-watchdog.js";
@@ -1112,6 +1113,18 @@ export class MessageProcessor {
     // answer rescue path instead. maxStallRetries = 0 restores legacy behaviour.
     let stallRetryCount = 0;
     const maxStallRetries = getProviderStallRetries();
+    // Mid-loop dead-socket CONTINUATION counter (loop-persistent). Distinct from
+    // the TTFB re-prompt above: when the watchdog fires AFTER earlier tool steps
+    // ran (chunksThisAttempt > 0) but the in-flight step produced zero bytes
+    // (chunksThisStep === 0 — observed live: xai/grok-build-0.1 wedges the socket
+    // on an inter-step request mid-investigation, session 247a0cea2eac), we
+    // append the completed steps' messages to history and re-issue streamText to
+    // RESUME from the stalled step. Because completed tool-calls + tool-results
+    // are in history, no tool is re-run and no text is duplicated — safe even
+    // for write tools (the TTFB re-prompt is NOT, hence its zero-chunks gate).
+    // Bounded by the same maxStallRetries cap so a persistently-dead provider
+    // still falls through to the partial-answer rescue.
+    let midLoopStallRetryCount = 0;
 
     // Live-queue steering: messages the user typed mid-turn are drained at a
     // prepareStep boundary and accumulated here, then re-appended (deduped) to
@@ -1255,6 +1268,11 @@ export class MessageProcessor {
         // Count of stream parts received in THIS attempt. Stays 0 only when the
         // provider never sent a first byte → the safe-to-re-prompt stall case.
         let chunksThisAttempt = 0;
+        // Count of stream parts received since the last step boundary (reset in
+        // prepareStep). Distinguishes a mid-loop dead socket (a single step's
+        // request got zero bytes while every prior step completed) from a stall
+        // that interrupted text mid-generation. See shouldContinueAfterMidLoopStall.
+        let chunksThisStep = 0;
         // Decide whether a fired stall watchdog should re-prompt (re-issue the
         // same request) instead of falling through to rescue/error. Returns the
         // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
@@ -1871,6 +1889,12 @@ export class MessageProcessor {
             // See src/orchestrator/tool-args-repair.ts for the transforms.
             experimental_repairToolCall: repairToolCallHook,
             prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
+              // A new step's provider request is about to go out — reset the
+              // per-step chunk counter. Fires after the previous step's chunks
+              // were counted (prepareStep runs post tool-execution), so if THIS
+              // step's request wedges before any byte, chunksThisStep stays 0 and
+              // the mid-loop dead-socket continuation can safely resume from here.
+              chunksThisStep = 0;
               if (sn < 1) return {};
               // --- Live-queue steering injection ---------------------------
               // Drain the UI steer queue ONCE per prepareStep call (sn >= 1),
@@ -2189,7 +2213,10 @@ export class MessageProcessor {
             // Count only real content parts. The watchdog abort itself surfaces
             // as an "abort" part — counting it would defeat the TTFB-stall gate
             // (a frozen-before-first-byte stall yields ONLY the abort part).
-            if (part.type !== "abort") chunksThisAttempt++;
+            if (part.type !== "abort") {
+              chunksThisAttempt++;
+              chunksThisStep++;
+            }
             if (signal.aborted) {
               yield { type: "content", content: "\n\n[Cancelled]" };
               break;
@@ -2815,6 +2842,107 @@ export class MessageProcessor {
                     if (!signal.aborted) {
                       stallTriggered = false;
                       continue streamAttempt;
+                    }
+                  }
+                  // Mid-loop dead-socket CONTINUATION (distinct from the TTFB
+                  // re-prompt above): the watchdog fired AFTER earlier steps ran
+                  // (chunksThisAttempt > 0) but the in-flight step produced zero
+                  // bytes (chunksThisStep === 0) — a single wedged inter-step
+                  // socket (xai/grok-build-0.1 mid-investigation, session
+                  // 247a0cea2eac), not a down backend. The TTFB re-prompt can't
+                  // recover this (its zero-chunks gate refuses, since restarting
+                  // the whole request would re-run the tools that already ran).
+                  // Instead, append the COMPLETED steps' generated messages
+                  // (assistant tool-calls + their tool-results) to history and
+                  // re-issue streamText: with the results already in context, no
+                  // tool re-runs and no text duplicates, so this is safe even for
+                  // write/commit tools. Falls through to the rescue path if the
+                  // completed steps can't be recovered.
+                  if (
+                    shouldContinueAfterMidLoopStall({
+                      stallTriggered,
+                      chunksThisAttempt,
+                      chunksThisStep,
+                      retryCount: midLoopStallRetryCount,
+                      maxRetries: maxStallRetries,
+                      aborted: signal.aborted,
+                    })
+                  ) {
+                    let _appended = 0;
+                    try {
+                      // result.response settles fast here (the stream was already
+                      // aborted via stall.signal). Race a short timeout so a
+                      // doubly-wedged provider can't re-hang the recovery itself.
+                      const _resp = (await Promise.race([
+                        result.response,
+                        new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                      ])) as { messages: ModelMessage[] };
+                      const _gen = sanitizeModelMessages(
+                        scrubImagePayloadsInMessages(_resp.messages),
+                      ) as ModelMessage[];
+                      for (const _m of _gen) {
+                        deps.messages.push(_m);
+                        _appended++;
+                      }
+                    } catch (respErr) {
+                      console.error(
+                        `[message-processor] mid-loop stall continuation: completed steps unavailable: ${(respErr as Error)?.message}`,
+                      );
+                    }
+                    // A re-issue with zero preserved steps would restart from the
+                    // original prompt and re-run every tool — only continue when
+                    // the completed steps were actually grafted onto history.
+                    if (_appended > 0) {
+                      midLoopStallRetryCount++;
+                      const _midBackoff = stallRepromptBackoffMs(midLoopStallRetryCount);
+                      try {
+                        const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                          | { emitEvent: (e: unknown) => void }
+                          | undefined;
+                        _ar?.emitEvent({
+                          t: "event",
+                          kind: "stream-retry",
+                          attempt: midLoopStallRetryCount,
+                          maxAttempts: maxStallRetries + 1,
+                          errorName: "TimeoutError",
+                          errorMessage: "provider-stall (mid-loop) — resuming from completed steps",
+                          nextDelayMs: _midBackoff,
+                        });
+                        _ar?.emitEvent({
+                          t: "event",
+                          kind: "toast",
+                          level: "warning",
+                          text: `Model stalled mid-task — resuming (attempt ${midLoopStallRetryCount}/${maxStallRetries})…`,
+                        });
+                      } catch (emitErr) {
+                        console.error(
+                          `[message-processor] mid-loop continuation telemetry failed: ${(emitErr as Error)?.message}`,
+                        );
+                      }
+                      try {
+                        if (deps.session) {
+                          logInteraction(deps.session.id, "stream_retry", {
+                            data: {
+                              attempt: midLoopStallRetryCount,
+                              maxAttempts: maxStallRetries + 1,
+                              errorName: "provider-stall-midloop",
+                              errorMessage: "no byte on inter-step request — resumed from completed steps",
+                              appendedMessages: _appended,
+                              nextDelayMs: _midBackoff,
+                            },
+                          });
+                        }
+                      } catch (logErr) {
+                        console.error(
+                          `[message-processor] mid-loop continuation log failed: ${(logErr as Error)?.message}`,
+                        );
+                      }
+                      stall.dispose();
+                      await new Promise<void>((r) => setTimeout(r, _midBackoff));
+                      if (!signal.aborted) {
+                        stallTriggered = false;
+                        continue streamAttempt;
+                      }
                     }
                   }
                   stall.dispose();

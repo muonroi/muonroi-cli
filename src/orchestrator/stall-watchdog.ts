@@ -74,6 +74,59 @@ export function shouldRepromptStall(s: StallRepromptState): boolean {
   );
 }
 
+/** Inputs to the mid-loop stall continuation decision — see {@link shouldContinueAfterMidLoopStall}. */
+export interface MidLoopStallState {
+  /** The watchdog fired for this attempt. */
+  stallTriggered: boolean;
+  /**
+   * Real content parts received across the WHOLE streamText attempt (all steps).
+   * `> 0` proves earlier tool steps already ran — so this is NOT a time-to-first-
+   * byte stall (that case is handled by {@link shouldRepromptStall}).
+   */
+  chunksThisAttempt: number;
+  /**
+   * Real content parts received since the last step boundary (reset in
+   * `prepareStep`). `0` means the in-flight step's provider request produced no
+   * byte before the watchdog fired — a dead socket on a SINGLE step, with every
+   * prior step fully completed. Safe to continue: the completed steps'
+   * assistant+tool messages are appended to history before re-issuing, so no
+   * tool is re-run and no text is duplicated.
+   */
+  chunksThisStep: number;
+  /** How many mid-loop continuations have already happened this turn. */
+  retryCount: number;
+  /** Configured cap (getProviderStallRetries); 0 disables continuation. */
+  maxRetries: number;
+  /** True on genuine user cancel (never continue over a cancel). */
+  aborted: boolean;
+}
+
+/**
+ * Decide whether a fired stall watchdog should CONTINUE the turn (append the
+ * completed steps' messages, then re-issue streamText to resume from the
+ * stalled step) instead of falling through to the partial-answer rescue.
+ *
+ * This is the mid-loop counterpart to {@link shouldRepromptStall}. The TTFB
+ * re-prompt restarts the WHOLE request from the original prompt, so it is gated
+ * on `chunksThisAttempt === 0` to avoid re-running tools. Continuation instead
+ * preserves all completed steps in history (assistant tool-calls + their
+ * tool-results), so re-issuing cannot re-run a tool — making it safe even when
+ * earlier steps had side effects (writes, commits).
+ *
+ * Qualifies ONLY when: the watchdog fired, earlier steps ran
+ * (`chunksThisAttempt > 0`), the CURRENT step produced nothing
+ * (`chunksThisStep === 0` → a clean dead socket, no partial text to duplicate),
+ * under the retry cap, and not a user cancel. A step that emitted partial text
+ * then stalled (`chunksThisStep > 0`) falls through to rescue instead, since
+ * re-issuing would duplicate that partial output. Pure (no side effects) so it
+ * is unit-testable in isolation from the orchestrator loop.
+ */
+export function shouldContinueAfterMidLoopStall(s: MidLoopStallState): boolean {
+  return (
+    s.stallTriggered && s.chunksThisAttempt > 0 && s.chunksThisStep === 0 && s.retryCount < s.maxRetries && !s.aborted
+  );
+}
+
 /**
  * Exponential backoff (ms, capped at 4s) before the Nth stall re-prompt
  * (1-based): 500 → 1000 → 2000 → 4000 → 4000.
