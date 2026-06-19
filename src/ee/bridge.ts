@@ -13,6 +13,14 @@ import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv, withEeTimeout } from "../utils/ee-logger.js";
 
+export type { WhoAmIDim, WhoAmIDimName, WhoAmIProfile } from "./who-am-i.js";
+// "Who Am I" v4.0 profile access. Re-exported through the bridge so PIL layers
+// reach it via the single sanctioned EE entry point (see the no-network-in-pil
+// arch guard: layer1/types may import `../ee/bridge` only). The provider is
+// local-only (no network), cached, and fail-open — the same contract as the rest
+// of this bridge.
+export { getWhoAmIProfile, outputStyleFromProfile, resetWhoAmICache } from "./who-am-i.js";
+
 /**
  * Phase 21.5 — `routeModel` / `routeTask` budget. EE server unreachability used
  * to hang `/ideal` for the OS-level fetch connect timeout (~5 min on Windows).

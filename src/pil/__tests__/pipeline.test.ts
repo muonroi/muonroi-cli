@@ -10,6 +10,8 @@ vi.mock("../../ee/bridge.js", () => ({
   searchCollection: vi.fn().mockResolvedValue([]),
   getEmbeddingRaw: vi.fn().mockResolvedValue(null),
   routeTask: vi.fn().mockResolvedValue(null),
+  getWhoAmIProfile: vi.fn(() => null),
+  outputStyleFromProfile: vi.fn(() => null),
 }));
 
 import { classify } from "../../router/classifier/index.js";

@@ -50,13 +50,14 @@ const DIRECTIVE_BUDGET_FRACTION = 0.25;
 // 700 tokens ≈ 2.8K chars). The fraction still wins when tokenBudget is large.
 const DIRECTIVE_MIN_TOKENS = 700;
 
-// TODO(WhoAmI-L4): when EE v4.0 Who Am I profile is available:
-//   - work_patterns.delegation_style="autonomous" → bias routeTask toward "direct",
-//     skip qc-flow discussion phase for familiar task types
-//   - decision_speed="fast-intuitive" → trim heavy-tier directive text,
-//     remove "consider alternatives" section
-//   - Cache routeTask result per (taskType, domain) in the profile so the
-//     EE brain round-trip is skipped for patterns the user has confirmed before
+// TODO(WhoAmI-L4): deferred — EE slice-1 does NOT emit the dims this needs.
+//   - work_patterns.delegation_style="autonomous" → bias routeTask toward "direct":
+//     `delegation_style` is NOT in EE's emitted set — awaits a later EE slice.
+//   - decision_speed="fast-intuitive" → trim heavy-tier directive: decision_speed IS
+//     available via ../ee/who-am-i.ts (getWhoAmIProfile), but trimming the HEAVY
+//     directive is risky (see DIRECTIVE_MIN_TOKENS below — past truncation dropped
+//     the rubric), so it stays manual pending a measured approach.
+//   - Cache routeTask result per (taskType, domain): unblocked by the provider, future.
 
 export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> {
   // Short-circuit: chitchat / pure-greeting inputs (detected by layer1) should

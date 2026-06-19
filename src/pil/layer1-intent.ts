@@ -467,6 +467,14 @@ function detectStyleFromText(raw: string): OutputStyle | null {
 export interface Layer1Options {
   /** Pass 4 LLM fallback closure — fires when brain returned null or confidence < 0.7. */
   llmFallback?: LlmClassifyFn;
+  /**
+   * WhoAmI v4.0 output-style baseline, derived once in the pipeline from the
+   * device-local profile (via ../ee/bridge.js getWhoAmIProfile + outputStyleFromProfile).
+   * Applied as the standing default when no per-turn style signal resolves — replaces
+   * the generic "balanced" classifier-default. null/undefined ⇒ behaviour unchanged.
+   * Passed in (not read here) to keep layer1 off the EE/profile import path.
+   */
+  profileStyleBaseline?: OutputStyle | null;
 }
 
 // Explicit command/tool-execution signals (EN + VI). When any fires the turn
@@ -1111,8 +1119,11 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     // accidentally swallow phrases like "refactor this" or "fix the bug" that
     // happen to be short.
     //
-    // TODO(WhoAmI-Pass0): when EE v4.0 Who Am I profile is available, read
-    // communication.brevity + decision_speed here as outputStyle baseline.
+    // WhoAmI v4.0: the outputStyle baseline from communication.brevity +
+    // decision_speed is now wired below (getWhoAmIProfile/outputStyleFromProfile
+    // at the classifier-default branch — it replaces "balanced" when no per-turn
+    // signal resolves the style). Not applied at this chitchat hot-path: greetings
+    // already force "concise" regardless of profile.
     const trimmed = ctx.raw.trim();
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
     const noTaskSignal = taskType === null || (taskType === "general" && result.reason === "regex:short-message");
@@ -1374,6 +1385,13 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
               styleSource = "brain-legacy";
             }
           }
+        } else if (opts.profileStyleBaseline) {
+          // WhoAmI v4.0 baseline: a standing communication.brevity/decision_speed
+          // preference (computed once in the pipeline from the on-device profile)
+          // fills in when no per-turn signal resolved the style. Per-turn detection
+          // above still wins (override); this only replaces the generic "balanced".
+          outputStyle = opts.profileStyleBaseline;
+          styleSource = "whoami-profile";
         } else {
           outputStyle = "balanced";
           styleSource = "classifier-default";

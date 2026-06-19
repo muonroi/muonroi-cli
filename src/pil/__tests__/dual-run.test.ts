@@ -13,6 +13,8 @@ vi.mock("../../ee/bridge.js", () => ({
   getEmbeddingRaw: vi.fn().mockResolvedValue(null),
   routeTask: vi.fn().mockResolvedValue(null),
   pilContext: vi.fn().mockResolvedValue(null),
+  getWhoAmIProfile: vi.fn(() => null),
+  outputStyleFromProfile: vi.fn(() => null),
 }));
 
 const FIXTURES = [

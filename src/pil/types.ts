@@ -115,8 +115,10 @@ export interface PipelineContext {
    * behavioral reflex status. Layer 6 appends them as MANDATORY RULES to the
    * output suffix so the model treats them as instructions, not just context.
    *
-   * TODO(WhoAmI): when EE v4.0 Who Am I is implemented, merge project-level
-   * t1Rules with user-level personality directives from the profile model.
+   * TODO(WhoAmI): user-level personality is now available via ../ee/who-am-i.ts
+   * (getWhoAmIProfile). A future enhancement can merge these project-level t1Rules
+   * with user-level personality directives in the Layer 6 suffix; today the profile
+   * is consumed as the L1 outputStyle baseline rather than as MANDATORY RULES.
    */
   t1Rules?: string[];
   /**
@@ -180,7 +182,14 @@ export interface IntentDetectionTrace {
   /** Pass 4 LLM fallback returned a parseable result. */
   pass4LlmSucceeded?: boolean;
   /** How the final outputStyle was resolved. */
-  styleSource: "explicit-regex" | "brain-unified" | "brain-legacy" | "chitchat-default" | "classifier-default" | "none";
+  styleSource:
+    | "explicit-regex"
+    | "brain-unified"
+    | "brain-legacy"
+    | "whoami-profile"
+    | "chitchat-default"
+    | "classifier-default"
+    | "none";
   /** Final taskType emitted by Layer 1. */
   finalTaskType: string | null;
   /** Final confidence emitted by Layer 1. */
