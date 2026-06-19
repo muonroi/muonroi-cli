@@ -5,6 +5,9 @@ vi.mock("../../ee/bridge.js", () => ({
   getEmbeddingRaw: vi.fn().mockResolvedValue(null),
   searchCollection: vi.fn().mockResolvedValue([]),
   searchByText: vi.fn().mockResolvedValue([]),
+  // WhoAmI v4.0: L5 reads session_length to tune the resume-digest stale window.
+  // Default null = fail-open → 30m default, so the pre-v4.0 assertions below hold.
+  getWhoAmIProfile: vi.fn(() => null),
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -20,7 +23,8 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
-import { layer5Context } from "../layer5-context";
+import { getWhoAmIProfile } from "../../ee/bridge.js";
+import { layer5Context, staleThresholdMsForSessionLength } from "../layer5-context";
 
 function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   return {
@@ -153,5 +157,46 @@ describe("layer5Context", () => {
     );
     expect(result.enriched).toContain("already enriched prompt");
     expect(result.enriched).toContain("[flow-context:");
+  });
+
+  // WhoAmI v4.0: session_length tunes the resume-digest stale window. A 45-minute-old
+  // digest is stale at the 30m default but FRESH for a long-session user (window→60m).
+  // This proves the profile actually flows through layer5Context, not just the helper.
+  it("long session_length relaxes the stale window — 45m digest is not stale", async () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValueOnce({
+      level: "minimal",
+      dims: { "work_patterns.session_length": { value: "long", confidence: 0.5, samples: 16 } },
+    });
+    const result = await layer5Context(
+      makeCtx({ resumeDigest: "Deep-work session context", digestAgeMs: 45 * 60 * 1000 }),
+    );
+    expect(result.enriched).not.toContain("stale");
+    const layer = result.layers.find((l) => l.name === "context-enrichment");
+    expect(layer!.delta).toContain("window=60m");
+    expect(layer!.delta).not.toContain(",stale");
+  });
+
+  it("short session_length tightens the stale window — 20m digest is stale", async () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValueOnce({
+      level: "minimal",
+      dims: { "work_patterns.session_length": { value: "short", confidence: 0.5, samples: 16 } },
+    });
+    const result = await layer5Context(
+      makeCtx({ resumeDigest: "Quick-burst session context", digestAgeMs: 20 * 60 * 1000 }),
+    );
+    expect(result.enriched).toContain("stale");
+    const layer = result.layers.find((l) => l.name === "context-enrichment");
+    expect(layer!.delta).toContain("window=15m");
+  });
+});
+
+describe("staleThresholdMsForSessionLength — pure session_length → stale window mapping", () => {
+  it("long → 60m, short → 15m, medium/absent/unknown → 30m default (fail-open)", () => {
+    expect(staleThresholdMsForSessionLength("long")).toBe(60 * 60 * 1000);
+    expect(staleThresholdMsForSessionLength("short")).toBe(15 * 60 * 1000);
+    expect(staleThresholdMsForSessionLength("medium")).toBe(30 * 60 * 1000);
+    expect(staleThresholdMsForSessionLength(undefined)).toBe(30 * 60 * 1000);
+    expect(staleThresholdMsForSessionLength(null)).toBe(30 * 60 * 1000);
+    expect(staleThresholdMsForSessionLength("telegraphic")).toBe(30 * 60 * 1000);
   });
 });

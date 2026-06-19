@@ -27,18 +27,24 @@ describe("selectWhoAmIDims — privacy allowlist + commit/confidence gates", () 
       "personality.decision_speed": rawDim("fast-intuitive", 0.7),
       "work_patterns.energy": rawDim("night-owl", 0.6),
       "work_patterns.multitasking": rawDim("sequential-deep", 0.65),
+      "work_patterns.session_length": rawDim("long", 0.55),
     });
 
-  test("minimal exposes only the 3 Tang-1 work dims", () => {
+  test("minimal exposes only the 4 Tang-1 work dims", () => {
     const dims = selectWhoAmIDims(all(), "minimal");
     expect(Object.keys(dims).sort()).toEqual(
-      ["personality.decision_speed", "work_patterns.energy", "work_patterns.multitasking"].sort(),
+      [
+        "personality.decision_speed",
+        "work_patterns.energy",
+        "work_patterns.multitasking",
+        "work_patterns.session_length",
+      ].sort(),
     );
   });
 
-  test("standard exposes all 8 committed dims", () => {
+  test("standard exposes all 9 committed dims", () => {
     const dims = selectWhoAmIDims(all(), "standard");
-    expect(Object.keys(dims).length).toBe(8);
+    expect(Object.keys(dims).length).toBe(9);
   });
 
   test("standard-built profile rendered at minimal strips Tang-2 dims (no stale leak)", () => {
