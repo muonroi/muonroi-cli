@@ -148,12 +148,12 @@ describe("checkForUpdate", () => {
 });
 
 describe("runUpdate", () => {
-  it("returns success when the script-managed updater succeeds", async () => {
+  it("returns success when the managed updater succeeds", async () => {
     vi.doMock("./install-manager", async () => {
       const actual = await vi.importActual<typeof import("./install-manager")>("./install-manager");
       return {
         ...actual,
-        runScriptManagedUpdate: vi.fn().mockResolvedValue({ success: true, output: "Updated to Grok 2.0.0." }),
+        runManagedUpdate: vi.fn().mockResolvedValue({ success: true, output: "Updated to muonroi-cli 2.0.0." }),
       };
     });
 
@@ -164,12 +164,12 @@ describe("runUpdate", () => {
     expect(result.output).toContain("Updated");
   });
 
-  it("returns failure when the script-managed updater fails", async () => {
+  it("returns failure when the managed updater fails", async () => {
     vi.doMock("./install-manager", async () => {
       const actual = await vi.importActual<typeof import("./install-manager")>("./install-manager");
       return {
         ...actual,
-        runScriptManagedUpdate: vi.fn().mockResolvedValue({ success: false, output: "permission denied" }),
+        runManagedUpdate: vi.fn().mockResolvedValue({ success: false, output: "permission denied" }),
       };
     });
 
@@ -178,5 +178,20 @@ describe("runUpdate", () => {
 
     expect(result.success).toBe(false);
     expect(result.output).toContain("permission denied");
+  });
+});
+
+describe("getUpdateCommandForMethod", () => {
+  it("maps bun/npm global installs to the right update command", async () => {
+    const { getUpdateCommandForMethod } = await import("./install-manager");
+    expect(getUpdateCommandForMethod("bun-global")).toBe("bun add -g muonroi-cli@latest");
+    expect(getUpdateCommandForMethod("npm-global")).toBe("npm install -g muonroi-cli@latest");
+  });
+
+  it("returns null for methods without a package-manager command", async () => {
+    const { getUpdateCommandForMethod } = await import("./install-manager");
+    expect(getUpdateCommandForMethod("script")).toBeNull();
+    expect(getUpdateCommandForMethod("compiled")).toBeNull();
+    expect(getUpdateCommandForMethod("unknown")).toBeNull();
   });
 });

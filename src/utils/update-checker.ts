@@ -1,6 +1,6 @@
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
-import { fetchLatestReleaseVersion, runScriptManagedUpdate } from "./install-manager";
+import { fetchLatestReleaseVersion, runManagedUpdate } from "./install-manager";
 
 export interface UpdateCheckResult {
   currentVersion: string;
@@ -29,5 +29,5 @@ export async function checkForUpdate(currentVersion: string): Promise<UpdateChec
 }
 
 export function runUpdate(currentVersion: string): Promise<UpdateRunResult> {
-  return runScriptManagedUpdate(currentVersion);
+  return runManagedUpdate(currentVersion);
 }
