@@ -559,7 +559,7 @@ ${prompt}`;
 // Hoisted to module-level so React useEffect deps stay stable across renders.
 const SPLASH_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow"];
 
-export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) {
+export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }: AppProps) {
   const t = dark;
   const renderer = useRenderer();
   // Set initial status bar values synchronously before first render
@@ -4455,9 +4455,15 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         case "update":
           setIsUpdating(true);
           setUpdateOutput(null);
+          // Always echo into the message log — the home-screen `updateOutput`
+          // banner only renders on the splash screen, so an /update run inside an
+          // active chat would otherwise produce no visible output at all.
+          setMessages((prev) => [...prev, buildAssistantEntry("⟳ Checking for updates…")]);
           runUpdate(startupConfig.version).then((result) => {
             setIsUpdating(false);
-            setUpdateOutput(result.success ? result.output : `Update failed: ${result.output}`);
+            const text = result.success ? result.output : `Update failed: ${result.output}`;
+            setUpdateOutput(text);
+            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
           });
           break;
         case "clear":
@@ -5383,9 +5389,14 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
         if (key.name === "return") {
           setIsUpdating(true);
           setShowUpdateModal(false);
+          // Echo into the message log too — same reason as the /update command:
+          // the updateOutput banner only renders on the home/splash screen.
+          setMessages((prev) => [...prev, buildAssistantEntry("⟳ Checking for updates…")]);
           runUpdate(startupConfig.version).then((result) => {
             setIsUpdating(false);
-            setUpdateOutput(result.output);
+            const text = result.success ? result.output : `Update failed: ${result.output}`;
+            setUpdateOutput(text);
+            setMessages((prev) => [...prev, buildAssistantEntry(text)]);
           });
           return;
         }
@@ -5786,12 +5797,20 @@ export function App({ agent, startupConfig, initialMessage, onExit }: AppProps) 
           }
           // Close the modal first so the toast renders before the spawn.
           setShowSessionPicker(false);
-          pushToast("info", `Resuming session ${picked.id.slice(-8)}… restarting CLI`);
-          // Defer to the next tick so OpenTUI flushes the toast frame; then
-          // spawn the child (which inherits the TTY) and exit this process.
+          pushToast("info", `Resuming session ${picked.id}… restarting CLI`);
+          // Defer to the next tick so OpenTUI flushes the toast frame, then hand
+          // off to onRelaunch — which tears down the renderer + restores the
+          // terminal (raw mode / mouse tracking / alt-screen) and supervises the
+          // child. Doing the spawn here directly (the old relaunchWithSession
+          // call) skipped that teardown and dropped the user to a corrupted
+          // shell prompt. Fall back to the legacy path only if no handler wired.
           setTimeout(() => {
             try {
-              relaunchWithSession(picked.id);
+              if (onRelaunch) {
+                onRelaunch(picked.id);
+              } else {
+                relaunchWithSession(picked.id);
+              }
             } catch (err) {
               console.error(`[session-picker] relaunch failed: ${(err as Error)?.message ?? err}`);
               pushToast("error", `Resume failed: ${(err as Error)?.message ?? err}`);

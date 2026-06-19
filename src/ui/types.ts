@@ -69,6 +69,13 @@ export interface AppProps {
   startupConfig: AppStartupConfig;
   initialMessage?: string;
   onExit?: () => void;
+  /**
+   * Restart the CLI bound to a different session id (used by the /sessions
+   * picker). Routes through the same terminal teardown as onExit and supervises
+   * the child process, so resuming never strands the user at a corrupted shell
+   * prompt.
+   */
+  onRelaunch?: (sessionId: string) => void;
 }
 
 export interface ActiveTurnState {

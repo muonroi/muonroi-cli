@@ -93,14 +93,21 @@ export class SessionStore {
   /**
    * List recent sessions in this workspace (most recently updated first).
    * Used by the `/sessions` slash command for resume picking.
+   *
+   * Only sessions that actually have a persisted message are returned. Every
+   * CLI launch WITHOUT `--session` opens a fresh empty session, and test /
+   * harness runs leave behind title-only stubs — without this filter the picker
+   * fills with empty rows that resume to a blank screen, so a user picking one
+   * thinks resume is broken.
    */
   listRecentSessions(limit = 20): SessionInfo[] {
     const rows = getDatabase()
       .prepare(`
-      SELECT id, workspace_id, title, model, mode, cwd_at_start, cwd_last, status, created_at, updated_at
-      FROM sessions
-      WHERE workspace_id = ?
-      ORDER BY updated_at DESC
+      SELECT s.id, s.workspace_id, s.title, s.model, s.mode, s.cwd_at_start, s.cwd_last, s.status, s.created_at, s.updated_at
+      FROM sessions s
+      WHERE s.workspace_id = ?
+        AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+      ORDER BY s.updated_at DESC
       LIMIT ?
     `)
       .all(this.workspace.id, limit) as SessionRow[];

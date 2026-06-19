@@ -47,6 +47,27 @@ describe("sanitizeArgvForResume", () => {
     expect(() => sanitizeArgvForResume([], "")).toThrow(/sessionId is required/);
     expect(() => sanitizeArgvForResume([], "  ")).toThrow(/sessionId is required/);
   });
+
+  it("strips transient launch-mode flags (--agent-mode) so resume does not re-enter agent-mode", () => {
+    expect(sanitizeArgvForResume(["--agent-mode", "-m", "grok-build-0.1"], "new-id")).toEqual([
+      "-m",
+      "grok-build-0.1",
+      "--session",
+      "new-id",
+    ]);
+  });
+
+  it("strips `--mock-llm <dir>` and the combined form", () => {
+    expect(sanitizeArgvForResume(["--mock-llm", "/fix/dir", "-y"], "new-id")).toEqual(["-y", "--session", "new-id"]);
+    expect(sanitizeArgvForResume(["--mock-llm=/fix/dir", "-y"], "new-id")).toEqual(["-y", "--session", "new-id"]);
+  });
+
+  it("strips agent-mode + mock-llm together (harness-launched resume → clean user CLI)", () => {
+    expect(sanitizeArgvForResume(["--agent-mode", "--mock-llm", "/fx", "--session", "old"], "new")).toEqual([
+      "--session",
+      "new",
+    ]);
+  });
 });
 
 describe("relaunchWithSession", () => {
@@ -87,6 +108,44 @@ describe("relaunchWithSession", () => {
     expect(exitMock).toHaveBeenCalledWith(1);
     expect(errMock).toHaveBeenCalled();
     errMock.mockRestore();
+  });
+
+  it("runs beforeSpawn teardown before spawning", () => {
+    const calls: string[] = [];
+    const child = new EventEmitter();
+    const spawnMock = vi.fn(() => {
+      calls.push("spawn");
+      return child;
+    }) as unknown as typeof import("node:child_process").spawn;
+
+    relaunchWithSession("sess", {
+      argv: ["/bin/bun", "src/index.ts"],
+      onExit: () => {},
+      spawnFn: spawnMock,
+      beforeSpawn: () => calls.push("teardown"),
+    });
+
+    expect(calls).toEqual(["teardown", "spawn"]);
+  });
+
+  it("supervise: stays alive until the child exits, then propagates the exit code", () => {
+    const exitMock = vi.fn();
+    const child = new EventEmitter();
+    const spawnMock = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+
+    relaunchWithSession("sess", {
+      argv: ["/bin/bun", "src/index.ts"],
+      onExit: exitMock,
+      spawnFn: spawnMock,
+      supervise: true,
+    });
+
+    // Does NOT exit on spawn when supervising.
+    child.emit("spawn");
+    expect(exitMock).not.toHaveBeenCalled();
+    // Exits with the child's code when the child finally exits.
+    child.emit("exit", 3);
+    expect(exitMock).toHaveBeenCalledWith(3);
   });
 
   it("throws when argv[0] is missing (cannot relaunch without an executable)", () => {
