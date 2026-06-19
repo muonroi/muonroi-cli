@@ -29,7 +29,8 @@ export type WhoAmIDimName =
   | "personality.risk_tolerance"
   | "personality.decision_speed"
   | "work_patterns.energy"
-  | "work_patterns.multitasking";
+  | "work_patterns.multitasking"
+  | "work_patterns.session_length";
 
 export interface WhoAmIDim {
   value: string;
@@ -47,6 +48,7 @@ export interface WhoAmIProfile {
 const TIER_MINIMAL: WhoAmIDimName[] = [
   "work_patterns.energy",
   "work_patterns.multitasking",
+  "work_patterns.session_length",
   "personality.decision_speed",
 ];
 // Tang 2 (decision + communication style) added at standard. `full` == standard today

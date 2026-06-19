@@ -1,18 +1,27 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { searchByText } from "../ee/bridge.js";
+import { getWhoAmIProfile, searchByText } from "../ee/bridge.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
-// TODO(WhoAmI-L5): partly unblocked. `work_patterns.multitasking`
-// (sequential-deep | task-switcher) IS emitted by EE slice-1 and reachable via
-// ../ee/who-am-i.ts (getWhoAmIProfile) → could lift the stale threshold for
-// sequential-deep / keep it tight for task-switchers. `session_length` is NOT
-// emitted by EE — drop that arm until a later slice adds it. Left manual for now to
-// avoid changing recall-freshness behaviour without measurement.
-// Also: deduplicate with L3 — if L3 already injected experience-principles,
-// skip that collection here to avoid double-injection.
+// WhoAmI v4.0 (wired): `work_patterns.session_length` (short|medium|long), reachable
+// via ../ee/bridge.js → who-am-i.ts, tunes the resume-digest staleness window below.
+// TODO(WhoAmI-L5): `work_patterns.multitasking` (sequential-deep | task-switcher) IS
+// also emitted and could tune recall freshness similarly — deferred until measured.
+// Also: deduplicate with L3 — if L3 already injected experience-principles, skip that
+// collection here to avoid double-injection.
 const STALE_THRESHOLD_MS = 30 * 60 * 1000;
+
+// session_length → resume-digest staleness window. Long deep-work sessions keep a
+// resume digest relevant longer (relax to 60m); short bursts go stale sooner (tighten
+// to 15m). medium / absent → the 30m default, so a machine with no committed
+// session_length dim (the common case — needs N>=10 sessions) behaves byte-identically
+// to pre-v4.0: zero regression. Pure + exported for deterministic unit testing.
+export function staleThresholdMsForSessionLength(value: string | undefined | null): number {
+  if (value === "long") return 60 * 60 * 1000;
+  if (value === "short") return 15 * 60 * 1000;
+  return STALE_THRESHOLD_MS;
+}
 
 // Single round-trip for both collections via /api/search; topK=5 yields
 // up to 2 principles + 3 behavioral after server-side scoring.
@@ -112,15 +121,19 @@ export async function layer5Context(ctx: PipelineContext): Promise<PipelineConte
     deltaSegments.push("principles=skipped-l1-unified");
   }
 
-  // 2. Resume digest (5% budget)
+  // 2. Resume digest (5% budget). Staleness window is profile-tuned by session_length
+  //    (fail-open: absent dim → 30m default, identical to pre-v4.0). getWhoAmIProfile
+  //    is cached + fail-open, so this never adds latency or a failure path here.
   const digest = ctx.resumeDigest;
   if (digest?.trim()) {
-    const isStale = typeof ctx.digestAgeMs === "number" && ctx.digestAgeMs > STALE_THRESHOLD_MS;
+    const staleMs = staleThresholdMsForSessionLength(getWhoAmIProfile()?.dims["work_patterns.session_length"]?.value);
+    const isStale = typeof ctx.digestAgeMs === "number" && ctx.digestAgeMs > staleMs;
     const stalePrefix = isStale ? "(stale — verify before relying)\n" : "";
     const hint = `[flow-context: Resume]\n${stalePrefix}${digest.trim()}`;
     const trimmed = truncateToBudget(hint, Math.floor(ctx.tokenBudget * 0.05));
     parts.push(trimmed);
-    deltaSegments.push(`digest=${trimmed.length}ch${isStale ? ",stale" : ""}`);
+    const windowTag = staleMs !== STALE_THRESHOLD_MS ? `,window=${staleMs / 60000}m` : "";
+    deltaSegments.push(`digest=${trimmed.length}ch${isStale ? ",stale" : ""}${windowTag}`);
   }
 
   // 3. Flow state (5% budget)
