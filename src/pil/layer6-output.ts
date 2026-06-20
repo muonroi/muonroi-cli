@@ -14,7 +14,7 @@
  */
 
 import type { ToolSet } from "ai";
-import { classifyViaBrain } from "../ee/bridge.js";
+import { classifyViaBrain, getWhoAmIProfile } from "../ee/bridge.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildResponseTools } from "./response-tools.js";
@@ -134,6 +134,13 @@ const NO_PREAMBLE_RULE = `\nFORBIDDEN OPENERS: do not start with "I'll", "I will
 // guidance from the Layer 4 QUESTION directive (buildQuestion).
 const NO_BOOKKEEPING_NOTE = `\nWRITE FOR THE READER: the answer is for the human who asked. Do NOT append a provenance / compliance footer (e.g. "evidence only from this turn", "did not infer unopened files", token-budget notes) and do NOT restate internal rule / contract / layer / tool names as compliance — those are your operating rules, invisible to the reader. End on the answer's last substantive point.`;
 
+// WhoAmI v4.0: a precise-correction feedback style means the user corrects with
+// surgical edits, not rewrites. Bias code-producing tasks toward an AUDITABLE
+// presentation so a follow-up correction can target one line. This is orthogonal to
+// brevity (answer length) and delegation_style (clarify rounds) — it shapes the FORMAT
+// of changes, not their length or whether to ask first.
+const CORRECTION_AFFORDANCE_RULE = `\nAUDITABLE CHANGES: show exactly what changed — a unified diff or before/after for each edit, file:line anchored — and keep edits small and individually reviewable so a precise correction can target a single change.`;
+
 const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   refactor: {
     concise: `\nOUTPUT RULES (refactor): Show only changed code. Prefer unified diff or replacement function. No prose unless architecture changes. One sentence max if explanation needed. No preamble.`,
@@ -179,12 +186,13 @@ const SUFFIXES: Record<string, Record<OutputStyle, string>> = {
   },
 };
 
-// TODO(WhoAmI-L6): partly addressed. The brevity-derived default style now flows in
-// via ctx.outputStyle (layer1-intent.ts → ../ee/who-am-i.ts), so the brevity arm is
-// effectively covered without re-reading the profile here. The feedback_style arm is
-// DEFERRED: EE slice-1 emits feedback_style ∈ {implicit, precise-correction}, NOT the
-// "explicit" value this assumed — there is no committed signal to gate NO_PREAMBLE_RULE
-// on yet. Revisit when a later EE slice adds an explicit-preamble preference.
+// WhoAmI v4.0 (wired): brevity → ctx.outputStyle (layer1-intent.ts) drives answer
+// length; feedback_style="precise-correction" → CORRECTION_AFFORDANCE_RULE on code
+// tasks (auditable diffs, see applyPilSuffix below). The originally-assumed
+// feedback_style="explicit" → gate-NO_PREAMBLE arm was dropped on purpose: EE emits
+// implicit | precise-correction (no "explicit"), and gating preamble on it would
+// double-count brevity's verbosity axis. The "implicit" value is likewise left
+// unwired — its signal is already carried by brevity + delegation_style.
 
 export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, responseToolsActive = false): string {
   // Chitchat: layer6Output already skipped suffix work; mirror that here so
@@ -264,6 +272,18 @@ export function applyPilSuffix(systemPrompt: string, ctx: PipelineContext, respo
   const isQuestionTurn = ctx.deliverableKind ? ctx.deliverableKind === "answer" : isQuestionLike(ctx.raw);
   if (!isQuestionTurn) {
     result += NO_BOOKKEEPING_NOTE;
+  }
+
+  // WhoAmI v4.0: precise-correctors get an auditable-changes nudge on code tasks.
+  // Fail-open: getWhoAmIProfile is cached + returns null when absent → unchanged.
+  // We intentionally do NOT wire feedback_style="implicit" — its signal (terseness /
+  // proceed-without-confirm) is already carried by brevity + delegation_style, so a
+  // second knob would double-count. Only the precise-correction arm is non-redundant.
+  if (
+    ACTION_TASKS.has(ctx.taskType) &&
+    getWhoAmIProfile()?.dims["communication.feedback_style"]?.value === "precise-correction"
+  ) {
+    result += CORRECTION_AFFORDANCE_RULE;
   }
 
   // T1 behavioral rules (proven-tier EE points set by Layer 3). These are
