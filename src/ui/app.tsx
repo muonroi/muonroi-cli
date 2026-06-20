@@ -1044,13 +1044,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     if (!h) return;
     clearInterval(h.interval);
     interCardHeartbeatRef.current = null;
-    // Strip the heartbeat assistant entry so the next chunk starts clean.
+    // Strip the heartbeat assistant entry so the next chunk starts clean. It is
+    // usually the last entry, but an askcard answer can insert a `user` message
+    // AFTER it (the answer flow runs outside the chunk loop), which left the
+    // heartbeat orphaned + frozen in scrollback. Match the precise heartbeat
+    // shape (`⏳ … elapsed Ns`) and remove it wherever it landed in the tail —
+    // the shape is distinctive enough not to hit real assistant content.
     setMessages((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (!last || last.type !== "assistant") return prev;
-      if (!last.content?.includes(h.marker)) return prev;
-      return prev.slice(0, -1);
+      const HEARTBEAT_RE = /^⏳ .*… elapsed \d+s\s*$/;
+      const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
+      if (idx === -1) return prev;
+      return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
     });
   }, []);
 
