@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getWhoAmIProfile } from "../../ee/bridge.js";
 import {
   applyPilSuffix,
   getResponseToolSet,
@@ -8,9 +9,11 @@ import {
 } from "../layer6-output.js";
 import type { OutputStyle, PipelineContext, TaskType } from "../types.js";
 
-// Mock bridge for PIL-03 classifyViaBrain tests
+// Mock bridge for PIL-03 classifyViaBrain tests. getWhoAmIProfile defaults to null
+// (fail-open) so applyPilSuffix never reads the real on-device profile during tests.
 vi.mock("../../ee/bridge.js", () => ({
   classifyViaBrain: vi.fn().mockResolvedValue(null),
+  getWhoAmIProfile: vi.fn(() => null),
 }));
 
 async function getMockBrain() {
@@ -524,5 +527,36 @@ describe("isImplementationIntent — improve / cải thiện (regression: sessio
   it("does not over-match analysis questions that merely describe behaviour", () => {
     expect(isImplementationIntent("what does the enrichment layer do?")).toBe(false);
     expect(isImplementationIntent("why does the suite fail — break it down")).toBe(false);
+  });
+});
+
+describe("applyPilSuffix — WhoAmI feedback_style correction-affordance", () => {
+  const withFeedback = (value: string) => ({
+    level: "standard" as const,
+    dims: { "communication.feedback_style": { value, confidence: 0.7, samples: 20 } },
+  });
+
+  // Reset around each test so a mockReturnValue never leaks into (or out of) this
+  // block — clearAllMocks elsewhere only clears history, not the return override.
+  beforeEach(() => vi.mocked(getWhoAmIProfile).mockReturnValue(null));
+  afterEach(() => vi.mocked(getWhoAmIProfile).mockReturnValue(null));
+
+  it("precise-correction + action task (refactor) → AUDITABLE CHANGES rule", () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValue(withFeedback("precise-correction"));
+    expect(applyPilSuffix("SYS", makeCtx("refactor"))).toContain("AUDITABLE CHANGES");
+  });
+
+  it("precise-correction + non-action task (analyze) → no rule (diffs don't apply)", () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValue(withFeedback("precise-correction"));
+    expect(applyPilSuffix("SYS", makeCtx("analyze"))).not.toContain("AUDITABLE CHANGES");
+  });
+
+  it("implicit feedback → no rule (intentionally unwired — covered by brevity/delegation)", () => {
+    vi.mocked(getWhoAmIProfile).mockReturnValue(withFeedback("implicit"));
+    expect(applyPilSuffix("SYS", makeCtx("debug"))).not.toContain("AUDITABLE CHANGES");
+  });
+
+  it("absent profile → no rule (fail-open)", () => {
+    expect(applyPilSuffix("SYS", makeCtx("generate"))).not.toContain("AUDITABLE CHANGES");
   });
 });
