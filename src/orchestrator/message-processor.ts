@@ -2854,6 +2854,95 @@ export class MessageProcessor {
                     }
                   }
                 }
+                // F6b-2: a TRANSIENT error-part that arrives AFTER content/tool steps
+                // (F6b's no-content guard above skipped it — assistantText/tools already
+                // flowed). Try to graft the COMPLETED steps onto history and re-issue, so
+                // a flaky 5xx after a tool step RESUMES instead of ending the turn (the
+                // observed Cycle-1 "fail liên tục" case: read big file → finish-step → 500).
+                // SAFE by construction: if result.response can't yield the completed steps
+                // (it rejects on a hard stream error), _appended stays 0 and we fall through
+                // to surface the error — identical to prior behavior. No tool re-run: the
+                // completed steps are grafted onto history, not replayed. Shares the
+                // mid-loop recovery budget (midLoopStallRetryCount / maxStallRetries).
+                {
+                  const { transient: _contTransient } = classifyStreamError(part.error);
+                  if (
+                    _contTransient &&
+                    midLoopStallRetryCount < maxStallRetries &&
+                    !signal.aborted &&
+                    !stallTriggered
+                  ) {
+                    let _appended = 0;
+                    try {
+                      const _resp = (await Promise.race([
+                        result.response,
+                        new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                      ])) as { messages: ModelMessage[] };
+                      const _gen = sanitizeModelMessages(
+                        scrubImagePayloadsInMessages(_resp.messages),
+                      ) as ModelMessage[];
+                      for (const _m of _gen) {
+                        deps.messages.push(_m);
+                        _appended++;
+                      }
+                    } catch (respErr) {
+                      console.error(
+                        `[message-processor] error-part continuation: completed steps unavailable: ${(respErr as Error)?.message}`,
+                      );
+                    }
+                    if (_appended > 0) {
+                      midLoopStallRetryCount++;
+                      const _contBackoff = stallRepromptBackoffMs(midLoopStallRetryCount);
+                      const _errName = part.error instanceof Error ? part.error.name : "Error";
+                      const _errMsg = part.error instanceof Error ? part.error.message : String(part.error);
+                      try {
+                        const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                          | { emitEvent: (e: unknown) => void }
+                          | undefined;
+                        _ar?.emitEvent({
+                          t: "event",
+                          kind: "stream-retry",
+                          attempt: midLoopStallRetryCount,
+                          maxAttempts: maxStallRetries + 1,
+                          errorName: _errName,
+                          errorMessage: "transient error-part after tool step — resuming from completed steps",
+                          nextDelayMs: _contBackoff,
+                        });
+                        _ar?.emitEvent({
+                          t: "event",
+                          kind: "toast",
+                          level: "warning",
+                          text: `Transient error mid-task — resuming (attempt ${midLoopStallRetryCount}/${maxStallRetries})…`,
+                        });
+                      } catch {
+                        /* best-effort telemetry */
+                      }
+                      try {
+                        if (deps.session) {
+                          logInteraction(deps.session.id, "stream_retry", {
+                            data: {
+                              attempt: midLoopStallRetryCount,
+                              maxAttempts: maxStallRetries + 1,
+                              errorName: _errName,
+                              errorMessage: `${_errMsg.slice(0, 160)} — resumed from completed steps`,
+                              appendedMessages: _appended,
+                              nextDelayMs: _contBackoff,
+                              source: "error-part-continuation",
+                            },
+                          });
+                        }
+                      } catch (logErr) {
+                        console.error(
+                          `[message-processor] error-part continuation log failed: ${(logErr as Error)?.message}`,
+                        );
+                      }
+                      await new Promise<void>((resolve) => setTimeout(resolve, _contBackoff));
+                      if (!signal.aborted) {
+                        continue streamAttempt;
+                      }
+                    }
+                  }
+                }
                 const authError = isAuthenticationError(part.error);
                 const friendly = humanizeApiError(part.error, {
                   modelId: runtime.modelId,
