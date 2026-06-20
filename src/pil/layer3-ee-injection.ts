@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import type { EEPoint } from "../ee/bridge.js";
 import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
+import { formatPendingReminder, isRecallLedgerEnabled, sessionRecallLedger } from "../ee/recall-ledger.js";
 import { getRenderSink } from "../ee/render.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
@@ -349,6 +350,32 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
 
+  // Close the POSITIVE arm of the recall loop in-process. Record the RATEABLE
+  // injected points (principles + behavioral; checkpoints are artifacts, not
+  // recall verdicts) into the SAME session ledger the native ee_feedback builtin
+  // clears. Before this, the ledger was only ever populated by the external MCP
+  // ee.query, so in-CLI ee_feedback.clear() was a guaranteed no-op and nothing
+  // surfaced pending debt to the agent — leaving passive injections with an
+  // automatic NEGATIVE signal (prompt-stale decay every turn) but no positive
+  // one. Recording here makes a passive injection real, rateable debt that the
+  // dynamic reminder below names and an explicit ee_feedback(followed) resolves —
+  // the signal the brain needs to learn which injections were gold. No auto
+  // verdict is emitted (that would pollute Gate-4 precision); the agent rates
+  // deliberately. Collection is the search arm (deterministic), which is what
+  // ee_feedback requires.
+  const ledgerEnabled = isRecallLedgerEnabled();
+  let ledgerRecorded = 0;
+  if (ledgerEnabled) {
+    const rateableEntries = [
+      ...deduplicatedPrinciples.map((p) => ({ id: String(p.id), collection: "experience-principles" })),
+      ...deduplicatedBehavioral.map((p) => ({ id: String(p.id), collection: "experience-behavioral" })),
+    ].filter((e) => e.id);
+    if (rateableEntries.length > 0) {
+      sessionRecallLedger.record(rateableEntries, `passive-injection: ${ctx.raw.slice(0, 80)}`);
+      ledgerRecorded = rateableEntries.length;
+    }
+  }
+
   // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block.
   // Carry per-point {id, title, tier} so the TUI can show WHAT was injected, not
   // just how many (the data already exists here; previously only the count + ids
@@ -402,8 +429,14 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // on long sessions; this nudge rides next to the [id:..] handles it refers to.
   // Gated on rateable experience (principles/behavioral) — checkpoints are task
   // artifacts, not recall verdicts.
+  // Dynamic, token-bounded reminder of accumulated unrated debt (this turn's
+  // fresh injections + any earlier still-unrated ones), naming the actual
+  // [id collection] so ee_feedback is actionable — the static nudge named no ids,
+  // so the model could not complete a rating even when willing. Falls back to the
+  // static nudge when the ledger is disabled. Gated on rateable experience.
   if (deduplicatedPrinciples.length + deduplicatedBehavioral.length > 0) {
-    parts.push(RECALL_FEEDBACK_NUDGE);
+    const pending = ledgerEnabled ? sessionRecallLedger.pending() : [];
+    parts.push(pending.length > 0 ? formatPendingReminder(pending, { max: 5 }) : RECALL_FEEDBACK_NUDGE);
   }
   const injected = parts.join("\n");
 
@@ -420,6 +453,11 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           t1RuleCount: t1Rules.length,
           pointIds: allPoints.map((p) => String(p.id)),
           injectedChars: injected.length,
+          // Recall-loop closure observability (harness verification reads these
+          // from the interaction log): how many rateable points were recorded as
+          // pending debt this turn, and the total still-unrated debt afterwards.
+          ledgerRecorded,
+          ledgerPending: sessionRecallLedger.pendingCount(),
           taskType: ctx.taskType ?? null,
           domain: ctx.domain ?? null,
         },
