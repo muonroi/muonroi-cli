@@ -61,6 +61,41 @@ const MAX_EMPTY_WITH_TOOLS = 2;
 const ABSOLUTE_MAX_ROUNDS = 8;
 /** Default initial round budget when the planner does not propose one. */
 const DEFAULT_PLANNED_ROUNDS = 3;
+
+/**
+ * Per-kind hard ceiling on debate rounds — the leader may extend up to this, never
+ * past it. Discussion-style debates (decision / evaluation / investigation) converge
+ * fast, so capping them at 3 stops a simple "X or Y?" from burning 5-8 rounds of
+ * diminishing returns. Observed live (2026-06-20): a Redis-vs-in-memory decision ran
+ * 5 rounds / ~10 min on a slow provider, and the leader's own round-5 note was
+ * "remaining disagreements are minor and further rounds would repeat established
+ * positions" — i.e. rounds 4-5 added latency, not signal. Greenfield exploration
+ * keeps more breadth (5). Kinds absent here fall back to ABSOLUTE_MAX_ROUNDS.
+ */
+const KIND_MAX_ROUNDS: Record<string, number> = {
+  implementation_plan: 3,
+  decision: 3,
+  evaluation: 3,
+  investigation: 3,
+  exploration: 5,
+};
+
+/**
+ * Resolve the initial round budget + hard ceiling from the plan's output-shape kind
+ * and the planner-proposed round count. Pure + exported for unit testing the cap.
+ */
+export function resolveDebateRoundBudget(
+  planKind: string | undefined,
+  plannedRounds: number | undefined,
+): { maxRounds: number; effectiveCeiling: number; kindCapped: boolean } {
+  const kindCap = planKind !== undefined ? KIND_MAX_ROUNDS[planKind] : undefined;
+  const effectiveCeiling = Math.min(ABSOLUTE_MAX_ROUNDS, kindCap ?? ABSOLUTE_MAX_ROUNDS);
+  const maxRounds = Math.min(
+    effectiveCeiling,
+    Math.max(1, typeof plannedRounds === "number" && plannedRounds > 0 ? plannedRounds : DEFAULT_PLANNED_ROUNDS),
+  );
+  return { maxRounds, effectiveCeiling, kindCapped: kindCap !== undefined };
+}
 /** Cap on the size of a single archived position. Anything longer is
  * trimmed and reported via `length`. Mirrors the goal of keeping the
  * follow-up memory record small enough to be reloaded cheaply. */
@@ -454,17 +489,13 @@ export async function* runDebate(
   // absolute ceiling still applies there.
   let roundCount = 0;
   const planKind = debatePlan?.outputShape?.kind;
-  const KIND_MAX_ROUNDS: Record<string, number> = {
-    implementation_plan: 3,
-  };
-  const kindCap = planKind ? KIND_MAX_ROUNDS[planKind] : undefined;
-  const initialPlanned = debatePlan?.plannedRounds;
-  const effectiveCeiling = Math.min(ABSOLUTE_MAX_ROUNDS, kindCap ?? ABSOLUTE_MAX_ROUNDS);
-  let maxRounds = Math.min(
+  const {
+    maxRounds: plannedMaxRounds,
     effectiveCeiling,
-    Math.max(1, typeof initialPlanned === "number" && initialPlanned > 0 ? initialPlanned : DEFAULT_PLANNED_ROUNDS),
-  );
-  const ceilingNote = kindCap
+    kindCapped,
+  } = resolveDebateRoundBudget(planKind, debatePlan?.plannedRounds);
+  let maxRounds = plannedMaxRounds;
+  const ceilingNote = kindCapped
     ? ` (hard ceiling ${effectiveCeiling} for ${planKind})`
     : ` (hard ceiling ${ABSOLUTE_MAX_ROUNDS})`;
   yield {
