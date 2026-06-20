@@ -12,7 +12,7 @@
  *   spawn implementation via createMcpHarnessServer({ spawn }).
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -86,6 +86,49 @@ export function sanitizeEnv(env: Record<string, string>): Record<string, string>
 
 const REPO_ROOT = process.cwd();
 
+/**
+ * Opt-in extra cwd roots for tui.start, layered ON TOP of the default
+ * {home, repo-root} allowlist. The posture stays deny-by-default: only roots an
+ * operator has explicitly listed are added. Two union sources:
+ *
+ *   1. env `MUONROI_HARNESS_EXTRA_ROOTS` — a path list separated by the OS path
+ *      separator (";" on win32, ":" elsewhere) and/or commas.
+ *   2. `<REPO_ROOT>/.muonroi-harness-roots.json` — `{ "roots": string[] }`.
+ *
+ * Rationale: the drive-harness needs to dogfood sibling ecosystem repos (e.g.
+ * `D:\sources\Core\*`) that live outside both home and the muonroi-cli checkout.
+ * Without an explicit opt-in those cwds are rejected, which blocks real-task
+ * evaluation. Clean checkouts have neither the env nor the (gitignored) config
+ * file, so behaviour is identical to the original home+repo-only boundary.
+ */
+export function loadExtraRoots(): string[] {
+  const roots: string[] = [];
+  const envVal = process.env.MUONROI_HARNESS_EXTRA_ROOTS;
+  if (envVal) {
+    // Split on the OS path separator or commas. On win32 the separator is ";"
+    // (not ":") so drive letters like "D:\..." stay intact.
+    const listSep = process.platform === "win32" ? ";" : ":";
+    for (const part of envVal.split(new RegExp(`[${listSep},]`))) {
+      const trimmed = part.trim();
+      if (trimmed) roots.push(trimmed);
+    }
+  }
+  const cfgPath = resolve(REPO_ROOT, ".muonroi-harness-roots.json");
+  if (existsSync(cfgPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(cfgPath, "utf8")) as { roots?: unknown };
+      if (Array.isArray(parsed.roots)) {
+        for (const r of parsed.roots) {
+          if (typeof r === "string" && r.trim()) roots.push(r.trim());
+        }
+      }
+    } catch (err) {
+      console.error(`[harness/mcp-server] failed to parse ${cfgPath}: ${(err as Error)?.message}`);
+    }
+  }
+  return roots;
+}
+
 export function validateCwd(cwd: string): { ok: true } | { ok: false; reason: string } {
   let real: string;
   try {
@@ -93,16 +136,21 @@ export function validateCwd(cwd: string): { ok: true } | { ok: false; reason: st
   } catch {
     return { ok: false, reason: "cwd does not exist or unreadable" };
   }
-  const home = realpathSync(homedir());
-  const root = realpathSync(REPO_ROOT);
   const sep = process.platform === "win32" ? "\\" : "/";
-  if (real === home || real.startsWith(home + sep)) {
-    return { ok: true };
+  const allowedRoots = [realpathSync(homedir()), realpathSync(REPO_ROOT)];
+  for (const extra of loadExtraRoots()) {
+    try {
+      allowedRoots.push(realpathSync(extra));
+    } catch (err) {
+      console.error(`[harness/mcp-server] extra cwd root unresolved, skipping: ${extra} (${(err as Error)?.message})`);
+    }
   }
-  if (real === root || real.startsWith(root + sep)) {
-    return { ok: true };
+  for (const root of allowedRoots) {
+    if (real === root || real.startsWith(root + sep)) {
+      return { ok: true };
+    }
   }
-  return { ok: false, reason: "cwd escapes home and repo root" };
+  return { ok: false, reason: "cwd escapes home, repo root, and configured extra roots" };
 }
 
 export function validateMockLlmPath(value: string): boolean {
