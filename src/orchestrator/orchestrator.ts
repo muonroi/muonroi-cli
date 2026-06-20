@@ -1753,6 +1753,27 @@ export class Agent {
     }
     const signal = this.abortController?.signal;
 
+    // B1: Resolve a run directory so runCouncil persists decisions.lock.md after
+    // synthesis. The auto-council/sprint paths get a runDir from their own flow
+    // wiring, but the explicit /council SLASH path never did — so its outcome was
+    // never written to disk (no audit trail, nothing for a later /ideal to read).
+    // Reuse the session's active flow run; create one if the session never booted
+    // a flow. Fail-open: a runDir-resolution error must not block the council.
+    let runDir: string | undefined;
+    try {
+      const nodePath = await import("node:path");
+      const flowDir = await ensureFlowDir(this.bash.getCwd());
+      let runId = this._activeRunId ?? (await getActiveRunId(flowDir));
+      if (!runId) {
+        runId = (await createRun(flowDir)).id;
+        await setActiveRunId(flowDir, runId);
+        this._activeRunId = runId;
+      }
+      runDir = nodePath.join(flowDir, "runs", runId);
+    } catch (err) {
+      console.error(`[council] runDir resolution failed (decisions.lock will be skipped): ${(err as Error)?.message}`);
+    }
+
     try {
       const gen = runCouncil(
         topic,
@@ -1769,6 +1790,7 @@ export class Agent {
           cwd: this.bash.getCwd(),
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
+          runDir, // B1 — persist decisions.lock.md for the /council slash path
         },
       );
 

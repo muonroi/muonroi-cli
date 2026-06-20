@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildClarificationPrompt, buildReadinessJudgePrompt } from "../prompts.js";
+import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesisPrompt } from "../prompts.js";
 
 // Guards the de-robotized askcard contract (2026-06-14). The council clarifier
 // used to (a) force "AT LEAST 2 questions" → rambling/over-asking, (b) tell the
@@ -41,6 +41,29 @@ describe("buildClarificationPrompt — de-robotized askcard", () => {
     expect(system).toMatch(/"suggestions"/);
     expect(system).toMatch(/"recommended"/);
     expect(system).toMatch(/Output ONLY a JSON array/);
+  });
+});
+
+// Issue A — language drift. buildSpecSynthesisPrompt had NO language rule, so
+// DeepSeek defaulted the brief to English even for a Vietnamese topic. Because
+// the final synthesis detects its output language FROM this problemStatement,
+// an English brief dragged the whole council off the user's language. The fix
+// adds a mandatory "use the user's language" rule. These lock it in.
+describe("buildSpecSynthesisPrompt — user-language rule (issue A)", () => {
+  const { system } = buildSpecSynthesisPrompt("Xây dựng REST API quản lý todo", "", [
+    { question: "Auth?", answer: "Không cần" },
+  ]);
+
+  it("instructs writing every field in the user's language, not defaulting to English", () => {
+    expect(system).toMatch(/Language Rule/i);
+    expect(system).toMatch(/SAME[\s\S]*language the user used/i);
+    expect(system).toMatch(/Do NOT default to[\s\S]*English/i);
+  });
+
+  it("keeps the mock-router substring so council-e2e fixtures still match", () => {
+    // tests/council/council-e2e.ts routes the spec-synthesis mock on this exact
+    // phrase — changing it silently diverges the e2e flow. Guard it.
+    expect(system).toContain("synthesizing a discussion brief");
   });
 });
 
