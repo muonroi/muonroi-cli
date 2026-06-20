@@ -31,6 +31,7 @@ vi.mock("../../ee/intercept.js", () => ({
   updateLastSurfacedState: vi.fn(),
 }));
 
+import { sessionRecallLedger } from "../../ee/recall-ledger.js";
 import { layer3EeInjection } from "../layer3-ee-injection.js";
 import type { PipelineContext } from "../types.js";
 
@@ -51,6 +52,9 @@ describe("layer3 experience_injected chunk emission (CQ-16b)", () => {
   beforeEach(() => {
     capturedSinkCalls.length = 0;
     mockSearchByText.mockResolvedValue([]);
+    // Reset the process-singleton recall ledger so pending debt from a prior test
+    // does not change the dynamic feedback reminder content of the next.
+    sessionRecallLedger.reset();
   });
 
   it("emits experience_injected chunk when searchByText returns high-score point", async () => {
@@ -133,7 +137,15 @@ describe("layer3 experience_injected chunk emission (CQ-16b)", () => {
     ]);
 
     const result = await layer3EeInjection(BASE_CTX);
-    expect(result.enriched).toContain("ee_feedback(id, followed|ignored|noise)");
+    // The dynamic pending-feedback reminder replaced the fixed nudge when the ledger
+    // is enabled (default soft); it names the actual [id collection] so ee_feedback is
+    // actionable. Accept either form (reminder when the ledger recorded debt, or the
+    // static fallback when disabled).
+    expect(result.enriched).toMatch(/ee_feedback\(id, (collection, )?followed\|ignored\|noise\)/);
+    // Reminder names the actual [id collection]; the mock returns the same point in
+    // both search arms so the principles arm wins first-sighting (real searches return
+    // distinct points per collection) — assert id-named, collection-agnostic.
+    expect(result.enriched).toMatch(/\[p1 experience-(principles|behavioral)\]/);
   });
 
   it("does NOT emit experience_injected when searchByText returns empty array", async () => {
