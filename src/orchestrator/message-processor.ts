@@ -2789,6 +2789,71 @@ export class MessageProcessor {
               }
 
               case "error": {
+                // F6b: a TRANSIENT error delivered as a stream PART (e.g. a provider
+                // 5xx / dropped socket surfaced mid-loop after a tool step) otherwise
+                // BYPASSES the thrown-error transient-retry path below — the turn would
+                // surface the error and stop instead of retrying a flaky transient
+                // (observed live: SiliconFlow 500 error-part ended a multi-step turn).
+                // Route it through the SAME bounded budget (shared streamRetryCount /
+                // MAX_STREAM_RETRIES) and the same no-content guard, so an error-part
+                // and a thrown error behave identically. (A 2026-06-20 council debate
+                // independently endorsed bounded auto-retry for exactly this case.)
+                {
+                  const { transient: _partTransient } = classifyStreamError(part.error);
+                  if (
+                    _partTransient &&
+                    !assistantText.trim() &&
+                    streamRetryCount < MAX_STREAM_RETRIES &&
+                    !signal.aborted &&
+                    !stallTriggered
+                  ) {
+                    streamRetryCount++;
+                    // Exponential backoff: 500 → 8000 ms with ±25% jitter (mirrors the
+                    // thrown-error path).
+                    const baseMs = 500;
+                    const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
+                    const spread = expMs * 0.25;
+                    const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+                    const errName = part.error instanceof Error ? part.error.name : "Error";
+                    const errMsg = part.error instanceof Error ? part.error.message : String(part.error);
+                    try {
+                      const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                        | { emitEvent: (e: unknown) => void }
+                        | undefined;
+                      _ar?.emitEvent({
+                        t: "event",
+                        kind: "stream-retry",
+                        attempt: streamRetryCount,
+                        maxAttempts: MAX_STREAM_RETRIES + 1,
+                        errorName: errName,
+                        errorMessage: errMsg,
+                        nextDelayMs,
+                      });
+                    } catch {
+                      /* best-effort telemetry */
+                    }
+                    try {
+                      if (deps.session) {
+                        logInteraction(deps.session.id, "stream_retry", {
+                          data: {
+                            attempt: streamRetryCount,
+                            maxAttempts: MAX_STREAM_RETRIES + 1,
+                            errorName: errName,
+                            errorMessage: errMsg.slice(0, 200),
+                            nextDelayMs,
+                            source: "error-part",
+                          },
+                        });
+                      }
+                    } catch (logErr) {
+                      console.error(`[message-processor] error-part retry log failed: ${(logErr as Error)?.message}`);
+                    }
+                    await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+                    if (!signal.aborted) {
+                      continue streamAttempt;
+                    }
+                  }
+                }
                 const authError = isAuthenticationError(part.error);
                 const friendly = humanizeApiError(part.error, {
                   modelId: runtime.modelId,
