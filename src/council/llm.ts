@@ -6,8 +6,9 @@ import { emitMatches } from "../ee/render.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
-import { loadKeyForProvider } from "../providers/keychain.js";
-import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
+import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
+import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
+import type { ProviderId } from "../providers/types.js";
 import type { BashTool } from "../tools/bash.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
@@ -18,6 +19,32 @@ import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
 import type { CouncilLLM, CouncilStats, ToolTraceEmitter, UsageCallback } from "./types.js";
+
+/**
+ * Resolve a provider factory for a council sub-call, OAuth-aware.
+ *
+ * The council reachability gate (`isProviderReachable` in leader.ts) counts
+ * OAuth-authenticated providers as usable (via `getConfiguredProviders`), so a
+ * multi-provider roster can route a stance to an OAuth-only provider such as
+ * xai/grok. `loadKeyForProvider` is API-key-only and throws
+ * `ProviderKeyMissingError` for those — which previously surfaced as
+ * "[Error: No API key found for provider 'xai'.]" on every call of that stance,
+ * even though the provider was fully authenticated. Mirror the main
+ * orchestrator path: fall back to `createProviderFactoryAsync`, which loads +
+ * refreshes the stored OAuth bearer token. Only the expected missing-key case
+ * is swallowed; unexpected errors propagate.
+ */
+async function resolveCouncilFactory(providerId: ProviderId) {
+  let apiKey: string | undefined;
+  try {
+    apiKey = await loadKeyForProvider(providerId);
+  } catch (err) {
+    if (!(err instanceof ProviderKeyMissingError)) throw err;
+    // OAuth-only provider — createProviderFactoryAsync injects the bearer token.
+  }
+  const { factory } = await createProviderFactoryAsync(providerId, apiKey ? { apiKey } : {});
+  return factory;
+}
 
 // ── Debug logging (off unless MUONROI_COUNCIL_DEBUG_LOG points at a writable file) ──
 //
@@ -269,8 +296,7 @@ export function createCouncilLLM(
         return result.text;
       }
       const providerId = detectProviderForModel(modelId);
-      const key = await loadKeyForProvider(providerId);
-      const { factory } = createProviderFactory(providerId, { apiKey: key });
+      const factory = await resolveCouncilFactory(providerId);
       const runtime = resolveModelRuntime(factory, modelId);
       const t0 = Date.now();
       // Combine the user-abort signal (when threaded from runCouncil) with the
@@ -372,8 +398,7 @@ export function createCouncilLLM(
         return { text: result.text, toolCalls: [] };
       }
       const providerId = detectProviderForModel(modelId);
-      const key = await loadKeyForProvider(providerId);
-      const { factory } = createProviderFactory(providerId, { apiKey: key });
+      const factory = await resolveCouncilFactory(providerId);
       const runtime = resolveModelRuntime(factory, modelId);
 
       // Verification tools — re-introduced after the no-tools fix (session
@@ -550,8 +575,7 @@ export function createCouncilLLM(
         return result.text;
       }
       const providerId = detectProviderForModel(modelId);
-      const key = await loadKeyForProvider(providerId);
-      const { factory } = createProviderFactory(providerId, { apiKey: key });
+      const factory = await resolveCouncilFactory(providerId);
       const runtime = resolveModelRuntime(factory, modelId);
 
       const builtinTools = createTools(bash, mode);

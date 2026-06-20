@@ -60,6 +60,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       createProviderFactory: vi.fn().mockReturnValue({
         factory: {},
       }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({
         model: {},
         providerOptions: undefined,
@@ -107,6 +108,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
@@ -162,6 +164,7 @@ describe("CQ-03: research() MCP tool merge", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
@@ -212,6 +215,7 @@ describe("CQ-03: research() MCP tool merge", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({

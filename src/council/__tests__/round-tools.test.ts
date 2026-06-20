@@ -36,6 +36,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../prompts.js", () => ({
@@ -71,6 +72,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     // Builtin tools — must contain grep+read_file so the filter keeps something
@@ -126,6 +128,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
@@ -181,6 +184,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
@@ -232,6 +236,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
@@ -271,6 +276,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../../tools/registry.js", () => ({
