@@ -584,4 +584,47 @@ describe("Council E2E", () => {
       expect(content).toContain("Opening Analysis");
     });
   });
+
+  // ── Case 6: explicit /council — clarification round cap (#2) ────────────────
+  // Real-world: a user types `/council <detailed topic>`. Before the cap, the
+  // ready-gate could re-ask across 2-3 rounds even on an already-detailed topic.
+  // The explicit path is now capped to a single clarification round.
+  describe("Case 6: explicit /council caps clarification to one round", () => {
+    it("asks exactly one clarification round even when the ready-gate never clears", async () => {
+      let clarifyGenCalls = 0;
+      const llm = createMockLLM({ _researchNeed: '{"needsResearch":false}' });
+      const orig = llm.generate.bind(llm);
+      // Always return a fresh question and never "[]". The readiness judge also
+      // never returns ready (the mock fallback isn't valid JSON), so WITHOUT the
+      // cap this loop would run to MAX_CLARIFY_ROUNDS (12). The cap stops it at 1.
+      llm.generate = async (modelId, system, prompt, maxTokens) => {
+        if (system.includes("preparing for a multi-expert discussion")) {
+          clarifyGenCalls++;
+          return JSON.stringify([{ question: `Clarify Q${clarifyGenCalls}?`, why: "w", isRequired: true }]);
+        }
+        return orig(modelId, system, prompt, maxTokens);
+      };
+
+      const gen = runCouncil(
+        "Một chủ đề đã đủ chi tiết, không cần hỏi nhiều vòng",
+        "deepseek-chat",
+        [],
+        "test-session-cap",
+        llm,
+        // "save_exit" is a known post-debate value → the post-debate card exits
+        // cleanly; for clarify questions it's just the recorded answer text.
+        (_qid) => Promise.resolve("save_exit"),
+        (_pid) => Promise.resolve(true),
+        async function* () {
+          yield { type: "content" as const, content: "ok" };
+        },
+      );
+
+      const { chunks } = await collectChunks(gen);
+
+      // Cap = 1 round → exactly one clarify-question generate and one clarify card.
+      expect(clarifyGenCalls).toBe(1);
+      expect(getQuestions(chunks).length).toBe(1);
+    });
+  });
 });

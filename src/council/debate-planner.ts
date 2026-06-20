@@ -117,6 +117,7 @@ export async function* planDebate(
   experienceMode?: CouncilExperienceMode, // CQ-14: controls Experience Auditor injection
   taskType?: string, // CQ-11: task type from PIL (e.g. "architecture", "bugfix")
   complexityTier?: string, // CQ-11: complexity tier from PIL (e.g. "heavy", "medium", "light")
+  signal?: AbortSignal, // user-abort signal — threaded into the direct generateObject attempt
 ): AsyncGenerator<StreamChunk, DebatePlan, unknown> {
   const eeSnippets = eeWarnings?.map((w) => w.text).filter(Boolean) ?? [];
   const { system: baseSystem, prompt } = buildDebatePlanPrompt(spec);
@@ -156,7 +157,8 @@ export async function* planDebate(
     // Bound attempt-1: a wedged provider response here would freeze the whole
     // council/loop silently (no streamText stall watchdog covers generateObject).
     // On timeout this rejects → caught below → retry (guarded) → fallback plan.
-    const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(undefined, getProviderStallTimeoutMs());
+    // The user-abort signal is combined in so an Esc during planning aborts it.
+    const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, getProviderStallTimeoutMs());
     const { object } = await withDeadlineRace(
       () =>
         generateObject({
@@ -169,6 +171,7 @@ export async function* planDebate(
         }),
       getProviderStallTimeoutMs() + 5_000,
       "plan_debate",
+      signal,
     ).finally(() => cleanupTimeout());
 
     // Validate with existing sanitize helpers for normalization

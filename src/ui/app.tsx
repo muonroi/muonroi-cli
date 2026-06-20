@@ -4104,9 +4104,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             setCouncilPhases([]);
             setCouncilStatuses([]);
             councilDoneAtRef.current.clear();
+            // Mark the turn as processing for the lifetime of the council run.
+            // The /council slash command is dispatched via a DETACHED
+            // `dispatchSlash(...).then(...)` promise: the submit handler returns
+            // (and resets isProcessing) before this callback runs, so without
+            // re-arming it here `interruptActiveRun` bails on `!isProcessingRef`
+            // and Esc never reaches `agent.abort()` — the multi-minute council
+            // was uncancellable. Set the ref (read synchronously by the Esc
+            // handler) AND the state (drives the "esc to interrupt" affordance).
+            isProcessingRef.current = true;
+            setIsProcessing(true);
             try {
               const gen = agent.runCouncilV2(topic);
               for await (const chunk of gen) {
+                // Council emitted a chunk — clear the "Waiting for next phase"
+                // inter-card heartbeat started after the last askcard answer.
+                // The /council chunk loop never cleared it (only /ideal's did),
+                // so on cancel/done it orphaned and kept overwriting the final
+                // message — making a cancelled/finished run look stuck.
+                // clearInterCardHeartbeat is idempotent.
+                clearInterCardHeartbeat();
                 if (chunk.type === "content") {
                   setMessages((prev) => {
                     const last = prev[prev.length - 1];
@@ -4275,6 +4292,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               setCouncilPhases([]);
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
+              // Stop any orphaned inter-card heartbeat so a finished/cancelled
+              // run doesn't keep ticking "Waiting for next phase…".
+              clearInterCardHeartbeat();
+              // Release the processing flag re-armed before the run so the
+              // composer returns to idle and a subsequent turn isn't blocked.
+              isProcessingRef.current = false;
+              setIsProcessing(false);
             }
             return;
           }

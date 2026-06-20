@@ -482,6 +482,13 @@ export async function* runDebate(
   let consecutiveRoundFailures = 0;
 
   for (let round = 1; round <= maxRounds; round++) {
+    // User cancelled mid-debate — stop before spending another round of
+    // parallel pair LLM calls. The caller (runCouncil) re-checks the signal at
+    // its next phase boundary and skips synthesis too.
+    if (signal?.aborted) {
+      yield { type: "content", content: `\n> Debate cancelled by user.\n` };
+      break;
+    }
     roundCount = round;
     const p2Start = Date.now();
     const roundPhaseId = `phase:round-${round}`;
