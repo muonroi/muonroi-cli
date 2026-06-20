@@ -56,6 +56,9 @@ package-lock.json
 council.json
 .brain-*.tmp
 
+# Opt-in drive-harness extra cwd roots — machine-specific absolute paths, local dev only
+.muonroi-harness-roots.json
+
 
 # Visual Studio workspace state (IDE-local, never versioned)
 .vs/

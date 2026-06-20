@@ -403,6 +403,7 @@ Then drive via tool calls: `tui.start`, `tui.snapshot`, `tui.press`, `tui.type`,
 - argv allowlist: `--agent-*`, `--mock-llm=*`, `--profile=*`. Anything else → `{error: "argv_rejected"}`
 - env strip: `NODE_OPTIONS`, `BUN_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `LD_AUDIT`, `NODE_PATH` removed
 - cwd containment: `realpathSync` against `homedir()` or repo root
+- cwd extra roots (opt-in, default-deny preserved): set env `MUONROI_HARNESS_EXTRA_ROOTS` (OS-path-list or comma-separated) **or** create `.muonroi-harness-roots.json` (`{ "roots": [...] }`, gitignored) at repo root to also allow dogfooding sibling ecosystem repos (e.g. `D:\sources\Core\*`). Clean checkouts have neither → identical to home+repo-only. Implemented in `packages/agent-harness-core/src/mcp-server.ts` (`loadExtraRoots`)
 - mock-llm path: must resolve inside repo root
 - Windows: **supported** via named-pipe transport (`packages/agent-harness-opentui/src/agent-mode.ts:73`); the legacy `windows_unsupported` guard is no longer emitted
 - Permission modes (safe / auto-edit / yolo) + shuru sandbox now emit mandatory audit events (yolo-override, permission-override, shuru wraps with redacted cmd) to decision-log; review via `usage security-audit --since 7d`. See AGENTS.md "Permission Mode Threat Model" and 01-security-hardening-PLAN.md:134-150.
