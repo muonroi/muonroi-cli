@@ -4281,6 +4281,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   });
                 }
                 if (chunk.type === "done") break;
+                // C (latency UX): re-arm the inter-chunk heartbeat so the long
+                // silent gaps BETWEEN council phases (planDebate, each debate
+                // pair call, synthesis — 30-60s each on a slow provider) show a
+                // ticking "⏳ Council working… elapsed Ns" instead of a
+                // frozen-looking UI. The next chunk clears it at the top of the
+                // loop (clearInterCardHeartbeat), and finally clears it on exit.
+                startInterCardHeartbeat("Council working");
               }
             } catch (e: unknown) {
               setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
