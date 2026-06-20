@@ -88,6 +88,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
 
@@ -120,6 +121,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
 
@@ -185,6 +187,7 @@ describe("planDebate — forwards signal to the direct generateObject attempt", 
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
 

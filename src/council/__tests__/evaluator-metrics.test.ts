@@ -401,6 +401,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../prompts.js", () => ({
@@ -448,6 +449,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../prompts.js", () => ({
@@ -484,6 +486,7 @@ describe("CQ-10: planDebate returns FALLBACK_PLAN after double failure", () => {
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
     }));
     vi.doMock("../prompts.js", () => ({
