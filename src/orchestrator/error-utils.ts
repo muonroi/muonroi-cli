@@ -84,9 +84,22 @@ function humanizeApiErrorBase(error: unknown): string {
 
   if (APICallError.isInstance(error)) {
     const detail = extractResponseDetail(error.responseBody);
+    const status = error.statusCode;
+    // 5xx response bodies are usually generic server-side noise that MASKS the
+    // actionable status. Verified live: SiliconFlow returns a 500 with body
+    // {code:60000,message:"Request failed: Unknown error."} — surfacing that
+    // string told the user nothing and hid the fact it was a retryable 500.
+    // For 5xx prefer the canned "retry later" message + the status code; keep a
+    // body detail only when it actually adds information.
+    if (status && status >= 500) {
+      const canned = STATUS_MESSAGES[status] ?? "The API server returned an error. Please try again later.";
+      if (!detail || isOpaqueDetail(detail)) return `${canned} (HTTP ${status})`;
+      return `${detail} (HTTP ${status})`;
+    }
+    // 4xx: the body almost always says WHAT was wrong — keep it verbatim.
     if (detail) return detail;
-    if (error.statusCode && STATUS_MESSAGES[error.statusCode]) {
-      return STATUS_MESSAGES[error.statusCode];
+    if (status && STATUS_MESSAGES[status]) {
+      return STATUS_MESSAGES[status];
     }
   }
 
@@ -113,6 +126,22 @@ function extractResponseDetail(body: string | undefined): string | null {
     /* not JSON */
   }
   return null;
+}
+
+/**
+ * A provider "detail" string that carries no diagnostic value — generic
+ * server-error phrasing that masks the more useful HTTP status. Verified live:
+ * SiliconFlow 500s carry message "Request failed: Unknown error.". Used only on
+ * the 5xx path so an informative server message is still preferred when present.
+ */
+function isOpaqueDetail(detail: string): boolean {
+  const s = detail.trim().toLowerCase();
+  return (
+    s.length < 4 ||
+    /unknown error|request failed|internal server error|service (unavailable|temporarily)|bad gateway|gateway time-?out|^error\.?$|^failed\.?$/.test(
+      s,
+    )
+  );
 }
 
 /**
