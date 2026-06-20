@@ -6814,14 +6814,26 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
                     if (cm.kind === "leader") {
                       return (
-                        <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                        <Semantic
+                          key={`sem-cm-${idx}`}
+                          id={`council-msg-${idx}`}
+                          role="listitem"
+                          name={semName}
+                          value={cm.text}
+                        >
                           <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
                         </Semantic>
                       );
                     }
                     if (cm.kind === "synthesis") {
                       return (
-                        <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                        <Semantic
+                          key={`sem-cm-${idx}`}
+                          id={`council-msg-${idx}`}
+                          role="listitem"
+                          name={semName}
+                          value={cm.text}
+                        >
                           <CouncilSynthesisBanner key={idx} msg={cm} />
                         </Semantic>
                       );
@@ -6831,7 +6843,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       : `solo::${cm.speaker.role}`;
                     const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
                     return (
-                      <Semantic key={`sem-cm-${idx}`} id={`council-msg-${idx}`} role="listitem" name={semName}>
+                      <Semantic
+                        key={`sem-cm-${idx}`}
+                        id={`council-msg-${idx}`}
+                        role="listitem"
+                        name={semName}
+                        value={cm.text}
+                      >
                         <CouncilMessageBubble
                           key={idx}
                           msg={cm}

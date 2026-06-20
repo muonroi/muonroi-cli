@@ -40,6 +40,11 @@ export function buildClarificationPrompt(
       `the project IS the one described in the "## Current Project" section of the context. DO NOT ask which project.\n` +
       `- Only ask about project identity when the topic mentions multiple distinct projects or external products.\n` +
       `- Use the project's package.json name and description as implicit context for follow-up questions.\n\n` +
+      `## Language Rule (mandatory)\n` +
+      `Write the "question", "why", and every "suggestions"/"recommended" option in the SAME ` +
+      `language the user used in the Topic below — detect it; if the user wrote Vietnamese, write ` +
+      `Vietnamese; if English, English. The user reads and answers these on a card, so they must ` +
+      `NOT default to English. Keep code identifiers, file paths, tech/product names, and JSON keys in English.\n\n` +
       `Output ONLY a JSON array (no markdown, no preamble):\n` +
       `[{"question": "...", "why": "why this matters for a focused discussion", "suggestions": ["option A", "option B"], "recommended": "option A", "isRequired": true}]\n\n` +
       `Rules for "recommended" (be decisive — the user should never face an unranked list):\n` +
@@ -71,7 +76,15 @@ export function buildSpecSynthesisPrompt(
       `  "constraints": ["constraint 1", "constraint 2"],\n` +
       `  "successCriteria": ["criterion 1", "criterion 2"],\n` +
       `  "scope": "what is in and out of scope"\n` +
-      `}`,
+      `}\n\n` +
+      `## Language Rule (mandatory)\n` +
+      `Write EVERY field (problemStatement, constraints, successCriteria, scope) in the SAME ` +
+      `language the user used — detect it from the Original Topic and Clarification Q&A below. ` +
+      `If the user wrote Vietnamese, write Vietnamese; if English, English. Do NOT default to ` +
+      `English. This brief is shown to the user on the approval card AND the final synthesis ` +
+      `detects its output language from this problemStatement, so writing it in the wrong ` +
+      `language drags the whole council's output off the user's language. Keep code identifiers, ` +
+      `tech/product names, and JSON keys in English.`,
     prompt:
       `## Original Topic\n${topic}\n\n` +
       (conversationContext ? `## Context\n${conversationContext}\n\n` : "") +
