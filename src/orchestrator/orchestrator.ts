@@ -1738,36 +1738,58 @@ export class Agent {
 
     const processMessageFn = (message: string) => this.processMessage(message, options?.observer);
 
-    const gen = runCouncil(
-      topic,
-      this.modelId,
-      this.messages as Array<{ role: string; content: string | unknown }>,
-      this.session?.id,
-      llm,
-      this.councilManager.createQuestionResponder(),
-      this.councilManager.createPreflightResponder(),
-      processMessageFn,
-      {
-        skipClarification: options?.skipClarification,
-        userModelMessage: options?.userModelMessage,
-        cwd: this.bash.getCwd(),
-        councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
-      },
-    );
+    // Ensure a turn-scoped AbortController exists so Esc → agent.abort() →
+    // this.abortController.abort() actually cancels the council. Two entry points
+    // reach here: the auto-council path runs INSIDE processMessage, which already
+    // set this.abortController; the /council SLASH path calls runCouncilV2
+    // directly with NONE set — so before this guard, pressing Esc during an
+    // explicit /council run was a no-op (abort() hit a null controller) and the
+    // multi-minute debate ran to completion regardless. Create one when absent
+    // so the user-abort signal threads into every council generate/debate/
+    // research call for BOTH entry points. Only tear down a controller we own.
+    const ownsController = !this.abortController;
+    if (ownsController) {
+      this.abortController = new AbortController();
+    }
+    const signal = this.abortController?.signal;
 
-    let result: IteratorResult<StreamChunk, string | null>;
-    do {
-      result = await gen.next();
-      if (!result.done && result.value) {
-        yield result.value;
+    try {
+      const gen = runCouncil(
+        topic,
+        this.modelId,
+        this.messages as Array<{ role: string; content: string | unknown }>,
+        this.session?.id,
+        llm,
+        this.councilManager.createQuestionResponder(),
+        this.councilManager.createPreflightResponder(),
+        processMessageFn,
+        {
+          skipClarification: options?.skipClarification,
+          userModelMessage: options?.userModelMessage,
+          cwd: this.bash.getCwd(),
+          councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
+          signal,
+        },
+      );
+
+      let result: IteratorResult<StreamChunk, string | null>;
+      do {
+        result = await gen.next();
+        if (!result.done && result.value) {
+          yield result.value;
+        }
+      } while (!result.done);
+
+      const synthesis = result.value;
+      this.councilManager.setLastSynthesis(synthesis);
+
+      if (options?.userModelMessage && synthesis) {
+        this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
       }
-    } while (!result.done);
-
-    const synthesis = result.value;
-    this.councilManager.setLastSynthesis(synthesis);
-
-    if (options?.userModelMessage && synthesis) {
-      this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+    } finally {
+      if (ownsController && this.abortController?.signal === signal) {
+        this.abortController = null;
+      }
     }
   }
 

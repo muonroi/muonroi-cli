@@ -260,6 +260,7 @@ export function createCouncilLLM(
       prompt: string,
       maxTokens = 4096,
       onUsage?: UsageCallback,
+      signal?: AbortSignal,
     ): Promise<string> {
       const mock = getMockLlm();
       if (mock) {
@@ -272,7 +273,11 @@ export function createCouncilLLM(
       const { factory } = createProviderFactory(providerId, { apiKey: key });
       const runtime = resolveModelRuntime(factory, modelId);
       const t0 = Date.now();
-      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(undefined, COUNCIL_LLM_TIMEOUT_MS);
+      // Combine the user-abort signal (when threaded from runCouncil) with the
+      // per-call wall-clock deadline. Without the parent signal, an Esc/Ctrl-C
+      // during the longest generate calls (8192-token synthesis, clarify, leader
+      // eval) was a no-op — the call ran to completion or hit the 5-min timeout.
+      const { signal: timedSignal, cleanup: cleanupTimeout } = withTimeoutSignal(signal, COUNCIL_LLM_TIMEOUT_MS);
       try {
         const result = await withDeadlineRace(
           () =>
@@ -296,6 +301,7 @@ export function createCouncilLLM(
             ),
           COUNCIL_LLM_TIMEOUT_MS + 5_000,
           "council.generate",
+          signal,
         );
         cleanupTimeout();
         stats.calls++;
@@ -453,6 +459,7 @@ export function createCouncilLLM(
             ),
           COUNCIL_LLM_TIMEOUT_MS + 5_000,
           "council.debate",
+          signal,
         );
         cleanupTimeout();
         stats.calls++;
@@ -619,6 +626,7 @@ export function createCouncilLLM(
             ),
           researchTimeoutMs + 5_000,
           "council.research",
+          signal,
         );
         cleanupTimeout();
         const researchUsage = logCouncilCost({

@@ -286,6 +286,12 @@ export interface CouncilLLM {
     prompt: string,
     maxTokens?: number,
     onUsage?: UsageCallback,
+    /**
+     * User-abort signal. Threaded so a mid-council cancel (Esc/Ctrl-C) aborts
+     * the in-flight generate call. Trailing+optional for back-compat — existing
+     * positional callers/mocks are unaffected. See withCouncilSignal in index.ts.
+     */
+    signal?: AbortSignal,
   ): Promise<string>;
   research(
     modelId: string,

@@ -30,10 +30,51 @@ import type {
   QuestionResponder,
 } from "./types.js";
 
+/**
+ * Wrap a CouncilLLM so every `generate` call inherits the council-wide abort
+ * signal. The whole generate-based call path (clarifier, research-need eval,
+ * leader round-eval, opening statements, round summary, spec/plan synthesis,
+ * and the debate-planner retry) calls `llm.generate(...)` with NO signal arg —
+ * none of those sites thread one. Injecting it here in ONE place makes them all
+ * cancellable without touching each signature. `debate`/`research` already get
+ * `config.signal` explicitly, so they pass through unchanged.
+ *
+ * An explicit per-call signal (none exist today, but the param is there) wins
+ * over the injected one. Returns the original llm untouched when no signal is
+ * configured (e.g. the sprint-planner path, which has no user-abort signal).
+ */
+export function withCouncilSignal(llm: CouncilLLM, signal: AbortSignal | undefined): CouncilLLM {
+  if (!signal) return llm;
+  return {
+    ...llm,
+    generate: (modelId, system, prompt, maxTokens, onUsage, sig) =>
+      llm.generate(modelId, system, prompt, maxTokens, onUsage, sig ?? signal),
+  };
+}
+
+/**
+ * Explicit `/council …` is the ONLY caller that runs the clarifier — auto-council
+ * (message-processor) and the sprint-planner both pass `skipClarification: true`.
+ * Capping it to a single round (down from the ready-gate's MAX_CLARIFY_ROUNDS=12)
+ * stops the 2-3 rounds of follow-up askcards users hit on already-detailed topics
+ * (see project-council-subsystem memory). The per-round ready-gate has no
+ * production behavioural effect anyway — `spec.ready`/`confidenceScore`/
+ * `remainingGaps` are write-only — so its only real cost is the extra rounds.
+ * Round 0 still runs, so the user is asked the key questions exactly once.
+ */
+const EXPLICIT_COUNCIL_CLARIFY_ROUNDS = 1;
+
 export interface RunCouncilOptions {
   skipClarification?: boolean;
   userModelMessage?: ModelMessage;
   signal?: AbortSignal;
+  /**
+   * Hard cap on clarification rounds for the explicit /council path. Defaults to
+   * EXPLICIT_COUNCIL_CLARIFY_ROUNDS (1). Callers that genuinely want the full
+   * multi-round ready-gate can raise it; auto-council/sprint pass
+   * skipClarification:true and never reach the clarifier regardless.
+   */
+  clarifyMaxRounds?: number;
   /** Working directory used to resolve the "current project" snapshot. */
   cwd?: string;
   /** Shared stats object from orchestrator — when provided, runCouncil uses it instead of a local one so stats.calls is accurate (Phase 14 CQ-01). */
@@ -45,12 +86,60 @@ export interface RunCouncilOptions {
   runDir?: string;
 }
 
+export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
+
+/**
+ * Decide the DEFAULT post-debate action surfaced as the recommended option.
+ * Extracted as a pure function so the policy is unit-testable.
+ *
+ * Issue #3 (post-debate default mismatch): when synthesis succeeded and no plan
+ * exists yet, only an `implementation_plan`-shaped debate should default to
+ * "generate_plan" (Lock plan & execute Sprint 1). For a `decision`, `evaluation`,
+ * `investigation`, or `exploration` debate the synthesis IS the deliverable — the
+ * user asked a question, not for code — so the default is `save_exit`. The
+ * generate_plan OPTION is still offered downstream; it's just no longer the
+ * pre-selected default for non-build topics.
+ */
+export function pickPostDebateRecommendation(input: {
+  synthesisFailed: boolean;
+  hasEmptySections: boolean;
+  refinementTopics: string[];
+  confidenceLevel: "high" | "medium" | "low";
+  hasPlan: boolean;
+  outputKind: string;
+}): { value: PostDebateAction; reason: string } {
+  if (input.synthesisFailed) {
+    return {
+      value: "retry_synthesis",
+      reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures.",
+    };
+  }
+  if (input.hasEmptySections) {
+    return { value: "refine", reason: `Fill in ${input.refinementTopics.length} section(s) the debate left empty.` };
+  }
+  if (input.confidenceLevel === "low") {
+    return {
+      value: "ask_followup",
+      reason: "Press the council on the weakest claims rather than accepting a thin synthesis.",
+    };
+  }
+  if (!input.hasPlan) {
+    return input.outputKind === "implementation_plan"
+      ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
+      : {
+          value: "save_exit",
+          reason: `This was a ${input.outputKind} debate — the synthesis above is the deliverable; save it.`,
+        };
+  }
+  return { value: "save_exit", reason: "Outcome looks solid — save and move on." };
+}
+
 export async function* runCouncil(
   topic: string,
   sessionModelId: string,
   messages: Array<{ role: string; content: string | unknown }>,
   sessionId: string | undefined,
-  llm: CouncilLLM,
+  rawLlm: CouncilLLM,
   respondToQuestion: QuestionResponder,
   respondToPreflight: PreflightResponder,
   processMessageFn: (message: string) => AsyncGenerator<StreamChunk, void, unknown>,
@@ -58,6 +147,19 @@ export async function* runCouncil(
 ): AsyncGenerator<StreamChunk, string | null, unknown> {
   const stats: CouncilStats = options?.councilStats ?? { calls: 0, startMs: Date.now(), phases: [] };
   const costAware = isCouncilCostAware();
+  // Inject the user-abort signal into every generate-based sub-call (clarify,
+  // research-need, leader-eval, opening, summary, synthesis, debate-plan retry).
+  // No-op passthrough when options.signal is undefined.
+  const llm = withCouncilSignal(rawLlm, options?.signal);
+
+  // Hard-stop guard. Threading the signal into LLM calls makes them abortable,
+  // but every council sub-phase wraps its work in fail-open try/catch that
+  // swallows the resulting AbortError and returns normally — so without an
+  // explicit check at each phase boundary the loop would march on to the next
+  // phase after a cancel. `userAborted()` is checked between phases; when true
+  // the run stops cleanly rather than burning the remaining (debate, synthesis)
+  // LLM budget. Cancellation latency is bounded by one in-flight sub-call.
+  const userAborted = (): boolean => options?.signal?.aborted === true;
 
   // ── Resolve models ──────────────────────────────────────────────────────────
   const leaderResolution = await resolveLeaderModelDetailed(sessionModelId);
@@ -95,6 +197,12 @@ export async function* runCouncil(
     : baseContext;
   const internetFirst = projectInfo.isEmpty;
   const active: CouncilParticipant[] = participants.map((p) => ({ ...p, position: "" }));
+
+  if (userAborted()) {
+    yield { type: "content", content: "\n> Council cancelled by user.\n" };
+    yield { type: "done" };
+    return null;
+  }
 
   // ── Phase A + B loop: Clarify → Confirm ─────────────────────────────────────
   let spec: ClarifiedSpec = buildSpecFromTopic(topic, conversationContext);
@@ -134,7 +242,7 @@ export async function* runCouncil(
         llm,
         options?.signal,
         pilSeed,
-        undefined,
+        options?.clarifyMaxRounds ?? EXPLICIT_COUNCIL_CLARIFY_ROUNDS,
         undefined,
         costAware,
       );
@@ -150,6 +258,9 @@ export async function* runCouncil(
       spec = buildSpecFromTopic(topic, conversationContext);
       yield { type: "content", content: `\n> Auto-council: skipping clarification (PIL pre-classified).\n` };
     }
+
+    // Cancelled during clarification — don't pop the preflight approval card.
+    if (userAborted()) break;
 
     const researchNeeded = true;
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
@@ -167,6 +278,12 @@ export async function* runCouncil(
   }
 
   stats.phases.push({ name: "clarify+preflight", durationMs: Date.now() - phaseAStart });
+
+  if (userAborted()) {
+    yield { type: "content", content: "\n> Council cancelled by user.\n" };
+    yield { type: "done" };
+    return null;
+  }
 
   // ── Research-need check + user override ────────────────────────────────────
   // Leader-LLM decides if research is required. If yes, give the user a chance
@@ -236,6 +353,12 @@ export async function* runCouncil(
     };
   }
 
+  if (userAborted()) {
+    yield { type: "content", content: "\n> Council cancelled by user.\n" };
+    yield { type: "done" };
+    return null;
+  }
+
   // ── Phase B.5: Leader plans the debate (stances + output shape) ─────────────
   const planStartMs = Date.now();
   yield phaseStart({
@@ -252,6 +375,7 @@ export async function* runCouncil(
     experienceMode,
     pilCtx?.taskType ?? undefined,
     pilCtx?.complexityTier ?? undefined,
+    options?.signal,
   );
   let planStep: IteratorResult<StreamChunk, import("./types.js").DebatePlan>;
   do {
@@ -294,6 +418,12 @@ export async function* runCouncil(
     active.length = debatePlan.stances.length;
   }
   stats.phases.push({ name: "plan_debate", durationMs: Date.now() - planStartMs });
+
+  if (userAborted()) {
+    yield { type: "content", content: "\n> Council cancelled by user.\n" };
+    yield { type: "done" };
+    return null;
+  }
 
   // ── Phase C: Dynamic Debate ─────────────────────────────────────────────────
   const debateStart = Date.now();
@@ -351,6 +481,12 @@ export async function* runCouncil(
     durationMs: Date.now() - debateStart,
     data: { topic, roundCount: debateState.roundCount },
   });
+
+  if (userAborted()) {
+    yield { type: "content", content: "\n> Council cancelled by user — skipping synthesis.\n" };
+    yield { type: "done" };
+    return null;
+  }
 
   // ── Phase D: Plan ───────────────────────────────────────────────────────────
   const planStart = Date.now();
@@ -445,25 +581,17 @@ export async function* runCouncil(
             ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
             : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
 
-      // Recommendation surfaced to the user as the default action.
-      const recommendation: {
-        value: "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
-        reason: string;
-      } = synthesisFailed
-        ? {
-            value: "retry_synthesis",
-            reason: "Re-run synthesis with a compact prompt — usually clears provider-timeout failures.",
-          }
-        : hasEmptySections
-          ? { value: "refine", reason: `Fill in ${refinementTopics.length} section(s) the debate left empty.` }
-          : confidenceLevel === "low"
-            ? {
-                value: "ask_followup",
-                reason: "Press the council on the weakest claims rather than accepting a thin synthesis.",
-              }
-            : !hasPlan
-              ? { value: "generate_plan", reason: "Convert the agreed outcome into concrete steps." }
-              : { value: "save_exit", reason: "Outcome looks solid — save and move on." };
+      // Recommendation surfaced to the user as the default action. The
+      // implementation_plan-vs-decision/evaluation split lives in
+      // pickPostDebateRecommendation (issue #3 — see its doc comment).
+      const recommendation = pickPostDebateRecommendation({
+        synthesisFailed,
+        hasEmptySections,
+        refinementTopics,
+        confidenceLevel,
+        hasPlan: !!hasPlan,
+        outputKind: debatePlan.outputShape.kind,
+      });
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
 

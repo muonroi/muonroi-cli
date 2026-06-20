@@ -42,11 +42,18 @@ function wrapLLMForUsageTracking(llm: CouncilLLM, ctx: DriverContext): CouncilLL
     }
   };
   return {
-    generate: (modelId, system, prompt, maxTokens, onUsage) =>
-      llm.generate(modelId, system, prompt, maxTokens, (u) => {
-        recorder(modelId)(u);
-        onUsage?.(u);
-      }),
+    generate: (modelId, system, prompt, maxTokens, onUsage, signal) =>
+      llm.generate(
+        modelId,
+        system,
+        prompt,
+        maxTokens,
+        (u) => {
+          recorder(modelId)(u);
+          onUsage?.(u);
+        },
+        signal,
+      ),
     debate: (modelId, system, prompt, signal, persistTrace, options, onUsage) =>
       llm.debate(modelId, system, prompt, signal, persistTrace, options, (u) => {
         recorder(modelId)(u);

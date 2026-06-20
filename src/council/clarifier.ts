@@ -141,7 +141,7 @@ export async function* runClarification(
   conversationContext: string,
   respondToQuestion: QuestionResponder,
   llm: CouncilLLM,
-  _signal?: AbortSignal,
+  signal?: AbortSignal,
   seedQuestions?: GrayAreaQuestion[],
   maxRounds?: number,
   /**
@@ -179,6 +179,10 @@ export async function* runClarification(
   let pendingGaps: string[] = [];
 
   for (let round = 0; round < max; round++) {
+    // User cancelled during clarification — stop asking further rounds. The
+    // generate calls themselves are already abort-aware (wrapped llm); this
+    // guard prevents starting a fresh round after a mid-round cancel.
+    if (signal?.aborted) break;
     const useSeed = round === 0 && seeded.length > 0;
     const roundId = `phase:clarification-round-${round + 1}`;
     const roundStart = Date.now();

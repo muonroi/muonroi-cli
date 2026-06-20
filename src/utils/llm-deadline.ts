@@ -65,16 +65,47 @@ export function withTimeoutSignal(
  * still be aborted via `withTimeoutSignal` for cleanup; this layer just ensures
  * the caller is never blocked past the deadline.
  */
-export async function withDeadlineRace<T>(fn: () => Promise<T>, deadlineMs: number, label: string): Promise<T> {
+export async function withDeadlineRace<T>(
+  fn: () => Promise<T>,
+  deadlineMs: number,
+  label: string,
+  /**
+   * User-abort signal. When it fires, the race rejects within `abortGraceMs`
+   * even if `fn()` hasn't settled — so a provider that ignores its abortSignal
+   * mid-call (observed with DeepSeek/grok socket stalls) can't keep the caller
+   * (and, for council, the locked composer) blocked until the full `deadlineMs`.
+   * The short grace lets the normal fetch-level abort win first when it's quick.
+   */
+  abortSignal?: AbortSignal,
+  abortGraceMs = 1500,
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let abortTimer: ReturnType<typeof setTimeout> | null = null;
+  let abortListener: (() => void) | null = null;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       reject(new Error(`${label} exceeded ${deadlineMs}ms deadline (timeout)`));
     }, deadlineMs);
   });
+  const racers: Array<Promise<T>> = [fn(), deadline as Promise<T>];
+  if (abortSignal) {
+    const abortRace = new Promise<never>((_, reject) => {
+      const arm = () => {
+        abortTimer = setTimeout(() => reject(new Error(`${label} aborted by user`)), abortGraceMs);
+      };
+      if (abortSignal.aborted) arm();
+      else {
+        abortListener = arm;
+        abortSignal.addEventListener("abort", arm, { once: true });
+      }
+    });
+    racers.push(abortRace as Promise<T>);
+  }
   try {
-    return await Promise.race([fn(), deadline]);
+    return await Promise.race(racers);
   } finally {
     if (timer) clearTimeout(timer);
+    if (abortTimer) clearTimeout(abortTimer);
+    if (abortListener && abortSignal) abortSignal.removeEventListener("abort", abortListener);
   }
 }
