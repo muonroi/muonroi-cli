@@ -149,6 +149,48 @@ export async function gateStagedPaths(
   }
 }
 
+/**
+ * G1 follow-up: the set of paths a bash-tool `git commit` would include, so the
+ * LSP commit gate can run on them. A raw `git commit` (unlike the `git_commit`
+ * tool) doesn't tell us its paths, so derive them from git state:
+ *   - always: the already-staged set (`git diff --cached --name-only`)
+ *   - `git commit -a`: + tracked modifications it auto-stages at commit time
+ *     (`git diff --name-only`)
+ *   - `git add -A`/`.`/`--all` chained in the SAME command: + the whole
+ *     working-tree change set (`git status --porcelain`), since the add hasn't
+ *     run yet at pre-exec time so it isn't reflected in `--cached`.
+ * Deleted/binary/unreadable paths are skipped later by gateStagedPaths when it
+ * reads them. KNOWN GAP: `git add <specific-path> && git commit` in one command
+ * where <specific-path> was not pre-staged is NOT covered (we don't parse
+ * pathspecs); the `git_commit` tool + auto-commit backstop remain the primary
+ * gates. Returns repo-relative paths (gateStagedPaths resolves them against cwd).
+ */
+export async function pathsForCommitGate(
+  cwd: string,
+  opts: { broadAdd: boolean; commitAll: boolean },
+): Promise<string[]> {
+  const set = new Set<string>();
+  const addLines = (out: string) => {
+    for (const line of out.split("\n")) {
+      const p = line.trim();
+      if (p) set.add(p);
+    }
+  };
+  const staged = await git(cwd, ["diff", "--cached", "--name-only"]);
+  if (staged.ok) addLines(staged.stdout);
+  if (opts.broadAdd) {
+    // `git add -A/.` stages every working-tree change; `--porcelain` enumerates
+    // exactly that superset (and omits gitignored dirs like node_modules/dist).
+    const status = await git(cwd, ["status", "--porcelain"]);
+    if (status.ok) for (const p of parsePorcelainPaths(status.stdout)) set.add(p);
+  } else if (opts.commitAll) {
+    // `git commit -a` auto-stages tracked modifications (not untracked files).
+    const mod = await git(cwd, ["diff", "--name-only"]);
+    if (mod.ok) addLines(mod.stdout);
+  }
+  return [...set];
+}
+
 export function isAutoCommitEnabled(): boolean {
   if (process.env.MUONROI_AUTO_COMMIT === "0") return false;
   // Never auto-commit while the unit-test suite runs — it executes in the repo

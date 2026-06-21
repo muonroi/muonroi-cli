@@ -18,6 +18,7 @@ import { FileTracker } from "./file-tracker.js";
 import {
   analyzeGitCommand,
   checkPushGate,
+  commitBlockedMessage,
   pushBlockedMessage,
   recordCommandOutcome,
   stagingWarning,
@@ -247,6 +248,32 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         const gate = checkPushGate(gitSafetyKey);
         if (gate.blocked) {
           return `${pushBlockedMessage(gate.failed)}${stageWarn}`;
+        }
+      }
+
+      // G1 follow-up: a raw bash `git commit` must not bypass the LSP commit
+      // gate that the `git_commit` tool + auto-commit backstop enforce. Derive
+      // the to-be-committed paths from git state and block (pre-exec, never run
+      // the commit) if any staged source file has a severity-1 LSP error. The
+      // gate is fail-OPEN (LSP slow/down → allow) and self-disables under
+      // MUONROI_COMMIT_GATE=0 / the unit-test suite. Lazy-import keeps the
+      // LSP-heavy module off the hot bash path (mirrors git_commit below).
+      if (gitShape.isCommit) {
+        const { gateStagedPaths, isCommitGateEnabled, pathsForCommitGate } = await import(
+          "../orchestrator/auto-commit.js"
+        );
+        if (isCommitGateEnabled()) {
+          const commitCwd = bash.getCwd();
+          const paths = await pathsForCommitGate(commitCwd, {
+            broadAdd: gitShape.isBroadAdd,
+            commitAll: gitShape.isCommitAll,
+          });
+          if (paths.length > 0) {
+            const gate = await gateStagedPaths(commitCwd, paths);
+            if (!gate.ok) {
+              return `${commitBlockedMessage(gate.summary)}${stageWarn}`;
+            }
+          }
         }
       }
 

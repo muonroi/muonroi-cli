@@ -72,18 +72,34 @@ const BROAD_ADD_RE = /\bgit\b[^|&;\n]*[ \t]add[ \t]+(?:-A\b|--all\b|\.(?=[ \t]|$
 // `-a` / `-am` / `-ma` etc. — a short-flag cluster CONTAINING `a`, terminated by
 // whitespace or end (so `-a--otherflag` and `--amend` do NOT match).
 const COMMIT_ALL_RE = /\bgit\b[^|&;\n]*[ \t]commit\b[^|&;\n]*[ \t]-[a-z]*a[a-z]*(?=[ \t]|$)/;
+// Any `git commit` (with or without `-a`). `commit` must end at whitespace or
+// the clause boundary so plumbing like `commit-tree` / `commit-graph` and
+// option values like `--grep=commit` do NOT match. Drives the bash-tool LSP
+// commit gate so a raw `git commit` cannot bypass the `git_commit` tool's gate.
+const COMMIT_RE = /\bgit\b[^|&;\n]*[ \t]commit(?=[ \t]|$)/;
 
 export interface GitCommandShape {
   isPush: boolean;
   /** `git add -A` / `git add .` / `git add --all` / `git commit -a[m]`. */
   isBroadStage: boolean;
+  /** Any `git commit` (with or without `-a`). Gated by the LSP commit gate. */
+  isCommit: boolean;
+  /** `git add -A` / `git add .` / `git add --all` (stages the whole working tree). */
+  isBroadAdd: boolean;
+  /** `git commit -a[m]` (auto-stages tracked modifications at commit time). */
+  isCommitAll: boolean;
 }
 
 export function analyzeGitCommand(command: string): GitCommandShape {
   const c = stripQuoted(command);
+  const isBroadAdd = BROAD_ADD_RE.test(c);
+  const isCommitAll = COMMIT_ALL_RE.test(c);
   return {
     isPush: PUSH_RE.test(c),
-    isBroadStage: BROAD_ADD_RE.test(c) || COMMIT_ALL_RE.test(c),
+    isBroadStage: isBroadAdd || isCommitAll,
+    isCommit: COMMIT_RE.test(c),
+    isBroadAdd,
+    isCommitAll,
   };
 }
 
@@ -129,6 +145,21 @@ export function pushBlockedMessage(failed: string[]): string {
     `${list}\n\n` +
     "Re-run the failing check until it passes (0 failures), then push. This mirrors the mandatory Pre-Push Test Gate " +
     "(never push on red). If you must override for a genuine reason, set MUONROI_ALLOW_PUSH_ON_RED=1."
+  );
+}
+
+/**
+ * Message returned in place of running a blocked bash `git commit`. Mirrors the
+ * G1 `git_commit` tool gate: the agent must FIX the reported errors, not bypass
+ * the gate — so (per the G1 convention) the user-only `MUONROI_COMMIT_GATE=0`
+ * escape hatch is intentionally NOT advertised here.
+ */
+export function commitBlockedMessage(summary?: string): string {
+  return (
+    "BLOCKED: refusing to run `git commit` — staged file(s) have errors that must be fixed first:\n" +
+    `${summary ?? "(no diagnostic detail available)"}\n\n` +
+    "Fix the reported errors, re-stage the file(s), then commit again. This mirrors the `git_commit` " +
+    "tool's quality gate so a bash `git commit` cannot bypass it."
   );
 }
 
