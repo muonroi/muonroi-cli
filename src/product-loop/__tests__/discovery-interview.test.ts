@@ -2,7 +2,7 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { iterateInterview, type UserPromptFn } from "../discovery-interview.js";
 import { initDiscoveryState, readDiscoveryState } from "../discovery-persistence.js";
 
@@ -71,13 +71,24 @@ function makeRecommender(answers: Record<string, any>) {
 describe("discovery-interview", () => {
   let flowDir: string;
   const runId = "iv-run";
+  let prevAutofill: string | undefined;
 
   beforeEach(async () => {
+    // These tests exercise the per-question CARD flow (skip budget, FE-policy
+    // retry, leader/council dispatch). Disable G2-b auto-fill so the cards
+    // actually surface; the auto-fill path has its own test below.
+    prevAutofill = process.env.MUONROI_DISCOVERY_AUTOFILL;
+    process.env.MUONROI_DISCOVERY_AUTOFILL = "0";
     flowDir = await mktmp();
     await initDiscoveryState(flowDir, runId, {
       classification: "greenfield",
       prefillSource: { fromDetection: [], fromPrompt: [] },
     });
+  });
+
+  afterEach(() => {
+    if (prevAutofill === undefined) delete process.env.MUONROI_DISCOVERY_AUTOFILL;
+    else process.env.MUONROI_DISCOVERY_AUTOFILL = prevAutofill;
   });
 
   it("iterates all 10 questions with leader/council dispatch", async () => {
@@ -301,5 +312,51 @@ describe("discovery-interview", () => {
     expect(frontendAttempts).toBe(2); // first rejected, second accepted
     const state = await readDiscoveryState(flowDir, runId);
     expect((state?.answers.frontendApproach as any).library).toBe("shadcn");
+  });
+
+  // G2-b: a minimal/well-specified prompt auto-accepts the recommender primary
+  // for required questions — NO per-question cards — and surfaces ONE summary
+  // gate listing the assumptions (verified live: /ideal previously showed
+  // productType/targetPlatform/audience as 3 separate cards).
+  it("auto-fills required questions and surfaces ONE summary gate (minimal prompt)", async () => {
+    delete process.env.MUONROI_DISCOVERY_AUTOFILL; // auto-fill ON (default)
+    const answers = {
+      productType: "saas",
+      targetPlatform: ["cli"],
+      audience: { persona: "devs", scale: "1k-100k", geography: "SEA" },
+      backendArchitecture: "monolith",
+      backendStack: { language: "TS", framework: "Nest" },
+      dbStrategy: { mode: "greenfield", engine: "PG" },
+    };
+    const rec = makeRecommender(answers);
+    const promptedIds: string[] = [];
+    let gateAssumptions: Array<{ id: string; value: any }> | undefined;
+    const userPrompt: UserPromptFn = async (args) => {
+      promptedIds.push(args.questionId);
+      if (args.questionId === "__user_gate__") {
+        gateAssumptions = args.assumptions;
+        return { action: "proceed" };
+      }
+      return { action: "accept" };
+    };
+    await iterateInterview({
+      flowDir,
+      runId,
+      idea: "build a small cli todo app",
+      capUsd: 50,
+      detection: FAKE_DETECTION,
+      userPrompt,
+      recommender: rec as any,
+    });
+    // No per-question card was shown — only the single summary gate.
+    expect(promptedIds.filter((id) => id !== "__user_gate__")).toEqual([]);
+    expect(promptedIds).toContain("__user_gate__");
+    // The gate carried the assumed required answers for one-shot review.
+    expect(gateAssumptions?.map((a) => a.id)).toEqual(
+      expect.arrayContaining(["productType", "targetPlatform", "audience", "backendStack", "dbStrategy"]),
+    );
+    const state = await readDiscoveryState(flowDir, runId);
+    expect(state?.answers.productType).toBe("saas");
+    expect(state?.userGatePassed).toBe(true);
   });
 });

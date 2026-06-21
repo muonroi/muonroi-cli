@@ -123,11 +123,17 @@ function buildLiveTuiAsk(
 export function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]) => Promise<string>): UserPromptFn {
   return async (args: UserPromptArgs): Promise<UserPromptResult> => {
     if (args.questionId === "__user_gate__") {
-      const choice = await tuiAsk("All required questions answered. Proceed to research or ask more?", [
-        "proceed",
-        "ask-more",
-        "abort",
-      ]);
+      // G2-b: when required answers were auto-filled from the recommender
+      // (minimal/well-specified prompt), this single card IS the summary — list
+      // the assumptions so the user reviews them in one place instead of N
+      // sequential per-question cards. "ask-more" lets them revisit/expand.
+      const label =
+        args.assumptions && args.assumptions.length > 0
+          ? `Assumed from your prompt:\n${args.assumptions
+              .map((a) => `  • ${a.id} = ${JSON.stringify(a.value)}`)
+              .join("\n")}\n\nProceed, or ask more to adjust/expand?`
+          : "All required questions answered. Proceed to research or ask more?";
+      const choice = await tuiAsk(label, ["proceed", "ask-more", "abort"]);
       if (choice === "proceed") return { action: "proceed" };
       if (choice === "abort") return { action: "abort" };
       return { action: "ask-more" };
