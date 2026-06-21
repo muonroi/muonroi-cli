@@ -23,6 +23,9 @@ vi.mock("../../ee/bridge.js", () => ({
 vi.mock("../config.js", () => ({
   isUnifiedPilEnabled: mockIsUnifiedPilEnabled,
   isLlmFirstClassifyEnabled: mockIsLlmFirstClassifyEnabled,
+  // Pass-3 unified reads the client-side budget; whole-module mock replaces the
+  // real export, so it must be provided or the call site throws.
+  getUnifiedPilBudgetMs: vi.fn(() => 3500),
 }));
 
 import { layer1Intent } from "../layer1-intent.js";
