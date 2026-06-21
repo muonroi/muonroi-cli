@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  buildAutoCommitSubject,
+  buildFileListSubject,
   isAutoCommitEnabled,
   isCliArtifactPath,
   isExcludedPath,
   isSensitivePath,
   parsePorcelainPaths,
+  splitCommitMessage,
 } from "../auto-commit.js";
 
 describe("auto-commit pure helpers", () => {
@@ -49,12 +50,17 @@ describe("auto-commit pure helpers", () => {
     expect(isExcludedPath("greeting.txt")).toBe(false);
   });
 
-  it("builds a bounded conventional subject", () => {
-    expect(buildAutoCommitSubject("add a login form", 2)).toBe("chore: add a login form");
-    expect(buildAutoCommitSubject("x".repeat(300), 1).length).toBeLessThanOrEqual(72);
-    expect(buildAutoCommitSubject("", 3)).toContain("agent changes");
-    // strips backticks/quotes that could break the -m argument intent
-    expect(buildAutoCommitSubject('fix `foo` "bar"', 1)).not.toMatch(/[`"]/);
+  it("backstop subject lists files + stays bounded (never the raw prompt)", () => {
+    expect(buildFileListSubject(["src/a.ts", "src/b.ts"])).toBe("chore: update 2 file(s) — a.ts, b.ts");
+    expect(buildFileListSubject(["a.ts", "b.ts", "c.ts", "d.ts", "e.ts"])).toContain("+2 more");
+    expect(buildFileListSubject(Array.from({ length: 20 }, (_, i) => `file${i}.ts`)).length).toBeLessThanOrEqual(72);
+  });
+
+  it("splits an agent-authored message: subject <=72, body kept, attribution deduped", () => {
+    expect(splitCommitMessage("feat: add X\r\n\r\nbody line")).toEqual({ subject: "feat: add X", body: "body line" });
+    expect(splitCommitMessage("x".repeat(200)).subject.length).toBeLessThanOrEqual(72);
+    // an attribution the agent already added is dropped (we append exactly one)
+    expect(splitCommitMessage("feat: y\nCoding by - Muonroi-CLI")).toEqual({ subject: "feat: y", body: "" });
   });
 
   it("is disabled under the unit-test runner so the suite never commits", () => {
