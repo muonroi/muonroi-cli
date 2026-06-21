@@ -40,6 +40,13 @@ export interface UserPromptArgs {
   recommendation?: RecommendOutput;
   prefilled?: any;
   message?: string;
+  /**
+   * G2-b: when the interview auto-filled required questions from the
+   * recommender (minimal/well-specified prompt), the `__user_gate__` card
+   * carries the assumed answers so it can render ONE summary ("I assumed X/Y/Z
+   * — proceed or adjust?") instead of N sequential per-question cards.
+   */
+  assumptions?: Array<{ id: string; value: any }>;
 }
 
 export type UserPromptFn = (args: UserPromptArgs) => Promise<UserPromptResult>;
@@ -83,6 +90,19 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   // not web) are deferred unless the user explicitly re-runs with more context.
   const specificity = computePromptSpecificity(opts.idea);
   const skipOptionalForMinimal = specificity === "minimal";
+
+  // G2-b: for a minimal OR well-specified ("detailed") prompt the recommender's
+  // primary is high-confidence — minimal picks smallest-scope defaults, detailed
+  // respects the stated context. In both cases surfacing a card for EVERY
+  // required question (productType/targetPlatform/audience/…) is over-asking the
+  // user already complained about: they accept by reflex. Instead auto-accept
+  // the recommender primary for required questions and surface ONE summary card
+  // (the user gate) listing the assumptions so the user can proceed or adjust.
+  // "moderate" prompts keep the per-question cards (genuinely ambiguous). Escape
+  // hatch: MUONROI_DISCOVERY_AUTOFILL=0 restores per-question cards everywhere.
+  const autoFillRequired =
+    (specificity === "minimal" || specificity === "detailed") && process.env.MUONROI_DISCOVERY_AUTOFILL !== "0";
+  const assumed: Array<{ id: string; value: any }> = [];
 
   // Build the repo brief ONCE per interview run for existing projects. The
   // brief replaces the Muonroi vendor preamble inside leader prompts so
@@ -142,13 +162,34 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       recommendation = await opts.recommender.leaderRecommend(recInput);
     }
 
+    // G2-b: auto-accept the recommender primary for required questions on a
+    // minimal/well-specified prompt — no per-question card. Validated (+ FE
+    // policy) so a malformed recommendation falls back to the normal card flow.
+    // The assumed answers are surfaced together on the single user-gate card.
+    let autoAccepted = false;
+    if (autoFillRequired && effectivelyRequired && recommendation.primary?.value != null) {
+      const v = recommendation.primary.value;
+      const validation = validateAnswer(question.id, v);
+      const feLib = question.id === "frontendApproach" ? (v as any)?.library : undefined;
+      const fePolicyOk = !feLib || isFePolicyAccepted(feLib);
+      if (validation.ok && fePolicyOk) {
+        await recordRecommendation(flowDir, runId, question.id, toEntry(recommendation), recommendation.costUsd);
+        await saveDiscoveryAnswer(flowDir, runId, question.id, v);
+        assumed.push({ id: question.id, value: v });
+        autoAccepted = true;
+        // Fall through to the post-answer user-gate check below (skip the card).
+      }
+    }
+
     // Per-question skip-attempt counter for required questions.
     // Resets when the user provides a real answer (accept/override).
     let skipAttempts = 0;
     const MAX_SKIP_ATTEMPTS = 3;
     const _debugInterview = process.env.MUONROI_DEBUG_LEADER === "1";
 
-    for (;;) {
+    // When auto-accepted above, the card loop body is skipped entirely (the
+    // for-condition is false on entry) and we go straight to the gate check.
+    for (; !autoAccepted; ) {
       const _iterStart = Date.now();
       if (_debugInterview) {
         process.stderr.write(
@@ -254,7 +295,10 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       allRequiredAnswered(refreshed.questionsAnswered, refreshedPlatforms) &&
       !refreshed.userGatePassed
     ) {
-      const gate = await opts.userPrompt({ questionId: "__user_gate__" });
+      const gate = await opts.userPrompt({
+        questionId: "__user_gate__",
+        assumptions: assumed.length > 0 ? assumed : undefined,
+      });
       if (gate.action === "proceed") {
         await markUserGatePassed(flowDir, runId);
         break;
