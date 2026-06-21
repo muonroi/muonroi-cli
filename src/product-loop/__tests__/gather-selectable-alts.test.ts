@@ -117,3 +117,48 @@ describe("buildGatherUserPrompt — selectable alternatives", () => {
     expect(await prompt2({ questionId: "x", recommendation: makeRec() })).toEqual({ action: "skip" });
   });
 });
+
+describe("buildGatherUserPrompt — user-gate per-field edit (G1 follow-up)", () => {
+  const assumptions = [
+    { id: "productType", value: "internal-tool" },
+    { id: "targetPlatform", value: ["cli"] },
+  ];
+
+  it("offers proceed + one edit:<id> per assumption + ask-more + abort", async () => {
+    let captured: string[] | undefined;
+    const tuiAsk = vi.fn(async (_label: string, options?: string[]) => {
+      captured = options;
+      return "proceed";
+    });
+    await buildGatherUserPrompt(tuiAsk)({ questionId: "__user_gate__", assumptions });
+    expect(captured).toEqual(["proceed", "edit: productType", "edit: targetPlatform", "ask-more", "abort"]);
+  });
+
+  it('selecting "edit: targetPlatform" returns {action:"edit-field", fieldId}', async () => {
+    const tuiAsk = vi.fn(async () => "edit: targetPlatform");
+    const result = await buildGatherUserPrompt(tuiAsk)({ questionId: "__user_gate__", assumptions });
+    expect(result).toEqual({ action: "edit-field", fieldId: "targetPlatform" });
+  });
+
+  it("no assumptions → no edit options (proceed/ask-more/abort only)", async () => {
+    let captured: string[] | undefined;
+    const tuiAsk = vi.fn(async (_label: string, options?: string[]) => {
+      captured = options;
+      return "ask-more";
+    });
+    await buildGatherUserPrompt(tuiAsk)({ questionId: "__user_gate__" });
+    expect(captured).toEqual(["proceed", "ask-more", "abort"]);
+  });
+
+  it("proceed / abort / ask-more still map correctly with assumptions present", async () => {
+    expect(
+      await buildGatherUserPrompt(vi.fn(async () => "proceed"))({ questionId: "__user_gate__", assumptions }),
+    ).toEqual({ action: "proceed" });
+    expect(
+      await buildGatherUserPrompt(vi.fn(async () => "abort"))({ questionId: "__user_gate__", assumptions }),
+    ).toEqual({ action: "abort" });
+    expect(
+      await buildGatherUserPrompt(vi.fn(async () => "ask-more"))({ questionId: "__user_gate__", assumptions }),
+    ).toEqual({ action: "ask-more" });
+  });
+});

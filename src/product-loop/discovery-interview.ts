@@ -33,6 +33,13 @@ export type UserPromptResult =
   | { action: "more-options" }
   | { action: "proceed" }
   | { action: "ask-more" }
+  /**
+   * G1 follow-up: from the `__user_gate__` summary card the user picked one
+   * auto-filled assumption to revise. The interview re-asks that single field
+   * (reusing the per-question card) and re-shows the gate — instead of forcing
+   * an abort-and-reprompt or MUONROI_DISCOVERY_AUTOFILL=0 to change one value.
+   */
+  | { action: "edit-field"; fieldId: string }
   | { action: "abort" };
 
 export interface UserPromptArgs {
@@ -103,6 +110,10 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   const autoFillRequired =
     (specificity === "minimal" || specificity === "detailed") && process.env.MUONROI_DISCOVERY_AUTOFILL !== "0";
   const assumed: Array<{ id: string; value: any }> = [];
+  // G1 follow-up: keep the recommendation behind each auto-filled assumption so
+  // the user-gate "edit: <field>" path can re-render the SAME per-question card
+  // (Recommended + alternatives) without a second recommender LLM call.
+  const assumedRec = new Map<string, RecommendOutput>();
 
   // Build the repo brief ONCE per interview run for existing projects. The
   // brief replaces the Muonroi vendor preamble inside leader prompts so
@@ -176,6 +187,7 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
         await recordRecommendation(flowDir, runId, question.id, toEntry(recommendation), recommendation.costUsd);
         await saveDiscoveryAnswer(flowDir, runId, question.id, v);
         assumed.push({ id: question.id, value: v });
+        assumedRec.set(question.id, recommendation);
         autoAccepted = true;
         // Fall through to the post-answer user-gate check below (skip the card).
       }
@@ -295,16 +307,30 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
       allRequiredAnswered(refreshed.questionsAnswered, refreshedPlatforms) &&
       !refreshed.userGatePassed
     ) {
-      const gate = await opts.userPrompt({
-        questionId: "__user_gate__",
-        assumptions: assumed.length > 0 ? assumed : undefined,
-      });
-      if (gate.action === "proceed") {
-        await markUserGatePassed(flowDir, runId);
+      // Gate loop: "proceed" exits the whole interview, "abort" throws,
+      // "edit-field" re-asks one assumed answer then RE-shows the gate (so the
+      // user can revise several before proceeding), "ask-more" falls through to
+      // keep iterating optional questions.
+      let proceeded = false;
+      for (;;) {
+        const gate = await opts.userPrompt({
+          questionId: "__user_gate__",
+          assumptions: assumed.length > 0 ? assumed : undefined,
+        });
+        if (gate.action === "proceed") {
+          await markUserGatePassed(flowDir, runId);
+          proceeded = true;
+          break;
+        }
+        if (gate.action === "abort") throw new Error("discovery aborted at user gate");
+        if (gate.action === "edit-field") {
+          await reAskAssumedField(opts, flowDir, runId, gate.fieldId, assumed, assumedRec.get(gate.fieldId));
+          continue; // re-render the gate with the updated assumption
+        }
+        // ask-more: stop gating, continue iterating optional questions
         break;
       }
-      if (gate.action === "abort") throw new Error("discovery aborted at user gate");
-      // ask-more: continue iterating optional questions
+      if (proceeded) break;
     }
   }
 
@@ -317,6 +343,68 @@ export async function iterateInterview(opts: IterateOpts): Promise<ProjectContex
   await writeProjectContext(flowDir, runId, ctx);
   await markDone(flowDir, runId);
   return ctx;
+}
+
+/**
+ * G1 follow-up: re-ask ONE auto-filled assumption from the user gate. Renders
+ * the same per-question card (Recommended + alternatives) as the normal flow by
+ * reusing the stored recommendation, validates (+ FE policy), persists the new
+ * answer, and updates the in-memory `assumed` list so the re-rendered gate shows
+ * the revised value. "skip" cancels the edit (keeps the current assumption);
+ * "abort" aborts the whole interview, consistent with the per-question card.
+ */
+async function reAskAssumedField(
+  opts: IterateOpts,
+  flowDir: string,
+  runId: string,
+  fieldId: string,
+  assumed: Array<{ id: string; value: any }>,
+  recommendation: RecommendOutput | undefined,
+): Promise<void> {
+  const question = DISCOVERY_QUESTIONS.find((q) => q.id === fieldId);
+  if (!question) return; // unknown field id — ignore defensively, keep current value
+  for (;;) {
+    const ans = await opts.userPrompt({ questionId: fieldId, recommendation });
+    if (ans.action === "abort") throw new Error("discovery aborted by user");
+    let chosenValue: any;
+    if (ans.action === "accept") {
+      if (recommendation?.primary?.value == null) continue; // nothing to accept — re-prompt
+      chosenValue = recommendation.primary.value;
+    } else if (ans.action === "override") {
+      chosenValue = ans.value;
+    } else if (ans.action === "skip") {
+      return; // user backed out of editing this field — keep the existing assumption
+    } else {
+      continue; // more-options / edit-field / proceed / ask-more are no-ops here
+    }
+
+    const validation = validateAnswer(fieldId, chosenValue);
+    if (!validation.ok) {
+      if (fieldId !== "frontendApproach") {
+        await opts.userPrompt({ questionId: fieldId, message: validation.reason ?? "invalid answer" });
+      }
+      continue;
+    }
+    if (fieldId === "frontendApproach") {
+      const lib = (chosenValue as any)?.library;
+      if (lib && !isFePolicyAccepted(lib)) {
+        await opts.userPrompt({
+          questionId: fieldId,
+          message: "FE policy: library must be shadcn, radix, headlessui, or none",
+        });
+        continue;
+      }
+    }
+
+    if (ans.action === "override" && recommendation) {
+      await appendUserOverride(flowDir, runId, fieldId, recommendation.primary.value, chosenValue, ans.reason);
+    }
+    await saveDiscoveryAnswer(flowDir, runId, fieldId, chosenValue);
+    const entry = assumed.find((a) => a.id === fieldId);
+    if (entry) entry.value = chosenValue;
+    else assumed.push({ id: fieldId, value: chosenValue });
+    return;
+  }
 }
 
 function allRequiredAnswered(answered: string[], platforms: PlatformT[]): boolean {

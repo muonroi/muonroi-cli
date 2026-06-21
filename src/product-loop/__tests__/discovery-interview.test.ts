@@ -359,4 +359,52 @@ describe("discovery-interview", () => {
     expect(state?.answers.productType).toBe("saas");
     expect(state?.userGatePassed).toBe(true);
   });
+
+  // G1 follow-up: from the summary gate the user can revise ONE auto-filled
+  // assumption in place (instead of abort+reprompt or AUTOFILL=0). The interview
+  // re-asks just that field, persists the new value, and re-shows the gate.
+  it("edit-field at the gate re-asks one assumption, saves the new value, then re-shows the gate", async () => {
+    delete process.env.MUONROI_DISCOVERY_AUTOFILL; // auto-fill ON
+    const answers = {
+      productType: "saas",
+      targetPlatform: ["cli"],
+      audience: { persona: "devs", scale: "1k-100k", geography: "SEA" },
+      backendArchitecture: "monolith",
+      backendStack: { language: "TS", framework: "Nest" },
+      dbStrategy: { mode: "greenfield", engine: "PG" },
+    };
+    const rec = makeRecommender(answers);
+    const gatesSeen: Array<Array<{ id: string; value: any }> | undefined> = [];
+    let productTypeEditAsks = 0;
+    const userPrompt: UserPromptFn = async (args) => {
+      if (args.questionId === "__user_gate__") {
+        gatesSeen.push(args.assumptions);
+        // First gate → edit productType; after the edit, second gate → proceed.
+        return gatesSeen.length === 1 ? { action: "edit-field", fieldId: "productType" } : { action: "proceed" };
+      }
+      if (args.questionId === "productType" && !args.message) {
+        productTypeEditAsks += 1;
+        return { action: "override", value: "internal-tool", reason: "revised at gate" };
+      }
+      return { action: "accept" };
+    };
+    await iterateInterview({
+      flowDir,
+      runId,
+      idea: "build a small cli todo app",
+      capUsd: 50,
+      detection: FAKE_DETECTION,
+      userPrompt,
+      recommender: rec as any,
+    });
+    // Gate shown twice (edit, then proceed); productType re-asked exactly once.
+    expect(gatesSeen.length).toBe(2);
+    expect(productTypeEditAsks).toBe(1);
+    // The edited value is persisted (NOT the auto-filled "saas").
+    const state = await readDiscoveryState(flowDir, runId);
+    expect(state?.answers.productType).toBe("internal-tool");
+    expect(state?.userGatePassed).toBe(true);
+    // The re-shown gate reflects the edit in its assumption summary.
+    expect(gatesSeen[1]?.find((a) => a.id === "productType")?.value).toBe("internal-tool");
+  });
 });

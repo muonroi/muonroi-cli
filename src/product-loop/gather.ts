@@ -127,15 +127,23 @@ export function buildGatherUserPrompt(tuiAsk: (label: string, options?: string[]
       // (minimal/well-specified prompt), this single card IS the summary — list
       // the assumptions so the user reviews them in one place instead of N
       // sequential per-question cards. "ask-more" lets them revisit/expand.
-      const label =
-        args.assumptions && args.assumptions.length > 0
-          ? `Assumed from your prompt:\n${args.assumptions
-              .map((a) => `  • ${a.id} = ${JSON.stringify(a.value)}`)
-              .join("\n")}\n\nProceed, or ask more to adjust/expand?`
-          : "All required questions answered. Proceed to research or ask more?";
-      const choice = await tuiAsk(label, ["proceed", "ask-more", "abort"]);
+      const hasAssumptions = !!args.assumptions && args.assumptions.length > 0;
+      const label = hasAssumptions
+        ? `Assumed from your prompt:\n${args
+            .assumptions!.map((a) => `  • ${a.id} = ${JSON.stringify(a.value)}`)
+            .join("\n")}\n\nProceed, edit one of the assumptions, or ask more to adjust/expand?`
+        : "All required questions answered. Proceed to research or ask more?";
+      // G1 follow-up: one "edit: <field>" option per auto-filled assumption so a
+      // single wrong default can be revised in place — no abort+reprompt or
+      // MUONROI_DISCOVERY_AUTOFILL=0. The prefix must match the parse below.
+      const EDIT_PREFIX = "edit: ";
+      const editOpts = hasAssumptions ? args.assumptions!.map((a) => `${EDIT_PREFIX}${a.id}`) : [];
+      const choice = await tuiAsk(label, ["proceed", ...editOpts, "ask-more", "abort"]);
       if (choice === "proceed") return { action: "proceed" };
       if (choice === "abort") return { action: "abort" };
+      if (choice.startsWith(EDIT_PREFIX)) {
+        return { action: "edit-field", fieldId: choice.slice(EDIT_PREFIX.length) };
+      }
       return { action: "ask-more" };
     }
     if (args.message) {
