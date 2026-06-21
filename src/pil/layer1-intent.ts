@@ -12,7 +12,12 @@
 
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { getUnifiedPilBudgetMs, isLlmFirstClassifyEnabled, isUnifiedPilEnabled } from "./config.js";
+import {
+  getUnifiedPilBudgetMs,
+  isLlmFirstBrainEnabled,
+  isLlmFirstClassifyEnabled,
+  isUnifiedPilEnabled,
+} from "./config.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -717,6 +722,50 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           complexity,
           complexityScore,
         };
+
+        // G3 (b1): reach the unified injection on the default (model-first)
+        // path. Without this, _brainData stays null and layer3 falls back to a
+        // legacy dense-only /api/search round-trip with divergent source
+        // attribution. Populate _brainData from the SAME server-side unified
+        // retrieval the offline cascade uses (one round-trip, bounded by budget)
+        // so layer3 renders the richer source="unified" block AND records the
+        // rateable ledger consistently. On chitchat / null / failure, _brainData
+        // stays null → layer3 legacy path (behaviour unchanged). Gate:
+        // MUONROI_LLM_FIRST_BRAIN=0 reverts.
+        let llmFirstBrainData: BrainData | null = null;
+        if (isLlmFirstBrainEnabled() && intentKind !== "chitchat") {
+          let brainRaw = ctx.raw;
+          if (ctx.sessionId) {
+            brainRaw =
+              ctx.raw +
+              ' [EE task checkpoints ("Context checkpoint summary" with ✔ DONE) from prior compactions are available via the ee.query tool. ' +
+              "To keep full tool history this turn when you see pre-warn or compaction note, emit exact literal PRESERVE_FULL_CONTEXT in reasoning or assistant note. " +
+              'Self-check "task finished?" or "compacted yet this turn?" using the checkpoints.]';
+          }
+          intentTrace.pass3UnifiedAttempted = true;
+          // try/catch (not .catch) so a SYNC throw from pilContext (e.g. no EE
+          // client configured, as in unit tests) is also swallowed — it must
+          // never break the model-first return; _brainData just stays null.
+          let resp: Awaited<ReturnType<typeof pilContext>> = null;
+          try {
+            resp = await pilContext(brainRaw, {
+              projectCtx: domain ? { domain } : undefined,
+              budgetMs: getUnifiedPilBudgetMs(),
+            });
+          } catch (err) {
+            console.error(`[pil/layer1] llm-first unified brain fetch failed: ${(err as Error)?.message}`);
+          }
+          if (resp) {
+            llmFirstBrainData = {
+              t0_principles: resp.t0_principles,
+              t1_rules: resp.t1_rules,
+              t2_patterns: resp.t2_patterns,
+              retrieval_skipped_reason: resp.retrieval_skipped_reason,
+            };
+            intentTrace.pass3UnifiedSucceeded = true;
+          }
+        }
+
         return {
           ...ctx,
           taskType: llmRes.taskType,
@@ -737,9 +786,10 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           // the raw prompt.
           ecosystemScope: llmRes.ecosystemScope,
           replyLanguage: llmRes.replyLanguage,
-          // null lets L6 run its cheap style-rescue if outputStyle is still null;
-          // EE retrieval enrichment happens downstream in layer3 as usual.
-          _brainData: null,
+          // G3 (b1): populated from the unified pil-context fetch above so
+          // layer3 renders source="unified" instead of its legacy dense-only
+          // round-trip. null (chitchat / fetch failed) → layer3 legacy path.
+          _brainData: llmFirstBrainData,
           _intentTrace: intentTrace,
           layers: [
             ...ctx.layers,
