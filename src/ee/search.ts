@@ -251,6 +251,90 @@ export async function mirrorFeedbackLocally(
   }
 }
 
+export interface WriteExperienceResult {
+  ok: boolean;
+  id?: string;
+  error?: string;
+}
+
+/**
+ * Write a NEW experience/lesson into the brain mid-session so it is RECALLABLE.
+ * POSTs to /api/import-memory → storeImportedExperience → upsertEntry, which
+ * embeds the text AND writes the `text_bm25` sparse vector (+ a proper payload via
+ * buildStorePayload). That dense+sparse write is what makes the lesson reliably
+ * recallable via ee_query / passive injection (both the dense and lexical legs can
+ * match it). NB: /api/ingest-point writes DENSE-ONLY (no sparse) — its points are
+ * lexically invisible and only surface on a strong dense match, so they are NOT
+ * reliably recallable; do not use it for recall-critical writes.
+ *
+ * This is the missing "agent proactively records a mistake→fix lesson" arm of the
+ * recall loop: ee_query recalls, ee_feedback rates, ee_write creates. Mirrors
+ * feedbackEE's direct-fetch transport (cached baseUrl + bearer token); fails soft.
+ */
+export async function writeExperienceEE(
+  lesson: string,
+  opts: { collection?: string; title?: string; projectSlug?: string; confidence?: number } = {},
+): Promise<WriteExperienceResult> {
+  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
+  const { randomUUID } = await import("node:crypto");
+  const authToken = (await loadEEAuthToken()) ?? undefined;
+  const baseUrl = (getCachedServerBaseUrl() ?? "http://localhost:8082").replace(/\/+$/, "");
+  const collection = opts.collection ?? "experience-behavioral";
+  const id = randomUUID();
+  // storeImportedExperience embeds `${qa.trigger} ${qa.question} ${qa.solution}`,
+  // so put the lesson in solution (and the title in question) to anchor the vector.
+  const qa = {
+    trigger: "",
+    question: opts.title ?? "",
+    solution: lesson,
+    scope: opts.projectSlug ? { project_slug: opts.projectSlug } : {},
+  };
+  const body = {
+    experiences: [
+      {
+        id,
+        collection,
+        qa,
+        tier: 2,
+        confidence: opts.confidence ?? 0.65,
+        runtime: "muonroi-cli-agent",
+      },
+    ],
+  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
+  try {
+    const res = await fetch(`${baseUrl}/api/import-memory`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    const respText = await res.text();
+    let parsed: {
+      error?: string;
+      stored?: number;
+      results?: Array<{ id?: string; ok?: boolean; reason?: string }>;
+    } | null = null;
+    try {
+      parsed = JSON.parse(respText);
+    } catch {
+      /* non-JSON error body — fall through to status handling */
+    }
+    if (!res.ok) {
+      return { ok: false, error: parsed?.error || respText || `HTTP ${res.status}` };
+    }
+    const r0 = parsed?.results?.[0];
+    if (!parsed?.stored || r0?.ok !== true) {
+      return { ok: false, error: r0?.reason ?? "not_stored" };
+    }
+    return { ok: true, id };
+  } catch (err) {
+    const { logEeFailure, classifyEeError } = await import("../utils/ee-logger.js");
+    logEeFailure("search.writeExperienceEE", classifyEeError(err), err as Error);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** Reachability probe for the EE server. */
 export async function healthEE(): Promise<{ ok: boolean; status: number }> {
   const { createEEClient } = await import("./client.js");
