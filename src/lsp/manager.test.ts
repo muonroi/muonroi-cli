@@ -72,7 +72,7 @@ describe("createWorkspaceLspManager", () => {
     expect(result.success).toBe(true);
     expect(result.output).toContain("file:///demo.ts");
     expect(client.openOrChangeFile).toHaveBeenCalledWith(filePath, "typescript", "const demo = 1;\n");
-    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath);
+    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath, undefined);
 
     await manager.close();
     expect(client.stop).toHaveBeenCalled();
@@ -110,7 +110,7 @@ describe("createWorkspaceLspManager", () => {
 
     expect(result).toEqual(diagnostics);
     expect(client.saveFile).toHaveBeenCalledWith(filePath);
-    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath);
+    expect(client.waitForDiagnostics).toHaveBeenCalledWith(filePath, undefined);
 
     await manager.close();
   });

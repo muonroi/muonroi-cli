@@ -1,13 +1,28 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { LspDiagnostic, LspDiagnosticFile } from "../../lsp/types.js";
 import {
+  blockingErrorsForFile,
   buildFileListSubject,
   isAutoCommitEnabled,
   isCliArtifactPath,
+  isCommitGateEnabled,
   isExcludedPath,
   isSensitivePath,
   parsePorcelainPaths,
   splitCommitMessage,
 } from "../auto-commit.js";
+
+function diag(severity: number | undefined): LspDiagnostic {
+  return {
+    message: "x",
+    severity,
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+  } as LspDiagnostic;
+}
+function diagFile(filePath: string, severities: Array<number | undefined>): LspDiagnosticFile {
+  return { filePath, serverId: "ts", diagnostics: severities.map(diag) };
+}
 
 describe("auto-commit pure helpers", () => {
   it("parses porcelain output incl. rename + quoted paths", () => {
@@ -66,5 +81,46 @@ describe("auto-commit pure helpers", () => {
   it("is disabled under the unit-test runner so the suite never commits", () => {
     // VITEST is set while this runs → must be false regardless of MUONROI_AUTO_COMMIT.
     expect(isAutoCommitEnabled()).toBe(false);
+  });
+});
+
+describe("G1 commit quality gate", () => {
+  it("commit gate is disabled under the unit-test runner (specs commit fixtures freely)", () => {
+    // Mirrors isAutoCommitEnabled — VITEST is set, so the gate must be off here.
+    expect(isCommitGateEnabled()).toBe(false);
+  });
+
+  describe("blockingErrorsForFile — errors-only + per-file scope", () => {
+    it("returns severity-1 (error) diagnostics for the staged file", () => {
+      const abs = resolve("foo.ts");
+      const errs = blockingErrorsForFile([diagFile("foo.ts", [1, 1])], abs);
+      expect(errs).toHaveLength(2);
+    });
+
+    it("treats a missing severity as an error (LSP default is 1)", () => {
+      const abs = resolve("foo.ts");
+      expect(blockingErrorsForFile([diagFile("foo.ts", [undefined])], abs)).toHaveLength(1);
+    });
+
+    it("ignores warnings/infos (severity >= 2) — they never block a commit", () => {
+      const abs = resolve("foo.ts");
+      expect(blockingErrorsForFile([diagFile("foo.ts", [2, 3, 4])], abs)).toHaveLength(0);
+    });
+
+    it("ignores errors reported against a DIFFERENT file (cross-file breakage doesn't block)", () => {
+      const abs = resolve("foo.ts");
+      // An error on other.ts must not block a commit of foo.ts.
+      expect(blockingErrorsForFile([diagFile("other.ts", [1, 1])], abs)).toHaveLength(0);
+    });
+
+    it("mixes: keeps only this file's errors out of a multi-file, multi-severity set", () => {
+      const abs = resolve("foo.ts");
+      const errs = blockingErrorsForFile([diagFile("foo.ts", [1, 2, 3]), diagFile("bar.ts", [1, 1])], abs);
+      expect(errs).toHaveLength(1); // only foo.ts's single severity-1
+    });
+
+    it("empty diagnostics → no blockers (non-source / no-LSP-server files pass)", () => {
+      expect(blockingErrorsForFile([], resolve("README.md"))).toEqual([]);
+    });
   });
 });
