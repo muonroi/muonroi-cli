@@ -15,15 +15,18 @@ vi.mock("./config.js", () => ({
   // Default OFF so the existing cascade tests below exercise the regex passes.
   // The model-first gate has its own describe block that flips this to true.
   isLlmFirstClassifyEnabled: vi.fn(() => false),
+  // G3 (b1): default OFF so the existing model-first classification tests don't
+  // trigger the unified brain fetch; the brain-path test flips it true.
+  isLlmFirstBrainEnabled: vi.fn(() => false),
   // Pass-3 unified reads the client-side budget; provided so the whole-module
   // mock does not drop the export (the model-first tests never hit it, but the
   // cascade tests can).
   getUnifiedPilBudgetMs: vi.fn(() => 3500),
 }));
 
-import { classifyViaBrain } from "../ee/bridge.js";
+import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { isLlmFirstClassifyEnabled } from "./config.js";
+import { isLlmFirstBrainEnabled, isLlmFirstClassifyEnabled } from "./config.js";
 import {
   hasActionableToolIntent,
   isGreenfieldBuildTask,
@@ -36,6 +39,8 @@ import type { PipelineContext } from "./types";
 const mockedClassify = vi.mocked(classify);
 const mockedClassifyViaBrain = vi.mocked(classifyViaBrain);
 const mockedLlmFirst = vi.mocked(isLlmFirstClassifyEnabled);
+const mockedLlmFirstBrain = vi.mocked(isLlmFirstBrainEnabled);
+const mockedPilContext = vi.mocked(pilContext);
 
 function makeCtx(raw: string): PipelineContext {
   return {
@@ -670,6 +675,10 @@ describe("Pass 2.6 — social pleasantries route to chitchat (drop the tool-sche
 describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () => {
   beforeEach(() => {
     mockedLlmFirst.mockReturnValue(true);
+    // G3 (b1): brain fetch OFF by default so the classification tests don't
+    // trigger pilContext; the brain-path tests flip it on explicitly.
+    mockedLlmFirstBrain.mockReturnValue(false);
+    mockedPilContext.mockReset();
     // Make the regex cascade obviously WRONG so passing tests prove the model won.
     mockedClassify.mockReturnValue({ tier: "hot", reason: "regex:create-file", confidence: 0.9 });
   });
@@ -692,6 +701,78 @@ describe("layer1Intent — model-first gate (MUONROI_LLM_FIRST_CLASSIFY)", () =>
     expect(result.deliverableKind).toBe("answer"); // Phase 2b: model deliverable threads onto ctx
     expect(result._intentTrace?.pass1Reason).toBe("llm-first");
     expect(mockedClassify).not.toHaveBeenCalled();
+  });
+
+  it("G3 (b1): populates _brainData from pilContext on the model-first path (→ layer3 unified)", async () => {
+    mockedLlmFirstBrain.mockReturnValue(true);
+    // biome-ignore lint/suspicious/noExplicitAny: partial pil-context shape for the test
+    mockedPilContext.mockResolvedValue({
+      taskType: "general",
+      intentKind: "task",
+      outputStyle: "concise",
+      confidence: 0.9,
+      t0_principles: [{ text: "principle-1", score: 0.9 }],
+      t1_rules: [{ text: "rule-1", score: 0.8 }],
+      t2_patterns: [],
+      retrieval_skipped_reason: null,
+    } as any);
+    const result = await layer1Intent(makeCtx("explain the auth flow"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "answer" as const,
+        depthTier: null,
+        ecosystemScope: null,
+        replyLanguage: null,
+      }),
+    });
+    // _brainData now carries the unified brain → layer3 renders source="unified"
+    // instead of its legacy dense-only /api/search round-trip.
+    expect(result._brainData?.t0_principles).toHaveLength(1);
+    expect(result._brainData?.t1_rules).toHaveLength(1);
+    expect(result._intentTrace?.pass3UnifiedAttempted).toBe(true);
+    expect(result._intentTrace?.pass3UnifiedSucceeded).toBe(true);
+    expect(mockedPilContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("G3 (b1): chitchat skips the brain fetch (no pilContext round-trip)", async () => {
+    mockedLlmFirstBrain.mockReturnValue(true);
+    const result = await layer1Intent(makeCtx("cảm ơn nhé"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "chitchat" as const,
+        deliverableKind: "answer" as const,
+        depthTier: null,
+        ecosystemScope: null,
+        replyLanguage: null,
+      }),
+    });
+    expect(result._brainData).toBeNull();
+    expect(mockedPilContext).not.toHaveBeenCalled();
+  });
+
+  it("G3 (b1): a failed/empty pilContext leaves _brainData null (layer3 legacy path)", async () => {
+    mockedLlmFirstBrain.mockReturnValue(true);
+    mockedPilContext.mockResolvedValue(null as any);
+    const result = await layer1Intent(makeCtx("explain the auth flow"), {
+      llmFallback: async () => ({
+        taskType: "general" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "answer" as const,
+        depthTier: null,
+        ecosystemScope: null,
+        replyLanguage: null,
+      }),
+    });
+    expect(result._brainData).toBeNull();
+    expect(result.taskType).toBe("general"); // classification still intact
+    expect(mockedPilContext).toHaveBeenCalledTimes(1);
   });
 
   it("marks chitchat from the model for a pure greeting", async () => {

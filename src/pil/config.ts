@@ -37,6 +37,18 @@ export function isLlmFirstClassifyEnabled(): boolean {
   return process.env.MUONROI_LLM_FIRST_CLASSIFY !== "0";
 }
 
+/**
+ * G3 (b1): on the model-first classify path, also fetch the unified pil-context
+ * brain so layer3 renders the rich source="unified" injection (server-attributed
+ * t0/t2 + t1_rules + the rateable ledger) instead of falling through to its
+ * legacy dense-only /api/search round-trip. Default ON; set "0" to revert to
+ * the legacy layer3 injection on the default path. Independent of
+ * MUONROI_PIL_UNIFIED (which gates the OFFLINE cascade's unified pass).
+ */
+export function isLlmFirstBrainEnabled(): boolean {
+  return process.env.MUONROI_LLM_FIRST_BRAIN !== "0";
+}
+
 export function isDiscoveryEnabled(): boolean {
   return process.env.MUONROI_PIL_DISCOVERY !== "0";
 }
