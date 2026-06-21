@@ -40,6 +40,10 @@ export interface EEToolDeps {
     verdict: FeedbackVerdict,
     reason?: NoiseReason,
   ) => Promise<FeedbackResult>;
+  write?: (
+    lesson: string,
+    opts: { collection?: string; title?: string; projectSlug?: string; confidence?: number },
+  ) => Promise<{ ok: boolean; id?: string; error?: string }>;
   /** Session pending-recall ledger. Defaults to the process singleton. */
   ledger?: RecallLedger;
 }
@@ -198,6 +202,44 @@ export function registerEETools(server: McpServer, deps: EEToolDeps = {}): void 
         return ok(await health());
       } catch (e) {
         return fail("ee_unavailable", e instanceof Error ? e.message : String(e));
+      }
+    },
+  );
+
+  server.registerTool(
+    "ee_write",
+    {
+      description:
+        "Save a NEW lesson to the Experience Engine brain so you and future sessions recall it. Call the MOMENT you " +
+        "hit a mistake / error / dead-end and find the working fix: record the pitfall AND the fix in one concise, " +
+        "generalizable lesson (1-3 sentences — what to do or avoid next time, NOT a play-by-play of this turn). The " +
+        "lesson is embedded immediately (via /api/import-memory: dense + sparse) and becomes recallable via ee_query " +
+        "in this and future sessions. Use ee_query first if unsure a lesson already exists. collection defaults to " +
+        "experience-behavioral (use experience-principles only for a broad, project-independent principle); project " +
+        "scopes the lesson.",
+      inputSchema: {
+        lesson: z.string().min(12).max(4000),
+        title: z.string().max(200).optional(),
+        collection: z.enum(["experience-behavioral", "experience-principles"]).optional(),
+        project: z.string().max(200).optional(),
+      },
+    },
+    async ({ lesson, title, collection, project }) => {
+      const trimmed = lesson.trim();
+      const text = trimmed.length > 1500 ? `${trimmed.slice(0, 1497)}...` : trimmed;
+      const targetCollection = collection ?? "experience-behavioral";
+      const write = deps.write ?? ((l, o) => import("../ee/search.js").then((m) => m.writeExperienceEE(l, o)));
+      try {
+        const result = await write(text, {
+          collection: targetCollection,
+          title,
+          projectSlug: project,
+          confidence: 0.65,
+        });
+        if (!result.ok) return fail("write_failed", result.error ?? "import-memory POST failed");
+        return ok({ ok: true, id: result.id, collection: targetCollection, recallable: "now via ee_query" });
+      } catch (e) {
+        return fail("write_failed", e instanceof Error ? e.message : String(e));
       }
     },
   );

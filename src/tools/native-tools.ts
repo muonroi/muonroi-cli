@@ -28,6 +28,7 @@ import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
 export const NATIVE_MUONROI_TOOL_NAMES = [
   "ee_health",
   "ee_feedback",
+  "ee_write",
   "usage_forensics",
   "lsp_query",
   "setup_guide",
@@ -111,6 +112,63 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         });
       } catch (e) {
         return errLine("feedback_failed", e instanceof Error ? e.message : String(e));
+      }
+    },
+  });
+
+  tools.ee_write = dynamicTool({
+    description:
+      "Save a NEW lesson to the Experience Engine brain so you and future sessions recall it. Call this the MOMENT " +
+      "you hit a mistake / error / dead-end and find the working fix: record the pitfall AND the fix in one concise, " +
+      "generalizable lesson (1-3 sentences — what to do or avoid next time, NOT a play-by-play of this turn). The " +
+      "lesson is embedded immediately and becomes recallable via ee_query in THIS and future sessions. Use ee_query " +
+      "first when unsure if a lesson already exists. collection defaults to experience-behavioral (use " +
+      "experience-principles only for a broad, project-independent principle).",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        lesson: {
+          type: "string",
+          description: "The lesson: the mistake/pitfall AND the fix, concise and generalizable.",
+        },
+        title: { type: "string", description: "Optional short title (<=120 chars)." },
+        collection: {
+          type: "string",
+          enum: ["experience-behavioral", "experience-principles"],
+          description: "Target tier; default experience-behavioral.",
+        },
+      },
+      required: ["lesson"],
+      additionalProperties: false,
+    }),
+    execute: async (input: any) => {
+      const lesson = typeof input?.lesson === "string" ? input.lesson.trim() : "";
+      if (lesson.length < 12) {
+        return errLine("invalid_args", "ee_write requires a non-empty, substantive lesson (>=12 chars)");
+      }
+      // Cap oversized bodies (EE import-quality rule: bare points >1500 chars are
+      // status-dumps, not lessons).
+      const text = lesson.length > 1500 ? `${lesson.slice(0, 1497)}...` : lesson;
+      const collection =
+        input?.collection === "experience-principles" ? "experience-principles" : "experience-behavioral";
+      const title =
+        typeof input?.title === "string" && input.title.trim() ? input.title.trim().slice(0, 120) : undefined;
+      try {
+        const { writeExperienceEE } = await import("../ee/search.js");
+        const path = await import("node:path");
+        const cwd = opts.cwd ?? process.cwd();
+        // confidence 0.65 (above the import default 0.6): an agent-asserted lesson
+        // is deliberate but unproven — the ee_feedback loop then tunes it.
+        const result = await writeExperienceEE(text, {
+          collection,
+          title,
+          projectSlug: path.basename(cwd),
+          confidence: 0.65,
+        });
+        if (!result.ok) return errLine("write_failed", result.error ?? "import-memory POST failed");
+        return json({ ok: true, id: result.id, collection, recallable: "now — same session via ee_query" });
+      } catch (e) {
+        return errLine("write_failed", e instanceof Error ? e.message : String(e));
       }
     },
   });
