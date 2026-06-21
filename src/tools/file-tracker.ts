@@ -22,10 +22,25 @@ export interface ReadRecord {
 
 export class FileTracker {
   private records = new Map<string, ReadRecord>();
+  // Absolute paths the agent CREATED/MODIFIED via write_file/edit_file this
+  // session. Distinct from `records` (which also holds read-only files). The
+  // git_commit tool stages exactly these so an agent commit never sweeps the
+  // user's unrelated working-tree changes or files the agent merely read.
+  private written = new Set<string>();
 
   /** Record content as known to the agent. Called after a successful read. */
   markRead(absolutePath: string, content: string, mtimeMs: number): void {
     this.records.set(absolutePath, { hash: hashOf(content), mtimeMs });
+  }
+
+  /** Record that the agent wrote/edited this file. Called after a successful write. */
+  markWritten(absolutePath: string): void {
+    this.written.add(absolutePath);
+  }
+
+  /** Absolute paths the agent created or modified via tools this session. */
+  writtenPaths(): string[] {
+    return [...this.written];
   }
 
   /** True if the file has been recorded as read this session. */
@@ -62,6 +77,7 @@ export class FileTracker {
   /** Drop everything (e.g. on /clear). */
   reset(): void {
     this.records.clear();
+    this.written.clear();
   }
 }
 

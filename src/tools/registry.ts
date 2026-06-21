@@ -436,6 +436,52 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       },
     });
 
+    // git_commit — the agent commits its OWN work with a message IT writes.
+    tools.git_commit = dynamicTool({
+      description:
+        "Commit the files you have created/edited so far, with a commit message YOU write. Use this to commit each " +
+        "cohesive, working chunk the moment it is finished — and after EACH step of a multi-step plan — instead of " +
+        "leaving everything for one commit at the end. message: a clear conventional subject describing WHAT changed " +
+        "(e.g. 'feat(auth): add token refresh'), optionally followed by a body — NOT a restatement of the request. " +
+        "Only files you wrote via write_file/edit_file are staged (secrets + CLI artifacts are excluded, and the " +
+        "'Coding by - Muonroi-CLI' attribution line is appended automatically). No-op if none of your written files " +
+        "have uncommitted changes.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          message: {
+            type: "string",
+            description: "Conventional commit subject (optionally + body) describing what changed, authored by you.",
+          },
+        },
+        required: ["message"],
+      }),
+      execute: async (input: any) => {
+        const message = typeof input?.message === "string" ? input.message.trim() : "";
+        if (message.length < 3) {
+          return { success: false, output: "git_commit requires a non-empty commit message." };
+        }
+        const written = fileTracker.writtenPaths();
+        if (written.length === 0) {
+          return {
+            success: false,
+            output:
+              "Nothing to commit — you have not created or edited any file via write_file/edit_file this session.",
+          };
+        }
+        try {
+          const { commitSpecificPaths } = await import("../orchestrator/auto-commit.js");
+          const result = await commitSpecificPaths(bash.getCwd(), written, message);
+          if (!result.committed) {
+            return { success: false, output: `No commit made (${result.reason}).` };
+          }
+          return { success: true, output: `Committed ${result.fileCount} file(s) → ${result.sha}` };
+        } catch (e) {
+          return { success: false, output: `git_commit failed: ${e instanceof Error ? e.message : String(e)}` };
+        }
+      },
+    });
+
     // task
     if (opts?.runTask) {
       const runTask = opts.runTask;

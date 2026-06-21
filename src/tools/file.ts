@@ -106,6 +106,7 @@ export async function writeFile(
 
     // Refresh tracker so subsequent edits in the same session don't refuse.
     tracker?.markRead(full, content, mtimeMsOf(full));
+    tracker?.markWritten(full);
 
     const diff = computeDiff(filePath, before, content);
     const verb = before === "" ? "Created" : "Updated";
@@ -186,6 +187,7 @@ export async function editFile(
 
     // Refresh tracker so back-to-back edits keep working.
     tracker?.markRead(full, after, mtimeMsOf(full));
+    tracker?.markWritten(full);
 
     const diff = computeDiff(filePath, before, after);
     const lspDiagnostics = await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
