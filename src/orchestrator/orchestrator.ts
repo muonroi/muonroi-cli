@@ -105,6 +105,13 @@ import {
   type ProcessMessageUsage,
   type ResolvedModelRuntime,
 } from "./agent-options";
+import {
+  AUTO_COMMIT_ATTRIBUTION,
+  type AutoCommitResult,
+  isAutoCommitEnabled,
+  maybeAutoCommitTurn,
+  snapshotDirtyPaths,
+} from "./auto-commit.js";
 import { BatchTurnRunner, type BatchTurnRunnerDeps } from "./batch-turn-runner.js";
 import {
   accumulateUsage,
@@ -2495,7 +2502,28 @@ export class Agent {
     images?: Array<{ path: string; mediaType: string; base64: string }>,
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const processor = new MessageProcessor(this._buildMessageProcessorDeps());
+    // Deterministic "task done -> commit" (auto-commit): snapshot the dirty set
+    // before the turn so we can commit ONLY the files the agent changes during it
+    // (and never the user's pre-existing work-in-progress). Gated off under tests
+    // and via MUONROI_AUTO_COMMIT=0.
+    const autoCommitOn = isAutoCommitEnabled();
+    const cwd = this.bash.getCwd();
+    const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
     yield* processor.run(userMessage, observer, images);
+    // Reached only when the turn completed normally (an abort/throw propagates
+    // through yield* and skips this) — exactly when committing is appropriate.
+    if (autoCommitOn) {
+      const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
+        console.error(`[auto-commit] unexpected failure: ${(err as Error)?.message}`);
+        return { committed: false } as AutoCommitResult;
+      });
+      if (auto.committed) {
+        yield {
+          type: "content",
+          content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
+        };
+      }
+    }
   }
 
   /**
