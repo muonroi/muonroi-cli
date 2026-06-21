@@ -23,7 +23,7 @@
  *   expect(calls[0].maxOutputTokens).toBeUndefined();
  */
 
-import type { LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { APICallError, type LanguageModelV3CallOptions, type LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { simulateReadableStream } from "ai";
 import { MockLanguageModelV3 } from "ai/test";
 
@@ -276,11 +276,46 @@ function normalizeStreamChunks(chunks: StreamChunks): StreamChunks {
   return chunks.map((c) => {
     if (c && (c as { type?: string }).type === "error") {
       const raw = (c as { error?: unknown }).error;
-      const err = raw instanceof Error ? raw : new Error(typeof raw === "string" ? raw : "mock LLM error");
-      return { ...(c as object), error: err } as typeof c;
+      return { ...(c as object), error: buildFixtureError(raw) } as typeof c;
     }
     return c;
   });
+}
+
+/**
+ * Turn a fixture `error` payload into the right runtime shape:
+ * - an `APICallError` when the payload is an object carrying a `statusCode`
+ *   (or `apiCallError: true`), so harness specs can exercise the orchestrator's
+ *   status-aware paths (humanizeApiError 5xx canned text, summarizeApiErrorForLog
+ *   forensics, retry classifier). `APICallError.isInstance` duck-types on a
+ *   shared marker, so constructing it here satisfies the `isInstance` checks in
+ *   error-utils.ts. A pure JSON fixture cannot otherwise build one (it would
+ *   arrive as a plain string).
+ * - a plain `Error` for string payloads (the common transient-message case).
+ */
+function buildFixtureError(raw: unknown): Error {
+  if (raw instanceof Error) return raw;
+  if (raw && typeof raw === "object") {
+    const o = raw as {
+      apiCallError?: boolean;
+      statusCode?: number;
+      message?: string;
+      responseBody?: string;
+      url?: string;
+      isRetryable?: boolean;
+    };
+    if (o.apiCallError === true || typeof o.statusCode === "number") {
+      return new APICallError({
+        message: o.message ?? `mock API error${o.statusCode ? ` (HTTP ${o.statusCode})` : ""}`,
+        url: o.url ?? "https://mock.invalid/v1/chat/completions",
+        requestBodyValues: {},
+        statusCode: o.statusCode,
+        responseBody: o.responseBody,
+        isRetryable: o.isRetryable,
+      });
+    }
+  }
+  return new Error(typeof raw === "string" ? raw : "mock LLM error");
 }
 
 export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModelHandle | null> {
