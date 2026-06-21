@@ -226,6 +226,13 @@ export interface CouncilConfig {
   internetFirst?: boolean;
   /** When true, leader sub-tasks downshift to cheaper tier models on the same provider. */
   costAware?: boolean;
+  /**
+   * Enclosing council run id (= sessionId). Used only as the correlationId on the
+   * observe-only `council-turn-length` harness event so per-turn length samples can
+   * be grouped by run. Optional: direct callers/tests may omit it (falls back to a
+   * stable literal); has no effect on debate behaviour.
+   */
+  runId?: string;
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────

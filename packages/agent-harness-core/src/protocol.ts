@@ -98,6 +98,26 @@ export type LiveEvent =
       /** Correlation ID linking this speaker event to the enclosing council run. */
       correlationId: string;
     }
+  // Thrift measurability — emitted when a council speaker's turn output is fully
+  // assembled (opening statement or discussion turn). Observe-only: NO truncation,
+  // NO behaviour change; it just reports how long each speaker spoke so a harness
+  // can measure council verbosity per role/model/round. See src/council/debate.ts.
+  | {
+      t: "event";
+      kind: "council-turn-length";
+      /** Council role label (e.g. "architect"); matches council-speaker.role. */
+      role: string;
+      /** Debate round: 0 = opening statements, 1+ = discussion rounds. */
+      round: number;
+      /** Full character count of the speaker's output (trimmed; never truncated). */
+      charCount: number;
+      /** Word count of the speaker's output (whitespace-split, empties dropped). */
+      wordCount: number;
+      /** The speaker's model id, for per-model thrift attribution. */
+      model: string;
+      /** Correlation ID tying turns to the enclosing council run (= sessionId). */
+      correlationId: string;
+    }
   | {
       t: "event";
       kind: "askcard-open";

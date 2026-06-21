@@ -392,7 +392,34 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
     "tui.last_event",
     {
       description: "Return the most recent event of the given kind (null if none).",
-      inputSchema: { kind: z.enum(["toast", "stream.delta"]) },
+      // Full protocol event set (minus the idle sentinel) so an external agent can
+      // observe lifecycle events — council/sprint/route/askcard, not just toasts.
+      // The Driver accepts any kind; this enum is the MCP-boundary validation.
+      inputSchema: {
+        kind: z.enum([
+          "toast",
+          "stream.delta",
+          "llm-token",
+          "llm-done",
+          "council-step",
+          "council-speaker",
+          "council-turn-length",
+          "askcard-open",
+          "askcard-answered",
+          "askcard-cancel",
+          "sprint-stage",
+          "sprint-halt",
+          "sprint-plan-committed",
+          "route-decision",
+          "steer-inject",
+          "usage",
+          "grounding-flag",
+          "ee-timeout",
+          "ee-error",
+          "stream-retry",
+          "disconnect",
+        ]),
+      },
     },
     async ({ kind }) => {
       const d = getDriver();

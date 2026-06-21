@@ -133,6 +133,45 @@ describe("redactEvent — council-step (safe fields pass through)", () => {
   });
 });
 
+describe("redactEvent — council-turn-length (safe fields pass through)", () => {
+  it("passes all council-turn-length fields unchanged", () => {
+    const e: Extract<LiveEvent, { kind: "council-turn-length" }> = {
+      t: "event",
+      kind: "council-turn-length",
+      role: "architect",
+      round: 2,
+      charCount: 1234,
+      wordCount: 210,
+      model: "grok-4.3",
+      correlationId: "sess-abc",
+    };
+    const out = redactEvent(e) as Extract<LiveEvent, { kind: "council-turn-length" }>;
+    expect(out.role).toBe("architect");
+    expect(out.round).toBe(2);
+    expect(out.charCount).toBe(1234);
+    expect(out.wordCount).toBe(210);
+    expect(out.model).toBe("grok-4.3");
+    expect(out.correlationId).toBe("sess-abc");
+  });
+
+  it("strips an unlisted field (closed allowlist — telemetry text can't leak)", () => {
+    const e = {
+      t: "event",
+      kind: "council-turn-length",
+      role: "qa",
+      round: 0,
+      charCount: 10,
+      wordCount: 2,
+      model: "m",
+      correlationId: "c",
+      rawText: "should not leak",
+    } as unknown as Extract<LiveEvent, { kind: "council-turn-length" }>;
+    const out = asRecord(redactEvent(e));
+    expect(out.rawText).toBeUndefined();
+    expect(out.charCount).toBe(10);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Unknown kind — fail-safe strips all fields except t + kind
 // ---------------------------------------------------------------------------

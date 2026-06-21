@@ -440,6 +440,7 @@ export async function* runCouncil(
       leaderNeedsResearch,
       internetFirst,
       costAware,
+      runId: sessionId,
     },
     llm,
   );
