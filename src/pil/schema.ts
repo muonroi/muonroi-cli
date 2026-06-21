@@ -82,16 +82,41 @@ export const PipelineContextSchema = z.object({
   t1Rules: z.array(z.string()).optional(),
   _brainData: z
     .object({
-      t0_principles: z.array(z.object({ text: z.string(), score: z.number() })),
+      // id/collection optional — mirrors ScoredText (PIL schema_version 1.1+).
+      t0_principles: z.array(
+        z.object({
+          text: z.string(),
+          score: z.number(),
+          id: z.string().optional(),
+          collection: z.string().optional(),
+        }),
+      ),
       t1_rules: z.array(z.string()),
-      t2_patterns: z.array(z.object({ text: z.string(), score: z.number() })),
+      t2_patterns: z.array(
+        z.object({
+          text: z.string(),
+          score: z.number(),
+          id: z.string().optional(),
+          collection: z.string().optional(),
+        }),
+      ),
       retrieval_skipped_reason: z.string().nullable(),
     })
     .nullable()
     .optional(),
 });
 
-const ScoredText = z.object({ text: z.string(), score: z.number() });
+// id + collection are optional (PIL schema_version 1.1+): present when the brain
+// can attribute the retrieved point, which lets the unified injection path record
+// it as rateable recall debt resolvable via ee_feedback(id, collection, verdict).
+// Older servers omit them — they MUST be declared here regardless, because a bare
+// z.object() strips undeclared keys at parse, which would silently drop the ids.
+const ScoredText = z.object({
+  text: z.string(),
+  score: z.number(),
+  id: z.string().optional(),
+  collection: z.string().optional(),
+});
 
 export const PilContextResponseSchema = z
   .object({

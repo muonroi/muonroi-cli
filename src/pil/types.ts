@@ -205,8 +205,10 @@ export interface IntentDetectionTrace {
 }
 
 export interface BrainData {
-  t0_principles: Array<{ text: string; score: number }>;
+  // id/collection present when PIL schema_version >= 1.1 (server attributes the
+  // point), enabling layer3's unified path to record it as rateable recall debt.
+  t0_principles: Array<{ text: string; score: number; id?: string; collection?: string }>;
   t1_rules: string[];
-  t2_patterns: Array<{ text: string; score: number }>;
+  t2_patterns: Array<{ text: string; score: number; id?: string; collection?: string }>;
   retrieval_skipped_reason: string | null;
 }
