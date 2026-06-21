@@ -3,7 +3,7 @@ import type {
   ProcessMessageStepFinish,
   ProcessMessageStepStart,
 } from "../orchestrator/agent-options";
-import type { StreamChunk, ToolCall, ToolResult } from "../types";
+import type { StreamChunk, StructuredResponse, ToolCall, ToolResult } from "../types";
 
 export type HeadlessOutputFormat = "text" | "json";
 
@@ -53,6 +53,14 @@ export type HeadlessJsonEvent =
         totalTokens?: number;
         costUsdTicks?: number;
       };
+    }
+  | {
+      type: "structured_response";
+      sessionID?: string;
+      stepNumber: number;
+      timestamp: number;
+      taskType: string;
+      data: Record<string, unknown>;
     }
   | {
       type: "error";
@@ -109,6 +117,12 @@ export function renderHeadlessChunk(chunk: StreamChunk): HeadlessWrites {
       return { stderr: `${stderr}\n` };
     }
 
+    case "structured_response":
+      // A respond_* terminal answer arrives ONLY as this chunk (never as
+      // `content`). Without this case it hit the no-op default below and the
+      // answer was silently dropped from `--format text` stdout.
+      return chunk.structuredResponse ? { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` } : {};
+
     case "error":
       return chunk.content ? { stderr: `\x1b[31m${chunk.content}\x1b[0m\n` } : {};
 
@@ -125,6 +139,114 @@ export function renderHeadlessChunk(chunk: StreamChunk): HeadlessWrites {
 
 function truncate(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * Plain-text rendering of a respond_* terminal answer for headless `--format
+ * text`. Mirrors the per-taskType layout of {@link StructuredResponseView}
+ * (src/ui/components/structured-response-view.tsx) but emits flat text (no ANSI
+ * box-drawing) so the answer pipes cleanly. Falls back to the primary text
+ * field, then raw JSON, for taskTypes without a dedicated layout.
+ */
+export function formatStructuredResponseText(sr: StructuredResponse): string {
+  const d = (sr.data ?? {}) as Record<string, unknown>;
+  const str = (v: unknown): string => (typeof v === "string" ? v : "");
+  const arr = <T>(v: unknown): T[] => (Array.isArray(v) ? (v as T[]) : []);
+
+  switch (sr.taskType) {
+    case "general":
+      return str(d.response) || JSON.stringify(d, null, 2);
+
+    case "documentation": {
+      const examples = arr<{ code?: string; description?: string }>(d.examples);
+      const parts = [str(d.content)];
+      for (const ex of examples) {
+        if (ex.description) parts.push(`\n${ex.description}`);
+        if (ex.code) parts.push(ex.code);
+      }
+      const out = parts.filter(Boolean).join("\n");
+      return out || JSON.stringify(d, null, 2);
+    }
+
+    case "analyze": {
+      const findings = arr<{ text?: string; evidence?: string; severity?: string }>(d.findings);
+      if (findings.length === 0) return JSON.stringify(d, null, 2);
+      return findings
+        .map((f) => {
+          const sev = (f.severity ?? "").toUpperCase();
+          const head = sev ? `[${sev}] ${f.text ?? ""}` : (f.text ?? "");
+          return f.evidence ? `${head}\n  evidence: ${f.evidence}` : head;
+        })
+        .join("\n");
+    }
+
+    case "plan": {
+      const steps = arr<{ action?: string; criterion?: string; rationale?: string }>(d.steps);
+      const lines: string[] = [];
+      steps.forEach((s, i) => {
+        lines.push(`${i + 1}. ${s.action ?? ""}`);
+        if (s.criterion) lines.push(`   done when: ${s.criterion}`);
+        if (s.rationale) lines.push(`   why: ${s.rationale}`);
+      });
+      const assumptions = arr<string>(d.assumptions);
+      const risks = arr<string>(d.risks);
+      if (assumptions.length > 0) {
+        lines.push("", "assumptions:");
+        for (const a of assumptions) lines.push(`  - ${a}`);
+      }
+      if (risks.length > 0) {
+        lines.push("", "risks:");
+        for (const rk of risks) lines.push(`  - ${rk}`);
+      }
+      return lines.length > 0 ? lines.join("\n") : JSON.stringify(d, null, 2);
+    }
+
+    case "debug": {
+      const r = d as {
+        hypothesis?: string;
+        root_cause?: string;
+        fix?: { file?: string; diff?: string };
+        verify_command?: string;
+      };
+      const lines: string[] = [];
+      if (r.hypothesis) lines.push(`hypothesis: ${r.hypothesis}`);
+      if (r.root_cause) lines.push(`root cause: ${r.root_cause}`);
+      if (r.fix?.file) lines.push(`fix: ${r.fix.file}`);
+      if (r.fix?.diff) lines.push(r.fix.diff);
+      if (r.verify_command) lines.push(`verify: ${r.verify_command}`);
+      return lines.length > 0 ? lines.join("\n") : JSON.stringify(d, null, 2);
+    }
+
+    case "refactor": {
+      const r = d as { summary?: string; changes?: Array<{ file?: string; diff?: string }>; verify_command?: string };
+      const lines: string[] = [];
+      if (r.summary) lines.push(r.summary);
+      for (const c of r.changes ?? []) {
+        if (c.file) lines.push(`\n── ${c.file} ──`);
+        if (c.diff) lines.push(c.diff);
+      }
+      if (r.verify_command) lines.push(`verify: ${r.verify_command}`);
+      return lines.length > 0 ? lines.join("\n") : JSON.stringify(d, null, 2);
+    }
+
+    case "generate": {
+      const r = d as { files?: Array<{ path?: string; content?: string; language?: string }>; explanation?: string };
+      const lines: string[] = [];
+      if (r.explanation) lines.push(r.explanation);
+      for (const f of r.files ?? []) {
+        const lang = f.language ? ` (${f.language})` : "";
+        if (f.path) lines.push(`\n── ${f.path}${lang} ──`);
+        if (f.content) lines.push(f.content);
+      }
+      return lines.length > 0 ? lines.join("\n") : JSON.stringify(d, null, 2);
+    }
+
+    default: {
+      // Renderer-missing taskType: probe common text-bearing fields, then JSON.
+      const primary = str(d.response) || str(d.summary) || str(d.content) || str(d.text);
+      return primary || JSON.stringify(d, null, 2);
+    }
+  }
 }
 
 function formatToolCallLabel(tc: ToolCall): string {
@@ -147,6 +269,50 @@ function formatToolCallLabel(tc: ToolCall): string {
     }
   } catch {}
   return name;
+}
+
+/**
+ * Stateful headless TEXT consumer. Streams tool/error progress to stderr (via
+ * {@link renderHeadlessChunk}) but BUFFERS assistant `content` so that a
+ * terminal `respond_*` answer ({@link StructuredResponse}) supersedes any
+ * preamble the model leaked before calling the response tool — otherwise the
+ * answer would print twice (once as raw leaked content, once formatted). For a
+ * normal chat turn with no structured answer, the buffered content is flushed
+ * verbatim at the end. Mirrors the buffer-and-supersede design of
+ * {@link createHeadlessJsonlEmitter}.
+ */
+export function createHeadlessTextEmitter(): {
+  consumeChunk(chunk: StreamChunk): HeadlessWrites;
+  flush(): HeadlessWrites;
+} {
+  let pendingContent = "";
+  let structuredEmitted = false;
+
+  function consumeChunk(chunk: StreamChunk): HeadlessWrites {
+    switch (chunk.type) {
+      case "content":
+        pendingContent += chunk.content ?? "";
+        return {};
+      case "structured_response":
+        if (!chunk.structuredResponse) return {};
+        // Terminal answer is authoritative — drop any buffered preamble.
+        pendingContent = "";
+        structuredEmitted = true;
+        return { stdout: `${formatStructuredResponseText(chunk.structuredResponse)}\n` };
+      case "done":
+        // Trailing newline is emitted by flush() alongside the final answer.
+        return {};
+      default:
+        return renderHeadlessChunk(chunk);
+    }
+  }
+
+  function flush(): HeadlessWrites {
+    if (structuredEmitted || pendingContent.length === 0) return {};
+    return { stdout: `${pendingContent}\n` };
+  }
+
+  return { consumeChunk, flush };
 }
 
 function jsonLine(event: HeadlessJsonEvent): string {
@@ -282,6 +448,34 @@ export function createHeadlessJsonlEmitter(sessionId?: string): {
               toolCall: chunk.toolCall,
               toolResult: chunk.toolResult,
               ...(timing ? { timing } : {}),
+            }) as HeadlessJsonEvent,
+          );
+        }
+        break;
+      }
+
+      case "structured_response": {
+        if (chunk.structuredResponse) {
+          // Flush any buffered preamble text first so ordering is preserved,
+          // then emit the typed terminal answer (previously dropped entirely).
+          if (textBuffer.length > 0) {
+            stdout += jsonLine(
+              withSession({
+                type: "text",
+                stepNumber: currentStep,
+                text: textBuffer,
+                timestamp: Date.now(),
+              }) as HeadlessJsonEvent,
+            );
+            textBuffer = "";
+          }
+          stdout += jsonLine(
+            withSession({
+              type: "structured_response",
+              stepNumber: currentStep,
+              timestamp: Date.now(),
+              taskType: chunk.structuredResponse.taskType,
+              data: chunk.structuredResponse.data,
             }) as HeadlessJsonEvent,
           );
         }

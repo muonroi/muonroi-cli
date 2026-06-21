@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { StreamChunk, ToolCall } from "../types";
 import {
   createHeadlessJsonlEmitter,
+  createHeadlessTextEmitter,
+  formatStructuredResponseText,
   isHeadlessOutputFormat,
   renderHeadlessChunk,
   renderHeadlessPrelude,
@@ -198,5 +200,76 @@ describe("headless output helpers", () => {
       message: "boom",
     });
     expectSessionAndTimestamp(parsed, sessionId);
+  });
+
+  // Regression backstop for G5: a respond_* terminal answer arrives ONLY as a
+  // `structured_response` chunk. Both headless renderers used to drop it
+  // (no-op default branch), so `--format text` produced empty stdout and
+  // `--format json` emitted no answer payload on a preamble-free turn.
+  describe("structured_response (respond_* terminal answer)", () => {
+    const generalChunk: StreamChunk = {
+      type: "structured_response",
+      structuredResponse: { taskType: "general", data: { response: "The answer." } },
+    };
+
+    it("renderHeadlessChunk renders the answer to stdout (no longer dropped)", () => {
+      const w = renderHeadlessChunk(generalChunk);
+      expect(w.stdout).toBe("The answer.\n");
+      expect(w.stderr).toBeUndefined();
+    });
+
+    it("formatStructuredResponseText lays out each taskType as flat text", () => {
+      expect(
+        formatStructuredResponseText({
+          taskType: "analyze",
+          data: { findings: [{ text: "Bug X", evidence: "file:1", severity: "high" }] },
+        }),
+      ).toBe("[HIGH] Bug X\n  evidence: file:1");
+      expect(
+        formatStructuredResponseText({
+          taskType: "plan",
+          data: { steps: [{ action: "Do A", criterion: "A done", rationale: "because" }] },
+        }),
+      ).toBe("1. Do A\n   done when: A done\n   why: because");
+      // Unknown taskType falls back to a primary text field, then JSON.
+      expect(formatStructuredResponseText({ taskType: "mystery", data: { summary: "hi" } })).toBe("hi");
+      expect(formatStructuredResponseText({ taskType: "mystery", data: { n: 1 } })).toBe('{\n  "n": 1\n}');
+    });
+
+    it("text emitter: a structured answer SUPERSEDES leaked preamble content (no duplicate)", () => {
+      const e = createHeadlessTextEmitter();
+      // Model leaks the raw answer as content, then delivers it via respond_*.
+      expect(e.consumeChunk({ type: "content", content: '```json\n{"x":1}\n```' }).stdout).toBeUndefined();
+      const out = e.consumeChunk(generalChunk).stdout;
+      expect(out).toBe("The answer.\n");
+      // Nothing buffered remains to flush — the answer is not printed twice.
+      expect(e.flush().stdout).toBeUndefined();
+    });
+
+    it("text emitter: a normal content-only turn flushes its buffered answer", () => {
+      const e = createHeadlessTextEmitter();
+      expect(e.consumeChunk({ type: "content", content: "PONG" }).stdout).toBeUndefined();
+      expect(e.consumeChunk({ type: "done" }).stdout).toBeUndefined();
+      expect(e.flush().stdout).toBe("PONG\n");
+    });
+
+    it("text emitter: tool/error progress still streams to stderr immediately", () => {
+      const e = createHeadlessTextEmitter();
+      const w = e.consumeChunk({ type: "tool_calls", toolCalls: [toolCall("bash")] });
+      expect(w.stderr).toContain("bash");
+      expect(w.stdout).toBeUndefined();
+    });
+
+    it("json emitter: emits a typed structured_response event carrying the payload", () => {
+      const { consumeChunk } = createHeadlessJsonlEmitter("sess-sr");
+      const out = consumeChunk(generalChunk).stdout ?? "";
+      const events = out
+        .trim()
+        .split("\n")
+        .map((l) => JSON.parse(l));
+      const sr = events.find((ev) => ev.type === "structured_response");
+      expect(sr).toMatchObject({ type: "structured_response", taskType: "general", data: { response: "The answer." } });
+      expectSessionAndTimestamp(sr, "sess-sr");
+    });
   });
 });

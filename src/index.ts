@@ -30,9 +30,9 @@ import {
 } from "./headless/council-answers";
 import {
   createHeadlessJsonlEmitter,
+  createHeadlessTextEmitter,
   type HeadlessOutputFormat,
   isHeadlessOutputFormat,
-  renderHeadlessChunk,
   renderHeadlessPrelude,
 } from "./headless/output";
 import { loadCatalog, normalizeModelId } from "./models/registry.js";
@@ -729,12 +729,16 @@ async function runHeadless(
       return;
     }
 
+    const textEmitter = createHeadlessTextEmitter();
     for await (const chunk of agent.processMessage(enhancedMessage)) {
       maybeAutoAnswer(chunk);
-      const writes = renderHeadlessChunk(chunk);
+      const writes = textEmitter.consumeChunk(chunk);
       if (writes.stdout) writeSafe(process.stdout, writes.stdout);
       if (writes.stderr) writeSafe(process.stderr, writes.stderr);
     }
+    const textTail = textEmitter.flush();
+    if (textTail.stdout) writeSafe(process.stdout, textTail.stdout);
+    if (textTail.stderr) writeSafe(process.stderr, textTail.stderr ?? "");
   } finally {
     await agent.cleanup();
   }
