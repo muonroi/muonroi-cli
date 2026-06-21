@@ -473,7 +473,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           const { commitSpecificPaths } = await import("../orchestrator/auto-commit.js");
           const result = await commitSpecificPaths(bash.getCwd(), written, message);
           if (!result.committed) {
-            return { success: false, output: `No commit made (${result.reason}).` };
+            // G1: when the LSP quality gate blocked the commit, surface the
+            // per-file errors so the agent can fix them and call git_commit again.
+            const detail =
+              result.reason === "lsp-errors"
+                ? `\nStaged files have errors — fix them, then call git_commit again (or set MUONROI_COMMIT_GATE=0 to bypass):\n${result.detail ?? ""}`
+                : "";
+            return { success: false, output: `No commit made (${result.reason}).${detail}` };
           }
           return { success: true, output: `Committed ${result.fileCount} file(s) → ${result.sha}` };
         } catch (e) {

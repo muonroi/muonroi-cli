@@ -21,7 +21,9 @@
  * cannot inject shell commands.
  */
 import { execFile } from "node:child_process";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
+import type { LspDiagnostic, LspDiagnosticFile } from "../lsp/types.js";
 
 const pexecFile = promisify(execFile);
 
@@ -47,6 +49,104 @@ export interface AutoCommitResult {
   sha?: string;
   fileCount?: number;
   reason?: string;
+  /** G1: when reason === "lsp-errors", the per-file diagnostic summary the agent should fix. */
+  detail?: string;
+}
+
+/**
+ * G1 commit quality gate. Default ON; disable with `MUONROI_COMMIT_GATE=0`
+ * (mirrors the `MUONROI_AUTO_COMMIT=0` convention). Off automatically under the
+ * unit-test suite so specs that commit fixtures aren't gated.
+ */
+export function isCommitGateEnabled(): boolean {
+  if (process.env.MUONROI_COMMIT_GATE === "0") return false;
+  if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
+  return true;
+}
+
+/**
+ * G1: per-file LSP-errors gate. Runs the SAME LSP diagnostics produced at
+ * write-time on each staged path; blocks the commit if any staged file has an
+ * ERROR (severity 1). Scoped to each file's OWN diagnostics so unrelated repo
+ * breakage never blocks. Files with no registered LSP server return no
+ * diagnostics and pass (so docs/config/non-source commits are unaffected).
+ *
+ * Fails OPEN on timeout or any error — the gate must never hang a turn or block
+ * a commit on its own failure. Only a clean, in-budget run with a real
+ * severity-1 diagnostic blocks.
+ */
+/**
+ * G1 (pure): the gate's BLOCK decision for one staged file — its own
+ * severity-1 (error) diagnostics. Scoped by absolute path so a diagnostic LSP
+ * reports against a DIFFERENT file (cross-file type breakage) never blocks this
+ * commit, and warnings/infos (severity >= 2) are ignored. Exported for testing.
+ */
+export function blockingErrorsForFile(diagFiles: LspDiagnosticFile[], absPath: string): LspDiagnostic[] {
+  const out: LspDiagnostic[] = [];
+  for (const f of diagFiles) {
+    if (resolve(f.filePath) !== absPath) continue;
+    for (const d of f.diagnostics) {
+      if ((d.severity ?? 1) === 1) out.push(d);
+    }
+  }
+  return out;
+}
+
+export async function gateStagedPaths(
+  cwd: string,
+  paths: string[],
+  budgetMs = 9_000,
+): Promise<{ ok: boolean; summary?: string }> {
+  if (!isCommitGateEnabled()) return { ok: true };
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const { syncFileWithLsp, summarizeDiagnostics } = await import("../lsp/runtime.js");
+
+    // Per-file diagnostics wait. The LSP default (1.5s) is fine for a WARM
+    // server (diagnostics cached) but a COLD tsserver loading the project on
+    // the first file pushes publishDiagnostics later — so a commit issued
+    // seconds after the first edit would slip past a 1.5s wait. Wait longer per
+    // file, bounded by the overall budgetMs (fail-open) so the gate can't hang.
+    const perFileWaitMs = 4_000;
+    const errorFiles: LspDiagnosticFile[] = [];
+    const work = (async () => {
+      for (const p of paths) {
+        const abs = resolve(cwd, p);
+        let content: string;
+        try {
+          content = await readFile(abs, "utf8");
+        } catch {
+          continue; // deleted / binary / unreadable → nothing to gate
+        }
+        const diags = await syncFileWithLsp(cwd, abs, content, false, true, perFileWaitMs).catch(
+          () => [] as LspDiagnosticFile[],
+        );
+        const errs = blockingErrorsForFile(diags, abs);
+        if (errs.length > 0) {
+          const serverId = diags.find((f) => resolve(f.filePath) === abs)?.serverId ?? "lsp";
+          errorFiles.push({ filePath: abs, serverId, diagnostics: errs });
+        }
+      }
+    })();
+
+    const TIMED_OUT = Symbol("timeout");
+    const outcome = await Promise.race([
+      work.then(() => "done" as const),
+      new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), budgetMs)),
+    ]);
+    if (outcome === TIMED_OUT) {
+      console.error(`[commit-gate] LSP gate exceeded ${budgetMs}ms — allowing commit (fail-open)`);
+      return { ok: true };
+    }
+    if (errorFiles.length === 0) return { ok: true };
+    const summary = summarizeDiagnostics(errorFiles) ?? `${errorFiles.length} file(s) have LSP errors`;
+    return { ok: false, summary };
+  } catch (err) {
+    console.error(`[commit-gate] gate failed open: ${(err as Error)?.message}`, {
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+    return { ok: true };
+  }
 }
 
 export function isAutoCommitEnabled(): boolean {
@@ -168,6 +268,15 @@ export async function maybeAutoCommitTurn(opts: {
     return { committed: false, reason: "add-failed" };
   }
 
+  // G1 quality gate: do NOT auto-commit code that fails LSP error checks. The
+  // backstop simply skips (no spurious chore commit of broken code); the agent
+  // will see/fix it next turn. Staged paths stay staged (idempotent).
+  const gate = await gateStagedPaths(cwd, newPaths);
+  if (!gate.ok) {
+    console.error(`[auto-commit] skipped — staged files have LSP errors:\n${gate.summary}`);
+    return { committed: false, reason: "lsp-errors", detail: gate.summary };
+  }
+
   // Separate -m flags → git inserts the blank line between subject and
   // attribution (Windows-safe; embedded "\n\n" in one -m arg gets mangled).
   // Scope the commit to exactly the agent's paths (pathspec).
@@ -212,6 +321,13 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
   // repeat calls — already-committed files stage nothing).
   const staged = await git(cwd, ["diff", "--cached", "--name-only", "--", ...safe]);
   if (!staged.ok || !staged.stdout.trim()) return { committed: false, reason: "nothing-staged" };
+
+  // G1 quality gate: block the commit if any staged file has an LSP error. The
+  // git_commit tool surfaces reason+detail so the agent can fix and recommit.
+  const gate = await gateStagedPaths(cwd, safe);
+  if (!gate.ok) {
+    return { committed: false, reason: "lsp-errors", detail: gate.summary };
+  }
 
   const { subject, body } = splitCommitMessage(message);
   // Separate -m flags so git inserts the blank-line separators itself.

@@ -20,6 +20,7 @@ export async function syncFileWithLsp(
   content: string,
   save = true,
   waitForDiagnostics = true,
+  diagnosticsTimeoutMs?: number,
 ): Promise<LspDiagnosticFile[]> {
   const manager = getOrCreateManager(cwd);
   return manager.syncFile(
@@ -27,6 +28,7 @@ export async function syncFileWithLsp(
     content,
     save,
     waitForDiagnostics,
+    diagnosticsTimeoutMs,
   );
 }
 

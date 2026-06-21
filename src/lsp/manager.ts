@@ -28,6 +28,7 @@ export interface WorkspaceLspManager {
     content: string,
     save?: boolean,
     waitForDiagnostics?: boolean,
+    diagnosticsTimeoutMs?: number,
   ): Promise<LspDiagnosticFile[]>;
   query(input: LspQueryInput): Promise<LspToolResponse>;
   close(): Promise<void>;
@@ -112,6 +113,7 @@ export function createWorkspaceLspManager(
     content: string,
     save = true,
     waitForDiagnostics = true,
+    diagnosticsTimeoutMs?: number,
   ): Promise<LspDiagnosticFile[]> {
     const records = await getClientsForFile(filePath);
     if (records.length === 0) return [];
@@ -126,7 +128,7 @@ export function createWorkspaceLspManager(
             await client.saveFile(filePath);
           }
           if (waitForDiagnostics) {
-            await client.waitForDiagnostics(filePath);
+            await client.waitForDiagnostics(filePath, diagnosticsTimeoutMs);
           }
           return {
             filePath,
