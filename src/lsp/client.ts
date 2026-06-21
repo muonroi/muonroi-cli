@@ -315,8 +315,16 @@ function normalizeUriPath(uri: string): string {
   return normalizeFsPath(uri);
 }
 
-function normalizeFsPath(filePath: string): string {
-  return filePath.replace(/\\/g, "/");
+export function normalizeFsPath(filePath: string): string {
+  const slashed = filePath.replace(/\\/g, "/");
+  // Windows drive letters are case-insensitive, but the two sides of the
+  // diagnostics cache disagree on case: publishDiagnostics URIs decode to a
+  // LOWERCASE drive (tsserver emits `file:///c%3A/…`), while query paths come
+  // from `path.resolve(cwd, …)` which yields the cwd's (usually UPPERCASE)
+  // drive. Without canonicalizing the drive, diagnostics stored under `c:/…`
+  // are never found under `C:/…` → the cache always returns [] on Windows
+  // (silently breaking both write-time LSP feedback and the commit gate).
+  return slashed.replace(/^([a-zA-Z]):\//, (_m, d) => `${(d as string).toLowerCase()}:/`);
 }
 
 function ensureActive(stopped: boolean, serverId: string): void {

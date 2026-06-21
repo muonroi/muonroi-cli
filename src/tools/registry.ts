@@ -475,9 +475,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           if (!result.committed) {
             // G1: when the LSP quality gate blocked the commit, surface the
             // per-file errors so the agent can fix them and call git_commit again.
+            // Tell the agent to FIX the errors — do NOT advertise the bypass
+            // env here (that is a USER escape hatch; surfacing it to the agent
+            // just invites it to circumvent the gate instead of fixing).
             const detail =
               result.reason === "lsp-errors"
-                ? `\nStaged files have errors — fix them, then call git_commit again (or set MUONROI_COMMIT_GATE=0 to bypass):\n${result.detail ?? ""}`
+                ? `\nStaged files have errors — fix them and call git_commit again:\n${result.detail ?? ""}`
                 : "";
             return { success: false, output: `No commit made (${result.reason}).${detail}` };
           }
