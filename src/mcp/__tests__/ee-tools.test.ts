@@ -245,4 +245,44 @@ describe("ee-tools", () => {
     await handlers["ee_query"]!({ query: "two" });
     expect(ledger.pendingCount()).toBe(0); // nothing stamped when gate is off
   });
+
+  // ─── ee_write (Layer 1 — agent records a new lesson) ───────────────────────
+
+  it("ee_write forwards the lesson to the write helper and returns the new id", async () => {
+    let seen: { lesson: string; opts: { collection?: string; title?: string; projectSlug?: string } } | null = null;
+    const handlers = collectTools((s) =>
+      registerEETools(s, {
+        write: async (lesson, opts) => {
+          seen = { lesson, opts };
+          return { ok: true, id: "new-point-1" };
+        },
+      }),
+    );
+    const out = textOf(
+      await handlers["ee_write"]!({
+        lesson: "always call flushFrob() before reindex or reads go stale",
+        title: "reindex pitfall",
+        project: "experience-engine",
+      }),
+    ) as { json: { ok: boolean; id?: string; collection?: string }; isError?: boolean };
+    expect(out.isError).toBeFalsy();
+    expect(out.json.ok).toBe(true);
+    expect(out.json.id).toBe("new-point-1");
+    expect(out.json.collection).toBe("experience-behavioral");
+    expect(seen!.lesson).toContain("flushFrob");
+    expect(seen!.opts.collection).toBe("experience-behavioral");
+    expect(seen!.opts.projectSlug).toBe("experience-engine");
+  });
+
+  it("ee_write surfaces write_failed when the write helper fails", async () => {
+    const handlers = collectTools((s) =>
+      registerEETools(s, { write: async () => ({ ok: false, error: "import-memory HTTP 500" }) }),
+    );
+    const out = textOf(await handlers["ee_write"]!({ lesson: "a sufficiently long lesson body here" })) as {
+      json: { error?: string };
+      isError?: boolean;
+    };
+    expect(out.isError).toBe(true);
+    expect(out.json.error).toBe("write_failed");
+  });
 });
