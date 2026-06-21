@@ -28,6 +28,7 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   "llm-done",
   "council-step",
   "council-speaker",
+  "council-turn-length",
   "askcard-open",
   "askcard-answered",
   "askcard-cancel",

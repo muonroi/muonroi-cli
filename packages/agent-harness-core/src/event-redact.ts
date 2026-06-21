@@ -72,6 +72,14 @@ const ALLOWED_FIELDS: Partial<Record<EventKind, Record<string, FieldSpec>>> = {
     round: "pass",
     correlationId: "pass",
   },
+  "council-turn-length": {
+    role: "pass",
+    round: "pass",
+    charCount: "pass",
+    wordCount: "pass",
+    model: "pass",
+    correlationId: "pass",
+  },
   "askcard-open": {
     questionId: "pass",
     question: 300, // cap to 300 chars, then scrub

@@ -351,6 +351,7 @@ correlation.
 | `route-decision` | /ideal dispatched → routing decision made | `path`, `complexity`, `forceCouncil`, `runId` |
 | `council-step` | Council phase changes state | `phaseId`, `phaseKind`, `state`, `label`, `elapsedMs` |
 | `council-speaker` | Per-role speaker turn starts/ends | `role`, `status` ("start"\|"done"), `round`, `correlationId` |
+| `council-turn-length` | A council speaker's turn output is fully assembled (observe-only, no truncation) | `role`, `round` (0=opening), `charCount`, `wordCount`, `model`, `correlationId` |
 | `askcard-open` | Council question card appears | `questionId`, `question`, `phase`, `optionCount` |
 | `askcard-answered` | User answers question card | `questionId`, `answerKind`, `answerText` |
 | `askcard-cancel` | User presses Escape on question card | `questionId` |

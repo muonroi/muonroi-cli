@@ -58,6 +58,19 @@ function makeCouncilSpeaker(status: "start" | "done" = "start"): Extract<LiveEve
   return { t: "event", kind: "council-speaker", role: "architect", status, correlationId: "corr-1" };
 }
 
+function makeCouncilTurnLength(round = 0): Extract<LiveEvent, { kind: "council-turn-length" }> {
+  return {
+    t: "event",
+    kind: "council-turn-length",
+    role: "architect",
+    round,
+    charCount: 842,
+    wordCount: 140,
+    model: "grok-4.3",
+    correlationId: "corr-1",
+  };
+}
+
 function makeAskcardOpen(): Extract<LiveEvent, { kind: "askcard-open" }> {
   return {
     t: "event",
@@ -203,6 +216,32 @@ describe("LiveEvent protocol — driver layer (synthetic inject)", () => {
       await driver.wait_for({
         event: "council-speaker",
         match: (e) => e.t === "event" && e.kind === "council-speaker" && e.status === "done",
+        timeoutMs: 500,
+      });
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // council-turn-length (observe-only thrift telemetry)
+  // -----------------------------------------------------------------------
+
+  describe("council-turn-length", () => {
+    it("ingest + last_event returns char/word counts, role, round, model", () => {
+      driver._ingest({ kind: "event", event: makeCouncilTurnLength(1) });
+      const e = driver.last_event("council-turn-length");
+      expect(e?.role).toBe("architect");
+      expect(e?.round).toBe(1);
+      expect(e?.charCount).toBe(842);
+      expect(e?.wordCount).toBe(140);
+      expect(e?.model).toBe("grok-4.3");
+      expect(e?.correlationId).toBe("corr-1");
+    });
+
+    it("wait_for resolves on a matching round", async () => {
+      driver._ingest({ kind: "event", event: makeCouncilTurnLength(2) });
+      await driver.wait_for({
+        event: "council-turn-length",
+        match: (e) => e.t === "event" && e.kind === "council-turn-length" && e.round === 2,
         timeoutMs: 500,
       });
     });

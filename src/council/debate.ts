@@ -110,6 +110,46 @@ function makeExcerpt(text: string): { excerpt: string; length: number } {
 }
 
 /**
+ * Emit the observe-only `council-turn-length` harness event for one fully-assembled
+ * speaker turn (opening statement or discussion turn). Reports char + word count so
+ * a harness can measure council verbosity per role/model/round — NO truncation, NO
+ * behaviour change. Best-effort: a no-op when the agent runtime is absent (normal
+ * user mode) or the event kind is filtered out (MUONROI_HARNESS_EVENTS). Uses the
+ * same globalThis.__muonroiAgentRuntime emitter as sprint-runner.ts.
+ */
+function emitCouncilTurnLength(args: {
+  role: string;
+  round: number;
+  text: string;
+  model: string;
+  correlationId: string;
+}): void {
+  try {
+    const ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    if (!ar || typeof ar.emitEvent !== "function") return;
+    const trimmed = args.text.trim();
+    ar.emitEvent({
+      t: "event",
+      kind: "council-turn-length",
+      role: args.role,
+      round: args.round,
+      charCount: trimmed.length,
+      wordCount: trimmed.length === 0 ? 0 : trimmed.split(/\s+/).filter(Boolean).length,
+      model: args.model,
+      correlationId: args.correlationId,
+    });
+  } catch (err) {
+    // Observe-only telemetry — swallow so a harness hiccup can't break a debate turn.
+    // Logged only under MUONROI_DEBUG_HARNESS (No-Silent-Catch) to keep TUI output clean.
+    if (process.env.MUONROI_DEBUG_HARNESS === "1") {
+      console.error(`[council] council-turn-length emit failed: ${(err as Error)?.message ?? String(err)}`);
+    }
+  }
+}
+
+/**
  * Lock-phrase detector. Counts what fraction of pair-turns in the latest round
  * contain explicit convergence signals. When ≥80% of pair-turns signal "lock",
  * we force shouldContinue=false regardless of leader judgment — sessions like
@@ -304,6 +344,10 @@ export async function* runDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
+  // Correlation id for the observe-only council-turn-length telemetry (groups
+  // per-turn length samples by run). sessionId in production; a stable literal
+  // for direct callers/tests that omit runId.
+  const turnCorrelationId = config.runId ?? "council";
   const researchSkipOverride = config.researchSkipOverride === true;
   const leaderNeedsResearch = config.leaderNeedsResearch;
   const internetFirst = config.internetFirst === true;
@@ -460,6 +504,13 @@ export async function* runDebate(
           attempts: o.attempts,
         },
       };
+      emitCouncilTurnLength({
+        role: speakerRole,
+        round: 0,
+        text: o.position,
+        model: o.model,
+        correlationId: turnCorrelationId,
+      });
     }
   }
 
@@ -791,6 +842,13 @@ export async function* runDebate(
               attempts: chunk.attempts,
             },
           };
+          emitCouncilTurnLength({
+            role: speakerName,
+            round,
+            text: chunk.text,
+            model: modelId,
+            correlationId: turnCorrelationId,
+          });
         }
         for (const trace of chunk.traces ?? []) {
           yield { type: "council_status" as const, content: trace };
