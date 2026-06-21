@@ -7,11 +7,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import { APICallError, type LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { generateObject, stepCountIs, streamText, tool } from "ai";
 import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 
+import { humanizeApiError } from "../../orchestrator/error-utils.js";
 import { createMockModel, loadMockModelFromDir, textOnlyStream, toolCallStream } from "../mock-model.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
@@ -216,6 +217,60 @@ describe("loadMockModelFromDir", () => {
       prompt: "go",
     });
     expect(object).toEqual({ ok: true, label: "built" });
+  });
+
+  it("constructs an APICallError from a structured error fixture (drives the humanizeApiError 5xx branch)", async () => {
+    // A pure-JSON fixture cannot otherwise build an APICallError (it arrives as
+    // a plain string). buildFixtureError() in mock-model.ts upgrades a structured
+    // `error` object carrying a statusCode into a real APICallError so harness/
+    // unit specs can exercise the orchestrator's status-aware 5xx path.
+    const dir = mkFixtureDir({
+      provider: "mock",
+      modelId: "mock-gpt",
+      stream: [
+        [
+          { type: "stream-start", warnings: [] },
+          {
+            type: "error",
+            error: {
+              apiCallError: true,
+              statusCode: 500,
+              message: "AI_APICallError: Request failed",
+              responseBody: JSON.stringify({ code: 60000, message: "Request failed: Unknown error." }),
+              url: "https://api.siliconflow.cn/v1/chat/completions",
+              isRetryable: true,
+            },
+          },
+          {
+            type: "finish",
+            finishReason: { unified: "error", raw: null },
+            usage: {
+              inputTokens: { total: 0, noCache: 0, cacheRead: null, cacheWrite: null },
+              outputTokens: { total: 0, text: 0, reasoning: null },
+            },
+          },
+        ],
+      ] as unknown as LanguageModelV3StreamPart[][],
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+
+    const r = streamText({ model: handle!.model, prompt: "hi" });
+    let errPart: { error?: unknown } | null = null;
+    for await (const part of r.fullStream) {
+      if ((part as { type?: string }).type === "error") errPart = part as { error?: unknown };
+    }
+    expect(errPart).not.toBeNull();
+    expect(APICallError.isInstance(errPart?.error)).toBe(true);
+    expect((errPart?.error as APICallError).statusCode).toBe(500);
+
+    // The 5xx branch must surface the canned actionable text + (HTTP 500) and
+    // SUPPRESS the opaque provider body (the SiliconFlow "Unknown error" mask).
+    const msg = humanizeApiError(errPart?.error);
+    expect(msg).toContain("HTTP 500");
+    expect(msg.toLowerCase()).toContain("try again later");
+    expect(msg).not.toContain("Unknown error");
+    expect(msg).not.toContain("Request failed");
   });
 
   it("supports multi-round stream arrays from the fixture file", async () => {
