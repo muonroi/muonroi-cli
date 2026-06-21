@@ -40,6 +40,13 @@ describe("registerNativeMuonroiTools", () => {
     expect(await exec(tools, "ee_feedback", { verdict: "followed" })).toMatch(/invalid_args/);
   });
 
+  it("ee_write rejects a too-short lesson (no network call)", async () => {
+    const tools: ToolSet = {};
+    registerNativeMuonroiTools(tools);
+    expect(await exec(tools, "ee_write", { lesson: "oops" })).toMatch(/invalid_args/);
+    expect(await exec(tools, "ee_write", {})).toMatch(/invalid_args/);
+  });
+
   it("selfverify_status returns not_found for an unknown runId (shared JobManager)", async () => {
     const tools: ToolSet = {};
     registerNativeMuonroiTools(tools);
