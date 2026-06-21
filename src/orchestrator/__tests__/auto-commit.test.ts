@@ -1,5 +1,8 @@
-import { resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { LspDiagnostic, LspDiagnosticFile } from "../../lsp/types.js";
 import {
   blockingErrorsForFile,
@@ -10,6 +13,7 @@ import {
   isExcludedPath,
   isSensitivePath,
   parsePorcelainPaths,
+  pathsForCommitGate,
   splitCommitMessage,
 } from "../auto-commit.js";
 
@@ -122,5 +126,48 @@ describe("G1 commit quality gate", () => {
     it("empty diagnostics → no blockers (non-source / no-LSP-server files pass)", () => {
       expect(blockingErrorsForFile([], resolve("README.md"))).toEqual([]);
     });
+  });
+});
+
+describe("pathsForCommitGate — bash `git commit` gate path set (real git)", () => {
+  let dir: string;
+  const g = (args: string[]) => execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "commit-gate-"));
+    g(["init", "-q"]);
+    g(["config", "user.email", "t@t.t"]);
+    g(["config", "user.name", "t"]);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("returns only the already-staged set for a plain `git commit`", async () => {
+    writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(dir, "b.ts"), "export const b = 2;\n");
+    g(["add", "a.ts"]); // b.ts left untracked
+    const paths = await pathsForCommitGate(dir, { broadAdd: false, commitAll: false });
+    expect(paths).toEqual(["a.ts"]);
+  });
+
+  it("adds tracked modifications that `git commit -a` will auto-stage", async () => {
+    writeFileSync(join(dir, "a.ts"), "export const a = 1;\n");
+    g(["add", "a.ts"]);
+    g(["commit", "-qm", "init", "--no-verify"]); // temp fixture repo — hook-free by design
+    writeFileSync(join(dir, "a.ts"), "export const a = 99;\n"); // modify tracked, NOT re-staged
+
+    // plain commit sees nothing staged; commit -a includes the modification.
+    expect(await pathsForCommitGate(dir, { broadAdd: false, commitAll: false })).toEqual([]);
+    expect(await pathsForCommitGate(dir, { broadAdd: false, commitAll: true })).toContain("a.ts");
+  });
+
+  it("includes the whole working tree for a chained broad `git add -A` (add not yet run)", async () => {
+    writeFileSync(join(dir, "a.ts"), "export const a = 1;\n"); // untracked
+    writeFileSync(join(dir, "c.ts"), "export const c = 3;\n"); // untracked
+    // Nothing staged at pre-exec time → plain set is empty…
+    expect(await pathsForCommitGate(dir, { broadAdd: false, commitAll: false })).toEqual([]);
+    // …but `git add -A` would stage both, so the broad path enumerates them.
+    const broad = await pathsForCommitGate(dir, { broadAdd: true, commitAll: false });
+    expect(broad).toContain("a.ts");
+    expect(broad).toContain("c.ts");
   });
 });
