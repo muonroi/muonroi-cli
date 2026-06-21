@@ -10,6 +10,55 @@ import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
 export const MAX_CLARIFY_ROUNDS = 12;
 
 /**
+ * G2-a: Hard cap on clarifier questions SURFACED per round, regardless of how
+ * many the model emits. buildClarificationPrompt asks for "typically 0-2", but
+ * that soft hint has repeatedly been ignored (e.g. 6 generic greenfield
+ * questions on a scoped "improve council quality" topic). This deterministic
+ * cap enforces the documented target so the user is never carpet-bombed.
+ */
+export const MAX_CLARIFY_QUESTIONS_PER_ROUND = 2;
+
+/**
+ * G2-a: Generic "greenfield" questions that the prompt already tells the model
+ * NOT to ask when a "## Current Project" snapshot is present (existing repo) —
+ * product type, target audience, which language/framework, which database,
+ * hosting/deploy target. Matched in both English and Vietnamese on the
+ * question + why text. Used only as an existing-repo filter; never applied to
+ * greenfield topics where these questions are legitimate.
+ */
+const GREENFIELD_QUESTION_RE =
+  /\b(target audience|product type|what (kind|type) of (product|app|application)|which (programming )?language|which framework|which database|which db|hosting|deploy(ment)? target|tech stack)\b|đối tượng (người dùng|sử dụng)|loại (sản phẩm|ứng dụng)|ngôn ngữ (lập trình|nào)|framework nào|cơ sở dữ liệu|database nào|triển khai ở đâu/i;
+
+export function isGenericGreenfieldQuestion(q: { question: string; why?: string }): boolean {
+  return GREENFIELD_QUESTION_RE.test(`${q.question} ${q.why ?? ""}`);
+}
+
+/**
+ * G2-a: deterministically enforce the clarifier's "typically 0-2 questions"
+ * rule. In an existing repo (`existingRepo` — a "## Current Project" snapshot
+ * is present) first drop generic greenfield questions the prompt already told
+ * the model not to ask; then hard-cap the remainder at
+ * MAX_CLARIFY_QUESTIONS_PER_ROUND. Never zero out a round that had questions —
+ * if every one looked generic, keep the model's top pick rather than asking
+ * nothing. Pure + exported so it is unit-testable in isolation.
+ */
+export function capClarifierQuestions<T extends { question: string; why?: string }>(
+  questions: T[],
+  existingRepo: boolean,
+): { kept: T[]; dropped: number } {
+  const before = questions.length;
+  let kept = questions;
+  if (existingRepo) {
+    const filtered = kept.filter((q) => !isGenericGreenfieldQuestion(q));
+    kept = filtered.length > 0 ? filtered : kept.slice(0, 1);
+  }
+  if (kept.length > MAX_CLARIFY_QUESTIONS_PER_ROUND) {
+    kept = kept.slice(0, MAX_CLARIFY_QUESTIONS_PER_ROUND);
+  }
+  return { kept, dropped: before - kept.length };
+}
+
+/**
  * P5: Call the readiness judge to determine whether the current spec + Q&A is
  * sufficient to start a productive debate, or whether critical gaps remain.
  *
@@ -250,6 +299,24 @@ export async function* runClarification(
       } catch {
         questions = [];
       }
+    }
+
+    // G2-a: enforce the "typically 0-2 questions per round" rule the prompt asks
+    // for but the model/seeds repeatedly exceed. Applies to BOTH the LLM path
+    // AND the PIL gray-area SEED path — live drive (greenfield "/ideal") showed
+    // round-0 seeds (productType/targetPlatform/audience) surfacing uncapped,
+    // which a model-path-only cap missed. In an existing repo (a
+    // "## Current Project" snapshot is present) generic greenfield questions are
+    // also dropped — the documented EE-3589e10d failure. A non-silent content
+    // line surfaces whatever was trimmed.
+    const existingRepo = conversationContext.includes("## Current Project");
+    const capped = capClarifierQuestions(questions, existingRepo);
+    questions = capped.kept;
+    if (capped.dropped > 0) {
+      yield {
+        type: "content",
+        content: `\n_(clarifier: trimmed ${capped.dropped} question${capped.dropped === 1 ? "" : "s"} — cap ${MAX_CLARIFY_QUESTIONS_PER_ROUND}/round${existingRepo ? " + dropped generic greenfield questions for an existing repo" : ""})_\n`,
+      };
     }
 
     if (questions.length === 0) {
