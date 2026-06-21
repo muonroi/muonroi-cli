@@ -198,6 +198,28 @@ const EVIDENCE_RULE_FOLLOWUP =
   `Tag verified results: \`[CONFIRMED via <tool>:<evidence>]\` or \`[REFUTED via <tool>:<evidence>]\`.\n` +
   `Uncited numbers you cannot verify: \`[UNVERIFIED: <claim>]\`.\n`;
 
+/**
+ * Length discipline injected into every debate turn (F13 token-thrift). The
+ * debate-turn ceilings are generous (4096-6144 maxTokens) and reasoning models
+ * left unbounded emit ~400-600 words/turn — ~17 turns/debate is token-heavy and
+ * directly fights the "tiết kiệm token" goal. A concrete word cap + "density
+ * over length" cuts filler / preamble / brief-restating while keeping the
+ * analytical core (position, reasoning bullets, the cross-question). This does
+ * NOT lower maxTokens: reasoning models need that headroom to think without
+ * empty-turn truncation (see llm.ts) — the saving comes from the model writing
+ * less, not from a hard output ceiling. The text deliberately contains none of
+ * the prompt substrings the council mocks route on (e.g. "responding to",
+ * "continuing a discussion", "team lead", "Summarize this discussion").
+ */
+function concisenessRule(maxWords: number): string {
+  return (
+    `\n## Length (be token-thrifty)\n` +
+    `Keep this turn under ~${maxWords} words. Open with your position in one line, ` +
+    `then 2-4 bullets of your strongest reasoning. No preamble, no restating the ` +
+    `brief, no filler — density over length. A tight argument beats a long one.\n`
+  );
+}
+
 /** Resolve the persona label used inside debate prompts. Stance wins; role is fallback. */
 function personaOf(role: string, stance?: DebateStance): { label: string; lens: string; focus: string } {
   if (stance) {
@@ -233,6 +255,7 @@ export function buildOpeningPrompt(ctx: {
       focusLine +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_OPENING +
+      concisenessRule(220) +
       (stackLock ? `\n${stackLock}\n` : "") +
       guardrails +
       (ctx.conversationContext ? `\n## Conversation Context\n${ctx.conversationContext}\n\n---\n\n` : "\n") +
@@ -264,6 +287,7 @@ export function buildResponsePrompt(ctx: {
       `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_RESPONSE +
+      concisenessRule(160) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
@@ -302,6 +326,7 @@ export function buildFollowupPrompt(ctx: {
       `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_FOLLOWUP +
+      concisenessRule(140) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n` +
       (ctx.runningSummary
