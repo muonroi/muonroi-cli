@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import type { EEPoint } from "../ee/bridge.js";
 import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
+import { formatPendingReminder, isRecallLedgerEnabled, sessionRecallLedger } from "../ee/recall-ledger.js";
 import { getRenderSink } from "../ee/render.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
@@ -228,30 +229,102 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     const parts: string[] = [];
     const deltas: string[] = [];
 
-    if (ctx._brainData.t0_principles.length > 0) {
-      const lines = ctx._brainData.t0_principles.map((p) => `- ${p.text.slice(0, 120)}`);
+    // Collection fallback by array position mirrors the legacy path's arm→collection
+    // mapping (t0 = principles, t2 = behavioral). The server (PIL schema_version
+    // 1.1+) may override per-point — e.g. a selfqa hit merged into the behavioral
+    // bucket carries collection="experience-selfqa" so ee_feedback resolves it.
+    const principleItems = ctx._brainData.t0_principles.map((p) => ({
+      ...p,
+      collection: p.collection ?? "experience-principles",
+    }));
+    const behavioralItems = ctx._brainData.t2_patterns.map((p) => ({
+      ...p,
+      collection: p.collection ?? "experience-behavioral",
+    }));
+    // Render the [id:..] handle inline (mirrors formatPrincipleRules/Hints) so the
+    // [id collection] reminder below refers to handles the agent can actually see.
+    const renderLine = (p: { text: string; id?: string }): string =>
+      p.id ? `- ${p.text.slice(0, 120)} [id:${p.id}]` : `- ${p.text.slice(0, 120)}`;
+
+    if (principleItems.length > 0) {
+      const lines = principleItems.map(renderLine);
       const block = truncateToBudget(
         `[principles: Generalized principles from past work]\n${lines.join("\n")}`,
         principlesBudget,
       );
       parts.push(block);
-      deltas.push(`principles=${ctx._brainData.t0_principles.length}`);
+      deltas.push(`principles=${principleItems.length}`);
     }
-    if (ctx._brainData.t2_patterns.length > 0) {
-      const lines = ctx._brainData.t2_patterns.map((p) => `- ${p.text.slice(0, 120)}`);
+    if (behavioralItems.length > 0) {
+      const lines = behavioralItems.map(renderLine);
       const block = truncateToBudget(
         `[experience: Relevant patterns from past work]\n${lines.join("\n")}`,
         behavioralBudget,
       );
       parts.push(block);
-      deltas.push(`behavioral=${ctx._brainData.t2_patterns.length}`);
+      deltas.push(`behavioral=${behavioralItems.length}`);
     }
     deltas.push(`t1=${ctx._brainData.t1_rules.length}`);
     deltas.push(`src=unified`);
 
+    // Close BOTH arms of the recall loop on the unified path, symmetric with the
+    // legacy path below (previously this formatter rendered text only — invisible
+    // to both arms). NEGATIVE arm: register surfaced ids for prompt-stale decay.
+    // POSITIVE arm: record the rateable points (those carrying an id from
+    // schema_version 1.1+) into the SAME session ledger the native ee_feedback
+    // builtin clears, then surface a dynamic [id collection] reminder so an
+    // explicit ee_feedback(followed) can credit the injection. No auto verdict is
+    // emitted (that would pollute Gate-4 precision). Points without an id (older
+    // server) fall through to the static nudge — rendered, but unrateable.
+    const ledgerEnabled = isRecallLedgerEnabled();
+    let ledgerRecorded = 0;
+    const rateable = [...principleItems, ...behavioralItems].filter((p) => p.id);
+    if (rateable.length > 0) {
+      updateLastSurfacedState(rateable.map((p) => String(p.id)));
+      if (ledgerEnabled) {
+        sessionRecallLedger.record(
+          rateable.map((p) => ({ id: String(p.id), collection: p.collection })),
+          `passive-injection (unified): ${ctx.raw.slice(0, 80)}`,
+        );
+        ledgerRecorded = rateable.length;
+      }
+    }
+
+    if (parts.length > 0 && principleItems.length + behavioralItems.length > 0) {
+      const pending = ledgerEnabled ? sessionRecallLedger.pending() : [];
+      parts.push(pending.length > 0 ? formatPendingReminder(pending, { max: 5 }) : RECALL_FEEDBACK_NUDGE);
+    }
+
+    const injected = parts.join("\n");
+    try {
+      if (ctx.sessionId && parts.length > 0) {
+        logInteraction(ctx.sessionId, "ee_injection", {
+          eventSubtype: "injected",
+          data: {
+            phase: "pil_enrichment",
+            role: "knowledge_retriever",
+            source: "unified",
+            principleCount: principleItems.length,
+            behavioralCount: behavioralItems.length,
+            t1RuleCount: ctx._brainData.t1_rules.length,
+            pointIds: rateable.map((p) => String(p.id)),
+            injectedChars: injected.length,
+            // Recall-loop closure observability (harness verification reads these):
+            // rateable points recorded as pending debt this turn + total unrated.
+            ledgerRecorded,
+            ledgerPending: sessionRecallLedger.pendingCount(),
+            taskType: ctx.taskType ?? null,
+            domain: ctx.domain ?? null,
+          },
+        });
+      }
+    } catch {
+      /* fail-open — never break injection path */
+    }
+
     return {
       ...ctx,
-      enriched: parts.length > 0 ? `${ctx.enriched}\n${parts.join("\n")}` : ctx.enriched,
+      enriched: parts.length > 0 ? `${ctx.enriched}\n${injected}` : ctx.enriched,
       t1Rules: ctx._brainData.t1_rules,
       layers: [
         ...ctx.layers,
@@ -349,6 +422,32 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
 
+  // Close the POSITIVE arm of the recall loop in-process. Record the RATEABLE
+  // injected points (principles + behavioral; checkpoints are artifacts, not
+  // recall verdicts) into the SAME session ledger the native ee_feedback builtin
+  // clears. Before this, the ledger was only ever populated by the external MCP
+  // ee.query, so in-CLI ee_feedback.clear() was a guaranteed no-op and nothing
+  // surfaced pending debt to the agent — leaving passive injections with an
+  // automatic NEGATIVE signal (prompt-stale decay every turn) but no positive
+  // one. Recording here makes a passive injection real, rateable debt that the
+  // dynamic reminder below names and an explicit ee_feedback(followed) resolves —
+  // the signal the brain needs to learn which injections were gold. No auto
+  // verdict is emitted (that would pollute Gate-4 precision); the agent rates
+  // deliberately. Collection is the search arm (deterministic), which is what
+  // ee_feedback requires.
+  const ledgerEnabled = isRecallLedgerEnabled();
+  let ledgerRecorded = 0;
+  if (ledgerEnabled) {
+    const rateableEntries = [
+      ...deduplicatedPrinciples.map((p) => ({ id: String(p.id), collection: "experience-principles" })),
+      ...deduplicatedBehavioral.map((p) => ({ id: String(p.id), collection: "experience-behavioral" })),
+    ].filter((e) => e.id);
+    if (rateableEntries.length > 0) {
+      sessionRecallLedger.record(rateableEntries, `passive-injection: ${ctx.raw.slice(0, 80)}`);
+      ledgerRecorded = rateableEntries.length;
+    }
+  }
+
   // CQ-16b: Emit experience_injected StreamChunk so TUI can show collapsible block.
   // Carry per-point {id, title, tier} so the TUI can show WHAT was injected, not
   // just how many (the data already exists here; previously only the count + ids
@@ -402,8 +501,14 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // on long sessions; this nudge rides next to the [id:..] handles it refers to.
   // Gated on rateable experience (principles/behavioral) — checkpoints are task
   // artifacts, not recall verdicts.
+  // Dynamic, token-bounded reminder of accumulated unrated debt (this turn's
+  // fresh injections + any earlier still-unrated ones), naming the actual
+  // [id collection] so ee_feedback is actionable — the static nudge named no ids,
+  // so the model could not complete a rating even when willing. Falls back to the
+  // static nudge when the ledger is disabled. Gated on rateable experience.
   if (deduplicatedPrinciples.length + deduplicatedBehavioral.length > 0) {
-    parts.push(RECALL_FEEDBACK_NUDGE);
+    const pending = ledgerEnabled ? sessionRecallLedger.pending() : [];
+    parts.push(pending.length > 0 ? formatPendingReminder(pending, { max: 5 }) : RECALL_FEEDBACK_NUDGE);
   }
   const injected = parts.join("\n");
 
@@ -420,6 +525,11 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
           t1RuleCount: t1Rules.length,
           pointIds: allPoints.map((p) => String(p.id)),
           injectedChars: injected.length,
+          // Recall-loop closure observability (harness verification reads these
+          // from the interaction log): how many rateable points were recorded as
+          // pending debt this turn, and the total still-unrated debt afterwards.
+          ledgerRecorded,
+          ledgerPending: sessionRecallLedger.pendingCount(),
           taskType: ctx.taskType ?? null,
           domain: ctx.domain ?? null,
         },

@@ -11,6 +11,21 @@ export function isUnifiedPilEnabled(): boolean {
 }
 
 /**
+ * MUONROI_PIL_UNIFIED_BUDGET_MS: client-side timeout for the unified
+ * /api/pil-context call in Layer 1 Pass 3. The server's uncached path is
+ * classifier-bound (~1.5-3s; its own classifier timeout is 3500ms), so the
+ * legacy 1500ms budget aborted before the server could ever answer — the
+ * unified path then ALWAYS fell back to legacy, making MUONROI_PIL_UNIFIED=1 a
+ * no-op. Default 3500ms clears realistic uncached latency; cache hits return in
+ * ~1ms regardless. Clamped to [1000, 8000].
+ */
+export function getUnifiedPilBudgetMs(): number {
+  const raw = Number(process.env.MUONROI_PIL_UNIFIED_BUDGET_MS);
+  if (!Number.isFinite(raw)) return 3500;
+  return Math.max(1000, Math.min(8000, Math.trunc(raw)));
+}
+
+/**
  * MUONROI_LLM_FIRST_CLASSIFY: model-first Layer-1 classification. When enabled
  * (default), the configured model classifies taskType/intentKind/style at the
  * top of the turn and the brittle keyword-regex cascade becomes the OFFLINE

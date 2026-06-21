@@ -15,6 +15,10 @@ vi.mock("./config.js", () => ({
   // Default OFF so the existing cascade tests below exercise the regex passes.
   // The model-first gate has its own describe block that flips this to true.
   isLlmFirstClassifyEnabled: vi.fn(() => false),
+  // Pass-3 unified reads the client-side budget; provided so the whole-module
+  // mock does not drop the export (the model-first tests never hit it, but the
+  // cascade tests can).
+  getUnifiedPilBudgetMs: vi.fn(() => 3500),
 }));
 
 import { classifyViaBrain } from "../ee/bridge.js";

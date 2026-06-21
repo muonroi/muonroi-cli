@@ -69,3 +69,37 @@ export function createRecallLedger(): RecallLedger {
 
 /** Process-scoped singleton = the current MCP session's unrated-recall debt. */
 export const sessionRecallLedger: RecallLedger = createRecallLedger();
+
+/**
+ * Whether the recall-feedback ledger is active. Mirrors the gate env the external
+ * MCP ee.query already honours (EXPERIENCE_RECALL_FEEDBACK_GATE) so an operator
+ * can disable in-CLI ledger accounting with the same switch. In-CLI we only need
+ * on/off — never a hard refusal — so a turn is never blocked. Default on (soft).
+ */
+export function isRecallLedgerEnabled(): boolean {
+  return (
+    String(process.env.EXPERIENCE_RECALL_FEEDBACK_GATE ?? "soft")
+      .trim()
+      .toLowerCase() !== "off"
+  );
+}
+
+/**
+ * Compact, token-bounded reminder of still-unrated surfaced/recalled handles, for
+ * injection next to the `[id]` handles the agent already saw. Names the actual
+ * `{id, collection}` pairs so an `ee_feedback(id, collection, verdict)` call is
+ * actionable — the legacy static nudge named no ids, so the model could not
+ * complete the rating even when willing. Capped so a long session can't bloat the
+ * prompt (token-thrift).
+ */
+export function formatPendingReminder(pending: PendingRecall[], opts: { max?: number } = {}): string {
+  if (pending.length === 0) return "";
+  const max = Math.max(1, Math.min(opts.max ?? 5, 20));
+  const shown = pending.slice(0, max);
+  const lines = shown.map((p) => `  - [${p.id} ${p.collection ?? "?"}]`);
+  const more = pending.length > max ? `\n  …and ${pending.length - max} more` : "";
+  return (
+    `↳ ${pending.length} earlier EE hint(s) still unrated — rate the one(s) you acted on so the brain keeps what helped: ` +
+    `ee_feedback(id, collection, followed|ignored|noise).\n${lines.join("\n")}${more}`
+  );
+}

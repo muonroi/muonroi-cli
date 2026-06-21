@@ -603,6 +603,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           if (resp === null) {
             return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
           }
+          // Record recalled entries as pending feedback debt in the same in-process
+          // ledger the native ee_feedback builtin clears, so an in-CLI active recall
+          // accrues a verdict obligation exactly like the external MCP ee.query does
+          // (mcp/ee-tools.ts). Layer 3 surfaces this debt as a reminder on the next
+          // enriched turn; without it the in-CLI recall arm was write-only and
+          // ee_feedback.clear() was a no-op.
+          try {
+            const { sessionRecallLedger, isRecallLedgerEnabled } = await import("../ee/recall-ledger.js");
+            if (isRecallLedgerEnabled()) sessionRecallLedger.record(resp.entries, query);
+          } catch (err) {
+            console.error(`[tools:ee_query] recall-ledger record failed: ${(err as Error)?.message}`);
+          }
           // Compact ranked `[id col]` index, not a JSON dump — the recallMode text
           // is ~30k (wide net), so JSON.stringify wasted the budget on escaping.
           return truncateOutput(
