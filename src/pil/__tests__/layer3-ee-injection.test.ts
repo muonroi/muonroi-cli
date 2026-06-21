@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { sessionRecallLedger } from "../../ee/recall-ledger";
 import { layer3EeInjection, RECALL_FEEDBACK_NUDGE } from "../layer3-ee-injection";
 import type { PipelineContext } from "../types";
 
@@ -27,6 +28,9 @@ describe("layer3EeInjection (bridge-based)", () => {
   beforeEach(() => {
     vi.mocked(searchByText).mockReset();
     vi.mocked(searchByText).mockResolvedValue([]);
+    // The recall-feedback ledger is a process singleton; reset so passive-injection
+    // debt recorded by one test does not lengthen the pending reminder in the next.
+    sessionRecallLedger.reset();
   });
 
   test("Test 1: returns enriched context with hints when searchByText returns points with payload.text", async () => {
@@ -108,10 +112,10 @@ describe("layer3EeInjection (bridge-based)", () => {
         const chars = parseInt(charsMatch[1], 10);
         // Two parallel collections, each at 15% of budget: 15% of 100 tokens * 4 chars/token
         // = 60 chars per block + 3 for "..." suffix, joined with newline. Allow generous
-        // ceiling for header text + 2 blocks, PLUS the fixed ee_feedback nudge appended
-        // when rateable experience is present. The 2000-char input means a truncation
-        // regression would blow well past this bound regardless.
-        expect(chars).toBeLessThanOrEqual(260 + RECALL_FEEDBACK_NUDGE.length + 1);
+        // ceiling for header text + 2 blocks, PLUS the dynamic pending-feedback reminder
+        // (≤5 [id collection] lines) that replaced the fixed nudge. The 2000-char input
+        // means a truncation regression would blow well past this bound regardless.
+        expect(chars).toBeLessThanOrEqual(600);
       }
     }
   });
@@ -169,6 +173,67 @@ describe("Layer 3 formatter mode (ctx._brainData populated)", () => {
     expect(result.enriched).toContain("always run tests");
     expect(result.enriched).toContain("mock fs in unit tests");
     expect(result.t1Rules).toEqual(["never skip tests"]);
+  });
+
+  test("unified path: records rateable points (with id) into the ledger + names [id collection] in the reminder", async () => {
+    // Symmetric with the legacy-path recall-loop closure. When the server (PIL
+    // schema_version 1.1+) attributes points with id/collection, the unified
+    // formatter must record them as pending debt and surface an actionable reminder.
+    sessionRecallLedger.reset();
+    const { layer3EeInjection } = await import("../layer3-ee-injection.js");
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "always run tests", score: 0.9, id: "pr1", collection: "experience-principles" }],
+        t1_rules: [],
+        t2_patterns: [{ text: "mock fs in unit tests", score: 0.7, id: "be1", collection: "experience-behavioral" }],
+        retrieval_skipped_reason: null,
+      },
+    };
+    const result = await layer3EeInjection(ctx);
+    // Inline [id:..] handle rendered so the reminder refers to something visible.
+    expect(result.enriched).toContain("[id:pr1]");
+    // Dynamic reminder names the actual [id collection] so ee_feedback is actionable.
+    expect(result.enriched).toMatch(/ee_feedback\(id, collection, followed\|ignored\|noise\)/);
+    expect(result.enriched).toContain("[pr1 experience-principles]");
+    expect(result.enriched).toContain("[be1 experience-behavioral]");
+    // Both points recorded as rateable pending debt.
+    expect(sessionRecallLedger.pendingCount()).toBe(2);
+  });
+
+  test("unified path: no id (older server) renders text but stays unrateable (static nudge)", async () => {
+    sessionRecallLedger.reset();
+    const { layer3EeInjection } = await import("../layer3-ee-injection.js");
+    const ctx = {
+      raw: "x",
+      enriched: "x",
+      taskType: "debug" as const,
+      domain: null,
+      confidence: 0.85,
+      outputStyle: "balanced" as const,
+      tokenBudget: 2000,
+      metrics: null,
+      layers: [],
+      _brainData: {
+        t0_principles: [{ text: "always run tests", score: 0.9 }],
+        t1_rules: [],
+        t2_patterns: [{ text: "mock fs in unit tests", score: 0.7 }],
+        retrieval_skipped_reason: null,
+      },
+    };
+    const result = await layer3EeInjection(ctx);
+    expect(result.enriched).toContain("always run tests");
+    // No ids → nothing recorded; the static nudge is the fallback.
+    expect(sessionRecallLedger.pendingCount()).toBe(0);
+    expect(result.enriched).toContain(RECALL_FEEDBACK_NUDGE);
   });
 
   test("emits no block when ctx._brainData is null AND legacy disabled by flag", async () => {

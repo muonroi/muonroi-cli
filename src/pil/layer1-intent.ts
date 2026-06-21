@@ -12,7 +12,7 @@
 
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
 import { classify } from "../router/classifier/index.js";
-import { isLlmFirstClassifyEnabled, isUnifiedPilEnabled } from "./config.js";
+import { getUnifiedPilBudgetMs, isLlmFirstClassifyEnabled, isUnifiedPilEnabled } from "./config.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
@@ -1184,7 +1184,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       }
       const resp = await pilContext(brainRaw, {
         projectCtx: domain ? { domain } : undefined,
-        budgetMs: 1500,
+        budgetMs: getUnifiedPilBudgetMs(),
       });
       if (resp) {
         if (resp.taskType) taskType = resp.taskType;
