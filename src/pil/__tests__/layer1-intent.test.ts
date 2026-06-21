@@ -10,6 +10,9 @@ vi.mock("../config.js", () => ({
   // OFF here so these cascade tests exercise the regex passes (the model-first
   // gate is covered in src/pil/layer1-intent.test.ts).
   isLlmFirstClassifyEnabled: vi.fn(() => false),
+  // Pass-3 unified reads the client-side budget; whole-module mock replaces the
+  // real export, so it must be provided or the call site throws.
+  getUnifiedPilBudgetMs: vi.fn(() => 3500),
 }));
 
 vi.mock("../../ee/bridge.js", () => ({
