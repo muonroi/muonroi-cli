@@ -448,8 +448,9 @@ function staticPrefixCacheKey(
   sandboxMode: SandboxMode,
   providerId: string,
   isChitchat: boolean,
+  subagentsHash: string,
 ): string {
-  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}`;
+  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}|${subagentsHash}`;
 }
 
 function computeStaticPrefix(
@@ -501,8 +502,12 @@ export function buildSystemPromptParts(
   const chitchat = options?.chitchat === true;
   const pid = providerId ?? "default";
 
+  // Subagents rarely change mid-session, but when they do we need a cache miss.
+  // JSON-stable stringify is fast for typical configs (< 10 entries, no circular refs).
+  const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
+
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat);
+  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat, subagentsHash);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
