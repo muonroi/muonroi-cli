@@ -206,6 +206,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // (it can only over-block a push, never wrongly allow one).
   const gitSafetyKey =
     opts?.sessionId && opts.sessionId.length > 0 ? opts.sessionId : `__proc_default__:${process.pid}`;
+  // Per-session empty-bash streak counter: escalates from guidance (strike 1-2)
+  // to hard block (strike 3+) so a cheap model that repeatedly emits `bash: {}`
+  // cannot loop indefinitely (live: deepseek session bf58d0f46b51 — 8+ empty calls).
+  const _emptyBashStreak = new Map<string, number>();
   tools.bash = dynamicTool({
     description:
       "Execute a shell command. Output is automatically cached — every call returns a " +
@@ -221,7 +225,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       },
       required: ["command"],
     }),
-    execute: async (input: any) => {
+    execute: async (input: any, extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown> }) => {
       // Corrective guard for malformed calls: a cheap model sometimes emits a
       // bash call with a missing / empty `command` (live: deepseek sent `{}`
       // repeatedly until the loop-guard fired). Passing undefined to
@@ -230,8 +234,29 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       // both look like progress and feed the loop. Return a crisp instruction
       // so the next step supplies a real command instead of repeating.
       if (typeof input.command !== "string" || input.command.trim() === "") {
+        // Track empty-bash streak per session; escalate from guidance to hard block.
+        const _ebKey = gitSafetyKey ?? "no-session";
+        let _eb = _emptyBashStreak.get(_ebKey) ?? 0;
+        _eb++;
+        _emptyBashStreak.set(_ebKey, _eb);
+        if (_eb >= 3) {
+          return (
+            'BLOCKED: the `bash` tool has been called with an empty/missing "command" 3+ times in a row. ' +
+            "Bash is now DISABLED for the remainder of this session — use read_file, grep, or other tools instead. " +
+            "If you need to run a shell command, state the blocker explicitly and the CLI will enable it again on the next turn."
+          );
+        }
+        if (_eb >= 2) {
+          return (
+            'ERROR (2nd consecutive empty bash call): the `bash` tool requires a non-empty "command" string ' +
+            "but this is the 2nd call in a row with empty arguments. One more empty call will BLOCK bash for the session. " +
+            'Provide a real command, e.g. {"command":"ls -la"}.'
+          );
+        }
         return 'ERROR: the `bash` tool requires a non-empty "command" string, but the call had empty arguments. Provide the shell command to run, e.g. {"command":"ls -la"}.';
       }
+      // Reset the empty-bash streak on any successful command.
+      _emptyBashStreak.delete(gitSafetyKey ?? "no-session");
 
       const cmd = typeof input.command === "string" ? input.command : "";
 
