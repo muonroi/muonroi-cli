@@ -1469,9 +1469,11 @@ export class Agent {
       keepRecentTokens = Math.min(100_000, Math.max(20_000, Math.floor(contextWindow * 0.1)));
     }
 
-    // Compact more aggressively for long sessions to prevent runaway token growth
+    // For long sessions, reduce keepRecentTokens slightly to slow context growth
+    // (0.85 instead of old 0.75 — session bf58d0f46b51 showed 0.75 created a
+    // tight compact-loop: keep 15K → add 50K tool results → re-compact immediately).
     if (this._compactionStats.count >= 2) {
-      keepRecentTokens = Math.floor(keepRecentTokens * 0.75);
+      keepRecentTokens = Math.floor(keepRecentTokens * 0.85);
     }
 
     return {
