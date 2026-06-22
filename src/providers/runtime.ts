@@ -50,7 +50,7 @@ export function createProviderFactory(
  * For OpenAI: loads stored OAuth tokens (auto-refreshing if expiring) and injects
  * them as Authorization / ChatGPT-Account-ID headers so subscription-backed
  * ChatGPT Plus/Pro accounts work without an API key.
- * For Google: loads stored Gemini OAuth tokens and injects Authorization header
+ * For Google: loads stored Agy OAuth tokens and injects Authorization header
  * so users can authenticate via their Google account without a GOOGLE_API_KEY.
  * Falls back to API-key path when no tokens are stored.
  * All other providers: identical to createProviderFactory.
@@ -75,7 +75,16 @@ export async function createProviderFactoryAsync(
         // api.responses.write" when the subscription token hits the platform
         // API. Fall back to opts.baseURL only when the OAuth provider declares
         // no dedicated backend (cfg.baseURL undefined, e.g. some Gemini flows).
-        const baseURL = cfg.baseURL ?? opts.baseURL;
+        //
+        // However, a user-specified baseURL in settings (e.g. switching to a
+        // different backend after an OAuth provider is killed) MUST override
+        // the hardcoded OAuth default. This lets users migrate from the old
+        // cloudcode-pa.googleapis.com endpoint to a new proxy/backend without
+        // modifying source.
+        const { loadUserSettings } = await import("../utils/settings.js");
+        const userSettings = loadUserSettings();
+        const userBaseURL = userSettings?.providers?.[id]?.baseURL;
+        const baseURL = userBaseURL ?? cfg.baseURL ?? opts.baseURL;
         const result = createProviderFactory(id, { ...opts, baseURL, headers });
         // Attach provider-level OAuth-only defaults so downstream code can merge them.
         if (cfg.defaultProviderOptions) {
