@@ -9,7 +9,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
-import { setActiveEeYield } from "../index.js";
+import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
@@ -3734,588 +3734,610 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
           lastPrompt: messages[messages.length - 1]?.content,
           sessionId: agent.getSessionId() ?? undefined,
           getLiveEntries: () => messages,
-        }).then(async (result) => {
-          if (result === null) return;
+        })
+          .then(async (result) => {
+            if (result === null) return;
 
-          if (result.startsWith("__COMPACT__")) {
-            const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
-            try {
-              const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+            if (result.startsWith("__COMPACT__")) {
+              const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+              try {
+                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                setMessages((prev) => [
+                  ...prev,
+                  buildAssistantEntry(
+                    `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                  ),
+                ]);
+              } catch (e: unknown) {
+                setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+              }
+              return;
+            }
+
+            if (result.startsWith("__EXPAND__")) {
+              const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
+              setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
+              return;
+            }
+
+            if (result.startsWith("__CLEAR__")) {
+              const summary = result.replace(/^__CLEAR__\n/, "");
+              agent.clearHistory();
+              setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
+              return;
+            }
+
+            if (result === "__PIN_LAST__") {
+              const seq = agent.pinLastUserMessage();
               setMessages((prev) => [
                 ...prev,
                 buildAssistantEntry(
-                  `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                  seq === null
+                    ? "No user message to pin."
+                    : `Pinned user message (seq=${seq}). It will survive compaction.`,
                 ),
               ]);
-            } catch (e: unknown) {
-              setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
-            }
-            return;
-          }
-
-          if (result.startsWith("__EXPAND__")) {
-            const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
-            setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
-            return;
-          }
-
-          if (result.startsWith("__CLEAR__")) {
-            const summary = result.replace(/^__CLEAR__\n/, "");
-            agent.clearHistory();
-            setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
-            return;
-          }
-
-          if (result === "__PIN_LAST__") {
-            const seq = agent.pinLastUserMessage();
-            setMessages((prev) => [
-              ...prev,
-              buildAssistantEntry(
-                seq === null
-                  ? "No user message to pin."
-                  : `Pinned user message (seq=${seq}). It will survive compaction.`,
-              ),
-            ]);
-            return;
-          }
-          if (result.startsWith("__PIN_SEQ__")) {
-            const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
-            const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
-            setMessages((prev) => [
-              ...prev,
-              buildAssistantEntry(
-                ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
-              ),
-            ]);
-            return;
-          }
-          if (result.startsWith("__UNPIN_SEQ__")) {
-            const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
-            const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
-            setMessages((prev) => [
-              ...prev,
-              buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
-            ]);
-            return;
-          }
-          if (result === "__PINS_LIST__") {
-            const seqs = agent.getPinnedSeqs();
-            setMessages((prev) => [
-              ...prev,
-              buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
-            ]);
-            return;
-          }
-
-          if (result.startsWith("__PRODUCT_LOOP__") || result.includes("\n__PRODUCT_LOOP__\n")) {
-            const sentinelIdx = result.indexOf("__PRODUCT_LOOP__\n");
-            const warningPrefix = sentinelIdx > 0 ? result.slice(0, sentinelIdx) : "";
-            const json = result.slice(sentinelIdx + "__PRODUCT_LOOP__\n".length);
-            let payload: any;
-            try {
-              payload = JSON.parse(json);
-            } catch (e) {
-              setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
               return;
             }
-            // Plan 23-02 — capture the original idea for EE-driven BB design.
-            if (payload.subcommand === "start" && typeof payload.idea === "string") {
-              lastIdealIdeaRef.current = payload.idea;
-              originalIdealPromptRef.current = payload.idea;
+            if (result.startsWith("__PIN_SEQ__")) {
+              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+              const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(
+                  ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                ),
+              ]);
+              return;
             }
-            const heading =
-              payload.subcommand === "start"
-                ? `/ideal "${payload.idea ?? ""}"`
-                : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
-            setMessages((prev) => [
-              ...prev,
-              buildUserEntry(heading),
-              buildAssistantEntry(
-                warningPrefix
-                  ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
-                  : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
-              ),
-            ]);
-            // Fresh product-loop run — clear any persisted phase/status so old
-            // runs don't bleed into the new one (phaseIds collide across runs).
-            setCouncilPhases([]);
-            setCouncilStatuses([]);
-            councilDoneAtRef.current.clear();
-            // Liveness heartbeat — between "Product loop starting…" and the
-            // first phase event (CB-1 + discovery + leader call can take
-            // 5-60s), the UI used to look frozen with no indication of
-            // activity. We append a single-line elapsed counter every second
-            // that is REPLACED in place (not appended) until the first real
-            // chunk arrives. The counter is then cleared so the normal phase
-            // flow takes over.
-            const heartbeatStartedAt = Date.now();
-            let firstChunkSeen = false;
-            const heartbeatLineMarker = "\n⏳ Initializing… elapsed ";
-            const writeHeartbeat = () => {
-              if (firstChunkSeen) return;
-              const elapsed = Math.floor((Date.now() - heartbeatStartedAt) / 1000);
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (!last || last.type !== "assistant") return prev;
-                const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
-                return [...prev.slice(0, -1), { ...last, content: `${base}${heartbeatLineMarker}${elapsed}s\n` }];
-              });
-            };
-            const heartbeatInterval = setInterval(writeHeartbeat, 1_000);
-            const clearHeartbeat = () => {
-              if (firstChunkSeen) return;
-              firstChunkSeen = true;
-              clearInterval(heartbeatInterval);
-              // Strip the heartbeat line from the assistant message so the
-              // normal phase output starts on a clean slate.
-              setMessages((prev) => {
-                const last = prev[prev.length - 1];
-                if (!last || last.type !== "assistant") return prev;
-                const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
-                return [...prev.slice(0, -1), { ...last, content: base.endsWith("\n") ? base : `${base}\n` }];
-              });
-            };
-            try {
-              const gen = (agent as any).runProductLoopV1(payload);
-              for await (const chunk of gen) {
+            if (result.startsWith("__UNPIN_SEQ__")) {
+              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+              const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+              ]);
+              return;
+            }
+            if (result === "__PINS_LIST__") {
+              const seqs = agent.getPinnedSeqs();
+              setMessages((prev) => [
+                ...prev,
+                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+              ]);
+              return;
+            }
+
+            if (result.startsWith("__PRODUCT_LOOP__") || result.includes("\n__PRODUCT_LOOP__\n")) {
+              const sentinelIdx = result.indexOf("__PRODUCT_LOOP__\n");
+              const warningPrefix = sentinelIdx > 0 ? result.slice(0, sentinelIdx) : "";
+              const json = result.slice(sentinelIdx + "__PRODUCT_LOOP__\n".length);
+              let payload: any;
+              try {
+                payload = JSON.parse(json);
+              } catch (e) {
+                setMessages((prev) => [...prev, buildAssistantEntry(`/ideal parse error: ${e}`)]);
+                return;
+              }
+              // Plan 23-02 — capture the original idea for EE-driven BB design.
+              if (payload.subcommand === "start" && typeof payload.idea === "string") {
+                lastIdealIdeaRef.current = payload.idea;
+                originalIdealPromptRef.current = payload.idea;
+              }
+              const heading =
+                payload.subcommand === "start"
+                  ? `/ideal "${payload.idea ?? ""}"`
+                  : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
+              setMessages((prev) => [
+                ...prev,
+                buildUserEntry(heading),
+                buildAssistantEntry(
+                  warningPrefix
+                    ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
+                    : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
+                ),
+              ]);
+              // Fresh product-loop run — clear any persisted phase/status so old
+              // runs don't bleed into the new one (phaseIds collide across runs).
+              setCouncilPhases([]);
+              setCouncilStatuses([]);
+              councilDoneAtRef.current.clear();
+              // Liveness heartbeat — between "Product loop starting…" and the
+              // first phase event (CB-1 + discovery + leader call can take
+              // 5-60s), the UI used to look frozen with no indication of
+              // activity. We append a single-line elapsed counter every second
+              // that is REPLACED in place (not appended) until the first real
+              // chunk arrives. The counter is then cleared so the normal phase
+              // flow takes over.
+              const heartbeatStartedAt = Date.now();
+              let firstChunkSeen = false;
+              const heartbeatLineMarker = "\n⏳ Initializing… elapsed ";
+              const writeHeartbeat = () => {
+                if (firstChunkSeen) return;
+                const elapsed = Math.floor((Date.now() - heartbeatStartedAt) / 1000);
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  if (!last || last.type !== "assistant") return prev;
+                  const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
+                  return [...prev.slice(0, -1), { ...last, content: `${base}${heartbeatLineMarker}${elapsed}s\n` }];
+                });
+              };
+              const heartbeatInterval = setInterval(writeHeartbeat, 1_000);
+              const clearHeartbeat = () => {
+                if (firstChunkSeen) return;
+                firstChunkSeen = true;
+                clearInterval(heartbeatInterval);
+                // Strip the heartbeat line from the assistant message so the
+                // normal phase output starts on a clean slate.
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  if (!last || last.type !== "assistant") return prev;
+                  const base = (last.content ?? "").split(heartbeatLineMarker)[0] ?? last.content ?? "";
+                  return [...prev.slice(0, -1), { ...last, content: base.endsWith("\n") ? base : `${base}\n` }];
+                });
+              };
+              try {
+                const gen = (agent as any).runProductLoopV1(payload);
+                for await (const chunk of gen) {
+                  clearHeartbeat();
+                  clearInterCardHeartbeat();
+                  if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                    const cq = chunk.councilQuestion;
+                    process.stderr.write(
+                      `[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`,
+                    );
+                  }
+                  const _chunkType = chunk.type;
+                  if (chunk.type === "content") {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: (last.content ?? "") + (chunk.content ?? "") },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                    });
+                  }
+                  if (chunk.type === "council_question" && chunk.councilQuestion) {
+                    const cq2 = chunk.councilQuestion;
+                    setPendingCouncilQuestionSync(cq2);
+                    setCouncilCardStateSync(initialCardState(cq2));
+                    // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-open",
+                        questionId: cq2.questionId,
+                        question: cq2.question,
+                        phase: cq2.phase ?? "clarify",
+                        optionCount: cq2.options?.length ?? 0,
+                        defaultIndex: cq2.defaultIndex,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_open",
+                      data: {
+                        questionId: cq2.questionId,
+                        question: cq2.question,
+                        phase: cq2.phase ?? "clarify",
+                        optionCount: cq2.options?.length ?? 0,
+                        defaultIndex: cq2.defaultIndex,
+                        optionLabels: cq2.options?.map((o: { label: string }) => o.label),
+                        recommendedLabel: cq2.options?.[cq2.defaultIndex ?? 0]?.label,
+                      },
+                    });
+                  }
+                  if (chunk.type === "council_preflight" && chunk.councilPreflight) {
+                    setPendingCouncilPreflight(chunk.councilPreflight);
+                    setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  }
+                  if (chunk.type === "council_message" && chunk.councilMessage) {
+                    const cm = chunk.councilMessage;
+                    setCouncilMessages((prev) => [...prev, cm]);
+                    if (cm.kind === "debate" && cm.partner) {
+                      const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
+                      storeQuote(pairKey, cm.speaker.role, cm.text);
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        for (const [id, p] of next) {
+                          if (p.role === cm.speaker.role) next.delete(id);
+                        }
+                        return next;
+                      });
+                    }
+                  }
+                  if (chunk.type === "council_status" && chunk.councilStatus) {
+                    const cs = chunk.councilStatus;
+                    if (cs.state === "start" && cs.label) {
+                      const placeholderRole = cs.label;
+                      const isLeader = /^leader\b/i.test(placeholderRole);
+                      const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
+                      const side: "left" | "right" = isLeader
+                        ? "left"
+                        : getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        next.set(cs.statusId, {
+                          role: placeholderRole,
+                          side,
+                          color: styleForRole?.color ?? t.councilLeaderBorder,
+                          variant: isLeader ? "leader" : "participant",
+                        });
+                        return next;
+                      });
+                    }
+                    if (cs.state === "done" || cs.state === "error") {
+                      councilDoneAtRef.current.set(cs.statusId, Date.now());
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        next.delete(cs.statusId);
+                        return next;
+                      });
+                    }
+                    setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                    // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "council-speaker",
+                        role: cs.role ?? cs.label ?? "unknown",
+                        status: cs.state === "start" ? "start" : "done",
+                        correlationId: cs.statusId,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                  }
+                  if (chunk.type === "council_phase" && chunk.councilPhase) {
+                    const cp2 = chunk.councilPhase;
+                    setCouncilPhases((prev) => upsertPhase(prev, cp2));
+                    // Task 2.2 — emit council-step in branch 2 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "council-step",
+                        phaseId: cp2.phaseId,
+                        phaseKind: cp2.kind,
+                        state: cp2.state,
+                        label: cp2.label,
+                        elapsedMs: cp2.elapsedMs,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                  }
+                  if (chunk.type === "product_status_card" && chunk.productStatusCard) {
+                    const d = chunk.productStatusCard;
+                    setProductStatus((prev) => {
+                      // Accumulate per-sprint history client-side so loop-driver
+                      // doesn't have to ship the full history every chunk.
+                      const total = d.criteriaMet + d.criteriaPartial + d.criteriaUnmet;
+                      const prevHistory = prev?.criteriaHistory ?? [];
+                      const lastHist = prevHistory[prevHistory.length - 1];
+                      const criteriaHistory =
+                        lastHist && lastHist.sprintN === d.sprintN
+                          ? [...prevHistory.slice(0, -1), { sprintN: d.sprintN, met: d.criteriaMet, total }]
+                          : [...prevHistory, { sprintN: d.sprintN, met: d.criteriaMet, total }];
+                      const prevCost = prev?.costHistory ?? [];
+                      const lastCost = prevCost[prevCost.length - 1];
+                      const costHistory =
+                        lastCost && lastCost.sprintN === d.sprintN
+                          ? [...prevCost.slice(0, -1), { sprintN: d.sprintN, cumulativeUsd: d.costSpent }]
+                          : [...prevCost, { sprintN: d.sprintN, cumulativeUsd: d.costSpent }];
+                      return { ...d, criteriaHistory, costHistory };
+                    });
+                  }
+                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          {
+                            ...last,
+                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                          },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
+                    });
+                  }
+                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          {
+                            ...last,
+                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
+                          },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
+                    });
+                  }
+                  if (chunk.type === "halt" && chunk.haltChunk) {
+                    // Surface the structured recovery card. The /ideal product-loop
+                    // emits halt when CB-1 / CB-3 trip (e.g. no verify recipe in
+                    // the target directory). Without this branch the chunk was
+                    // silently dropped and the TUI looked frozen.
+                    setActiveHaltCard(chunk.haltChunk);
+                    setHaltSelectedIndex(0);
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "halt_card_open",
+                      data: {
+                        reason: chunk.haltChunk.reason,
+                        optionCount: chunk.haltChunk.recovery_options.length,
+                        optionIds: chunk.haltChunk.recovery_options.map((o: { id: string }) => o.id),
+                      },
+                    });
+                  }
+                  if (chunk.type === "done") break;
+                  if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                    process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);
+                  }
+                }
+                if (process.env.MUONROI_DEBUG_LEADER === "1") {
+                  process.stderr.write(`[ideal-loop-exit] for-await ended cleanly\n`);
+                }
+              } catch (e: unknown) {
                 clearHeartbeat();
-                clearInterCardHeartbeat();
                 if (process.env.MUONROI_DEBUG_LEADER === "1") {
-                  const cq = chunk.councilQuestion;
-                  process.stderr.write(`[ideal-chunk-rx] type=${chunk.type}, questionId=${cq?.questionId ?? "n/a"}\n`);
+                  process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
                 }
-                const _chunkType = chunk.type;
-                if (chunk.type === "content") {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
-                    }
-                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                  });
-                }
-                if (chunk.type === "council_question" && chunk.councilQuestion) {
-                  const cq2 = chunk.councilQuestion;
-                  setPendingCouncilQuestionSync(cq2);
-                  setCouncilCardStateSync(initialCardState(cq2));
-                  // Task 2.2c — emit askcard-open in branch 2 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "askcard-open",
-                      questionId: cq2.questionId,
-                      question: cq2.question,
-                      phase: cq2.phase ?? "clarify",
-                      optionCount: cq2.options?.length ?? 0,
-                      defaultIndex: cq2.defaultIndex,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                  logUIInteraction(agent.getSessionId() ?? undefined, {
-                    subtype: "askcard_open",
-                    data: {
-                      questionId: cq2.questionId,
-                      question: cq2.question,
-                      phase: cq2.phase ?? "clarify",
-                      optionCount: cq2.options?.length ?? 0,
-                      defaultIndex: cq2.defaultIndex,
-                      optionLabels: cq2.options?.map((o: { label: string }) => o.label),
-                      recommendedLabel: cq2.options?.[cq2.defaultIndex ?? 0]?.label,
-                    },
-                  });
-                }
-                if (chunk.type === "council_preflight" && chunk.councilPreflight) {
-                  setPendingCouncilPreflight(chunk.councilPreflight);
-                  setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
-                }
-                if (chunk.type === "council_message" && chunk.councilMessage) {
-                  const cm = chunk.councilMessage;
-                  setCouncilMessages((prev) => [...prev, cm]);
-                  if (cm.kind === "debate" && cm.partner) {
-                    const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
-                    storeQuote(pairKey, cm.speaker.role, cm.text);
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      for (const [id, p] of next) {
-                        if (p.role === cm.speaker.role) next.delete(id);
-                      }
-                      return next;
-                    });
-                  }
-                }
-                if (chunk.type === "council_status" && chunk.councilStatus) {
-                  const cs = chunk.councilStatus;
-                  if (cs.state === "start" && cs.label) {
-                    const placeholderRole = cs.label;
-                    const isLeader = /^leader\b/i.test(placeholderRole);
-                    const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
-                    const side: "left" | "right" = isLeader
-                      ? "left"
-                      : getSide(`placeholder::${placeholderRole}`, placeholderRole);
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      next.set(cs.statusId, {
-                        role: placeholderRole,
-                        side,
-                        color: styleForRole?.color ?? t.councilLeaderBorder,
-                        variant: isLeader ? "leader" : "participant",
-                      });
-                      return next;
-                    });
-                  }
-                  if (cs.state === "done" || cs.state === "error") {
-                    councilDoneAtRef.current.set(cs.statusId, Date.now());
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      next.delete(cs.statusId);
-                      return next;
-                    });
-                  }
-                  setCouncilStatuses((prev) => upsertStatus(prev, cs));
-                  // Task 2.2b — emit council-speaker in branch 2 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-speaker",
-                      role: cs.role ?? cs.label ?? "unknown",
-                      status: cs.state === "start" ? "start" : "done",
-                      correlationId: cs.statusId,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                }
-                if (chunk.type === "council_phase" && chunk.councilPhase) {
-                  const cp2 = chunk.councilPhase;
-                  setCouncilPhases((prev) => upsertPhase(prev, cp2));
-                  // Task 2.2 — emit council-step in branch 2 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-step",
-                      phaseId: cp2.phaseId,
-                      phaseKind: cp2.kind,
-                      state: cp2.state,
-                      label: cp2.label,
-                      elapsedMs: cp2.elapsedMs,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                }
-                if (chunk.type === "product_status_card" && chunk.productStatusCard) {
-                  const d = chunk.productStatusCard;
-                  setProductStatus((prev) => {
-                    // Accumulate per-sprint history client-side so loop-driver
-                    // doesn't have to ship the full history every chunk.
-                    const total = d.criteriaMet + d.criteriaPartial + d.criteriaUnmet;
-                    const prevHistory = prev?.criteriaHistory ?? [];
-                    const lastHist = prevHistory[prevHistory.length - 1];
-                    const criteriaHistory =
-                      lastHist && lastHist.sprintN === d.sprintN
-                        ? [...prevHistory.slice(0, -1), { sprintN: d.sprintN, met: d.criteriaMet, total }]
-                        : [...prevHistory, { sprintN: d.sprintN, met: d.criteriaMet, total }];
-                    const prevCost = prev?.costHistory ?? [];
-                    const lastCost = prevCost[prevCost.length - 1];
-                    const costHistory =
-                      lastCost && lastCost.sprintN === d.sprintN
-                        ? [...prevCost.slice(0, -1), { sprintN: d.sprintN, cumulativeUsd: d.costSpent }]
-                        : [...prevCost, { sprintN: d.sprintN, cumulativeUsd: d.costSpent }];
-                    return { ...d, criteriaHistory, costHistory };
-                  });
-                }
-                if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        {
-                          ...last,
-                          content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                        },
-                      ];
-                    }
-                    return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                  });
-                }
-                if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        {
-                          ...last,
-                          content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                        },
-                      ];
-                    }
-                    return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                  });
-                }
-                if (chunk.type === "halt" && chunk.haltChunk) {
-                  // Surface the structured recovery card. The /ideal product-loop
-                  // emits halt when CB-1 / CB-3 trip (e.g. no verify recipe in
-                  // the target directory). Without this branch the chunk was
-                  // silently dropped and the TUI looked frozen.
-                  setActiveHaltCard(chunk.haltChunk);
-                  setHaltSelectedIndex(0);
-                  logUIInteraction(agent.getSessionId() ?? undefined, {
-                    subtype: "halt_card_open",
-                    data: {
-                      reason: chunk.haltChunk.reason,
-                      optionCount: chunk.haltChunk.recovery_options.length,
-                      optionIds: chunk.haltChunk.recovery_options.map((o: { id: string }) => o.id),
-                    },
-                  });
-                }
-                if (chunk.type === "done") break;
-                if (process.env.MUONROI_DEBUG_LEADER === "1") {
-                  process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);
-                }
+                setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
+              } finally {
+                if (!firstChunkSeen) clearHeartbeat();
+                setCouncilPhases([]);
+                setCouncilStatuses([]);
+                councilDoneAtRef.current.clear();
+                setProductStatus(null);
               }
-              if (process.env.MUONROI_DEBUG_LEADER === "1") {
-                process.stderr.write(`[ideal-loop-exit] for-await ended cleanly\n`);
-              }
-            } catch (e: unknown) {
-              clearHeartbeat();
-              if (process.env.MUONROI_DEBUG_LEADER === "1") {
-                process.stderr.write(`[ideal-loop-error] ${String(e)}\n`);
-              }
-              setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${e}`)]);
-            } finally {
-              if (!firstChunkSeen) clearHeartbeat();
+              return;
+            }
+
+            if (result.startsWith("__COUNCIL__")) {
+              const lines = result.split("\n");
+              const topic = lines.slice(2).join("\n");
+              setMessages((prev) => [
+                ...prev,
+                buildUserEntry(`/council ${topic}`),
+                buildAssistantEntry("Council convening...\n"),
+              ]);
+              // Fresh council run — clear any persisted phase timeline so old runs
+              // don't bleed into the new one (phaseIds collide across runs).
               setCouncilPhases([]);
               setCouncilStatuses([]);
               councilDoneAtRef.current.clear();
-              setProductStatus(null);
-            }
-            return;
-          }
-
-          if (result.startsWith("__COUNCIL__")) {
-            const lines = result.split("\n");
-            const topic = lines.slice(2).join("\n");
-            setMessages((prev) => [
-              ...prev,
-              buildUserEntry(`/council ${topic}`),
-              buildAssistantEntry("Council convening...\n"),
-            ]);
-            // Fresh council run — clear any persisted phase timeline so old runs
-            // don't bleed into the new one (phaseIds collide across runs).
-            setCouncilPhases([]);
-            setCouncilStatuses([]);
-            councilDoneAtRef.current.clear();
-            // Mark the turn as processing for the lifetime of the council run.
-            // The /council slash command is dispatched via a DETACHED
-            // `dispatchSlash(...).then(...)` promise: the submit handler returns
-            // (and resets isProcessing) before this callback runs, so without
-            // re-arming it here `interruptActiveRun` bails on `!isProcessingRef`
-            // and Esc never reaches `agent.abort()` — the multi-minute council
-            // was uncancellable. Set the ref (read synchronously by the Esc
-            // handler) AND the state (drives the "esc to interrupt" affordance).
-            isProcessingRef.current = true;
-            setIsProcessing(true);
-            try {
-              const gen = agent.runCouncilV2(topic);
-              for await (const chunk of gen) {
-                // Council emitted a chunk — clear the "Waiting for next phase"
-                // inter-card heartbeat started after the last askcard answer.
-                // The /council chunk loop never cleared it (only /ideal's did),
-                // so on cancel/done it orphaned and kept overwriting the final
-                // message — making a cancelled/finished run look stuck.
-                // clearInterCardHeartbeat is idempotent.
-                clearInterCardHeartbeat();
-                if (chunk.type === "content") {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                    }
-                    return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                  });
-                }
-                if (chunk.type === "council_question" && chunk.councilQuestion) {
-                  const cq3 = chunk.councilQuestion;
-                  setPendingCouncilQuestionSync(cq3);
-                  setCouncilCardStateSync(initialCardState(cq3));
-                  // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "askcard-open",
-                      questionId: cq3.questionId,
-                      question: cq3.question,
-                      phase: cq3.phase ?? "clarify",
-                      optionCount: cq3.options?.length ?? 0,
-                      defaultIndex: cq3.defaultIndex,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                  logUIInteraction(agent.getSessionId() ?? undefined, {
-                    subtype: "askcard_open",
-                    data: {
-                      questionId: cq3.questionId,
-                      question: cq3.question,
-                      phase: cq3.phase ?? "clarify",
-                      optionCount: cq3.options?.length ?? 0,
-                      defaultIndex: cq3.defaultIndex,
-                      optionLabels: cq3.options?.map((o) => o.label),
-                      recommendedLabel: cq3.options?.[cq3.defaultIndex ?? 0]?.label,
-                    },
-                  });
-                }
-                if (chunk.type === "council_preflight" && chunk.councilPreflight) {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + (chunk.content ?? "") }];
-                    }
-                    return prev;
-                  });
-                  setPendingCouncilPreflight(chunk.councilPreflight);
-                  setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
-                }
-                if (chunk.type === "council_message" && chunk.councilMessage) {
-                  const cm = chunk.councilMessage;
-                  setCouncilMessages((prev) => [...prev, cm]);
-                  if (cm.kind === "debate" && cm.partner) {
-                    const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
-                    storeQuote(pairKey, cm.speaker.role, cm.text);
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      for (const [id, p] of next) {
-                        if (p.role === cm.speaker.role) next.delete(id);
+              // Mark the turn as processing for the lifetime of the council run.
+              // The /council slash command is dispatched via a DETACHED
+              // `dispatchSlash(...).then(...)` promise: the submit handler returns
+              // (and resets isProcessing) before this callback runs, so without
+              // re-arming it here `interruptActiveRun` bails on `!isProcessingRef`
+              // and Esc never reaches `agent.abort()` — the multi-minute council
+              // was uncancellable. Set the ref (read synchronously by the Esc
+              // handler) AND the state (drives the "esc to interrupt" affordance).
+              isProcessingRef.current = true;
+              setIsProcessing(true);
+              try {
+                const gen = agent.runCouncilV2(topic);
+                for await (const chunk of gen) {
+                  // Council emitted a chunk — clear the "Waiting for next phase"
+                  // inter-card heartbeat started after the last askcard answer.
+                  // The /council chunk loop never cleared it (only /ideal's did),
+                  // so on cancel/done it orphaned and kept overwriting the final
+                  // message — making a cancelled/finished run look stuck.
+                  // clearInterCardHeartbeat is idempotent.
+                  clearInterCardHeartbeat();
+                  if (chunk.type === "content") {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
                       }
-                      return next;
+                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
                     });
                   }
-                }
-                if (chunk.type === "council_status" && chunk.councilStatus) {
-                  const cs = chunk.councilStatus;
-                  if (cs.state === "start" && cs.label) {
-                    const placeholderRole = cs.label;
-                    const isLeader = /^leader\b/i.test(placeholderRole);
-                    const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
-                    const side: "left" | "right" = isLeader
-                      ? "left"
-                      : getSide(`placeholder::${placeholderRole}`, placeholderRole);
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      next.set(cs.statusId, {
-                        role: placeholderRole,
-                        side,
-                        color: styleForRole?.color ?? t.councilLeaderBorder,
-                        variant: isLeader ? "leader" : "participant",
+                  if (chunk.type === "council_question" && chunk.councilQuestion) {
+                    const cq3 = chunk.councilQuestion;
+                    setPendingCouncilQuestionSync(cq3);
+                    setCouncilCardStateSync(initialCardState(cq3));
+                    // Task 2.2c — emit askcard-open in branch 3 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "askcard-open",
+                        questionId: cq3.questionId,
+                        question: cq3.question,
+                        phase: cq3.phase ?? "clarify",
+                        optionCount: cq3.options?.length ?? 0,
+                        defaultIndex: cq3.defaultIndex,
                       });
-                      return next;
-                    });
-                  }
-                  if (cs.state === "done" || cs.state === "error") {
-                    councilDoneAtRef.current.set(cs.statusId, Date.now());
-                    setCouncilPlaceholders((prev) => {
-                      const next = new Map(prev);
-                      next.delete(cs.statusId);
-                      return next;
-                    });
-                  }
-                  setCouncilStatuses((prev) => upsertStatus(prev, cs));
-                  // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-speaker",
-                      role: cs.role ?? cs.label ?? "unknown",
-                      status: cs.state === "start" ? "start" : "done",
-                      correlationId: cs.statusId,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                }
-                if (chunk.type === "council_phase" && chunk.councilPhase) {
-                  const cp3 = chunk.councilPhase;
-                  setCouncilPhases((prev) => upsertPhase(prev, cp3));
-                  // Task 2.2 — emit council-step in branch 3 (agent-mode only).
-                  try {
-                    agentRuntime?.emitEvent({
-                      t: "event",
-                      kind: "council-step",
-                      phaseId: cp3.phaseId,
-                      phaseKind: cp3.kind,
-                      state: cp3.state,
-                      label: cp3.label,
-                      elapsedMs: cp3.elapsedMs,
-                    });
-                  } catch {
-                    /* best-effort */
-                  }
-                }
-                if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        {
-                          ...last,
-                          content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                        },
-                      ];
+                    } catch {
+                      /* best-effort */
                     }
-                    return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                  });
-                }
-                if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                  setMessages((prev) => {
-                    const last = prev[prev.length - 1];
-                    if (last?.type === "assistant") {
-                      return [
-                        ...prev.slice(0, -1),
-                        {
-                          ...last,
-                          content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                        },
-                      ];
+                    logUIInteraction(agent.getSessionId() ?? undefined, {
+                      subtype: "askcard_open",
+                      data: {
+                        questionId: cq3.questionId,
+                        question: cq3.question,
+                        phase: cq3.phase ?? "clarify",
+                        optionCount: cq3.options?.length ?? 0,
+                        defaultIndex: cq3.defaultIndex,
+                        optionLabels: cq3.options?.map((o) => o.label),
+                        recommendedLabel: cq3.options?.[cq3.defaultIndex ?? 0]?.label,
+                      },
+                    });
+                  }
+                  if (chunk.type === "council_preflight" && chunk.councilPreflight) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          { ...last, content: (last.content ?? "") + (chunk.content ?? "") },
+                        ];
+                      }
+                      return prev;
+                    });
+                    setPendingCouncilPreflight(chunk.councilPreflight);
+                    setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  }
+                  if (chunk.type === "council_message" && chunk.councilMessage) {
+                    const cm = chunk.councilMessage;
+                    setCouncilMessages((prev) => [...prev, cm]);
+                    if (cm.kind === "debate" && cm.partner) {
+                      const pairKey = makePairKey(cm.speaker.role, cm.partner.role);
+                      storeQuote(pairKey, cm.speaker.role, cm.text);
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        for (const [id, p] of next) {
+                          if (p.role === cm.speaker.role) next.delete(id);
+                        }
+                        return next;
+                      });
                     }
-                    return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                  });
+                  }
+                  if (chunk.type === "council_status" && chunk.councilStatus) {
+                    const cs = chunk.councilStatus;
+                    if (cs.state === "start" && cs.label) {
+                      const placeholderRole = cs.label;
+                      const isLeader = /^leader\b/i.test(placeholderRole);
+                      const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
+                      const side: "left" | "right" = isLeader
+                        ? "left"
+                        : getSide(`placeholder::${placeholderRole}`, placeholderRole);
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        next.set(cs.statusId, {
+                          role: placeholderRole,
+                          side,
+                          color: styleForRole?.color ?? t.councilLeaderBorder,
+                          variant: isLeader ? "leader" : "participant",
+                        });
+                        return next;
+                      });
+                    }
+                    if (cs.state === "done" || cs.state === "error") {
+                      councilDoneAtRef.current.set(cs.statusId, Date.now());
+                      setCouncilPlaceholders((prev) => {
+                        const next = new Map(prev);
+                        next.delete(cs.statusId);
+                        return next;
+                      });
+                    }
+                    setCouncilStatuses((prev) => upsertStatus(prev, cs));
+                    // Task 2.2b — emit council-speaker in branch 3 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "council-speaker",
+                        role: cs.role ?? cs.label ?? "unknown",
+                        status: cs.state === "start" ? "start" : "done",
+                        correlationId: cs.statusId,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                  }
+                  if (chunk.type === "council_phase" && chunk.councilPhase) {
+                    const cp3 = chunk.councilPhase;
+                    setCouncilPhases((prev) => upsertPhase(prev, cp3));
+                    // Task 2.2 — emit council-step in branch 3 (agent-mode only).
+                    try {
+                      agentRuntime?.emitEvent({
+                        t: "event",
+                        kind: "council-step",
+                        phaseId: cp3.phaseId,
+                        phaseKind: cp3.kind,
+                        state: cp3.state,
+                        label: cp3.label,
+                        elapsedMs: cp3.elapsedMs,
+                      });
+                    } catch {
+                      /* best-effort */
+                    }
+                  }
+                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          {
+                            ...last,
+                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
+                          },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
+                    });
+                  }
+                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
+                    setMessages((prev) => {
+                      const last = prev[prev.length - 1];
+                      if (last?.type === "assistant") {
+                        return [
+                          ...prev.slice(0, -1),
+                          {
+                            ...last,
+                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
+                          },
+                        ];
+                      }
+                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
+                    });
+                  }
+                  if (chunk.type === "done") break;
+                  // C (latency UX): re-arm the inter-chunk heartbeat so the long
+                  // silent gaps BETWEEN council phases (planDebate, each debate
+                  // pair call, synthesis — 30-60s each on a slow provider) show a
+                  // ticking "⏳ Council working… elapsed Ns" instead of a
+                  // frozen-looking UI. The next chunk clears it at the top of the
+                  // loop (clearInterCardHeartbeat), and finally clears it on exit.
+                  startInterCardHeartbeat("Council working");
                 }
-                if (chunk.type === "done") break;
-                // C (latency UX): re-arm the inter-chunk heartbeat so the long
-                // silent gaps BETWEEN council phases (planDebate, each debate
-                // pair call, synthesis — 30-60s each on a slow provider) show a
-                // ticking "⏳ Council working… elapsed Ns" instead of a
-                // frozen-looking UI. The next chunk clears it at the top of the
-                // loop (clearInterCardHeartbeat), and finally clears it on exit.
-                startInterCardHeartbeat("Council working");
+              } catch (e: unknown) {
+                setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
+              } finally {
+                // Clear council ephemeral UI so the assistant message (containing
+                // synthesis output + stats) becomes the bottommost visible content.
+                // Without this, the persisted timeline hides the final result and
+                // makes the council look stuck.
+                setCouncilPhases([]);
+                setCouncilStatuses([]);
+                councilDoneAtRef.current.clear();
+                // Stop any orphaned inter-card heartbeat so a finished/cancelled
+                // run doesn't keep ticking "Waiting for next phase…".
+                clearInterCardHeartbeat();
+                // Release the processing flag re-armed before the run so the
+                // composer returns to idle and a subsequent turn isn't blocked.
+                isProcessingRef.current = false;
+                setIsProcessing(false);
               }
-            } catch (e: unknown) {
-              setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
-            } finally {
-              // Clear council ephemeral UI so the assistant message (containing
-              // synthesis output + stats) becomes the bottommost visible content.
-              // Without this, the persisted timeline hides the final result and
-              // makes the council look stuck.
-              setCouncilPhases([]);
-              setCouncilStatuses([]);
-              councilDoneAtRef.current.clear();
-              // Stop any orphaned inter-card heartbeat so a finished/cancelled
-              // run doesn't keep ticking "Waiting for next phase…".
-              clearInterCardHeartbeat();
-              // Release the processing flag re-armed before the run so the
-              // composer returns to idle and a subsequent turn isn't blocked.
-              isProcessingRef.current = false;
-              setIsProcessing(false);
+              return;
             }
-            return;
-          }
 
-          setMessages((prev) => [...prev, buildAssistantEntry(result)]);
-        });
+            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+          })
+          .catch((err: unknown) => {
+            // A slash handler that throws must never escape as an unhandled
+            // rejection — that path (headless) calls process.exit(1) and (TUI) is
+            // now suppressed by setTuiActive, so without this the user is either
+            // kicked out or sees nothing (e.g. /export when buildChatEntries' DB
+            // read throws). Surface it in-band, log to crash.log, release the
+            // composer.
+            const emsg = err instanceof Error ? err.message : String(err);
+            appendCrashLog("SLASH", `/${name}: ${err instanceof Error ? err.stack || err.message : emsg}`);
+            setMessages((prev) => [...prev, buildAssistantEntry(`/${name} failed: ${emsg}`)]);
+            isProcessingRef.current = false;
+            setIsProcessing(false);
+          });
         return true;
       }
       return false;
@@ -4549,102 +4571,112 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             lastPrompt: messages[messages.length - 1]?.content,
             sessionId: agent.getSessionId() ?? undefined,
             getLiveEntries: () => messages,
-          }).then(async (result) => {
-            if (result === null) return;
-            if (result.startsWith("__COMPACT__")) {
-              const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
-              try {
-                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+          })
+            .then(async (result) => {
+              if (result === null) return;
+              if (result.startsWith("__COMPACT__")) {
+                const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
+                try {
+                  const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                  setMessages((prev) => [
+                    ...prev,
+                    buildAssistantEntry(
+                      `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                    ),
+                  ]);
+                } catch (e: unknown) {
+                  setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                }
+                return;
+              }
+              if (result.startsWith("__EXPAND__")) {
+                const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
+                setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
+                return;
+              }
+              if (result.startsWith("__CLEAR__")) {
+                const summary = result.replace(/^__CLEAR__\n/, "");
+                agent.clearHistory();
+                setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
+                return;
+              }
+              if (result === "__PIN_LAST__") {
+                const seq = agent.pinLastUserMessage();
                 setMessages((prev) => [
                   ...prev,
                   buildAssistantEntry(
-                    `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                    seq === null
+                      ? "No user message to pin."
+                      : `Pinned user message (seq=${seq}). It will survive compaction.`,
                   ),
                 ]);
-              } catch (e: unknown) {
-                setMessages((prev) => [...prev, buildAssistantEntry(`Compaction failed: ${e}`)]);
+                return;
               }
-              return;
-            }
-            if (result.startsWith("__EXPAND__")) {
-              const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
-              setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
-              return;
-            }
-            if (result.startsWith("__CLEAR__")) {
-              const summary = result.replace(/^__CLEAR__\n/, "");
-              agent.clearHistory();
-              setMessages([buildAssistantEntry(`Session cleared and relocked.\n\n${summary}`)]);
-              return;
-            }
-            if (result === "__PIN_LAST__") {
-              const seq = agent.pinLastUserMessage();
-              setMessages((prev) => [
-                ...prev,
-                buildAssistantEntry(
-                  seq === null
-                    ? "No user message to pin."
-                    : `Pinned user message (seq=${seq}). It will survive compaction.`,
-                ),
-              ]);
-              return;
-            }
-            if (result.startsWith("__PIN_SEQ__")) {
-              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
-              const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
-              setMessages((prev) => [
-                ...prev,
-                buildAssistantEntry(
-                  ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
-                ),
-              ]);
-              return;
-            }
-            if (result.startsWith("__UNPIN_SEQ__")) {
-              const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
-              const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
-              setMessages((prev) => [
-                ...prev,
-                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
-              ]);
-              return;
-            }
-            if (result === "__PINS_LIST__") {
-              const seqs = agent.getPinnedSeqs();
-              setMessages((prev) => [
-                ...prev,
-                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
-              ]);
-              return;
-            }
-            if (result.startsWith("__COUNCIL__")) {
-              const topic = result.replace(/^__COUNCIL__\n/, "");
-              setMessages((prev) => [
-                ...prev,
-                buildUserEntry(`/council ${topic}`),
-                buildAssistantEntry("Council convening...\n"),
-              ]);
-              try {
-                const gen = agent.runCouncilRound(topic);
-                for await (const chunk of gen) {
-                  if (chunk.type === "content") {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
-                      }
-                      return [...prev, buildAssistantEntry(chunk.content ?? "")];
-                    });
+              if (result.startsWith("__PIN_SEQ__")) {
+                const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+                const ok = Number.isFinite(seq) && agent.pinMessageBySeq(seq);
+                setMessages((prev) => [
+                  ...prev,
+                  buildAssistantEntry(
+                    ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                  ),
+                ]);
+                return;
+              }
+              if (result.startsWith("__UNPIN_SEQ__")) {
+                const seq = Number.parseInt(result.split("\n")[1] ?? "", 10);
+                const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
+                setMessages((prev) => [
+                  ...prev,
+                  buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+                ]);
+                return;
+              }
+              if (result === "__PINS_LIST__") {
+                const seqs = agent.getPinnedSeqs();
+                setMessages((prev) => [
+                  ...prev,
+                  buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+                ]);
+                return;
+              }
+              if (result.startsWith("__COUNCIL__")) {
+                const topic = result.replace(/^__COUNCIL__\n/, "");
+                setMessages((prev) => [
+                  ...prev,
+                  buildUserEntry(`/council ${topic}`),
+                  buildAssistantEntry("Council convening...\n"),
+                ]);
+                try {
+                  const gen = agent.runCouncilRound(topic);
+                  for await (const chunk of gen) {
+                    if (chunk.type === "content") {
+                      setMessages((prev) => {
+                        const last = prev[prev.length - 1];
+                        if (last?.type === "assistant") {
+                          return [...prev.slice(0, -1), { ...last, content: (last.content ?? "") + chunk.content }];
+                        }
+                        return [...prev, buildAssistantEntry(chunk.content ?? "")];
+                      });
+                    }
+                    if (chunk.type === "done") break;
                   }
-                  if (chunk.type === "done") break;
+                } catch (e: unknown) {
+                  setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
                 }
-              } catch (e: unknown) {
-                setMessages((prev) => [...prev, buildAssistantEntry(`Council error: ${e}`)]);
+                return;
               }
-              return;
-            }
-            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
-          });
+              setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+            })
+            .catch((err: unknown) => {
+              // See the typed-slash .catch above: a throwing slash handler must
+              // surface in-band, never become a fatal unhandledRejection.
+              const emsg = err instanceof Error ? err.message : String(err);
+              appendCrashLog("SLASH", `/${item.id}: ${err instanceof Error ? err.stack || err.message : emsg}`);
+              setMessages((prev) => [...prev, buildAssistantEntry(`/${item.id} failed: ${emsg}`)]);
+              isProcessingRef.current = false;
+              setIsProcessing(false);
+            });
           return true;
         }
       }

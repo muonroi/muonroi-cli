@@ -19,6 +19,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { appendCrashLog } from "../../index.js";
 import { getDatabase } from "../../storage/db.js";
 import { buildChatEntries } from "../../storage/transcript.js";
 import type { ChatEntry } from "../../types/index.js";
@@ -276,7 +277,23 @@ export const handleExportSlash: SlashHandler = async (_args, ctx) => {
     return "No active session. Start a conversation first.";
   }
 
-  const dbEntries = buildChatEntries(sessionId);
+  let dbEntries: ChatEntry[] = [];
+  try {
+    dbEntries = buildChatEntries(sessionId);
+  } catch (err) {
+    // A DB read failure here (SQLite busy/locked right after a council turn,
+    // schema drift, a corrupt page) used to throw out of this async handler.
+    // With no .catch on the dispatchSlash call site that became an
+    // unhandledRejection → process.exit(1) → the user kicked out of the TUI.
+    // Degrade instead: export the live TUI scrollback + interaction timeline.
+    // Logged to crash.log, NOT console (console.error corrupts the OpenTUI
+    // framebuffer while the renderer owns the terminal).
+    appendCrashLog(
+      "EXPORT",
+      `buildChatEntries failed for session ${sessionId}: ${err instanceof Error ? err.stack || err.message : String(err)}`,
+    );
+    dbEntries = [];
+  }
   const liveEntries = ctx.getLiveEntries?.() ?? [];
   const timeline = selectInteractionTimeline(sessionId);
 
