@@ -1618,11 +1618,15 @@ export class Agent {
     // Mark as surfaced for prompt-stale reconciliation (per plan Phase 1).
     updateLastSurfacedState([`compact-checkpoint-${this._compactionStats.count + 1}`]);
 
-    // Track compaction stats — net of the tokens spent ON compaction itself.
+    // Track compaction stats — report the GROSS context reduction, NOT net-after-compact-cost.
+    // Rationale: the compaction call's own prompt/completion tokens ARE already counted in
+    // in_tokens/out_tokens/session_usd (updateStatusBar at line 986). Subtracting them here
+    // would double-penalize: the user sees the real cost in the token counter AND sees
+    // "0 saved" because compactCost >= grossSaved (the compact prompt is the full conversation).
+    // grossSaved tells the user how many context tokens were reclaimed — a real benefit that
+    // reduces subsequent turn costs.
     const tokensAfter = estimateConversationTokens(system, this.messages);
-    const grossSaved = Math.max(0, preparation.tokensBefore - tokensAfter);
-    const compactCost = compactUsage.promptTokens + compactUsage.completionTokens;
-    const saved = Math.max(0, grossSaved - compactCost);
+    const saved = Math.max(0, preparation.tokensBefore - tokensAfter);
     const pct = preparation.tokensBefore > 0 ? ((saved / preparation.tokensBefore) * 100).toFixed(1) : "0.0";
     this._compactionStats.count++;
     this._compactionStats.totalSaved += saved;
@@ -1653,8 +1657,6 @@ export class Agent {
             tokensBefore: preparation.tokensBefore,
             tokensAfter,
             saved,
-            grossSaved,
-            compactCost,
             pct,
             isLongSession,
           },
