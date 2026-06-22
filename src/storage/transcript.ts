@@ -474,9 +474,19 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
   const toolResults = loadStoredToolResults(sessionId);
   const callMap = new Map<string, ToolCall>();
   const entries: ChatEntry[] = [];
+  // Response-tool callIds already rendered as a structured_response from a
+  // persisted tool-RESULT row (success path). After the loop we recover any
+  // response tool that was CALLED but produced no result row — i.e. respond_*
+  // whose execution ERRORED (the AI SDK does not persist tool-error parts as
+  // tool-result rows). Its answer lives in the call args; without this it is
+  // dropped on the turn-finalize rebuild and the user sees an empty turn or
+  // only the last council debate round.
+  const renderedResponseCallIds = new Set<string>();
+  let lastTimestamp: Date | undefined;
 
   for (const row of buildEffectiveMessageRecords(sessionId)) {
     const { message, timestamp } = row;
+    lastTimestamp = timestamp;
 
     if (message.role === "user") {
       const content = renderUserContent(message.content);
@@ -529,6 +539,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         // wraps tool outputs as `{type:"json", value:{...}}`; unwrap to expose
         // the schema-shaped payload to the renderer.
         if (isResponseTool(part.toolName)) {
+          renderedResponseCallIds.add(part.toolCallId);
           const rawOutput = part.output as unknown;
           const unwrapped =
             rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
@@ -560,6 +571,31 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         });
       }
     }
+  }
+
+  // Recover response-tool answers that were CALLED but never produced a
+  // tool-result row (execution ERRORED). The payload lives in the call args.
+  // Without this, a respond_* that errored after the council debate is dropped
+  // on finalize and only the last debate round stays visible.
+  for (const [callId, call] of callMap) {
+    if (renderedResponseCallIds.has(callId)) continue;
+    if (!isResponseTool(call.function.name)) continue;
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+    } catch {
+      // Args unparseable — nothing to recover for this call.
+      continue;
+    }
+    entries.push({
+      type: "structured_response",
+      content: "",
+      timestamp: lastTimestamp ?? new Date(),
+      structuredResponse: {
+        taskType: getResponseTaskType(call.function.name) ?? call.function.name,
+        data,
+      },
+    });
   }
 
   return entries;
