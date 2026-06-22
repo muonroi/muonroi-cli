@@ -981,7 +981,7 @@ export function isAutoCompactAfterTurnEnabled(): boolean {
 export function getAutoCompactThresholdPct(): number {
   const val = loadUserSettings().autoCompactThresholdPct;
   if (typeof val === "number" && val >= 0.05 && val <= 0.5) return val;
-  return 0.25; // default 25% — compact later to reduce summarize-call frequency
+  return 0.4; // default 40% — Reduced from 25% after session bf58d0f46b51 analysis: 13 compacts in 43min generated 1.3M uncached tokens. Higher threshold = fewer compacts = less compaction overhead. For DeepSeek 128K context: fires at 51K instead of 32K.
 }
 
 /**
