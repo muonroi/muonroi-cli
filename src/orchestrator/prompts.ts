@@ -427,6 +427,66 @@ export function buildMcpCapabilityBlock(toolNames: readonly string[]): string {
   );
 }
 
+// ---- Static prefix cache ----
+// The static prefix accounts for ~48-50KB of system prompt and is nearly
+// identical across turns (only cwd/mode/sandbox/providerId/chitchat affect it).
+// Caching it avoids redundant disk I/O (discoverSkills, loadValidSubAgents,
+// loadCustomInstructions) and string building on every user turn.
+// Dynamic per-turn context (planContext, resumeDigest, MCP tools) lives in
+// dynamicSuffix and is computed fresh each call — not cached.
+interface StaticPrefixCacheEntry {
+  prefix: string;
+  sandboxSettings: string; // serialized — to detect changes in sandbox config
+  cachedAt: number;
+}
+const _staticPrefixCache = new Map<string, StaticPrefixCacheEntry>();
+const STATIC_PREFIX_CACHE_TTL_MS = 300_000; // 5 min — ample; inputs are session-stable
+
+function staticPrefixCacheKey(
+  cwd: string,
+  mode: AgentMode,
+  sandboxMode: SandboxMode,
+  providerId: string,
+  isChitchat: boolean,
+): string {
+  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}`;
+}
+
+function computeStaticPrefix(
+  cwd: string,
+  mode: AgentMode,
+  sandboxMode: SandboxMode,
+  subagents: CustomSubagentConfig[] | undefined,
+  sandboxSettings: SandboxSettings | undefined,
+  providerId: string,
+  chitchat: boolean,
+): { prefix: string; sandboxSettingsSerialized: string } {
+  const custom = loadCustomInstructions(cwd);
+  const customSection = custom
+    ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
+    : "";
+
+  const skillsText = chitchat ? "" : formatSkillsForPrompt(discoverSkills(cwd));
+  const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
+  const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
+  const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
+
+  let modePrompt = MODE_PROMPTS[mode];
+  if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
+  const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
+  if (promptStyle !== "anthropic") {
+    modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
+  }
+
+  const contractSection = buildContractSection({ chitchat });
+  const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
+
+  const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
+  const sandboxSettingsSerialized = JSON.stringify(sandboxSettings ?? {});
+
+  return { prefix, sandboxSettingsSerialized };
+}
+
 export function buildSystemPromptParts(
   cwd: string,
   mode: AgentMode,
@@ -439,44 +499,43 @@ export function buildSystemPromptParts(
   options?: SystemPromptOptions,
 ): SystemPromptParts {
   const chitchat = options?.chitchat === true;
+  const pid = providerId ?? "default";
 
-  const custom = loadCustomInstructions(cwd);
-  const customSection = custom
-    ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
-    : "";
+  // Try cache for the static prefix
+  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat);
+  const now = Date.now();
+  const cached = _staticPrefixCache.get(key);
 
-  // Skip skills + subagents catalogs for chitchat — these are pure tool/agent
-  // routing context the model doesn't need to answer "Hi". On this codebase
-  // they account for ~3K tokens per call.
-  const skillsText = chitchat ? "" : formatSkillsForPrompt(discoverSkills(cwd));
-  const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
-  const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
-  const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
-
-  let modePrompt = MODE_PROMPTS[mode];
-  // Phase 12.2-G5: defer the "is this an anthropic-style prompt or not?"
-  // decision to the provider capability. Default (no providerId) keeps the
-  // pre-G5 behaviour by treating the prompt as anthropic-native.
-  if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
-  const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
-  if (promptStyle !== "anthropic") {
-    modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
+  let staticPrefix: string;
+  if (cached && now - cached.cachedAt < STATIC_PREFIX_CACHE_TTL_MS) {
+    // Also verify sandbox settings haven't changed (edge case — fine to
+    // invalidate the whole entry on mismatch since settings rarely change).
+    const currentSandboxSerialized = JSON.stringify(sandboxSettings ?? {});
+    if (cached.sandboxSettings === currentSandboxSerialized) {
+      staticPrefix = cached.prefix;
+    } else {
+      // Sandbox settings changed — recompute
+      const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat);
+      staticPrefix = result.prefix;
+      _staticPrefixCache.set(key, {
+        prefix: staticPrefix,
+        sandboxSettings: result.sandboxSettingsSerialized,
+        cachedAt: now,
+      });
+    }
+  } else {
+    // Cache miss — compute and store
+    const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat);
+    staticPrefix = result.prefix;
+    _staticPrefixCache.set(key, {
+      prefix: staticPrefix,
+      sandboxSettings: result.sandboxSettingsSerialized,
+      cachedAt: now,
+    });
   }
 
-  // Front-load the Agent Operating Contract (all tiers) so the
-  // grounding/evidence discipline registers — the same rules buried in
-  // CUSTOM INSTRUCTIONS get underweighted when not front-loaded. Skipped for
-  // chitchat (no tools, no factual claims). See agent-operating-contract.ts.
-  const contractSection = buildContractSection({ chitchat });
-
-  // Native capability manifest (agent mode only) — gives the in-CLI agent a
-  // self-model of the tools, sub-agents, and CLI subsystems it has, so it
-  // wields them instead of reconstructing its own runtime by grepping source.
-  // See native-capabilities-workbook.ts (session d95113d3be09 motivation).
-  const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
-
-  const staticPrefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
-
+  // dynamicSuffix is always computed fresh — it carries per-turn context
+  // (planContext, resumeDigest) that changes between user messages.
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
     : "";
@@ -488,6 +547,11 @@ export function buildSystemPromptParts(
   const dynamicSuffix = `${planSection}${resumeSection}\n\nCurrent working directory: ${cwd}`;
 
   return { staticPrefix, dynamicSuffix };
+}
+
+/** Reset the static prefix cache (for tests). */
+export function resetStaticPrefixCache(): void {
+  _staticPrefixCache.clear();
 }
 
 export function buildSystemPrompt(
