@@ -6885,16 +6885,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       variant={p.variant}
                     />
                   ))}
-                  {pendingCouncilQuestion && councilCardState && (
-                    <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
-                  )}
-                  {pendingCouncilPreflight && preflightCardState && (
-                    <CouncilQuestionCard
-                      question={buildPreflightQuestion(pendingCouncilPreflight)}
-                      theme={t}
-                      state={preflightCardState}
-                    />
-                  )}
+                  {/* Council question / preflight askcards render at the END of
+                      the scrollbox (see below) so the bottom-sticky scroll
+                      always anchors to the active question. Rendered here they
+                      sat ABOVE trailing live content (streamContent,
+                      councilProgress, reasoning pill), which owned the sticky
+                      anchor during the council debate phase — leaving the card
+                      scrolled above the fold so the user had to scroll UP to
+                      find it. See fix/tui-askcard-anchor. */}
                   {/* Reasoning pill — Claude-style "💭 Thinking…" while a
                       reasoning streak is active, then "💭 Thought for Ns"
                       once the model emits text or a tool call. CoT body is
@@ -6953,6 +6951,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         </text>
                       </box>
                     </Semantic>
+                  )}
+                  {/* Active council askcards LAST so the bottom-sticky scroll
+                      anchors to the pending question (moved here from above
+                      streamContent/councilProgress — see fix/tui-askcard-anchor). */}
+                  {pendingCouncilQuestion && councilCardState && (
+                    <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                  )}
+                  {pendingCouncilPreflight && preflightCardState && (
+                    <CouncilQuestionCard
+                      question={buildPreflightQuestion(pendingCouncilPreflight)}
+                      theme={t}
+                      state={preflightCardState}
+                    />
                   )}
                 </scrollbox>
               </Semantic>
