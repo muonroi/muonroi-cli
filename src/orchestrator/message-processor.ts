@@ -1097,7 +1097,7 @@ export class MessageProcessor {
     // tool, we surface the warning and stop rather than loop. Loop-persistent so
     // a model that degrades every step can't burn unbounded re-steers.
     let textToolReSteerCount = 0;
-    const MAX_TEXT_TOOL_RESTEER = 1;
+    const MAX_TEXT_TOOL_RESTEER = 2; // DeepSeek often needs 2 re-steers (DSML text → real tool call)
     // Silent-hang guard: set true when the stall watchdog aborts a stuck stream.
     // Reset before each streamText attempt; read in the stream catch to surface a
     // clear toast and SKIP the transient-retry (a stalled provider just stalls
@@ -1347,6 +1347,8 @@ export class MessageProcessor {
         const turnToolResults: StallToolResult[] = [];
         // SAMR: track whether Phase 1 produced tool calls
         let phase1HadToolCalls = false;
+        let _pendingStructuredResponse: { taskType: string; data: Record<string, unknown> } | null = null;
+        let _pendingStructuredResponseLen = -1;
 
         try {
           const settings = attemptedOverflowRecovery
@@ -1548,8 +1550,8 @@ export class MessageProcessor {
           // most complete one (longest serialized data) after the stream
           // drains — robust to either ordering (hedge-then-answer or
           // answer-then-summary).
-          let _pendingStructuredResponse: { taskType: string; data: Record<string, unknown> } | null = null;
-          let _pendingStructuredResponseLen = -1;
+          _pendingStructuredResponse = null;
+          _pendingStructuredResponseLen = -1;
           let _responseToolEmitCount = 0;
 
           // G3: providerOptions assembly is owned by the capability layer
@@ -3289,6 +3291,18 @@ export class MessageProcessor {
               type: "structured_response" as StreamChunk["type"],
               structuredResponse: _pendingStructuredResponse,
             };
+            // Ensure DB has the answer as assistant row even if later _finalMessages
+            // or buildChatEntries path drops the tool-call-only assistant (sanitize,
+            // response-tool terminal, vision bridge, sub-delegate). Prevents TUI
+            // "flashed then vanished" on finalizeActiveTurn + getChatEntries().
+            if (deps.session) {
+              try {
+                const _d = _pendingStructuredResponse.data as { response?: unknown };
+                const _ans =
+                  typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
+                deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
+              } catch {}
+            }
             if (_responseToolEmitCount > 1 && deps.session) {
               try {
                 logInteraction(deps.session.id, "f6_synthesis", {
@@ -3302,6 +3316,14 @@ export class MessageProcessor {
           }
 
           if (signal.aborted) {
+            if (_pendingStructuredResponse) {
+              try {
+                const _d = _pendingStructuredResponse.data as { response?: unknown };
+                const _ans =
+                  typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
+                deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
+              } catch {}
+            }
             deps.discardAbortedTurn(userModelMessage);
             yield { type: "done" };
             return;
@@ -3680,9 +3702,27 @@ export class MessageProcessor {
             continue;
           }
 
-          // Re-steer budget exhausted (or no clean finish): surface the leak so
-          // the turn is not SILENTLY wasted. The "answer" above is unexecuted XML.
+          // Re-steer exhausted: inject DSML intent as a user message so the
+          // model re-issues the same calls via the real tool interface.
           if (_textToolCall.detected) {
+            const _parsedDsml = assistantText ? parseDsmlToolCalls(assistantText) : [];
+            if (_parsedDsml.length > 0) {
+              const _intentStr = _parsedDsml
+                .map(
+                  (c) =>
+                    `${c.name}(${Object.entries(c.args)
+                      .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+                      .join(", ")})`,
+                )
+                .join("; ");
+              deps.messages.push({
+                role: "user",
+                content: `[DSML intent: ${_intentStr} — re-issue via the tool interface now.]`,
+              });
+              await closeMcp?.().catch(() => {});
+              continue;
+            }
+            // No parseable DSML — surface the dead-end warning.
             yield {
               type: "content",
               content:
@@ -3690,10 +3730,10 @@ export class MessageProcessor {
                 "so that action did NOT run and this turn made no real progress. " +
                 "Re-run the request (optionally with a more capable model) — the tool interface was not used.]\n",
             };
-            const _gar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+            const _gar2 = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
               | { emitEvent: (e: unknown) => void }
               | undefined;
-            _gar?.emitEvent({
+            _gar2?.emitEvent({
               t: "event",
               kind: "toast",
               level: "warn",
@@ -3883,13 +3923,14 @@ export class MessageProcessor {
             content: friendly,
             isAuthError: authError,
           };
-          if (assistantText.trim()) {
+          if (_pendingStructuredResponse) {
+            const _d = _pendingStructuredResponse.data as { response?: unknown };
+            const _ans =
+              typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
+            deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
+          } else if (assistantText.trim()) {
             deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
           } else if (deps.session && userWriteAheadSeq != null) {
-            // Phase A5 — Stream threw before producing assistant text. The
-            // write-ahead user row is stuck at `status='pending'`. Mark it
-            // errored so forensics + recovery can distinguish "in-flight"
-            // from "crashed mid-flight".
             markMessageErrored(deps.session.id, userWriteAheadSeq);
           }
 
