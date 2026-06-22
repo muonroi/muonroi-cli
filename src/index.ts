@@ -75,25 +75,46 @@ const exitCleanlyOnSigterm = () => {
 
 process.on("SIGTERM", exitCleanlyOnSigterm);
 
-process.on("uncaughtException", (err) => {
+// Set true while the interactive TUI owns the terminal (raw mode + alternate
+// screen). When it is mounted, writing to stdout/stderr corrupts OpenTUI's
+// framebuffer and a process.exit(1) tears the whole UI down — surfacing to the
+// user as "kicked out of the TUI". A single stray unhandledRejection (e.g. a
+// slash handler whose DB read throws and rejects with no .catch) must not be
+// allowed to do that; while _tuiActive is set we log to crash.log and keep the
+// process alive. Headless / CLI paths keep the original fail-fast behaviour.
+let _tuiActive = false;
+
+export function setTuiActive(active: boolean): void {
+  _tuiActive = active;
+}
+
+export function appendCrashLog(label: string, msg: string): void {
   try {
     require("fs").appendFileSync(
       require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"),
-      `[${new Date().toISOString()}] UNCAUGHT: ${err.stack || err.message}\n`,
+      `[${new Date().toISOString()}] ${label}: ${msg}\n`,
     );
-  } catch {}
+  } catch {
+    /* crash.log is best-effort diagnostics; the logger itself must never throw */
+  }
+}
+
+process.on("uncaughtException", (err) => {
+  appendCrashLog("UNCAUGHT", err.stack || err.message);
   console.error("Fatal:", err.message);
   process.exit(1);
 });
 
 process.on("unhandledRejection", (reason) => {
   const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
-  try {
-    require("fs").appendFileSync(
-      require("path").join(require("os").homedir(), ".muonroi-cli", "crash.log"),
-      `[${new Date().toISOString()}] REJECTION: ${msg}\n`,
-    );
-  } catch {}
+  appendCrashLog("REJECTION", msg);
+  // TUI mounted → do NOT corrupt the framebuffer with console.error and do NOT
+  // exit. The rejection is logged; the renderer stays up so the user keeps
+  // their session (see slash-dispatch .catch handlers in app.tsx, which also
+  // surface the failure in-band).
+  if (_tuiActive) {
+    return;
+  }
   if (reason instanceof Error) {
     console.error("Unhandled rejection:", reason.stack || reason.message);
   } else if (reason && typeof reason === "object") {
@@ -472,6 +493,11 @@ async function startInteractive(
     },
   });
 
+  // The TUI now owns the terminal — route fatal-handler behaviour away from
+  // process.exit(1) (see the unhandledRejection handler above). Cleared in
+  // restoreTerminalSync() the moment we begin tearing the terminal back down.
+  setTuiActive(true);
+
   /**
    * Restore terminal to main-screen mode before the process exits.
    *
@@ -486,6 +512,9 @@ async function startInteractive(
    * flush delay before process.exit().
    */
   function restoreTerminalSync(): void {
+    // Terminal is being handed back — restore fail-fast crash behaviour so a
+    // throw during/after teardown still exits cleanly instead of hanging.
+    setTuiActive(false);
     try {
       // 1. Disable Kitty keyboard protocol if enabled.
       if (typeof (renderer as any).disableKittyKeyboard === "function") {
