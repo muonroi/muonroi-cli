@@ -2654,6 +2654,33 @@ export class MessageProcessor {
                       : JSON.stringify(errPart.error);
                 const tr = { success: false, output: `[tool-error] ${errMsg}` };
 
+                // A respond_* (response) tool that ERRORED still carries the
+                // model's terminal answer in its call args — for response tools
+                // execution is identity, so an execution failure is usually a
+                // post-processing issue and the payload is intact. Recover it so
+                // the turn is not left empty (textLength:0) and the answer is not
+                // swallowed on turn-finalize. Mirrors the tool-call / tool-result
+                // buffering above.
+                if (isResponseTool(errPart.toolName)) {
+                  if (!_pendingStructuredResponse && errPart.input && typeof errPart.input === "object") {
+                    const data = errPart.input as Record<string, unknown>;
+                    const _len = JSON.stringify(data).length;
+                    if (_len > _pendingStructuredResponseLen) {
+                      _pendingStructuredResponseLen = _len;
+                      _pendingStructuredResponse = {
+                        taskType: getResponseTaskType(errPart.toolName) ?? errPart.toolName,
+                        data,
+                      };
+                    }
+                  }
+                  if (!_pendingStructuredResponse) {
+                    // Nothing recoverable (args never parsed). Do NOT suppress F6
+                    // synthesis — let it produce a visible prose answer instead
+                    // of an empty turn.
+                    responseToolCalled = false;
+                  }
+                }
+
                 // Settle pending-call ledger so we don't leak stale .tmp files.
                 if (deps.pendingCalls) {
                   const pending = activeToolCalls.find((t) => t.id === errPart.toolCallId);
