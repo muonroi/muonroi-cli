@@ -3,18 +3,18 @@ import { detectProviderForModel } from "../providers/runtime.js";
 import { getModelInfo, loadCatalog } from "./registry.js";
 
 /**
- * Regression guard for the Gemini catalog entries (added 2026-06-04). Model IDs
- * verified against ai.google.dev/gemini-api/docs/models on that date. Without a
- * catalog entry a model cannot be selected or routed (Zero-Hardcode Rule), so
- * these assertions lock in that Gemini is actually usable end-to-end.
+ * Regression guard for the Agy/Google Gemini catalog entries.
+ * These are the models Agy supports for the "google" provider (via agy.exe OAuth + cloudcode-pa).
+ * Without a catalog entry a model cannot be selected or routed (Zero-Hardcode Rule).
  */
 
 const GEMINI_IDS = [
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-3.1-pro-preview",
+  "gemini-3.5-flash-high",
+  "gemini-3.5-flash-medium",
+  "gemini-3.5-flash-low",
+  "gemini-3.1-pro-high",
+  "gemini-3.1-pro-low",
+  "gemini-3-flash",
 ] as const;
 
 describe("Gemini catalog entries", () => {
@@ -31,8 +31,10 @@ describe("Gemini catalog entries", () => {
   });
 
   it("maps gemini ids to the google provider via runtime detection", () => {
-    expect(detectProviderForModel("gemini-2.5-flash")).toBe("google");
+    // direct + alias (gemini-3.5-flash aliases to the high variant)
+    expect(detectProviderForModel("gemini-3.5-flash-high")).toBe("google");
     expect(detectProviderForModel("gemini-3.5-flash")).toBe("google");
+    expect(detectProviderForModel("gemini-3.1-pro-high")).toBe("google");
   });
 
   it("marks all Gemini models multimodal (vision) and 1M context", () => {

@@ -44,6 +44,7 @@ import {
   subagentTaskType,
 } from "../pil/cheap-model-workbooks.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
+import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import {
   buildTurnProviderOptions,
@@ -53,6 +54,7 @@ import {
   shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -296,10 +298,25 @@ export class StreamRunner {
         : topBash.getSandboxSettings(),
       shellSettings: getCurrentShellSettings(),
     });
+
+    // Resolve child model early so we can pass modelId to createBuiltinTools
+    // (needed for vision-proxy tools: analyze_image / ask_vision_proxy).
+    const childModelId = normalizeModelId(
+      isVision
+        ? VISION_MODEL
+        : isComputer
+          ? COMPUTER_MODEL
+          : custom
+            ? custom.model
+            : this.deps.resolveModelForTask(
+                isExplore ? "explore" : isVerify || isVerifyDetect || isVerifyManifest ? "verify" : "general",
+              ),
+    );
+
     // Mirror the file-local `createTools` wrapper from orchestrator.ts —
-    // it calls createBuiltinTools(bash, mode) without provider/opts; the
-    // provider arg in the original wrapper was unused.
-    const childBaseToolsRaw = createBuiltinTools(childBash, childMode);
+    // pass modelId so registry can inject analyze_image/ask_vision_proxy for
+    // text-only child models (needsVisionProxy).
+    const childBaseToolsRaw = createBuiltinTools(childBash, childMode, { modelId: childModelId });
     // Wrap with the cumulative cap so the sub-agent's tool loop cannot
     // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
     // tiered compression schedule. The cap is per-invocation; each sub-agent
@@ -327,17 +344,6 @@ export class StreamRunner {
     let lastActivity = initialDetail;
     let childTools: ToolSet = childBaseTools;
     let closeMcp: (() => Promise<void>) | undefined;
-    const childModelId = normalizeModelId(
-      isVision
-        ? VISION_MODEL
-        : isComputer
-          ? COMPUTER_MODEL
-          : custom
-            ? custom.model
-            : this.deps.resolveModelForTask(
-                isExplore ? "explore" : isVerify || isVerifyDetect || isVerifyManifest ? "verify" : "general",
-              ),
-    );
     const topModelId = this.deps.getModelId();
     if (childModelId !== topModelId) {
       statusBarStore.setState({ routed_from: topModelId, model: childModelId });
@@ -394,6 +400,12 @@ export class StreamRunner {
     const childSystem = shouldInjectCheapModelPlaybook(childRuntime.modelInfo)
       ? injectCheapModelShellDirective(childWithPlaybook, cheapModelShellLine(resolveShell({}).kind, process.platform))
       : childWithPlaybook;
+
+    // Inject vision proxy guidance for text-only child models (DeepSeek etc.)
+    // so sub-agents know to use analyze_image / ask_vision_proxy when they
+    // receive image context or file paths. Mirrors top-level in message-processor.
+    const visionGuidance = needsVisionProxy(childModelId) ? getVisionGuidanceForTextOnly(childModelId) : "";
+    const childSystemWithVision = visionGuidance ? `${childSystem}\n\n${visionGuidance}` : childSystem;
 
     onActivity?.(initialDetail);
 
@@ -455,7 +467,7 @@ export class StreamRunner {
         childMode,
         childBash,
         childRuntime,
-        childSystem,
+        childSystem: childSystemWithVision,
         childMessages,
         childTools,
         childProviderOptions,
