@@ -2614,33 +2614,36 @@ export class MessageProcessor {
                 // retry on the next turn). The approved command is stored in
                 // the global __muonroiSafetyApproved map so registry.ts's
                 // bash.execute bypasses the block on the retry.
-                const _outputText = typeof tr.output === "string" ? tr.output : "";
-                const _blockMatch = _outputText.match(/^BLOCKED \((\w+)\):\s*(.*)/);
-                if (_blockMatch && part.toolName === "bash" && deps.askSafetyOverride && !tr.success) {
+                const _outputText = [tr.output, tr.error].filter((x): x is string => typeof x === "string").join("\n");
+                const _blockMatch = _outputText.match(/^BLOCKED \(([^)]+)\):\s*(.*)/);
+                if (_blockMatch && part.toolName === "bash") {
                   const _blockKind = _blockMatch[1] as SafetyBlockKind;
                   const _blockReason = _blockMatch[2];
                   const _command =
                     typeof part.input === "object" && part.input != null
                       ? String((part.input as Record<string, unknown>).command ?? "")
                       : "";
-                  const _verdict = await deps.askSafetyOverride({
-                    kind: _blockKind,
-                    toolName: part.toolName,
-                    blockedItem: _command,
-                    reason: _blockReason,
-                    source: "bash.execute",
-                  });
+                  const _verdict = deps.askSafetyOverride
+                    ? await deps.askSafetyOverride({
+                        kind: _blockKind,
+                        toolName: part.toolName,
+                        blockedItem: _command,
+                        reason: _blockReason,
+                        source: "bash.execute",
+                      })
+                    : { action: "block" as const };
                   if (_verdict.action === "allow-once" || _verdict.action === "allow-session") {
                     // Store approval so registry.ts can bypass the block on retry.
-                    const _approvedMap = (globalThis as Record<string, unknown>).__muonroiSafetyApproved as
-                      | Map<string, { kind: string; command: string }>
-                      | undefined;
-                    if (_approvedMap) {
-                      _approvedMap.set(part.toolCallId, {
-                        kind: _verdict.action === "allow-session" ? "session" : "once",
-                        command: _command,
-                      });
+                    const _globalSafety = globalThis as typeof globalThis & {
+                      __muonroiSafetyApproved?: Map<string, { kind: "once" | "session"; command: string }>;
+                    };
+                    if (!_globalSafety.__muonroiSafetyApproved) {
+                      _globalSafety.__muonroiSafetyApproved = new Map();
                     }
+                    _globalSafety.__muonroiSafetyApproved.set(part.toolCallId, {
+                      kind: _verdict.action === "allow-session" ? "session" : "once",
+                      command: _command,
+                    });
                     // Rewrite tool result as success so the stream continues
                     // without an error. The model will see "Approved: ..." and
                     // may retry the tool call on the next turn, at which point
@@ -2651,7 +2654,9 @@ export class MessageProcessor {
                       content: `[User approved blocked command: ${_blockKind} — ${_verdict.action}]\n`,
                     };
                   }
-                  // If action === "block", leave tr as-is (the original error).
+                  if (_verdict.action === "block") {
+                    tr = { ...tr, success: false, error: _outputText, output: _outputText };
+                  }
                 }
 
                 // Capture into the stall-rescue digest before any further
@@ -2752,7 +2757,7 @@ export class MessageProcessor {
                             // readers know the patch is partial.
                             patchPreview:
                               _trWithDiff.diff.patch.length > 4000
-                                ? _trWithDiff.diff.patch.slice(0, 4000) + "\n…[truncated]"
+                                ? `${_trWithDiff.diff.patch.slice(0, 4000)}\n…[truncated]`
                                 : _trWithDiff.diff.patch,
                           }
                         : undefined;

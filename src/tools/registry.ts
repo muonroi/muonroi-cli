@@ -18,6 +18,7 @@ import { FileTracker } from "./file-tracker.js";
 import {
   analyzeGitCommand,
   checkPushGate,
+  checkSensitiveStaging,
   commitBlockedMessage,
   pushBlockedMessage,
   recordCommandOutcome,
@@ -73,6 +74,15 @@ interface BashRepeatEntry {
 declare global {
   // eslint-disable-next-line no-var
   var __muonroiBashRepeatState: Map<string, BashRepeatEntry> | undefined;
+  // eslint-disable-next-line no-var
+  var __muonroiSafetyApproved: Map<string, { kind: "once" | "session"; command: string }> | undefined;
+}
+
+function getSafetyApprovedMap(): Map<string, { kind: "once" | "session"; command: string }> {
+  if (!globalThis.__muonroiSafetyApproved) {
+    globalThis.__muonroiSafetyApproved = new Map();
+  }
+  return globalThis.__muonroiSafetyApproved;
 }
 
 function getBashRepeatState(): Map<string, BashRepeatEntry> {
@@ -210,6 +220,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // to hard block (strike 3+) so a cheap model that repeatedly emits `bash: {}`
   // cannot loop indefinitely (live: deepseek session bf58d0f46b51 — 8+ empty calls).
   const _emptyBashStreak = new Map<string, number>();
+  const _prefixBlock = (kind: string, msg: string): string => `BLOCKED (${kind}): ${msg}`;
+
   tools.bash = dynamicTool({
     description:
       "Execute a shell command. Output is automatically cached — every call returns a " +
@@ -225,6 +237,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       },
       required: ["command"],
     }),
+    // Phase 8 — safety-blocked commands queue, keyed by sessionId + toolCallId.
+    // When the orchestrator intercepts a blocked result, the approval handler
+    // stores the approved command here so bash.execute() can retry it.
     execute: async (input: any, extra?: { toolCallId?: string; messages?: ReadonlyArray<unknown> }) => {
       // Corrective guard for malformed calls: a cheap model sometimes emits a
       // bash call with a missing / empty `command` (live: deepseek sent `{}`
@@ -260,6 +275,23 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       const cmd = typeof input.command === "string" ? input.command : "";
 
+      // Safety override check: approval is granted after a blocked call, but
+      // the model's retry receives a new toolCallId. Match by id first, then
+      // by exact command so allow-once survives the retry boundary.
+      const _approvedMap = getSafetyApprovedMap();
+      const _approvalKey =
+        extra?.toolCallId && _approvedMap.has(extra.toolCallId)
+          ? extra.toolCallId
+          : [..._approvedMap.entries()].find(([, approval]) => approval.command === cmd)?.[0];
+      const _approvalEntry = _approvalKey ? _approvedMap.get(_approvalKey) : undefined;
+      if (_approvalEntry) {
+        if (_approvalEntry.kind === "once") {
+          _approvedMap.delete(_approvalKey!);
+        }
+        const result = await bash.execute(input.command, input.timeout ?? 30000);
+        return formatResult(result);
+      }
+
       // Git safety (pre-execution). Block `git push` while a verification
       // command failed this session and was not re-run green; warn on broad
       // `git add -A` / `git commit -a` when sensitive paths exist. Applied to
@@ -268,11 +300,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       // (or the real sessionId) — unlike repeatKey, whose anon fallback changes
       // on every registry rebuild and would silently drop the gate across turns.
       const gitShape = analyzeGitCommand(cmd);
-      const stageWarn = gitShape.isBroadStage ? stagingWarning(bash.getCwd()) : "";
+      // Hard-block broad staging when sensitive files are present.
+      // This runs PRE-EXECUTION (before bash.execute) regardless of permission mode.
+      if (gitShape.isBroadStage) {
+        const stagingBlock = checkSensitiveStaging(bash.getCwd());
+        if (stagingBlock.blocked) {
+          return _prefixBlock("git-safety", stagingBlock.message);
+        }
+      }
       if (gitShape.isPush) {
         const gate = checkPushGate(gitSafetyKey);
         if (gate.blocked) {
-          return `${pushBlockedMessage(gate.failed)}${stageWarn}`;
+          return _prefixBlock("git-safety", pushBlockedMessage(gate.failed));
         }
       }
 
@@ -296,7 +335,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           if (paths.length > 0) {
             const gate = await gateStagedPaths(commitCwd, paths);
             if (!gate.ok) {
-              return `${commitBlockedMessage(gate.summary)}${stageWarn}`;
+              return _prefixBlock("git-safety", commitBlockedMessage(gate.summary));
             }
           }
         }
@@ -304,7 +343,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       if (input.background) {
         const result = await bash.startBackground(input.command);
-        return `${formatResult(result)}${stageWarn}`;
+        return formatResult(result);
       }
       // 3-3: compute canonical form BEFORE running so we can attach an
       // inline reminder if it matches the previous bash call.
@@ -345,9 +384,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           chars >= 4_000
             ? ` — ${chars} chars cached; use bash_output_get(run_id, mode=tail|head|grep|lines) to re-query`
             : "";
-        return `${formatted}\n\n[bash_run_id: ${result.bashRunId}${hint}]${reminder}${stageWarn}`;
+        return `${formatted}\n\n[bash_run_id: ${result.bashRunId}${hint}]${reminder}`;
       }
-      return `${formatted}${stageWarn}`;
+      return formatted;
     },
   });
 

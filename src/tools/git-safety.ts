@@ -165,17 +165,39 @@ export function commitBlockedMessage(summary?: string): string {
 
 // Repo-root paths that should essentially never be committed. Presence-based
 // (fs.existsSync) so the check is O(1) and never spawns git.
+//
+// Patterns cover:
+//   - All .env variants (.env, .env.*, *.env)
+//   - SSH private keys (id_rsa, id_ed25519, id_ecdsa, id_dsa, *.pem, *.key)
+//   - Cloud / service credentials
+//   - muonroi-cli settings (may hold provider API keys)
 const SENSITIVE_NAMES = [
   ".env",
   ".env.local",
   ".env.production",
   ".env.development",
+  ".env.test",
+  ".env.staging",
   ".muonroi-cli",
   "id_rsa",
   "id_ed25519",
+  "id_ecdsa",
+  "id_dsa",
   "credentials.json",
+  "service-account.json",
   ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".aws",
+  ".kube",
+  ".docker",
+  "secrets.json",
+  "secrets.yaml",
+  "secrets.yml",
 ];
+
+/** Sensitive file name suffixes checked via endsWith (catches *.pem, *.key, *.pfx). */
+const SENSITIVE_SUFFIXES = [".pem", ".key", ".pfx", ".p12", ".env"];
 
 /** Sensitive paths present in `cwd` that a broad `git add` would likely sweep in. */
 export function detectSensitiveStaging(cwd: string): string[] {
@@ -187,16 +209,71 @@ export function detectSensitiveStaging(cwd: string): string[] {
       // ignore unreadable entries — best-effort detection only
     }
   }
+  // Scan shallow directory entries for sensitive suffixes (*.pem, *.key, etc.)
+  // Only the cwd root — not recursive — to keep this O(n) and fast.
+  try {
+    const entries = fs.readdirSync(cwd);
+    for (const entry of entries) {
+      if (found.includes(entry)) continue; // already captured
+      const lower = entry.toLowerCase();
+      if (SENSITIVE_SUFFIXES.some((s) => lower.endsWith(s))) {
+        found.push(entry);
+      }
+    }
+  } catch {
+    // ignore — e.g. permission error on readdir
+  }
   return found;
 }
 
-/** Non-blocking warning appended to a broad-stage command's output, or "". */
+export interface StagingBlockResult {
+  /** true means broad staging must be blocked (pre-execution). */
+  blocked: boolean;
+  /** Sensitive paths found in the working directory root. */
+  sensitive: string[];
+  /** Human-readable block message to return from the bash tool. */
+  message: string;
+}
+
+/**
+ * Hard-block check for broad `git add`/`git commit -a` when sensitive files are
+ * present in the working directory.
+ *
+ * Replaces the non-blocking `stagingWarning()`. Returns blocked=true when
+ * sensitive paths are detected. The caller (registry.ts bash tool) must
+ * return `result.message` WITHOUT executing the command.
+ *
+ * The user can override this gate by:
+ *   1. Explicitly staging only the files they want (`git add <path>` instead of `-A`).
+ *   2. Setting MUONROI_ALLOW_BROAD_STAGE=1 (escape hatch, logged to decision-log).
+ */
+export function checkSensitiveStaging(cwd: string): StagingBlockResult {
+  if (process.env.MUONROI_ALLOW_BROAD_STAGE === "1") {
+    return { blocked: false, sensitive: [], message: "" };
+  }
+  const sensitive = detectSensitiveStaging(cwd);
+  if (sensitive.length === 0) return { blocked: false, sensitive: [], message: "" };
+  const list = sensitive.map((n) => `  • ${n}`).join("\n");
+  const message =
+    "BLOCKED: refusing broad `git add`/`git commit -a` — the following sensitive " +
+    "paths exist in the repo root and would be swept into the staging area:\n" +
+    `${list}\n\n` +
+    "Stage files EXPLICITLY with `git add <path>` to avoid accidentally committing " +
+    "secrets or credentials. Ensure these paths are listed in .gitignore. " +
+    "To bypass this gate (not recommended), set MUONROI_ALLOW_BROAD_STAGE=1.";
+  return { blocked: true, sensitive, message };
+}
+
+/**
+ * @deprecated Use checkSensitiveStaging() for hard-blocking.
+ * Kept for call sites that emit a trailing warning (non-broad-stage contexts).
+ */
 export function stagingWarning(cwd: string): string {
   const sensitive = detectSensitiveStaging(cwd);
   if (sensitive.length === 0) return "";
   return (
-    "\n\n[WARNING: a broad `git add`/`git commit -a` was run while these sensitive paths exist in the repo root: " +
-    `${sensitive.join(", ")}. Verify none were staged (git status), stage files EXPLICITLY (git add <path>), and ensure ` +
+    "\n\n[WARNING: sensitive paths exist in the repo root: " +
+    `${sensitive.join(", ")}. Verify none were staged (git status) and ensure ` +
     "secrets are gitignored before committing/pushing.]"
   );
 }

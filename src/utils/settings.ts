@@ -39,7 +39,6 @@ export function getCatalogDefaultModel(): string {
 }
 
 export type TelegramStreamingMode = "off" | "partial";
-export type SandboxMode = "off" | "shuru";
 export type CouncilExperienceMode = "off" | "advisory" | "enforcing";
 
 /** @deprecated Phase 4 will replace with LemonSqueezy billing. Wallet UI only. */
@@ -73,29 +72,6 @@ const DEFAULT_LSP_SETTINGS: NormalizedLspSettings = {
   builtins: {},
   servers: [],
 };
-
-export interface SandboxSecretConfig {
-  name: string;
-  fromEnv: string;
-  hosts: string[];
-}
-
-export interface SandboxSettings {
-  allowNet?: boolean;
-  allowedHosts?: string[];
-  ports?: string[];
-  cpus?: number;
-  memory?: number;
-  diskSize?: number;
-  secrets?: SandboxSecretConfig[];
-  from?: string;
-  allowEphemeralInstall?: boolean;
-  guestWorkdir?: string;
-  syncHostWorkspace?: boolean;
-  verifyBaseFrom?: string;
-  shellInit?: string[];
-  hostBrowserCommandsOnHost?: boolean;
-}
 
 export interface TelegramAudioInputSettings {
   /** Enable Telegram voice/audio transcription before sending text to the agent. Default: true. */
@@ -204,8 +180,6 @@ export interface UserSettings {
    * defaultModel field stays as the hard pin for legacy paths.
    */
   defaultProvider?: ProviderId;
-  sandboxMode?: SandboxMode;
-  sandbox?: SandboxSettings;
   /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
   shell?: ShellSettings;
   lsp?: LspSettings;
@@ -338,8 +312,6 @@ export interface UserSettings {
 
 export interface ProjectSettings {
   model?: string;
-  sandboxMode?: SandboxMode;
-  sandbox?: SandboxSettings;
   shell?: ShellSettings;
   lsp?: LspSettings;
 }
@@ -422,7 +394,6 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
     ...partial,
     ...(partial.apiKey !== undefined ? { apiKey: partial.apiKey } : {}),
     ...(partial.defaultModel !== undefined ? { defaultModel: normalizeModelId(partial.defaultModel) } : {}),
-    ...(partial.sandboxMode !== undefined ? { sandboxMode: normalizeSandboxMode(partial.sandboxMode) } : {}),
     ...(partial.reasoningEffortByModel !== undefined
       ? {
           reasoningEffortByModel: Object.fromEntries(
@@ -466,9 +437,6 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
           })),
         }
       : {}),
-    ...(partial.sandbox !== undefined
-      ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
-      : {}),
     ...(partial.shell !== undefined ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) } : {}),
     ...(partial.lsp !== undefined
       ? {
@@ -507,10 +475,6 @@ export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
     ...current,
     ...partial,
     ...(partial.model !== undefined ? { model: normalizeModelId(partial.model) } : {}),
-    ...(partial.sandboxMode !== undefined ? { sandboxMode: normalizeSandboxMode(partial.sandboxMode) } : {}),
-    ...(partial.sandbox !== undefined
-      ? { sandbox: normalizeSandboxSettings({ ...current.sandbox, ...partial.sandbox }) }
-      : {}),
     ...(partial.shell !== undefined ? { shell: normalizeShellSettings({ ...current.shell, ...partial.shell }) } : {}),
     ...(partial.lsp !== undefined
       ? {
@@ -647,84 +611,8 @@ export function getModeSpecificModel(mode: AgentMode): string | undefined {
   return modeModel ? normalizeModelId(modeModel) : undefined;
 }
 
-export function normalizeSandboxMode(value: unknown): SandboxMode {
-  return value === "shuru" ? "shuru" : "off";
-}
-
 function isNonNullObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function normalizeSecretConfig(raw: unknown): SandboxSecretConfig | null {
-  if (!isNonNullObject(raw)) return null;
-  const name = typeof raw.name === "string" ? raw.name.trim() : "";
-  const fromEnv = typeof raw.fromEnv === "string" ? raw.fromEnv.trim() : "";
-  const hosts = Array.isArray(raw.hosts)
-    ? raw.hosts.filter((h): h is string => typeof h === "string" && h.trim() !== "")
-    : [];
-  if (!name || !fromEnv) return null;
-  return { name, fromEnv, hosts };
-}
-
-export function normalizeSandboxSettings(raw: unknown): SandboxSettings {
-  if (!isNonNullObject(raw)) return {};
-  const result: SandboxSettings = {};
-
-  if (typeof raw.allowNet === "boolean") result.allowNet = raw.allowNet;
-  if (Array.isArray(raw.allowedHosts)) {
-    const hosts = raw.allowedHosts.filter((h): h is string => typeof h === "string" && h.trim() !== "");
-    if (hosts.length > 0) result.allowedHosts = hosts;
-  }
-  if (Array.isArray(raw.ports)) {
-    const ports = raw.ports.filter((p): p is string => typeof p === "string" && /^\d+:\d+$/.test(p.trim()));
-    if (ports.length > 0) result.ports = ports;
-  }
-  if (typeof raw.cpus === "number" && raw.cpus > 0) result.cpus = raw.cpus;
-  if (typeof raw.memory === "number" && raw.memory > 0) result.memory = raw.memory;
-  if (typeof raw.diskSize === "number" && raw.diskSize > 0) result.diskSize = raw.diskSize;
-  if (Array.isArray(raw.secrets)) {
-    const secrets = raw.secrets.map(normalizeSecretConfig).filter((s): s is SandboxSecretConfig => s !== null);
-    if (secrets.length > 0) result.secrets = secrets;
-  }
-  if (typeof raw.from === "string" && raw.from.trim()) result.from = raw.from.trim();
-  if (typeof raw.verifyBaseFrom === "string" && raw.verifyBaseFrom.trim())
-    result.verifyBaseFrom = raw.verifyBaseFrom.trim();
-  if (typeof raw.allowEphemeralInstall === "boolean") result.allowEphemeralInstall = raw.allowEphemeralInstall;
-  if (typeof raw.syncHostWorkspace === "boolean") result.syncHostWorkspace = raw.syncHostWorkspace;
-  if (typeof raw.guestWorkdir === "string" && raw.guestWorkdir.trim()) result.guestWorkdir = raw.guestWorkdir.trim();
-  if (Array.isArray(raw.shellInit)) {
-    const shellInit = raw.shellInit.filter((line): line is string => typeof line === "string" && line.trim() !== "");
-    if (shellInit.length > 0) result.shellInit = shellInit;
-  }
-  if (typeof raw.hostBrowserCommandsOnHost === "boolean")
-    result.hostBrowserCommandsOnHost = raw.hostBrowserCommandsOnHost;
-
-  return result;
-}
-
-export function mergeSandboxSettings(
-  base: SandboxSettings | undefined,
-  override: SandboxSettings | undefined,
-): SandboxSettings {
-  if (!base && !override) return {};
-  if (!base) return { ...override };
-  if (!override) return { ...base };
-  return {
-    allowNet: override.allowNet ?? base.allowNet,
-    allowedHosts: override.allowedHosts ?? base.allowedHosts,
-    ports: override.ports ?? base.ports,
-    cpus: override.cpus ?? base.cpus,
-    memory: override.memory ?? base.memory,
-    diskSize: override.diskSize ?? base.diskSize,
-    secrets: override.secrets ?? base.secrets,
-    from: override.from ?? base.from,
-    allowEphemeralInstall: override.allowEphemeralInstall ?? base.allowEphemeralInstall,
-    guestWorkdir: override.guestWorkdir ?? base.guestWorkdir,
-    syncHostWorkspace: override.syncHostWorkspace ?? base.syncHostWorkspace,
-    verifyBaseFrom: override.verifyBaseFrom ?? base.verifyBaseFrom,
-    shellInit: override.shellInit ?? base.shellInit,
-    hostBrowserCommandsOnHost: override.hostBrowserCommandsOnHost ?? base.hostBrowserCommandsOnHost,
-  };
 }
 
 function normalizeLspBuiltInServerSettings(raw: unknown): LspBuiltInServerSettings | undefined {
@@ -869,20 +757,6 @@ export function mergeLspSettings(
           ? baseNormalized.servers
           : DEFAULT_LSP_SETTINGS.servers,
   };
-}
-
-export function getCurrentSandboxMode(): SandboxMode {
-  const project = loadProjectSettings();
-  if (project.sandboxMode) return normalizeSandboxMode(project.sandboxMode);
-  const user = loadUserSettings();
-  if (user.sandboxMode) return normalizeSandboxMode(user.sandboxMode);
-  return "off";
-}
-
-export function getCurrentSandboxSettings(): SandboxSettings {
-  const user = loadUserSettings();
-  const project = loadProjectSettings();
-  return mergeSandboxSettings(user.sandbox, project.sandbox);
 }
 
 export function getCurrentShellSettings(): ShellSettings {
@@ -1243,4 +1117,113 @@ export function getDefaultProvider(): ProviderId | null {
 
 export function setDefaultProvider(provider: ProviderId): void {
   saveUserSettings({ defaultProvider: provider });
+}
+
+export type SandboxMode = "off" | "shuru";
+
+export interface SandboxSecretConfig {
+  name: string;
+  fromEnv: string;
+  hosts: string[];
+}
+
+export interface SandboxSettings {
+  allowNet?: boolean;
+  allowedHosts?: string[];
+  ports?: string[];
+  cpus?: number;
+  memory?: number;
+  diskSize?: number;
+  secrets?: SandboxSecretConfig[];
+  from?: string;
+  allowEphemeralInstall?: boolean;
+  guestWorkdir?: string;
+  syncHostWorkspace?: boolean;
+  verifyBaseFrom?: string;
+  shellInit?: string[];
+  hostBrowserCommandsOnHost?: boolean;
+}
+
+export function getCurrentSandboxMode(): SandboxMode {
+  return "off";
+}
+
+export function getCurrentSandboxSettings(): SandboxSettings {
+  return {};
+}
+
+function normalizeSecretConfig(raw: unknown): SandboxSecretConfig | null {
+  if (!isNonNullObject(raw)) return null;
+  const name = typeof raw.name === "string" ? raw.name.trim() : "";
+  const fromEnv = typeof raw.fromEnv === "string" ? raw.fromEnv.trim() : "";
+  const hosts = Array.isArray(raw.hosts)
+    ? raw.hosts.filter((h): h is string => typeof h === "string" && h.trim() !== "")
+    : [];
+  if (!name || !fromEnv) return null;
+  return { name, fromEnv, hosts };
+}
+
+export function normalizeSandboxSettings(raw: unknown): SandboxSettings {
+  if (!isNonNullObject(raw)) return {};
+  const result: SandboxSettings = {};
+
+  if (typeof raw.allowNet === "boolean") result.allowNet = raw.allowNet;
+  if (Array.isArray(raw.allowedHosts)) {
+    const hosts = raw.allowedHosts.filter((h): h is string => typeof h === "string" && h.trim() !== "");
+    if (hosts.length > 0) result.allowedHosts = hosts;
+  }
+  if (Array.isArray(raw.ports)) {
+    const ports = raw.ports.filter((p): p is string => typeof p === "string" && /^\d+:\d+$/.test(p.trim()));
+    if (ports.length > 0) result.ports = ports;
+  }
+  if (typeof raw.cpus === "number" && raw.cpus > 0) result.cpus = raw.cpus;
+  if (typeof raw.memory === "number" && raw.memory > 0) result.memory = raw.memory;
+  if (typeof raw.diskSize === "number" && raw.diskSize > 0) result.diskSize = raw.diskSize;
+  if (Array.isArray(raw.secrets)) {
+    const secrets = raw.secrets.map(normalizeSecretConfig).filter((s): s is SandboxSecretConfig => s !== null);
+    if (secrets.length > 0) result.secrets = secrets;
+  }
+  if (typeof raw.from === "string" && raw.from.trim()) result.from = raw.from.trim();
+  if (typeof raw.verifyBaseFrom === "string" && raw.verifyBaseFrom.trim())
+    result.verifyBaseFrom = raw.verifyBaseFrom.trim();
+  if (typeof raw.allowEphemeralInstall === "boolean") result.allowEphemeralInstall = raw.allowEphemeralInstall;
+  if (typeof raw.syncHostWorkspace === "boolean") result.syncHostWorkspace = raw.syncHostWorkspace;
+  if (typeof raw.guestWorkdir === "string" && raw.guestWorkdir.trim()) result.guestWorkdir = raw.guestWorkdir.trim();
+  if (Array.isArray(raw.shellInit)) {
+    const shellInit = raw.shellInit.filter((line): line is string => typeof line === "string" && line.trim() !== "");
+    if (shellInit.length > 0) result.shellInit = shellInit;
+  }
+  if (typeof raw.hostBrowserCommandsOnHost === "boolean")
+    result.hostBrowserCommandsOnHost = raw.hostBrowserCommandsOnHost;
+
+  return result;
+}
+
+export function mergeSandboxSettings(
+  base: SandboxSettings | undefined,
+  override: SandboxSettings | undefined,
+): SandboxSettings {
+  if (!base && !override) return {};
+  if (!base) return { ...override };
+  if (!override) return { ...base };
+  return {
+    allowNet: override.allowNet ?? base.allowNet,
+    allowedHosts: override.allowedHosts ?? base.allowedHosts,
+    ports: override.ports ?? base.ports,
+    cpus: override.cpus ?? base.cpus,
+    memory: override.memory ?? base.memory,
+    diskSize: override.diskSize ?? base.diskSize,
+    secrets: override.secrets ?? base.secrets,
+    from: override.from ?? base.from,
+    allowEphemeralInstall: override.allowEphemeralInstall ?? base.allowEphemeralInstall,
+    guestWorkdir: override.guestWorkdir ?? base.guestWorkdir,
+    syncHostWorkspace: override.syncHostWorkspace ?? base.syncHostWorkspace,
+    verifyBaseFrom: override.verifyBaseFrom ?? base.verifyBaseFrom,
+    shellInit: override.shellInit ?? base.shellInit,
+    hostBrowserCommandsOnHost: override.hostBrowserCommandsOnHost ?? base.hostBrowserCommandsOnHost,
+  };
+}
+
+export function normalizeSandboxMode(value: unknown): SandboxMode {
+  return value === "shuru" ? "shuru" : "off";
 }

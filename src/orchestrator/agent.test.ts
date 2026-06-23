@@ -84,13 +84,16 @@ describe("Agent class", { timeout: 30_000 }, () => {
     expect(agent.getModel()).toBe("claude-sonnet-4-6-20250514");
   });
 
-  it("constructs with sandbox mode", async () => {
+  it("constructs with sandbox mode — always returns 'off' (sandbox removed)", async () => {
     const { Agent } = await importAgentModule();
+    // Sandbox has been removed; passing sandboxMode: "shuru" is accepted for
+    // back-compat but getSandboxMode() always returns "off" until a new
+    // sandbox implementation is wired in.
     const agent = new Agent(undefined, undefined, undefined, undefined, {
       persistSession: false,
       sandboxMode: "shuru",
     });
-    expect(agent.getSandboxMode()).toBe("shuru");
+    expect(agent.getSandboxMode()).toBe("off");
   });
 
   it("defaults sandbox mode to off", async () => {

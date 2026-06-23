@@ -70,7 +70,7 @@ describe("bridge — loaded core", () => {
   it("Test 1: classifyViaBrain returns classification string when core loaded", async () => {
     const result = await classifyViaBrain("write a function to sort an array");
     expect(result).toBe("generate");
-    expect(mockCore.classifyViaBrain).toHaveBeenCalledWith("write a function to sort an array", 5000);
+    expect(mockCore.classifyViaBrain).toHaveBeenCalledWith("write a function to sort an array", 5000, undefined);
   });
 
   it("Test 2: searchCollection returns EEPoint[] when core loaded", async () => {
