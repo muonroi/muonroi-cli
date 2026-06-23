@@ -3,8 +3,77 @@ import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { requireRuntimeProvider, resolveModelRuntime } from "../providers/runtime.js";
+import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { containsEncryptedReasoning } from "./reasoning";
 import { countTokens } from "./token-counter.js";
+
+/**
+ * A single action the compaction proposer model wants to take on one message.
+ */
+export interface CompactionProposeAction {
+  messageIndex: number;
+  action: "keep" | "drop" | "summarize";
+  reason: string;
+}
+
+/**
+ * The full decision returned by the compaction proposer model.
+ */
+export interface CompactionProposal {
+  shouldCompact: boolean;
+  reason: string;
+  actions: CompactionProposeAction[];
+}
+
+/**
+ * Call the model to propose what to compact/keep/drop.
+ * The model sees the current messages and decides whether compaction is needed at all.
+ * Returns null if the proposer call fails (caller should fall back gracefully).
+ */
+export async function proposeCompaction(
+  provider: LegacyProvider,
+  modelId: string,
+  messages: ModelMessage[],
+  signal?: AbortSignal,
+): Promise<CompactionProposal | null> {
+  try {
+    const runtime = resolveModelRuntime(provider, modelId);
+    const compactCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
+    const serialized = serializeConversation(messages);
+
+    const result = await generateText({
+      model: runtime.model,
+      system: COMPACT_PROPOSER_SYSTEM_PROMPT,
+      prompt: `Current conversation messages:\n\n${serialized}\n\nDecide if compaction is needed and what to keep/drop/summarize. Return strict JSON.`,
+      abortSignal: signal,
+      maxRetries: 1,
+      temperature: 0.1,
+      ...(!compactCaps.acceptsParam("maxOutputTokens", runtime.modelInfo) ? {} : { maxOutputTokens: 2048 }),
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    });
+
+    const text = result.text.trim();
+    // Attempt to parse top-level JSON object. The model might wrap in markdown fences — strip those.
+    const jsonStr = text.replace(/^```(?:json)?\s*|\s*```$/gi, "").trim();
+    const parsed: CompactionProposal = JSON.parse(jsonStr);
+
+    // Validate shape
+    if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
+      return null;
+    }
+    // Validate each action
+    for (const action of parsed.actions) {
+      if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
+        return null;
+      }
+    }
+
+    return parsed;
+  } catch {
+    // Proposer failure is non-fatal — caller falls back to heuristic or no-compact
+    return null;
+  }
+}
 
 export interface CompactionSettings {
   reserveTokens: number;
