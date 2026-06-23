@@ -11,7 +11,7 @@
  *
  * Providers covered:
  *   - DeepSeek native  → api.deepseek.com (models endpoint + known pricing)
- *   - SiliconFlow       → api.siliconflow.cn/v1/models
+ *   - SiliconFlow       → api.siliconflow.com/v1/models
  *   - OpenAI (OAuth)    → subscription-billed, price stays 0
  *   - Google/Agy        → no public pricing API; verify via known table
  *   - xAI (Grok)        → known pricing table
@@ -140,7 +140,7 @@ async function fetchSiliconFlowPricing(): Promise<PriceOverride[]> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (key) headers["Authorization"] = `Bearer ${key}`;
 
-    const res = await fetch("https://api.siliconflow.cn/v1/models", {
+    const res = await fetch("https://api.siliconflow.com/v1/models", {
       headers,
       signal: AbortSignal.timeout(8000),
     });
