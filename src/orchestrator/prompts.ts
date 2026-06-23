@@ -466,8 +466,9 @@ function staticPrefixCacheKey(
   providerId: string,
   isChitchat: boolean,
   subagentsHash: string,
+  subAgent = false,
 ): string {
-  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}|${subagentsHash}`;
+  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}`;
 }
 
 function computeStaticPrefix(
@@ -478,13 +479,15 @@ function computeStaticPrefix(
   sandboxSettings: SandboxSettings | undefined,
   providerId: string,
   chitchat: boolean,
+  subAgent = false,
 ): { prefix: string; sandboxSettingsSerialized: string } {
   const custom = loadCustomInstructions(cwd);
-  const customSection = custom
-    ? `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`
-    : "";
+  const customSection =
+    subAgent || !custom
+      ? ""
+      : `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`;
 
-  const skillsText = chitchat ? "" : formatSkillsForPrompt(discoverSkills(cwd));
+  const skillsText = chitchat || subAgent ? "" : formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
   const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
@@ -522,6 +525,7 @@ export function buildSystemPromptParts(
   options?: SystemPromptOptions,
 ): SystemPromptParts {
   const chitchat = options?.chitchat === true;
+  const subAgent = options?.subAgent ?? false;
   const pid = providerId ?? "default";
 
   // Subagents rarely change mid-session, but when they do we need a cache miss.
@@ -529,7 +533,7 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat, subagentsHash);
+  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat, subagentsHash, subAgent);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
@@ -542,7 +546,7 @@ export function buildSystemPromptParts(
       staticPrefix = cached.prefix;
     } else {
       // Sandbox settings changed — recompute
-      const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat);
+      const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat, subAgent);
       staticPrefix = result.prefix;
       _staticPrefixCache.set(key, {
         prefix: staticPrefix,
@@ -552,7 +556,7 @@ export function buildSystemPromptParts(
     }
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat);
+    const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat, subAgent);
     staticPrefix = result.prefix;
     _staticPrefixCache.set(key, {
       prefix: staticPrefix,
@@ -740,7 +744,9 @@ export function buildSubagentPrompt(
     "",
     `Delegated task: ${request.description}`,
     "",
-    buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings, providerId),
+    buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings, providerId, undefined, {
+      subAgent: true,
+    }),
   ].join("\n");
 }
 
