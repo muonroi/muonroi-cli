@@ -92,6 +92,24 @@ export function planSafetyAskcard(info: SafetyBlockInfo): SafetyAskcardLayout {
   };
 }
 
+// --- Types shared between message-processor (askcard trigger) and app.tsx (UI) ---
+
+/** Info passed to the safety-override handler when a tool block is detected. */
+export interface SafetyOverrideAskInfo {
+  kind: SafetyBlockKind;
+  /** The blocked tool name (e.g. "bash", "edit_file"). */
+  toolName: string;
+  /** The command/args that were blocked. */
+  blockedItem: string;
+  /** Human-readable reason from the filter. */
+  reason: string;
+  /** Source block kind tag for the agent to decide retry. */
+  source: "bash.execute" | "registry.precheck";
+}
+
+/** Verdict the UI returns after the user answers the askcard. */
+export type SafetyOverrideVerdict = { action: "allow-once" } | { action: "allow-session" } | { action: "block" };
+
 /**
  * Build a safe alternative suggestion for a blocked command.
  * Returns null when no canned alternative exists.

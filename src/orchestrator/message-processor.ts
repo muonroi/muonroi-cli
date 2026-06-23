@@ -174,6 +174,7 @@ import {
   shouldInjectRepetitionReminder,
 } from "./repetition-detector.js";
 import { classifyStreamError } from "./retry-classifier.js";
+import type { SafetyBlockKind, SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import {
   forcedFinalize,
   getSessionLastTask,
@@ -353,6 +354,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
    */
   drainSteerMessages?: () => { text: string }[];
   askToolLoopContinue?: ToolLoopCapAsk;
+  /** Safety override handler — invoked when a tool call is blocked by the safety filter. */
+  askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
   runCouncilV2(
     userMessage: string,
     opts: { skipClarification: boolean; observer?: ProcessMessageObserver; userModelMessage: ModelMessage },
@@ -2602,6 +2605,53 @@ export class MessageProcessor {
                   }
                 } catch (err) {
                   console.error("[Agent:visionBridge] failed to process image for tool result", err);
+                }
+
+                // Safety-block intercept: when bash.execute returns a
+                // "BLOCKED (...):" error, surface an askcard to the user via
+                // deps.askSafetyOverride. If allowed, rewrite the output as a
+                // success so the model knows the command was approved (it may
+                // retry on the next turn). The approved command is stored in
+                // the global __muonroiSafetyApproved map so registry.ts's
+                // bash.execute bypasses the block on the retry.
+                const _outputText = typeof tr.output === "string" ? tr.output : "";
+                const _blockMatch = _outputText.match(/^BLOCKED \((\w+)\):\s*(.*)/);
+                if (_blockMatch && part.toolName === "bash" && deps.askSafetyOverride && !tr.success) {
+                  const _blockKind = _blockMatch[1] as SafetyBlockKind;
+                  const _blockReason = _blockMatch[2];
+                  const _command =
+                    typeof part.input === "object" && part.input != null
+                      ? String((part.input as Record<string, unknown>).command ?? "")
+                      : "";
+                  const _verdict = await deps.askSafetyOverride({
+                    kind: _blockKind,
+                    toolName: part.toolName,
+                    blockedItem: _command,
+                    reason: _blockReason,
+                    source: "bash.execute",
+                  });
+                  if (_verdict.action === "allow-once" || _verdict.action === "allow-session") {
+                    // Store approval so registry.ts can bypass the block on retry.
+                    const _approvedMap = (globalThis as Record<string, unknown>).__muonroiSafetyApproved as
+                      | Map<string, { kind: string; command: string }>
+                      | undefined;
+                    if (_approvedMap) {
+                      _approvedMap.set(part.toolCallId, {
+                        kind: _verdict.action === "allow-session" ? "session" : "once",
+                        command: _command,
+                      });
+                    }
+                    // Rewrite tool result as success so the stream continues
+                    // without an error. The model will see "Approved: ..." and
+                    // may retry the tool call on the next turn, at which point
+                    // registry.ts will see the approval and actually run it.
+                    tr = { ...tr, success: true, output: `Approved (${_verdict.action}): ${_blockReason}` };
+                    yield {
+                      type: "content",
+                      content: `[User approved blocked command: ${_blockKind} — ${_verdict.action}]\n`,
+                    };
+                  }
+                  // If action === "block", leave tr as-is (the original error).
                 }
 
                 // Capture into the stall-rescue digest before any further
