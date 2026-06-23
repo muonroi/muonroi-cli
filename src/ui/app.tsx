@@ -932,6 +932,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   const [reasoningActive, setReasoningActive] = useState(false);
   const [lastReasoningElapsedMs, setLastReasoningElapsedMs] = useState(0);
   const reasoningStartRef = useRef<number | null>(null);
+  const [streamReasoning, setStreamReasoning] = useState("");
+  const reasoningAccRef = useRef("");
+  const lastReasoningRenderTimeRef = useRef(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [liveTurnSourceLabel, setLiveTurnSourceLabel] = useState<string | null>(null);
   modelRef.current = model;
@@ -2030,6 +2033,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     setReasoningActive(false);
     setLastReasoningElapsedMs(0);
     reasoningStartRef.current = null;
+    setStreamReasoning("");
+    reasoningAccRef.current = "";
+    lastReasoningRenderTimeRef.current = 0;
     setActiveToolCalls([]);
     setActiveSubagent(null);
     setLiveTurnSourceLabel(null);
@@ -2085,6 +2091,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         modeColor: activeTurn.modeColor,
         remoteKey: activeTurn.remoteKey,
         sourceLabel: activeTurn.sourceLabel,
+        reasoning: reasoningAccRef.current || undefined,
       }),
     ]);
 
@@ -2094,6 +2101,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
 
     contentAccRef.current = "";
     setStreamContent("");
+    setStreamReasoning("");
+    reasoningAccRef.current = "";
+    lastReasoningRenderTimeRef.current = 0;
   }, []);
 
   // Close the in-progress ToolGroup (if any) and stamp it as done / failed.
@@ -3075,16 +3085,22 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   setLastReasoningElapsedMs(Date.now() - reasoningStartRef.current);
                   reasoningStartRef.current = null;
                   setReasoningActive(false);
+                  setStreamReasoning(reasoningAccRef.current);
                 }
                 applyLocalAssistantDelta(chunk.content || "");
                 break;
               case "reasoning":
-                // Drop CoT body — keep only the duration as a "Thought for Ns"
-                // pill. DeepSeek emits 80–120 reasoning tokens/sec; rendering
-                // those into the chat froze the renderer.
                 if (reasoningStartRef.current === null) {
                   reasoningStartRef.current = Date.now();
                   setReasoningActive(true);
+                }
+                if (chunk.content) {
+                  reasoningAccRef.current += chunk.content;
+                  const now = Date.now();
+                  if (now - lastReasoningRenderTimeRef.current > 150) {
+                    setStreamReasoning(reasoningAccRef.current);
+                    lastReasoningRenderTimeRef.current = now;
+                  }
                 }
                 break;
               case "tool_calls":
@@ -3092,6 +3108,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   setLastReasoningElapsedMs(Date.now() - reasoningStartRef.current);
                   reasoningStartRef.current = null;
                   setReasoningActive(false);
+                  setStreamReasoning(reasoningAccRef.current);
                 }
                 if (chunk.toolCalls) {
                   showLiveToolCalls(chunk.toolCalls);
@@ -6930,12 +6947,23 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       once the model emits text or a tool call. CoT body is
                       discarded so we never re-render heavy markdown for it. */}
                   {(reasoningActive || lastReasoningElapsedMs > 0) && (
-                    <box paddingLeft={3} marginTop={1} flexShrink={0}>
+                    <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
                       <text fg={t.textMuted}>
                         {reasoningActive
                           ? "💭 Thinking…"
                           : `💭 Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
                       </text>
+                      {streamReasoning ? (
+                        <box
+                          border={["left"]}
+                          borderColor={t.textMuted}
+                          paddingLeft={2}
+                          marginTop={1}
+                          flexDirection="column"
+                        >
+                          <Markdown content={streamReasoning} t={t} />
+                        </box>
+                      ) : null}
                     </box>
                   )}
                   {/* Streaming assistant content */}

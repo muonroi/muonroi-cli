@@ -233,6 +233,14 @@ function MessageViewImpl({
       return (
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
+          {entry.reasoning ? (
+            <box paddingLeft={0} marginBottom={1} flexShrink={0} flexDirection="column">
+              <text fg={t.textMuted}>💭 Thought</text>
+              <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">
+                <Markdown content={entry.reasoning} t={t} />
+              </box>
+            </box>
+          ) : null}
           <AssistantMessageContent
             content={entry.content}
             t={t}

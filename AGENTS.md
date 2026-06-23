@@ -85,6 +85,12 @@ Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch {
 - shuru sandbox: when enabled, every command is wrapped + logged (effective net/mounts + redacted cmd); degrades gracefully on non-macOS with warning (bash.ts:489).
 - Recommendation: treat yolo as "audit-then-trust"; never use on untrusted or high-stakes prompts. Cross-refs: 01-security-hardening-PLAN.md:134-150 (Task 4), src/utils/permission-mode.ts:36 (toolNeedsApproval + context), src/tools/bash.ts:598 (wrapCommandForShuru), usage security-audit (reuses decision-log events from Tasks 1-3).
 
+## Agent Interruption & Prioritization Rule
+
+When the agent is performing a task and the user interrupts (e.g., by pressing Escape to halt, or by streaming/entering a new message), the agent must prioritize the unfinished work:
+- Read and analyze the user's input to deduce if they want to discard the current work or if it's a new request.
+- If the user's input introduces a different task, prioritize completing the current in-progress task first to ensure a stable, completed state before starting the new task.
+
 ## Architecture notes
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)
@@ -98,3 +104,4 @@ Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch {
 - Council: `/council` triggers multi-model debate with dynamic prompts and convergence detection
 - Auto-compact: after every turn, context is silently compressed to keep token costs flat
 - Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)
+
