@@ -1,0 +1,48 @@
+{
+  "___note": "Fixture for model-driven AskCard discovery flow. The model generateText path (not generateObject) returns ModelCard[] JSON that the discovery proposer parses.",
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-discovery",
+    "stream": [
+      [
+        { "type": "text-delta", "textDelta": "[" },
+        { "type": "text-delta", "textDelta": "\n  {" },
+        { "type": "text-delta", "textDelta": "\n    \"question\": \"What do you want to build?\"," },
+        { "type": "text-delta", "textDelta": "\n    \"context\": \"Clarify the core scope of your request\"," },
+        { "type": "text-delta", "textDelta": "\n    \"options\": [" },
+        {
+          "type": "text-delta",
+          "textDelta": "\n      {\"label\": \"A simple todo CRUD app\", \"description\": \"Basic add/list/mark-done with local storage\", \"kind\": \"choice\"},"
+        },
+        {
+          "type": "text-delta",
+          "textDelta": "\n      {\"label\": \"A CLI tool for project scaffolding\", \"description\": \"Scaffold new projects with templates\", \"kind\": \"choice\"},"
+        },
+        { "type": "text-delta", "textDelta": "\n      {\"label\": \"Let me describe more\", \"kind\": \"freetext\"}," },
+        {
+          "type": "text-delta",
+          "textDelta": "\n      {\"label\": \"Cancel my request\", \"kind\": \"choice\", \"isCancel\": true},"
+        },
+        {
+          "type": "text-delta",
+          "textDelta": "\n      {\"label\": \"Not exactly — let me adjust\", \"kind\": \"choice\", \"isAdjust\": true}"
+        },
+        { "type": "text-delta", "textDelta": "\n    ]," },
+        { "type": "text-delta", "textDelta": "\n    \"defaultIndex\": 0" },
+        { "type": "text-delta", "textDelta": "\n  }," },
+        { "type": "text-delta", "textDelta": "\n  {" },
+        { "type": "text-delta", "textDelta": "\n    \"question\": \"What tech stack should I assume?\"," },
+        { "type": "text-delta", "textDelta": "\n    \"options\": [" },
+        { "type": "text-delta", "textDelta": "\n      {\"label\": \"TypeScript / Node.js\", \"kind\": \"choice\"}," },
+        { "type": "text-delta", "textDelta": "\n      {\"label\": \"Python\", \"kind\": \"choice\"}," },
+        { "type": "text-delta", "textDelta": "\n      {\"label\": \"Rust\", \"kind\": \"choice\"}" },
+        { "type": "text-delta", "textDelta": "\n    ]," },
+        { "type": "text-delta", "textDelta": "\n    \"defaultIndex\": 0" },
+        { "type": "text-delta", "textDelta": "\n  }" },
+        { "type": "text-delta", "textDelta": "\n]" },
+        { "type": "text-delta", "textDelta": "" },
+        { "type": "finish", "finishReason": { "unified": "stop", "raw": "stop" } }
+      ]
+    ]
+  }
+}
