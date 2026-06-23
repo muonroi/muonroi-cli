@@ -572,17 +572,6 @@ export class MessageProcessor {
         const text = await pilResponder(question.questionId);
         return { questionId: question.questionId, text, kind: "choice" as const };
       },
-      showAcceptance: async (card) => {
-        const { buildAcceptanceQuestion } = await import("../pil/layer18-acceptance.js");
-        const question = buildAcceptanceQuestion(card, crypto.randomUUID());
-        pilChunkQueue.push({
-          type: "council_question",
-          content: question.question,
-          councilQuestion: question,
-        } as StreamChunk);
-        const text = await pilResponder(question.questionId);
-        return text.toLowerCase() as "accept" | "adjust" | "cancel";
-      },
     };
 
     const _pilStart = Date.now();

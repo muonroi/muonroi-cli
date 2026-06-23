@@ -27,14 +27,33 @@ export interface RelevantModule {
   exists: boolean;
 }
 
-export type ClarityDimension = "outcome" | "scope" | "constraint";
+/**
+ * A card designed entirely by the model — the model controls the question,
+ * context, options (labels, kinds, which is cancel/adjust), and default.
+ * The CLI only assigns questionId and renders via CouncilQuestionData.
+ */
+export interface ModelCard {
+  /** The question text shown to the user */
+  question: string;
+  /** Optional context/explanation shown below the question */
+  context?: string;
+  /** User-selectable options. Model controls labels, kinds, cancel/adjust markers */
+  options: ModelCardOption[];
+  /** Which option is pre-selected (0 = first). Defaults to 0. */
+  defaultIndex?: number;
+}
 
-export interface ClarityGap {
-  dimension: ClarityDimension;
-  description: string;
-  suggestedQuestion: string;
-  options: string[];
-  defaultIndex: number;
+export interface ModelCardOption {
+  /** Button label or freetext field label */
+  label: string;
+  /** Optional tooltip / description */
+  description?: string;
+  /** 'choice' = clickable button, 'freetext' = free-text input field */
+  kind: "choice" | "freetext";
+  /** If true, picking this option cancels the entire interaction */
+  isCancel?: boolean;
+  /** If true, picking this indicates the user wants to clarify further (triggers re-interview) */
+  isAdjust?: boolean;
 }
 
 export interface ClarifiedIntent {
@@ -58,7 +77,7 @@ export type ModelClarificationProposer = (input: {
     domain?: string | null;
   };
   additionalContext?: string;
-}) => Promise<string[]>;
+}) => Promise<ModelCard[]>;
 
 export interface FeasibilityResult {
   viable: boolean;
@@ -82,6 +101,8 @@ export interface DiscoveryResult {
   domain: string | null;
   outputStyle: OutputStyle | null;
   discoveryMs: number;
+  /** Raw Q&A pairs from the interview, visible to the model in enrichment */
+  interviewTranscript: Array<{ question: string; answer: string }>;
 }
 
 export interface AcceptanceCardData {
@@ -93,5 +114,4 @@ export interface AcceptanceCardData {
 
 export interface DiscoveryInteractionHandler {
   askQuestion(question: CouncilQuestionData): Promise<CouncilQuestionAnswer>;
-  showAcceptance(card: AcceptanceCardData): Promise<"accept" | "adjust" | "cancel">;
 }

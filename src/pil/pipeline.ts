@@ -150,6 +150,12 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       );
       ctx = { ...ctx, _discoveryResult: discovery };
       if (discovery.interviewed && discovery.accepted) {
+        // Build prefix with both the structured summary and the raw interview transcript
+        const transcriptLines =
+          discovery.interviewTranscript.length > 0
+            ? "\n[Discovery Interview]\n" +
+              discovery.interviewTranscript.map((qa) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n")
+            : "";
         const discoveryPrefix = [
           `[Discovery] Intent: ${discovery.intentStatement}`,
           `[Discovery] Outcome: ${discovery.outcome}`,
@@ -157,6 +163,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
           discovery.feasibilityWarnings.length > 0
             ? `[Discovery] Warnings: ${discovery.feasibilityWarnings.join("; ")}`
             : "",
+          transcriptLines,
         ]
           .filter(Boolean)
           .join("\n");

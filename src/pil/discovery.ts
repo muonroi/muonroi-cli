@@ -4,23 +4,17 @@ import { getMaxInterviewQuestions, isDiscoveryEnabled } from "./config.js";
 import { getCachedProjectContext, setCachedProjectContext } from "./discovery-cache.js";
 import type {
   ClarifiedIntent,
-  ClarityGap,
   DiscoveryInteractionHandler,
   DiscoveryResult,
+  ModelCard,
   ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
 import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
-import {
-  buildInterviewQuestion,
-  getAutofilledOutcome,
-  isProvideOwnDetailsSentinel,
-  PROVIDE_OWN_DETAILS_OPTION_EN,
-  resolveGapsNonInteractive,
-} from "./layer16-clarity.js";
+import { getDefaultOutcome, modelCardToQuestion, resolveGapsNonInteractive } from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
-import { buildAcceptanceCard, buildAcceptanceQuestion } from "./layer18-acceptance.js";
+import { buildAcceptanceCard } from "./layer18-acceptance.js";
 import { markDiscoveryAccepted } from "./session-state.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
@@ -58,7 +52,7 @@ export async function runDiscovery(
 ): Promise<DiscoveryResult> {
   const start = Date.now();
 
-  const baseResult = (): DiscoveryResult => ({
+  const baseResult = (transcript: Array<{ question: string; answer: string }> = []): DiscoveryResult => ({
     raw,
     projectContext: emptyProjectContext(cwd),
     clarifiedIntent: { outcome: raw, scope: [], constraints: [], gaps: [] },
@@ -74,33 +68,14 @@ export async function runDiscovery(
     domain: l1.domain,
     outputStyle: l1.outputStyle,
     discoveryMs: Date.now() - start,
+    interviewTranscript: transcript,
   });
 
   if (!isDiscoveryEnabled()) return baseResult();
   if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
-  // The user explicitly told the agent not to clarify ("don't ask" / "trả lời
-  // thẳng"). This is the USER's consent decision, not a classification heuristic,
-  // so it stays: skip the entire interview + acceptance ceremony.
   if (detectNoClarifySignal(raw)) return baseResult();
 
-  // ── Model-driven clarification gate (Phase 2) ──────────────────────────────
-  // The configured chat model — NOT a regex/keyword heuristic — is the sole
-  // decider of whether this turn has a genuine gray area, what to ask, which
-  // options to offer, why, and which option is recommended (user directive
-  // 2026-06-16: "các askcard bắt buộc xuất phát từ model muốn hỏi"). The CLI only
-  // injects the proposer prompt to open the path.
-  //
-  // There is deliberately NO regex fallback. The old path ran shouldAutoPass() +
-  // detectClarityGaps() keyword heuristics and fabricated questions/outcomes from
-  // them — the exact "phân loại task qua regex từ khoá ... bad bad bad UX, miss
-  // hàng tỷ case" behaviour this phase removes (it also fabricated a build outcome
-  // for a yes/no question — live repro f6f7881a5fae). If the model cannot propose
-  // questions (no proposer wired, or it throws), we log loudly and proceed WITHOUT
-  // an interview; we never invent a question from keywords ("không bao giờ hardcode
-  // fallback... có vấn đề = fail = ghi logs"). The agent can still clarify inline.
   if (!clarificationProposer) {
-    // Interactive turns always wire a proposer (orchestrator/message-processor).
-    // A missing one there is a wiring bug — surface it, never paper over with regex.
     if (handler) {
       console.error(
         "[Agent:discovery] interactive turn has no model clarification proposer — skipping interview (no regex fallback by design)",
@@ -109,8 +84,7 @@ export async function runDiscovery(
     return baseResult();
   }
 
-  // L1.5: Context Discovery (cacheable) — gives the model real project facts so
-  // it never asks for something it can inspect itself (language/framework/modules).
+  // L1.5: Context Discovery (cacheable)
   let projectContext: ProjectContext;
   const cached = getCachedProjectContext(cwd);
   if (cached) {
@@ -127,16 +101,14 @@ export async function runDiscovery(
     }
   }
 
-  // L1.6: Ask the MODEL what (if anything) it still needs. The model owns the
-  // gray-area decision, the questions, the options, the "why", and the
-  // recommended default. An empty result means it sees nothing worth asking →
-  // no interview, no fabricated [Discovery] outcome.
-  let gaps: ClarityGap[];
+  // L1.6: Ask the MODEL to design interview cards.
+  // The model returns ModelCard[] — it controls the question, options,
+  // option kinds (choice/freetext), and which options cancel/adjust.
+  // An empty array means the model sees no gray area → proceed directly.
+  let cards: ModelCard[];
   try {
-    gaps = await proposeModelGaps(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
+    cards = await proposeModelCards(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
   } catch (err) {
-    // No Silent Catch + fail-loud: log with context, then proceed WITHOUT an
-    // interview. We do NOT fall back to regex-generated questions.
     console.error(
       `[Agent:discovery] model clarification proposer threw — proceeding without interview (no regex fallback): ${(err as Error)?.message}`,
       { stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
@@ -144,98 +116,106 @@ export async function runDiscovery(
     return baseResult();
   }
 
-  // Model decided there is no gray area worth asking about → proceed directly.
-  if (gaps.length === 0) return baseResult();
+  if (cards.length === 0) return baseResult();
 
-  let clarifiedIntent: ClarifiedIntent;
   let interviewed = false;
+  const interviewTranscript: Array<{ question: string; answer: string }> = [];
 
-  if (gaps.length > 0 && handler) {
+  // Interactive interview: show model-designed cards and collect raw answers
+  if (handler) {
     interviewed = true;
-    const answeredGaps: Array<(typeof gaps)[number] & { answer: string | null }> = gaps.map((g) => ({
-      ...g,
-      answer: null,
-    }));
-    const maxQ = Math.min(gaps.length, getMaxInterviewQuestions());
+    const maxQ = Math.min(cards.length, getMaxInterviewQuestions());
 
     for (let i = 0; i < maxQ; i++) {
-      const gap = answeredGaps[i]!;
-      const question = buildInterviewQuestion(gap, randomUUID());
+      const card = cards[i]!;
+      const question = modelCardToQuestion(card, randomUUID());
       const answer = await handler.askQuestion(question);
-      answeredGaps[i] = { ...gap, answer: answer.text };
+      interviewTranscript.push({ question: card.question, answer: answer.text });
+
+      // If the user picked a cancel option → stop the whole discovery
+      const chosenOption = card.options.find((o) => o.label === answer.text);
+      if (chosenOption?.isCancel) {
+        const result = baseResult(interviewTranscript);
+        result.accepted = false;
+        return result;
+      }
     }
 
-    clarifiedIntent = buildClarifiedIntentFromAnswers(answeredGaps, raw, projectContext);
+    // After the first round, if any answer had isAdjust flag → re-interview
+    let needsReInterview = false;
+    for (let i = 0; i < Math.min(cards.length, getMaxInterviewQuestions()); i++) {
+      const card = cards[i]!;
+      const chosenOption = card.options.find((o) => o.label === interviewTranscript[i]!.answer);
+      if (chosenOption?.isAdjust) {
+        needsReInterview = true;
+        break;
+      }
+    }
+
+    if (needsReInterview) {
+      let reCards: ModelCard[] = [];
+      try {
+        reCards = await proposeModelCards(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
+      } catch (err) {
+        console.error(
+          `[Agent:discovery] re-interview proposer threw — keeping prior answers: ${(err as Error)?.message}`,
+        );
+      }
+      if (reCards.length > 0) {
+        const maxRe = Math.min(reCards.length, getMaxInterviewQuestions());
+        for (let i = 0; i < maxRe; i++) {
+          const card = reCards[i]!;
+          const question = modelCardToQuestion(card, randomUUID());
+          const answer = await handler.askQuestion(question);
+          interviewTranscript.push({ question: card.question, answer: answer.text });
+
+          const chosenOption = card.options.find((o) => o.label === answer.text);
+          if (chosenOption?.isCancel) {
+            const result = baseResult(interviewTranscript);
+            result.accepted = false;
+            return result;
+          }
+        }
+      }
+    }
   } else {
-    clarifiedIntent = resolveGapsNonInteractive(gaps, projectContext, raw);
+    // Headless: resolve defaults
+    const resolved = resolveGapsNonInteractive(cards, projectContext, raw);
+    interviewTranscript.push(
+      ...cards.map((c) => ({
+        question: c.question,
+        answer: c.options[c.defaultIndex ?? 0]?.label ?? "",
+      })),
+    );
   }
 
-  // Auto-fill outcome for analyze/plan/documentation when no outcome gap was asked.
-  // Override only when the resolved outcome is a raw-derived generic ("Complete: …" /
-  // "Complete the task …") or a genuine filesystem-path leak (Local path, project root,
-  // "src/foo.ts" scope-option shapes). It must NOT clobber a legitimate user answer that
-  // merely contains a slash ("support REST/GraphQL", "input/output") — see looksLikePathLeak.
-  const autoOutcome = getAutofilledOutcome(l1.taskType, raw);
-  const currentOutcome = clarifiedIntent.outcome ?? "";
-  const isGenericComplete = /^Complete(?::| the task)/i.test(currentOutcome);
-  if (autoOutcome && (!currentOutcome || isGenericComplete || looksLikePathLeak(currentOutcome))) {
-    clarifiedIntent = { ...clarifiedIntent, outcome: autoOutcome };
-  }
+  // Build a clarified intent summary from the transcript
+  const resolvedOutcome =
+    interviewTranscript
+      .filter((qa) => qa.answer.length > 0)
+      .map((qa) => qa.answer)
+      .join("; ") || raw;
+  const intentStatement = `${l1.taskType}: ${resolvedOutcome.slice(0, 120)}`;
+
+  const clarifiedIntent: ClarifiedIntent = {
+    outcome: resolvedOutcome,
+    scope:
+      projectContext.relevantModules.length > 0 ? projectContext.relevantModules.map((m) => m.path) : ["project root"],
+    constraints: [],
+    interviewed,
+    accepted: true,
+  };
 
   // L1.7: Feasibility Check
-  let feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => ({
+  const feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => ({
     viable: true as const,
     warnings: [] as string[],
     adjustedScope: clarifiedIntent.scope,
   }));
 
-  // L1.8: User Acceptance
-  const intentStatement = `${l1.taskType ?? "task"}: ${clarifiedIntent.outcome}`;
-  let accepted = true;
-
-  if (handler && interviewed) {
-    const card = buildAcceptanceCard(intentStatement, clarifiedIntent, feasibility, raw);
-    const question = buildAcceptanceQuestion(card, randomUUID());
-    const answer = await handler.askQuestion(question);
-    const decision = answer.text.toLowerCase();
-
-    if (decision === "cancel") {
-      accepted = false;
-    } else if (decision === "adjust") {
-      // The user asked to change something — let the MODEL re-propose questions
-      // given the same context (it owns the gray-area decision, exactly like the
-      // initial pass). On a proposer failure we keep the already-resolved intent
-      // rather than fabricate regex questions.
-      let reGaps: ClarityGap[] = [];
-      try {
-        reGaps = await proposeModelGaps(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
-      } catch (err) {
-        console.error(
-          `[Agent:discovery] re-interview proposer threw — keeping prior intent: ${(err as Error)?.message}`,
-        );
-      }
-      if (reGaps.length > 0) {
-        const reAnswered: Array<(typeof reGaps)[number] & { answer: string | null }> = reGaps.map((g) => ({
-          ...g,
-          answer: null,
-        }));
-        const maxRe = Math.min(reGaps.length, getMaxInterviewQuestions());
-        for (let i = 0; i < maxRe; i++) {
-          const gap = reAnswered[i]!;
-          const q = buildInterviewQuestion(gap, randomUUID());
-          const ans = await handler.askQuestion(q);
-          reAnswered[i] = { ...gap, answer: ans.text };
-        }
-        clarifiedIntent = buildClarifiedIntentFromAnswers(reAnswered, raw, projectContext);
-        feasibility = await checkFeasibility(clarifiedIntent, projectContext).catch(() => feasibility);
-      }
-      accepted = true;
-    }
-  }
-
-  if (accepted) {
-    markDiscoveryAccepted(sessionId);
-  }
+  // L1.8: Acceptance — use the model's own cards; no separate acceptance ceremony.
+  // Feasibility warnings are added to the result but don't trigger a separate card.
+  markDiscoveryAccepted(sessionId);
 
   return {
     raw,
@@ -250,95 +230,28 @@ export async function runDiscovery(
         ? (feasibility.adjustedScope ?? [])
         : (clarifiedIntent.scope ?? ["project root"]),
     feasibilityWarnings: feasibility.warnings ?? [],
-    accepted,
+    accepted: true,
     taskType: l1.taskType,
     confidence: l1.confidence,
     domain: l1.domain,
     outputStyle: l1.outputStyle,
     discoveryMs: Date.now() - start,
+    interviewTranscript,
   };
 }
 
 /**
- * True only for outcomes that are genuine filesystem-path leakage — known
- * leaked-scope phrases ("Local path", "project root", …) or a real path segment
- * ("src/foo.ts", a "src/cli (cli)" scope-option shape) that also carries a
- * path-ish signal (file extension, path keyword, or trailing "(name)").
- *
- * A bare "/" is NOT sufficient: "support REST/GraphQL", "validate input/output",
- * and "details / constraints" use the slash as an "or" separator and must be
- * preserved. The previous implementation matched any "/" and silently clobbered
- * such legitimate answers with the generic taskType default.
+ * Call the model proposer and parse its ModelCard[] response.
+ * The model is the sole designer of all cards — questions, options,
+ * option kinds (choice/freetext), cancel/adjust markers, and defaults.
  */
-function looksLikePathLeak(outcome: string): boolean {
-  // Anchored known leaked-scope phrases (preserves prior override behaviour).
-  if (/(?:\b(?:local path|in prompts|directory as|project root|absolute)\b)|local\/repo/i.test(outcome)) {
-    return true;
-  }
-  // word/word path segment (no spaces around the slash) — e.g. "src/foo.ts".
-  if (!/\b[\w.-]+\/[\w./-]+/.test(outcome)) return false;
-  const hasFileExtension = /\/[\w-]+\.[a-z0-9]{1,5}\b/i.test(outcome); // ".../foo.ts"
-  const hasPathKeyword = /\b(?:path|dir|directory|folder|repo|root|module|src|lib|dist|tests?)\b/i.test(outcome);
-  const hasScopeOptionSuffix = /\([^)]+\)\s*$/.test(outcome); // "src/cli (cli)" scope-option shape
-  return hasFileExtension || hasPathKeyword || hasScopeOptionSuffix;
-}
-
-function buildClarifiedIntentFromAnswers(
-  answeredGaps: Array<{ dimension: string; answer: string | null; options: string[]; defaultIndex: number }>,
-  raw: string,
-  projectContext: ProjectContext,
-): ClarifiedIntent {
-  const outcomeGap = answeredGaps.find((g) => g.dimension === "outcome");
-  const scopeGap = answeredGaps.find((g) => g.dimension === "scope");
-  const constraintGap = answeredGaps.find((g) => g.dimension === "constraint");
-
-  // The "provide my own details" meta-option is a no-answer sentinel; treat it
-  // as missing so the raw-derived generic (and downstream inferred outcome) is
-  // used instead of the sentinel string surviving verbatim as the outcome.
-  const outcomeAnswer = isProvideOwnDetailsSentinel(outcomeGap?.answer) ? null : (outcomeGap?.answer ?? null);
-  const outcome = outcomeAnswer ?? `Complete: ${raw.slice(0, 80)}`;
-  const scope = (() => {
-    if (scopeGap?.answer) return [scopeGap.answer.replace(/\s*\(.*\)\s*$/, "").trim()];
-    return projectContext.relevantModules.map((m) => m.path);
-  })();
-  const constraints = constraintGap?.answer ? [constraintGap.answer] : [];
-
-  return {
-    intentStatement: outcome,
-    outcome,
-    scope: scope.length > 0 ? scope : ["project root"],
-    feasibilityWarnings: [],
-    interviewed: false,
-    accepted: false,
-    constraints,
-    gaps: answeredGaps.map((g) => ({
-      dimension: g.dimension as "outcome" | "scope" | "constraint",
-      description: "",
-      suggestedQuestion: "",
-      options: g.options,
-      defaultIndex: g.defaultIndex,
-      answer: g.answer,
-    })),
-  };
-}
-
-/**
- * Build the enrichment context the model sees, call the proposer, and map each
- * returned line into a ClarityGap. This is the SINGLE place discovery turns a
- * model response into askcard gaps — the model owns the question, the options
- * (recommends), the recommended default (first option), and the "why" (threaded
- * into the gap description → askcard context). No regex/keyword gap synthesis.
- *
- * Throws on proposer error so the caller can decide how to degrade (initial pass
- * proceeds without interview; the "adjust" pass keeps the prior intent).
- */
-async function proposeModelGaps(
+async function proposeModelCards(
   proposer: ModelClarificationProposer,
   raw: string,
   l1: L1Result,
   projectContext: ProjectContext,
   recentTurnsSummary: string | null,
-): Promise<ClarityGap[]> {
+): Promise<ModelCard[]> {
   const additionalContext = [
     projectContext.language ? `Language: ${projectContext.language}` : "",
     projectContext.framework ? `Framework: ${projectContext.framework}` : "",
@@ -354,52 +267,19 @@ async function proposeModelGaps(
   ]
     .filter(Boolean)
     .join("\n");
-  const modelQuestions = await proposer({
+  const modelCards = await proposer({
     raw,
     l1: { taskType: l1.taskType, confidence: l1.confidence },
     additionalContext: additionalContext || undefined,
   });
-  return modelQuestions.slice(0, 3).map(parseModelQuestionToGap);
-}
-
-/**
- * Parse one proposer line ("question [MODEL RECS: a | b] [WHY: reason]") into a
- * ClarityGap. The recommends become the askcard options (first = recommended
- * default); the WHY clause becomes the askcard context so the user sees the
- * model's own reason for asking.
- */
-function parseModelQuestionToGap(line: string, idx: number): ClarityGap {
-  let recs = [PROVIDE_OWN_DETAILS_OPTION_EN];
-  const recMatch = line.match(/\[MODEL RECS:?\s*(.+?)\]/i) || line.match(/RECS:\s*(.+)$/i);
-  if (recMatch) {
-    const parsed = recMatch[1]
-      .split(/\s*\|\s*/)
-      .map((r) => r.trim())
-      .filter(Boolean)
-      .slice(0, 3);
-    if (parsed.length > 0) recs = parsed;
-  }
-  const whyMatch = line.match(/\[WHY:\s*(.+?)\]/i);
-  const why = whyMatch ? whyMatch[1].trim() : "";
-  const question = line
-    .replace(/\[WHY:.*?\]/i, "")
-    .replace(/\[MODEL RECS:?.*?\]/i, "")
-    .replace(/RECS:.*$/, "")
-    .trim();
-  return {
-    dimension: "outcome",
-    description: why || `Model-generated clarification #${idx + 1}`,
-    suggestedQuestion: question || "What else needs clarification?",
-    options: [...recs, "Other (type free answer)"],
-    defaultIndex: 0,
-  };
+  return modelCards.slice(0, 3);
 }
 
 /**
  * Create a ModelClarificationProposer backed by the actual task model.
- * The model receives the user raw + CLI enrichment (l1, project modules, etc.)
- * and outputs the specific questions *it* needs the user to answer.
- * This is the effective way to let the model interview based on what is still missing.
+ * The model receives the user raw + CLI enrichment and outputs the
+ * exact ModelCard[] it wants shown — full control over questions, options,
+ * option kinds, and cancel/adjust markers.
  */
 export function createModelClarificationProposer(providerFactory: any, modelId: string): ModelClarificationProposer {
   return async (input) => {
@@ -413,11 +293,6 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
       const special = isMetaAnalysisPrompt(input.raw)
         ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
         : "";
-      // Environment/self header — the main system prompt has buildEnvironmentBlock,
-      // but THIS discovery question-generator is a separate LLM call that lacked it,
-      // so it assumed Python and asked the user to paste the directory tree despite
-      // running inside the repo (live grok session). Escape hatch:
-      // MUONROI_DISCOVERY_SKIP_ENV_CONTEXT=1.
       const osLabel = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux";
       const envHeader =
         process.env.MUONROI_DISCOVERY_SKIP_ENV_CONTEXT === "1"
@@ -428,21 +303,41 @@ ${envHeader}User request: "${input.raw}"
 Task type from CLI: ${input.l1.taskType}
 ${contextStr}
 
-You decide whether this turn has a genuine gray area that BLOCKS you from delivering correctly. Output the FEW specific, concise questions you (the model) genuinely still need answered — ask only what is truly blocking, not a quota. Most well-scoped requests need 0-1 questions. If everything you need is already inferable from the request + context above, OR the request is a plain question you can simply answer, return an empty array [].
-If the User request is a follow-up or continuation of the recent conversation history (if provided above), do NOT ask for new project details; assume the context is already established and return [] unless there is a critical new ambiguity.
-Consider the provided language/framework/modules/EE patterns when suggesting questions and recs — never ask something the context above already answers.${special}
-For each question: (1) provide 1-2 short concrete recommendations the user can pick from, ALWAYS listing the ONE you would choose FIRST — it becomes the default the user accepts with one keypress; (2) give a short "reason" clause explaining WHY answering it changes what you do. Be decisive; do not hand back an unranked list.
-Return ONLY valid JSON array, nothing else:
-[{"question":"...","recommends":["rec1","rec2"],"reason":"why this matters"}, ...]
-Max 3 items.`;
+You design question cards shown to the user *before* you start working.
+Each card is a structured question with selectable options.
+
+Rules:
+1. Ask ONLY what is genuinely blocking. Most well-scoped requests need 0 cards.
+2. If everything you need is inferable from the request + context above, OR the request is a plain question you can simply answer, return [] (empty array).
+3. If this is a follow-up or continuation of recent conversation history, assume context is already established and return [] unless there is a critical new ambiguity.
+4. Consider the provided language/framework/modules/EE patterns — never ask what the context already answers.${special}
+5. For each card, design the options however you want:
+   - Use kind="choice" for clickable buttons (recommendations, accept/adjust/cancel, etc.)
+   - Use kind="freetext" when the user should type their own answer
+   - Mark an option with isCancel:true when picking it should cancel the entire request
+   - Mark an option with isAdjust:true when picking it means the user wants to clarify further
+   - Set defaultIndex to the option most users would pick (0 = first)
+6. Return ONLY valid JSON array, nothing else.
+7. Max 3 cards.
+
+JSON format:
+[{
+  "question": "string — the question text",
+  "context": "string — optional explanation shown below the question",
+  "options": [
+    {"label": "string", "description": "string", "kind": "choice", "isCancel": false, "isAdjust": false},
+    {"label": "string", "kind": "freetext"}
+  ],
+  "defaultIndex": 0
+}]`;
 
       const result = await generateText({
         model: runtime.model,
         prompt,
-        maxOutputTokens: 320,
+        maxOutputTokens: 600,
       });
 
-      let items: Array<{ question?: string; recommends?: string[]; reason?: string }>;
+      let items: ModelCard[];
       try {
         const txt = result.text
           .trim()
@@ -451,28 +346,17 @@ Max 3 items.`;
         const parsed = JSON.parse(txt);
         items = Array.isArray(parsed) ? parsed : [];
       } catch (parseErr) {
-        // A malformed (non-JSON) model response must NOT be coerced into a junk
-        // askcard — log and return no questions (proceed without interview).
         console.error(
-          `[Agent:discovery] clarification proposer returned non-JSON — no questions this turn: ${(parseErr as Error)?.message}`,
+          `[Agent:discovery] clarification proposer returned non-JSON — no cards this turn: ${(parseErr as Error)?.message}`,
           { sample: result.text.slice(0, 160) },
         );
         return [];
       }
+
       return items
-        .filter((it) => it && typeof it.question === "string" && it.question.trim())
-        .slice(0, 3)
-        .map((it) => {
-          const recs = (it.recommends || []).slice(0, 2).join(" | ");
-          const recTag = recs ? ` [MODEL RECS: ${recs}]` : "";
-          const why = (it.reason || "").trim();
-          const whyTag = why ? ` [WHY: ${why}]` : "";
-          return `${it.question!.trim()}${recTag}${whyTag}`;
-        });
+        .filter((it: any) => it && typeof it.question === "string" && it.question.trim())
+        .slice(0, 3) as ModelCard[];
     } catch (err) {
-      // No Silent Catch + fail-loud: the model call failed. Log with context and
-      // return no questions — discovery proceeds WITHOUT an interview rather than
-      // fabricating a regex-derived one ("có vấn đề = fail = ghi logs").
       console.error(`[Agent:discovery] clarification proposer failed (${modelId}): ${(err as Error)?.message}`, {
         stack: (err as Error)?.stack?.split("\n").slice(0, 3),
       });

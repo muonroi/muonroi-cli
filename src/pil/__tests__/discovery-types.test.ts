@@ -3,11 +3,10 @@ import type {
   AcceptanceCardData,
   BoundedContext,
   ClarifiedIntent,
-  ClarityDimension,
-  ClarityGap,
   DiscoveryInteractionHandler,
   DiscoveryResult,
   FeasibilityResult,
+  ModelCard,
   ProjectContext,
   RelevantModule,
 } from "../discovery-types.js";
@@ -30,12 +29,21 @@ describe("discovery-types", () => {
     expect(ctx.language).toBe("typescript");
   });
 
-  it("ClarityDimension union covers all 3 values", () => {
-    const dims: ClarityDimension[] = ["outcome", "scope", "constraint"];
-    expect(dims).toHaveLength(3);
+  it("ModelCard has all required fields", () => {
+    const card: ModelCard = {
+      question: "What auth method?",
+      options: [
+        { label: "OAuth", kind: "choice", isCancel: false, isAdjust: false },
+        { label: "API keys", kind: "choice" },
+        { label: "Custom", kind: "freetext" },
+      ],
+      defaultIndex: 0,
+    };
+    expect(card.question).toBe("What auth method?");
+    expect(card.options).toHaveLength(3);
   });
 
-  it("DiscoveryResult has all required fields", () => {
+  it("DiscoveryResult has all required fields including interviewTranscript", () => {
     const result: DiscoveryResult = {
       raw: "fix auth",
       projectContext: {
@@ -62,7 +70,9 @@ describe("discovery-types", () => {
       domain: "typescript",
       outputStyle: "balanced",
       discoveryMs: 100,
+      interviewTranscript: [],
     };
     expect(result.accepted).toBe(true);
+    expect(result.interviewTranscript).toEqual([]);
   });
 });

@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ClarityGap, ProjectContext } from "../discovery-types.js";
-import { buildInterviewQuestion, resolveGapsNonInteractive } from "../layer16-clarity.js";
-
-// Phase 2 (2026-06-16): detectClarityGaps + its keyword option-builders were
-// removed (the model now generates every clarification). The surviving helpers
-// — buildInterviewQuestion (render) and resolveGapsNonInteractive (headless
-// default-answer resolution) — are exercised here with model-shaped gaps.
+import type { ModelCard, ProjectContext } from "../discovery-types.js";
+import { modelCardToQuestion, resolveGapsNonInteractive } from "../layer16-clarity.js";
 
 const EMPTY_PROJECT: ProjectContext = {
   language: "typescript",
@@ -22,52 +17,59 @@ const EMPTY_PROJECT: ProjectContext = {
   cwd: "/proj",
 };
 
-describe("buildInterviewQuestion()", () => {
-  it("builds a CouncilQuestionData with pil-interview phase", () => {
-    const gap: ClarityGap = {
-      dimension: "outcome",
-      description: "no outcome",
-      suggestedQuestion: "What outcome?",
-      options: ["test passes", "no error"],
+describe("modelCardToQuestion()", () => {
+  it("maps ModelCard to CouncilQuestionData with pil-interview phase", () => {
+    const card: ModelCard = {
+      question: "What outcome?",
+      context: "This changes how we debug",
+      options: [
+        { label: "Error disappears", kind: "choice" },
+        { label: "Custom fix", kind: "freetext" },
+      ],
       defaultIndex: 0,
     };
-    const q = buildInterviewQuestion(gap, "q-1");
+    const q = modelCardToQuestion(card, "q-1");
     expect(q.phase).toBe("pil-interview");
     expect(q.questionId).toBe("q-1");
     expect(q.options).toBeDefined();
-    expect(q.options!.some((o) => o.kind === "freetext")).toBe(true);
+    expect(q.options).toHaveLength(2);
+    expect(q.options![0]!.isCancel).toBeUndefined();
+    expect(q.options![0]!.isAdjust).toBeUndefined();
   });
 
-  it("surfaces the model's reason (gap.description) as the askcard context", () => {
-    const gap: ClarityGap = {
-      dimension: "outcome",
-      description: "answering this changes whether we add OAuth or just API keys",
-      suggestedQuestion: "Which auth method?",
-      options: ["OAuth", "API keys"],
+  it("preserves isCancel and isAdjust flags from model card options", () => {
+    const card: ModelCard = {
+      question: "Proceed?",
+      options: [
+        { label: "Looks good, go ahead", kind: "choice" },
+        { label: "Cancel this", kind: "choice", isCancel: true },
+        { label: "Let me clarify", kind: "choice", isAdjust: true },
+      ],
       defaultIndex: 0,
     };
-    const q = buildInterviewQuestion(gap, "q-2");
-    expect(q.context).toBe("answering this changes whether we add OAuth or just API keys");
+    const q = modelCardToQuestion(card, "q-2");
+    expect(q.options![1]!.isCancel).toBe(true);
+    expect(q.options![2]!.isAdjust).toBe(true);
   });
 });
 
 describe("resolveGapsNonInteractive()", () => {
-  it("fills gaps with best-effort defaults from the model options + project context", () => {
-    const gaps: ClarityGap[] = [
+  it("fills gaps with default options from model cards", () => {
+    const cards: ModelCard[] = [
       {
-        dimension: "outcome",
-        description: "Model-generated clarification #1",
-        suggestedQuestion: "What outcome do you expect?",
-        options: ["Error resolved", "Other (type free answer)"],
+        question: "What outcome?",
+        options: [
+          { label: "Error resolved", kind: "choice" },
+          { label: "Not sure", kind: "freetext" },
+        ],
         defaultIndex: 0,
       },
     ];
-    const resolved = resolveGapsNonInteractive(gaps, EMPTY_PROJECT, "fix auth");
-    expect(resolved.outcome).toBe("Error resolved");
-    expect(resolved.scope.length).toBeGreaterThan(0);
+    const resolved = resolveGapsNonInteractive(cards, EMPTY_PROJECT, "fix auth");
+    expect(resolved.outcome).toContain("Error resolved");
   });
 
-  it("falls back to the raw-derived outcome when there is no outcome gap", () => {
+  it("falls back to raw-derived outcome when model cards are empty", () => {
     const resolved = resolveGapsNonInteractive([], EMPTY_PROJECT, "fix the login bug");
     expect(resolved.outcome).toBeTruthy();
     expect(resolved.scope.length).toBeGreaterThan(0);
