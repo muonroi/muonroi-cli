@@ -27,7 +27,7 @@ export const TASK_TIER_PREFS: Record<ModelTaskKind, Array<"fast" | "balanced" | 
   // general sub-agents downgrade to balanced (was premium-first) — the top
   // model already planned the delegation; the focused execution doesn't need
   // premium. Premium remains the fallback so premium-only providers are unaffected.
-  general: ["balanced", "premium"],
+  general: ["balanced", "fast", "premium"],
   // verify keeps premium-first: a downgrade here would weaken the very check it
   // exists to perform. Mirrors council `verify` role preference.
   verify: ["premium", "balanced"],
