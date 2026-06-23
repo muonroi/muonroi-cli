@@ -52,17 +52,7 @@ import type { StreamChunk } from "./types/index.js";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
 import type { PermissionMode } from "./utils/permission-mode.js";
-import {
-  getApiKey,
-  getBaseURL,
-  getCurrentModel,
-  getCurrentSandboxMode,
-  getCurrentSandboxSettings,
-  mergeSandboxSettings,
-  type SandboxMode,
-  type SandboxSettings,
-  saveUserSettings,
-} from "./utils/settings";
+import { getApiKey, getBaseURL, getCurrentModel, saveUserSettings } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
 
@@ -390,8 +380,6 @@ async function startInteractive(
   model: string | undefined,
   maxToolRounds: number,
   batchApi: boolean,
-  sandboxMode: SandboxMode,
-  sandboxSettings: SandboxSettings,
   session?: string,
   initialMessage?: string,
   permissionMode: PermissionMode = "safe",
@@ -465,8 +453,6 @@ async function startInteractive(
 
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
-    sandboxMode,
-    sandboxSettings,
     batchApi,
     abortContext: orchestratorAbort,
     pendingCalls,
@@ -679,8 +665,6 @@ async function startInteractive(
         baseURL,
         model: agent.getModel(),
         maxToolRounds,
-        sandboxMode,
-        sandboxSettings,
         version: packageJson.version,
         injectHalt,
       },
@@ -698,8 +682,6 @@ async function runHeadless(
   model: string | undefined,
   maxToolRounds: number,
   batchApi: boolean,
-  sandboxMode: SandboxMode,
-  sandboxSettings: SandboxSettings,
   format: HeadlessOutputFormat,
   session?: string,
   permissionMode: PermissionMode = "safe",
@@ -707,8 +689,6 @@ async function runHeadless(
 ) {
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
-    sandboxMode,
-    sandboxSettings,
     batchApi,
     permissionMode,
   });
@@ -808,12 +788,6 @@ function collect(value: string, prev: string[]): string[] {
   return [...prev, value];
 }
 
-function resolveCliSandboxMode(value: string | boolean | undefined): SandboxMode | undefined {
-  if (value === true) return "shuru";
-  if (value === false) return "off";
-  return undefined;
-}
-
 async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
   let output = "";
   let agent: Agent | undefined;
@@ -846,12 +820,8 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     }
     const maxToolRounds =
       parseInt(stringOption(options.maxToolRounds) || String(delegation.maxToolRounds), 10) || delegation.maxToolRounds;
-    const sandboxMode = resolveCliSandboxMode(options.sandbox) || delegation.sandboxMode || getCurrentSandboxMode();
-    const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), delegation.sandboxSettings);
     agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
       persistSession: false,
-      sandboxMode,
-      sandboxSettings,
       batchApi: Boolean(delegation.batchApi ?? options.batchApi === true),
     });
     const result = await agent.runTaskRequest({
@@ -902,20 +872,6 @@ function resolveConfig(options: CliOptions) {
   // surface so the user can adjust scope. Override via --max-tool-rounds CLI
   // flag or MUONROI_MAX_TOOL_ROUNDS env.
   const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "12", 10) || 12;
-  const sandboxMode = resolveCliSandboxMode(options.sandbox) || getCurrentSandboxMode();
-
-  const cliOverrides: SandboxSettings = {};
-  if (options.allowNet === true) cliOverrides.allowNet = true;
-  const allowHostValue = options.allowHost;
-  if (Array.isArray(allowHostValue) && allowHostValue.length > 0) {
-    cliOverrides.allowedHosts = allowHostValue as string[];
-    if (!cliOverrides.allowNet) cliOverrides.allowNet = true;
-  }
-  const portValue = options.port;
-  if (Array.isArray(portValue) && portValue.length > 0) {
-    cliOverrides.ports = portValue as string[];
-  }
-  const sandboxSettings = mergeSandboxSettings(getCurrentSandboxSettings(), cliOverrides);
 
   if (typeof options.apiKey === "string" && process.env.MUONROI_TEST_NO_PERSIST !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.
@@ -925,14 +881,7 @@ function resolveConfig(options: CliOptions) {
   }
   if (typeof options.model === "string") saveUserSettings({ defaultModel: normalizeModelId(options.model) });
 
-  if (options.sandbox !== undefined) {
-    const resolved = resolveCliSandboxMode(options.sandbox);
-    if (resolved) {
-      saveUserSettings({ sandboxMode: resolved });
-    }
-  }
-
-  return { apiKey, baseURL, model, maxToolRounds, sandboxMode, sandboxSettings };
+  return { apiKey, baseURL, model, maxToolRounds };
 }
 
 function requireApiKey(apiKey: string | undefined): string {
@@ -966,11 +915,6 @@ program
   .option("-p, --prompt <prompt>", "Run a single prompt headlessly")
   .option("--verify", "Run the built-in verify flow headlessly")
   .option("--format <format>", "Headless output format: text or json", parseHeadlessOutputFormat, "text")
-  .option("--sandbox", "Run agent shell commands inside a Shuru sandbox")
-  .option("--no-sandbox", "Run agent shell commands directly on the host")
-  .option("--allow-net", "Enable network access inside the Shuru sandbox")
-  .option("--allow-host <pattern>", "Restrict sandbox network to specific hosts (repeatable)", collect, [])
-  .option("--port <mapping>", "Forward a host port to sandbox guest (HOST:GUEST, repeatable)", collect, [])
   .option("-s, --session <id>", "Continue a saved session by id, or use 'latest'")
   .option("--background-task-file <path>", "Run a persisted background delegation")
   .option("--max-tool-rounds <n>", "Max tool execution rounds (ultimate runaway safety net)", "120")
@@ -1290,14 +1234,12 @@ program
       }
 
       await runHeadless(
-        buildVerifyPrompt(process.cwd(), config.sandboxMode),
+        buildVerifyPrompt(process.cwd()),
         requireApiKey(config.apiKey),
         config.baseURL,
         config.model,
         config.maxToolRounds,
         options.batchApi === true,
-        config.sandboxMode,
-        config.sandboxSettings,
         options.format,
         options.session,
         options.permission as PermissionMode,
@@ -1314,8 +1256,6 @@ program
         config.model,
         config.maxToolRounds,
         options.batchApi === true,
-        config.sandboxMode,
-        config.sandboxSettings,
         options.format,
         options.session,
         options.permission as PermissionMode,
@@ -1331,8 +1271,6 @@ program
       config.model,
       config.maxToolRounds,
       options.batchApi === true,
-      config.sandboxMode,
-      config.sandboxSettings,
       options.session,
       initialMessage,
       options.permission as PermissionMode,
