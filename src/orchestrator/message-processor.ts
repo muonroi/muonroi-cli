@@ -50,7 +50,7 @@
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
 //   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
 
-import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
@@ -1098,6 +1098,10 @@ export class MessageProcessor {
     // a model that degrades every step can't burn unbounded re-steers.
     let textToolReSteerCount = 0;
     const MAX_TEXT_TOOL_RESTEER = 2; // DeepSeek often needs 2 re-steers (DSML text → real tool call)
+    let patternLoopInjectCount = 0;
+    let patternLoopForceHalt = false;
+    let agentLoopDecisionCount = 0;
+    const MAX_AGENT_LOOP_DECISIONS = 2;
     // Silent-hang guard: set true when the stall watchdog aborts a stuck stream.
     // Reset before each streamText attempt; read in the stream catch to surface a
     // clear toast and SKIP the transient-retry (a stalled provider just stalls
@@ -1741,7 +1745,89 @@ export class MessageProcessor {
           // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
           const _baseDynamicStopWhen = createToolLoopCapPredicate({
             initialCap: deps.maxToolRounds,
-            ask: deps.askToolLoopContinue,
+            ask: async (info) => {
+              if (info.kind === "pattern") {
+                if (patternLoopInjectCount < 1) {
+                  patternLoopInjectCount++;
+                  patternLoopForceHalt = true;
+                  deps.messages.push({
+                    role: "user",
+                    content: `[System Warning: You have called tool '${info.toolName}' ${info.count} times with similar arguments in this turn. If you are stuck in a loop, please re-evaluate your plan, change your approach, or explain the blocker. Do not repeat the same unsuccessful tool call.]`,
+                  });
+                  return "stop";
+                }
+              }
+
+              // Query the agent itself to make the decision instead of showing a raw user askcard
+              if (agentLoopDecisionCount < MAX_AGENT_LOOP_DECISIONS) {
+                try {
+                  const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                    | { emitEvent: (e: unknown) => void }
+                    | undefined;
+                  _ar?.emitEvent({
+                    t: "event",
+                    kind: "toast",
+                    level: "info",
+                    text:
+                      info.kind === "pattern"
+                        ? `phát hiện lặp tool liên tục — đang hỏi ý kiến agent có muốn tiếp tục không...`
+                        : `đạt giới hạn số bước (${info.stepNumber} bước) — đang hỏi ý kiến agent có muốn tiếp tục không...`,
+                  });
+
+                  const loopContext =
+                    info.kind === "pattern"
+                      ? `You have called the tool '${info.toolName}' repeatedly ${info.count} times in a row with similar inputs. This indicates you might be stuck in a tool loop.`
+                      : `You have reached the tool execution limit of ${info.stepNumber} steps (cap: ${info.cap}).`;
+
+                  const systemPrompt =
+                    `You are an AI loop-guard assistant. Your task is to evaluate the agent's progress and decide whether they should keep trying to run tools (continue) or stop and present their best answer now (stop).\n` +
+                    `Choose 'stop' if the agent is stuck in an unproductive loop (e.g. repeated unsuccessful commands, permission errors, file reading loops without making progress), or if they already have enough information to write a final response.\n` +
+                    `Choose 'continue' only if they are making active progress, are close to a breakthrough, or genuinely need a few more steps to verify their changes.\n\n` +
+                    `Format your decision EXACTLY as:\n` +
+                    `<decision>continue</decision> or <decision>stop</decision>\n` +
+                    `followed by a brief 1-sentence explanation of your decision (in English).`;
+
+                  const recentMessages = deps.messages.slice(-10);
+                  const modelMessages = [
+                    ...recentMessages,
+                    {
+                      role: "user" as const,
+                      content: `[System Loop Guard Context: ${loopContext}\nBased on the conversation history and recent tool executions, do you need to continue executing tools or should you stop and summarize now?]`,
+                    },
+                  ];
+
+                  const { text: decisionText } = await generateText({
+                    model: runtime.model,
+                    system: systemPrompt,
+                    messages: modelMessages,
+                    abortSignal: signal,
+                  });
+
+                  const cleanText = decisionText.trim();
+                  const match = cleanText.match(/<decision>(continue|stop)<\/decision>/i);
+                  const decision = match ? match[1].toLowerCase() : "stop";
+
+                  const reason = cleanText.replace(/<decision>.*?<\/decision>/gs, "").trim();
+                  _ar?.emitEvent({
+                    t: "event",
+                    kind: "toast",
+                    level: "info",
+                    text: `Agent quyết định: ${decision === "continue" ? "TIẾP TỤC" : "DỪNG LẠI"} (${reason || "không có lý do"})`,
+                  });
+
+                  agentLoopDecisionCount++;
+                  if (decision === "continue") {
+                    return "continue";
+                  } else {
+                    return "stop";
+                  }
+                } catch (err) {
+                  console.error(`[Agent] loop auto-decision failed: ${(err as Error)?.message ?? err}`);
+                }
+              }
+
+              return deps.askToolLoopContinue ? await deps.askToolLoopContinue(info) : "stop";
+            },
             // Phase 5 BUG-H — thread the resolved natural ceiling down so the
             // pattern askcard can pick a context-aware default action (continue
             // early in the run, stop once we're past 50% of the natural budget).
@@ -3516,6 +3602,26 @@ export class MessageProcessor {
             return;
           }
 
+          if (patternLoopForceHalt) {
+            patternLoopForceHalt = false;
+            try {
+              const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar?.emitEvent({
+                t: "event",
+                kind: "toast",
+                level: "info",
+                text: "vòng lặp tool được phát hiện — đang tự động tiêm prompt nhắc nhở để agent tự sửa đổi",
+              });
+            } catch {
+              /* best-effort */
+            }
+            stall.dispose();
+            await closeMcp?.().catch(() => {});
+            continue;
+          }
+
           // Phase 5 Fix 5 — the Phase 4 4B forced-finalize-on-ceiling-hit
           // block lived here. With the matrix ceiling no longer halting the
           // stream (it's pure telemetry now), _ceilingHit can never be true
@@ -3525,7 +3631,9 @@ export class MessageProcessor {
           // breadcrumb for future archaeology.
 
           if (!streamOk && assistantText.trim()) {
-            deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+            deps.appendCompletedTurn(userModelMessage, [
+              { role: "assistant", content: stripDsmlMarkup(assistantText) },
+            ]);
           }
 
           // Fallback: model responded in text despite tool_choice=required
@@ -3706,7 +3814,8 @@ export class MessageProcessor {
           // model re-issues the same calls via the real tool interface.
           if (_textToolCall.detected) {
             const _parsedDsml = assistantText ? parseDsmlToolCalls(assistantText) : [];
-            if (_parsedDsml.length > 0) {
+            if (_parsedDsml.length > 0 && textToolReSteerCount < MAX_TEXT_TOOL_RESTEER) {
+              textToolReSteerCount++;
               const _intentStr = _parsedDsml
                 .map(
                   (c) =>
@@ -3929,7 +4038,9 @@ export class MessageProcessor {
               typeof _d.response === "string" ? _d.response : JSON.stringify(_pendingStructuredResponse.data);
             deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: _ans } as ModelMessage]);
           } else if (assistantText.trim()) {
-            deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: assistantText }]);
+            deps.appendCompletedTurn(userModelMessage, [
+              { role: "assistant", content: stripDsmlMarkup(assistantText) },
+            ]);
           } else if (deps.session && userWriteAheadSeq != null) {
             markMessageErrored(deps.session.id, userWriteAheadSeq);
           }
@@ -3971,4 +4082,13 @@ export class MessageProcessor {
       }
     }
   }
+}
+
+function stripDsmlMarkup(text: string): string {
+  if (!text) return "";
+  // Strip entire <｜｜DSML｜｜tool_calls>...</｜｜DSML｜｜tool_calls> block including content
+  let cleaned = text.replace(/<[^>]*｜｜DSML｜｜tool_calls[^>]*>[\s\S]*?<\/?[^>]*｜｜DSML｜｜tool_calls[^>]*>/gi, "");
+  // Also strip any individual invoke/parameter tags with U+FF5C bars
+  cleaned = cleaned.replace(/<[^>]*｜｜DSML｜｜[^>]*>/gi, "");
+  return cleaned.trim();
 }
