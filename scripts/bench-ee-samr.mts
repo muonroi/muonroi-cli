@@ -155,8 +155,22 @@ function computeStats(values: number[], label: string): void {
   console.log(`  ${label}: min=${min.toFixed(0)}ms p50=${p50.toFixed(0)}ms p90=${p90.toFixed(0)}ms p99=${p99.toFixed(0)}ms max=${max.toFixed(0)}ms mean=${mean.toFixed(0)}ms`);
 }
 
+async function initEE(): Promise<void> {
+  // KHỞI TẠO EE: load auth token + detect client mode
+  // Nếu không làm step này, getCachedServerBaseUrl() luôn trả về null
+  // và classifyViaBrain sẽ skip HTTP thin-client path.
+  const { loadEEAuthToken } = await import("../src/ee/auth.js");
+  const { detectEEClientMode, describeMode } = await import("../src/ee/client-mode.js");
+  await loadEEAuthToken();
+  const modeInfo = await detectEEClientMode({ force: true });
+  console.log(`  EE mode: ${describeMode(modeInfo)}`);
+  console.log();
+}
+
 async function main(): Promise<void> {
   console.log(`EE SAMR Benchmark — ${ITERS} iterations/profile, timeout=${TIMEOUT_MS}ms, warmup=${WARMUP}\n`);
+
+  await initEE();
 
   const allDurations: number[] = [];
   let totalCalls = 0;
