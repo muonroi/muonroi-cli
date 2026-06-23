@@ -47,35 +47,30 @@ function ItemRow({ item, t }: ItemRowProps) {
   let glyph: string;
   let glyphColor: string;
   let textColor: string;
-  let label: string;
+  const label = item.status === "in_progress" ? (item.activeForm ?? item.subject) : item.subject;
+
   if (item.status === "completed") {
     glyph = "✓";
     glyphColor = t.diffAddedFg;
     textColor = t.textMuted;
-    // Strikethrough via U+0336 combining mark. OpenTUI doesn't expose CSS
-    // text-decoration so we synthesise it character-by-character — matches the
-    // visual goal in the spec.
-    label = item.subject
-      .split("")
-      .map((c) => `${c}̶`)
-      .join("");
   } else if (item.status === "in_progress") {
     glyph = "◉";
     glyphColor = t.accent;
     textColor = t.text;
-    label = item.activeForm ?? item.subject;
   } else {
     glyph = "○";
     glyphColor = t.textMuted;
     textColor = t.text;
-    label = item.subject;
   }
+
   return (
     <Semantic id={`task-${item.id}`} role="listitem" name={label} state={item.status}>
-      <text>
-        <span style={{ fg: glyphColor }}>{`${glyph} `}</span>
-        <span style={{ fg: textColor }}>{trunc(label, 80)}</span>
-      </text>
+      <box width="100%">
+        <text fg={textColor}>
+          <span style={{ fg: glyphColor }}>{`${glyph} `}</span>
+          {trunc(label, 70)}
+        </text>
+      </box>
     </Semantic>
   );
 }
@@ -111,14 +106,24 @@ export function TaskListPanel({ snapshot, t, expanded }: TaskListPanelProps) {
         marginBottom={1}
         flexDirection="column"
       >
-        <text>
-          <span style={{ fg: t.textMuted }}>{"Todos"}</span>
-        </text>
-        {visible.map((it) => (
-          <ItemRow key={it.id} item={it} t={t} />
-        ))}
-        {overflow > 0 && <text fg={t.textMuted}>{`… +${overflow} more (ctrl+e to expand)`}</text>}
-        <text fg={t.textDim}>{footer}</text>
+        <box paddingBottom={1}>
+          <text fg={t.textMuted}>
+            <b>{"Todos"}</b>
+          </text>
+        </box>
+        <box flexDirection="column">
+          {visible.map((it) => (
+            <ItemRow key={it.id} item={it} t={t} />
+          ))}
+        </box>
+        {overflow > 0 && (
+          <box marginTop={1}>
+            <text fg={t.textMuted}>{`… +${overflow} more (ctrl+e to expand)`}</text>
+          </box>
+        )}
+        <box marginTop={1} paddingTop={1} border={["top"]} borderColor={t.border}>
+          <text fg={t.textDim}>{footer}</text>
+        </box>
       </box>
     </Semantic>
   );

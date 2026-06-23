@@ -43,7 +43,7 @@ afterEach(() => {
 });
 
 describe("Agent sandbox mode", { timeout: 30_000 }, () => {
-  it("can switch sandbox mode at runtime", async () => {
+  it("can switch sandbox mode at runtime — always 'off' (sandbox removed)", async () => {
     const { Agent } = await importAgentModule();
     const agent = new Agent(undefined, undefined, undefined, undefined, {
       persistSession: false,
@@ -52,16 +52,18 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
 
     expect(agent.getSandboxMode()).toBe("off");
 
+    // Sandbox has been removed: setSandboxMode is a no-op stub.
+    // The mode remains "off" regardless of what is passed.
     agent.setSandboxMode("shuru");
 
-    expect(agent.getSandboxMode()).toBe("shuru");
+    expect(agent.getSandboxMode()).toBe("off");
   });
 
-  it("passes sandbox mode into background delegations", async () => {
+  it("passes sandbox mode into background delegations — always 'off' (sandbox removed)", async () => {
     const { Agent } = await importAgentModule();
     const agent = new Agent(undefined, undefined, undefined, undefined, {
       persistSession: false,
-      sandboxMode: "shuru",
+      sandboxMode: "shuru", // accepted for back-compat but ignored
     });
     const startMock = vi.fn(async () => ({ success: true, output: "ok" }));
     (agent as unknown as { delegations: { start: typeof startMock } }).delegations.start = startMock;
@@ -72,9 +74,10 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
       prompt: "Look around",
     });
 
+    // Sandbox removed: delegations always receive sandboxMode: "off".
     expect(startMock).toHaveBeenCalledWith(
       expect.objectContaining({ agent: "explore" }),
-      expect.objectContaining({ sandboxMode: "shuru" }),
+      expect.objectContaining({ sandboxMode: "off" }),
     );
   });
 

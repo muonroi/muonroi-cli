@@ -42,6 +42,7 @@ export function createCouncilAutoAnswerer(opts: {
     "pil-interview": [],
     "pil-acceptance": [],
     "tool-loop-cap": [],
+    "safety-override": [],
   };
   const preflightApprove = opts.file?.preflightApprove ?? true;
 

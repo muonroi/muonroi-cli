@@ -298,6 +298,7 @@ TOKEN BUDGET:
 
 SELF-LIMIT:
 - When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
+- Combine and invoke independent or related tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a single turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
 - Batch independent commands into one bash call (a; b; c) rather than sequential single calls.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
@@ -453,7 +454,6 @@ export function buildMcpCapabilityBlock(toolNames: readonly string[]): string {
 // dynamicSuffix and is computed fresh each call — not cached.
 interface StaticPrefixCacheEntry {
   prefix: string;
-  sandboxSettings: string; // serialized — to detect changes in sandbox config
   cachedAt: number;
 }
 const _staticPrefixCache = new Map<string, StaticPrefixCacheEntry>();
@@ -462,25 +462,22 @@ const STATIC_PREFIX_CACHE_TTL_MS = 300_000; // 5 min — ample; inputs are sessi
 function staticPrefixCacheKey(
   cwd: string,
   mode: AgentMode,
-  sandboxMode: SandboxMode,
   providerId: string,
   isChitchat: boolean,
   subagentsHash: string,
   subAgent = false,
 ): string {
-  return `${cwd}|${mode}|${sandboxMode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}`;
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}`;
 }
 
 function computeStaticPrefix(
   cwd: string,
   mode: AgentMode,
-  sandboxMode: SandboxMode,
   subagents: CustomSubagentConfig[] | undefined,
-  sandboxSettings: SandboxSettings | undefined,
   providerId: string,
   chitchat: boolean,
   subAgent = false,
-): { prefix: string; sandboxSettingsSerialized: string } {
+): { prefix: string } {
   const custom = loadCustomInstructions(cwd);
   const customSection =
     subAgent || !custom
@@ -490,7 +487,6 @@ function computeStaticPrefix(
   const skillsText = chitchat || subAgent ? "" : formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
-  const sandboxSection = formatSandboxPromptSection(sandboxMode, sandboxSettings);
 
   let modePrompt = MODE_PROMPTS[mode];
   if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
@@ -507,10 +503,9 @@ function computeStaticPrefix(
   const contractSection = buildContractSection({ chitchat });
   const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
 
-  const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${sandboxSection}${customSection}${skillsSection}${subagentsSection}`;
-  const sandboxSettingsSerialized = JSON.stringify(sandboxSettings ?? {});
+  const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${customSection}${skillsSection}${subagentsSection}`;
 
-  return { prefix, sandboxSettingsSerialized };
+  return { prefix };
 }
 
 export function buildSystemPromptParts(
@@ -533,40 +528,23 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, sandboxMode, pid, chitchat, subagentsHash, subAgent);
+  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
   let staticPrefix: string;
   if (cached && now - cached.cachedAt < STATIC_PREFIX_CACHE_TTL_MS) {
-    // Also verify sandbox settings haven't changed (edge case — fine to
-    // invalidate the whole entry on mismatch since settings rarely change).
-    const currentSandboxSerialized = JSON.stringify(sandboxSettings ?? {});
-    if (cached.sandboxSettings === currentSandboxSerialized) {
-      staticPrefix = cached.prefix;
-    } else {
-      // Sandbox settings changed — recompute
-      const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat, subAgent);
-      staticPrefix = result.prefix;
-      _staticPrefixCache.set(key, {
-        prefix: staticPrefix,
-        sandboxSettings: result.sandboxSettingsSerialized,
-        cachedAt: now,
-      });
-    }
+    staticPrefix = cached.prefix;
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, sandboxMode, subagents, sandboxSettings, pid, chitchat, subAgent);
+    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent);
     staticPrefix = result.prefix;
     _staticPrefixCache.set(key, {
       prefix: staticPrefix,
-      sandboxSettings: result.sandboxSettingsSerialized,
       cachedAt: now,
     });
   }
 
-  // dynamicSuffix is always computed fresh — it carries per-turn context
-  // (planContext, resumeDigest) that changes between user messages.
   const planSection = planContext
     ? `\n\nAPPROVED PLAN:\nThe following plan has been approved by the user. Execute it now.\n${planContext}\n`
     : "";
@@ -751,37 +729,7 @@ export function buildSubagentPrompt(
 }
 
 export function formatSandboxPromptSection(sandboxMode: SandboxMode, settings?: SandboxSettings): string {
-  if (sandboxMode === "off") return "";
-
-  const s = settings ?? {};
-  let networkLine: string;
-  if (s.allowNet) {
-    networkLine = s.allowedHosts?.length
-      ? `- Network access is restricted to: ${s.allowedHosts.join(", ")}.`
-      : "- Network access is enabled.";
-  } else {
-    networkLine = "- Network is disabled.";
-  }
-
-  const lines = [
-    "",
-    "SANDBOX MODE:",
-    "- Bash commands run inside a Shuru sandbox.",
-    networkLine,
-    "- The current workspace is mounted inside the sandbox at `/workspace`.",
-    "- Shell-side workspace file changes do not persist back to the host in this version.",
-    "- Use `read_file`, `edit_file`, and `write_file` for durable source edits.",
-    "- If a task needs a host-persistent shell mutation, explain that sandbox mode blocks that workflow and ask whether to disable sandbox mode.",
-  ];
-
-  if (s.ports?.length) {
-    lines.push(`- Port forwards: ${s.ports.join(", ")}.`);
-  }
-  if (s.from) {
-    lines.push(`- Starting from checkpoint: ${s.from}.`);
-  }
-
-  return lines.join("\n");
+  return "";
 }
 
 export function applyModelConstraints(system: string, modelId: string): string {

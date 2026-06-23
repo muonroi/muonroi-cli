@@ -664,6 +664,8 @@ async function startInteractive(
         apiKey,
         baseURL,
         model: agent.getModel(),
+        sandboxMode: "off",
+        sandboxSettings: {},
         maxToolRounds,
         version: packageJson.version,
         injectHalt,

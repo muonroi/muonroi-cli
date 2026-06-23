@@ -15,13 +15,17 @@ import { __resetGitSafetyState, recordCommandOutcome } from "./git-safety.js";
 import { createBuiltinTools } from "./registry.js";
 
 interface ToolWithExecute {
-  execute?: (input: unknown) => Promise<unknown> | unknown;
+  execute?: (input: unknown, extra?: { toolCallId?: string }) => Promise<unknown> | unknown;
 }
 
-async function runBash(tools: Record<string, unknown>, args: Record<string, unknown>): Promise<string> {
+async function runBash(
+  tools: Record<string, unknown>,
+  args: Record<string, unknown>,
+  extra?: { toolCallId?: string },
+): Promise<string> {
   const t = tools.bash as ToolWithExecute;
   if (!t?.execute) throw new Error("bash tool has no execute");
-  const out = await t.execute(args);
+  const out = await t.execute(args, extra);
   return typeof out === "string" ? out : JSON.stringify(out);
 }
 
@@ -34,6 +38,7 @@ describe("git-safety wiring in bash tool", () => {
   });
   afterEach(() => {
     delete process.env.MUONROI_ALLOW_PUSH_ON_RED;
+    delete (globalThis as { __muonroiSafetyApproved?: unknown }).__muonroiSafetyApproved;
   });
 
   it("BLOCKS git push (without executing) after a verification failed this session", async () => {
@@ -43,7 +48,7 @@ describe("git-safety wiring in bash tool", () => {
     recordCommandOutcome("GS1", "npm test", false);
 
     const out = await runBash(tools, { command: "git push origin main", timeout: 10_000 });
-    expect(out).toMatch(/^BLOCKED:/);
+    expect(out).toMatch(/^BLOCKED \(git-safety\):/);
     expect(out).toMatch(/npm test/);
     // The distinctive block message proves git push never ran (a real push in
     // tmpdir would fail with a git error like "not a git repository", not this).
@@ -86,17 +91,34 @@ describe("git-safety wiring in bash tool", () => {
     // Fresh anon registry (simulates the per-turn rebuild).
     const toolsB = createBuiltinTools(bash, "agent"); // no sessionId
     const pushOut = await runBash(toolsB, { command: "git push origin main", timeout: 10_000 });
-    expect(pushOut).toMatch(/^BLOCKED:/);
+    expect(pushOut).toMatch(/^BLOCKED \(git-safety\):/);
   }, 30_000);
 
-  it("appends a sensitive-path WARNING on a broad git add when secrets exist", async () => {
+  it("uses command-matched safety approval when the retry has a new toolCallId", async () => {
+    const bash = new BashTool(os.tmpdir());
+    const tools = createBuiltinTools(bash, "agent", { sessionId: "GS-APPROVE" });
+    recordCommandOutcome("GS-APPROVE", "npm test", false);
+    globalThis.__muonroiSafetyApproved = new Map([
+      ["blocked-tool-call-id", { kind: "once", command: "git push origin main" }],
+    ]);
+
+    const out = await runBash(
+      tools,
+      { command: "git push origin main", timeout: 10_000 },
+      { toolCallId: "retry-tool-call-id" },
+    );
+
+    expect(out).not.toMatch(/^BLOCKED/);
+  }, 20_000);
+
+  it("blocks broad git add when sensitive paths exist", async () => {
     const dir = mkdtempSync(join(os.tmpdir(), "gs-stage-"));
     writeFileSync(join(dir, ".env"), "API_KEY=secret");
     try {
       const bash = new BashTool(dir);
       const tools = createBuiltinTools(bash, "agent", { sessionId: "GS4" });
       const out = await runBash(tools, { command: "git add -A", timeout: 10_000 });
-      expect(out).toMatch(/\[WARNING:/);
+      expect(out).toMatch(/^BLOCKED \(git-safety\):/);
       expect(out).toMatch(/\.env/);
     } finally {
       rmSync(dir, { recursive: true, force: true });

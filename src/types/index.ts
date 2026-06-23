@@ -254,7 +254,8 @@ export type CouncilQuestionPhase =
   | "post-debate"
   | "pil-interview"
   | "pil-acceptance"
-  | "tool-loop-cap";
+  | "tool-loop-cap"
+  | "safety-override";
 
 export type CouncilOptionKind = "choice" | "freetext" | "chat";
 

@@ -148,6 +148,7 @@ import { lastPersistedSeq } from "./message-seq.js";
 import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
+import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { setProviderHint } from "./token-counter.js";
@@ -520,11 +521,13 @@ export class Agent {
   }
 
   getSandboxMode(): SandboxMode {
+    // Sandbox has been removed; BashTool.getSandboxMode() always returns "off".
     return this.bash.getSandboxMode();
   }
 
-  setSandboxMode(mode: SandboxMode): void {
-    this.bash.setSandboxMode(mode);
+  setSandboxMode(_mode: SandboxMode): void {
+    // No-op: sandbox has been removed. BashTool no longer has a mutable sandbox mode.
+    // Will be re-implemented when the new sandbox is ready.
   }
 
   getSandboxSettings(): SandboxSettings {
@@ -722,6 +725,17 @@ export class Agent {
 
   setToolLoopCapHandler(fn: ToolLoopCapAsk | null): void {
     this._toolLoopCapHandler = fn;
+  }
+
+  // Safety-override handler — set by the UI (app.tsx) at startup. Invoked
+  // from the message-processor tool-result pipeline when a safety block
+  // (catastrophic, dangerous, git-safety, empty-bash) is detected. The UI
+  // surfaces an askcard ("Allow once / Allow session / Block") and resolves
+  // with the verdict. When unset, blocks pass through as normal errors.
+  private _safetyOverrideHandler: ((block: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>) | null = null;
+
+  setSafetyOverrideHandler(fn: ((block: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>) | null): void {
+    this._safetyOverrideHandler = fn;
   }
 
   respondToToolApproval(approvalId: string, approved: boolean): void {
@@ -2711,6 +2725,16 @@ export class Agent {
         } catch (err) {
           console.error(`[Agent] askToolLoopContinue crashed: ${(err as Error)?.message ?? err}`);
           return "stop";
+        }
+      },
+      askSafetyOverride: async (info) => {
+        const h = self._safetyOverrideHandler;
+        if (!h) return { action: "block" };
+        try {
+          return await h(info);
+        } catch (err) {
+          console.error(`[Agent] askSafetyOverride crashed: ${(err as Error)?.message ?? err}`);
+          return { action: "block" };
         }
       },
       runCouncilV2: (msg, opts) => self.runCouncilV2(msg, opts),

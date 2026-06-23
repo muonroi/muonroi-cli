@@ -14,6 +14,8 @@ import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
+import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
+import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
 import { planLoopCapAskcard } from "../orchestrator/tool-loop-askcard.js";
 import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
@@ -1152,6 +1154,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // Pending resolvers for tool-loop-cap askcards. Keyed by questionId; populated
   // by setToolLoopCapHandler, drained by the askcard answer/cancel branches.
   const toolLoopCapResolversRef = useRef<Map<string, (verdict: "continue" | "stop") => void>>(new Map());
+
+  // Pending resolvers for safety-override askcards. Keyed by questionId; populated
+  // by setSafetyOverrideHandler, drained by the askcard answer/cancel branches.
+  const safetyOverrideResolversRef = useRef<Map<string, (verdict: SafetyOverrideVerdict) => void>>(new Map());
   // Current todo snapshot (Claude-style sticky checklist). Updated by
   // `task_list_update` chunks emitted after every `todo_write` tool call.
   // Auto-hides ~2s after 100% completion so the panel doesn't linger.
@@ -1455,8 +1461,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         telegramAgent.setSandboxMode(next);
       }
       setSandboxModeState(next);
-      saveProjectSettings({ sandboxMode: next });
-      saveUserSettings({ sandboxMode: next });
+      // sandboxMode settings removed — sandbox will be redesigned later
     },
     [agent],
   );
@@ -1468,8 +1473,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         telegramAgent.setSandboxSettings(next);
       }
       setSandboxSettingsState(next);
-      saveProjectSettings({ sandbox: next });
-      saveUserSettings({ sandbox: next });
+      // sandbox settings removed — sandbox will be redesigned later
     },
     [agent],
   );
@@ -2373,6 +2377,56 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     return () => {
       agent.setToolLoopCapHandler(null);
       toolLoopCapResolversRef.current.clear();
+    };
+  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+
+  // Safety-override askcard handler. When bash.execute blocks a command,
+  // the message-processor calls askSafetyOverride. We surface a council-style
+  // askcard with Allow-once / Allow-session / Block options.
+  useEffect(() => {
+    agent.setSafetyOverrideHandler(async (info: SafetyOverrideAskInfo) => {
+      const layout = planSafetyAskcard({
+        kind: info.kind,
+        blockedItem: info.blockedItem,
+        reason: info.reason,
+      });
+      return new Promise<SafetyOverrideVerdict>((resolve) => {
+        const qid = `safety-override-${Date.now()}`;
+        safetyOverrideResolversRef.current.set(qid, resolve);
+        const question: CouncilQuestionData = {
+          questionId: qid,
+          question: layout.question,
+          context: layout.detail,
+          isRequired: true,
+          phase: "safety-override",
+          options: layout.options.map((o) => ({
+            label: o.label,
+            value: o.value,
+            kind: "choice" as const,
+            description: o.description,
+          })),
+          defaultIndex: layout.defaultIndex,
+        };
+        setPendingCouncilQuestionSync(question);
+        setCouncilCardStateSync(initialCardState(question));
+        try {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-open",
+            questionId: qid,
+            question: question.question,
+            phase: "safety-override",
+            optionCount: question.options!.length,
+            defaultIndex: question.defaultIndex ?? 0,
+          });
+        } catch {
+          /* best-effort */
+        }
+      });
+    });
+    return () => {
+      agent.setSafetyOverrideHandler(null);
+      safetyOverrideResolversRef.current.clear();
     };
   }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
 
@@ -5254,6 +5308,37 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               });
               return;
             }
+            // Safety-override askcard: resolve the stored promise with the
+            // user's verdict (allow-once / allow-session / block).
+            if (pendingQuestion.phase === "safety-override") {
+              const resolver = safetyOverrideResolversRef.current.get(qid);
+              safetyOverrideResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              let parsed: SafetyOverrideVerdict;
+              if (ans.text === "allow-once" || ans.text === "allow-session") {
+                parsed = { action: ans.text };
+              } else {
+                parsed = { action: "block" };
+              }
+              resolver?.(parsed);
+              try {
+                agentRuntime?.emitEvent({
+                  t: "event",
+                  kind: "askcard-answered",
+                  questionId: qid,
+                  answerKind: ans.kind ?? "choice",
+                  answerText: ans.text,
+                });
+              } catch {
+                /* best-effort */
+              }
+              logUIInteraction(agent.getSessionId() ?? undefined, {
+                subtype: "askcard_answered",
+                data: { questionId: qid, answerKind: "choice", answerText: ans.text },
+              });
+              return;
+            }
             // Resolve the label of the option that was selected. For "choice"
             // and "freetext" the option index lives on the card state; for
             // "chat" the user typed a free reply and there is no option to
@@ -5311,6 +5396,21 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               setCouncilCardStateSync(null);
               clearInterCardHeartbeat();
               resolver?.("stop");
+              try {
+                agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
+              } catch {
+                /* best-effort */
+              }
+              return;
+            }
+            // Safety-override cancel → treat as "block" (user wants out).
+            if (pendingQuestion.phase === "safety-override") {
+              const resolver = safetyOverrideResolversRef.current.get(qid);
+              safetyOverrideResolversRef.current.delete(qid);
+              setPendingCouncilQuestionSync(null);
+              setCouncilCardStateSync(null);
+              clearInterCardHeartbeat();
+              resolver?.({ action: "block" });
               try {
                 agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId: qid });
               } catch {
@@ -6742,15 +6842,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         onMouseDown={handleRootMouseDown}
       >
         {copyFlashId > 0 ? <CopyFlashBanner t={t} width={width} /> : null}
-        {activeToast ? (
-          <Toast
-            key={activeToast.id}
-            level={activeToast.level}
-            text={activeToast.text}
-            theme={t}
-            onDismiss={dismissToast}
-          />
-        ) : null}
         {hasMessages ? (
           <box flexGrow={1} flexDirection="column">
             <SessionHeader
@@ -6760,11 +6851,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               sessionId={sessionId}
               onCopySessionId={showCopyBanner}
             />
-            {taskListSnapshot && (
-              <box paddingLeft={2} paddingRight={2}>
-                <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
-              </box>
-            )}
             <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
               {/* Scrollable messages */}
               <Semantic id="log" role="log" props={{ scrollTop: scrollRef.current?.scrollTop ?? 0 }}>
@@ -6804,6 +6890,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       </Semantic>
                     ));
                   })()}
+                  {/* taskListSnapshot moved below scrollbox — renders as a
+                      fixed-bottom panel so agent text can never push it up. */}
                   {liveTurnSourceLabel && (activeToolCalls.length > 0 || streamContent || isProcessing) && (
                     <box paddingLeft={3} marginTop={1} flexShrink={0}>
                       <text fg={t.textMuted}>{liveTurnSourceLabel}</text>
@@ -6961,7 +7049,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           marginTop={1}
                           flexDirection="column"
                         >
-                          <Markdown content={streamReasoning} t={t} />
+                          {reasoningActive ? (
+                            // While actively streaming, render only the last 3
+                            // non-empty lines as plain text to avoid Markdown
+                            // re-parse overhead every 150ms.
+                            <text fg={t.textMuted}>
+                              {streamReasoning
+                                .split("\n")
+                                .filter((l) => l.trim().length > 0)
+                                .slice(-3)
+                                .join(" · ")}
+                            </text>
+                          ) : (
+                            <Markdown content={streamReasoning} t={t} />
+                          )}
                         </box>
                       ) : null}
                     </box>
@@ -7028,6 +7129,23 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 </scrollbox>
               </Semantic>
               {btwState && <BtwOverlay state={btwState} theme={t} />}
+              {/* TodoCard — fixed bottom so agent text cannot push it up */}
+              {taskListSnapshot && (
+                <box flexShrink={0} paddingLeft={2} paddingRight={2} marginBottom={1}>
+                  <TaskListPanel snapshot={taskListSnapshot} t={t} expanded={false} />
+                </box>
+              )}
+              {activeToast ? (
+                <box flexShrink={0} marginBottom={1}>
+                  <Toast
+                    key={activeToast.id}
+                    level={activeToast.level}
+                    text={activeToast.text}
+                    theme={t}
+                    onDismiss={dismissToast}
+                  />
+                </box>
+              ) : null}
               {/* Prompt */}
               <box flexShrink={0}>
                 <PromptBox
@@ -7077,6 +7195,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               </box>
               <box height={1} minHeight={0} flexShrink={1} />
               <box width="100%" maxWidth={75} flexShrink={0}>
+                {activeToast ? (
+                  <box marginBottom={1} flexShrink={0}>
+                    <Toast
+                      key={activeToast.id}
+                      level={activeToast.level}
+                      text={activeToast.text}
+                      theme={t}
+                      onDismiss={dismissToast}
+                    />
+                  </box>
+                ) : null}
                 <PromptBox
                   t={t}
                   inputRef={inputRef}

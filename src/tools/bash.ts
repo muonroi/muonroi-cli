@@ -6,8 +6,8 @@ import path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
-import type { SandboxMode, SandboxSettings } from "../utils/settings";
-import { appendAudit } from "../utils/permission-mode.js";
+import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
+import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
 
@@ -27,7 +27,13 @@ export interface BackgroundProcess {
 }
 
 interface BashToolOptions {
-  sandboxMode?: SandboxMode;
+  /**
+   * Accepted for backward compatibility with callers that pass sandboxMode.
+   * Sandbox has been removed; this value is ignored — mode is always "off".
+   * Will be repurposed when the new sandbox is implemented.
+   * @deprecated
+   */
+  sandboxMode?: string;
   sandboxSettings?: SandboxSettings;
   shellSettings?: ShellSettings;
 }
@@ -38,18 +44,31 @@ export class BashTool {
   private cwd: string;
   private bgProcesses = new Map<number, BackgroundProcess>();
   private tmpDir: string | null = null;
-  private sandboxMode: SandboxMode;
-  private sandboxSettings: SandboxSettings;
   private shellSettings: ShellSettings;
   private resolvedShell: ResolvedShell;
-  private sandboxUnsupportedWarned = false;
+  private sandboxSettings: SandboxSettings = {};
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
     this.cwd = initialCwd;
-    this.sandboxMode = options.sandboxMode ?? "off";
-    this.sandboxSettings = options.sandboxSettings ?? {};
     this.shellSettings = options.shellSettings ?? {};
     this.resolvedShell = resolveShell(this.shellSettings);
+    this.sandboxSettings = options.sandboxSettings ?? {};
+  }
+
+  /**
+   * Sandbox has been removed. Always returns "off".
+   * Kept for backward compatibility with orchestrator / stream-runner callers.
+   */
+  getSandboxMode(): SandboxMode {
+    return "off";
+  }
+
+  getSandboxSettings(): SandboxSettings {
+    return this.sandboxSettings;
+  }
+
+  setSandboxSettings(settings: SandboxSettings): void {
+    this.sandboxSettings = settings;
   }
 
   private async ensureTmpDir(): Promise<string> {
@@ -62,19 +81,6 @@ export class BashTool {
   async execute(command: string, timeout = 30_000, abortSignal?: AbortSignal): Promise<ToolResult> {
     try {
       if (command.startsWith("cd ")) {
-        // Parse "cd <dir>" with optional "&&|||;" chained remainder.
-        // Without this split, `cd D:\foo && gh run list` was passed wholesale
-        // to stat() → ENOENT → agents retried with different shell syntaxes
-        // and burned hundreds of tool calls (session 127140a47b56: 248 bash
-        // calls all hit this bug).
-        // Path token = quoted string or bare word stopping at first unquoted
-        // shell separator. The regex deliberately excludes `&|;<>` from the
-        // bare-word class so chained commands split correctly.
-        // Strip cmd.exe-style DOS flags (e.g. `cd /d D:\path` — `/d` enables
-        // drive-change, irrelevant in our cwd tracker). Without this, agents
-        // using `cd /d <path>` (session 7dcf8fd7d6a4 caller still does this
-        // habitually) parse as dir="/d" → resolve fails. Drop the flag and
-        // continue parsing.
         const afterCd = command
           .substring(3)
           .trim()
@@ -86,18 +92,10 @@ export class BashTool {
         const chainOp = parsed?.[2];
         const remainder = parsed?.[3]?.trim() || null;
 
-        const dir = rawDir
-          .replace(/^["']|["']$/g, "")
-          // Strip a trailing backslash that was an escaped quote in the shell
-          // parse (e.g. cd "C:\foo\" && cmd → C:\foo). Only strip on Windows
-          // because on POSIX a trailing backslash is a valid path continuation.
-          .replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
+        const dir = rawDir.replace(/^["']|["']$/g, "").replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
         let cdSucceeded = false;
         let cdError: ToolResult | null = null;
         try {
-          // Translate POSIX-style absolute paths (e.g. /d/sources/x, ~/foo)
-          // when the active shell understands them, so cwd tracking matches
-          // what the shell would actually resolve.
           const translated = this.resolvedShell.isPosix ? posixToNative(dir) : dir;
           const nextCwd = path.resolve(this.cwd, translated);
           const info = await stat(nextCwd);
@@ -121,15 +119,10 @@ export class BashTool {
           cdError = { success: false, error: `Cannot change directory: ${msg}` };
         }
 
-        // No chained command — return the cd outcome as before.
         if (!remainder) {
           return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
         }
 
-        // Chained command — respect shell semantics:
-        //   `&&` runs remainder only if cd succeeded
-        //   `||` runs remainder only if cd failed
-        //   `;`  runs remainder unconditionally
         const shouldRunRemainder =
           chainOp === ";" || (chainOp === "&&" && cdSucceeded) || (chainOp === "||" && !cdSucceeded);
 
@@ -171,9 +164,6 @@ export class BashTool {
             timeout,
             maxBuffer: 10 * 1024 * 1024,
             env: { ...process.env, FORCE_COLOR: "0" },
-            // Route through the resolved shell so POSIX syntax
-            // (`2>&1 &`, `$()`, single-quotes, `&&` as logical AND, …)
-            // works on Windows instead of falling back to cmd.exe.
             ...(this.resolvedShell.binary ? { shell: this.resolvedShell.binary } : {}),
           },
           (err, stdoutRaw, stderrRaw) => {
@@ -182,9 +172,6 @@ export class BashTool {
               return;
             }
 
-            // ANSI strip — FORCE_COLOR=0 covers cooperating children, but
-            // vitest / bun emit cursor-control sequences regardless, so we
-            // strip post-process before the output ever leaves this module.
             const stdout = stripAnsi(stdoutRaw);
             const stderr = stripAnsi(stderrRaw);
             const exitCode = err && typeof err.code === "number" ? err.code : err ? 1 : 0;
@@ -199,11 +186,6 @@ export class BashTool {
             const totalChars = stdout.length + stderr.length;
             const output = stdout + (stderr ? `\nSTDERR: ${stderr}` : "");
             if (err) {
-              const sandboxError = this.formatSandboxRuntimeError(output, err.message);
-              if (sandboxError) {
-                finish({ success: false, error: sandboxError, bashRunId: runId, bashTotalChars: totalChars });
-                return;
-              }
               if (output.trim()) {
                 finish({ success: false, error: output.trim(), bashRunId: runId, bashTotalChars: totalChars });
                 return;
@@ -363,10 +345,10 @@ export class BashTool {
           tailed || "(no output yet)",
         ].join("\n"),
       };
-    } catch {
+    } catch (err: unknown) {
       return {
-        success: true,
-        output: `[Process ${id} — ${entry.alive ? "running" : "exited"}] (no output yet)`,
+        success: false,
+        output: `Failed to read logs for process ${id}: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
@@ -378,36 +360,18 @@ export class BashTool {
     }
 
     if (!entry.alive) {
-      return {
-        success: true,
-        output: `Process ${id} already exited (code ${entry.exitCode ?? "unknown"}).`,
-      };
+      return { success: false, output: `Process ${id} is already stopped.` };
     }
 
     try {
       entry.child.kill("SIGTERM");
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => {
-          try {
-            entry.child.kill("SIGKILL");
-          } catch {
-            /* already dead */
-          }
-          resolve();
-        }, 3_000);
-        entry.child.on("exit", () => {
-          clearTimeout(timeout);
-          resolve();
-        });
-      });
-
-      return {
-        success: true,
-        output: `Process ${id} (pid ${entry.pid}) stopped.`,
-      };
+      entry.alive = false;
+      return { success: true, output: `Process ${id} terminated.` };
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, output: `Failed to stop process ${id}: ${msg}` };
+      return {
+        success: false,
+        output: `Failed to stop process ${id}: ${err instanceof Error ? err.message : String(err)}`,
+      };
     }
   }
 
@@ -468,59 +432,7 @@ export class BashTool {
     this.cwd = next;
   }
 
-  getSandboxMode(): SandboxMode {
-    return this.sandboxMode;
-  }
-
-  setSandboxMode(mode: SandboxMode): void {
-    this.sandboxMode = mode;
-  }
-
-  /**
-   * The sandbox mode that actually takes effect. When "shuru" is configured but
-   * the current platform cannot run Shuru (non-macOS/arm64), the sandbox is
-   * inert: every wrapped command would fail with the macOS-only error, and the
-   * tool description would still advertise a `/workspace` mount that does not
-   * exist — so the model `cd`s into a phantom dir and abandons verification.
-   * Degrade to "off" (host execution) with a one-time warning so bash keeps
-   * working and the description reflects reality. A stale checked-in project
-   * `sandboxMode: "shuru"` therefore no longer bricks the shell off-platform.
-   */
-  private effectiveSandboxMode(): SandboxMode {
-    if (this.sandboxMode === "shuru" && getSandboxUnsupportedReason() !== null) {
-      if (!this.sandboxUnsupportedWarned) {
-        this.sandboxUnsupportedWarned = true;
-        console.error(
-          `[bash] sandboxMode "shuru" is configured but ${getSandboxUnsupportedReason()} ` +
-            'Falling back to host execution for this platform. Set sandboxMode to "off" to silence this.',
-        );
-      }
-      return "off";
-    }
-    return this.sandboxMode;
-  }
-
-  getSandboxSettings(): SandboxSettings {
-    return this.sandboxSettings;
-  }
-
-  setSandboxSettings(settings: SandboxSettings): void {
-    this.sandboxSettings = settings;
-  }
-
   getToolDescription(): string {
-    if (this.effectiveSandboxMode() === "shuru") {
-      const s = this.sandboxSettings;
-      const netStatus = s.allowNet
-        ? s.allowedHosts?.length
-          ? `network is restricted to: ${s.allowedHosts.join(", ")}`
-          : "network access is enabled"
-        : "network is disabled";
-      const hostBrowserNote = s.hostBrowserCommandsOnHost
-        ? " Commands that invoke agent-browser run on the host instead of inside Shuru so they can interact with forwarded localhost services."
-        : "";
-      return `Execute a bash command inside a Shuru sandbox. Use for find, ls, git inspection, build tools, test runners, and other shell commands that should stay isolated. For content search, prefer the dedicated grep tool. The current workspace is mounted inside the sandbox at /workspace, ${netStatus}, and shell-side workspace file changes do not persist back to the host in this version, so prefer the dedicated file tools for durable edits.${hostBrowserNote} Set background=true for long-running processes like dev servers or watchers.`;
-    }
     return "Execute a bash command. Use for find, ls, git, build tools, package managers, running tests, and any other shell command. For content search, prefer the dedicated grep tool. Set background=true for long-running processes like dev servers, watchers, or anything that should keep running while you continue working. For file read/write/edit, prefer the dedicated file tools instead.";
   }
 
@@ -543,50 +455,48 @@ export class BashTool {
       // cmd.exe or unknown
       return { binary: shell.binary, args: ["/d", "/s", "/c", command] };
     }
-    // No explicit binary: rely on platform default the same way exec() does.
     if (process.platform === "win32") {
       return { binary: process.env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", command] };
     }
     return { binary: "/bin/sh", args: ["-c", command] };
   }
 
-  private prepareCommand(command: string): { ok: true; command: string } | { ok: false; error: string } {
-    if (this.effectiveSandboxMode() !== "shuru") {
-      return { ok: true, command };
+  /**
+   * Pre-execution command preparation.
+   *
+   * Layer 1 — Catastrophic hard-block: checks the command against
+   * CATASTROPHIC_PATTERNS in permission-mode.ts. These are irreversible or
+   * severely dangerous operations that are blocked regardless of permission
+   * mode (safe / auto-edit / yolo) and regardless of sandbox state.
+   *
+   * Layer 2 — Future sandbox: when a new sandbox is wired in, wrap the
+   * command here before returning.
+   */
+  /**
+   * Pre-execution command preparation with two-layer safety.
+   *
+   * Layer 1 — Catastrophic hard-block: checks the command against
+   * CATASTROPHIC_PATTERNS in permission-mode.ts. Returns structured block
+   * result so callers can route to askcard approval flow.
+   *
+   * Layer 2 — Future sandbox: when a new sandbox is wired in, wrap the
+   * command here before returning.
+   */
+  private prepareCommand(
+    command: string,
+  ): { ok: true; command: string } | { ok: false; error: string; block: SafetyBlockResult } {
+    const catBlock = checkCatastrophicCommand(command);
+    if (catBlock) {
+      return {
+        ok: false,
+        error:
+          `BLOCKED (${catBlock.kind}): ${catBlock.reason}\n` +
+          "This command is blocked by the safety filter. " +
+          "Use the safety_override tool or ask the user for approval.",
+        block: catBlock,
+      };
     }
-    if (shouldRunOnHostInSandboxMode(command, this.sandboxSettings)) {
-      return { ok: true, command: wrapHostBrowserCommand(command) };
-    }
-    const unsupportedReason = getSandboxUnsupportedReason();
-    if (unsupportedReason) {
-      return { ok: false, error: unsupportedReason };
-    }
-    const blockedReason = getSandboxMutationBlockReason(command, this.sandboxSettings);
-    if (blockedReason) {
-      return { ok: false, error: blockedReason };
-    }
-    const wrapped = wrapCommandForShuru(this.cwd, command, this.sandboxSettings);
-    appendAudit({
-      kind: "permission-override",
-      tool: "bash",
-      mode: "safe",
-      context: { command, shuru: true, settings: this.sandboxSettings },
-      ts: Date.now(),
-    });
-    return { ok: true, command: wrapped };
-  }
-
-  private formatSandboxRuntimeError(output: string, fallbackMessage: string): string | null {
-    if (this.effectiveSandboxMode() !== "shuru") {
-      return null;
-    }
-    if (output.includes("shuru: command not found") || output.includes("sh: shuru: not found")) {
-      return "Shuru sandbox mode is enabled, but the `shuru` CLI is not installed or not on PATH. Install Shuru or disable sandbox mode.";
-    }
-    if (output.includes("Apple Silicon") || fallbackMessage.includes("Apple Silicon")) {
-      return "Shuru sandbox mode requires macOS on Apple Silicon.";
-    }
-    return null;
+    return { ok: true, command };
   }
 }
 
@@ -604,166 +514,6 @@ function formatAge(start: Date): string {
   return `${hr}h${min % 60}m`;
 }
 
-export function wrapCommandForShuru(cwd: string, command: string, settings: SandboxSettings = {}): string {
-  const parts: string[] = ["shuru", "run"];
-
-  if (settings.cpus) parts.push("--cpus", String(settings.cpus));
-  if (settings.memory) parts.push("--memory", String(settings.memory));
-  if (settings.diskSize) parts.push("--disk-size", String(settings.diskSize));
-  if (settings.allowNet) parts.push("--allow-net");
-  if (settings.allowedHosts) {
-    for (const host of settings.allowedHosts) parts.push("--allow-host", host);
-  }
-  if (settings.ports) {
-    for (const port of settings.ports) parts.push("-p", port);
-  }
-  if (settings.secrets) {
-    for (const s of settings.secrets) {
-      parts.push("--secret", `${s.name}=${s.fromEnv}@${s.hosts.join(",")}`);
-    }
-  }
-  if (settings.from) parts.push("--from", settings.from);
-
-  const mountArg = `${cwd}:/workspace`;
-  parts.push("--mount", shellQuote(mountArg));
-  const shellInit = buildShellInitScript(settings);
-  const guestPrelude = buildGuestWorkspacePrelude(settings);
-  const guestSteps = [
-    shellInit,
-    guestPrelude,
-    `cd ${shellPathForScript(settings.guestWorkdir || "/workspace")}`,
-    command,
-  ].filter(Boolean);
-  const guestCommand = guestSteps.join(" && ");
-  parts.push("--", "sh", "-lc", shellQuote(guestCommand));
-  return parts.join(" ");
-}
-
-const HOST_SAFE_SEGMENT_RE =
-  /^\s*(?:(?:npx(?:\s+-y)?|bunx)\s+)?agent-browser\b|^\s*mkdir\s|^\s*sleep\s|^\s*echo\s|^\s*true\s*$|^\s*$/;
-
-export function shouldRunOnHostInSandboxMode(command: string, settings: SandboxSettings = {}): boolean {
-  if (!settings.hostBrowserCommandsOnHost) {
-    return false;
-  }
-  if (!/\bagent-browser\b/.test(command)) {
-    return false;
-  }
-  if (/\$\(|`/.test(command)) {
-    return false;
-  }
-  const segments = command.split(/\s*(?:&&|\|\||;|\|[^|]|>>?)\s*/);
-  return segments.every((segment) => HOST_SAFE_SEGMENT_RE.test(segment));
-}
-
 export function wrapHostBrowserCommand(command: string): string {
-  const normalized = command
-    .replace(/\bbunx\s+agent-browser\b/g, "__muonroi_ab")
-    .replace(/\bnpx(?:\s+-y)?\s+agent-browser\b/g, "__muonroi_ab")
-    .replace(/\bagent-browser\b/g, "__muonroi_ab");
-  return [
-    "__muonroi_ab() {",
-    "  if command -v agent-browser >/dev/null 2>&1; then",
-    '    command agent-browser "$@"',
-    "  elif command -v bunx >/dev/null 2>&1; then",
-    '    bunx agent-browser "$@"',
-    "  elif command -v npx >/dev/null 2>&1; then",
-    '    npx -y agent-browser "$@"',
-    "  else",
-    '    echo "agent-browser: not found (no bunx/npx fallback)" >&2',
-    "    return 127",
-    "  fi",
-    "}",
-    normalized,
-  ].join("\n");
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function shellPathForScript(value: string): string {
-  return /^[A-Za-z0-9_./-]+$/.test(value) ? value : shellQuote(value);
-}
-
-function buildGuestWorkspacePrelude(settings: SandboxSettings): string {
-  if (!settings.guestWorkdir || !settings.syncHostWorkspace) {
-    return "";
-  }
-
-  const guest = shellQuote(settings.guestWorkdir);
-  const exclusions = [
-    ".git",
-    "node_modules",
-    ".venv",
-    ".next",
-    "dist",
-    "build",
-    "target",
-    ".pytest_cache",
-    ".mypy_cache",
-  ];
-  const tarExcludes = exclusions.map((entry) => `--exclude=${shellQuote(entry)}`).join(" ");
-  return [
-    `mkdir -p ${guest}`,
-    `find ${guest} -mindepth 1 -maxdepth 1 ${exclusions
-      .map((entry) => `! -name ${shellQuote(entry)}`)
-      .join(" ")} -exec rm -rf {} + 2>/dev/null || true`,
-    `tar -C /workspace ${tarExcludes} -cf - . | tar -C ${guest} -xf -`,
-  ].join(" && ");
-}
-
-function buildShellInitScript(settings: SandboxSettings): string {
-  return (settings.shellInit ?? []).filter(Boolean).join(" && ");
-}
-
-function getSandboxUnsupportedReason(): string | null {
-  if (process.platform !== "darwin" || process.arch !== "arm64") {
-    return "Shuru sandbox mode currently requires macOS on Apple Silicon.";
-  }
-  return null;
-}
-
-export function getSandboxMutationBlockReason(command: string, settings: SandboxSettings = {}): string | null {
-  const trimmed = command.trim();
-  if (!trimmed) return null;
-
-  if (/\bgit\s+/.test(trimmed) && !/\bgit\s+(status|diff|log|show|rev-parse|grep|ls-files)\b/.test(trimmed)) {
-    return [
-      "Sandbox mode blocks git commands that mutate repository state because Shuru guest-side workspace changes do not persist back to the host.",
-      "Disable sandbox mode to run persistent git mutations on the real workspace.",
-    ].join(" ");
-  }
-
-  const blockedPatterns: Array<{ pattern: RegExp; reason: string }> = [
-    {
-      pattern:
-        /\b(?:prettier\s+--write|eslint\b.*--fix|biome\s+check\b.*--write|ruff\s+check\b.*--fix|gofmt\s+-w|rustfmt\b|clang-format\b.*-i)\b/,
-      reason:
-        "Shell-driven formatters that rewrite files are blocked in sandbox mode because those file changes would not persist back to the host workspace.",
-    },
-  ];
-
-  if (!settings.allowEphemeralInstall) {
-    const installPatterns: Array<{ pattern: RegExp; reason: string }> = [
-      {
-        pattern: /\b(?:npm|pnpm|yarn|bun)\s+(?:add|install|remove|unlink|update|upgrade)\b/,
-        reason:
-          "Package-manager installs are blocked in sandbox mode because workspace changes like lockfile updates would stay inside the Shuru guest overlay.",
-      },
-      {
-        pattern: /\b(?:pip|pip3)\s+install\b|\bpoetry\s+add\b|\buv\s+add\b|\bcargo\s+add\b/,
-        reason:
-          "Dependency install commands are blocked in sandbox mode because resulting workspace changes would not persist back to the host.",
-      },
-    ];
-    const installMatch = installPatterns.find(({ pattern }) => pattern.test(trimmed));
-    if (installMatch) {
-      return `${installMatch.reason} Use read_file/edit_file/write_file for durable edits, or disable sandbox mode for host-persistent shell changes.`;
-    }
-  }
-
-  const matched = blockedPatterns.find(({ pattern }) => pattern.test(trimmed));
-  if (!matched) return null;
-  return `${matched.reason} Use read_file/edit_file/write_file for durable edits, or disable sandbox mode for host-persistent shell changes.`;
+  return command;
 }
