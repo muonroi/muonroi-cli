@@ -441,5 +441,10 @@ export const MessageView = memo(MessageViewImpl, (prev, next) => {
   const nextMcp = next.mcpRun;
   if ((prevMcp?.hidden ?? false) !== (nextMcp?.hidden ?? false)) return false;
   if ((prevMcp?.count ?? 0) !== (nextMcp?.count ?? 0)) return false;
+  // Phase 5 F7 — isFinalAssistant changes when a new assistant message is
+  // appended (the previously-final message is no longer final). Without this
+  // check, the memo skips the re-render and the old final assistant stays
+  // incorrectly expanded for the rest of the session.
+  if ((prev.isFinalAssistant ?? false) !== (next.isFinalAssistant ?? false)) return false;
   return true;
 });
