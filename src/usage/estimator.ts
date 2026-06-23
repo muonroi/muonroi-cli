@@ -17,6 +17,26 @@ export function estimateTokensFromChars(chars: number): number {
 }
 
 /**
+ * Sanitize an actual input-token count by comparing it to the estimated
+ * (chars/4) count. Some providers (SiliconFlow, possibly others) return
+ * implausibly low `prompt_tokens` (e.g. 10) regardless of actual prompt size,
+ * which under-reports cost and inflates apparent cache-hit ratios.
+ *
+ * Rules:
+ *   - When `actual === undefined`: return `estimated` (no data = use estimate).
+ *   - When `actual === 0`: return 0 (preserve mock / failed-call semantics).
+ *   - When `estimated > 0` and `actual < estimated * 0.1`: the value is likely
+ *     bogus — return `estimated` so cost projections stay accurate.
+ *   - Otherwise: return `actual` as-is.
+ */
+export function sanitizeInputTokens(actual: number | undefined, estimated: number): number {
+  if (actual === undefined) return estimated;
+  if (actual === 0) return 0;
+  if (estimated > 0 && actual < estimated * 0.1) return estimated;
+  return actual;
+}
+
+/**
  * Project the USD cost of a request given token estimates and the static pricing table.
  * Returns 0 for unknown provider/model -- caller decides how to handle (ledger treats as 0 risk).
  */
