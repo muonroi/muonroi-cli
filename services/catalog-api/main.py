@@ -1,8 +1,9 @@
 """Muonroi shared model catalog API (FastAPI).
 
-Serves the single source-of-truth catalog at ``src/models/catalog.json`` so the
-CLI (``src/models/catalog-client.ts``) and the Experience Engine (offline seed)
-consume identical model/provider metadata instead of hardcoding it.
+Serves the single source-of-truth catalog at ``src/models/catalog.json`` with
+LIVE pricing overlaid from provider APIs (SiliconFlow, DeepSeek) so the CLI
+and Experience Engine always see current per-token costs without waiting for
+a file update + container rebuild.
 
 Design notes
 ------------
@@ -13,22 +14,31 @@ Design notes
 * Pydantic validates the file on load — the catalog historically had NO schema
   validation, so a malformed entry would surface as a runtime ``AttributeError``
   deep in the CLI. Here a bad catalog fails fast at startup with a clear error.
-* ``/api/v1/models`` mirrors the shape the CLI already expects
-  (``{version, updated_at, models[]}``) so the client needs only a URL change.
+* Pricing is fetched from provider APIs at startup and refreshed in the
+  background every 6 hours. The known pricing table acts as fallback for
+  providers without a live pricing API (Google/Agy, xAI/Grok).
+* ``/api/v1/models`` merges live pricing onto the file-based catalog before
+  returning, so the CLI sees accurate per-model costs on every request.
+* ``POST /api/v1/pricing/refresh`` triggers an immediate re-fetch (protected
+  by the same API key).
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import os
+import time
+import urllib.error
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # --------------------------------------------------------------------------- #
