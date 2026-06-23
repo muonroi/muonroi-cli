@@ -71,7 +71,7 @@ import type {
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
-import { projectCostUSD } from "../usage/estimator.js";
+import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
@@ -999,6 +999,10 @@ export class Agent {
     // where orchestrator/task/title traffic is actually spending.
     // Best-effort: failures inside appendCostLog are swallowed (see cost-log.ts).
     const breakdown = source === "message" ? (this._lastPromptBreakdown ?? undefined) : undefined;
+    // Sanitize actualInputTokens for providers (e.g. SiliconFlow) that return
+    // implausibly low prompt_tokens (e.g. 10) regardless of prompt size.
+    const estIn = breakdown ? Math.ceil(((breakdown.systemChars ?? 0) + (breakdown.messagesChars ?? 0)) / 4) : 0;
+    const actualInput = sanitizeInputTokens(totalInput, estIn);
     appendCostLog({
       ts: Date.now(),
       provider: this.providerId,
@@ -1006,7 +1010,7 @@ export class Agent {
       estimatedUsd: turnCostMicros / 1_000_000,
       callsite: `orchestrator.${source}`,
       phase: source,
-      actualInputTokens: totalInput,
+      actualInputTokens: actualInput,
       actualOutputTokens: output,
       cachedInputTokens: cacheRead,
       systemChars: breakdown?.systemChars,

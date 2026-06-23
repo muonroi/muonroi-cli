@@ -15,7 +15,7 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { projectCostUSD } from "./estimator.js";
+import { projectCostUSD, sanitizeInputTokens } from "./estimator.js";
 import type { CostMeta } from "./product-ledger.js";
 
 export interface CostLogEntry extends CostMeta {
@@ -95,7 +95,7 @@ export async function meteredGenerate<T>(
   const startedAt = Date.now();
   try {
     const { result, actualInputTokens, actualOutputTokens, cachedInputTokens, stepCount } = await fn();
-    const inTok = actualInputTokens ?? estIn;
+    const inTok = sanitizeInputTokens(actualInputTokens, estIn);
     const outTok = actualOutputTokens ?? Math.max(1, Math.ceil(estOut / 4));
     const usd = projectCostUSD(args.provider, args.model, inTok, outTok);
     await appendCostLog(
