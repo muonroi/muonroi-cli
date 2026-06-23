@@ -220,6 +220,8 @@ describe("schemas validate correct input", () => {
   });
 });
 
+import { normalizeStructuredResponseTaskType } from "../response-tools";
+
 describe("respond_general catch-all tool", () => {
   it("respond_general tool exists with correct schema", () => {
     const tools = buildResponseTools("general");
@@ -235,5 +237,73 @@ describe("respond_general catch-all tool", () => {
 
   it("isResponseTool returns true for 'respond_general'", () => {
     expect(isResponseTool("respond_general")).toBe(true);
+  });
+});
+
+describe("normalizeStructuredResponseTaskType", () => {
+  // Regression: session 48d22fe436f6 — model called respond_analyze but sent
+  // { response: "..." } (general shape). TUI rendered empty findings box.
+  it("normalizes 'analyze' → 'general' when findings missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("analyze", { response: "Some analysis text" })).toBe("general");
+  });
+
+  it("keeps 'analyze' when findings array is present", () => {
+    expect(
+      normalizeStructuredResponseTaskType("analyze", {
+        findings: [{ text: "issue", evidence: "file:1", severity: "high" }],
+      }),
+    ).toBe("analyze");
+  });
+
+  it("normalizes 'debug' → 'general' when root_cause missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("debug", { response: "Bug is in the store" })).toBe("general");
+  });
+
+  it("keeps 'debug' when root_cause is present", () => {
+    expect(
+      normalizeStructuredResponseTaskType("debug", {
+        hypothesis: "race condition",
+        root_cause: "shared mutable state",
+        fix: { file: "src/a.ts", diff: "+x" },
+        verify_command: "bun test",
+      }),
+    ).toBe("debug");
+  });
+
+  it("normalizes 'plan' → 'general' when steps missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("plan", { response: "Step 1: do A" })).toBe("general");
+  });
+
+  it("normalizes 'refactor' → 'general' when changes missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("refactor", { response: "Refactored X" })).toBe("general");
+  });
+
+  it("normalizes 'documentation' → 'general' when content missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("documentation", { response: "Docs here" })).toBe("general");
+  });
+
+  it("normalizes 'generate' → 'general' when files missing but response present", () => {
+    expect(normalizeStructuredResponseTaskType("generate", { response: "Generated code" })).toBe("general");
+  });
+
+  it("keeps 'general' unchanged always", () => {
+    expect(normalizeStructuredResponseTaskType("general", { response: "hello" })).toBe("general");
+    expect(normalizeStructuredResponseTaskType("general", {})).toBe("general");
+  });
+
+  it("does NOT normalize when response field is empty string", () => {
+    expect(normalizeStructuredResponseTaskType("analyze", { response: "" })).toBe("analyze");
+  });
+
+  it("does NOT normalize when response field is whitespace-only", () => {
+    expect(normalizeStructuredResponseTaskType("analyze", { response: "   " })).toBe("analyze");
+  });
+
+  it("does NOT normalize when response field is missing entirely", () => {
+    expect(normalizeStructuredResponseTaskType("analyze", { summary: "Some summary" })).toBe("analyze");
+  });
+
+  it("keeps unknown taskType unchanged", () => {
+    expect(normalizeStructuredResponseTaskType("unknown_type", { response: "hello" })).toBe("unknown_type");
   });
 });

@@ -184,4 +184,44 @@ export function buildResponseTools(taskType: string): ToolSet {
   };
 }
 
+/**
+ * Detect schema-mismatch in a buffered structured response and normalize
+ * taskType to 'general' when the model called a typed respond_<task> tool
+ * but sent a free-form `{ response: "..." }` payload.
+ *
+ * This happens when the tool was unavailable in the current turn's tool set
+ * (Zod didn't enforce the schema), so the model fell back to the general shape
+ * it learned from prior turns. The typed TUI renderer (e.g. case "analyze")
+ * would display an empty box because the expected schema fields (e.g. findings[])
+ * are absent. Normalizing to 'general' routes the payload to the plain-markdown
+ * renderer.
+ *
+ * Session 48d22fe436f6: respond_analyze called with { response: "..." } —
+ * analyze renderer showed empty findings list — answer swallowed.
+ */
+export function normalizeStructuredResponseTaskType(taskType: string, data: Record<string, unknown>): string {
+  if (taskType === "general") return taskType;
+  const hasResponseField = typeof data.response === "string" && (data.response as string).trim().length > 0;
+  if (!hasResponseField) return taskType;
+  const schemaKeyMissing = (() => {
+    switch (taskType) {
+      case "analyze":
+        return !Array.isArray(data.findings);
+      case "debug":
+        return typeof data.root_cause !== "string";
+      case "plan":
+        return !Array.isArray(data.steps);
+      case "refactor":
+        return !Array.isArray(data.changes);
+      case "documentation":
+        return typeof data.content !== "string";
+      case "generate":
+        return !Array.isArray(data.files);
+      default:
+        return false;
+    }
+  })();
+  return schemaKeyMissing ? "general" : taskType;
+}
+
 export { AnalyzeSchema, DebugSchema, DocsSchema, GeneralSchema, GenerateSchema, PlanSchema, RefactorSchema };
