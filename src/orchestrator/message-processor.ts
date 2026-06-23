@@ -1555,23 +1555,24 @@ export class MessageProcessor {
           // here because it depends on PIL task context, not provider quirks.
           // biome-ignore lint/suspicious/noExplicitAny: matches RuntimeResult.providerOptions shape (any) used downstream
           const baseProviderOpts: any = buildTurnProviderOptions(runtime, { sessionId: deps.session?.id }) ?? {};
-          const providerOpts = runtime.modelInfo?.reasoning
-            ? {
-                ...baseProviderOpts,
-                anthropic: {
-                  ...(baseProviderOpts.anthropic ?? {}),
-                  thinking: {
-                    type: "enabled" as const,
-                    budgetTokens:
-                      taskTypeToReasoningEffort(pilCtx.taskType) === "high"
-                        ? 32_768
-                        : taskTypeToReasoningEffort(pilCtx.taskType) === "medium"
-                          ? 8_192
-                          : 2_048,
+          const providerOpts =
+            runtime.modelInfo?.reasoning && runtime.modelInfo?.provider === "anthropic"
+              ? {
+                  ...baseProviderOpts,
+                  anthropic: {
+                    ...(baseProviderOpts.anthropic ?? {}),
+                    thinking: {
+                      type: "enabled" as const,
+                      budgetTokens:
+                        taskTypeToReasoningEffort(pilCtx.taskType) === "high"
+                          ? 32_768
+                          : taskTypeToReasoningEffort(pilCtx.taskType) === "medium"
+                            ? 8_192
+                            : 2_048,
+                    },
                   },
-                },
-              }
-            : baseProviderOpts;
+                }
+              : baseProviderOpts;
           // Use catalog's thinkingType field instead of regex matching.
           // providerOpts is loosely typed (Record<string, unknown>) after the
           // g1 capability refactor — narrow with a local typed view.
