@@ -29,7 +29,98 @@ import { getModelByTier } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo } from "../types/index.js";
+import { readTimeoutEnv } from "../utils/ee-logger.js";
 import { isModelDisabled, isProviderDisabled, loadUserSettings } from "../utils/settings.js";
+
+// ─── EE-guided SAMR override ─────────────────────────────────────────────────
+// EE_SAMR_TIMEOUT: per-call budget for consulting the EE brain about SAMR.
+// Default 2s, range 500ms..5s. Falls back to heuristics on timeout/error.
+const EE_SAMR_TIMEOUT_MS = readTimeoutEnv("MUONROI_EE_SAMR_TIMEOUT_MS", 2000, 500, 5000);
+
+export interface EESamrGuidance {
+  overrideConfig: StepRouterConfig | null;
+  reason: string;
+}
+
+/**
+ * Consult the EE brain + local heuristics to decide whether SAMR should be
+ * enabled for this turn even when the user config has it disabled.
+ *
+ * Resolution order:
+ *   1. Fast heuristic — mechanical/simple tasks skip EE entirely (zero cost).
+ *   2. EE brain — asks classifyViaBrain for a yes/no + execution tier.
+ *   3. Heuristic fallback — when EE is unreachable, uses taskType + complexity.
+ */
+export async function eeSamrGuidance(params: {
+  userMessage: string;
+  taskType: string | null;
+  taskConfidence: number;
+  complexitySize?: string;
+  taskComplexity?: string;
+}): Promise<EESamrGuidance> {
+  const { userMessage, taskType, taskConfidence, complexitySize, taskComplexity } = params;
+
+  // Step 1: fast heuristic — mechanical tasks never benefit from SAMR
+  const mechanicalTypes = new Set(["general", "documentation", "generate", "build", "chitchat"]);
+  if (taskType && mechanicalTypes.has(taskType)) {
+    return { overrideConfig: null, reason: `mechanical taskType=${taskType} — no SAMR benefit` };
+  }
+
+  // Step 2: fast heuristic — trivial tasks don't need a split
+  if (taskComplexity === "low" && (complexitySize === "small" || complexitySize === undefined)) {
+    return { overrideConfig: null, reason: "low complexity + small — no SAMR benefit" };
+  }
+
+  // Step 3: ask EE brain
+  try {
+    const { classifyViaBrain } = await import("../ee/bridge.js");
+    const eePrompt = [
+      `Task: ${userMessage.slice(0, 200)}`,
+      `Context: type=${taskType ?? "unknown"} complexity=${taskComplexity ?? "unknown"} size=${complexitySize ?? "unknown"}`,
+      `Question: Would splitting the work into (1) premium reasoning then (2) cheap execution save tokens without hurting quality?`,
+      `Reply valid JSON: {"samr":true,"executionTier":"balanced"} or {"samr":false}`,
+    ].join("\n");
+
+    const response = await classifyViaBrain(eePrompt, EE_SAMR_TIMEOUT_MS);
+    if (!response) {
+      // Fallback heuristic when EE unreachable
+      return samrHeuristicFallback(taskType, taskComplexity, complexitySize);
+    }
+
+    const parsed = JSON.parse(response) as { samr?: boolean; executionTier?: string };
+    if (parsed.samr === true) {
+      const tier = parsed.executionTier === "fast" ? ("fast" as const) : ("balanced" as const);
+      return {
+        overrideConfig: { enabled: true, toolExecutionTier: tier, premiumSynthesis: false },
+        reason: `ee-guided: ${tier} execution phase`,
+      };
+    }
+    return { overrideConfig: null, reason: "ee-declined" };
+  } catch {
+    return samrHeuristicFallback(taskType, taskComplexity, complexitySize);
+  }
+}
+
+/**
+ * Deterministic fallback when EE brain is unreachable.
+ * Reasoning-heavy tasks with high complexity are strong SAMR candidates.
+ */
+function samrHeuristicFallback(
+  taskType: string | null,
+  taskComplexity?: string,
+  complexitySize?: string,
+): EESamrGuidance {
+  const reasoningTypes = new Set(["plan", "analyze", "refactor", "debug", "architect"]);
+  if (taskType && reasoningTypes.has(taskType)) {
+    if (taskComplexity === "high" || complexitySize === "large") {
+      return {
+        overrideConfig: { enabled: true, toolExecutionTier: "balanced", premiumSynthesis: false },
+        reason: `heuristic: ${taskType}/${taskComplexity ?? "?"}/${complexitySize ?? "?"} benefits from SAMR`,
+      };
+    }
+  }
+  return { overrideConfig: null, reason: "heuristic: no benefit" };
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
