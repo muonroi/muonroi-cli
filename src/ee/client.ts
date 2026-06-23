@@ -633,7 +633,11 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }
     },
 
-    async brainProxy(prompt: string, timeoutMs = 2000): Promise<string | null> {
+    async brainProxy(
+      prompt: string,
+      timeoutMs = 2000,
+      options?: import("./types.js").BrainProxyOptions,
+    ): Promise<string | null> {
       try {
         // Tight client-side ceiling (~150ms grace over caller's intent budget)
         // so we never wait longer than the PIL pipeline can use the result.
@@ -641,10 +645,18 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         // we forward in the body — both ends abort together.
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), timeoutMs + 150);
+        const body: Record<string, unknown> = { prompt, timeoutMs };
+        if (options) {
+          if (options.systemPrompt) body.systemPrompt = options.systemPrompt;
+          if (options.responseFormat) body.responseFormat = options.responseFormat;
+          if (options.model) body.model = options.model;
+          if (options.maxTokens != null) body.maxTokens = options.maxTokens;
+          if (options.provider) body.provider = options.provider;
+        }
         const resp = await f(`${baseUrl}/api/brain`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify({ prompt, timeoutMs }),
+          body: JSON.stringify(body),
           signal: ctrl.signal,
         });
         clearTimeout(t);

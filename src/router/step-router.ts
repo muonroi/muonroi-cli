@@ -81,7 +81,12 @@ export async function eeSamrGuidance(params: {
       `Reply valid JSON: {"samr":true,"executionTier":"balanced"} or {"samr":false}`,
     ].join("\n");
 
-    const response = await classifyViaBrain(eePrompt, EE_SAMR_TIMEOUT_MS);
+    const response = await classifyViaBrain(eePrompt, EE_SAMR_TIMEOUT_MS, {
+      systemPrompt:
+        'You are a SAMR (Step-Aware Model Routing) evaluator. Given a task description, context, and question, reply ONLY with valid JSON: {"samr":true,"executionTier":"balanced"} or {"samr":false}. No extra text, no markdown.',
+      responseFormat: { type: "json_object" },
+      maxTokens: 100,
+    });
     if (!response) {
       // Fallback heuristic when EE unreachable
       return samrHeuristicFallback(taskType, taskComplexity, complexitySize);
