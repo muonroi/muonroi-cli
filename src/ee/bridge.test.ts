@@ -259,7 +259,6 @@ describe("bridge — config isolation (BRIDGE-03)", () => {
     const _validCallWithTimeout = () => classifyViaBrain("prompt", 3000);
 
     // These would cause @ts-expect-error if uncommented:
-    // @ts-expect-error — qdrantUrl is not a valid parameter
     const _invalidCall = () => classifyViaBrain("prompt", 3000, "http://localhost:6333" as any);
 
     expect(_validCall).toBeDefined();

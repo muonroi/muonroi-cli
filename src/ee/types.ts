@@ -390,6 +390,20 @@ export interface EEUserResponse {
   user: string;
 }
 
+// ─── Brain proxy options — forwarded to server for SAMR/custom classifiers ────
+export interface BrainProxyOptions {
+  /** Override the default system prompt sent to the LLM. */
+  systemPrompt?: string;
+  /** Request JSON-mode response_format (e.g. { type: "json_object" }). */
+  responseFormat?: { type: string };
+  /** Override the LLM model id used for classification. */
+  model?: string;
+  /** Override max_tokens for the LLM response. */
+  maxTokens?: number;
+  /** Override the brain provider (siliconflow | ollama | openai | ...). */
+  provider?: string;
+}
+
 // ─── Client interface ────────────────────────────────────────────────────────
 export interface EEClient {
   health(): Promise<{ ok: boolean; status: number }>;
@@ -424,7 +438,7 @@ export interface EEClient {
   recall(query: string, opts?: EERecallOptions): Promise<EERecallResponse | null>;
   user(): Promise<EEUserResponse | null>;
   // PIL brain proxy — used by thin clients to reach the VPS LLM router.
-  brainProxy(prompt: string, timeoutMs?: number): Promise<string | null>;
+  brainProxy(prompt: string, timeoutMs?: number, options?: BrainProxyOptions): Promise<string | null>;
   pilContext(
     prompt: string,
     options?: { localeHint?: string; projectCtx?: Record<string, unknown>; budgetMs?: number; signal?: AbortSignal },
