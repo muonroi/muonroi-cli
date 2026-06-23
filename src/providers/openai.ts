@@ -36,9 +36,13 @@ export function createOpenAIAdapter(config: ProviderConfig): Adapter {
   const provider = config.oauthHeaders
     ? createOpenAI({
         apiKey: "oauth", // placeholder — overridden by Authorization header
+        baseURL: config.baseURL,
         headers: config.oauthHeaders,
       })
-    : createOpenAI({ apiKey: config.apiKey });
+    : createOpenAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+      });
 
   return {
     id: "openai",

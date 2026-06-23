@@ -136,7 +136,12 @@ interface PriceOverride {
 async function fetchSiliconFlowPricing(): Promise<PriceOverride[]> {
   const results: PriceOverride[] = [];
   try {
+    const key = process.env.SILICONFLOW_API_KEY ?? process.env.MUONROI_SILICONFLOW_API_KEY;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (key) headers["Authorization"] = `Bearer ${key}`;
+
     const res = await fetch("https://api.siliconflow.cn/v1/models", {
+      headers,
       signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) {

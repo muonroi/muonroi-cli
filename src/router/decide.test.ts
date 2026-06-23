@@ -16,6 +16,34 @@ vi.mock("../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
 }));
 
+vi.mock("../models/catalog-client.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../models/catalog-client.js")>();
+  return {
+    ...original,
+    fetchCatalog: async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const raw = fs.readFileSync(path.resolve(process.cwd(), "src/models/catalog.json"), "utf8");
+      const data = JSON.parse(raw);
+      return data.models;
+    },
+  };
+});
+
+let disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
+
+vi.mock("../utils/settings.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../utils/settings.js")>();
+  return {
+    ...original,
+    isProviderDisabled: (provider: string) => {
+      const res = disabledProvidersList.includes(provider);
+      console.log(`[MOCK] isProviderDisabled("${provider}") => ${res}`);
+      return res;
+    },
+  };
+});
+
 let BASE_OPTS: DecideOpts;
 
 describe("decide()", () => {
@@ -28,8 +56,8 @@ describe("decide()", () => {
     BASE_OPTS = {
       tenantId: "default",
       cwd: "/tmp",
-      defaultModel: "deepseek-v4-flash",  // stable, independent of getModelByTier order after Agy catalog updates
-      defaultProvider: providers.default,
+      defaultModel: "deepseek-v4-flash", // stable, independent of getModelByTier order after Agy catalog updates
+      defaultProvider: "google",
       threshold: 0.55,
     };
     stub = await startStubEEServer({
@@ -56,6 +84,7 @@ describe("decide()", () => {
   });
 
   beforeEach(() => {
+    disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
     routerStore.setState({
       tier: "hot",
       degraded: false,
@@ -108,6 +137,7 @@ describe("decide()", () => {
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
 
+    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
@@ -125,6 +155,7 @@ describe("decide()", () => {
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
     routerStore.setState({ degraded: true });
 
+    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,

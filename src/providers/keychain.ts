@@ -13,6 +13,13 @@ import { redactor } from "../utils/redactor.js";
 import type { ProviderId } from "./types.js";
 import { ALL_PROVIDER_IDS } from "./types.js";
 
+function normalizeKeychainProvider(p: string): ProviderId | null {
+  const lower = p.toLowerCase();
+  if (lower === "agy") return "google"; // agy alias for google provider
+  if ((ALL_PROVIDER_IDS as readonly string[]).includes(lower)) return lower as ProviderId;
+  return null;
+}
+
 const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
   anthropic: "anthropic",
   openai: "openai",
@@ -84,7 +91,8 @@ export const KEYCHAIN_PROVIDER_IDS: readonly ProviderId[] = ALL_PROVIDER_IDS.fil
  * Store a provider API key in the OS keychain. Returns true on success.
  * Falls back to false (silent) if keytar is unavailable on this platform.
  */
-export async function setKeyForProvider(provider: ProviderId, key: string): Promise<boolean> {
+export async function setKeyForProvider(provider: string | ProviderId, key: string): Promise<boolean> {
+  const norm = normalizeKeychainProvider(provider as string) ?? (provider as ProviderId);
   if (!key || key.length < 20) {
     throw new Error(`Key for '${provider}' is too short (< 20 chars).`);
   }
@@ -92,7 +100,7 @@ export async function setKeyForProvider(provider: ProviderId, key: string): Prom
   if (!kt?.setPassword) return false;
   redactor.enrollSecret(key);
   try {
-    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider], key);
+    await kt.setPassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[norm], key);
     return true;
   } catch (err: any) {
     // Runtime backend failure is common on Linux when libsecret / secret service
@@ -110,10 +118,18 @@ export async function setKeyForProvider(provider: ProviderId, key: string): Prom
  * Delete a stored key. Returns true if a key was deleted, false if none was
  * present or keytar is unavailable.
  */
-export async function deleteKeyForProvider(provider: ProviderId): Promise<boolean> {
+export async function deleteKeyForProvider(provider: string | ProviderId): Promise<boolean> {
+  const norm = normalizeKeychainProvider(provider as string) ?? (provider as ProviderId);
   const kt = await loadKeytar();
   if (!kt?.deletePassword) return false;
-  return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[provider]);
+  try {
+    return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_PROVIDER[norm]);
+  } catch (err: any) {
+    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
+      console.error(`[keychain] deletePassword backend error for ${provider}:`, err?.message || err);
+    }
+    return false;
+  }
 }
 
 /**

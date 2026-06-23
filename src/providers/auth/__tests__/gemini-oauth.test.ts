@@ -1,9 +1,5 @@
 /**
- * Tests for src/providers/auth/gemini-oauth.ts
- *
- * Login flow (callback server mocked), refresh (expiry pre-emption + mutex),
- * revoke, authHeaders, loadGeminiTokensWithRefresh.
- * No live network calls — all HTTP via mockFetch, no real browser opens.
+ * Tests for Agy Google OAuth (replaces legacy gemini public client)
  */
 
 import { describe, expect, it, vi } from "vitest";
