@@ -86,6 +86,7 @@ import {
   getResponseTaskType,
   getResponseToolSet,
   isResponseTool,
+  normalizeStructuredResponseTaskType,
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
@@ -3362,6 +3363,21 @@ export class MessageProcessor {
           // collapses any duplicate response-tool emissions in the turn into a
           // single structured_response block for the UI.
           if (_pendingStructuredResponse) {
+            // Schema-mismatch normalization: when the model calls a typed
+            // respond_<task> (e.g. respond_analyze) but sends a payload shaped
+            // like respond_general ({ response: "..." } without schema-specific
+            // fields like `findings`), the TUI typed renderer renders an empty
+            // box. Normalize taskType to 'general' so the plain-markdown
+            // renderer is used. See normalizeStructuredResponseTaskType() docs.
+            // Session 48d22fe436f6: respond_analyze({ response: "..." }) →
+            // analyze renderer showed empty findings list → answer swallowed.
+            const _normalizedType = normalizeStructuredResponseTaskType(
+              _pendingStructuredResponse.taskType,
+              _pendingStructuredResponse.data,
+            );
+            if (_normalizedType !== _pendingStructuredResponse.taskType) {
+              _pendingStructuredResponse = { taskType: _normalizedType, data: _pendingStructuredResponse.data };
+            }
             yield {
               type: "structured_response" as StreamChunk["type"],
               structuredResponse: _pendingStructuredResponse,

@@ -103,7 +103,18 @@ export function StructuredResponseView({ t, sr, modeColor }: { t: Theme; sr: Str
       );
     }
     case "analyze": {
-      const r = d as { findings?: Array<{ text: string; evidence: string; severity: string }> };
+      const r = d as { findings?: Array<{ text: string; evidence: string; severity: string }>; response?: string };
+      // Graceful fallback: model may have called respond_analyze but sent a
+      // free-form { response: "..." } payload (schema mismatch due to tool being
+      // unavailable in the current turn). Render as plain markdown rather than
+      // an empty findings list (session 48d22fe436f6 swallowed-answer bug).
+      if ((!r.findings || r.findings.length === 0) && typeof r.response === "string" && r.response.trim()) {
+        return (
+          <box flexDirection="column" paddingLeft={2} marginTop={1}>
+            {renderMarkdown(r.response, t)}
+          </box>
+        );
+      }
       const sevColor = (s: string) => (s === "high" ? t.diffRemovedFg : s === "medium" ? t.planStepNum : t.textMuted);
       return (
         <box flexDirection="column" paddingLeft={2} marginTop={1}>

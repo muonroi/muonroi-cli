@@ -17,6 +17,7 @@ export { type PipelineOptions, runPipeline } from "./pipeline.js";
 export {
   getResponseTaskType,
   isResponseTool,
+  normalizeStructuredResponseTaskType,
   shouldHaltOnResponseTool,
   stepEmittedResponseTool,
 } from "./response-tools.js";
