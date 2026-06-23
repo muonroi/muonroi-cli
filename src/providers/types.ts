@@ -63,7 +63,7 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
 
 /**
  * Supported provider identifiers.
- * 'google' maps to Gemini via @ai-sdk/google; 'deepseek' and 'siliconflow'
+ * 'google' maps to Gemini/Agy via @ai-sdk/google; 'deepseek' and 'siliconflow'
  * share the OpenAI-compatible adapter with different baseURLs.
  */
 export type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "xai" | "ollama";

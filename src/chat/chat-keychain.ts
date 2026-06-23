@@ -100,7 +100,14 @@ export async function getChatSecret(id: ChatSecretId): Promise<string | null> {
 export async function deleteChatSecret(id: ChatSecretId): Promise<boolean> {
   const kt = await loadKeytar();
   if (!kt?.deletePassword) return false;
-  return kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id]);
+  try {
+    return await kt.deletePassword(KEYCHAIN_SERVICE, ACCOUNT_BY_CHAT[id]);
+  } catch (err: any) {
+    if (process.env.DEBUG || process.env.MUONROI_DEBUG_KEYCHAIN) {
+      console.error(`[chat-keychain] deletePassword backend error for ${id}:`, err?.message || err);
+    }
+    return false;
+  }
 }
 
 /**

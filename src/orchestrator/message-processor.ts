@@ -1933,17 +1933,17 @@ export class MessageProcessor {
                 }
                 if (pendingSteers.length === 0) return r;
                 const _base = r.messages ?? stepMessages;
-                const _steerContents = new Set(
-                  pendingSteers.map((s) => (typeof s.content === "string" ? s.content : JSON.stringify(s.content))),
+                const _existingContents = new Set(
+                  _base
+                    .filter((m) => m.role === "user")
+                    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))),
                 );
-                const _deduped = _base.filter(
-                  (m) =>
-                    !(
-                      m.role === "user" &&
-                      _steerContents.has(typeof m.content === "string" ? m.content : JSON.stringify(m.content))
-                    ),
-                );
-                return { ...r, messages: [..._deduped, ...pendingSteers] as typeof stepMessages };
+                const steersToAdd = pendingSteers.filter((s) => {
+                  const sContent = typeof s.content === "string" ? s.content : JSON.stringify(s.content);
+                  return !_existingContents.has(sContent);
+                });
+                if (steersToAdd.length === 0) return r;
+                return { ...r, messages: [..._base, ...steersToAdd] as typeof stepMessages };
               };
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
 

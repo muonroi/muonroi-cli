@@ -199,6 +199,19 @@ describe("transformThinkingModeBody — backfill / disable (code 20015 fix)", ()
     expect(asst[1]!.reasoning_content).toBe(""); // backfilled
   });
 
+  it("A (default): backfills content: '' on a reasoning-only turn that lacks content and tool_calls", () => {
+    const body: WireBody = {
+      messages: [
+        { role: "user", content: "go" },
+        { role: "assistant", content: null, reasoning_content: "only thought" },
+      ],
+    };
+    const out = transformThinkingModeBody(body);
+    const asst = out.messages.find((m) => m.role === "assistant")!;
+    expect(asst.reasoning_content).toBe("only thought");
+    expect(asst.content).toBe("");
+  });
+
   it("A (default): does not touch non-assistant messages", () => {
     const body: WireBody = {
       messages: [

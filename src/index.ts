@@ -1478,7 +1478,9 @@ keys
 
 keys
   .command("login <provider>")
-  .description("Log in to a provider via OAuth subscription (supported: openai, google, xai)")
+  .description(
+    "Log in to a provider via OAuth subscription (supported: openai, google/agy, xai). 'google'/'agy' now uses agy client creds.",
+  )
   .action(async (provider: string) => {
     const { runKeysLogin } = await import("./cli/keys.js");
     await runKeysLogin(provider);

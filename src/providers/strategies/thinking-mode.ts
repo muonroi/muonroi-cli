@@ -51,10 +51,28 @@ function backfillReasoningContent(messages: WireMessage[]): WireMessage[] {
   let mutated = false;
   const next = messages.map((m) => {
     if (m?.role !== "assistant") return m;
+    const newM = { ...m };
+    let changed = false;
+
     const rc = m.reasoning_content;
-    if (typeof rc === "string") return m; // already present (incl. "")
-    mutated = true;
-    return { ...m, reasoning_content: "" };
+    if (typeof rc !== "string") {
+      newM.reasoning_content = "";
+      changed = true;
+    }
+
+    const hasContent = m.content !== undefined && m.content !== null;
+    const hasToolCalls =
+      m.tool_calls !== undefined && m.tool_calls !== null && Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+    if (!hasContent && !hasToolCalls) {
+      newM.content = "";
+      changed = true;
+    }
+
+    if (changed) {
+      mutated = true;
+      return newM;
+    }
+    return m;
   });
   return mutated ? next : messages;
 }

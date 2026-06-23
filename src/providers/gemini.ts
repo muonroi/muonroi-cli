@@ -1,7 +1,7 @@
 /**
  * src/providers/gemini.ts
  *
- * Gemini adapter implementation behind the Adapter interface.
+ * Gemini/Agy adapter implementation behind the Adapter interface.
  * Uses @ai-sdk/google + AI SDK v6 streamText/fullStream.
  */
 
@@ -23,8 +23,15 @@ export function createGeminiAdapter(config: ProviderConfig): Adapter {
   // SDK still wants a non-empty apiKey for config validation; the Authorization
   // header takes precedence on the wire.
   const provider = config.oauthHeaders
-    ? createGoogleGenerativeAI({ apiKey: "oauth", headers: config.oauthHeaders })
-    : createGoogleGenerativeAI({ apiKey: config.apiKey });
+    ? createGoogleGenerativeAI({
+        apiKey: "oauth",
+        baseURL: config.baseURL,
+        headers: config.oauthHeaders,
+      })
+    : createGoogleGenerativeAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+      });
 
   return {
     id: "google",

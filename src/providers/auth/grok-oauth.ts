@@ -7,7 +7,7 @@
  * the standard xAI API base (https://api.x.ai/v1), which is OpenAI-compatible
  * and accepts the token on both /chat/completions and /responses.
  *
- * Flow (mirrors gemini-oauth.ts, with xAI-specific authorize params):
+ * Flow (mirrors gemini-oauth.ts / agy Google OAuth, with xAI-specific authorize params):
  *   1. Spawn a loopback HTTP server (OS-assigned port — xAI's OAuth client
  *      allows arbitrary 127.0.0.1 ports per RFC 8252; pi-grok confirms this
  *      with its listen(0) fallback).

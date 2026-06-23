@@ -15,8 +15,8 @@
  *   keys delete <provider>        — remove a stored key
  *   keys import-bw [providers]    — pull from Bitwarden vault, store in keychain
  *   keys cleanup-settings         — strip plaintext keys from user-settings.json
- *   keys login <provider>         — OAuth login (openai, google)
- *   keys logout <provider>        — OAuth logout (openai, google)
+ *   keys login <provider>         — OAuth login (openai, google/agy)
+ *   keys logout <provider>        — OAuth logout (openai, google/agy)
  */
 
 import { spawnSync } from "node:child_process";
@@ -64,8 +64,17 @@ function maskKey(key: string): string {
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
 }
 
+function normalizeProvider(p: string): ProviderId | null {
+  const lower = p.toLowerCase();
+  if (lower === "agy") return "google"; // agy is alias for google (OAuth + key)
+  if ((KEYCHAIN_PROVIDER_IDS as readonly string[]).includes(lower)) {
+    return lower as ProviderId;
+  }
+  return null;
+}
+
 function isValidProvider(p: string): p is ProviderId {
-  return (KEYCHAIN_PROVIDER_IDS as string[]).includes(p);
+  return normalizeProvider(p) !== null;
 }
 
 async function promptHidden(question: string): Promise<string> {
@@ -127,8 +136,11 @@ export interface KeysSetOptions {
 }
 
 export async function runKeysSet(provider: string, options: KeysSetOptions = {}): Promise<void> {
-  if (!isValidProvider(provider)) {
-    console.error(`Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")}`);
+  const norm = normalizeProvider(provider);
+  if (!norm) {
+    console.error(
+      `Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")} (agy is alias for google)`,
+    );
     process.exit(1);
   }
   const key = (await promptHidden(`Paste ${provider} API key (hidden): `)).trim();
@@ -149,7 +161,7 @@ export async function runKeysSet(provider: string, options: KeysSetOptions = {})
   }
 
   try {
-    const ok = await setKeyForProvider(provider, key);
+    const ok = await setKeyForProvider(norm, key);
     if (!ok) {
       console.error("OS keychain unavailable (keytar failed to load or secret service backend unavailable).");
       console.error("Common on Linux: install the runtime library, e.g.");
@@ -212,13 +224,33 @@ export async function runKeysList(): Promise<void> {
 
   // Load OAuth tokens for supported providers
   const { loadTokens } = await import("../providers/auth/token-store.js");
-  const oauthRows: Array<{ provider: string; email?: string; expiresAt: number }> = [];
+  const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+  const oauthRows: Array<{ provider: string; display: string; email?: string; expiresAt: number }> = [];
   const oauthIds = await getOAuthProviderIds();
   for (const p of oauthIds) {
     try {
-      const tokens = await loadTokens(p);
+      let tokens = await loadTokens(p);
+      if (!tokens && p === "google") {
+        // Import from agy storage only for fresh (non-expired) tokens.
+        // Stale agy tokens should be cleaned by running `keys logout google` + removing old .gemini file.
+        const { loadAgyTokensWithRefresh } = await import("../providers/auth/gemini-oauth.js");
+        const agyTokens = await loadAgyTokensWithRefresh();
+        if (agyTokens && Date.now() < agyTokens.expiresAt) {
+          tokens = agyTokens;
+        }
+      }
       if (tokens) {
-        oauthRows.push({ provider: p, email: tokens.email, expiresAt: tokens.expiresAt });
+        if (Date.now() < tokens.expiresAt) {
+          const cfg = await getOAuthProviderConfig(p as any);
+          const display = cfg?.displayName ?? p;
+          oauthRows.push({ provider: p, display, email: tokens.email, expiresAt: tokens.expiresAt });
+        } else if (p === "google") {
+          // auto-clean stale Agy token from our store (imported from old ~/.gemini)
+          try {
+            const { deleteTokens } = await import("../providers/auth/token-store.js");
+            await deleteTokens("google");
+          } catch {}
+        }
       }
     } catch {
       // ignore
@@ -230,7 +262,7 @@ export async function runKeysList(): Promise<void> {
     console.log("No keys stored in OS keychain.");
     console.log("Run 'muonroi-cli keys set <provider>' or 'muonroi-cli keys import-bw' to add some.");
     console.log("Run 'muonroi-cli keys login openai' to log in with your OpenAI subscription.");
-    console.log("Run 'muonroi-cli keys login google' to log in with your Google account.");
+    console.log("Run 'muonroi-cli keys login google' or 'keys login agy' to log in with Agy (Google OAuth).");
     console.log("Run 'muonroi-cli keys login xai' to log in with your SuperGrok / X Premium+ subscription.");
     return;
   }
@@ -244,7 +276,7 @@ export async function runKeysList(): Promise<void> {
       const account = row.email ?? "(no email)";
       const expiry = new Date(row.expiresAt).toLocaleString();
       const expired = Date.now() > row.expiresAt ? " [EXPIRED]" : "";
-      console.log(`${row.provider.padEnd(12)} ${account.padEnd(26)} ${expiry}${expired}`);
+      console.log(`${row.display.padEnd(12)} ${account.padEnd(26)} ${expiry}${expired}`);
     }
     console.log("");
   }
@@ -284,12 +316,38 @@ export async function runKeysList(): Promise<void> {
 }
 
 export async function runKeysDelete(provider: string): Promise<void> {
-  if (!isValidProvider(provider)) {
-    console.error(`Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")}`);
+  const norm = normalizeProvider(provider);
+  if (!norm) {
+    console.error(
+      `Unknown provider '${provider}'. Valid: ${KEYCHAIN_PROVIDER_IDS.join(", ")} (agy is alias for google)`,
+    );
     process.exit(1);
   }
-  const ok = await deleteKeyForProvider(provider);
+  const ok = await deleteKeyForProvider(norm);
   console.log(ok ? `Deleted ${provider} key from keychain.` : `No ${provider} key was stored.`);
+
+  // If deleting google/agy, also clean the OAuth token (Agy uses the google slot for its OAuth)
+  if (norm === "google") {
+    try {
+      const { loadTokens, deleteTokens } = await import("../providers/auth/token-store.js");
+      const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
+      const tokens = await loadTokens("google");
+      if (tokens) {
+        const cfg = await getOAuthProviderConfig("google");
+        if (cfg?.provider) {
+          try {
+            await cfg.provider.revoke(tokens);
+          } catch {
+            // best effort
+          }
+        }
+        await deleteTokens("google");
+        console.log(`Also cleared Agy/Google OAuth token.`);
+      }
+    } catch {
+      // ignore secondary errors
+    }
+  }
 }
 
 export async function runKeysExport(filePath: string): Promise<void> {
@@ -362,13 +420,14 @@ export async function runKeysImport(filePath: string): Promise<void> {
   let imported = 0;
   let skipped = 0;
   for (const [provider, key] of entries) {
-    if (!isValidProvider(provider)) {
+    const norm = normalizeProvider(provider);
+    if (!norm) {
       console.warn(`Skipping unknown provider '${provider}' in bundle.`);
       skipped++;
       continue;
     }
     try {
-      const ok = await setKeyForProvider(provider, key);
+      const ok = await setKeyForProvider(norm, key);
       if (ok) {
         imported++;
         console.log(`✓ ${provider} → keychain (${maskKey(key)})`);
@@ -427,7 +486,8 @@ export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void>
   let imported = 0;
   let skipped = 0;
   for (const provider of requested) {
-    if (!isValidProvider(provider)) {
+    const norm = normalizeProvider(provider);
+    if (!norm) {
       console.warn(`Skip unknown provider: ${provider}`);
       skipped++;
       continue;
@@ -446,7 +506,7 @@ export async function runKeysImportBw(opts: BwImportOptions = {}): Promise<void>
       continue;
     }
     try {
-      const ok = await setKeyForProvider(provider, key);
+      const ok = await setKeyForProvider(norm, key);
       if (!ok) {
         console.warn(`! ${provider} — OS keychain unavailable (keytar or secret service backend).`);
         console.warn(
@@ -686,21 +746,41 @@ export async function runChatImportBw(opts: ChatBwImportOptions = {}): Promise<v
  */
 export async function runKeysLogin(provider: string): Promise<void> {
   const oauthIds = await getOAuthProviderIds();
-  if (!oauthIds.includes(provider)) {
-    console.error(`OAuth login not supported for '${provider}'. Supported: ${oauthIds.join(", ")}`);
+  const norm = provider.toLowerCase() === "agy" ? "google" : provider;
+  if (!oauthIds.includes(norm)) {
+    const supported = oauthIds.map((id) => (id === "google" ? "google (or agy)" : id)).join(", ");
+    console.error(`OAuth login not supported for '${provider}'. Supported: ${supported}`);
     process.exit(1);
   }
 
   const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
   const { saveTokens } = await import("../providers/auth/token-store.js");
 
-  const cfg = await getOAuthProviderConfig(provider as ProviderId);
+  const cfg = await getOAuthProviderConfig(norm as ProviderId);
   if (!cfg) {
     console.error(`OAuth provider '${provider}' is registered but failed to load.`);
     process.exit(1);
   }
 
   const name = cfg.displayName;
+
+  // Special handling for google: prefer importing/reusing token from agy local config
+  // (~/.gemini/oauth_creds.json) so existing agy login "just works" without browser.
+  if (provider === "google") {
+    const { loadAgyTokensWithRefresh } = await import("../providers/auth/gemini-oauth.js");
+    const existing = await loadAgyTokensWithRefresh();
+    if (existing?.accessToken) {
+      console.log(`Found existing agy token for ${existing.email || "(no email)"}.`);
+      console.log("Reusing it (refreshed if near expiry). No browser needed.");
+      const expiry = new Date(existing.expiresAt).toLocaleString();
+      const isExpired = Date.now() > existing.expiresAt;
+      console.log(`Token expires: ${expiry}${isExpired ? " (was expired, refresh attempted)" : ""}`);
+      console.log("Run 'muonroi-cli keys list' to verify.");
+      return;
+    }
+    // No existing agy token — fall through to normal browser flow (using agy client)
+  }
+
   console.log(`Logging in to ${name} via OAuth...`);
   console.log("A browser window will open. Complete the sign-in to continue.");
 
@@ -716,13 +796,13 @@ export async function runKeysLogin(provider: string): Promise<void> {
         console.log(`  User code: ${codeOrUrl}`);
       }
       console.log("\n  Waiting for authorization...");
-      if (provider === "xai") {
+      if (norm === "xai") {
         console.log("  (If the xAI page shows a code instead of redirecting, paste it when the terminal prompts.)");
       }
     },
   });
 
-  await saveTokens(provider, tokens);
+  await saveTokens(norm, tokens);
 
   const emailDisplay = tokens.email ? ` (${tokens.email})` : "";
   const expiry = new Date(tokens.expiresAt).toLocaleString();
@@ -738,26 +818,28 @@ export async function runKeysLogin(provider: string): Promise<void> {
  */
 export async function runKeysLogout(provider: string): Promise<void> {
   const oauthIds = await getOAuthProviderIds();
-  if (!oauthIds.includes(provider)) {
-    console.error(`OAuth logout not supported for '${provider}'. Supported: ${oauthIds.join(", ")}`);
+  const norm = provider.toLowerCase() === "agy" ? "google" : provider;
+  if (!oauthIds.includes(norm)) {
+    const supported = oauthIds.map((id) => (id === "google" ? "google (or agy)" : id)).join(", ");
+    console.error(`OAuth logout not supported for '${provider}'. Supported: ${supported}`);
     process.exit(1);
   }
 
   const { getOAuthProviderConfig } = await import("../providers/auth/registry.js");
   const { loadTokens, deleteTokens } = await import("../providers/auth/token-store.js");
 
-  const tokens = await loadTokens(provider);
+  const tokens = await loadTokens(norm);
   if (!tokens) {
     console.log(`No OAuth tokens stored for '${provider}'.`);
     return;
   }
 
-  const cfg = await getOAuthProviderConfig(provider as ProviderId);
+  const cfg = await getOAuthProviderConfig(norm as ProviderId);
   if (cfg) {
     await cfg.provider.revoke(tokens); // best-effort
   }
 
-  await deleteTokens(provider);
+  await deleteTokens(norm);
   const name = cfg?.displayName ?? provider;
   console.log(`Logged out of ${name}. OAuth tokens revoked and deleted.`);
 }
