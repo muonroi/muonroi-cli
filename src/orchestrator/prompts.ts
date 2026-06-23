@@ -20,7 +20,7 @@ import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 // monotonically growing billed input. Env override allowed range 10..200.
 function readMaxToolRoundsFromEnv(): number {
   const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 12;
+  if (!raw) return 8;
   const n = Number(raw);
   if (!Number.isFinite(n)) return 50;
   return Math.max(10, Math.min(200, Math.floor(n)));
@@ -289,7 +289,18 @@ IMPORTANT:
 - Commit your own work as you go (in any git repo, without being asked): use the git_commit tool — YOU write the commit message — the moment a cohesive, working chunk passes its checks, and after EACH step of a multi-step plan. Prefer several small, logically-scoped commits with clear messages (describe WHAT changed) over one catch-all at the end. git_commit stages only the files you wrote, excludes secrets/artifacts, and appends the "Coding by - Muonroi-CLI" attribution for you. (Any commit you instead make by hand via bash must still end with that attribution line, verbatim, on its own final line.)
 - After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
 
-Be direct. Execute, don't just describe. Show results, not plans.`,
+Be direct. Execute, don't just describe. Show results, not plans.
+
+TOKEN BUDGET:
+- Each tool round sends ~17K system prompt tokens + accumulated tool results to the model.
+- Task(explore) / task(general) isolates context in a sub-agent — much cheaper than 5+ top-level rounds.
+- Consider: 1-2 rounds → direct; 3-5 rounds → consider task(explore); >5 rounds → should use task(explore).
+
+SELF-LIMIT:
+- When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
+- Batch independent commands into one bash call (a; b; c) rather than sequential single calls.
+- Read only specific file sections (start_line/end_line) instead of whole files.
+- When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
 
   plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
 
@@ -381,6 +392,12 @@ export interface SystemPromptOptions {
    * PIL Layer 1 (intentKind === "chitchat").
    */
   chitchat?: boolean;
+  /**
+   * When true (sub-agent), skip CUSTOM INSTRUCTIONS, skills catalog, and
+   * native capabilities — sub-agents don't need project-level instructions
+   * and can't run the full toolset anyway. Cuts ~6K tokens per sub-agent turn.
+   */
+  subAgent?: boolean;
 }
 
 /**
@@ -477,6 +494,11 @@ function computeStaticPrefix(
   const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
   if (promptStyle !== "anthropic") {
     modePrompt = stripToolsSection(modePrompt) + NON_ANTHROPIC_TOOL_PREAMBLE;
+  }
+  // Agent mode: strip tool descriptions for tools rarely needed in coding tasks
+  // to reduce system-prompt bloat. The tools remain available via API.
+  if (mode === "agent") {
+    modePrompt = modePrompt.replace(/\n- (wallet_|paid_|fetch_payment|schedule_|generate_|computer_|search_x).*/g, "");
   }
 
   const contractSection = buildContractSection({ chitchat });
