@@ -229,6 +229,7 @@ export interface ChatEntry {
   toolResult?: ToolResult;
   toolGroup?: ToolGroup;
   structuredResponse?: StructuredResponse;
+  reasoning?: string;
 }
 
 export interface PaymentPrecheck {
