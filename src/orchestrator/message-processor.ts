@@ -114,7 +114,7 @@ import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
-import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
+import { decideStepRouting, eeSamrGuidance, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
 import {
   getNextMessageSequence,
@@ -1061,7 +1061,31 @@ export class MessageProcessor {
     // SAMR: Step-Aware Model Routing — downgrade to fast model for tool-execution
     // steps after the initial reasoning step. The premium model decides WHAT to do;
     // a cheaper model handles the mechanical "read results, call more tools" loop.
-    const stepRouterCfg = getStepRouterConfig();
+    //
+    // EE-guided override: when SAMR is disabled in user config, ask the EE brain
+    // whether this task benefits from a reasoning/execution split. The EE may
+    // enable SAMR on-the-fly for complex tasks, then the static config takes
+    // over on the next turn. Falls back to static config on timeout/error.
+    let stepRouterCfg = getStepRouterConfig();
+    if (!stepRouterCfg.enabled) {
+      const pilCtxForSamr = pilCtx; // captured at line 649
+      const eeGuidance = await eeSamrGuidance({
+        userMessage,
+        taskType: pilCtxForSamr.taskType,
+        taskConfidence: pilCtxForSamr.confidence,
+        complexitySize: pilCtxForSamr.complexitySize?.size,
+        taskComplexity: (pilCtxForSamr as { _intentTrace?: { complexity?: string } })._intentTrace?.complexity,
+      });
+      if (eeGuidance.overrideConfig) {
+        stepRouterCfg = eeGuidance.overrideConfig;
+        _debugSteps.push({
+          name: "EESamrGuidance",
+          duration_ms: 0,
+          input_summary: "",
+          output_summary: eeGuidance.reason,
+        });
+      }
+    }
     const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg);
     let stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
     const phase2Runtime = stepRouterDecision.phase2ModelId
