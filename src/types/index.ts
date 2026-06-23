@@ -262,6 +262,10 @@ export interface CouncilQuestionOption {
   description?: string;
   value: string;
   kind: CouncilOptionKind;
+  /** Model-driven: if true, picking this cancels the whole interaction (discovery) */
+  isCancel?: boolean;
+  /** Model-driven: if true, picking this triggers a re-interview round (discovery) */
+  isAdjust?: boolean;
 }
 
 export interface CouncilQuestionData {

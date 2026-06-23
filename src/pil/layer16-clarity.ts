@@ -1,139 +1,94 @@
 /**
  * src/pil/layer16-clarity.ts
  *
- * Phase 2 (2026-06-16): `detectClarityGaps` and its keyword option-builders
- * (`buildOutcomeOptions` / `buildScopeOptions` / `pickBest*` / recency ranking)
- * were removed. The configured chat model now decides every clarification —
- * its questions, options, recommended default, and reason — in
- * `proposeModelGaps` (`discovery.ts`). There is no regex gap synthesis.
+ * Phase 3 (2026-06-23): the model now generates full ModelCard[] directly
+ * (questions, options, kinds, cancel/adjust markers) — no ClarityGap
+ * intermediate, no sentinel strings, no hardcoded "Type something" option.
  *
- * What remains here is gap RENDERING + RESOLUTION (consumed by the model path):
- *   - the "provide my own details" no-answer sentinel,
- *   - `buildInterviewQuestion` (ClarityGap → askcard),
- *   - `resolveGapsNonInteractive` (default-answer resolution when headless),
- *   - `getAutofilledOutcome` / `getDefaultOutcome` (outcome-label polish).
+ * What remains here is thin RENDERING + HEADLESS RESOLUTION:
+ *   - `modelCardToQuestion` (ModelCard → CouncilQuestionData)
+ *   - `resolveGapsNonInteractive` (default-answer resolution when headless)
  */
 import type { CouncilQuestionData, CouncilQuestionOption } from "../types/index.js";
-import { hasOperationalScope } from "./clarity-gate.js";
-import type { ClarifiedIntent, ClarityGap, ProjectContext } from "./discovery-types.js";
-import type { TaskType } from "./types.js";
+import type { ClarifiedIntent, ModelCard, ProjectContext } from "./discovery-types.js";
 
 /**
- * The default "no specific answer" meta-option offered for a model-generated
- * clarification when the model supplies no concrete recommendations. Selecting
- * it means "use your judgment / I have nothing specific to add" — it is a
- * sentinel, NOT a real outcome, so it must never surface verbatim as the
- * resolved outcome. Centralised here so discovery.ts (which presents the
- * option) and the outcome-resolution paths agree on the exact strings.
+ * Map a model-designed card into a CouncilQuestionData for TUI rendering.
+ * The model controls every field; the CLI only assigns questionId and maps
+ * the card options 1:1 into CouncilQuestionOptions (keeping isCancel/isAdjust).
  */
-export const PROVIDE_OWN_DETAILS_OPTION_EN = "I will provide my own details / constraints";
-export const PROVIDE_OWN_DETAILS_OPTION_VI = "Tôi sẽ trả lời tự do / cung cấp chi tiết cần thiết";
-
-/** True when an answer is the "I'll provide my own details" meta-option (any locale). */
-export function isProvideOwnDetailsSentinel(answer: string | null | undefined): boolean {
-  if (!answer) return false;
-  const norm = answer.trim().toLowerCase();
-  return norm === PROVIDE_OWN_DETAILS_OPTION_EN.toLowerCase() || norm === PROVIDE_OWN_DETAILS_OPTION_VI.toLowerCase();
-}
-
-export function buildInterviewQuestion(gap: ClarityGap, questionId: string): CouncilQuestionData {
-  const options: CouncilQuestionOption[] = gap.options.map((label) => ({
-    label,
-    value: label,
-    kind: "choice" as const,
+export function modelCardToQuestion(card: ModelCard, questionId: string): CouncilQuestionData {
+  const options: CouncilQuestionOption[] = card.options.map((o) => ({
+    label: o.label,
+    value: o.label,
+    kind: o.kind,
+    description: o.description,
+    isCancel: o.isCancel,
+    isAdjust: o.isAdjust,
   }));
-  options.push({
-    label: "Type something",
-    description: "Enter a custom answer",
-    value: "",
-    kind: "freetext" as const,
-  });
 
   return {
     questionId,
-    question: gap.suggestedQuestion,
-    context: gap.description,
-    isRequired: false,
-    phase: "pil-interview" as CouncilQuestionData["phase"],
+    question: card.question,
+    context: card.context,
+    isRequired: true,
+    phase: "pil-interview",
     options,
-    defaultIndex: gap.defaultIndex,
+    defaultIndex: card.defaultIndex ?? 0,
   };
 }
 
+/**
+ * Resolve model cards with best-effort defaults when there is no interactive
+ * handler (headless mode). Picks the default option for each card.
+ */
 export function resolveGapsNonInteractive(
-  gaps: ClarityGap[],
+  cards: ModelCard[],
   projectContext: ProjectContext,
   raw: string,
 ): ClarifiedIntent {
-  let outcome = "";
-  let scope: string[] = [];
-  const constraints: string[] = [];
-
-  for (const gap of gaps) {
-    const defaultAnswer = gap.options[gap.defaultIndex] ?? gap.options[0] ?? "";
-    switch (gap.dimension) {
-      case "outcome":
-        // The "provide my own details" meta-option is a no-answer sentinel —
-        // leave outcome empty so the inferred/default outcome is used downstream.
-        outcome = isProvideOwnDetailsSentinel(defaultAnswer) ? "" : defaultAnswer;
-        break;
-      case "scope": {
-        const relevant = projectContext.relevantModules.map((m) => m.path);
-        scope = relevant.length > 0 ? relevant : [defaultAnswer];
-        break;
-      }
-      case "constraint":
-        constraints.push(defaultAnswer);
-        break;
+  const answers: string[] = [];
+  for (const card of cards) {
+    const defaultIdx = card.defaultIndex ?? 0;
+    const opt = card.options[defaultIdx];
+    if (opt?.kind === "freetext") {
+      // Freetext can't be auto-answered; fall back to raw-derived outcome
+      answers.push("");
+    } else {
+      answers.push(opt?.label ?? "");
     }
   }
 
-  if (!outcome) outcome = getDefaultOutcome(raw);
-  if (scope.length === 0) {
-    scope = projectContext.relevantModules.map((m) => m.path);
-    if (scope.length === 0) scope = ["project root"];
-  }
+  const outcome = answers.find((a) => a.length > 0) ?? `Complete: ${raw.slice(0, 80)}`;
+  const scope =
+    projectContext.relevantModules.length > 0 ? projectContext.relevantModules.map((m) => m.path) : ["project root"];
 
   return {
     outcome,
     scope,
-    constraints,
-    gaps: gaps.map((g) => ({ ...g, answer: null })),
+    constraints: [],
+    gaps: [],
   };
 }
 
-const DEFAULT_OUTCOMES: Partial<Record<TaskType, string>> = {
-  analyze: "Detailed analysis with concrete improvement recommendations",
-  plan: "Step-by-step plan",
-  documentation: "Docs updated",
-  debug: "Error resolved, expected behavior restored",
-};
-
-export function getAutofilledOutcome(taskType: TaskType | null, raw?: string): string | null {
-  if (!taskType || !raw) return null;
-  const lower = raw.toLowerCase();
-  const isNativeMeta = /đánh giá|phân tích|cải thiện|fix|native|agent.*inside|cli.*bên trong|phỏng vấn|discovery/i.test(
-    lower,
-  );
-  if (isNativeMeta) {
-    // Force good outcome for self-review / native meta prompts regardless of L1 taskType (analyze/debug)
-    // Prevents generic "Local path...", "In prompts/ directory...", "Complete the task..." in [Discovery]
-    return "Native self-assessment of the CLI with specific, actionable code fixes proposed and verified";
+/**
+ * Get a default outcome label for well-known task types when no outcome
+ * was voiced by the user and no card provided one.
+ */
+export function getDefaultOutcome(taskType: string | null, raw?: string): string {
+  if (raw) {
+    const lower = raw.toLowerCase();
+    const isNativeMeta =
+      /đánh giá|phân tích|cải thiện|fix|native|agent.*inside|cli.*bên trong|phỏng vấn|discovery/i.test(lower);
+    if (isNativeMeta) {
+      return "Native self-assessment of the CLI with specific, actionable improvements";
+    }
   }
-  // Operational debug tasks (CI/build/deploy) have a stronger default outcome.
-  if (taskType === "debug" && hasOperationalScope(raw)) {
-    return "Pipeline green, all checks passing";
-  }
-  return DEFAULT_OUTCOMES[taskType] ?? null;
-}
-
-function getDefaultOutcome(raw: string): string {
-  const lower = raw.toLowerCase();
-  const isNativeMeta = /đánh giá|phân tích|cải thiện|fix|native|agent.*inside|cli.*bên trong|phỏng vấn|discovery/i.test(
-    lower,
-  );
-  if (isNativeMeta) {
-    return "Native self-assessment of muonroi-cli with concrete improvements identified and implemented";
-  }
-  return `Complete the task described in: "${raw.slice(0, 80)}"`;
+  const map: Partial<Record<string, string>> = {
+    analyze: "Detailed analysis with concrete improvement recommendations",
+    plan: "Step-by-step plan",
+    documentation: "Docs updated",
+    debug: "Error resolved, expected behavior restored",
+  };
+  return map[taskType ?? ""] ?? `Complete: ${(raw ?? "").slice(0, 80)}`;
 }
