@@ -136,6 +136,7 @@ import {
   generateCompactionSummary,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
+  proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
 import { CouncilManager } from "./council-manager.js";
@@ -1500,11 +1501,27 @@ export class Agent {
   ): Promise<boolean> {
     if (!this.session) return false;
 
+    // Phase 1: ask the compaction proposer model whether to compact and what to keep/drop.
+    // Only compact if the model says yes. On error/skip, fall back to heuristic.
+    const compactModelId = this._resolveCompactModel();
+    const proposal = await proposeCompaction(provider, compactModelId, this.messages, signal);
+
+    if (proposal !== null) {
+      // Model decided — compact only if model says shouldCompact
+      if (force) {
+        // force always proceeds; the proposer's actions still guide what to keep/drop
+      } else if (!proposal.shouldCompact) {
+        return false;
+      }
+    } else {
+      // Proposer unavailable — fall back to heuristic token-threshold check
+      if (!force && !shouldCompactContext(estimateConversationTokens(system, this.messages), contextWindow, settings)) {
+        return false;
+      }
+    }
+
     const preparation = prepareCompaction(this.messages, system, settings);
     if (!preparation) return false;
-    if (!force && !shouldCompactContext(preparation.tokensBefore, contextWindow, settings)) {
-      return false;
-    }
 
     const trigger = force ? "manual" : "auto";
 
@@ -1536,7 +1553,6 @@ export class Agent {
 
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
-    const compactModelId = this._resolveCompactModel();
     const compactStartedAt = Date.now();
     const { summary, usage: compactUsage } = await generateCompactionSummary(
       provider,
