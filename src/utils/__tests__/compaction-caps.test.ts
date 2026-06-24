@@ -107,12 +107,12 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
       }
     });
 
-    it("getTopLevelToolBudgetChars: default 400_000 when env unset and no user override", () => {
+    it("getTopLevelToolBudgetChars: default 200_000 when env unset and no user override", () => {
       const override = loadUserSettings().topLevelToolBudgetChars;
       if (typeof override === "number" && override >= 50_000 && override <= 1_500_000) {
         expect(getTopLevelToolBudgetChars()).toBe(Math.floor(override));
       } else {
-        expect(getTopLevelToolBudgetChars()).toBe(400_000);
+        expect(getTopLevelToolBudgetChars()).toBe(200_000);
       }
     });
 
