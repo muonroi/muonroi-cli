@@ -2155,7 +2155,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         closeCurrentToolGroup();
       }
       contentAccRef.current += delta;
-      
+
       const now = Date.now();
       if (now - lastFlushRef.current > 32) {
         flushContent();
@@ -2173,7 +2173,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
 
       activeTurn.latestAssistantText = fullContent;
       contentAccRef.current = getUnflushedTelegramAssistantContent(fullContent, activeTurn.flushedAssistantChars);
-      
+
       const now = Date.now();
       if (now - lastFlushRef.current > 32) {
         flushContent();
@@ -3168,6 +3168,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 break;
               case "council_question":
                 if (chunk.councilQuestion) {
+                  process.stderr.write(`[app.tsx] RECEIVED council_question: ${chunk.councilQuestion.questionId}\n`);
                   const cq = chunk.councilQuestion;
                   // Render the card via dedicated state — do NOT bleed text into
                   // the assistant stream (that caused the freetext-soup look).
