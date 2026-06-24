@@ -222,7 +222,7 @@ const checks = [
 
 let allOk = true;
 for (const [name, ok] of checks) {
-  console.log(ok ? "OK: " + name : "FAIL: " + name);
+  console.log(ok ? `OK: ${name}` : `FAIL: ${name}`);
   if (!ok) allOk = false;
 }
 

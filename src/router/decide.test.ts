@@ -51,8 +51,8 @@ describe("decide()", () => {
 
   beforeAll(async () => {
     await loadCatalog();
-    const models = getTestModels();
-    const providers = getTestProviders();
+    const _models = getTestModels();
+    const _providers = getTestProviders();
     BASE_OPTS = {
       tenantId: "default",
       cwd: "/tmp",

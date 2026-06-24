@@ -32,7 +32,7 @@ function bail(code) {
   process.exit(code);
 }
 
-if (process.env["SELF_QA_POST_EDIT"] === "0") bail(0);
+if (process.env.SELF_QA_POST_EDIT === "0") bail(0);
 
 let payload;
 try {

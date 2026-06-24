@@ -188,8 +188,8 @@ export async function createLLMBrain(opts: LLMBrainOptions): Promise<AgenticBrai
   //    flows without reasoning prose leaking through.
   // biome-ignore lint/suspicious/noExplicitAny: global flag is AI SDK's docs convention
   (globalThis as any).AI_SDK_LOG_WARNINGS = false;
-  if (process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] === undefined) {
-    process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"] = "1";
+  if (process.env.MUONROI_DEEPSEEK_DISABLE_THINKING === undefined) {
+    process.env.MUONROI_DEEPSEEK_DISABLE_THINKING = "1";
   }
 
   // Resolve the catalog before any model lookup — resolveModelRuntime needs it
@@ -342,29 +342,29 @@ function extractJsonCandidates(text: string): string[] {
 function tryParseDecisionSlice(slice: string): AgenticDecision | null {
   try {
     const obj = JSON.parse(slice) as Record<string, unknown>;
-    if (typeof obj["action"] !== "string") return null;
-    const action = obj["action"];
-    const reason = typeof obj["reason"] === "string" ? obj["reason"] : "";
+    if (typeof obj.action !== "string") return null;
+    const action = obj.action;
+    const reason = typeof obj.reason === "string" ? obj.reason : "";
     switch (action) {
       case "type":
-        if (typeof obj["text"] === "string") return { action, text: obj["text"], reason };
+        if (typeof obj.text === "string") return { action, text: obj.text, reason };
         return null;
       case "press":
-        if (typeof obj["key"] === "string") return { action, key: obj["key"], reason };
+        if (typeof obj.key === "string") return { action, key: obj.key, reason };
         return null;
       case "wait_for": {
         const w: AgenticDecision = {
           action,
           reason,
-          timeoutMs: typeof obj["timeoutMs"] === "number" ? obj["timeoutMs"] : 5_000,
+          timeoutMs: typeof obj.timeoutMs === "number" ? obj.timeoutMs : 5_000,
         };
-        if (obj["idle"] === true) w.idle = true;
-        if (typeof obj["selector"] === "string") w.selector = obj["selector"];
-        if (typeof obj["event"] === "string") w.event = obj["event"];
+        if (obj.idle === true) w.idle = true;
+        if (typeof obj.selector === "string") w.selector = obj.selector;
+        if (typeof obj.event === "string") w.event = obj.event;
         return w;
       }
       case "done": {
-        const v = obj["verdict"];
+        const v = obj.verdict;
         if (v === "pass" || v === "fail" || v === "inconclusive") {
           return { action, verdict: v, reason };
         }
@@ -580,9 +580,9 @@ function wireDriver(inWrite: NodeJS.WritableStream, outRead: NodeJS.ReadableStre
   const splitter = createLineSplitter((line) => {
     try {
       const msg = JSON.parse(line) as Record<string, unknown>;
-      if (msg["mode"] === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
-      else if (msg["t"] === "idle") driver._ingest({ kind: "idle" });
-      else if (msg["t"] === "event") driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
+      if (msg.mode === "live") driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
+      else if (msg.t === "idle") driver._ingest({ kind: "idle" });
+      else if (msg.t === "event") driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
     } catch {}
   });
   outRead.on("data", (chunk: Buffer | string) => {

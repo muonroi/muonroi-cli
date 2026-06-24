@@ -138,7 +138,7 @@ describe("Council Edge Cases", () => {
   // planner is unavailable in the mock). Leader can still bump up to 8 via
   // extendRounds, but without that signal the default budget stops the loop.
   it("debate stops at leader-decided budget even if leader says continue", async () => {
-    let roundsSeen = 0;
+    let _roundsSeen = 0;
     const llm: CouncilLLM = {
       async generate(_modelId, system, _prompt, _max) {
         if (system.includes("evaluating whether")) {
@@ -159,7 +159,7 @@ describe("Council Edge Cases", () => {
           return '{"type":"decision","summary":"Forced stop","agreed":[],"tradeoffs":[],"recommendation":"A"}\n---READABLE---\n## Done';
         if (system.includes("Summarize")) return "- Still debating";
         if (system.includes("continuing a discussion")) {
-          roundsSeen++;
+          _roundsSeen++;
           return "I still disagree. Let me explain further...";
         }
         return "My analysis...";
@@ -234,7 +234,7 @@ describe("Council Edge Cases", () => {
         if (system.includes("Summarize")) return "- Summary";
         return "My analysis based on what we know...";
       },
-      async research(_modelId, topic) {
+      async research(_modelId, _topic) {
         researchCalled = true;
         return `## Research Findings\n- Found JWT impl in src/auth/jwt.ts\n- Uses RS256 with 1h expiry\n## Gaps\n- None`;
       },

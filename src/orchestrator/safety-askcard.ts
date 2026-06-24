@@ -53,7 +53,7 @@ const CATEGORY_LABELS: Record<SafetyBlockKind, string> = {
  */
 export function planSafetyAskcard(info: SafetyBlockInfo): SafetyAskcardLayout {
   const kindLabel = CATEGORY_LABELS[info.kind];
-  const cmdPreview = info.blockedItem.length > 120 ? info.blockedItem.slice(0, 117) + "..." : info.blockedItem;
+  const cmdPreview = info.blockedItem.length > 120 ? `${info.blockedItem.slice(0, 117)}...` : info.blockedItem;
 
   const question = `⚠️  ${kindLabel}: Cho phép thực thi?`;
 

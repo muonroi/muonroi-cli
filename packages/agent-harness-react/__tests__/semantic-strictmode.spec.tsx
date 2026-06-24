@@ -11,8 +11,8 @@
  */
 import { createSemanticRegistry } from "@muonroi/agent-harness-core/registry";
 import { act, cleanup, render } from "@testing-library/react";
-import React, { lazy, Suspense, useState } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import React, { Suspense } from "react";
+import { afterEach, describe, expect, it } from "vitest";
 import { Semantic, SemanticProvider } from "../src/semantic.js";
 
 afterEach(() => {

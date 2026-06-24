@@ -53,7 +53,7 @@ describe("ee-tools", () => {
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
-    const out = rawTextOf(await handlers["ee_query"]!({ query: "redactor" }));
+    const out = rawTextOf(await handlers.ee_query!({ query: "redactor" }));
     expect(out.isError).toBeFalsy();
     expect(out.text).toContain("recall:redactor");
     expect(out.text).toContain("[id:abc col:experience-behavioral]"); // handle preserved for exp-feedback
@@ -68,7 +68,7 @@ describe("ee-tools", () => {
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
-    const out = rawTextOf(await handlers["ee_query"]!({ query: "wide", maxChars: 6000 }));
+    const out = rawTextOf(await handlers.ee_query!({ query: "wide", maxChars: 6000 }));
     expect(out.isError).toBeFalsy();
     expect(out.text.length).toBeLessThan(7000); // capped, not the full 50k dump
     expect(out.text).toContain("truncated");
@@ -86,7 +86,7 @@ describe("ee-tools", () => {
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
-    await handlers["ee_query"]!({ query: "scope filter", project: "storyflow" });
+    await handlers.ee_query!({ query: "scope filter", project: "storyflow" });
     expect(seenProject).toBe("storyflow");
   });
 
@@ -94,7 +94,7 @@ describe("ee-tools", () => {
     const handlers = collectTools((s) =>
       registerEETools(s, { recall: async () => null, health: async () => ({ ok: false, status: 0 }) }),
     );
-    const out = textOf(await handlers["ee_query"]!({ query: "x" })) as { json: { error?: string }; isError?: boolean };
+    const out = textOf(await handlers.ee_query!({ query: "x" })) as { json: { error?: string }; isError?: boolean };
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("ee_unavailable");
   });
@@ -103,7 +103,7 @@ describe("ee-tools", () => {
     const handlers = collectTools((s) =>
       registerEETools(s, { recall: async () => null, health: async () => ({ ok: true, status: 200 }) }),
     );
-    const out = textOf(await handlers["ee_health"]!({})) as { json: { ok: boolean; status: number } };
+    const out = textOf(await handlers.ee_health!({})) as { json: { ok: boolean; status: number } };
     expect(out.json).toEqual({ ok: true, status: 200 });
   });
 
@@ -116,7 +116,7 @@ describe("ee-tools", () => {
         },
       }),
     );
-    const out = textOf(await handlers["ee_health"]!({})) as { json: { error?: string }; isError?: boolean };
+    const out = textOf(await handlers.ee_health!({})) as { json: { error?: string }; isError?: boolean };
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("ee_unavailable");
   });
@@ -138,7 +138,7 @@ describe("ee-tools", () => {
       }),
     );
     const out = textOf(
-      await handlers["ee_feedback"]!({ id: "abc", collection: "experience-behavioral", verdict: "followed" }),
+      await handlers.ee_feedback!({ id: "abc", collection: "experience-behavioral", verdict: "followed" }),
     ) as { json: { ok: boolean; pendingRemaining: number }; isError?: boolean };
     expect(out.isError).toBeFalsy();
     expect(seen).toEqual({ id: "abc", collection: "experience-behavioral", verdict: "followed", reason: undefined });
@@ -149,9 +149,10 @@ describe("ee-tools", () => {
 
   it("ee_feedback requires a reason for verdict=noise", async () => {
     const handlers = collectTools((s) => registerEETools(s, { feedback: async () => ({ ok: true }) }));
-    const out = textOf(
-      await handlers["ee_feedback"]!({ id: "x", collection: "experience-selfqa", verdict: "noise" }),
-    ) as { json: { error?: string }; isError?: boolean };
+    const out = textOf(await handlers.ee_feedback!({ id: "x", collection: "experience-selfqa", verdict: "noise" })) as {
+      json: { error?: string };
+      isError?: boolean;
+    };
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("reason_required");
   });
@@ -163,7 +164,7 @@ describe("ee-tools", () => {
       registerEETools(s, { ledger, feedback: async () => ({ ok: false, error: "HTTP 500" }) }),
     );
     const out = textOf(
-      await handlers["ee_feedback"]!({ id: "abc", collection: "experience-behavioral", verdict: "ignored" }),
+      await handlers.ee_feedback!({ id: "abc", collection: "experience-behavioral", verdict: "ignored" }),
     ) as { json: { error?: string; message?: string }; isError?: boolean };
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("feedback_failed");
@@ -184,11 +185,11 @@ describe("ee-tools", () => {
       }),
     );
     // First recall — no prior debt, so no gate prefix.
-    const first = rawTextOf(await handlers["ee_query"]!({ query: "first" }));
+    const first = rawTextOf(await handlers.ee_query!({ query: "first" }));
     expect(first.text).not.toContain("still unrated");
     expect(ledger.pendingCount()).toBe(1);
     // Second recall — the prior id1 is still unrated → soft prefix, but recall still returned.
-    const second = rawTextOf(await handlers["ee_query"]!({ query: "second" }));
+    const second = rawTextOf(await handlers.ee_query!({ query: "second" }));
     expect(second.isError).toBeFalsy();
     expect(second.text).toContain("still unrated");
     expect(second.text).toContain("id1");
@@ -217,7 +218,7 @@ describe("ee-tools", () => {
         },
       }),
     );
-    const out = textOf(await handlers["ee_query"]!({ query: "blocked" })) as {
+    const out = textOf(await handlers.ee_query!({ query: "blocked" })) as {
       json: { error?: string; message?: string };
       isError?: boolean;
     };
@@ -241,8 +242,8 @@ describe("ee-tools", () => {
         health: async () => ({ ok: true, status: 200 }),
       }),
     );
-    await handlers["ee_query"]!({ query: "one" });
-    await handlers["ee_query"]!({ query: "two" });
+    await handlers.ee_query!({ query: "one" });
+    await handlers.ee_query!({ query: "two" });
     expect(ledger.pendingCount()).toBe(0); // nothing stamped when gate is off
   });
 
@@ -259,7 +260,7 @@ describe("ee-tools", () => {
       }),
     );
     const out = textOf(
-      await handlers["ee_write"]!({
+      await handlers.ee_write!({
         lesson: "always call flushFrob() before reindex or reads go stale",
         title: "reindex pitfall",
         project: "experience-engine",
@@ -278,7 +279,7 @@ describe("ee-tools", () => {
     const handlers = collectTools((s) =>
       registerEETools(s, { write: async () => ({ ok: false, error: "import-memory HTTP 500" }) }),
     );
-    const out = textOf(await handlers["ee_write"]!({ lesson: "a sufficiently long lesson body here" })) as {
+    const out = textOf(await handlers.ee_write!({ lesson: "a sufficiently long lesson body here" })) as {
       json: { error?: string };
       isError?: boolean;
     };

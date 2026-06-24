@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runCouncil } from "../../src/council/index.js";
 import type { CouncilLLM } from "../../src/council/types.js";
 import type { StreamChunk } from "../../src/types/index.js";
@@ -61,7 +61,7 @@ function createMockLLM(responses: Record<string, string>): CouncilLLM {
         "## Research Findings\n- Found relevant code in src/foo.ts\n## Key Evidence\n- Function bar() handles this\n## Gaps\n- None"
       );
     },
-    async debate(modelId: string, system: string, prompt: string) {
+    async debate(_modelId: string, system: string, prompt: string) {
       // Route debate calls through `generate` so the same keyword-based
       // response table drives them (e.g. "continuing a discussion").
       const text = await (async () => {
@@ -161,7 +161,7 @@ function getPhases(chunks: StreamChunk[]): StreamChunk[] {
   return chunks.filter((c) => c.type === "council_phase");
 }
 
-function hasPhaseKind(chunks: StreamChunk[], kind: string): boolean {
+function _hasPhaseKind(chunks: StreamChunk[], kind: string): boolean {
   return getPhases(chunks).some((c) => c.councilPhase?.kind === kind);
 }
 
@@ -184,7 +184,7 @@ vi.mock("../../src/ee/council-bridge.js", () => ({
   queryExperience: async () => ({ warnings: [] }),
 }));
 
-vi.mock("../../src/council/leader.js", async (importOriginal) => {
+vi.mock("../../src/council/leader.js", async (_importOriginal) => {
   return {
     resolveLeaderModel: () => "mock-premium",
     resolveLeaderModelDetailed: async () => ({ modelId: "mock-premium" }),
@@ -236,10 +236,10 @@ describe("Council E2E", () => {
         }),
       });
 
-      const questionAnswers = new Map<string, string>();
+      const _questionAnswers = new Map<string, string>();
       let questionCount = 0;
 
-      const respondToQuestion = (qid: string) => {
+      const respondToQuestion = (_qid: string) => {
         questionCount++;
         return Promise.resolve(
           questionCount === 1

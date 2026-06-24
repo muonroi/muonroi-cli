@@ -79,7 +79,7 @@ function buildFakeReadTool() {
       description: "Stub read for cost-leak-b3 verification.",
       inputSchema: z.object({ path: z.string() }),
       execute: async ({ path }: { path: string }) => {
-        return `READ:${path}\n` + "x".repeat(40_000);
+        return `READ:${path}\n${"x".repeat(40_000)}`;
       },
     }),
   };

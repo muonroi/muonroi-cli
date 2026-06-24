@@ -39,7 +39,7 @@ export function sanitizeContent(raw: string): string {
  * answer (e.g. `\frac{a}{b}`) is untouched. Fast-pathed: no work when absent.
  */
 export function stripStrayModelMacros(text: string): string {
-  if (!text || !text.includes("\\confidence")) return text;
+  if (!text?.includes("\\confidence")) return text;
   // Trailing form (most common) — also swallow the whitespace/newline before it.
   let out = text.replace(/\s*\\confidence\s*\{[^}]*\}\s*$/i, "");
   // Any remaining mid-text occurrences.

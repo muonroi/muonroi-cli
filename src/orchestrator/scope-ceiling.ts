@@ -95,7 +95,7 @@ export function parseBudgetOverride(raw: string): BudgetOverrideResult {
   if (!Number.isFinite(n) || n <= 0) return { override: undefined, cleanedPrompt: raw };
   // Strip the entire matched segment including its leading/trailing whitespace
   // and re-collapse the surrounding spaces.
-  const cleaned = (raw.slice(0, match.index ?? 0) + " " + raw.slice((match.index ?? 0) + match[0].length))
+  const cleaned = `${raw.slice(0, match.index ?? 0)} ${raw.slice((match.index ?? 0) + match[0].length)}`
     .replace(/\s+/g, " ")
     .trim();
   return { override: n, cleanedPrompt: cleaned };

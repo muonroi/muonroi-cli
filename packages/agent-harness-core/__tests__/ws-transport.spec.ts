@@ -8,7 +8,7 @@
  */
 
 import * as http from "node:http";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocketServer, WebSocket as WsClient } from "ws";
 import type { WsEnvelope } from "../src/transports/ws.js";
 import { createWebSocketTransport } from "../src/transports/ws.js";

@@ -1,5 +1,5 @@
 import { createSemanticRegistry } from "@muonroi/agent-harness-core/registry";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 // ---------------------------------------------------------------------------
 // SemanticRegistry — pure unit tests (no OpenTUI dependency)

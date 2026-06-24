@@ -16,7 +16,7 @@ const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME, ".experie
 let cfg = {};
 try {
   cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-} catch (err) {
+} catch (_err) {
   /* allow env-only */
 }
 const SERVER = process.env.SERVER_URL || cfg.serverBaseUrl;
@@ -35,7 +35,7 @@ function request(url, body) {
   const u = new URL(url);
   const opts = {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + TOKEN },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
   };
   const lib = u.protocol === "https:" ? https : http;
   return new Promise((resolve, reject) => {
@@ -45,7 +45,7 @@ function request(url, body) {
       res.on("end", () => {
         try {
           resolve({ status: res.statusCode, body: JSON.parse(s) });
-        } catch (err) {
+        } catch (_err) {
           resolve({ status: res.statusCode, raw: s.slice(0, 400) });
         }
       });
@@ -58,7 +58,7 @@ function request(url, body) {
 
 async function probe(label, body, expectedSlug) {
   console.log(`\n=== probe: ${label} (expect ${expectedSlug}) ===`);
-  const r = await request(SERVER + "/api/intercept", body);
+  const r = await request(`${SERVER}/api/intercept`, body);
   console.log("  status:", r.status);
   if (!r.body) {
     console.log("  raw:", r.raw);

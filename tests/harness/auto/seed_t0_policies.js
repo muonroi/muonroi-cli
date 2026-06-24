@@ -33,10 +33,7 @@ if (!EMBED_KEY || !QDRANT_KEY) {
 }
 
 function deterministicUuid(slug) {
-  const h = crypto
-    .createHash("sha1")
-    .update("seed-policy:" + slug)
-    .digest("hex");
+  const h = crypto.createHash("sha1").update(`seed-policy:${slug}`).digest("hex");
   return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
@@ -54,7 +51,7 @@ function request(url, body, headers, method = "POST") {
       res.on("end", () => {
         try {
           resolve(JSON.parse(s));
-        } catch (err) {
+        } catch (_err) {
           reject(new Error(`[${res.statusCode}] ${s.slice(0, 300)}`));
         }
       });
@@ -69,10 +66,10 @@ async function embed(text) {
   const r = await request(
     "https://api.siliconflow.com/v1/embeddings",
     { model: "Qwen/Qwen3-Embedding-0.6B", input: [text] },
-    { Authorization: "Bearer " + EMBED_KEY },
+    { Authorization: `Bearer ${EMBED_KEY}` },
   );
-  if (!r.data || !r.data[0] || !r.data[0].embedding) {
-    throw new Error("embedding failed: " + JSON.stringify(r).slice(0, 300));
+  if (!r.data?.[0]?.embedding) {
+    throw new Error(`embedding failed: ${JSON.stringify(r).slice(0, 300)}`);
   }
   return r.data[0].embedding;
 }
@@ -144,7 +141,7 @@ const ENTRIES = [
 
   process.stdout.write(`[upsert] ${points.length} points -> ${COLL}... `);
   const r = await request(
-    QDRANT + "/collections/" + COLL + "/points?wait=true",
+    `${QDRANT}/collections/${COLL}/points?wait=true`,
     { points },
     { "api-key": QDRANT_KEY },
     "PUT",

@@ -16,7 +16,7 @@
  *      the credentials file).
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthTokens } from "./types.js";

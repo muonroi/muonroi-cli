@@ -17,7 +17,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { withCouncilSignal } from "../index.js";
-import type { CouncilCallUsage, CouncilLLM } from "../types.js";
+import type { CouncilLLM } from "../types.js";
 
 /** Recording fake — captures the `signal` argument each method received. */
 function recordingLlm(generateReply: (prompt: string) => string = () => "{}") {

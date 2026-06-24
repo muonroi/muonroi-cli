@@ -8,7 +8,7 @@ export type Selector = {
   combinators: string[];
 };
 
-const FLAGS = new Set(["focus", "selected", "disabled"]);
+const _FLAGS = new Set(["focus", "selected", "disabled"]);
 
 export function parseSelector(input: string): Selector {
   // First, split by child combinator >>
@@ -156,7 +156,7 @@ function readField(node: UINode, key: string): unknown {
   if (key === "state") return node.state;
   if (key.startsWith("props.")) {
     const dot = key.slice("props.".length);
-    return (node.props ?? {})[dot];
+    return node.props?.[dot];
   }
   return undefined;
 }

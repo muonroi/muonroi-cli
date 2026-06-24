@@ -49,7 +49,7 @@ const AGY_CLIENT_ID =
  */
 const AGY_CLIENT_SECRET =
   process.env.MUONROI_GOOGLE_CLIENT_SECRET ??
-  "GOCSPX-" + Buffer.from("OVlRV3BGN1JEQzBRVGRqLVl4S013UjBadHNY", "base64").toString();
+  `GOCSPX-${Buffer.from("OVlRV3BGN1JEQzBRVGRqLVl4S013UjBadHNY", "base64").toString()}`;
 
 // Fallback pairs extracted from agy.exe (try in order until exchange succeeds)
 const AGY_OAUTH_PAIRS: Array<{ clientId: string; clientSecret: string }> = [
@@ -57,7 +57,7 @@ const AGY_OAUTH_PAIRS: Array<{ clientId: string; clientSecret: string }> = [
   // second pair from binary
   {
     clientId: ["884351071006060591-tmhssin2h21lcre235vtolojh4g403ep", "apps.googleusercontent.com"].join("."),
-    clientSecret: "GOCSPX-" + Buffer.from("SzU4RldSNDg2TGRMSjFtTEI4c1hDNHo2cURBZg==", "base64").toString(),
+    clientSecret: `GOCSPX-${Buffer.from("SzU4RldSNDg2TGRMSjFtTEI4c1hDNHo2cURBZg==", "base64").toString()}`,
   },
 ];
 
@@ -415,7 +415,7 @@ export const loadGeminiTokensWithRefresh = loadAgyTokensWithRefresh;
 // Approach C: custom OAuth client from settings
 // ---------------------------------------------------------------------------
 
-const GEMINI_SCOPES = [
+const _GEMINI_SCOPES = [
   "https://www.googleapis.com/auth/cloud-platform",
   "https://www.googleapis.com/auth/generativelanguage",
   "openid",

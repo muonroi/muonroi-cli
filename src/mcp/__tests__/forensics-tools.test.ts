@@ -40,7 +40,7 @@ describe("forensics-tools", () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => ["sess123"], collect: (id) => fakeSummary(id) }),
     );
-    const out = parse(await handlers["usage_forensics"]!({ prefix: "sess" }));
+    const out = parse(await handlers.usage_forensics!({ prefix: "sess" }));
     expect(out.isError).toBeFalsy();
     expect(out.json.sessionId).toBe("sess123");
     expect(out.json.peakSingleCallInput).toBe(100);
@@ -50,7 +50,7 @@ describe("forensics-tools", () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => [], collect: () => fakeSummary("x") }),
     );
-    const out = parse(await handlers["usage_forensics"]!({ prefix: "nope" }));
+    const out = parse(await handlers.usage_forensics!({ prefix: "nope" }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("not_found");
   });
@@ -59,7 +59,7 @@ describe("forensics-tools", () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => ["a1", "a2"], collect: () => fakeSummary("a1") }),
     );
-    const out = parse(await handlers["usage_forensics"]!({ prefix: "a" }));
+    const out = parse(await handlers.usage_forensics!({ prefix: "a" }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("ambiguous");
     expect(out.json.matches).toEqual(["a1", "a2"]);

@@ -189,7 +189,7 @@ function insertMissingCloseQuote(s: string): string {
     // `\\}` followed by a comma would get corrupted.
     const prefix = out.slice(0, m.index);
     if (!isInsideOpenString(prefix)) continue;
-    result += out.slice(lastIndex, m.index) + m[1] + '"' + m[2] + m[3];
+    result += `${out.slice(lastIndex, m.index) + m[1]}"${m[2]}${m[3]}`;
     lastIndex = m.index + m[0].length;
     matched = true;
   }

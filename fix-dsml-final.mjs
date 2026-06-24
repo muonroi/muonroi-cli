@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "fs";
 
-const BAR = String.fromCharCode(0xff5c);
+const _BAR = String.fromCharCode(0xff5c);
 let src = readFileSync("src/orchestrator/text-tool-call-detector.ts", "utf8");
 
 // Check each bar char on lines 108,176,177
