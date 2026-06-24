@@ -96,37 +96,6 @@ export async function executeEventHooks(
     if (input.hook_event_name === "PreToolUse") {
       const preInput = input as PreToolUseHookInput;
 
-      // Hard EE recall-feedback gate: block non-ee_feedback tools when there are
-      // pending unrated recalls. This enforces the core EE feedback loop at the
-      // tool layer — the agent must rate hints before proceeding with other work.
-      // ee_feedback is the only tool allowed through so the debt can be cleared.
-      try {
-        const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
-          "../ee/recall-ledger.js"
-        );
-        if (isRecallLedgerEnabled() && input.tool_name !== "ee_feedback") {
-          const pending = sessionRecallLedger.pending();
-          if (pending.length > 0) {
-            const reminder = formatPendingReminder(pending, { max: 10 });
-            return {
-              blocked: true,
-              blockingErrors: [
-                {
-                  command: "ee:recall-feedback-gate",
-                  stderr: `You have ${pending.length} unrated EE recall(s). Rate them with ee_feedback() before proceeding.`,
-                },
-              ],
-              preventContinuation: false,
-              additionalContexts: [`⚠️ Blocked by EE recall-feedback gate.\n${reminder}`],
-              results: [],
-              eeMatches: [],
-            };
-          }
-        }
-      } catch {
-        /* fail-open — never crash the hook path */
-      }
-
       // Capture EE render output so warnings surface in the agent content stream
       // (yielded as content above the tool action) rather than going to console.warn.
       // Also fan out to the previous sink so the active TUI render path (activeEeYield)
@@ -269,13 +238,35 @@ export async function executeEventHooks(
         confidence: m.confidence,
       }));
 
+      // Soft EE recall-feedback nudge: add non-blocking reminder when there are
+      // pending unrated hints. Unlike the previous hard gate, this doesn't block
+      // tool execution — it just adds context so the agent sees the reminder.
+      let recallReminder: string | null = null;
+      try {
+        const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
+          "../ee/recall-ledger.js"
+        );
+        if (isRecallLedgerEnabled()) {
+          const pending = sessionRecallLedger.pending();
+          if (pending.length > 0) {
+            recallReminder = `⚠️ ${pending.length} unrated EE recall(s) remaining.\n${formatPendingReminder(pending, { max: 5 })}`;
+          }
+        }
+      } catch {
+        /* fail-open */
+      }
+
       if (r.decision === "block") {
         return {
           blocked: true,
           blockingErrors: [{ command: "ee:intercept", stderr: r.reason ?? "ee-blocked" }],
           preventContinuation: true,
           stopReason: r.reason ?? "ee-blocked",
-          additionalContexts: [...capturedWarnings, ...(r.suggestions ?? [])],
+          additionalContexts: [
+            ...capturedWarnings,
+            ...(r.suggestions ?? []),
+            ...(recallReminder ? [recallReminder] : []),
+          ],
           decision: "block",
           results: [],
           eeMatches,
@@ -285,7 +276,11 @@ export async function executeEventHooks(
         blocked: false,
         blockingErrors: [],
         preventContinuation: false,
-        additionalContexts: [...capturedWarnings, ...(r.suggestions ?? [])],
+        additionalContexts: [
+          ...capturedWarnings,
+          ...(r.suggestions ?? []),
+          ...(recallReminder ? [recallReminder] : []),
+        ],
         decision: "approve",
         results: [],
         eeMatches,
