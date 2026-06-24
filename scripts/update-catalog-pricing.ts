@@ -54,7 +54,7 @@ interface CatalogResponse {
 }
 
 /** Source-of-truth provider IDs we expect */
-const ALL_PROVIDERS = new Set(["deepseek", "siliconflow", "openai", "google", "xai"]);
+const _ALL_PROVIDERS = new Set(["deepseek", "siliconflow", "openai", "google", "xai"]);
 
 // ── known pricing tables (fallback when no API available) ────────────────
 
@@ -111,7 +111,7 @@ function loadCatalog(): CatalogResponse {
 }
 
 function saveCatalog(catalog: CatalogResponse): void {
-  fs.writeFileSync(CATALOG_PATH, JSON.stringify(catalog, null, 2) + "\n", "utf-8");
+  fs.writeFileSync(CATALOG_PATH, `${JSON.stringify(catalog, null, 2)}\n`, "utf-8");
 }
 
 // ── API fetchers ─────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ async function fetchSiliconFlowPricing(): Promise<PriceOverride[]> {
   try {
     const key = process.env.SILICONFLOW_API_KEY ?? process.env.MUONROI_SILICONFLOW_API_KEY;
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (key) headers["Authorization"] = `Bearer ${key}`;
+    if (key) headers.Authorization = `Bearer ${key}`;
 
     const res = await fetch("https://api.siliconflow.com/v1/models", {
       headers,
@@ -192,7 +192,7 @@ async function fetchDeepSeekPricing(): Promise<PriceOverride[]> {
   try {
     const key = process.env.DEEPSEEK_API_KEY ?? process.env.MUONROI_DEEPSEEK_API_KEY;
     const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (key) headers["Authorization"] = `Bearer ${key}`;
+    if (key) headers.Authorization = `Bearer ${key}`;
 
     const res = await fetch("https://api.deepseek.com/v1/models", {
       headers,
@@ -302,7 +302,7 @@ function applyDiffs(catalog: CatalogResponse, diffs: DiffEntry[]): number {
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const shouldApply = args.includes("--apply");
-  const shouldDiff = args.includes("--diff") || !shouldApply; // default: diff-only
+  const _shouldDiff = args.includes("--diff") || !shouldApply; // default: diff-only
 
   console.log(`Catalog: ${CATALOG_PATH}`);
   console.log("");

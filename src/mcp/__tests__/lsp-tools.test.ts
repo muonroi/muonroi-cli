@@ -23,7 +23,7 @@ describe("lsp-tools", () => {
     const resp: LspToolResponse = { success: true, output: "def at file.ts:10" };
     const handlers = collectTools((s) => registerLspTools(s, { enabled: () => true, query: async () => resp }));
     const out = parse(
-      await handlers["lsp_query"]!({ operation: "goToDefinition", filePath: "a.ts", line: 1, character: 2 }),
+      await handlers.lsp_query!({ operation: "goToDefinition", filePath: "a.ts", line: 1, character: 2 }),
     );
     expect(out.isError).toBeFalsy();
     expect(out.json).toEqual(resp);
@@ -33,7 +33,7 @@ describe("lsp-tools", () => {
     const handlers = collectTools((s) =>
       registerLspTools(s, { enabled: () => false, query: async () => ({ success: true, output: "x" }) }),
     );
-    const out = parse(await handlers["lsp_query"]!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
+    const out = parse(await handlers.lsp_query!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("lsp_disabled");
   });
@@ -48,7 +48,7 @@ describe("lsp-tools", () => {
       }),
     );
     const out = parse(
-      await handlers["lsp_query"]!({ operation: "findReferences", filePath: "a.ts", line: 3, character: 4 }),
+      await handlers.lsp_query!({ operation: "findReferences", filePath: "a.ts", line: 3, character: 4 }),
     );
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("lsp_error");
@@ -64,7 +64,7 @@ describe("lsp-tools", () => {
         query: async () => ({ success: true, output: "x" }),
       }),
     );
-    const out = parse(await handlers["lsp_query"]!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
+    const out = parse(await handlers.lsp_query!({ operation: "hover", filePath: "a.ts", line: 0, character: 0 }));
     expect(out.isError).toBe(true);
     expect(out.json.error).toBe("lsp_error");
     expect(out.json.message).toContain("settings read failed");

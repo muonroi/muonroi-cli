@@ -32,7 +32,7 @@ function call(
       rej(new Error(`call timeout: ${method} (id=${id})`));
     }, timeoutMs);
     proc.stdout.on("data", onData);
-    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+    proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
   });
 }
 
@@ -43,7 +43,7 @@ async function initialize(proc: ChildProcessWithoutNullStreams): Promise<void> {
     capabilities: {},
     clientInfo: { name: "harness-test", version: "0.1.0" },
   });
-  proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+  proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
 }
 
 describe("MCP integration", () => {

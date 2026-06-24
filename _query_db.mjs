@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 
-const db = new Database(process.env.USERPROFILE + "/.muonroi-cli/muonroi.db");
+const db = new Database(`${process.env.USERPROFILE}/.muonroi-cli/muonroi.db`);
 
 // Get tables
 const tables = db.query("SELECT name FROM sqlite_master WHERE type='table'").all();

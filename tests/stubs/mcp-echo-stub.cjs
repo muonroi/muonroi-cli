@@ -8,7 +8,7 @@
 function sendResponse(obj) {
   const body = JSON.stringify(obj);
   // Content-Length framing per JSON-RPC stdio spec
-  process.stdout.write("Content-Length: " + body.length + "\r\n\r\n" + body);
+  process.stdout.write(`Content-Length: ${body.length}\r\n\r\n${body}`);
 }
 
 function handleMessage(msg) {

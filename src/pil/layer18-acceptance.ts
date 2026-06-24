@@ -16,7 +16,7 @@ export function buildAcceptanceCard(
   intentStatement: string,
   intent: ClarifiedIntent,
   feasibility: FeasibilityResult,
-  raw?: string,
+  _raw?: string,
 ): AcceptanceCardData {
   const warnings = [...feasibility.warnings];
 

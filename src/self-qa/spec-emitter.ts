@@ -110,10 +110,10 @@ function stepToCode(step: ScenarioStep): string {
       return `try { driver.focus(${JSON.stringify(step.selector)}); } catch { /* ambiguous */ }`;
     case "wait_for": {
       const obj: Record<string, unknown> = {};
-      if (step.idle) obj["idle"] = true;
-      if (step.selector) obj["selector"] = step.selector;
-      if (step.event) obj["event"] = step.event;
-      obj["timeoutMs"] = step.timeoutMs ?? 5_000;
+      if (step.idle) obj.idle = true;
+      if (step.selector) obj.selector = step.selector;
+      if (step.event) obj.event = step.event;
+      obj.timeoutMs = step.timeoutMs ?? 5_000;
       return `await driver.wait_for(${JSON.stringify(obj)});`;
     }
   }

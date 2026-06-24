@@ -26,7 +26,7 @@ function exitWith(code) {
   process.exit(code);
 }
 
-if (process.env["SELF_VERIFY_PRE_PUSH"] === "0") {
+if (process.env.SELF_VERIFY_PRE_PUSH === "0") {
   log("disabled via SELF_VERIFY_PRE_PUSH=0 — skipping");
   exitWith(0);
 }
@@ -35,7 +35,7 @@ if (process.env["SELF_VERIFY_PRE_PUSH"] === "0") {
 let baseRef = "origin/master";
 try {
   const remote =
-    process.env["PRE_PUSH_REMOTE"] ||
+    process.env.PRE_PUSH_REMOTE ||
     execSync("git remote", { encoding: "utf8" })
       .split(/\r?\n/)
       .find((l) => l.trim()) ||

@@ -138,7 +138,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     const splitter = createLineSplitter((line) => {
       try {
         const msg = JSON.parse(line) as Record<string, unknown>;
-        if (msg["mode"] === "live") {
+        if (msg.mode === "live") {
           // React has mounted once a frame carries the composer node. Use that
           // as the mount signal before honoring a boot-complete idle.
           if (!mountedSeen && line.includes('"id":"composer"')) {
@@ -147,7 +147,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
           if (inputSent) {
             frames.push(msg as unknown as LiveFrame);
           }
-        } else if (msg["t"] === "idle") {
+        } else if (msg.t === "idle") {
           if (!inputSent) {
             // Ignore any idle that fires before React has mounted — it is the
             // premature seq=0 idle, and driving input now would be dropped.
@@ -156,8 +156,8 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
             // safety budget over to the (much shorter) reply window — boot is
             // done, so the remaining wait is just the mock assistant turn.
             clearTimeout(safetyTimer);
-            inWrite.write(JSON.stringify({ op: "type", text: "hello" }) + "\n");
-            inWrite.write(JSON.stringify({ op: "press", key: "Enter" }) + "\n");
+            inWrite.write(`${JSON.stringify({ op: "type", text: "hello" })}\n`);
+            inWrite.write(`${JSON.stringify({ op: "press", key: "Enter" })}\n`);
             inputSent = true;
             awaitingReply = true;
             safetyTimer = setTimeout(() => {

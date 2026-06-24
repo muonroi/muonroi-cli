@@ -73,7 +73,7 @@ function normalizeProvider(p: string): ProviderId | null {
   return null;
 }
 
-function isValidProvider(p: string): p is ProviderId {
+function _isValidProvider(p: string): p is ProviderId {
   return normalizeProvider(p) !== null;
 }
 

@@ -65,9 +65,9 @@ export interface SprintSelfVerifyOpts {
  */
 function isEnabled(forceEnable?: boolean): boolean {
   if (forceEnable === true) return true;
-  const v = process.env["MUONROI_SPRINT_SELF_VERIFY"];
+  const v = process.env.MUONROI_SPRINT_SELF_VERIFY;
   if (v === "0" || (v && v.toLowerCase() === "false")) return false;
-  if (process.env["CI"] === "true" || process.env["NODE_ENV"] === "ci") return false;
+  if (process.env.CI === "true" || process.env.NODE_ENV === "ci") return false;
   // Default: ON. v === "1"/"true" still works; absence of env var also enables.
   return true;
 }

@@ -1,15 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type {
-  AcceptanceCardData,
-  BoundedContext,
-  ClarifiedIntent,
-  DiscoveryInteractionHandler,
-  DiscoveryResult,
-  FeasibilityResult,
-  ModelCard,
-  ProjectContext,
-  RelevantModule,
-} from "../discovery-types.js";
+import type { DiscoveryResult, ModelCard, ProjectContext } from "../discovery-types.js";
 
 describe("discovery-types", () => {
   it("ProjectContext is structurally valid", () => {

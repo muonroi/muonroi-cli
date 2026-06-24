@@ -332,7 +332,7 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
       let text = "";
       let reasoningText = "";
       const partCounts: Record<string, number> = {};
-      const debug = process.env["MUONROI_DEBUG_PIL_CLASSIFY"] === "1";
+      const debug = process.env.MUONROI_DEBUG_PIL_CLASSIFY === "1";
       for await (const part of result.fullStream) {
         if (debug) partCounts[part.type] = (partCounts[part.type] ?? 0) + 1;
         if (part.type === "text-delta") text += part.text ?? "";

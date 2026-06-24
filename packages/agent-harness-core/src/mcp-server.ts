@@ -536,7 +536,7 @@ export function createMcpHarnessServer({ spawn }: { spawn: HarnessSpawn }): McpS
       }
       if (!finalArgs.includes("--agent-mode")) finalArgs.push("--agent-mode");
 
-      const entry = process.cwd() + "/src/index.ts";
+      const entry = `${process.cwd()}/src/index.ts`;
 
       // Delegate to the injected spawn implementation — the core package has no
       // knowledge of the concrete transport (fd 3/4, named pipes, WebSocket …).

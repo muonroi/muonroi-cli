@@ -22,7 +22,7 @@ import { spawn } from "node:child_process";
  * `process.argv[0]` itself. We sanitize the WHOLE args portion in one pass.
  */
 export function sanitizeArgvForResume(args: ReadonlyArray<string>, sessionId: string): string[] {
-  if (!sessionId || !sessionId.trim()) {
+  if (!sessionId?.trim()) {
     throw new Error("sanitizeArgvForResume: sessionId is required");
   }
   const out: string[] = [];

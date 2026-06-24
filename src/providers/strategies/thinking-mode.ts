@@ -29,7 +29,7 @@
  */
 
 export function shouldDisableThinking(): boolean {
-  const v = process.env["MUONROI_DEEPSEEK_DISABLE_THINKING"];
+  const v = process.env.MUONROI_DEEPSEEK_DISABLE_THINKING;
   return v === undefined ? false : v === "1" || v.toLowerCase() === "true";
 }
 
@@ -90,7 +90,7 @@ export function transformThinkingModeBody<T extends Record<string, unknown>>(bod
 
   // Default A: keep thinking on, but guarantee every assistant message carries
   // a reasoning_content field so the validator is satisfied.
-  const messages = body["messages"];
+  const messages = body.messages;
   if (!Array.isArray(messages)) return body;
   const patched = backfillReasoningContent(messages as WireMessage[]);
   if (patched === messages) return body;

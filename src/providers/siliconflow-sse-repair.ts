@@ -80,7 +80,7 @@ export class SiliconflowSseRepairer {
       return eventText;
     }
 
-    const choice = (obj?.["choices"] as unknown[] | undefined)?.[0] as
+    const choice = (obj?.choices as unknown[] | undefined)?.[0] as
       | { delta?: Record<string, unknown>; finish_reason?: unknown }
       | undefined;
     const delta = choice?.delta;

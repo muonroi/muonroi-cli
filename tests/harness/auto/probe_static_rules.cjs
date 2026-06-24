@@ -21,7 +21,7 @@ const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME, ".experie
 let cfg = {};
 try {
   cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
-} catch (err) {
+} catch (_err) {
   /* env-only allowed */
 }
 const SERVER = process.env.SERVER_URL || cfg.serverBaseUrl;
@@ -39,7 +39,7 @@ function request(url, body) {
       u,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + TOKEN },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
       },
       (res) => {
         let s = "";
@@ -47,7 +47,7 @@ function request(url, body) {
         res.on("end", () => {
           try {
             resolve({ status: res.statusCode, body: JSON.parse(s) });
-          } catch (err) {
+          } catch (_err) {
             resolve({ status: res.statusCode, raw: s.slice(0, 400) });
           }
         });
@@ -64,7 +64,7 @@ function bigLines(n) {
 }
 
 async function probe(label, body, expectStaticFire) {
-  const r = await request(SERVER + "/api/intercept", body);
+  const r = await request(`${SERVER}/api/intercept`, body);
   const ids = (r.body?.surfacedIds || []).map((h) => (typeof h === "string" ? h : h?.id)).filter(Boolean);
   const staticHit = ids.some((id) => id.startsWith("file-size-cap-"));
   const ok = staticHit === expectStaticFire;

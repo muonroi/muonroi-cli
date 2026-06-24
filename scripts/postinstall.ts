@@ -7,7 +7,7 @@
  * `@muonroi/*` packages.
  */
 
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, symlinkSync } from "node:fs";
 import { resolve } from "node:path";
 
 const ROOT = import.meta.dir ? resolve(import.meta.dir, "..") : process.cwd();
@@ -40,7 +40,7 @@ for (const { name, pkg } of workspaceLinks) {
   try {
     symlinkSync(rel, linkPath, "junction");
     console.log(`  [linked] ${name} → ${rel}`);
-  } catch (e) {
+  } catch (_e) {
     // If symlink fails (e.g., permissions), try absolute.
     try {
       symlinkSync(target, linkPath, "junction");

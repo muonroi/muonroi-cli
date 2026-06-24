@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 // @ts-expect-error — bun:test is provided by the bun runtime; this file runs
 // via `bun test`, not vitest (vitest cannot resolve bun:sqlite's `db.run` API).
 // Excluded from vitest in vitest.config.ts.
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -64,7 +64,7 @@ function bootstrapDb(
 }
 
 beforeEach(() => {
-  tmpHome = join(tmpdir(), "muonroi-test-export-" + Date.now());
+  tmpHome = join(tmpdir(), `muonroi-test-export-${Date.now()}`);
   const muonroiDir = join(tmpHome, ".muonroi-cli");
   const experienceDir = join(tmpHome, ".experience");
   mkdirSync(muonroiDir, { recursive: true });

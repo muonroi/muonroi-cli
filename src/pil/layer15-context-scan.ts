@@ -70,7 +70,7 @@ export function scanBoundedContexts(cwd: string): BoundedContext[] {
     const entryNames = ["index.ts", "index.tsx", "index.js", "mod.rs", "__init__.py"];
     const entryFiles = entryNames.map((e) => join(dirPath, e)).filter((e) => existsSync(join(cwd, e)));
     const exportedSymbols = extractExports(cwd, entryFiles).slice(0, 20);
-    return { path: dirPath + "/", name: d, entryFiles, exportedSymbols };
+    return { path: `${dirPath}/`, name: d, entryFiles, exportedSymbols };
   });
 }
 

@@ -71,18 +71,18 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   const { proc, inWrite, outRead, cleanup } = result;
 
   const driver = createDriver({
-    sendKey: (k) => inWrite.write(JSON.stringify({ op: "press", key: k }) + "\n"),
-    sendType: (t) => inWrite.write(JSON.stringify({ op: "type", text: t }) + "\n"),
+    sendKey: (k) => inWrite.write(`${JSON.stringify({ op: "press", key: k })}\n`),
+    sendType: (t) => inWrite.write(`${JSON.stringify({ op: "type", text: t })}\n`),
   });
 
   const splitter = createLineSplitter((line) => {
     try {
       const msg = JSON.parse(line) as Record<string, unknown>;
-      if (msg["mode"] === "live") {
+      if (msg.mode === "live") {
         driver._ingest({ kind: "frame", frame: msg as unknown as LiveFrame });
-      } else if (msg["t"] === "idle") {
+      } else if (msg.t === "idle") {
         driver._ingest({ kind: "idle" });
-      } else if (msg["t"] === "event") {
+      } else if (msg.t === "event") {
         driver._ingest({ kind: "event", event: msg as unknown as LiveEvent });
       }
     } catch {

@@ -14,14 +14,11 @@
  */
 
 import { createServer } from "node:http";
-import { resolve } from "node:path";
 import { Component, PLATFORM_ID } from "@angular/core";
-import { fakeAsync, flush, TestBed, tick } from "@angular/core/testing";
+import { TestBed } from "@angular/core/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocketServer, WebSocket as WsImpl } from "ws";
 import "zone.js";
-
-import { SemanticRegistryService } from "../../packages/agent-harness-angular/src/registry.service.js";
 // Resolve Angular package to this test file's node_modules via workspace.
 // These imports work in vitest with the alias config in vitest.harness-angular.config.ts.
 import { SemanticDirective } from "../../packages/agent-harness-angular/src/semantic.directive.js";
@@ -138,7 +135,7 @@ describe("Angular adapter E2E — WS transport", () => {
 
     // Wait for at least one frame to arrive at the server (max 500ms).
     await new Promise<void>((res, rej) => {
-      const tid = setTimeout(() => {
+      const _tid = setTimeout(() => {
         if (receivedMessages.length > 0) res();
         else rej(new Error("No WS messages received within 500ms"));
       }, 500);
@@ -157,7 +154,7 @@ describe("Angular adapter E2E — WS transport", () => {
           return null;
         }
       })
-      .filter((m): m is Record<string, unknown> => m !== null && m["dir"] === "frame");
+      .filter((m): m is Record<string, unknown> => m !== null && m.dir === "frame");
 
     expect(frames.length).toBeGreaterThan(0);
 

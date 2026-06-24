@@ -12,9 +12,8 @@ import type {
 } from "./discovery-types.js";
 import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
-import { getDefaultOutcome, modelCardToQuestion, resolveGapsNonInteractive } from "./layer16-clarity.js";
+import { modelCardToQuestion, resolveGapsNonInteractive } from "./layer16-clarity.js";
 import { checkFeasibility } from "./layer17-feasibility.js";
-import { buildAcceptanceCard } from "./layer18-acceptance.js";
 import { markDiscoveryAccepted } from "./session-state.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
@@ -180,7 +179,7 @@ export async function runDiscovery(
     }
   } else {
     // Headless: resolve defaults
-    const resolved = resolveGapsNonInteractive(cards, projectContext, raw);
+    const _resolved = resolveGapsNonInteractive(cards, projectContext, raw);
     interviewTranscript.push(
       ...cards.map((c) => ({
         question: c.question,

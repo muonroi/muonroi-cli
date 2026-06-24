@@ -73,7 +73,7 @@ function buildFakeGrepTool() {
       description: "Stub grep for cost-leak-b4 verification.",
       inputSchema: z.object({ pattern: z.string() }),
       execute: async ({ pattern }: { pattern: string }) => {
-        return `GREP:${pattern}\n` + "x".repeat(40_000);
+        return `GREP:${pattern}\n${"x".repeat(40_000)}`;
       },
     }),
   };

@@ -77,7 +77,7 @@ describe("acquireMcpTools — cross-turn client pool", () => {
 
     const b1 = await acquireMcpTools([srv("fs")]);
     await expect(
-      (b1.tools["mcp_fs__boom"] as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute({}, {}),
+      (b1.tools.mcp_fs__boom as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute({}, {}),
     ).rejects.toThrow(/transport closed/);
 
     // Initial connect + exactly ONE in-turn reconnect — the retry is not looped.
@@ -103,9 +103,10 @@ describe("acquireMcpTools — cross-turn client pool", () => {
     });
 
     const b = await acquireMcpTools([srv("docs")]);
-    const result = await (
-      b.tools["mcp_docs__ping"] as { execute: (a: unknown, o: unknown) => Promise<unknown> }
-    ).execute({}, {});
+    const result = await (b.tools.mcp_docs__ping as { execute: (a: unknown, o: unknown) => Promise<unknown> }).execute(
+      {},
+      {},
+    );
     expect(result).toBe("pong"); // recovered within the SAME turn
     expect(connectOneServer).toHaveBeenCalledTimes(2); // drop + one reconnect
   });
@@ -133,7 +134,7 @@ describe("acquireMcpTools — cross-turn client pool", () => {
     });
 
     const b = await acquireMcpTools([srv("docs")]);
-    const tool = b.tools["mcp_docs__ping"] as { execute: (a: unknown, o: unknown) => Promise<unknown> };
+    const tool = b.tools.mcp_docs__ping as { execute: (a: unknown, o: unknown) => Promise<unknown> };
     const results = await Promise.all(Array.from({ length: 14 }, () => tool.execute({}, {})));
     expect(results.every((r) => r === "pong")).toBe(true);
     expect(connectOneServer).toHaveBeenCalledTimes(2); // 14 failures → exactly ONE shared reconnect

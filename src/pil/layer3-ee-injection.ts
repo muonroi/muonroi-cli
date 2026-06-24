@@ -518,7 +518,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   if (cpText) {
     const marker = `<!-- ee-checkpoint-injected:${payloadSha16(cpText)} -->`;
     // Idea 5: raised from 0.08 to 0.12 for higher fidelity on critical progress + artifact refs.
-    parts.push(truncateToBudget(cpText + "\n" + marker, Math.floor(ctx.tokenBudget * 0.12)));
+    parts.push(truncateToBudget(`${cpText}\n${marker}`, Math.floor(ctx.tokenBudget * 0.12)));
   }
   // Close the recall feedback loop at the injection site: passively-injected
   // experience (the agent did not ee_query for it) otherwise carries no feedback

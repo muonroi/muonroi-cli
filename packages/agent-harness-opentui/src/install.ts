@@ -94,7 +94,7 @@ export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenT
     const frame = hook.capture();
     if (frame === null) return; // dedup — no change
     try {
-      opts.transport.send(JSON.stringify(frame) + "\n");
+      opts.transport.send(`${JSON.stringify(frame)}\n`);
       opts.onFrame?.(frame);
     } catch {
       // Drop frame on transport error — survivor of next tick will retry.

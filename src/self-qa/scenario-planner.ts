@@ -115,7 +115,7 @@ function parseAttrs(chunk: string): Record<string, string | boolean | undefined>
     else out[key] = v;
   }
   // `isModal` may appear without `={true}` in JSX (boolean shorthand). Detect.
-  if (/\bisModal\b(?!\s*=)/.test(chunk)) out["isModal"] = true;
+  if (/\bisModal\b(?!\s*=)/.test(chunk)) out.isModal = true;
   return out;
 }
 

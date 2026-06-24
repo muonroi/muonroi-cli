@@ -53,11 +53,7 @@ function buildHarnessComponents() {
       return registry.register({ ...node, parentId });
     }, [registry, parentId, nodeKey]);
 
-    return (
-      <ParentCtx.Provider value={node.id}>
-        <Fragment>{children}</Fragment>
-      </ParentCtx.Provider>
-    );
+    return <ParentCtx.Provider value={node.id}>{children}</ParentCtx.Provider>;
   }
 
   return { Provider, SemanticNode };

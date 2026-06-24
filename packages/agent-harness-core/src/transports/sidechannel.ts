@@ -3,7 +3,7 @@ import type { HarnessMessage } from "../protocol.js";
 const MAX_BYTES = 1024 * 1024; // 1 MiB
 
 function serialize(msg: HarnessMessage | Record<string, unknown>): string {
-  const line = JSON.stringify(msg) + "\n";
+  const line = `${JSON.stringify(msg)}\n`;
   if (Buffer.byteLength(line, "utf8") > MAX_BYTES) {
     throw new Error(`sidechannel message exceeds 1 MiB cap`);
   }

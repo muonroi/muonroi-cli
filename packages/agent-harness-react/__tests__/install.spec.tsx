@@ -9,8 +9,7 @@
  */
 import { createSemanticRegistry } from "@muonroi/agent-harness-core/registry";
 import { act, cleanup, render } from "@testing-library/react";
-import React from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { installReactHarness } from "../src/install.js";
 import { Semantic, SemanticProvider } from "../src/semantic.js";
 
