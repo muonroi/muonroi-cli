@@ -211,7 +211,7 @@ import {
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
+import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -1757,7 +1757,10 @@ export class MessageProcessor {
           // for future provider-specific quirks). Reasoning round-trips
           // natively via @ai-sdk/openai-compatible — see
           // src/providers/__tests__/reasoning-roundtrip.test.ts.
-          const _topMessagesForCall = turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages;
+          const _topMessagesForCall = applyAnthropicPromptCaching(
+            turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages,
+            runtime.modelId,
+          );
           // Closure-mutable cap for the tool-loop askcard rescue.
           // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
           // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
@@ -2035,19 +2038,29 @@ export class MessageProcessor {
                     console.error(`[message-processor] steer-inject telemetry failed: ${(emitErr as Error)?.message}`);
                   }
                 }
-                if (pendingSteers.length === 0) return r;
-                const _base = r.messages ?? stepMessages;
-                const _existingContents = new Set(
-                  _base
-                    .filter((m) => m.role === "user")
-                    .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))),
-                );
-                const steersToAdd = pendingSteers.filter((s) => {
-                  const sContent = typeof s.content === "string" ? s.content : JSON.stringify(s.content);
-                  return !_existingContents.has(sContent);
-                });
-                if (steersToAdd.length === 0) return r;
-                return { ...r, messages: [..._base, ...steersToAdd] as typeof stepMessages };
+                const baseRes = (() => {
+                  if (pendingSteers.length === 0) return r;
+                  const _base = r.messages ?? stepMessages;
+                  const _existingContents = new Set(
+                    _base
+                      .filter((m) => m.role === "user")
+                      .map((m) => (typeof m.content === "string" ? m.content : JSON.stringify(m.content))),
+                  );
+                  const steersToAdd = pendingSteers.filter((s) => {
+                    const sContent = typeof s.content === "string" ? s.content : JSON.stringify(s.content);
+                    return !_existingContents.has(sContent);
+                  });
+                  if (steersToAdd.length === 0) return r;
+                  return { ...r, messages: [..._base, ...steersToAdd] as typeof stepMessages };
+                })();
+
+                if (baseRes.messages) {
+                  baseRes.messages = applyAnthropicPromptCaching(
+                    baseRes.messages,
+                    runtime.modelId,
+                  ) as typeof stepMessages;
+                }
+                return baseRes;
               };
               const stripped = turnCaps.sanitizeHistory(stepMessages) as typeof stepMessages;
 
@@ -2151,7 +2164,7 @@ export class MessageProcessor {
               const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
               if (compacted === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
                 const _cp = buildCheckpointReminder(sn, true);
-                const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible.]`;
+                const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
                 return withSteers({ messages: attachReminderToMessages(stripped, _pre) });
               }
               // Phase 4A — scope reminder injection (REQ-005).
@@ -2204,7 +2217,7 @@ export class MessageProcessor {
                 const _scopePart =
                   _shouldRemind || _shouldWarn || _justCrossedCeiling
                     ? _useStrong
-                      ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If wandering, simplify the next step. ${_baseReminder}`
+                      ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If you need to keep working in this long session, suggest that the user run the "/compact" slash command to compress the conversation history before continuing. Otherwise, simplify the next step. ${_baseReminder}`
                       : _shouldWarn
                         ? `[approaching ceiling] ${_baseReminder}`
                         : _baseReminder
@@ -2623,39 +2636,49 @@ export class MessageProcessor {
                     typeof part.input === "object" && part.input != null
                       ? String((part.input as Record<string, unknown>).command ?? "")
                       : "";
-                  const _verdict = deps.askSafetyOverride
-                    ? await deps.askSafetyOverride({
-                        kind: _blockKind,
-                        toolName: part.toolName,
-                        blockedItem: _command,
-                        reason: _blockReason,
-                        source: "bash.execute",
-                      })
-                    : { action: "block" as const };
-                  if (_verdict.action === "allow-once" || _verdict.action === "allow-session") {
-                    // Store approval so registry.ts can bypass the block on retry.
-                    const _globalSafety = globalThis as typeof globalThis & {
-                      __muonroiSafetyApproved?: Map<string, { kind: "once" | "session"; command: string }>;
-                    };
-                    if (!_globalSafety.__muonroiSafetyApproved) {
-                      _globalSafety.__muonroiSafetyApproved = new Map();
-                    }
-                    _globalSafety.__muonroiSafetyApproved.set(part.toolCallId, {
-                      kind: _verdict.action === "allow-session" ? "session" : "once",
-                      command: _command,
-                    });
-                    // Rewrite tool result as success so the stream continues
-                    // without an error. The model will see "Approved: ..." and
-                    // may retry the tool call on the next turn, at which point
-                    // registry.ts will see the approval and actually run it.
-                    tr = { ...tr, success: true, output: `Approved (${_verdict.action}): ${_blockReason}` };
-                    yield {
-                      type: "content",
-                      content: `[User approved blocked command: ${_blockKind} — ${_verdict.action}]\n`,
-                    };
-                  }
-                  if (_verdict.action === "block") {
+
+                  // empty-bash: auto-block without askcard.
+                  // The BLOCKED error from registry.ts already steers the agent
+                  // to self-correct. Showing an askcard adds user friction for
+                  // no benefit (empty bash calls are never intentional) and
+                  // wastes a turn of user interaction per strike.
+                  if (_blockKind === "empty-bash") {
                     tr = { ...tr, success: false, error: _outputText, output: _outputText };
+                  } else {
+                    const _verdict = deps.askSafetyOverride
+                      ? await deps.askSafetyOverride({
+                          kind: _blockKind,
+                          toolName: part.toolName,
+                          blockedItem: _command,
+                          reason: _blockReason,
+                          source: "bash.execute",
+                        })
+                      : { action: "block" as const };
+                    if (_verdict.action === "allow-once" || _verdict.action === "allow-session") {
+                      // Store approval so registry.ts can bypass the block on retry.
+                      const _globalSafety = globalThis as typeof globalThis & {
+                        __muonroiSafetyApproved?: Map<string, { kind: "once" | "session"; command: string }>;
+                      };
+                      if (!_globalSafety.__muonroiSafetyApproved) {
+                        _globalSafety.__muonroiSafetyApproved = new Map();
+                      }
+                      _globalSafety.__muonroiSafetyApproved.set(part.toolCallId, {
+                        kind: _verdict.action === "allow-session" ? "session" : "once",
+                        command: _command,
+                      });
+                      // Rewrite tool result as success so the stream continues
+                      // without an error. The model will see "Approved: ..." and
+                      // may retry the tool call on the next turn, at which point
+                      // registry.ts will see the approval and actually run it.
+                      tr = { ...tr, success: true, output: `Approved (${_verdict.action}): ${_blockReason}` };
+                      yield {
+                        type: "content",
+                        content: `[User approved blocked command: ${_blockKind} — ${_verdict.action}]\n`,
+                      };
+                    }
+                    if (_verdict.action === "block") {
+                      tr = { ...tr, success: false, error: _outputText, output: _outputText };
+                    }
                   }
                 }
 
