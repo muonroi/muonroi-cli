@@ -16,7 +16,7 @@ import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import { Agent } from "../orchestrator/orchestrator";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
-import { planLoopCapAskcard } from "../orchestrator/tool-loop-askcard.js";
+
 import type { HaltChunk, ProductStatusCardData } from "../product-loop/types.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
@@ -2050,7 +2050,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     const nextQueued = queuedMessagesRef.current.shift();
     if (nextQueued) {
       setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
-      isProcessingRef.current = false;
+      // KHÔNG set isProcessingRef=false ở đây — processMessage sẽ set nó thành true
+      // ở dòng 3030 ngay khi bắt đầu. Nếu set false trước, tạo window cho input khác
+      // bypass queue và gây duplicate/replay input qua các turn.
       void processMessageRef.current(nextQueued.text, nextQueued.displayText);
       return;
     }
@@ -2263,122 +2265,51 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     setMessages((prev) => replaceTurnEntries(prev, activeTurn.remoteKey!, delta));
   }, []);
 
-  // Register the tool-loop cap handler. The orchestrator's askToolLoopContinue
-  // dep calls this when stepCount reaches the cap; we surface an askcard, wait
-  // for the user's verdict, and resolve the promise with continue/stop. When
-  // the user cancels (Esc) we treat it as stop — same UX as other askcards.
+  // Register the tool-loop cap handler. The orchestrator calls this when
+  // stepCount reaches the cap or a repetition pattern fires. Previously this
+  // surfaced an askcard; now the agent is trusted to self-regulate — we auto-
+  // resolve so the session is never interrupted by a blocking user prompt.
+  //   • pattern kind → always "continue": the single-shot pattern guard already
+  //     fires only once per session, so auto-continuing lets the agent keep going
+  //     (the cap guard is still in place as the ultimate hard stop).
+  //   • cap kind → always "stop": hard cap reached, return the best answer.
+  // All auto-resolutions are logged to the audit trail so sessions can be reviewed.
   useEffect(() => {
     agent.setToolLoopCapHandler(async (info) => {
-      return new Promise<"continue" | "stop">((resolve) => {
-        const isPattern = info.kind === "pattern";
-        const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
-        toolLoopCapResolversRef.current.set(qid, resolve);
-        // Tier-aware askcard layout (planLoopCapAskcard) — 4 tiers:
-        //   early (< 0.5× ceiling)       → Default Continue, no warning
-        //   normal (0.5×–2× ceiling)     → Default Stop, no warning
-        //   overBudget (2×–5× ceiling)   → Default Stop, Continue label carries
-        //                                   the overage multiplier so cost is
-        //                                   visible (storyflow_ui 22661c8de9f2:
-        //                                   2.4× hit had no warning before)
-        //   extreme (> 5× ceiling)        → Stop FIRST in the array (Enter=Stop),
-        //                                   Continue labelled "expensive"
-        //                                   (session 1f29e238: 12.8× past ceiling)
-        const patternStep = isPattern ? info.stepNumber : 0;
-        const patternCeiling = isPattern ? info.naturalCeiling : undefined;
-        const layout = isPattern
-          ? planLoopCapAskcard({ stepNumber: patternStep, naturalCeiling: patternCeiling })
-          : null;
-        const patternEarly = layout?.tier === "early";
-        const patternOverBudget = layout?.tier === "overBudget";
-        const patternExtreme = layout?.tier === "extreme";
-        const overageMultiplier = layout?.overageMultiplier ?? null;
-        const patternDefaultIdx = layout?.defaultIndex ?? 0;
-        const patternOptions: CouncilQuestionOption[] = layout
-          ? [
-              { label: layout.optionLabels[0], value: layout.optionValues[0], kind: "choice" },
-              { label: layout.optionLabels[1], value: layout.optionValues[1], kind: "choice" },
-            ]
-          : [];
-        const question: CouncilQuestionData = isPattern
-          ? {
-              questionId: qid,
-              question: `Tool \`${info.toolName}\` đã chạy ${info.count}/${info.windowSize} lần với args gần giống (step ${info.stepNumber}${
-                patternCeiling ? `/${patternCeiling}` : ""
-              }) — có thể đang loop. Tiếp tục?`,
-              context: patternExtreme
-                ? `EXTREME OVERAGE — ${overageMultiplier}× past natural budget. Continuing has historically not converged in this regime (see session 1f29e238: 8× over budget, still failed). Stop returns the agent's best answer with current context.`
-                : patternOverBudget
-                  ? `Past natural budget — ${overageMultiplier}× the typical step count for this task type. Continuing may still converge but quality often degrades (longer compaction, stale tool results, forced-finalize on stall). Stop returns the agent's best answer with current context.`
-                  : patternEarly
-                    ? "Continue lets the agent keep trying — likely the right call this early in the run. Stop returns the agent's best answer with current context."
-                    : "You're past the natural budget for this task type. Stop usually recovers a clean answer; Continue keeps spending tokens.",
-              isRequired: true,
-              phase: "tool-loop-cap",
-              options: patternOptions,
-              defaultIndex: patternDefaultIdx,
-            }
-          : {
-              questionId: qid,
-              question: `Agent đã chạy ${info.stepNumber} tool rounds (cap ${info.cap}). Có dấu hiệu loop — tiếp tục?`,
-              context: `Continue raises the cap by +${info.bumpBy}. Stop returns the agent's best answer with current context.`,
-              isRequired: true,
-              phase: "tool-loop-cap",
-              options: [
-                { label: `Continue (+${info.bumpBy} rounds)`, value: "continue", kind: "choice" },
-                { label: "Stop and answer", value: "stop", kind: "choice" },
-              ],
-              defaultIndex: 0,
-            };
-        setPendingCouncilQuestionSync(question);
-        setCouncilCardStateSync(initialCardState(question));
-        try {
-          agentRuntime?.emitEvent({
-            t: "event",
-            kind: "askcard-open",
+      const isPattern = info.kind === "pattern";
+      const qid = isPattern ? `tool-pattern-loop-${Date.now()}` : `tool-loop-cap-${info.stepNumber}-${Date.now()}`;
+      const verdict: "continue" | "stop" = isPattern ? "continue" : "stop";
+      // Audit log — keep the trail so sessions are still reviewable.
+      try {
+        const patternInfo = isPattern ? (info as { toolName: string; count: number; naturalCeiling?: number }) : null;
+        const capInfo = !isPattern ? (info as { cap: number }) : null;
+        logUIInteraction(agent.getSessionId() ?? undefined, {
+          subtype: "loop_cap_auto",
+          data: {
             questionId: qid,
-            question: question.question,
             phase: "tool-loop-cap",
-            optionCount: question.options!.length,
-            defaultIndex: question.defaultIndex ?? 0,
-          });
-        } catch {
-          /* best-effort */
-        }
-        // Phase 5 BUG-H — persist the askcard_open to DB so verify queries can
-        // confirm the context-aware defaultIndex was picked correctly. Earlier
-        // the tool-loop-cap askcards only emitted via the harness sidechannel,
-        // leaving no DB trail; we couldn't audit defaults from past sessions.
-        try {
-          logUIInteraction(agent.getSessionId() ?? undefined, {
-            subtype: "askcard_open",
-            data: {
-              questionId: qid,
-              question: question.question,
-              phase: "tool-loop-cap",
-              optionCount: question.options!.length,
-              defaultIndex: question.defaultIndex ?? 0,
-              optionLabels: question.options!.map((o) => o.label),
-              recommendedLabel: question.options![question.defaultIndex ?? 0]?.label,
-              ...(isPattern
-                ? {
-                    stepNumber: info.stepNumber,
-                    naturalCeiling: info.naturalCeiling ?? null,
-                    toolName: info.toolName,
-                    count: info.count,
-                  }
-                : { stepNumber: info.stepNumber, cap: info.cap }),
-            },
-          });
-        } catch {
-          /* best-effort */
-        }
-      });
+            autoVerdict: verdict,
+            kind: info.kind,
+            stepNumber: info.stepNumber,
+            ...(patternInfo
+              ? {
+                  toolName: patternInfo.toolName,
+                  count: patternInfo.count,
+                  naturalCeiling: patternInfo.naturalCeiling ?? null,
+                }
+              : { cap: capInfo!.cap }),
+          },
+        });
+      } catch {
+        /* best-effort */
+      }
+      return verdict;
     });
     return () => {
       agent.setToolLoopCapHandler(null);
       toolLoopCapResolversRef.current.clear();
     };
-  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+  }, [agent]);
 
   // Safety-override askcard handler. When bash.execute blocks a command,
   // the message-processor calls askSafetyOverride. We surface a council-style
@@ -3402,6 +3333,27 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 }
                 break;
               case "done":
+                // Auto-complete any remaining non-completed todos when the turn ends.
+                // Models often write the initial todo list but forget to call todo_write
+                // again with all items marked "completed" at the end of the task.
+                // This synthetic update marks every item completed and starts the 2s
+                // auto-hide timer — same UX as if the model had done it explicitly.
+                setTaskListSnapshot((prev) => {
+                  if (!prev) return prev;
+                  const allDone = prev.items.every((it) => it.status === "completed");
+                  if (allDone) return prev; // nothing to do
+                  const items = prev.items.map((it) =>
+                    it.status === "completed" ? it : { ...it, status: "completed" as const },
+                  );
+                  const total = items.length;
+                  // Schedule auto-hide after 2s (same as explicit 100% completion path)
+                  if (taskListClearTimerRef.current) clearTimeout(taskListClearTimerRef.current);
+                  taskListClearTimerRef.current = setTimeout(() => {
+                    setTaskListSnapshot(null);
+                    taskListClearTimerRef.current = null;
+                  }, 2000);
+                  return { items, counts: { completed: total, inProgress: 0, pending: 0, total }, ts: Date.now() };
+                });
                 break;
             }
           }
