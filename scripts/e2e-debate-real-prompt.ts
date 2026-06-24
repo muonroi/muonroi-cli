@@ -11,7 +11,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createCouncilLLM } from "../src/council/llm.js";
-import { buildResponsePrompt, buildFollowupPrompt } from "../src/council/prompts.js";
+import { buildFollowupPrompt, buildResponsePrompt } from "../src/council/prompts.js";
 import type { CouncilStats } from "../src/council/types.js";
 
 const LOG_PATH = path.resolve("council-debug-realprompt.jsonl");
@@ -91,7 +91,8 @@ PDF.js zoom changes element scale via CSS transform. The tooltip's getBoundingCl
 - For long translations, add a "Copy" button — research shows users copy translations 40% of the time`;
 
 const spec = {
-  problemStatement: "Build a browser extension for Chrome/Brave that translates selected text in PDF files via an inline tooltip, using Google Translate or third-party APIs.",
+  problemStatement:
+    "Build a browser extension for Chrome/Brave that translates selected text in PDF files via an inline tooltip, using Google Translate or third-party APIs.",
   constraints: [],
   successCriteria: [
     "User can select text in any browser-rendered PDF and see a translation tooltip within 1 second",
@@ -104,14 +105,24 @@ const spec = {
 const r1 = buildResponsePrompt({
   speakerRole: "verify",
   partnerRole: "implement",
-  speakerStance: { name: "Integration & UX Engineer", lens: "user experience and frontend integration", focus: "tooltip, debounce, cache" },
-  partnerStance: { name: "Extension Architect", lens: "browser extension architecture", focus: "MV3, content scripts, PDF viewer" },
+  speakerStance: {
+    name: "Integration & UX Engineer",
+    lens: "user experience and frontend integration",
+    focus: "tooltip, debounce, cache",
+  },
+  partnerStance: {
+    name: "Extension Architect",
+    lens: "browser extension architecture",
+    focus: "MV3, content scripts, PDF viewer",
+  },
   speakerPosition: UX_OPENING,
   partnerPosition: ARCHITECT_OPENING,
   spec: spec as any,
 });
 
-console.log(`\nbuildResponsePrompt sizes: system=${r1.system.length} chars, prompt=${r1.prompt.length} chars, total=${r1.system.length + r1.prompt.length}`);
+console.log(
+  `\nbuildResponsePrompt sizes: system=${r1.system.length} chars, prompt=${r1.prompt.length} chars, total=${r1.system.length + r1.prompt.length}`,
+);
 
 async function probe(label: string, model: string, system: string, prompt: string): Promise<void> {
   const t0 = Date.now();
@@ -136,17 +147,31 @@ async function main(): Promise<void> {
   for (const line of lines) {
     try {
       const r = JSON.parse(line);
-      console.log(JSON.stringify({
-        kind: r.kind, model: r.modelId, ok: r.ok,
-        sysCh: r.systemChars, promptCh: r.promptChars,
-        textCh: r.textChars, reasonCh: r.reasoningChars,
-        finish: r.finishReason, ms: r.durationMs,
-        usage: (r.usage as any)?.outputTokenDetails,
-        error: r.error,
-        textHead: r.textHead?.slice(0, 100),
-      }));
-    } catch { /* skip */ }
+      console.log(
+        JSON.stringify({
+          kind: r.kind,
+          model: r.modelId,
+          ok: r.ok,
+          sysCh: r.systemChars,
+          promptCh: r.promptChars,
+          textCh: r.textChars,
+          reasonCh: r.reasoningChars,
+          finish: r.finishReason,
+          ms: r.durationMs,
+          usage: (r.usage as any)?.outputTokenDetails,
+          error: r.error,
+          textHead: r.textHead?.slice(0, 100),
+        }),
+      );
+    } catch {
+      /* skip */
+    }
   }
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

@@ -136,7 +136,7 @@ describe("layer3 experience_injected chunk emission (CQ-16b)", () => {
       },
     ]);
 
-    const result = await layer3EeInjection(BASE_CTX);
+    const result = await layer3EeInjection({ ...BASE_CTX, sessionId: "test-session-nudge" });
     // The dynamic pending-feedback reminder replaced the fixed nudge when the ledger
     // is enabled (default soft); it names the actual [id collection] so ee_feedback is
     // actionable. Accept either form (reminder when the ledger recorded debt, or the

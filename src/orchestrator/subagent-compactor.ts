@@ -165,13 +165,17 @@ export function isHighValueToolResult(
   if ((IMPORTANT_TOOL_NAMES as readonly string[]).includes(name)) {
     const p = preview.toLowerCase();
     if (/error|fail|todo|plan|done|✔|blocked|critical/.test(p)) return true;
-    if (/\.(ts|tsx|js|md|json|test|spec)\b/.test(p) || p.includes("src/") || p.includes("PLAN")) return true;
-    if (preview.length > 1500) return true;
-    return true; // read_file/grep etc on source are presumptively high-value
+    if (/\.(ts|tsx|js|md|json|test|spec)\b/.test(p) || p.includes("src/") || p.includes("PLAN")) {
+      // For source code/plans, only keep verbatim if it is relatively small (under 12000 chars)
+      // to prevent large file reads from leaking memory/tokens indefinitely in long sessions.
+      return preview.length <= 12000;
+    }
+    return false;
   }
   if (toolCallId && explicitKeepIds?.has(toolCallId)) return true;
   return false;
 }
+
 
 interface ResolvedOpts {
   thresholdChars: number;
@@ -498,3 +502,55 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   if (!mutated) return msg;
   return { ...msg, content: next } as unknown as ModelMessage;
 }
+
+/**
+ * Injects Anthropic prompt caching (cacheControl) into the last message's content
+ * block(s) if the model is Claude (starts with 'claude').
+ * Creates a copy of the messages array and the last message to avoid mutating in-place.
+ */
+export function applyAnthropicPromptCaching(
+  messages: readonly ModelMessage[],
+  modelId: string,
+): ModelMessage[] {
+  if (!modelId.startsWith("claude")) {
+    return messages as ModelMessage[];
+  }
+  if (messages.length === 0) {
+    return messages as ModelMessage[];
+  }
+
+  const newMessages = [...messages];
+  const lastIndex = newMessages.length - 1;
+  const originalLastMsg = newMessages[lastIndex];
+  if (!originalLastMsg) return messages as ModelMessage[];
+
+  const lastMsg = { ...originalLastMsg };
+
+  if (typeof lastMsg.content === "string") {
+    lastMsg.content = [
+      {
+        type: "text",
+        text: lastMsg.content,
+        providerOptions: {
+          anthropic: { cacheControl: { type: "ephemeral" as const } },
+        },
+      },
+    ];
+  } else if (Array.isArray(lastMsg.content)) {
+    const content = [...lastMsg.content] as any[];
+    const lastBlockIndex = content.length - 1;
+    if (lastBlockIndex >= 0) {
+      const lastBlock = { ...content[lastBlockIndex] };
+      lastBlock.providerOptions = {
+        ...lastBlock.providerOptions,
+        anthropic: { cacheControl: { type: "ephemeral" as const } },
+      };
+      content[lastBlockIndex] = lastBlock;
+      lastMsg.content = content as any;
+    }
+  }
+
+  newMessages[lastIndex] = lastMsg;
+  return newMessages;
+}
+

@@ -65,7 +65,8 @@ The Experience Engine brain holds prior decisions, gotchas, and learned warnings
 
 - If a test fails locally, the push is blocked. Either fix the test, fix the underlying bug, or revert your change.
 - "Pre-existing flake" is not a defense — fix the flake (deterministic wait, proper synchronization, isolated state) before pushing.
-- Run the FULL suite: `bunx vitest run` for unit tests, plus `bunx vitest -c vitest.harness.config.ts run tests/harness/` when touching UI/harness surfaces.
+- Run the FULL suite: `bun test` for unit tests.
+- **For UI/harness surfaces or workflow changes**, ALWAYS use the `selfverify_*` native tools (e.g. `selfverify_start(mode="tier1")`) to run the automated QA harness. This simulates a real user driving the live TUI and catches regressions that unit tests can't!
 - CI failures from a green-local push are still your responsibility — investigate environment differences before retrying.
 
 ## Zero Hardcode Rule — Model & Provider IDs

@@ -38,15 +38,12 @@ const warnings = await findUnwrappedComponents({
   wrapperNames: ["Semantic"],
 });
 
-const SCOPE_LABEL =
-  "src/ui/, packages/agent-harness-react/, packages/agent-harness-angular/";
+const SCOPE_LABEL = "src/ui/, packages/agent-harness-react/, packages/agent-harness-angular/";
 
 if (warnings.length === 0) {
   console.log(`✔  check-semantic-wrap: all components in ${SCOPE_LABEL} appear to have <Semantic> root wrapping.`);
 } else {
-  console.warn(
-    `\n⚠  check-semantic-wrap: ${warnings.length} component(s) are missing a <Semantic> root wrap.\n`,
-  );
+  console.warn(`\n⚠  check-semantic-wrap: ${warnings.length} component(s) are missing a <Semantic> root wrap.\n`);
   for (const w of warnings) {
     console.warn(`  ${w.path}:${w.line}`);
     console.warn(

@@ -235,6 +235,7 @@ function createTools(
     runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
     readDelegation?: (id: string) => Promise<ToolResult>;
     listDelegations?: () => Promise<ToolResult>;
+    killDelegation?: (id: string) => Promise<ToolResult>;
     scheduleManager?: unknown;
     subagents?: unknown[];
     sendTelegramFile?: (filePath: string) => Promise<ToolResult>;
@@ -247,6 +248,7 @@ function createTools(
     runDelegation: _opts?.runDelegation,
     readDelegation: _opts?.readDelegation,
     listDelegations: _opts?.listDelegations,
+    killDelegation: _opts?.killDelegation,
     modelId: _opts?.modelId,
   });
 }
@@ -1480,6 +1482,18 @@ export class Agent {
     }
   }
 
+  private async killDelegation(id: string): Promise<ToolResult> {
+    try {
+      return await this.delegations.kill(id);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        output: `Failed to terminate delegation: ${msg}`,
+      };
+    }
+  }
+
   private getCompactionSettings(contextWindow?: number): CompactionSettings {
     let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
 
@@ -2408,9 +2422,10 @@ export class Agent {
 
   private async *processMessageBatchTurn(args: {
     userModelMessage: ModelMessage;
+    userEnrichedMessage: ModelMessage;
     observer?: ProcessMessageObserver;
     provider: LegacyProvider;
-    subagents: CustomSubagentConfig[];
+    subagents: unknown[];
     system: string;
     runtime: ReturnType<typeof resolveModelRuntime>;
     modelInfo: ReturnType<typeof getModelInfo>;
@@ -2469,6 +2484,7 @@ export class Agent {
       runDelegation: (request, signal) => self.runDelegation(request, signal),
       readDelegation: (id) => self.readDelegation(id),
       listDelegations: () => self.listDelegations(),
+      killDelegation: (id) => self.killDelegation(id),
       executeBatchToolCall: (tools, toolCall, messages, signal) =>
         self.executeBatchToolCall(tools, toolCall, messages, signal),
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
@@ -2712,6 +2728,7 @@ export class Agent {
       runDelegation: (request, signal) => self.runDelegation(request, signal),
       readDelegation: (id) => self.readDelegation(id),
       listDelegations: () => self.listDelegations(),
+      killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => self.steerDrain?.() ?? [],
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
@@ -2729,7 +2746,10 @@ export class Agent {
       },
       askSafetyOverride: async (info) => {
         const h = self._safetyOverrideHandler;
-        if (!h) return { action: "block" };
+        if (!h) {
+          console.warn(`[Agent] askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`);
+          return { action: "block" };
+        }
         try {
           return await h(info);
         } catch (err) {

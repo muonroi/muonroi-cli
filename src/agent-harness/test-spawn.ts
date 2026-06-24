@@ -165,7 +165,9 @@ async function spawnWindows(args: string[], opts: SpawnOptions): Promise<SpawnRe
     // outPipe is where the child writes frames — wait for the handshake line.
     await waitForHandshake(outSocket, timeoutMs);
   } catch (err) {
-    proc.kill();
+    if (proc && typeof proc.kill === "function") {
+      proc.kill();
+    }
     inServer.close();
     outServer.close();
     throw err;

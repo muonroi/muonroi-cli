@@ -42,7 +42,8 @@ const HEAVY_RE = /\brefactor|migrate|architecture\b/i;
  * The combined regex deliberately scans for `path/like/tokens` so we count
  * distinct file/path mentions per the locked spec.
  */
-const PATH_TOKEN_RE = /(?:[\w.@-]+\/[\w./@-]+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|rs|go|cs|rb|java|yml|yaml|toml|sh|ps1))/gi;
+const PATH_TOKEN_RE =
+  /(?:[\w.@-]+\/[\w./@-]+|[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|py|rs|go|cs|rb|java|yml|yaml|toml|sh|ps1))/gi;
 
 /** Question-form starter words (case-insensitive). */
 const QUESTION_START_RE = /^(what|why|how|where|can|is|are|does)\b/i;

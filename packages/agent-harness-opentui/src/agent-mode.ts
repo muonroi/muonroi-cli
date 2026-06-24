@@ -18,9 +18,9 @@
 
 import { createReadStream, createWriteStream } from "node:fs";
 import { createEventFilter } from "@muonroi/agent-harness-core/event-filter";
+import { redactEvent } from "@muonroi/agent-harness-core/event-redact";
 import { createIdleDetector } from "@muonroi/agent-harness-core/idle";
 import type { LiveEvent } from "@muonroi/agent-harness-core/protocol";
-import { redactEvent } from "@muonroi/agent-harness-core/event-redact";
 import { createLineSplitter, createSidechannelWriter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { installOpenTUIHarness, type OpenTUIHarnessTransport } from "./install.js";
 import type { SemanticRegistry } from "./reconciler-hook.js";

@@ -6,10 +6,10 @@
  * project this as a single high-cost reservation that breaches cap
  * on the first attempt if cost exceeds the configured cap.
  */
-import { describe, it, expect } from "vitest";
-import { setupRunawayHome } from "./harness.js";
+import { describe, expect, it } from "vitest";
 import { reserve } from "../../src/usage/ledger.js";
 import { CapBreachError } from "../../src/usage/types.js";
+import { setupRunawayHome } from "./harness.js";
 
 describe("USAGE-07: large file recursion breaches cap on single reservation", () => {
   it("single high-cost reservation exceeds cap immediately", async () => {

@@ -5,21 +5,15 @@
  * Module-level test — directly exercises flow state read/write + resume pipeline
  * without requiring OpenTUI boot.
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { promises as fs } from "node:fs";
-import * as path from "node:path";
-import { tmpdir } from "node:os";
-import { mkdtemp, rm } from "node:fs/promises";
 
+import { promises as fs } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { getSection, parseSections } from "../../src/flow/parser.js";
+import { createRun, getActiveRunId, loadRun, setActiveRunId, updateRunFile } from "../../src/flow/run-manager.js";
 import { ensureFlowDir } from "../../src/flow/scaffold.js";
-import {
-  createRun,
-  setActiveRunId,
-  getActiveRunId,
-  loadRun,
-  updateRunFile,
-} from "../../src/flow/run-manager.js";
-import { parseSections, getSection } from "../../src/flow/parser.js";
 import { loadFlowResumeDigest } from "../../src/orchestrator/flow-resume.js";
 
 let tempDirs: string[] = [];
@@ -49,15 +43,9 @@ describe("kill-restart continuity (FLOW-04)", { timeout: 15000 }, () => {
 
     // 3. Write state to run's state.md (simulate mid-task state)
     const stateMap = parseSections("");
-    stateMap.sections.set(
-      "Resume Digest",
-      "Working on feature X. File: src/foo.ts modified.",
-    );
+    stateMap.sections.set("Resume Digest", "Working on feature X. File: src/foo.ts modified.");
     stateMap.sections.set("Status", "executing");
-    stateMap.sections.set(
-      "Experience Snapshot",
-      "[2026-04-30T12:00:00Z] Warning about Y",
-    );
+    stateMap.sections.set("Experience Snapshot", "[2026-04-30T12:00:00Z] Warning about Y");
     await updateRunFile(flowDir, run.id, "state.md", stateMap);
 
     // 4. Simulate crash (no cleanup — just abandon the "process")

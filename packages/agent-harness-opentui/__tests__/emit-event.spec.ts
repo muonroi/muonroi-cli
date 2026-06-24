@@ -462,10 +462,9 @@ describe("AgentMode emitEvent filter+redact integration (4.2)", () => {
     } as any);
 
     const lines = await collectLines(out);
-    const councilLine = lines.find((l) => (l as { kind?: string }).kind === "council-step") as Record<
-      string,
-      unknown
-    > | undefined;
+    const councilLine = lines.find((l) => (l as { kind?: string }).kind === "council-step") as
+      | Record<string, unknown>
+      | undefined;
     expect(councilLine).toBeDefined();
     expect(councilLine?.["phaseId"]).toBe("p2");
     expect(councilLine?.["state"]).toBe("done");

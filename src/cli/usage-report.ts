@@ -8,9 +8,9 @@
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readCostLog, type CostLogEntry } from "../usage/cost-log.js";
-import { readProductLedger } from "../usage/product-ledger.js";
+import { type CostLogEntry, readCostLog } from "../usage/cost-log.js";
 import { listDecisionLogDates, readDecisionLog } from "../usage/decision-log.js";
+import { readProductLedger } from "../usage/product-ledger.js";
 
 type GroupBy = "callsite" | "role" | "phase" | "model" | "provider";
 
@@ -268,9 +268,15 @@ export async function runUsageReport(opts: UsageReportOpts = {}): Promise<void> 
   // instead of 5+ separate bash/read/grep for system info, tool load, and "am I going blind on state?").
   // This is the actionable output the agent can consume after any turn to self-calibrate.
   console.log("\n[agent-self] comfort snapshot (run with --breakdown for full per-turn numbers)");
-  console.log("  batch system info in ONE bash with ; or && (uname; node -v; ls -la | head; git status; df -h; ps | head), then bash_output_get(run_id, mode=...) for slices — never re-run.");
-  console.log("  prefer read_file + grep over bash cat/grep/find for source; read-path budget defaults to 0 (unlimited after write/edit thanks to notifyWrite).");
-  console.log("  high avg tools or system chars = use sub-agent compaction or cheaper model for research/verify roles; watch the drift table above.");
+  console.log(
+    "  batch system info in ONE bash with ; or && (uname; node -v; ls -la | head; git status; df -h; ps | head), then bash_output_get(run_id, mode=...) for slices — never re-run.",
+  );
+  console.log(
+    "  prefer read_file + grep over bash cat/grep/find for source; read-path budget defaults to 0 (unlimited after write/edit thanks to notifyWrite).",
+  );
+  console.log(
+    "  high avg tools or system chars = use sub-agent compaction or cheaper model for research/verify roles; watch the drift table above.",
+  );
 }
 
 export { aggregate, printTable };
@@ -289,7 +295,9 @@ function parseRelativeSince(since?: string): number | null {
  * security-audit (Task 3): yolo/permission overrides + high-risk cmds from decision-log (populated by appendAudit in permission-mode + bash shuru).
  * Reuses aggregate/printTable. Supports --since <date|7d|1h|30m>
  */
-export async function runSecurityAudit(opts: { since?: string; json?: boolean; format?: "table" | "json" | "md" } = {}) {
+export async function runSecurityAudit(
+  opts: { since?: string; json?: boolean; format?: "table" | "json" | "md" } = {},
+) {
   const home = muonroiHome();
   const cutoff = parseRelativeSince(opts.since);
   let dates = await listDecisionLogDates(home);
@@ -302,7 +310,9 @@ export async function runSecurityAudit(opts: { since?: string; json?: boolean; f
   }
   let decisions: any[] = [];
   for (const d of dates) {
-    try { decisions = decisions.concat(await readDecisionLog(d, home)); } catch {}
+    try {
+      decisions = decisions.concat(await readDecisionLog(d, home));
+    } catch {}
   }
   if (cutoff) {
     decisions = decisions.filter((d: any) => (d.ts || 0) >= cutoff);
@@ -310,7 +320,9 @@ export async function runSecurityAudit(opts: { since?: string; json?: boolean; f
   const costDates = cutoff || !opts.since ? (await listCostLogDates(home)).slice(-1) : [opts.since!];
   let costEntries: CostLogEntry[] = [];
   for (const d of costDates) {
-    try { costEntries = costEntries.concat(await readCostLog(d, home)); } catch {}
+    try {
+      costEntries = costEntries.concat(await readCostLog(d, home));
+    } catch {}
   }
   const costRows = aggregate(costEntries, "callsite").slice(0, 8);
   const taken = decisions.filter((d: any) => d.taken);
@@ -318,7 +330,7 @@ export async function runSecurityAudit(opts: { since?: string; json?: boolean; f
   const highRiskCmds: string[] = overrides
     .map((d: any) => {
       const ctx = d.meta?.context || {};
-      let cmd = ctx.command ? String(ctx.command) : (ctx.shuru ? "[shuru]" : "");
+      let cmd = ctx.command ? String(ctx.command) : ctx.shuru ? "[shuru]" : "";
       if (cmd && cmd !== "[shuru]") {
         cmd = cmd.replace(/((?:key|token|secret|pwd|pass|auth|AWS_)[^=]*=)[^\s]+/gi, "$1[REDACTED]");
         cmd = cmd.replace(/https?:\/\/\S*?(?:key|token|secret)=\S+/gi, "[REDACTED_URL]");
@@ -338,20 +350,22 @@ export async function runSecurityAudit(opts: { since?: string; json?: boolean; f
           topCost: costRows,
         },
         null,
-        2
-      ) + "\n"
+        2,
+      ) + "\n",
     );
     return;
   }
   console.log(
-    `\n[security-audit] ${decisions.length} decisions (${taken.length} taken) | ${overrides.length} yolo/permission overrides | ${costEntries.length} cost entries (since ${opts.since || "recent"})`
+    `\n[security-audit] ${decisions.length} decisions (${taken.length} taken) | ${overrides.length} yolo/permission overrides | ${costEntries.length} cost entries (since ${opts.since || "recent"})`,
   );
   if (overrides.length > 0) {
     console.log("Yolo / Permission overrides:");
     overrides.slice(0, 5).forEach((d: any) => {
       const ctx = d.meta?.context || {};
       const cmd = ctx.command ? ` cmd=${String(ctx.command).slice(0, 40)}` : ctx.shuru ? " [shuru]" : "";
-      console.log(`  ${new Date(d.ts).toISOString().slice(0, 19)} ${d.kind} tool=${d.tool || ""}${cmd} reason=${d.reason || ""}`);
+      console.log(
+        `  ${new Date(d.ts).toISOString().slice(0, 19)} ${d.kind} tool=${d.tool || ""}${cmd} reason=${d.reason || ""}`,
+      );
     });
   }
   if (highRiskCmds.length > 0) {
@@ -381,7 +395,9 @@ export async function runPerfRegression(opts: { compare?: string; json?: boolean
   const dates = (await listCostLogDates(home)).slice(-2);
   let entries: CostLogEntry[] = [];
   for (const d of dates) {
-    try { entries = entries.concat(await readCostLog(d, home)); } catch {}
+    try {
+      entries = entries.concat(await readCostLog(d, home));
+    } catch {}
   }
   const rows = aggregate(entries, "callsite");
   if (opts.json) {
@@ -393,6 +409,8 @@ export async function runPerfRegression(opts: { compare?: string; json?: boolean
   const drifts = rows.filter((r) => r.driftSamples >= 2 && r.driftSum / r.driftSamples > 1.2).slice(0, 3);
   if (drifts.length > 0) {
     console.log("\nHigh drift (>1.2x) callsites (potential regression):");
-    drifts.forEach((r) => console.log(`  ${r.key} drift×${(r.driftSum / r.driftSamples).toFixed(2)} over ${r.driftSamples}`));
+    drifts.forEach((r) =>
+      console.log(`  ${r.key} drift×${(r.driftSum / r.driftSamples).toFixed(2)} over ${r.driftSamples}`),
+    );
   }
 }

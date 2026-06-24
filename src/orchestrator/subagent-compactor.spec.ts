@@ -413,4 +413,61 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     }
     expect(keptExplicit).toBe(true);
   });
+
+  it("elides low-value large read_file results while keeping high-value ones", () => {
+    // Turn 1: large low-value read_file output (15000 chars of 'x', no ts/src/PLAN/error keywords)
+    const lowValueOutput = "x".repeat(15000);
+    // Turn 2: large high-value read_file output containing 'error'
+    const highValueOutputWithError = "error: failed to load module\n" + "x".repeat(15000);
+    // Turn 3: small source file read (5000 chars of 'x' containing 'src/index.ts')
+    const highValueSourceOutput = "src/index.ts\n" + "x".repeat(5000);
+
+    const msgs: ModelMessage[] = [
+      { role: "system", content: "You are the agent." },
+      { role: "user", content: "perform task" },
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call_low", toolName: "read_file", input: {} }],
+      } as unknown as ModelMessage,
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call_low", toolName: "read_file", output: { type: "text", value: lowValueOutput } }],
+      } as unknown as ModelMessage,
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call_err", toolName: "read_file", input: {} }],
+      } as unknown as ModelMessage,
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call_err", toolName: "read_file", output: { type: "text", value: highValueOutputWithError } }],
+      } as unknown as ModelMessage,
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: "call_src", toolName: "read_file", input: {} }],
+      } as unknown as ModelMessage,
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "call_src", toolName: "read_file", output: { type: "text", value: highValueSourceOutput } }],
+      } as unknown as ModelMessage,
+      // Add a couple of low-value turns to push past threshold and keepLast turns (keepLast=1)
+      ...toolTurn(9, 10),
+    ];
+    // Force low value on the final kept turn
+    (msgs[msgs.length - 1] as any).content[0].toolName = "other_tool";
+
+    const out = compactSubAgentMessages(msgs, { thresholdChars: 10_000, keepLastTurns: 1 });
+    
+    // low-value large read_file MUST be elided
+    const lowValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_low");
+    expect((lowValMsg?.content as any)[0].output.value).toMatch(/elided by sub-agent compactor/);
+
+    // high-value large error read_file MUST NOT be elided
+    const errValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_err");
+    expect((errValMsg?.content as any)[0].output.value).toBe(highValueOutputWithError);
+
+    // high-value small source read_file MUST NOT be elided
+    const srcValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_src");
+    expect((srcValMsg?.content as any)[0].output.value).toBe(highValueSourceOutput);
+  });
 });
+

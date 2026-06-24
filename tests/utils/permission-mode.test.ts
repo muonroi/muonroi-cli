@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { toolNeedsApproval, appendAudit } from "../../src/utils/permission-mode.js";
+import { describe, expect, it } from "vitest";
 import { listDecisionLogDates, readDecisionLog } from "../../src/usage/decision-log.js";
+import { appendAudit, toolNeedsApproval } from "../../src/utils/permission-mode.js";
 
 describe("permission-mode context + audit (Wave 2 Task 1)", () => {
   it("old 2-arg calls unchanged (backward compat)", () => {
@@ -21,9 +21,7 @@ describe("permission-mode context + audit (Wave 2 Task 1)", () => {
     if (dates.length > 0) {
       const last = dates[dates.length - 1];
       const entries = await readDecisionLog(last);
-      const hasOverride = entries.some(
-        (e) => e.kind === "yolo-override" && e.reason.includes("yolo-override")
-      );
+      const hasOverride = entries.some((e) => e.kind === "yolo-override" && e.reason.includes("yolo-override"));
       expect(typeof hasOverride).toBe("boolean"); // soft; may be from prior or this run
     }
   });

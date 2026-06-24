@@ -192,12 +192,7 @@ function getCounter(col: string): IngestResult {
   return counters[col];
 }
 
-async function ingestPoint(
-  point: EEPoint,
-  state: IngestState,
-  fileKey: string,
-  fileHash: string,
-): Promise<void> {
+async function ingestPoint(point: EEPoint, state: IngestState, fileKey: string, fileHash: string): Promise<void> {
   if (COLLECTION_FILTER && point.collection !== COLLECTION_FILTER) return;
 
   const counter = getCounter(point.collection);
@@ -213,9 +208,7 @@ async function ingestPoint(
   const isNew = !existingHash;
 
   if (DRY_RUN) {
-    console.log(
-      `  [DRY-RUN] ${isNew ? "NEW" : "UPDATE"} ${point.collection}/${point.id}: ${point.text.slice(0, 80)}`,
-    );
+    console.log(`  [DRY-RUN] ${isNew ? "NEW" : "UPDATE"} ${point.collection}/${point.id}: ${point.text.slice(0, 80)}`);
     if (isNew) counter.new++;
     else counter.updated++;
     state[stateKey] = pointHash;
@@ -268,14 +261,7 @@ function parseDeepMap(content: string): DeepMapRow[] {
       if (cells.length >= 3) {
         const [file, classOrInterface, ...rest] = cells;
         // Skip header rows
-        if (
-          file === "File" ||
-          file === "Tool" ||
-          file === "Sample" ||
-          file === "Area" ||
-          file === "Command"
-        )
-          continue;
+        if (file === "File" || file === "Tool" || file === "Sample" || file === "Area" || file === "Command") continue;
         const keyMethods = rest.join(" | ");
         if (currentPackage && file && classOrInterface) {
           rows.push({ package: currentPackage, file, classOrInterface, keyMethods });
@@ -303,10 +289,7 @@ function parsePackageFamilies(content: string): PackageFamilyRow[] {
     content.indexOf("## Package Families") !== -1 || content.indexOf("## Package families") !== -1;
   if (!inFamiliesSection) return rows;
 
-  const sectionStart = Math.max(
-    content.indexOf("## Package Families"),
-    content.indexOf("## Package families"),
-  );
+  const sectionStart = Math.max(content.indexOf("## Package Families"), content.indexOf("## Package families"));
   const sectionEnd = content.indexOf("\n##", sectionStart + 1);
   const section = sectionEnd === -1 ? content.slice(sectionStart) : content.slice(sectionStart, sectionEnd);
 
@@ -368,7 +351,10 @@ function parseOssBoundary(content: string): OssBoundaryRule[] {
   const ossSection = content.match(/## OSS Packages[\s\S]*?\n([\s\S]*?)(?=\n## Commercial)/);
   if (ossSection) {
     for (const line of ossSection[1].split("\n")) {
-      const pkg = line.replace(/^-\s*/, "").trim().replace(/\s+\(.*\)/, "");
+      const pkg = line
+        .replace(/^-\s*/, "")
+        .trim()
+        .replace(/\s+\(.*\)/, "");
       if (pkg.startsWith("Muonroi.")) {
         rules.push({
           type: "oss-pkg",
@@ -384,7 +370,10 @@ function parseOssBoundary(content: string): OssBoundaryRule[] {
   const commercialSection = content.match(/## Commercial Packages[\s\S]*?\n([\s\S]*?)$/);
   if (commercialSection) {
     for (const line of commercialSection[1].split("\n")) {
-      const pkg = line.replace(/^-\s*/, "").trim().replace(/\s+\(.*\)/, "");
+      const pkg = line
+        .replace(/^-\s*/, "")
+        .trim()
+        .replace(/\s+\(.*\)/, "");
       if (pkg.startsWith("Muonroi.")) {
         rules.push({
           type: "commercial-pkg",
@@ -415,10 +404,14 @@ function parseSampleReadme(content: string, sampleDir: string): SampleInfo {
   const lines = content.split("\n");
 
   // Title: first H1
-  const title = lines.find((l) => l.startsWith("# "))?.slice(2).trim() ?? basename(sampleDir);
+  const title =
+    lines
+      .find((l) => l.startsWith("# "))
+      ?.slice(2)
+      .trim() ?? basename(sampleDir);
 
   // Intent: H2 "What this demonstrates" section
-  let intentLines: string[] = [];
+  const intentLines: string[] = [];
   let inIntent = false;
   for (const line of lines) {
     if (line.match(/^## What this demonstrates/i)) {
@@ -444,9 +437,7 @@ function parseSampleReadme(content: string, sampleDir: string): SampleInfo {
       .join(" ");
 
   // Keywords from intent + H1/H2 headings
-  const headings = lines
-    .filter((l) => l.startsWith("#"))
-    .map((l) => l.replace(/^#+\s*/, "").toLowerCase());
+  const headings = lines.filter((l) => l.startsWith("#")).map((l) => l.replace(/^#+\s*/, "").toLowerCase());
   const intentWords = intentText
     .toLowerCase()
     .split(/\W+/)
@@ -487,9 +478,7 @@ function parseSampleReadme(content: string, sampleDir: string): SampleInfo {
   ].slice(0, 10);
 
   // Extract package references from code blocks
-  const packageRefs = [
-    ...content.matchAll(/Muonroi\.\w+(?:\.\w+)*/g),
-  ].map((m) => m[0]);
+  const packageRefs = [...content.matchAll(/Muonroi\.\w+(?:\.\w+)*/g)].map((m) => m[0]);
 
   const packages = [...new Set(packageRefs)];
 
@@ -642,9 +631,7 @@ async function collectTemplates(templatesRoot: string): Promise<TemplateInfo[]> 
           await scanCsproj(full);
         } else if (entry.isFile() && entry.name.endsWith(".csproj")) {
           const content = await readFile(full, "utf8").catch(() => "");
-          const found = [...content.matchAll(/PackageReference[^>]*Include="(Muonroi\.[^"]+)"/g)].map(
-            (m) => m[1],
-          );
+          const found = [...content.matchAll(/PackageReference[^>]*Include="(Muonroi\.[^"]+)"/g)].map((m) => m[1]);
           pkgs.push(...found);
         }
       }
@@ -677,7 +664,7 @@ async function main() {
   console.log("");
 
   const state = loadState();
-  let exitCode = 0;
+  const exitCode = 0;
 
   // ---- 3.1 REPO_DEEP_MAP.md → bb-behavioral ----
   const deepMapPath = join(BB_ROOT, "REPO_DEEP_MAP.md");
@@ -713,7 +700,10 @@ async function main() {
     console.log(`  Found ${families.length} family rows`);
 
     for (const row of families) {
-      const pkgList = [...row.ossPackages.map((p) => `${p} (OSS)`), ...row.commercialPackages.map((p) => `${p} (Commercial)`)].join(", ");
+      const pkgList = [
+        ...row.ossPackages.map((p) => `${p} (OSS)`),
+        ...row.commercialPackages.map((p) => `${p} (Commercial)`),
+      ].join(", ");
       const text = `${row.area} area packages: ${pkgList}`;
       const point: EEPoint = {
         id: deterministicId("readme-package-families", text),
@@ -840,7 +830,10 @@ async function main() {
         source: "bb-template",
       },
     };
-    const tplRoot = join(TEMPLATES_ROOT, tpl.nugetId === "Muonroi.BaseTemplate" ? "Muonroi.BaseTemplate" : `${tpl.nugetId}.Template`);
+    const tplRoot = join(
+      TEMPLATES_ROOT,
+      tpl.nugetId === "Muonroi.BaseTemplate" ? "Muonroi.BaseTemplate" : `${tpl.nugetId}.Template`,
+    );
     await ingestPoint(point, state, tplRoot, sha256(JSON.stringify(tpl)));
   }
 
@@ -852,7 +845,9 @@ async function main() {
   let anyFailed = false;
   for (const [col, c] of Object.entries(counters)) {
     if (COLLECTION_FILTER && col !== COLLECTION_FILTER) continue;
-    console.log(`  ${col}: ✓ ingested ${c.new} new, ${c.updated} updated, ${c.unchanged} unchanged${c.failed > 0 ? `, ${c.failed} FAILED` : ""}`);
+    console.log(
+      `  ${col}: ✓ ingested ${c.new} new, ${c.updated} updated, ${c.unchanged} unchanged${c.failed > 0 ? `, ${c.failed} FAILED` : ""}`,
+    );
     if (c.failed > 0) anyFailed = true;
   }
 

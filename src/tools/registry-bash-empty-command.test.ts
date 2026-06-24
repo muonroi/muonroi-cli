@@ -32,7 +32,8 @@ describe("bash tool — empty/missing command corrective guard", () => {
     const bash = new BashTool(os.tmpdir());
     const tools = createBuiltinTools(bash, "agent");
     const out = await runBash(tools, {});
-    expect(out).toMatch(/ERROR/);
+    // Guard uses "BLOCKED (empty-bash):" prefix — more semantic than bare "ERROR".
+    expect(out).toMatch(/BLOCKED/);
     expect(out).toMatch(/non-empty/i);
     expect(out).toMatch(/command/i);
   });
@@ -41,7 +42,7 @@ describe("bash tool — empty/missing command corrective guard", () => {
     const bash = new BashTool(os.tmpdir());
     const tools = createBuiltinTools(bash, "agent");
     const out = await runBash(tools, { command: "" });
-    expect(out).toMatch(/ERROR/);
+    expect(out).toMatch(/BLOCKED/);
     expect(out).toMatch(/non-empty/i);
   });
 
@@ -49,7 +50,7 @@ describe("bash tool — empty/missing command corrective guard", () => {
     const bash = new BashTool(os.tmpdir());
     const tools = createBuiltinTools(bash, "agent");
     const out = await runBash(tools, { command: "   " });
-    expect(out).toMatch(/ERROR/);
+    expect(out).toMatch(/BLOCKED/);
     expect(out).toMatch(/non-empty/i);
   });
 

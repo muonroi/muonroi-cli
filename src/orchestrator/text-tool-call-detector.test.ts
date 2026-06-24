@@ -18,9 +18,15 @@ describe("detectTextEmittedToolCall", () => {
   });
 
   it("detects write_to_file / execute_command / apply_diff blocks", () => {
-    expect(detectTextEmittedToolCall("<write_to_file>\n<path>a.ts</path>\n<content>x</content>\n</write_to_file>").detected).toBe(true);
-    expect(detectTextEmittedToolCall("<execute_command>\n<command>npm test</command>\n</execute_command>").detected).toBe(true);
-    expect(detectTextEmittedToolCall("<apply_diff>\n<path>a.ts</path>\n<diff>...</diff>\n</apply_diff>").detected).toBe(true);
+    expect(
+      detectTextEmittedToolCall("<write_to_file>\n<path>a.ts</path>\n<content>x</content>\n</write_to_file>").detected,
+    ).toBe(true);
+    expect(
+      detectTextEmittedToolCall("<execute_command>\n<command>npm test</command>\n</execute_command>").detected,
+    ).toBe(true);
+    expect(detectTextEmittedToolCall("<apply_diff>\n<path>a.ts</path>\n<diff>...</diff>\n</apply_diff>").detected).toBe(
+      true,
+    );
   });
 
   it("detects an empty-but-closed tool block (open immediately closed)", () => {
@@ -42,14 +48,40 @@ describe("detectTextEmittedToolCall", () => {
 
   it("detects generic native wrappers (Qwen <tool_call>, Anthropic <invoke name=>)", () => {
     expect(detectTextEmittedToolCall('<tool_call>{"name":"read_file"}</tool_call>').detected).toBe(true);
-    expect(detectTextEmittedToolCall('<invoke name="read_file"><parameter name="path">a</parameter></invoke>').detected).toBe(true);
+    expect(
+      detectTextEmittedToolCall('<invoke name="read_file"><parameter name="path">a</parameter></invoke>').detected,
+    ).toBe(true);
     expect(detectTextEmittedToolCall("<function_calls>...").detected).toBe(true);
   });
 
-  it("detects the DeepSeek-native DSML leak (｜｜DSML｜｜invoke …) and extracts the tool name", () => {
+  it("detects the DeepSeek-native DSML leak (│invoke …) and extracts the tool name", () => {
     // Live: storyflow_ui explore-A/B, deepseek T3 (session 799f0508e830) emitted
     // this as text and made no real tool call → empty, silent turn. The generic
     // <invoke matcher misses it because `<` is followed by the U+FF5C sentinel.
+    const text = `<│tool_calls>
+<│invoke name="read_file">
+<│parameter name="file_path" string="true">src/app/foo.html</│parameter>
+</│invoke>
+</│tool_calls>`;
+    const r = detectTextEmittedToolCall(text);
+    expect(r.detected).toBe(true);
+    expect(r.tool).toBe("read_file");
+  });
+
+  it("detects the newer DeepSeek DSML format with │ DSML │ sentinel (2026-06-23+ leak)", () => {
+    // Newer DSML format where the model inserts "DSML" text between bars:
+    //   <│ DSML │invoke name="read_file">...</│ DSML │invoke>
+    const text = `<│tool_calls>
+<│ DSML │invoke name="read_file">
+<│ DSML │parameter name="file_path" string="true">D:\\sources\\Core\\muonroi-cli\\biome.json</│ DSML │parameter>
+</│ DSML │invoke>
+</│tool_calls>`;
+    const r = detectTextEmittedToolCall(text);
+    expect(r.detected).toBe(true);
+    expect(r.tool).toBe("read_file");
+  });
+
+  it("detects the double-bar DeepSeek DSML format with ｜｜ sentinel", () => {
     const text = `<｜｜DSML｜｜tool_calls>
 <｜｜DSML｜｜invoke name="read_file">
 <｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.html</｜｜DSML｜｜parameter>
@@ -58,6 +90,26 @@ describe("detectTextEmittedToolCall", () => {
     const r = detectTextEmittedToolCall(text);
     expect(r.detected).toBe(true);
     expect(r.tool).toBe("read_file");
+  });
+
+  it("parses double-bar DSML blocks with ｜｜ DSML ｜｜ sentinel format", () => {
+    const text = `<｜｜DSML｜｜invoke name="read_file">
+<｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.html</｜｜DSML｜｜parameter>
+</｜｜DSML｜｜invoke>`;
+    const calls = parseDsmlToolCalls(text);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe("read_file");
+    expect(calls[0]!.args.file_path).toBe("src/app/foo.html");
+  });
+
+  it("parses DSML blocks with │ DSML │ sentinel format", () => {
+    const text = `<│ DSML │invoke name="read_file">
+<│ DSML │parameter name="file_path" string="true">src/app.ts</│ DSML │parameter>
+</│ DSML │invoke>`;
+    const calls = parseDsmlToolCalls(text);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe("read_file");
+    expect(calls[0]!.args.file_path).toBe("src/app.ts");
   });
 
   it("does NOT fire on a bare inline mention of a tool name (no invocation shape)", () => {
@@ -69,12 +121,12 @@ describe("detectTextEmittedToolCall", () => {
   });
 
   it("parseDsmlToolCalls extracts name + args from the DSML block (for targeted re-steer)", () => {
-    const text = `<｜｜DSML｜｜tool_calls>
-<｜｜DSML｜｜invoke name="read_file">
-<｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.html</｜｜DSML｜｜parameter>
-<｜｜DSML｜｜parameter name="start_line" string="false">25</｜｜DSML｜｜parameter>
-</｜｜DSML｜｜invoke>
-</｜｜DSML｜｜tool_calls>`;
+    const text = `<│tool_calls>
+<│invoke name="read_file">
+<│parameter name="file_path" string="true">src/app/foo.html</│parameter>
+<│parameter name="start_line" string="false">25</│parameter>
+</│invoke>
+</│tool_calls>`;
     const calls = parseDsmlToolCalls(text);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.name).toBe("read_file");
@@ -83,7 +135,7 @@ describe("detectTextEmittedToolCall", () => {
   });
 
   it("parseDsmlToolCalls handles multiple invoke blocks and returns [] for non-DSML text", () => {
-    const text = `<｜｜DSML｜｜invoke name="read_file"><｜｜DSML｜｜parameter name="file_path">a.ts</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke><｜｜DSML｜｜invoke name="edit_file"><｜｜DSML｜｜parameter name="path">b.ts</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke>`;
+    const text = `<│invoke name="read_file"><│parameter name="file_path">a.ts</│parameter></│invoke><│invoke name="edit_file"><│parameter name="path">b.ts</│parameter></│invoke>`;
     const calls = parseDsmlToolCalls(text);
     expect(calls.map((c) => c.name)).toEqual(["read_file", "edit_file"]);
     expect(parseDsmlToolCalls("just a normal answer")).toEqual([]);
@@ -94,6 +146,8 @@ describe("detectTextEmittedToolCall", () => {
     expect(detectTextEmittedToolCall("```ts\nconst a = readFile(path);\n```").detected).toBe(false);
     expect(detectTextEmittedToolCall("").detected).toBe(false);
     // Angular template with self-closing/nested tags must not match a tool tag.
-    expect(detectTextEmittedToolCall('<span *ngIf="!story.cover" class="placeholder">{{ title }}</span>').detected).toBe(false);
+    expect(
+      detectTextEmittedToolCall('<span *ngIf="!story.cover" class="placeholder">{{ title }}</span>').detected,
+    ).toBe(false);
   });
 });

@@ -54,37 +54,97 @@ interface ProbeResult {
   errMsg?: string;
 }
 
-async function probeGenerate(label: string, model: string, system: string, prompt: string, maxTokens: number): Promise<ProbeResult> {
+async function probeGenerate(
+  label: string,
+  model: string,
+  system: string,
+  prompt: string,
+  maxTokens: number,
+): Promise<ProbeResult> {
   const t0 = Date.now();
   try {
     const text = await llm.generate(model, system, prompt, maxTokens);
     return { label, model, textLen: text.length, textHead: text.slice(0, 120), durationMs: Date.now() - t0, ok: true };
   } catch (err) {
-    return { label, model, textLen: 0, textHead: "", durationMs: Date.now() - t0, ok: false, errMsg: err instanceof Error ? err.message : String(err) };
+    return {
+      label,
+      model,
+      textLen: 0,
+      textHead: "",
+      durationMs: Date.now() - t0,
+      ok: false,
+      errMsg: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
-async function probeDebate(label: string, model: string, system: string, prompt: string): Promise<ProbeResult & { toolCount: number }> {
+async function probeDebate(
+  label: string,
+  model: string,
+  system: string,
+  prompt: string,
+): Promise<ProbeResult & { toolCount: number }> {
   const t0 = Date.now();
   try {
     const res = await llm.debate(model, system, prompt);
-    return { label, model, textLen: res.text.length, textHead: res.text.slice(0, 120), durationMs: Date.now() - t0, ok: true, toolCount: res.toolCalls.length };
+    return {
+      label,
+      model,
+      textLen: res.text.length,
+      textHead: res.text.slice(0, 120),
+      durationMs: Date.now() - t0,
+      ok: true,
+      toolCount: res.toolCalls.length,
+    };
   } catch (err) {
-    return { label, model, textLen: 0, textHead: "", durationMs: Date.now() - t0, ok: false, errMsg: err instanceof Error ? err.message : String(err), toolCount: 0 };
+    return {
+      label,
+      model,
+      textLen: 0,
+      textHead: "",
+      durationMs: Date.now() - t0,
+      ok: false,
+      errMsg: err instanceof Error ? err.message : String(err),
+      toolCount: 0,
+    };
   }
 }
 
 async function main(): Promise<void> {
   console.log("\n== PROBE 1: tiny generate, both models, max_tokens=64 ==\n");
-  const r1a = await probeGenerate("tiny-flash-64", FLASH, "You are a concise assistant.", "Reply with exactly the word: ok", 64);
+  const r1a = await probeGenerate(
+    "tiny-flash-64",
+    FLASH,
+    "You are a concise assistant.",
+    "Reply with exactly the word: ok",
+    64,
+  );
   console.log(r1a);
-  const r1b = await probeGenerate("tiny-pro-64", PRO, "You are a concise assistant.", "Reply with exactly the word: ok", 64);
+  const r1b = await probeGenerate(
+    "tiny-pro-64",
+    PRO,
+    "You are a concise assistant.",
+    "Reply with exactly the word: ok",
+    64,
+  );
   console.log(r1b);
 
   console.log("\n== PROBE 2: tiny generate, both models, max_tokens=2048 (council default) ==\n");
-  const r2a = await probeGenerate("tiny-flash-2048", FLASH, "You are a concise assistant.", "Reply with exactly the word: ok", 2048);
+  const r2a = await probeGenerate(
+    "tiny-flash-2048",
+    FLASH,
+    "You are a concise assistant.",
+    "Reply with exactly the word: ok",
+    2048,
+  );
   console.log(r2a);
-  const r2b = await probeGenerate("tiny-pro-2048", PRO, "You are a concise assistant.", "Reply with exactly the word: ok", 2048);
+  const r2b = await probeGenerate(
+    "tiny-pro-2048",
+    PRO,
+    "You are a concise assistant.",
+    "Reply with exactly the word: ok",
+    2048,
+  );
   console.log(r2b);
 
   console.log("\n== PROBE 3: realistic debate-style prompt (~3KB), max_tokens=2048 ==\n");
@@ -111,7 +171,9 @@ async function main(): Promise<void> {
       if (r.finishReason) finishReasons[r.finishReason] = (finishReasons[r.finishReason] ?? 0) + 1;
       if ((r.textChars ?? 0) === 0) totalEmpty++;
       if ((r.reasoningChars ?? 0) > 0) totalReasoning++;
-    } catch { /* skip */ }
+    } catch {
+      /* skip */
+    }
   }
   console.log("Per-call kinds:", byKey);
   console.log("Finish reasons:", finishReasons);
@@ -123,16 +185,33 @@ async function main(): Promise<void> {
   for (const line of lines.slice(0, 5)) {
     try {
       const r = JSON.parse(line);
-      console.log(JSON.stringify({
-        kind: r.kind, model: r.modelId, ok: r.ok,
-        textChars: r.textChars, reasoningChars: r.reasoningChars,
-        finishReason: r.finishReason,
-        textHead: r.textHead?.slice(0, 80),
-        reasoningHead: r.reasoningHead?.slice(0, 80),
-        usage: r.usage, error: r.error,
-      }, null, 2));
-    } catch { /* skip */ }
+      console.log(
+        JSON.stringify(
+          {
+            kind: r.kind,
+            model: r.modelId,
+            ok: r.ok,
+            textChars: r.textChars,
+            reasoningChars: r.reasoningChars,
+            finishReason: r.finishReason,
+            textHead: r.textHead?.slice(0, 80),
+            reasoningHead: r.reasoningHead?.slice(0, 80),
+            usage: r.usage,
+            error: r.error,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch {
+      /* skip */
+    }
   }
 }
 
-main().then(() => process.exit(0)).catch((e) => { console.error(e); process.exit(1); });
+main()
+  .then(() => process.exit(0))
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });

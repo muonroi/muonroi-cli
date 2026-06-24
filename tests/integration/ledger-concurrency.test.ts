@@ -1,18 +1,15 @@
-import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import * as os from "node:os";
+import * as path from "node:path";
+import { describe, expect, it } from "vitest";
 import { reserve } from "../../src/usage/ledger.js";
-import { CapBreachError } from "../../src/usage/types.js";
 import type { ReservationToken } from "../../src/usage/types.js";
+import { CapBreachError } from "../../src/usage/types.js";
 
 describe("USAGE-03: reservation ledger atomicity (Pitfall 2 + 7)", () => {
   it("10-parallel reserve never overshoots cap", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "muonroi-ledger-"));
-    await fs.writeFile(
-      path.join(home, "config.json"),
-      JSON.stringify({ cap: { monthly_usd: 1.0 } }),
-    );
+    await fs.writeFile(path.join(home, "config.json"), JSON.stringify({ cap: { monthly_usd: 1.0 } }));
 
     const args = {
       provider: "anthropic",

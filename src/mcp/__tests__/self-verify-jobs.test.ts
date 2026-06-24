@@ -12,10 +12,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeRunner(opts: {
-  tier1?: () => Promise<unknown>;
-  agentic?: () => Promise<unknown>;
-}): Runner {
+function makeRunner(opts: { tier1?: () => Promise<unknown>; agentic?: () => Promise<unknown> }): Runner {
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     tier1: (_o, log) => {
@@ -95,8 +92,8 @@ describe("JobManager", () => {
     const d = deferred<unknown>();
     const jm = new JobManager(makeRunner({ tier1: () => d.promise }));
     const runId = jm.start({ kind: "tier1" });
-    expect(jm.cancel(runId)).toBe(true);   // first cancel succeeds
-    expect(jm.cancel(runId)).toBe(false);  // second cancel: not running
+    expect(jm.cancel(runId)).toBe(true); // first cancel succeeds
+    expect(jm.cancel(runId)).toBe(false); // second cancel: not running
     expect(jm.cancel("nonexistent")).toBe(false);
   });
 });

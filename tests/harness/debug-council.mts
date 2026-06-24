@@ -52,13 +52,13 @@ const splitter = createLineSplitter((line) => {
           console.log("  PATCH:", JSON.stringify(p).slice(0, 200));
         }
       }
-    } catch { /* */ }
+    } catch {
+      /* */
+    }
   }
 });
 
-fd3?.on("data", (chunk: Buffer | string) =>
-  splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk),
-);
+fd3?.on("data", (chunk: Buffer | string) => splitter(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

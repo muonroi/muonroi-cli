@@ -5,10 +5,10 @@
  * ensures that the sum of accepted reservations never exceeds the cap.
  * (Pitfall 7: proper-lockfile serializes concurrent writes.)
  */
-import { describe, it, expect } from "vitest";
-import { setupRunawayHome } from "./harness.js";
+import { describe, expect, it } from "vitest";
 import { reserve } from "../../src/usage/ledger.js";
 import { CapBreachError } from "../../src/usage/types.js";
+import { setupRunawayHome } from "./harness.js";
 
 describe("USAGE-07: 10-parallel-tool-call burst — atomic-or-none", () => {
   it("sum of accepted reservations <= cap", async () => {
@@ -21,13 +21,9 @@ describe("USAGE-07: 10-parallel-tool-call burst — atomic-or-none", () => {
       homeOverride: home,
     };
 
-    const results = await Promise.all(
-      Array.from({ length: 10 }, () => reserve(args)),
-    );
+    const results = await Promise.all(Array.from({ length: 10 }, () => reserve(args)));
 
-    const accepted = results.filter(
-      (r) => !(r instanceof CapBreachError),
-    ) as Array<{ projected_usd: number }>;
+    const accepted = results.filter((r) => !(r instanceof CapBreachError)) as Array<{ projected_usd: number }>;
     const sum = accepted.reduce((s, t) => s + t.projected_usd, 0);
 
     expect(sum).toBeLessThanOrEqual(1.0);

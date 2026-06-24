@@ -202,10 +202,7 @@ export function createDriver(deps: DriverDeps): Driver {
     if ("event" in cond) {
       const kind = (cond as WaitConditionEvent).event;
       const matchFn = (cond as WaitConditionEvent).match;
-      return () =>
-        eventBuffer.some(
-          (e) => e.t === "event" && e.kind === kind && (matchFn ? matchFn(e) : true),
-        );
+      return () => eventBuffer.some((e) => e.t === "event" && e.kind === kind && (matchFn ? matchFn(e) : true));
     }
     return () => false;
   }

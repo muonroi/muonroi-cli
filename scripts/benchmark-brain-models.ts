@@ -6,7 +6,8 @@
 const API_KEY = "sk-rnqvvxycuvmztbwyenxoictwmhnquaecmulxwalcgoipphsl";
 const ENDPOINT = "https://api.siliconflow.com/v1/chat/completions";
 
-const SYSTEM = "You classify coding task complexity. Reply with exactly one word: fast, balanced, or premium. Nothing else.";
+const SYSTEM =
+  "You classify coding task complexity. Reply with exactly one word: fast, balanced, or premium. Nothing else.";
 
 const TEST_CASES: Array<[string, string]> = [
   // English - fast
@@ -79,7 +80,7 @@ async function classify(model: string, task: string): Promise<{ result: string |
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) return { result: null, ms: Date.now() - start };
-    const data = await res.json() as any;
+    const data = (await res.json()) as any;
     const content = data.choices?.[0]?.message?.content?.trim()?.toLowerCase() ?? null;
     // Normalize: extract first word that matches
     const match = content?.match(/\b(fast|balanced|premium)\b/);
@@ -150,10 +151,10 @@ console.log("-".repeat(100));
 results.forEach((r, i) => {
   console.log(
     `#${i + 1}`.padEnd(6) +
-    r.model.padEnd(49) +
-    `${(r.accuracy * 100).toFixed(0)}%`.padEnd(11) +
-    `${r.avgMs}ms`.padEnd(9) +
-    `${r.errors}`,
+      r.model.padEnd(49) +
+      `${(r.accuracy * 100).toFixed(0)}%`.padEnd(11) +
+      `${r.avgMs}ms`.padEnd(9) +
+      `${r.errors}`,
   );
 });
 

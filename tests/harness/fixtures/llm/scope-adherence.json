@@ -45,7 +45,12 @@
       ],
       [
         { "type": "stream-start", "warnings": [] },
-        { "type": "tool-call", "toolCallId": "bash-3", "toolName": "bash", "input": "{\"command\":\"echo step3-reminder-should-fire-now\"}" },
+        {
+          "type": "tool-call",
+          "toolCallId": "bash-3",
+          "toolName": "bash",
+          "input": "{\"command\":\"echo step3-reminder-should-fire-now\"}"
+        },
         {
           "type": "finish",
           "finishReason": { "unified": "tool-calls", "raw": null },
@@ -57,7 +62,12 @@
       ],
       [
         { "type": "stream-start", "warnings": [] },
-        { "type": "tool-call", "toolCallId": "bash-4", "toolName": "bash", "input": "{\"command\":\"echo step4-soft-warn-floor-of-6x0.7\"}" },
+        {
+          "type": "tool-call",
+          "toolCallId": "bash-4",
+          "toolName": "bash",
+          "input": "{\"command\":\"echo step4-soft-warn-floor-of-6x0.7\"}"
+        },
         {
           "type": "finish",
           "finishReason": { "unified": "tool-calls", "raw": null },
@@ -81,7 +91,12 @@
       ],
       [
         { "type": "stream-start", "warnings": [] },
-        { "type": "tool-call", "toolCallId": "bash-6", "toolName": "bash", "input": "{\"command\":\"echo step6-ceiling-hit\"}" },
+        {
+          "type": "tool-call",
+          "toolCallId": "bash-6",
+          "toolName": "bash",
+          "input": "{\"command\":\"echo step6-ceiling-hit\"}"
+        },
         {
           "type": "finish",
           "finishReason": { "unified": "tool-calls", "raw": null },
@@ -94,7 +109,11 @@
       [
         { "type": "stream-start", "warnings": [] },
         { "type": "text-start", "id": "final" },
-        { "type": "text-delta", "id": "final", "delta": "forced-finalize synthesis: halted at ceiling, partial answer follows." },
+        {
+          "type": "text-delta",
+          "id": "final",
+          "delta": "forced-finalize synthesis: halted at ceiling, partial answer follows."
+        },
         { "type": "text-end", "id": "final" },
         {
           "type": "finish",

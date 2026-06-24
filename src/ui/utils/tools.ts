@@ -27,7 +27,10 @@ export function toolArgs(tc?: ToolCall): string {
   if (!tc) return "";
   try {
     const a = JSON.parse(tc.function.arguments);
-    if (tc.function.name === "bash") return String(a.command || "").replace(/\n/g, " ").trim();
+    if (tc.function.name === "bash")
+      return String(a.command || "")
+        .replace(/\n/g, " ")
+        .trim();
     if (tc.function.name === "read_file" || tc.function.name === "write_file" || tc.function.name === "edit_file")
       return String(a.file_path || a.path || "");
     if (describeMcpFsTool(tc.function.name)) {

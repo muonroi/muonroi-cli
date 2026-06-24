@@ -33,6 +33,7 @@ interface ToolRegistryOpts {
   runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   readDelegation?: (id: string) => Promise<ToolResult>;
   listDelegations?: () => Promise<ToolResult>;
+  killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
   /**
    * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
@@ -154,7 +155,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // read_file
   tools.read_file = dynamicTool({
-    description: "Read file contents with optional start_line/end_line for iterative reading.",
+    description: "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -173,7 +174,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // grep
   tools.grep = dynamicTool({
     description:
-      "Fast regex content search across the codebase using ripgrep. Returns matching lines with file paths and line numbers.",
+      "Fast regex content search across the codebase using ripgrep. Returns matching lines with file paths and line numbers. Use this to find precise line numbers before calling read_file with start_line/end_line.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -256,19 +257,19 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         _emptyBashStreak.set(_ebKey, _eb);
         if (_eb >= 3) {
           return (
-            'BLOCKED: the `bash` tool has been called with an empty/missing "command" 3+ times in a row. ' +
+            'BLOCKED (empty-bash): the `bash` tool has been called with an empty/missing "command" 3+ times in a row. ' +
             "Bash is now DISABLED for the remainder of this session — use read_file, grep, or other tools instead. " +
             "If you need to run a shell command, state the blocker explicitly and the CLI will enable it again on the next turn."
           );
         }
         if (_eb >= 2) {
           return (
-            'ERROR (2nd consecutive empty bash call): the `bash` tool requires a non-empty "command" string ' +
+            'BLOCKED (empty-bash): ERROR (2nd consecutive empty bash call): the `bash` tool requires a non-empty "command" string ' +
             "but this is the 2nd call in a row with empty arguments. One more empty call will BLOCK bash for the session. " +
             'Provide a real command, e.g. {"command":"ls -la"}.'
           );
         }
-        return 'ERROR: the `bash` tool requires a non-empty "command" string, but the call had empty arguments. Provide the shell command to run, e.g. {"command":"ls -la"}.';
+        return 'BLOCKED (empty-bash): the `bash` tool requires a non-empty "command" string, but the call had empty arguments. Provide the shell command to run, e.g. {"command":"ls -la"}.';
       }
       // Reset the empty-bash streak on any successful command.
       _emptyBashStreak.delete(gitSafetyKey ?? "no-session");
@@ -597,11 +598,20 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             },
             description: { type: "string", description: "Short description of the task" },
             prompt: { type: "string", description: "Detailed instructions for the sub-agent" },
+            maxToolRounds: {
+              type: "number",
+              description: "Optional maximum tool execution rounds (default is 12 for foreground tasks)",
+            },
           },
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          const result = await runTask({ agent: input.agent, description: input.description, prompt: input.prompt });
+          const result = await runTask({
+            agent: input.agent,
+            description: input.description,
+            prompt: input.prompt,
+            maxToolRounds: input.maxToolRounds,
+          });
           return formatResult(result);
         },
       });
@@ -618,6 +628,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             agent: { type: "string", description: "Sub-agent type (usually 'explore')" },
             description: { type: "string", description: "Short description of the research task" },
             prompt: { type: "string", description: "Detailed research instructions" },
+            maxToolRounds: {
+              type: "number",
+              description: "Optional maximum tool execution rounds (default is 60 for explore delegations)",
+            },
           },
           required: ["agent", "description", "prompt"],
         }),
@@ -626,6 +640,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             agent: input.agent,
             description: input.description,
             prompt: input.prompt,
+            maxToolRounds: input.maxToolRounds,
           });
           return formatResult(result);
         },
@@ -662,6 +677,25 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }),
         execute: async () => {
           const result = await listDelegations();
+          return formatResult(result);
+        },
+      });
+    }
+
+    // delegation_kill
+    if (opts?.killDelegation) {
+      const killDelegation = opts.killDelegation;
+      tools.delegation_kill = dynamicTool({
+        description: "Terminate a running background delegation/subagent by ID.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            id: { type: "string", description: "Delegation ID to terminate" },
+          },
+          required: ["id"],
+        }),
+        execute: async (input: any) => {
+          const result = await killDelegation(input.id);
           return formatResult(result);
         },
       });

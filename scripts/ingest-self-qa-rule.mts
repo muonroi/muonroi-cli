@@ -102,12 +102,7 @@ const points: IngestPoint[] = seed.entries.map((e) => {
   //    (see scoring.js:computeEffectiveConfidence + config.js:getMinConfidence).
   //  - Flat payload.scope_* keys: required by the Qdrant index-level pre-filter
   //    (queryFilter closure in experience-core.js around line 166-216).
-  const solutionText = [
-    e.message,
-    "",
-    `Why: ${e.why}`,
-    `How to apply: ${e.how_to_apply}`,
-  ].join("\n");
+  const solutionText = [e.message, "", `Why: ${e.why}`, `How to apply: ${e.how_to_apply}`].join("\n");
   const confMap: Record<string, number> = { low: 0.5, medium: 0.7, high: 0.85 };
   const numericConfidence = confMap[e.confidence.toLowerCase()] ?? 0.7;
   const expJson = {

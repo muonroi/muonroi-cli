@@ -5,9 +5,6 @@
     "Google Cloud Translation API (paid, reliable)",
     "Auto-show tooltip/popup immediately on text highlight"
   ],
-  "post-debate": [
-    "no",
-    "continue"
-  ],
+  "post-debate": ["no", "continue"],
   "preflightApprove": true
 }

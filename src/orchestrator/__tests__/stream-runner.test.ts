@@ -198,4 +198,35 @@ describe("StreamRunner — DI surface", () => {
     const b = new StreamRunner(makeDeps());
     expect(a).not.toBe(b);
   });
+
+  describe("StreamRunner — maxSteps custom overrides", () => {
+    it("respects default maxSteps logic when request.maxToolRounds is undefined", async () => {
+      const deps = makeDeps({ getMaxToolRounds: () => 50 });
+      const runner = new StreamRunner(deps);
+      const outcome = await runner.setup({
+        agent: "explore",
+        description: "test",
+        prompt: "test",
+      });
+      expect(outcome.kind).toBe("prepared");
+      if (outcome.kind === "prepared") {
+        expect(outcome.prepared.maxSteps).toBe(100); // deps.getMaxToolRounds() * 2
+      }
+    });
+
+    it("uses request.maxToolRounds when it is explicitly defined", async () => {
+      const deps = makeDeps({ getMaxToolRounds: () => 50 });
+      const runner = new StreamRunner(deps);
+      const outcome = await runner.setup({
+        agent: "explore",
+        description: "test",
+        prompt: "test",
+        maxToolRounds: 75,
+      });
+      expect(outcome.kind).toBe("prepared");
+      if (outcome.kind === "prepared") {
+        expect(outcome.prepared.maxSteps).toBe(75);
+      }
+    });
+  });
 });

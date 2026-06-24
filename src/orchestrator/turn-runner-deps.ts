@@ -63,6 +63,7 @@ export interface TurnRunnerDepsBase {
   runDelegation(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
   readDelegation(id: string): Promise<ToolResult>;
   listDelegations(): Promise<ToolResult>;
+  killDelegation(id: string): Promise<ToolResult>;
 
   // ---- Turn bookkeeping --------------------------------------------------
   appendCompletedTurn(userMessage: ModelMessage, assistantMessages: ModelMessage[]): void;

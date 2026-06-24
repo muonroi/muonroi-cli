@@ -43,6 +43,7 @@ export interface TaskRequest {
   agent: BuiltinSubagentId | string;
   description: string;
   prompt: string;
+  maxToolRounds?: number;
 }
 
 export interface TaskRun {

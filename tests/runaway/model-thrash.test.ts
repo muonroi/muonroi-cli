@@ -5,10 +5,10 @@
  * model switches (each reservation is independent and commit removes
  * the prior reservation atomically).
  */
-import { describe, it, expect } from "vitest";
-import { setupRunawayHome } from "./harness.js";
-import { reserve, commit } from "../../src/usage/ledger.js";
+import { describe, expect, it } from "vitest";
+import { commit, reserve } from "../../src/usage/ledger.js";
 import { CapBreachError, type ReservationToken } from "../../src/usage/types.js";
+import { setupRunawayHome } from "./harness.js";
 
 const MODELS = [
   { provider: "anthropic", model: "claude-sonnet-4-20250514" },

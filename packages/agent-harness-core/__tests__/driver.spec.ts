@@ -128,13 +128,18 @@ describe("wait_for with match predicate", () => {
 
     const p = driver.wait_for({
       event: "council-step",
-      match: (e) => e.t === "event" && e.kind === "council-step" && (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
+      match: (e) =>
+        e.t === "event" &&
+        e.kind === "council-step" &&
+        (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
       timeoutMs: 200,
     });
 
     // Should not resolve yet (no done event)
     let resolved = false;
-    p.then(() => { resolved = true; }).catch(() => {});
+    p.then(() => {
+      resolved = true;
+    }).catch(() => {});
 
     await new Promise((r) => setTimeout(r, 50));
     expect(resolved).toBe(false);
@@ -153,7 +158,10 @@ describe("wait_for with match predicate", () => {
     await expect(
       driver.wait_for({
         event: "council-step",
-        match: (e) => e.t === "event" && e.kind === "council-step" && (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
+        match: (e) =>
+          e.t === "event" &&
+          e.kind === "council-step" &&
+          (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
         timeoutMs: 100,
       }),
     ).rejects.toThrow("wait_for timeout");
@@ -165,7 +173,10 @@ describe("wait_for with match predicate", () => {
 
     await driver.wait_for({
       event: "council-step",
-      match: (e) => e.t === "event" && e.kind === "council-step" && (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
+      match: (e) =>
+        e.t === "event" &&
+        e.kind === "council-step" &&
+        (e as Extract<LiveEvent, { kind: "council-step" }>).state === "done",
       timeoutMs: 200,
     });
   });
@@ -267,7 +278,9 @@ describe("driver.events() async iterable", () => {
     ingestEvent(driver, "toast", { level: "info", text: "keep" });
     ingestEvent(driver, "toast", { level: "error", text: "drop" });
 
-    const events = driver.events((e) => e.t === "event" && e.kind === "toast" && (e as Extract<LiveEvent, { kind: "toast" }>).level === "info");
+    const events = driver.events(
+      (e) => e.t === "event" && e.kind === "toast" && (e as Extract<LiveEvent, { kind: "toast" }>).level === "info",
+    );
     const iter = events[Symbol.asyncIterator]();
 
     const r = await iter.next();

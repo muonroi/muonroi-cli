@@ -13,7 +13,7 @@
 
 // Re-export LiveFrame from protocol via registry (it re-exports it)
 // We import from protocol directly to be explicit.
-import { PROTOCOL_VERSION, type LiveFrame } from "@muonroi/agent-harness-core/protocol";
+import { type LiveFrame, PROTOCOL_VERSION } from "@muonroi/agent-harness-core/protocol";
 import type { SemanticNodeInput, SemanticRegistry } from "@muonroi/agent-harness-core/registry";
 
 // ---------------------------------------------------------------------------

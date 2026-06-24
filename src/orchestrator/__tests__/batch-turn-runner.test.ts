@@ -76,6 +76,7 @@ function makeDeps(overrides: Partial<BatchTurnRunnerDeps> = {}): {
     runDelegation: async () => ({ success: true, output: "" }) as ToolResult,
     readDelegation: async () => ({ success: true, output: "" }) as ToolResult,
     listDelegations: async () => ({ success: true, output: "" }) as ToolResult,
+    killDelegation: async () => ({ success: true, output: "" }) as ToolResult,
     executeBatchToolCall: async (_tools: ToolSet, _call: ToolCall) => ({
       input: {},
       result: { success: true, output: "" } as ToolResult,
@@ -99,6 +100,7 @@ function makeArgs(signal: AbortSignal, providerStub?: unknown): Parameters<Batch
   const testProviders = getTestProviders();
   return {
     userModelMessage: { role: "user", content: "hello" } as ModelMessage,
+    userEnrichedMessage: { role: "user", content: "hello" } as ModelMessage,
     observer: undefined as ProcessMessageObserver | undefined,
     provider: (providerStub ?? {}) as Parameters<BatchTurnRunner["run"]>[0]["provider"],
     subagents: [],

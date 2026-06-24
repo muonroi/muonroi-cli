@@ -60,7 +60,7 @@ export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before in
 6. For a build / CI / test failure, read the ACTUAL failure log or stack trace
    BEFORE hypothesizing — fix the real error, not a guess from source alone.
 
-7. ANTI-MÙ / COMPACTION (for long sessions): On pre-warn or "[context compacted at step...", emit PRESERVE_FULL_CONTEXT (full veto) or lighter KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific high-value results. read_file/grep/lsp/bash on src/PLAN/error are auto-kept (idea 1). Use ee.query tool with "tool-artifact id=XXX" for on-demand full. Self-check "task finished?" / "compacted yet?". Use EE checkpoints.
+7. ANTI-MÙ / COMPACTION (for long sessions): On pre-warn or "[context compacted at step...", emit PRESERVE_FULL_CONTEXT (full veto) or lighter KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific high-value results. read_file/grep/lsp/bash on src/PLAN/error are auto-kept (idea 1). Use ee.query tool with "tool-artifact id=XXX" for on-demand full. Self-check "task finished?" / "compacted yet?". Use EE checkpoints. If you are reaching tool/step limits in a long session, suggest the user run "/compact" in the chat to compress this session's history.
 
 [END CRITICAL TOOL-USE RULES — your regular instructions begin below]
 

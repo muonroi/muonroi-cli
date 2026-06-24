@@ -5,11 +5,10 @@
  * The p95 latency MUST stay at or below 25ms. CI workflow perf-guard.yml
  * runs this on every PR to prevent regressions.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { startStubEEServer, type StubHandle } from "../../src/__test-stubs__/ee-server.js";
-import { setDefaultEEClient } from "../../src/ee/intercept.js";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { type StubHandle, startStubEEServer } from "../../src/__test-stubs__/ee-server.js";
 import { createEEClient } from "../../src/ee/client.js";
-import { intercept } from "../../src/ee/intercept.js";
+import { intercept, setDefaultEEClient } from "../../src/ee/intercept.js";
 
 describe("EE-08: PreToolUse p95 <= 25ms", () => {
   let stub: StubHandle;
@@ -18,9 +17,7 @@ describe("EE-08: PreToolUse p95 <= 25ms", () => {
     stub = await startStubEEServer({
       intercept: () => ({ decision: "allow" }),
     });
-    setDefaultEEClient(
-      createEEClient({ baseUrl: `http://localhost:${stub.port}` }),
-    );
+    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
   });
 
   afterAll(async () => {

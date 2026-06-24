@@ -82,9 +82,7 @@ export class JobManager {
     };
 
     const run =
-      opts.kind === "tier1"
-        ? this.runner.tier1(opts, log, ctrl.signal)
-        : this.runner.agentic(opts, log, ctrl.signal);
+      opts.kind === "tier1" ? this.runner.tier1(opts, log, ctrl.signal) : this.runner.agentic(opts, log, ctrl.signal);
 
     run.then(
       (report) => {
