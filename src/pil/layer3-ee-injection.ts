@@ -26,6 +26,14 @@ import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logge
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
+/**
+ * Session-scoped cross-turn dedup: records which pending recall IDs have
+ * already been surfaced via the feedback nudge in a previous turn. Prevents
+ * the same unrated [id] list from consuming input tokens turn after turn.
+ * Cleared on session reset (process exit or ledger.reset()).
+ */
+const _surfacedPendingIds = new Map<string, Set<string>>();
+
 // Budget for the HTTP/in-process search round-trip. 60ms (legacy) was tuned for
 // localhost Ollama and routinely tripped the abort on VPS thin-client setups
 // where embedding goes through SiliconFlow.
@@ -506,9 +514,29 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // [id collection] so ee_feedback is actionable — the static nudge named no ids,
   // so the model could not complete a rating even when willing. Falls back to the
   // static nudge when the ledger is disabled. Gated on rateable experience.
+  // Cross-turn dedup: only surface pending IDs NOT already shown in a prior
+  // turn. Once surfaced, the agent has seen the [id collection] handle and can
+  // act on it (ee_feedback) or ignore it — re-listing the same IDs every turn
+  // is pure input noise with no new signal. If nothing is new, skip the nudge.
   if (deduplicatedPrinciples.length + deduplicatedBehavioral.length > 0) {
     const pending = ledgerEnabled ? sessionRecallLedger.pending() : [];
-    parts.push(pending.length > 0 ? formatPendingReminder(pending, { max: 5 }) : RECALL_FEEDBACK_NUDGE);
+    if (pending.length > 0) {
+      const sid = ctx.sessionId ?? "_anon";
+      let surfaced = _surfacedPendingIds.get(sid);
+      if (!surfaced) {
+        surfaced = new Set<string>();
+        _surfacedPendingIds.set(sid, surfaced);
+      }
+      const newPending = pending.filter((p) => !surfaced!.has(p.id));
+      if (newPending.length > 0) {
+        for (const p of newPending) surfaced!.add(p.id);
+        parts.push(formatPendingReminder(newPending, { max: 5 }));
+      }
+      // else: all pending IDs were already surfaced — skip the nudge entirely.
+    } else {
+      // No pending debt at all; fall back to the generic static nudge.
+      parts.push(RECALL_FEEDBACK_NUDGE);
+    }
   }
   const injected = parts.join("\n");
 
