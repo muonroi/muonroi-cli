@@ -575,7 +575,7 @@ Optional env overrides for the caps:
 |---|---|---|---|
 | `MUONROI_MAX_TOOL_OUTPUT_CHARS` | 10_000–200_000 | 32_000 | Per-call tool-output cap (applies to every tool returning text). |
 | `MUONROI_SUB_AGENT_BUDGET_CHARS` | 20_000–600_000 | 120_000 | Cumulative budget the `task` sub-agent may receive across one invocation. Tiers at 30%/70% (aggressive). |
-| `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` | 50_000–1_500_000 | 400_000 | Cumulative budget for the TOP-LEVEL agentic tool loop, fresh per turn. Tiers at 50%/80% (loose — single-tool turns unaffected). Kicks in when sub-agent path fails and the top-level loop has to fall back to direct tool calls. |
+| `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` | 50_000–1_500_000 | 200_000 | Cumulative budget for the TOP-LEVEL agentic tool loop, fresh per turn. Tiers at 50%/80% (loose — single-tool turns unaffected). Kicks in when sub-agent path fails and the top-level loop has to fall back to direct tool calls. |
 | `MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS` | 20_000–500_000 | 80_000 | Phase B3 — cumulative message-chars above which the sub-agent `prepareStep` compactor rewrites older tool_result parts into short summary stubs. |
 | `MUONROI_SUBAGENT_COMPACT_KEEP_LAST` | 1–20 | 3 | Phase B3 — trailing tool turns kept verbatim during sub-agent compaction. |
 | `MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS` | 50_000–1_500_000 | 200_000 | Phase B4 — same as B3 threshold but for the top-level orchestrator loop. Higher default because top-level agents carry more useful early context. |
