@@ -96,6 +96,37 @@ export async function executeEventHooks(
     if (input.hook_event_name === "PreToolUse") {
       const preInput = input as PreToolUseHookInput;
 
+      // Hard EE recall-feedback gate: block non-ee_feedback tools when there are
+      // pending unrated recalls. This enforces the core EE feedback loop at the
+      // tool layer — the agent must rate hints before proceeding with other work.
+      // ee_feedback is the only tool allowed through so the debt can be cleared.
+      try {
+        const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
+          "../ee/recall-ledger.js"
+        );
+        if (isRecallLedgerEnabled() && input.tool_name !== "ee_feedback") {
+          const pending = sessionRecallLedger.pending();
+          if (pending.length > 0) {
+            const reminder = formatPendingReminder(pending, { max: 10 });
+            return {
+              blocked: true,
+              blockingErrors: [
+                {
+                  command: "ee:recall-feedback-gate",
+                  stderr: `You have ${pending.length} unrated EE recall(s). Rate them with ee_feedback() before proceeding.`,
+                },
+              ],
+              preventContinuation: false,
+              additionalContexts: [`⚠️ Blocked by EE recall-feedback gate.\n${reminder}`],
+              results: [],
+              eeMatches: [],
+            };
+          }
+        }
+      } catch {
+        /* fail-open — never crash the hook path */
+      }
+
       // Capture EE render output so warnings surface in the agent content stream
       // (yielded as content above the tool action) rather than going to console.warn.
       // Also fan out to the previous sink so the active TUI render path (activeEeYield)
