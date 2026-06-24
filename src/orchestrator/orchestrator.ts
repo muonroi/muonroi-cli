@@ -2493,6 +2493,20 @@ export class Agent {
     };
   }
 
+  private appendMidTurnMessages(newMessages: ModelMessage[]): void {
+    if (newMessages.length === 0) return;
+    if (!this.sessionStore || !this.session) {
+      this.messages.push(...newMessages);
+      this.messageSeqs.push(...newMessages.map(() => null));
+      return;
+    }
+    const insertedSeqs = appendMessages(this.session.id, newMessages);
+    this.messages.push(...newMessages);
+    this.messageSeqs.push(...insertedSeqs);
+    this.sessionStore.touchSession(this.session.id, this.bash.getCwd());
+    this.session = this.sessionStore.getRequiredSession(this.session.id);
+  }
+
   private appendCompletedTurn(userMessage: ModelMessage, newMessages: ModelMessage[]): void {
     if (newMessages.length === 0) return;
 
@@ -2730,6 +2744,7 @@ export class Agent {
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => self.steerDrain?.() ?? [],
+      appendMidTurnMessages: (msgs) => self.appendMidTurnMessages(msgs),
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
@@ -2747,7 +2762,9 @@ export class Agent {
       askSafetyOverride: async (info) => {
         const h = self._safetyOverrideHandler;
         if (!h) {
-          console.warn(`[Agent] askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`);
+          console.warn(
+            `[Agent] askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`,
+          );
           return { action: "block" };
         }
         try {
