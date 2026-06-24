@@ -27,6 +27,7 @@ import "../council-inspect.js";
 import "../ideal.js";
 import "../route.js";
 import "../status.js";
+import "../ponytail.js";
 
 describe("slash menu / registry parity", () => {
   it("every registered slash command has a menu entry", () => {

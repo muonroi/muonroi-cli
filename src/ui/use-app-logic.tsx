@@ -173,6 +173,7 @@ import "./slash/council.js";
 import "./slash/ideal.js";
 import "./slash/export.js";
 import "./slash/status.js";
+import "./slash/ponytail.js";
 import {
   CONNECT_CHANNELS,
   getSandboxVisibleRows,
