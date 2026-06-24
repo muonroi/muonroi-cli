@@ -303,8 +303,8 @@ TOKEN BUDGET:
 
 SELF-LIMIT:
 - When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
-- Combine and invoke independent or related tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a single turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
-- Batch independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
+- BATCH TOOL CALLS: You MUST combine and invoke independent tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a SINGLE turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
+- BATCH BASH COMMANDS: Combine independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
 
