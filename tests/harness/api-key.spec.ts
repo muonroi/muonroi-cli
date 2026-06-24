@@ -27,7 +27,14 @@ describe("api-key modal E2E", () => {
     // Spawn WITHOUT -k so the API-key modal actually appears.
     // --mock-llm is still passed so any accidental LLM call doesn't hit a real provider.
     // --agent-mode enables the sidechannel transport.
-    const ctx = await spawnHarness({ env: { MUONROI_TEST_NO_KEYCHAIN: "1" } });
+    const ctx = await spawnHarness({
+      env: {
+        MUONROI_TEST_NO_KEYCHAIN: "1",
+        ANTHROPIC_API_KEY: "",
+        OPENAI_API_KEY: "",
+        GOOGLE_GENERATIVE_AI_API_KEY: "",
+      },
+    });
     proc = ctx.proc;
     driver = ctx.driver;
     cleanup = ctx.cleanup;

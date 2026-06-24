@@ -56,10 +56,13 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
 
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
-    MUONROI_TEST_NO_PERSIST: "1",
+    // MUONROI_TEST_NO_PERSIST: "1",
     // Suppress the agent-harness shim deprecation warning in the spawned
     // child — this is an internal-callsite spawn, not an external consumer.
     MUONROI_INTERNAL_SHIM_OK: "1",
+    ANTHROPIC_API_KEY: "sk-ant-mock",
+    OPENAI_API_KEY: "sk-mock",
+    GOOGLE_GENERATIVE_AI_API_KEY: "mock",
     ...(opts.env ?? {}),
   };
 
@@ -100,6 +103,10 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   // error) are forwarded — duplicates are harmless because last_event reads
   // the most recent matching kind.
   let disconnected = false;
+  proc.stderr?.on("data", (d) => {
+    const txt = d.toString();
+    process.stdout.write(`STDERR: ${txt}`);
+  });
   const emitDisconnect = (reason: "end" | "close") => {
     if (disconnected) return;
     disconnected = true;

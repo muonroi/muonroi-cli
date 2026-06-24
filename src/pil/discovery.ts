@@ -70,9 +70,18 @@ export async function runDiscovery(
     interviewTranscript: transcript,
   });
 
-  if (!isDiscoveryEnabled()) return baseResult();
-  if (l1.intentKind === "chitchat" || l1.taskType === null) return baseResult();
-  if (detectNoClarifySignal(raw)) return baseResult();
+  if (!isDiscoveryEnabled()) {
+    process.stderr.write(`[discovery] isDiscoveryEnabled is FALSE\n`);
+    return baseResult();
+  }
+  if (l1.intentKind === "chitchat" || l1.taskType === null) {
+    process.stderr.write(`[discovery] intent is chitchat or taskType is null: ${l1.intentKind}, ${l1.taskType}\n`);
+    return baseResult();
+  }
+  if (detectNoClarifySignal(raw)) {
+    process.stderr.write(`[discovery] detectNoClarifySignal is TRUE\n`);
+    return baseResult();
+  }
 
   if (!clarificationProposer) {
     if (handler) {
@@ -80,6 +89,7 @@ export async function runDiscovery(
         "[Agent:discovery] interactive turn has no model clarification proposer — skipping interview (no regex fallback by design)",
       );
     }
+    process.stderr.write(`[discovery] clarificationProposer is NULL\n`);
     return baseResult();
   }
 
@@ -106,11 +116,12 @@ export async function runDiscovery(
   // An empty array means the model sees no gray area → proceed directly.
   let cards: ModelCard[];
   try {
+    process.stderr.write(`[discovery] calling proposeModelCards...\n`);
     cards = await proposeModelCards(clarificationProposer, raw, l1, projectContext, recentTurnsSummary);
+    process.stderr.write(`[discovery] proposeModelCards returned ${cards?.length} cards\n`);
   } catch (err) {
-    console.error(
-      `[Agent:discovery] model clarification proposer threw — proceeding without interview (no regex fallback): ${(err as Error)?.message}`,
-      { stack: (err as Error)?.stack?.split("\n").slice(0, 3) },
+    process.stderr.write(
+      `[Agent:discovery] model clarification proposer threw — proceeding without interview (no regex fallback): ${(err as Error)?.message}\n`,
     );
     return baseResult();
   }
@@ -282,6 +293,7 @@ async function proposeModelCards(
  */
 export function createModelClarificationProposer(providerFactory: any, modelId: string): ModelClarificationProposer {
   return async (input) => {
+    process.stderr.write(`[discovery] createModelClarificationProposer CALLED!\n`);
     try {
       const { resolveModelRuntime } = await import("../providers/runtime.js");
       const { generateText } = await import("ai");
@@ -344,10 +356,12 @@ JSON format:
           .trim();
         const parsed = JSON.parse(txt);
         items = Array.isArray(parsed) ? parsed : [];
+        process.stderr.write(
+          `[discovery] JSON parsed! Items length: ${items.length}, items: ${JSON.stringify(items)}\n`,
+        );
       } catch (parseErr) {
-        console.error(
-          `[Agent:discovery] clarification proposer returned non-JSON — no cards this turn: ${(parseErr as Error)?.message}`,
-          { sample: result.text.slice(0, 160) },
+        process.stderr.write(
+          `[Agent:discovery] clarification proposer returned non-JSON — no cards this turn: ${(parseErr as Error)?.message}\n`,
         );
         return [];
       }
@@ -356,9 +370,9 @@ JSON format:
         .filter((it: any) => it && typeof it.question === "string" && it.question.trim())
         .slice(0, 3) as ModelCard[];
     } catch (err) {
-      console.error(`[Agent:discovery] clarification proposer failed (${modelId}): ${(err as Error)?.message}`, {
-        stack: (err as Error)?.stack?.split("\n").slice(0, 3),
-      });
+      process.stderr.write(
+        `[Agent:discovery] clarification proposer failed (${modelId}): ${(err as Error)?.message}\n`,
+      );
       return [];
     }
   };
