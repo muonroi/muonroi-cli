@@ -101,6 +101,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "ee-context-status", label: "ee-context status", description: "Show current BB-context setting", hidden: true },
   { id: "export", label: "export", description: "Export entire conversation to a .txt file", hidden: true },
   { id: "status", label: "status", description: "Show Agile sprint progress dashboard", hidden: true },
+  { id: "ponytail", label: "ponytail", description: "Toggle Lazy Senior AI Mode (on/off/status)", hidden: false },
 ];
 
 /** Items shown in the splash autocomplete + /help listing. */
