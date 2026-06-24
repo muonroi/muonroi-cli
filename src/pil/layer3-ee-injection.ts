@@ -300,7 +300,25 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
 
     if (parts.length > 0 && principleItems.length + behavioralItems.length > 0) {
       const pending = ledgerEnabled ? sessionRecallLedger.pending() : [];
-      parts.push(pending.length > 0 ? formatPendingReminder(pending, { max: 5 }) : RECALL_FEEDBACK_NUDGE);
+      if (pending.length > 0) {
+        // Cross-turn dedup: only surface pending IDs NOT already shown in a prior
+        // turn. Once the agent has seen the [id collection] handle, re-listing it
+        // every turn is pure input noise.
+        const sid = ctx.sessionId ?? "_anon";
+        let surfaced = _surfacedPendingIds.get(sid);
+        if (!surfaced) {
+          surfaced = new Set<string>();
+          _surfacedPendingIds.set(sid, surfaced);
+        }
+        const newPending = pending.filter((p) => !surfaced!.has(p.id));
+        if (newPending.length > 0) {
+          for (const p of newPending) surfaced!.add(p.id);
+          parts.push(formatPendingReminder(newPending, { max: 5 }));
+        }
+        // else: all pending IDs were already surfaced — skip the nudge.
+      } else {
+        parts.push(RECALL_FEEDBACK_NUDGE);
+      }
     }
 
     const injected = parts.join("\n");

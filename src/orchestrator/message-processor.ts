@@ -258,6 +258,14 @@ import {
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
+ * Session-scoped cache for [EE Session Guidance] dedup. Maps sessionId to the
+ * sha256 prefix of the last-injected guidance content. Prevents the same block
+ * from being re-injected on every turn — once the model has seen a set of
+ * guidance entries it stays informed until new entries arrive.
+ */
+const _injectedGuidanceSha = new Map<string, string>();
+
+/**
  * Dependency surface the MessageProcessor needs to reach back into Agent
  * state without holding a circular reference. Properties expose array
  * references (mutating push() must affect the same array the Agent reads on
@@ -1014,16 +1022,24 @@ export class MessageProcessor {
 
     // Inject accumulated EE session guidance as a system message so the model
     // is informed of past warnings before making tool decisions this turn.
+    // Cross-turn dedup: compute sha of the rendered guidance; skip if identical
+    // to the previous turn (same guidance, same ~200-800 tokens saved per turn).
     if (deps.sessionEEGuidance.size > 0) {
       const lines = Array.from(deps.sessionEEGuidance.entries()).map(([, g]) => {
         const pct = Math.round(g.confidence * 100);
         return `- [${g.toolName}] ${g.message} (Why: ${g.why}) [${pct}%]`;
       });
-      deps.messages.push({
-        role: "system",
-        content: `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`,
-      });
-      deps.messageSeqs.push(null);
+      const content = `[EE Session Guidance — avoid these patterns when using tools]\n${lines.join("\n")}`;
+      const sid = deps.session?.id ?? "_anon";
+      const { createHash: _guidanceHash } = await import("node:crypto");
+      const sha = _guidanceHash("sha256").update(content).digest("hex").slice(0, 16);
+      if (_injectedGuidanceSha.get(sid) === sha) {
+        // Identical guidance already injected — skip.
+      } else {
+        _injectedGuidanceSha.set(sid, sha);
+        deps.messages.push({ role: "system", content });
+        deps.messageSeqs.push(null);
+      }
     }
 
     const provider = turnProvider;
@@ -1780,7 +1796,8 @@ export class MessageProcessor {
               }
 
               // Query the agent itself to make the decision instead of showing a raw user askcard
-              if (agentLoopDecisionCount < MAX_AGENT_LOOP_DECISIONS) {
+              // Active only in headless (batchApi) mode — TUI users expect the CLI to stop and wait.
+              if (deps.batchApi && agentLoopDecisionCount < MAX_AGENT_LOOP_DECISIONS) {
                 try {
                   const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
                     | { emitEvent: (e: unknown) => void }
@@ -1828,7 +1845,10 @@ export class MessageProcessor {
                   const match = cleanText.match(/<decision>(continue|stop)<\/decision>/i);
                   const decision = match ? match[1].toLowerCase() : "stop";
 
-                  const reason = cleanText.replace(/<decision>.*?<\/decision>/gs, "").trim();
+                  let reason = cleanText.replace(/<decision>.*?<\/decision>/gs, "").trim();
+                  // Strip DeepSeek's raw DSML or other XML tool leaks from the toast reason
+                  reason = reason.replace(/<[^>]+>/g, "").trim();
+
                   _ar?.emitEvent({
                     t: "event",
                     kind: "toast",
@@ -3853,9 +3873,9 @@ export class MessageProcessor {
             yield {
               type: "content",
               content:
-                `\n\n[Stopped: hit max-tool-rounds=${deps.maxToolRounds}. ` +
-                `Re-run with \`--max-tool-rounds ${deps.maxToolRounds * 2}\` to continue, ` +
-                "or accept the partial result above.]\n",
+                `\n\n[Stopped: Agent paused execution to prevent runaway loops (hit step cap of ${deps.maxToolRounds}). ` +
+                `If you want to continue the current task, simply reply with "continue" or "tiếp tục". ` +
+                `For long tasks, we strongly recommend running the \`/compact\` command first to free up context memory before continuing.]\n`,
             };
           }
 
