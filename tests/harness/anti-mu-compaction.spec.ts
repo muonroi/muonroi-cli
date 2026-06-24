@@ -71,19 +71,19 @@ function finalTextChunks(text: string): LanguageModelV3StreamPart[] {
 }
 
 // read_file is in IMPORTANT_TOOL_NAMES → kept verbatim. fake_lowval is NOT and
-// carries no high-value content signal → stubbed. Both return ~40k chars so the
-// 60k threshold is crossed after round 2.
+// carries no high-value content signal → stubbed. Both return ~10k chars so the
+// threshold is crossed after round 2.
 function buildTools() {
   return {
     read_file: tool({
       description: "Stub high-value read for anti-mù verification.",
       inputSchema: z.object({ arg: z.string() }),
-      execute: async ({ arg }: { arg: string }) => `READ ${arg}\n${HIGH_SENTINEL}\n${"H".repeat(40_000)}`,
+      execute: async ({ arg }: { arg: string }) => `READ src/${arg}\n${HIGH_SENTINEL}\n${"H".repeat(10_000)}`,
     }),
     fake_lowval: tool({
-      description: "Stub low-value tool (NOT in IMPORTANT_TOOL_NAMES) for anti-mù verification.",
+      description: "Stub low-value read that gets compacted.",
       inputSchema: z.object({ arg: z.string() }),
-      execute: async ({ arg }: { arg: string }) => `LOWVAL ${arg}\n${"L".repeat(40_000)}`,
+      execute: async ({ arg }: { arg: string }) => `RAW ${arg} low value\n${"L".repeat(20_000)}`,
     }),
   };
 }

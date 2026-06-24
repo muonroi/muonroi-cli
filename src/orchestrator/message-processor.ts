@@ -361,6 +361,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
    * mid-turn. Undefined / returns [] → no steering (legacy deferred queue).
    */
   drainSteerMessages?: () => { text: string }[];
+  appendMidTurnMessages?: (msgs: ModelMessage[]) => void;
   askToolLoopContinue?: ToolLoopCapAsk;
   /** Safety override handler — invoked when a tool call is blocked by the safety filter. */
   askSafetyOverride?: (info: SafetyOverrideAskInfo) => Promise<SafetyOverrideVerdict>;
@@ -2057,6 +2058,7 @@ export class MessageProcessor {
                 });
                 if (_newSteers.length > 0) {
                   pendingSteers.push(..._newSteers);
+                  deps.appendMidTurnMessages?.(_newSteers);
                   try {
                     const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
                       | { emitEvent: (e: unknown) => void }
@@ -2085,7 +2087,7 @@ export class MessageProcessor {
                     return !_existingContents.has(sContent);
                   });
                   if (steersToAdd.length === 0) return r;
-                  const insertIdx = deps.messages.length;
+                  const insertIdx = _base.length;
                   return {
                     ...r,
                     messages: [
