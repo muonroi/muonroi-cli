@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { StreamChunk } from "../../src/types/index.js";
 import { createHeadlessJsonlEmitter, type HeadlessWrites } from "../../src/headless/output.js";
+import type { StreamChunk } from "../../src/types/index.js";
 
 function collectLines(writes: HeadlessWrites): string[] {
   if (!writes.stdout) return [];

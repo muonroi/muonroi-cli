@@ -10,9 +10,9 @@
  * Requires BW_SESSION env var (run: $env:BW_SESSION = (bw unlock --raw))
  */
 import { spawnSync } from "node:child_process";
-import { loadKeyForProvider, KEYCHAIN_PROVIDER_IDS } from "../src/providers/keychain.js";
-import { getChatSecret } from "../src/chat/chat-keychain.js";
 import type { ChatSecretId } from "../src/chat/chat-keychain.js";
+import { getChatSecret } from "../src/chat/chat-keychain.js";
+import { KEYCHAIN_PROVIDER_IDS, loadKeyForProvider } from "../src/providers/keychain.js";
 
 function bw(args: string[], stdin?: string): { ok: boolean; stdout: string; stderr: string } {
   const r = spawnSync("bw", args, { encoding: "utf8", input: stdin });
@@ -68,7 +68,9 @@ async function main() {
   }
   const status = bw(["status", "--session", session]);
   let parsed: { status?: string } = {};
-  try { parsed = JSON.parse(status.stdout); } catch {}
+  try {
+    parsed = JSON.parse(status.stdout);
+  } catch {}
   if (parsed.status !== "unlocked") {
     console.error(`BW vault not unlocked (status: ${parsed.status ?? "unknown"})`);
     process.exit(2);
@@ -103,8 +105,13 @@ async function main() {
   const updated = results.filter((r) => r.outcome === "updated").length;
   const unchanged = results.filter((r) => r.outcome === "unchanged").length;
   const errors = results.filter((r) => r.outcome === "error").length;
-  console.log(`\nTotal: ${results.length}  (created=${created}, updated=${updated}, unchanged=${unchanged}, errors=${errors})`);
+  console.log(
+    `\nTotal: ${results.length}  (created=${created}, updated=${updated}, unchanged=${unchanged}, errors=${errors})`,
+  );
   if (errors > 0) process.exit(1);
 }
 
-main().catch((e) => { console.error("FAIL:", e); process.exit(1); });
+main().catch((e) => {
+  console.error("FAIL:", e);
+  process.exit(1);
+});

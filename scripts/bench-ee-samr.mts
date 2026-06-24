@@ -13,8 +13,8 @@
 
 import { performance } from "node:perf_hooks";
 
-const WARMUP = 3;   // số lần warm-up trước khi đo
-const ITERS = 20;   // số lần đo cho mỗi profile
+const WARMUP = 3; // số lần warm-up trước khi đo
+const ITERS = 20; // số lần đo cho mỗi profile
 const TIMEOUT_MS = Number(process.env.MUONROI_EE_SAMR_TIMEOUT_MS ?? 2000);
 
 interface Profile {
@@ -30,7 +30,8 @@ interface Profile {
 const PROFILES: Profile[] = [
   {
     label: "complex-refactor",
-    userMessage: "Refactor the step-router module to support dynamic model tier selection based on task complexity and prior success rates. The current implementation uses a hardcoded tier map.",
+    userMessage:
+      "Refactor the step-router module to support dynamic model tier selection based on task complexity and prior success rates. The current implementation uses a hardcoded tier map.",
     taskType: "refactor",
     complexitySize: "large",
     taskComplexity: "high",
@@ -46,7 +47,8 @@ const PROFILES: Profile[] = [
   },
   {
     label: "plan-feature",
-    userMessage: "Plan the implementation of a multi-step CI/CD pipeline that builds, tests, and deploys the agent harness packages across Windows and Linux matrices.",
+    userMessage:
+      "Plan the implementation of a multi-step CI/CD pipeline that builds, tests, and deploys the agent harness packages across Windows and Linux matrices.",
     taskType: "plan",
     complexitySize: "medium",
     taskComplexity: "medium",
@@ -54,7 +56,8 @@ const PROFILES: Profile[] = [
   },
   {
     label: "analyze-debug",
-    userMessage: "Analyze this test failure: expected 10 passed but got 3 passed, 7 failed. The failing specs all hang at the same wait_for step. Logs show no event emitted after the 3rd frame.",
+    userMessage:
+      "Analyze this test failure: expected 10 passed but got 3 passed, 7 failed. The failing specs all hang at the same wait_for step. Logs show no event emitted after the 3rd frame.",
     taskType: "analyze",
     complexitySize: "medium",
     taskComplexity: "high",
@@ -97,7 +100,9 @@ async function runProfile(profile: Profile): Promise<RunResult[]> {
   for (let i = 0; i < WARMUP; i++) {
     try {
       await classifyViaBrain(`Warmup ${i}`, TIMEOUT_MS);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   // Measurement
@@ -152,7 +157,9 @@ function computeStats(values: number[], label: string): void {
   const min = sorted[0]!;
   const max = sorted[sorted.length - 1]!;
   const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length;
-  console.log(`  ${label}: min=${min.toFixed(0)}ms p50=${p50.toFixed(0)}ms p90=${p90.toFixed(0)}ms p99=${p99.toFixed(0)}ms max=${max.toFixed(0)}ms mean=${mean.toFixed(0)}ms`);
+  console.log(
+    `  ${label}: min=${min.toFixed(0)}ms p50=${p50.toFixed(0)}ms p90=${p90.toFixed(0)}ms p99=${p99.toFixed(0)}ms max=${max.toFixed(0)}ms mean=${mean.toFixed(0)}ms`,
+  );
 }
 
 async function initEE(): Promise<void> {
@@ -209,7 +216,9 @@ async function main(): Promise<void> {
 
   // Summary
   console.log("─".repeat(60));
-  console.log(`Tổng: ${totalCalls} calls, ${totalErrors} errors, ${totalTimeouts} near-timeouts, ${totalFallbacks} fallbacks`);
+  console.log(
+    `Tổng: ${totalCalls} calls, ${totalErrors} errors, ${totalTimeouts} near-timeouts, ${totalFallbacks} fallbacks`,
+  );
   console.log();
 
   computeStats(allDurations, "All profiles");
@@ -224,7 +233,9 @@ async function main(): Promise<void> {
   } else if (p90 < 1500) {
     console.log("⚠️  KẾT LUẬN: EE latency chấp nhận được (p90 < 1500ms). Có thể call cho 2b nhưng nên cache kết quả.");
   } else if (p90 < TIMEOUT_MS) {
-    console.log("🔴 KẾT LUẬN: EE latency cao. Không nên call realtime mà nên dùng heuristic fallback là chính, EE chỉ để tune dần.");
+    console.log(
+      "🔴 KẾT LUẬN: EE latency cao. Không nên call realtime mà nên dùng heuristic fallback là chính, EE chỉ để tune dần.",
+    );
   } else {
     console.log("❌ KẾT LUẬN: EE thường xuyên timeout. 2b không thể dùng EE realtime — cần fallback toàn bộ.");
   }

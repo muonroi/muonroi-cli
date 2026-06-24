@@ -137,6 +137,20 @@ interface InitNewRetryPayload {
   bbTemplate: string | null;
 }
 
+/** Auto-resolved loop-cap event (no user prompt). Replaces the old askcard_open for tool-loop-cap. */
+interface LoopCapAutoPayload {
+  questionId: string;
+  phase: "tool-loop-cap";
+  autoVerdict: "continue" | "stop";
+  kind: "pattern" | "cap";
+  stepNumber: number;
+  /** Only present for pattern kind. */
+  toolName?: string;
+  count?: number;
+  naturalCeiling?: number | null;
+  /** Only present for cap kind. */
+  cap?: number;
+}
 type Payload =
   | { subtype: "route_decision"; data: RouteDecisionPayload }
   | { subtype: "sprint_stage"; data: SprintStagePayload }
@@ -150,7 +164,8 @@ type Payload =
   | { subtype: "init_new_submitted"; data: InitNewSubmittedPayload }
   | { subtype: "init_new_result"; data: InitNewResultPayload }
   | { subtype: "init_new_resume"; data: InitNewResumePayload }
-  | { subtype: "init_new_retry"; data: InitNewRetryPayload };
+  | { subtype: "init_new_retry"; data: InitNewRetryPayload }
+  | { subtype: "loop_cap_auto"; data: LoopCapAutoPayload };
 
 /**
  * Persist a UI lifecycle event. Caller passes a discriminated payload so

@@ -96,16 +96,18 @@ const PARAM_ALTERNATION = PARAM_TAGS.join("|");
 const GENERIC_WRAPPER_RE =
   /<\/?(?:tool_call|function_calls|tool_use)\b|<invoke\b[^>]*\bname\s*=|<function\b[^>]*\bname\s*=/i;
 
-// DeepSeek native tool-call markup leaking into text content. Signature is the
-// fullwidth-bar sentinel `｜｜DSML｜｜` (U+FF5C, NOT ASCII pipes) wrapping
-// invoke/tool_calls/parameter tokens, e.g. `<｜｜DSML｜｜invoke name="read_file">`.
+// DeepSeek native tool-call markup leaking into text content. Signature is a
+// vertical-bar sentinel — either U+FF5C fullwidth `｜` or U+2502 box-drawing `│`
+// — wrapping invoke/tool_calls/parameter tokens, e.g.:
+//   Old format:  <｜invoke name="read_file">   (U+FF5C, single bar)
+//   New format:  <│ DSML │invoke name="…">   (U+2502, with optional DSML label)
 // Live: storyflow_ui explore-A/B, deepseek T3 (session 799f0508e830) emitted a
-// full `<｜｜DSML｜｜invoke name="read_file">…` block as text and made no real tool
-// call → empty, silent turn. The generic `<invoke` matcher misses it because the
-// `<` is followed by the sentinel, not `invoke`. (BUG-A telemetry already flags
-// the `｜｜DSML｜｜` substring; this wires it into detect → re-steer/surface.)
-const DSML_WRAPPER_RE = /｜｜DSML｜｜\s*(?:invoke|tool_calls?|parameter)\b/i;
-const DSML_INVOKE_NAME_RE = /｜｜DSML｜｜\s*invoke\s+name\s*=\s*"([^"]+)"/i;
+// full DSML invoke block as text and made no real tool call → empty, silent turn.
+// The generic `<invoke` matcher misses it because `<` is followed by the sentinel.
+// Updated 2026-06-24 to cover both U+2502 and U+FF5C (tests use U+2502).
+const DSML_BAR = "[│｜]+"; // matches U+2502 (box-drawing) and U+FF5C (fullwidth)
+const DSML_WRAPPER_RE = new RegExp(`${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?(?:invoke|tool_calls?|parameter)\\b`, "i");
+const DSML_INVOKE_NAME_RE = new RegExp(`${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s+name\\s*=\\s*"([^"]+)"`, "i");
 
 /** Build a per-tool detector: `<tool>` then (within a small gap) a `<param>` or `</tool>`. */
 function buildToolRegexes(): RegExp[] {
@@ -161,23 +163,35 @@ function normalizeWrapperName(raw: string): string {
  * Parse the DeepSeek-native DSML tool-call markup into a structured list so the
  * re-steer can restate the model's EXACT intent (much more effective than a
  * generic "use the tool interface" nudge). Pure — no execution. Recognizes:
- *   <｜｜DSML｜｜invoke name="read_file">
- *     <｜｜DSML｜｜parameter name="file_path" string="true">src/app/foo.ts</｜｜DSML｜｜parameter>
- *   </｜｜DSML｜｜invoke>
+ *   Old format:  <│invoke name="read_file">
+ *                  <│parameter name="file_path" string="true">src/app/foo.ts</│parameter>
+ *                </│invoke>
+ *   New format:  <│ DSML │invoke name="read_file">
+ *                  <│ DSML │parameter name="file_path" string="true">src/app/foo.ts</│ DSML │parameter>
+ *                </│ DSML │invoke>
+ * Both U+2502 (box-drawing │) and U+FF5C (fullwidth ｜) bars are recognized.
  * Returns one entry per invoke block; args preserve insertion order. Tolerant of
- * missing close tags (cheap models truncate) — captures whatever parameters are
- * present. Returns [] when no parseable invoke block exists.
+ * missing close tags (cheap models truncate). Returns [] when no parseable invoke
+ * block exists.
  */
 export interface ParsedDsmlCall {
   name: string;
   args: Record<string, string>;
 }
 
-const DSML_INVOKE_BLOCK_RE = /｜｜DSML｜｜\s*invoke\s+name\s*=\s*"([^"]+)"([\s\S]*?)(?=｜｜DSML｜｜\s*invoke\s|$)/gi;
-const DSML_PARAM_RE = /｜｜DSML｜｜\s*parameter\s+name\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/?｜｜DSML｜｜\s*parameter/gi;
+// Guard regex: at least one DSML-bar sentinel must exist before we bother scanning
+const DSML_GUARD_RE = /[│｜]/;
+const DSML_INVOKE_BLOCK_RE = new RegExp(
+  `${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s+name\\s*=\\s*"([^"]+)"([\\s\\S]*?)(?=${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s|$)`,
+  "gi",
+);
+const DSML_PARAM_RE = new RegExp(
+  `${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?parameter\\s+name\\s*=\\s*"([^"]+)"[^>]*>([\\s\\S]*?)<\\/?${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?parameter`,
+  "gi",
+);
 
 export function parseDsmlToolCalls(text: string): ParsedDsmlCall[] {
-  if (!text || !text.includes("｜｜DSML｜｜")) return [];
+  if (!text || !DSML_GUARD_RE.test(text)) return [];
   const calls: ParsedDsmlCall[] = [];
   DSML_INVOKE_BLOCK_RE.lastIndex = 0;
   let block: RegExpExecArray | null;

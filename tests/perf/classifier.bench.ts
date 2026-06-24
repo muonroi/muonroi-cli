@@ -1,20 +1,20 @@
-import { describe, it, expect, beforeAll } from 'vitest';
-import { classify, warm } from '../../src/router/classifier/index.js';
+import { beforeAll, describe, expect, it } from "vitest";
+import { classify, warm } from "../../src/router/classifier/index.js";
 
-describe('ROUTE-01 perf: warm p99 < threshold', () => {
+describe("ROUTE-01 perf: warm p99 < threshold", () => {
   beforeAll(async () => {
     await warm();
     // Warm up JIT + module caches with throwaway calls
-    for (let i = 0; i < 10; i++) classify('warmup prompt');
+    for (let i = 0; i < 10; i++) classify("warmup prompt");
   }, 30_000);
 
-  it('200 warm classify() samples', () => {
+  it("200 warm classify() samples", () => {
     const prompts = [
-      'create a file foo.ts',
-      '```ts\nconst x: number = 1;\n```',
-      'edit src/index.ts to add a header',
-      'explain what this code does',
-      'refactor the auth module',
+      "create a file foo.ts",
+      "```ts\nconst x: number = 1;\n```",
+      "edit src/index.ts to add a header",
+      "explain what this code does",
+      "refactor the auth module",
     ];
     const samples: number[] = [];
     for (let i = 0; i < 200; i++) {

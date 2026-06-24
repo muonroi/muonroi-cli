@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helper: compute sha16 (mirrors bbContextMarker internals in bb-retrieval.ts)
@@ -90,8 +90,7 @@ describe("layer3-ee-injection BB dedup", () => {
       { id: "pt-2", score: 0.8, payload: { text: "A different rule not yet injected" } },
     ];
 
-    const getPointText = (p: typeof fakePoints[number]) =>
-      (p.payload?.text as string) ?? "";
+    const getPointText = (p: (typeof fakePoints)[number]) => (p.payload?.text as string) ?? "";
 
     const filtered = fakePoints.filter((p) => {
       const text = getPointText(p);
@@ -115,8 +114,7 @@ describe("layer3-ee-injection BB dedup", () => {
       { id: "pt-2", score: 0.8, payload: { text: "rule two" } },
     ];
 
-    const getPointText = (p: typeof fakePoints[number]) =>
-      (p.payload?.text as string) ?? "";
+    const getPointText = (p: (typeof fakePoints)[number]) => (p.payload?.text as string) ?? "";
 
     const filtered = fakePoints.filter((p) => {
       const text = getPointText(p);

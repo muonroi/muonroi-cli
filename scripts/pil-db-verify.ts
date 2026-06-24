@@ -4,8 +4,8 @@
 import { loadEEAuthToken } from "../src/ee/auth.js";
 import { detectEEClientMode } from "../src/ee/client-mode.js";
 import { runPipeline } from "../src/pil/pipeline.js";
-import { logInteraction } from "../src/storage/interaction-log.js";
 import { getDatabase } from "../src/storage/db.js";
+import { logInteraction } from "../src/storage/interaction-log.js";
 
 await loadEEAuthToken();
 await detectEEClientMode();
@@ -69,12 +69,20 @@ const pilRows = db
   .prepare(
     "SELECT id, event_subtype, duration_ms, metadata_json, created_at FROM interaction_logs WHERE session_id = ? AND event_type = 'pil' ORDER BY id ASC",
   )
-  .all(SESSION_ID) as Array<{ id: number; event_subtype: string; duration_ms: number; metadata_json: string; created_at: string }>;
+  .all(SESSION_ID) as Array<{
+  id: number;
+  event_subtype: string;
+  duration_ms: number;
+  metadata_json: string;
+  created_at: string;
+}>;
 for (const r of pilRows) {
   const meta = JSON.parse(r.metadata_json);
   console.log(`#${r.id} taskType=${r.event_subtype} dur=${r.duration_ms}ms`);
   console.log(`   layers(${meta.layerCount}) applied=[${meta.layers.join(", ")}]`);
-  console.log(`   domain=${meta.domain} conf=${meta.confidence} style=${meta.outputStyle} fallback=${meta.fallbackReason ?? "—"}`);
+  console.log(
+    `   domain=${meta.domain} conf=${meta.confidence} style=${meta.outputStyle} fallback=${meta.fallbackReason ?? "—"}`,
+  );
 }
 
 console.log("\n─── user_message rows ───");

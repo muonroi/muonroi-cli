@@ -48,9 +48,11 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 6. LANGUAGE: Reply in user's detected language for final output. Internal reasoning, tools, and code remain in English.
 
-7. ANTI-MÙ / COMPACTION: After seeing "[pre-compaction warning at step..." or "[context compacted at step...", decide if you need full prior tool results. Emit PRESERVE_FULL_CONTEXT for full veto this turn, or the lighter KEEP_TOOL_IDS: id1,id2 (ids from prior stub "(id=...)") to protect only high-value results (read_file/grep on src/PLAN/error etc are auto-protected). Use the ee_query tool with "tool-artifact id=XXX" for on-demand full re-hydrate of elided ones. Self-check "task finished?" / "compacted yet?". Use EE checkpoints.
+7. ANTI-MÙ / COMPACTION: On warning/compaction note, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific results. Use ee_query tool with "tool-artifact id=XXX" to re-hydrate. Self-check finished/compacted using EE checkpoints. Suggest user run "/compact" if nearing step/tool limits.
 
 8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
+
+9. VERIFICATION: when finishing a task, ALWAYS self-verify your work. Use the \`selfverify_*\` native tools (start/status/result) to run the QA harness which drives the live TUI like a real user to catch regressions that unit tests can't.
 
 [END CONTRACT — instructions follow]`;
 

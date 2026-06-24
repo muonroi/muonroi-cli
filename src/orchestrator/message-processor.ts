@@ -375,12 +375,13 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessageBatchTurn(args: {
     userModelMessage: ModelMessage;
+    userEnrichedMessage: ModelMessage;
     observer?: ProcessMessageObserver;
     provider: LegacyProvider;
-    subagents: ReturnType<typeof loadValidSubAgents>;
+    subagents: unknown[];
     system: string;
-    runtime: ResolvedModelRuntime;
-    modelInfo: ResolvedModelRuntime["modelInfo"];
+    runtime: ReturnType<typeof resolveModelRuntime>;
+    modelInfo: ReturnType<typeof getModelInfo>;
     signal: AbortSignal;
   }): AsyncGenerator<StreamChunk, void, unknown>;
 }
@@ -935,19 +936,27 @@ export class MessageProcessor {
     // mid-session. Clears after injection so only the first subsequent turn sees it.
     const cwdNote = deps.getPendingCwdNote();
     deps.setPendingCwdNote(null);
+    const messageForDb = cwdNote ? `${cwdNote}\n\n${userMessage}` : userMessage;
     const messageForModel = cwdNote ? `${cwdNote}\n\n${enrichedMessage}` : enrichedMessage;
 
     let userModelMessage: ModelMessage;
+    let userEnrichedMessage: ModelMessage;
     if (images?.length) {
-      const parts: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
+      const partsDb: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
+        { type: "text", text: messageForDb },
+      ];
+      const partsModel: Array<{ type: "text"; text: string } | { type: "image"; image: string; mediaType: string }> = [
         { type: "text", text: messageForModel },
       ];
       for (const img of images) {
-        parts.push({ type: "image", image: img.base64, mediaType: img.mediaType });
+        partsDb.push({ type: "image", image: img.base64, mediaType: img.mediaType });
+        partsModel.push({ type: "image", image: img.base64, mediaType: img.mediaType });
       }
-      userModelMessage = { role: "user", content: parts };
+      userModelMessage = { role: "user", content: partsDb };
+      userEnrichedMessage = { role: "user", content: partsModel };
     } else {
-      userModelMessage = { role: "user", content: messageForModel };
+      userModelMessage = { role: "user", content: messageForDb };
+      userEnrichedMessage = { role: "user", content: messageForModel };
     }
 
     // Vision proxy: convert images to text for models that don't support vision.
@@ -973,9 +982,10 @@ export class MessageProcessor {
             }
           }
           if (turnHasImages) {
-            const proxyResult = await proxyVision([userModelMessage], turnModelId, signal);
+            const proxyResult = await proxyVision([userModelMessage, userEnrichedMessage], turnModelId, signal);
             if (proxyResult.proxied) {
               userModelMessage = proxyResult.messages[0];
+              userEnrichedMessage = proxyResult.messages[1];
               yield {
                 type: "content",
                 content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n`,
@@ -985,7 +995,8 @@ export class MessageProcessor {
         } catch {
           yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
           if (turnHasImages) {
-            userModelMessage = { role: "user", content: enrichedMessage };
+            userModelMessage = { role: "user", content: messageForDb };
+            userEnrichedMessage = { role: "user", content: messageForModel };
           }
           // Strip image parts from history as a last-resort fallback so the
           // request doesn't blow up at the provider serialization layer.
@@ -1276,6 +1287,7 @@ export class MessageProcessor {
       try {
         yield* deps.processMessageBatchTurn({
           userModelMessage,
+          userEnrichedMessage,
           observer,
           provider,
           subagents,
@@ -1759,11 +1771,14 @@ export class MessageProcessor {
           deps.setLastProviderOptionsShape(
             Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
           );
+          // Substitute the enriched user message for the current turn so the LLM sees PIL additions,
+          // while leaving the DB-persisted `deps.messages` clean for future turns.
+          const _messagesForCall = deps.messages.map((m) => (m === userModelMessage ? userEnrichedMessage : m));
           if (wireDebug.enabled) {
             wireDebug.logRequest({
               providerId: runtime.modelInfo?.provider ?? "unknown",
               modelId: runtime.modelId,
-              messages: deps.messages as readonly unknown[],
+              messages: _messagesForCall as readonly unknown[],
               systemChars: (systemForModel as unknown as { length?: number })?.length ?? 0,
               toolNames: tools ? Object.keys(tools as Record<string, unknown>) : undefined,
               providerOptions: providerOpts,
@@ -1774,7 +1789,7 @@ export class MessageProcessor {
           // natively via @ai-sdk/openai-compatible — see
           // src/providers/__tests__/reasoning-roundtrip.test.ts.
           const _topMessagesForCall = applyAnthropicPromptCaching(
-            turnCaps.sanitizeHistory(deps.messages) as typeof deps.messages,
+            turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
             runtime.modelId,
           );
           // Closure-mutable cap for the tool-loop askcard rescue.
@@ -2024,7 +2039,6 @@ export class MessageProcessor {
               // step's request wedges before any byte, chunksThisStep stays 0 and
               // the mid-loop dead-socket continuation can safely resume from here.
               chunksThisStep = 0;
-              if (sn < 1) return {};
               // --- Live-queue steering injection ---------------------------
               // Drain the UI steer queue ONCE per prepareStep call (sn >= 1),
               // accumulate into pendingSteers, and graft pendingSteers onto the
@@ -2035,7 +2049,7 @@ export class MessageProcessor {
                 // already refuses to inject on abort, but draining still CLEARS
                 // the UI queue — so on a (programmatic) abort we must not drain,
                 // or a queued-but-uninjected message is lost (spec §143).
-                const _drained = steerEnabled && !signal.aborted ? (deps.drainSteerMessages?.() ?? []) : [];
+                const _drained = sn >= 1 && steerEnabled && !signal.aborted ? (deps.drainSteerMessages?.() ?? []) : [];
                 const _newSteers = planSteerInjection({
                   drained: _drained,
                   aborted: signal.aborted,
@@ -2071,7 +2085,15 @@ export class MessageProcessor {
                     return !_existingContents.has(sContent);
                   });
                   if (steersToAdd.length === 0) return r;
-                  return { ...r, messages: [..._base, ...steersToAdd] as typeof stepMessages };
+                  const insertIdx = deps.messages.length;
+                  return {
+                    ...r,
+                    messages: [
+                      ..._base.slice(0, insertIdx),
+                      ...steersToAdd,
+                      ..._base.slice(insertIdx),
+                    ] as typeof stepMessages,
+                  };
                 })();
 
                 if (baseRes.messages) {

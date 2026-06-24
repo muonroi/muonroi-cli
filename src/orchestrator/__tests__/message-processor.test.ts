@@ -108,6 +108,7 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
     runDelegation: async () => ({ success: true, output: "" }),
     readDelegation: async () => ({ success: true, output: "" }),
     listDelegations: async () => ({ success: true, output: "" }),
+    killDelegation: async () => ({ success: true, output: "" }),
     appendCompletedTurn: () => {},
     discardAbortedTurn: () => {},
     recordUsage: () => {},

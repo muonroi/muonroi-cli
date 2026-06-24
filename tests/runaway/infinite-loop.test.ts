@@ -4,8 +4,8 @@
  * Simulates an agent stuck in a loop calling tools forever.
  * The reservation ledger must halt with CapBreachError before cap is exceeded.
  */
-import { describe, it, expect } from "vitest";
-import { setupRunawayHome, drainUntilHalt } from "./harness.js";
+import { describe, expect, it } from "vitest";
+import { drainUntilHalt, setupRunawayHome } from "./harness.js";
 
 describe("USAGE-07: infinite tool loop halts at cap", () => {
   it("drainUntilHalt returns halted=true within 100 iterations", async () => {

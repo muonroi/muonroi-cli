@@ -16,9 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // vi.hoisted ensures the factory variable is available when vi.mock is hoisted.
 const { mockExecFile } = vi.hoisted(() => ({ mockExecFile: vi.fn() }));
 
-vi.mock("node:child_process", () => ({
-  execFile: mockExecFile,
-}));
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  return {
+    ...actual,
+    execFile: mockExecFile,
+  };
+});
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = (await importOriginal()) as typeof import("node:fs");

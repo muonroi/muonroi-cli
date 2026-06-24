@@ -1,7 +1,7 @@
-import { runDoctor, formatDoctorReport } from "../src/ops/doctor.js";
-import { healthDetailed } from "../src/ee/health.js";
-import { getCachedServerBaseUrl, getCachedAuthToken, loadEEAuthToken } from "../src/ee/auth.js";
+import { getCachedAuthToken, getCachedServerBaseUrl, loadEEAuthToken } from "../src/ee/auth.js";
 import { detectEEClientMode, getCachedEEClientMode } from "../src/ee/client-mode.js";
+import { healthDetailed } from "../src/ee/health.js";
+import { formatDoctorReport, runDoctor } from "../src/ops/doctor.js";
 
 await loadEEAuthToken();
 

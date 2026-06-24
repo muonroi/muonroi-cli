@@ -15,7 +15,7 @@ describe("delegation system preservation (CORE-04)", () => {
   it("orchestrator imports DelegationManager from delegations module", () => {
     const content = readFileSync(ORCHESTRATOR_PATH, "utf8");
     const hasImport =
-      content.includes('import { DelegationManager }') ||
+      content.includes("import { DelegationManager }") ||
       content.includes('from "./delegations"') ||
       content.includes("from './delegations'");
     expect(hasImport).toBe(true);
@@ -34,5 +34,6 @@ describe("delegation system preservation (CORE-04)", () => {
     expect(content).toContain("runDelegation");
     expect(content).toContain("listDelegations");
     expect(content).toContain("readDelegation");
+    expect(content).toContain("killDelegation");
   });
 });

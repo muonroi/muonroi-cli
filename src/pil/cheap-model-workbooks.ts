@@ -40,7 +40,7 @@ export const CHEAP_MODEL_CONVERGENCE = `[CONVERGENCE — minimise tool calls; th
   file:line, and never invent counts, line numbers, names, or bugs. If a number
   (test/file count) is not verified by a command you ran, run the check or mark
   it "unverified" — do NOT guess a value or assert a finding you did not observe.
-- ANTI-MÙ: After compaction note or pre-warn, emit PRESERVE_FULL_CONTEXT (full) or KEEP_TOOL_IDS: id1,id2 to protect high-value (auto for read_file/grep on src/PLAN/error). Use the ee_query tool with "tool-artifact id=XXX" for on-demand full re-hydrate. Recall checkpoints. `;
+- ANTI-MÙ: After compaction note or pre-warn, emit PRESERVE_FULL_CONTEXT (full) or KEEP_TOOL_IDS: id1,id2 to protect high-value (auto for read_file/grep on src/PLAN/error). Use the ee_query tool with "tool-artifact id=XXX" for on-demand full re-hydrate. Recall checkpoints. If you are reaching tool/step limits in a long session, suggest the user run "/compact" to compress history. `;
 
 /**
  * Per-task-type addenda. Each is 1–2 tight lines targeting that type's most

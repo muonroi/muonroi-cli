@@ -451,6 +451,11 @@ async function startInteractive(
     console.warn(`[muonroi-cli] reconciled ${reconciled.abandoned} abandoned tool calls from prior session`);
   }
 
+  const { warmMcpClients } = await import("./mcp/client-pool.js");
+  const { loadMcpServers } = await import("./utils/settings.js");
+  await warmMcpClients(loadMcpServers(), !session);
+
+
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
     batchApi,

@@ -2134,6 +2134,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     );
   }, []);
 
+  const lastFlushRef = useRef<number>(0);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushContent = useCallback(() => {
+    setStreamContent(sanitizeContent(contentAccRef.current));
+    lastFlushRef.current = Date.now();
+    setTimeout(scrollToBottom, 10);
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+  }, [scrollToBottom]);
+
   const applyLocalAssistantDelta = useCallback(
     (delta: string) => {
       // First non-empty assistant text after a tool streak ends that streak —
@@ -2142,10 +2155,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         closeCurrentToolGroup();
       }
       contentAccRef.current += delta;
-      setStreamContent(sanitizeContent(contentAccRef.current));
-      setTimeout(scrollToBottom, 10);
+      
+      const now = Date.now();
+      if (now - lastFlushRef.current > 32) {
+        flushContent();
+      } else if (!flushTimerRef.current) {
+        flushTimerRef.current = setTimeout(flushContent, 32);
+      }
     },
-    [closeCurrentToolGroup, scrollToBottom],
+    [closeCurrentToolGroup, flushContent],
   );
 
   const applyTelegramAssistantPreview = useCallback(
@@ -2155,10 +2173,15 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
 
       activeTurn.latestAssistantText = fullContent;
       contentAccRef.current = getUnflushedTelegramAssistantContent(fullContent, activeTurn.flushedAssistantChars);
-      setStreamContent(sanitizeContent(contentAccRef.current));
-      setTimeout(scrollToBottom, 10);
+      
+      const now = Date.now();
+      if (now - lastFlushRef.current > 32) {
+        flushContent();
+      } else if (!flushTimerRef.current) {
+        flushTimerRef.current = setTimeout(flushContent, 32);
+      }
     },
-    [scrollToBottom],
+    [flushContent],
   );
 
   const showLiveToolCalls = useCallback(

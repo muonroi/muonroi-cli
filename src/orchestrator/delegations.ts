@@ -166,6 +166,51 @@ export class DelegationManager {
     }
   }
 
+  async kill(id: string): Promise<ToolResult> {
+    const record = await this.getById(id);
+    if (!record) {
+      return {
+        success: false,
+        output: `Delegation "${id}" not found.`,
+      };
+    }
+
+    if (record.status !== "running") {
+      return {
+        success: false,
+        output: `Delegation "${id}" is not running (status: ${record.status}).`,
+      };
+    }
+
+    const pid = record.pid;
+    if (!pid) {
+      const jobPath = path.join(await ensureDelegationsDir(this.getCwd()), `${id}.json`);
+      await failDelegation(jobPath, "Cancelled: Process PID was not recorded.");
+      return {
+        success: true,
+        output: `Delegation "${id}" marked as cancelled (no active process ID was found).`,
+      };
+    }
+
+    try {
+      if (process.platform === "win32") {
+        spawn("taskkill", ["/F", "/T", "/PID", pid.toString()]).unref();
+      } else {
+        process.kill(pid, "SIGTERM");
+      }
+    } catch (err) {
+      // ignore
+    }
+
+    const jobPath = path.join(await ensureDelegationsDir(this.getCwd()), `${id}.json`);
+    await failDelegation(jobPath, "Cancelled by user.");
+
+    return {
+      success: true,
+      output: `Delegation "${id}" (PID: ${pid}) has been terminated.`,
+    };
+  }
+
   async consumeNotifications(): Promise<DelegationNotification[]> {
     const dir = await ensureDelegationsDir(this.getCwd());
     const files = await readDelegationFiles(dir);

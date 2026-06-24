@@ -20,7 +20,12 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-export type DecisionKind = "auto-council" | "post-turn-compact" | "router-tier" | "permission-override" | "yolo-override";
+export type DecisionKind =
+  | "auto-council"
+  | "post-turn-compact"
+  | "router-tier"
+  | "permission-override"
+  | "yolo-override";
 
 export interface DecisionLogEntry {
   ts: number;

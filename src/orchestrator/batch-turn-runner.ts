@@ -149,7 +149,8 @@ export class BatchTurnRunner {
 
   async *run(args: {
     userModelMessage: ModelMessage;
-    observer?: ProcessMessageObserver;
+    userEnrichedMessage: ModelMessage;
+    observer?: any;
     provider: LegacyProvider;
     subagents: unknown[];
     system: string;
@@ -233,7 +234,8 @@ export class BatchTurnRunner {
           const batchRequestId = `turn-${Date.now()}-${stepNumber}`;
           // Phase O1 — capture providerOptions SHAPE for batch path too.
           deps.setLastProviderOptionsShape(extractProviderOptionsShape(runtime.providerOptions));
-          await addBatchRequests({
+            const _messagesForCall = deps.messages.map((m) => (m === args.userModelMessage ? args.userEnrichedMessage : m));
+            await addBatchRequests({
             ...deps.getBatchClientOptions(signal),
             batchId: batch.batch_id,
             batchRequests: [
@@ -243,7 +245,7 @@ export class BatchTurnRunner {
                   chat_get_completion: buildBatchChatCompletionRequest({
                     modelId: runtime.modelId,
                     system,
-                    messages: [...deps.messages, ...turnMessages],
+                    messages: [..._messagesForCall, ...turnMessages],
                     temperature: 0.7,
                     maxOutputTokens: !batchCaps.acceptsParam("maxOutputTokens", runtime.modelInfo)
                       ? undefined

@@ -281,13 +281,31 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
  * has connected. Idempotent (cached entries are reused); a failed connect is
  * evicted by getOrConnect so a real turn retries.
  */
-export function warmMcpClients(servers: McpServerConfig[]): void {
-  for (const s of servers) {
-    if (!s.enabled) continue;
-    if (!validateMcpServerConfig(s).ok) continue;
-    void getOrConnect(s).catch(() => {
-      /* warm is best-effort — the eviction in getOrConnect lets a real turn retry */
-    });
+export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = false): Promise<void> {
+  const validServers = servers.filter(s => s.enabled && validateMcpServerConfig(s).ok);
+  if (syncAndLog && validServers.length > 0) {
+    console.log(`[MCP] Warming up ${validServers.length} server(s)...`);
+  }
+  
+  const promises = validServers.map(async (s) => {
+    try {
+      await getOrConnect(s);
+      if (syncAndLog) {
+        console.log(`[MCP] ✅ ${s.id}: healthy`);
+      }
+    } catch (e) {
+      if (syncAndLog) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.log(`[MCP] ❌ ${s.id}: failed - ${msg}`);
+      }
+    }
+  });
+
+  if (syncAndLog) {
+    await Promise.all(promises);
+  } else {
+    // Fire-and-forget for background warmup
+    void Promise.all(promises);
   }
 }
 

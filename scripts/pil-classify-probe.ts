@@ -1,6 +1,6 @@
-import { classify } from "../src/router/classifier/index.js";
 import { runPipeline } from "../src/pil/pipeline.js";
 import { PipelineContextSchema } from "../src/pil/schema.js";
+import { classify } from "../src/router/classifier/index.js";
 
 const PROMPTS = [
   "hi",

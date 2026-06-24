@@ -101,7 +101,7 @@ import {
 import { recordCompaction, recordElision } from "./session-experience.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { compactSubAgentMessages } from "./subagent-compactor.js";
+import { compactSubAgentMessages, applyAnthropicPromptCaching } from "./subagent-compactor.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
@@ -445,7 +445,8 @@ export class StreamRunner {
     void signal;
     const childMessages: ModelMessage[] = [{ role: "user", content: childPrompt }];
 
-    const maxSteps = Math.min(this.deps.getMaxToolRounds(), isExplore ? 60 : 120);
+    // The main agent manages its sub-agents, so don't apply an arbitrary hard limit.
+    const maxSteps = request.maxToolRounds ?? (this.deps.getMaxToolRounds() * 2);
 
     // F1 parity — derive per-turn providerOptions so the sub-agent OpenAI calls
     // carry a stable session-derived promptCacheKey (every tool round routes to
@@ -557,15 +558,15 @@ export class StreamRunner {
     // Explore sub-agents are READ-ONLY research — a codebase investigation
     // legitimately needs more grep/read steps than the tight general/medium=10
     // cell allows. Cutting it early (esp. for reasoning models that front-load
-    // tool calls) leaves no budget to reach the synthesis turn (root cause of
-    // empty "Task completed. Last action: grep" returns). Give explore the
-    // analyze/large cell (15); edit-capable agents keep general/medium (10).
+    // Sub-agent ceiling is no longer a hard halt. Per user request:
+    // "cũng áp dụng với sub agent nhé không nên hardcode maxtool mà nếu có
+    // vấn đề gì sẽ có main agent (khi spawn) kiểm soát đừng hard"
     const _subCeiling = isExplore ? resolveCeiling("analyze", "large") : resolveCeiling("general", "medium");
     const _subCounterKey = `subagent:${subCallId}`;
     const _subStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+      incSessionStep(_subCounterKey); // Keep telemetry counter ticking
       if (state.steps.length >= maxSteps) return true;
-      const next = incSessionStep(_subCounterKey);
-      return next >= _subCeiling;
+      return false;
     }) as unknown as Parameters<typeof streamText>[0]["stopWhen"];
 
     // Silent-hang guard — mirror the top-level loop (message-processor.ts).
@@ -661,20 +662,27 @@ export class StreamRunner {
         const _subK = cadenceForSize(_subSize);
         const _subShouldRemind = shouldInjectReminder(stepNumber, _subK);
         const _subShouldWarn = shouldInjectSoftWarn(stepNumber, _subCeiling, _subCounterKey);
-        if (_subShouldRemind || _subShouldWarn) {
-          const _baseReminder = buildScopeReminder({
-            step: stepNumber,
-            ceiling: _subCeiling,
-            taskType: "general",
-            size: _subSize,
-            originalPrompt: prepared.request.prompt,
-          });
-          const _reminder = _subShouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
-          const withReminder = attachReminderToMessages(compacted, _reminder);
-          return { messages: withReminder };
+        const finalMessages = (() => {
+          if (_subShouldRemind || _subShouldWarn) {
+            const _baseReminder = buildScopeReminder({
+              step: stepNumber,
+              ceiling: _subCeiling,
+              taskType: "general",
+              size: _subSize,
+              originalPrompt: prepared.request.prompt,
+            });
+            const _reminder = _subShouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+            return attachReminderToMessages(compacted, _reminder);
+          }
+          return compacted;
+        })();
+
+        if (childRuntime.modelId.startsWith("claude")) {
+          return { messages: applyAnthropicPromptCaching(finalMessages, childRuntime.modelId) };
         }
+
         if (compacted === stripped && stripped === messages) return undefined;
-        return { messages: compacted };
+        return { messages: finalMessages };
       },
       ...(childDropTemperature ? {} : { temperature: isExplore ? 0.2 : 0.5 }),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),

@@ -1,14 +1,14 @@
-import { describe, it, expect } from 'vitest';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
 
 const FORBIDDEN: Array<{ name: string; re: RegExp }> = [
-  { name: 'node:net', re: /from\s+['"]node:net['"]/ },
-  { name: 'node:http', re: /from\s+['"]node:https?['"]/ },
-  { name: 'undici', re: /from\s+['"]undici['"]/ },
-  { name: 'axios', re: /from\s+['"]axios['"]/ },
-  { name: 'ee-import', re: /from\s+['"](\.\.\/)+ee\// },
-  { name: 'global-fetch', re: /\bfetch\s*\(/ },
+  { name: "node:net", re: /from\s+['"]node:net['"]/ },
+  { name: "node:http", re: /from\s+['"]node:https?['"]/ },
+  { name: "undici", re: /from\s+['"]undici['"]/ },
+  { name: "axios", re: /from\s+['"]axios['"]/ },
+  { name: "ee-import", re: /from\s+['"](\.\.\/)+ee\// },
+  { name: "global-fetch", re: /\bfetch\s*\(/ },
 ];
 
 function* walk(dir: string): Generator<string> {
@@ -19,11 +19,11 @@ function* walk(dir: string): Generator<string> {
   }
 }
 
-describe('ROUTE-01: no network in hot-path classifier', () => {
-  it('src/router/classifier/** must not import network APIs or call fetch()', () => {
+describe("ROUTE-01: no network in hot-path classifier", () => {
+  it("src/router/classifier/** must not import network APIs or call fetch()", () => {
     const offenders: string[] = [];
-    for (const file of walk('src/router/classifier')) {
-      const src = readFileSync(file, 'utf8');
+    for (const file of walk("src/router/classifier")) {
+      const src = readFileSync(file, "utf8");
       for (const f of FORBIDDEN) {
         if (f.re.test(src)) offenders.push(`${file}: ${f.name}`);
       }
