@@ -3576,7 +3576,7 @@ export class MessageProcessor {
               // the AI SDK still carries the full base64 (e.g. Playwright
               // screenshot, ~1.5MB). Persisting that lets it accumulate and
               // overflow the model's context on subsequent turns.
-              const scrubbed = scrubImagePayloadsInMessages(response.messages);
+              const scrubbed = rewriteSafetyApprovedToolResults(scrubImagePayloadsInMessages(response.messages));
 
               // Phase 5 F6 — synthesis step when stream ended without a final
               // text response. Cheap models (DeepSeek V4 Flash) frequently
