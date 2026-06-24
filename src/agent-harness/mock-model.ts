@@ -117,7 +117,9 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       const text = generates.length > 0 ? generates[Math.min(genIdx, generates.length - 1)]! : "{}";
       genIdx += 1;
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
-        process.stderr.write(`[mock-model] doGenerate #${genIdx} → ${text.length} chars\n`);
+        process.stderr.write(
+          `[mock-model] doGenerate #${genIdx} → ${text.length} chars\nCALLER:\n${new Error().stack}\n`,
+        );
       }
       return {
         content: [{ type: "text" as const, text }],

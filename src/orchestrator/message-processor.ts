@@ -408,6 +408,41 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
  */
 const RESPONSE_TOOL_SPAM_CAP = 3;
 
+/**
+ * Rewrites tool-result parts in the AI SDK's final response history if the
+ * user manually approved a safety-blocked command. This ensures the model sees
+ * its own retry context accurately (as a success) rather than a repeated block
+ * message, avoiding infinite retry loops or hallucinated failures.
+ */
+export function rewriteSafetyApprovedToolResults<T extends { role: string; content?: any }>(messages: T[]): T[] {
+  const _globalSafety = globalThis as typeof globalThis & {
+    __muonroiSafetyApproved?: Map<string, { kind: "once" | "session"; command: string }>;
+  };
+  const approvedMap = _globalSafety.__muonroiSafetyApproved;
+  if (!approvedMap || approvedMap.size === 0) {
+    return messages;
+  }
+  return messages.map((m) => {
+    if (m.role !== "tool" || !Array.isArray(m.content)) return m;
+    let changed = false;
+    const newContent = m.content.map((part: any) => {
+      if (part.type === "tool-result" && typeof part.toolCallId === "string") {
+        const approved = approvedMap.get(part.toolCallId);
+        if (approved) {
+          changed = true;
+          return {
+            ...part,
+            isError: false,
+            result: `Approved (${approved.kind}): blocked command was allowed by user`,
+          };
+        }
+      }
+      return part;
+    });
+    return changed ? ({ ...m, content: newContent } as T) : m;
+  });
+}
+
 export class MessageProcessor {
   constructor(private deps: MessageProcessorDeps) {}
 
