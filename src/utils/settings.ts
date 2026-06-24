@@ -1009,7 +1009,14 @@ export function getTopLevelToolBudgetChars(): number {
   }
   const val = loadUserSettings().topLevelToolBudgetChars;
   if (typeof val === "number" && val >= 50_000 && val <= 1_500_000) return Math.floor(val);
-  return 400_000;
+  // Phase C5 symmetry — lowered from 400_000 to 200_000 chars. Evidence from
+  // session f1eef338c784: top-level tool loop ran 49 turns consuming 3.4M
+  // input tokens before the budget cap (set at 400K chars) meaningfully
+  // constrained tool outputs. At 200K chars the 50% tier fires at 100K chars
+  // (~3 tool turns), and the 80% tier at 160K chars (~5 turns); small tasks
+  // (1-3 turns) are unaffected. The sub-agent budget is 120K, so 200K maintains
+  // a ~1.7x ratio reflecting the broader top-level conversation context.
+  return 200_000;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {

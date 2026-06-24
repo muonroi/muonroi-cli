@@ -146,6 +146,9 @@ function buildEnvironmentBlock(): string {
         '- When a Windows-native command is genuinely needed, invoke it explicitly: `cmd.exe /c "command"` or `powershell -NoProfile -Command "command"`.',
       );
     }
+    shellRules.push(
+      "- CRITICAL: Batch independent commands in ONE call with `&&` or `;` instead of N sequential calls — each extra call adds ~500 tokens of overhead and prevents cross-request cache reuse. Examples: `ls && cat file` or `a; b; c; d` instead of four separate bash calls.",
+    );
   } else if (shell.kind === "powershell") {
     shellRules.push(
       "- The bash tool runs PowerShell. Use PowerShell cmdlets: Get-ChildItem, Select-String, Measure-Object, ConvertTo-Json, $env:VAR.",
@@ -299,7 +302,7 @@ TOKEN BUDGET:
 SELF-LIMIT:
 - When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
 - Combine and invoke independent or related tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a single turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
-- Batch independent commands into one bash call (a; b; c) rather than sequential single calls.
+- Batch independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
 

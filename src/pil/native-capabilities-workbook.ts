@@ -30,7 +30,7 @@ export const NATIVE_CAPABILITIES = `[NATIVE CAPABILITIES — you are an agent ru
 
 TOOLS (call directly):
 - read_file, grep — read/search source. Prefer a targeted read over broad greps.
-- bash — shell. Output is auto-cached: do NOT pipe \`| tail/head/grep\` or \`> file\`; run unpiped and slice the cached output via bash_output_get(run_id, mode=tail|head|grep|lines). Batch independent commands in ONE call (\`a; b; c\`). Use background=true for servers/watchers, then process_logs / process_list / process_stop.
+- bash — shell. Output is auto-cached: do NOT pipe \`| tail/head/grep\` or \`> file\`; run unpiped and slice the cached output via bash_output_get(run_id, mode=tail|head|grep|lines). Batch independent commands in ONE call (\`a; b; c\`) — each separate call adds ~500 token overhead and prevents cross-request cache reuse. Use background=true for servers/watchers, then process_logs / process_list / process_stop.
 - write_file, edit_file — must read a file before you overwrite/edit it.
 - ee_query — semantic recall over the Experience Engine brain. Rehydrate a compaction-elided tool output with query="tool-artifact id=<id from a stub>", or confirm finished work with query="recent compaction checkpoint Progress DONE". Cheaper than re-reading large files you already saw.
 
