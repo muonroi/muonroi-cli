@@ -241,14 +241,19 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     // mapping (t0 = principles, t2 = behavioral). The server (PIL schema_version
     // 1.1+) may override per-point — e.g. a selfqa hit merged into the behavioral
     // bucket carries collection="experience-selfqa" so ee_feedback resolves it.
-    const principleItems = ctx._brainData.t0_principles.map((p) => ({
+    let principleItems = ctx._brainData.t0_principles.map((p) => ({
       ...p,
       collection: p.collection ?? "experience-principles",
     }));
-    const behavioralItems = ctx._brainData.t2_patterns.map((p) => ({
+    let behavioralItems = ctx._brainData.t2_patterns.map((p) => ({
       ...p,
       collection: p.collection ?? "experience-behavioral",
     }));
+    // Suppress already-fedback entries so they don't re-inject as noise.
+    if (isRecallLedgerEnabled()) {
+      principleItems = principleItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
+      behavioralItems = behavioralItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
+    }
     // Render the [id:..] handle inline (mirrors formatPrincipleRules/Hints) so the
     // [id collection] reminder below refers to handles the agent can actually see.
     const renderLine = (p: { text: string; id?: string }): string =>
@@ -443,7 +448,18 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         })
       : result.checkpointPoints || [];
 
-  const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral, ...deduplicatedCheckpoints];
+  // Feedback-cleared suppression: skip points that were already rated via ee_feedback in an earlier turn.
+  // This prevents already-judged entries from being re-injected as noise.
+  const clearedFilteredPrinciples = deduplicatedPrinciples.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const clearedFilteredBehavioral = deduplicatedBehavioral.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const clearedFilteredCheckpoints = deduplicatedCheckpoints.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const allPoints = [...clearedFilteredPrinciples, ...clearedFilteredBehavioral, ...clearedFilteredCheckpoints];
 
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
