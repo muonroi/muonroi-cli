@@ -14,6 +14,7 @@ import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
+import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "../orchestrator/safety-askcard.js";
 import { planSafetyAskcard } from "../orchestrator/safety-askcard.js";
@@ -25,7 +26,12 @@ import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
-import { logUIInteraction } from "../storage/index.js";
+import {
+  appendCompaction,
+  getNextMessageSequence,
+  logUIInteraction,
+  revertLatestCompaction,
+} from "../storage/index.js";
 import type { StoredSchedule } from "../tools/schedule";
 import type {
   AgentMode,
@@ -3822,10 +3828,18 @@ export function useAppLogic(props: AppLogicProps) {
               const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
               try {
                 const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                const sessionId = agent.getSessionId();
+                if (sessionId) {
+                  const nextSeq = getNextMessageSequence(sessionId);
+                  appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
+                }
+                const summaryMsg = createCompactionSummaryMessage(cr.summary);
+                agent.setMessages([summaryMsg]);
+                setMessages(agent.getChatEntries());
                 setMessages((prev) => [
                   ...prev,
                   buildAssistantEntry(
-                    `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} ΓåÆ ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                    `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
                   ),
                 ]);
               } catch (e: unknown) {
@@ -3834,7 +3848,25 @@ export function useAppLogic(props: AppLogicProps) {
               return;
             }
 
-            if (result.startsWith("__EXPAND__")) {
+            if (result.startsWith("__EXPAND__") || result.startsWith("__EXPAND_JSON__")) {
+              const sessionId = agent.getSessionId();
+              if (result.startsWith("__EXPAND_JSON__")) {
+                try {
+                  const lines = result.split("\n");
+                  const jsonStr = lines[1]!;
+                  const restoredMessages = JSON.parse(jsonStr);
+                  if (sessionId) {
+                    revertLatestCompaction(sessionId);
+                  }
+                  agent.setMessages(restoredMessages);
+                  setMessages(agent.getChatEntries());
+                  const text = lines.slice(2).join("\n");
+                  setMessages((prev) => [...prev, buildAssistantEntry(text)]);
+                  return;
+                } catch (e) {
+                  // fallback
+                }
+              }
               const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
               setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
               return;
@@ -4658,10 +4690,18 @@ export function useAppLogic(props: AppLogicProps) {
                 const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
                 try {
                   const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                  const sessionId = agent.getSessionId();
+                  if (sessionId) {
+                    const nextSeq = getNextMessageSequence(sessionId);
+                    appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
+                  }
+                  const summaryMsg = createCompactionSummaryMessage(cr.summary);
+                  agent.setMessages([summaryMsg]);
+                  setMessages(agent.getChatEntries());
                   setMessages((prev) => [
                     ...prev,
                     buildAssistantEntry(
-                      `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} ΓåÆ ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
+                      `Compaction: ${cr.decisionsExtracted} decisions extracted, ${cr.tokensBeforeCompress} → ${cr.tokensAfterCompress} tokens.\nSnapshot: ${cr.historyPath}`,
                     ),
                   ]);
                 } catch (e: unknown) {
@@ -4669,7 +4709,25 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 return;
               }
-              if (result.startsWith("__EXPAND__")) {
+              if (result.startsWith("__EXPAND__") || result.startsWith("__EXPAND_JSON__")) {
+                const sessionId = agent.getSessionId();
+                if (result.startsWith("__EXPAND_JSON__")) {
+                  try {
+                    const lines = result.split("\n");
+                    const jsonStr = lines[1]!;
+                    const restoredMessages = JSON.parse(jsonStr);
+                    if (sessionId) {
+                      revertLatestCompaction(sessionId);
+                    }
+                    agent.setMessages(restoredMessages);
+                    setMessages(agent.getChatEntries());
+                    const text = lines.slice(2).join("\n");
+                    setMessages((prev) => [...prev, buildAssistantEntry(text)]);
+                    return;
+                  } catch (e) {
+                    // fallback
+                  }
+                }
                 const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
                 setMessages((prev) => [...prev, buildAssistantEntry(`Restored session context:\n${content}`)]);
                 return;

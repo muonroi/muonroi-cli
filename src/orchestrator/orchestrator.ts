@@ -612,6 +612,11 @@ export class Agent {
     return this.messages;
   }
 
+  setMessages(messages: ModelMessage[]): void {
+    this.messages = messages;
+    this.messageSeqs = messages.map(() => null);
+  }
+
   async listSchedules(): Promise<StoredSchedule[]> {
     return this.schedules.list();
   }

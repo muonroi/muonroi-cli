@@ -470,6 +470,22 @@ export function appendCompaction(sessionId: string, firstKeptSeq: number, summar
   });
 }
 
+export function revertLatestCompaction(sessionId: string): void {
+  withTransaction((db) => {
+    db.prepare(`
+      DELETE FROM compactions 
+      WHERE session_id = ? 
+      AND id = (SELECT MAX(id) FROM compactions WHERE session_id = ?)
+    `).run(sessionId, sessionId);
+
+    db.prepare(`
+      UPDATE sessions
+      SET updated_at = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), sessionId);
+  });
+}
+
 export function buildChatEntries(sessionId: string): ChatEntry[] {
   const toolResults = loadStoredToolResults(sessionId);
   const callMap = new Map<string, ToolCall>();
