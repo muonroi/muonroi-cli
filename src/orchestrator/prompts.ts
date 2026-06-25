@@ -6,6 +6,7 @@ import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
 import { loadCustomInstructions } from "../utils/instructions";
+import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
   loadValidSubAgents,
@@ -14,19 +15,32 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
-import { logger } from "../utils/logger.js";
 
-// F3 — hard cap on tool rounds per user turn. Default reduced 400 → 100
-// after session bca83bcbaad1 logged 178 tool calls in a single turn while
-// monotonically growing billed input. Env override allowed range 10..400.
+// F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
+// after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
+// with 3 turns (seq 33/81/1) consuming 82% of tokens.
+// Env override allowed range 10..400.
 function readMaxToolRoundsFromEnv(): number {
   const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 100;
+  if (!raw) return 40;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 100;
+  if (!Number.isFinite(n)) return 40;
   return Math.max(10, Math.min(400, Math.floor(n)));
 }
 export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
+
+// F3b — HARD cap: absolute non-bumpable ceiling per user turn.
+// Fires AFTER the soft cap (MAX_TOOL_ROUNDS default 40) has been bumped
+// by the user. Prevents runaway sessions even when the user says "continue".
+// Env override allowed range 20..400.
+function readHardMaxToolRoundsFromEnv(): number {
+  const raw = process.env.MUONROI_HARD_MAX_TOOL_ROUNDS;
+  if (!raw) return 60;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 60;
+  return Math.max(20, Math.min(400, Math.floor(n)));
+}
+export const HARD_MAX_TOOL_ROUNDS = readHardMaxToolRoundsFromEnv();
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
 export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 

@@ -133,8 +133,8 @@ import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../type
 import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
-import { openUrl } from "../utils/open-url.js";
 import { logger } from "../utils/logger.js";
+import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   getAutoCouncilConfidence,
@@ -1105,6 +1105,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // stepCountIs(maxToolRounds) fires and the user sees the TUI freeze
         // (session 7dcf8fd7d6a4 hit exactly 100 rounds → looked like a crash).
         let _lastFinishReason: string | null = null;
+        // F3b — track hard cap hit for visible toast after stream ends.
+        let _hardCapHit = false;
         // Phase B4: compact older tool_result parts before each top-level
         // step once cumulative message chars exceed the configured threshold.
         // The compactor preserves system + first user verbatim and keeps the
@@ -1274,6 +1276,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // _ceilingHit and _ceilingHitAtStep are kept for telemetry: a
         // crossing event is logged for forensics, but no action is taken.
         const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+          // F3b — HARD cap: absolute non-bumpable ceiling per user turn.
+          // Fires AFTER the soft cap (maxToolRounds) has been bumped by the
+          // user. Prevents runaway sessions (session 526a83cf22df: 16 LLM
+          // calls for a single user message, 2.44M total input tokens).
+          if (state.steps.length > deps.hardMaxToolRounds) {
+            _hardCapHit = true;
+            return true;
+          }
           // Terminal response tool: a `respond_*` call IS the model's final
           // structured answer (its `execute` is identity — the payload lives
           // in the tool-call args). `shouldHaltOnResponseTool` decides if the
@@ -3212,6 +3222,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
         } catch {
           /* fail-open */
+        }
+
+        // F3b — surface hard-cap stop (absolute ceiling, cannot be bumped).
+        if (_hardCapHit) {
+          yield {
+            type: "content",
+            content:
+              `\n\n[Hard limit reached: Agent hit the absolute step ceiling of ${deps.hardMaxToolRounds} steps. ` +
+              `This turn cannot continue — too many LLM round-trips. ` +
+              `Start a new turn or break your task into smaller steps.]\n`,
+          };
         }
 
         // Surface the round-cap stop so the user knows why the agent halted
