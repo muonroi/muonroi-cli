@@ -13,6 +13,7 @@ import type { SessionExperienceCounts } from "../orchestrator/session-experience
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { getDatabase } from "../storage/db.js";
+import { getSessionChain } from "../storage/index.js";
 import { selectSessionExperience } from "../storage/session-experience-store.js";
 
 export interface CostForensicsRow {
@@ -104,25 +105,28 @@ export function collectCostForensics(sessionId: string): CostForensicsSummary {
     | undefined;
   if (!session) throw new Error(`Session not found: ${sessionId}`);
 
+  const chain = getSessionChain(sessionId);
+  const placeholders = chain.map(() => "?").join(",");
+
   const rows = db
     .prepare(`
     SELECT id, source, model, message_seq, input_tokens, output_tokens,
            cache_read_tokens, cache_creation_tokens, cost_micros, created_at,
            provider_options_shape
     FROM usage_events
-    WHERE session_id = ?
+    WHERE session_id IN (${placeholders})
     ORDER BY id ASC
   `)
-    .all(sessionId) as UsageRow[];
+    .all(...chain) as UsageRow[];
 
   const counts = db
     .prepare(`
     SELECT event_type, COUNT(*) AS c
     FROM interaction_logs
-    WHERE session_id = ?
+    WHERE session_id IN (${placeholders})
     GROUP BY event_type
   `)
-    .all(sessionId) as InteractionCountRow[];
+    .all(...chain) as InteractionCountRow[];
 
   const countMap = new Map(counts.map((r) => [r.event_type, r.c]));
 

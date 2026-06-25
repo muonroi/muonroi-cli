@@ -1,6 +1,8 @@
 import { getModelInfo } from "../models/registry.js";
 import type { UsageEvent, UsageSource } from "../types/index";
+import { logger } from "../utils/logger.js";
 import { getDatabase } from "./db";
+import { getSessionChain } from "./transcript";
 
 interface UsageRow {
   id: number;
@@ -71,27 +73,42 @@ export function recordUsageEvent(
 }
 
 export function getSessionTotalTokens(sessionId: string): number {
+  const chain = getSessionChain(sessionId);
+  const placeholders = chain.map(() => "?").join(",");
   const row = getDatabase()
     .prepare(`
     SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens
     FROM usage_events
-    WHERE session_id = ?
+    WHERE session_id IN (${placeholders})
   `)
-    .get(sessionId) as { total_tokens: number } | undefined;
+    .get(...chain) as { total_tokens: number } | undefined;
 
-  return row?.total_tokens ?? 0;
+  const total = row?.total_tokens ?? 0;
+  logger.debug("storage", "Calculated session total tokens from chain", {
+    sessionId,
+    chainLength: chain.length,
+    totalTokens: total,
+  });
+  return total;
 }
 
 export function listSessionUsage(sessionId: string): UsageEvent[] {
+  const chain = getSessionChain(sessionId);
+  const placeholders = chain.map(() => "?").join(",");
   const rows = getDatabase()
     .prepare(`
     SELECT id, session_id, message_seq, source, model, input_tokens, output_tokens, total_tokens, cost_micros, created_at, cache_read_tokens, cache_creation_tokens
     FROM usage_events
-    WHERE session_id = ?
+    WHERE session_id IN (${placeholders})
     ORDER BY id ASC
   `)
-    .all(sessionId) as UsageRow[];
+    .all(...chain) as UsageRow[];
 
+  logger.debug("storage", "Retrieved session usage events from chain", {
+    sessionId,
+    chainLength: chain.length,
+    eventCount: rows.length,
+  });
   return rows.map((row) => ({
     id: row.id,
     sessionId: row.session_id,

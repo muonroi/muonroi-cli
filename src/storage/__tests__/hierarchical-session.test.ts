@@ -21,6 +21,14 @@ vi.mock("../db", () => {
         return {
           get: (param: string) => {
             if (lower.includes("from sessions")) {
+              if (lower.includes("where parent_session_id =")) {
+                for (const [id, val] of sessionsDb.entries()) {
+                  if (val.parent_session_id === param) {
+                    return { id };
+                  }
+                }
+                return undefined;
+              }
               return sessionsDb.get(param) || { parent_session_id: null };
             }
             if (lower.includes("from tool_calls") && lower.includes("todo_write")) {

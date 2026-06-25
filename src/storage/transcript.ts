@@ -2,6 +2,7 @@ import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
+import { logger } from "../utils/logger.js";
 import { getDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
 import { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
@@ -486,28 +487,51 @@ export function revertLatestCompaction(sessionId: string): void {
 }
 
 export function getSessionChain(sessionId: string): string[] {
-  const chain: string[] = [];
-  const visited = new Set<string>();
-  let currentId: string | null = sessionId;
+  logger.debug("storage", "Resolving session chain", { sessionId });
   const db = getDatabase();
 
-  while (currentId && !visited.has(currentId)) {
-    visited.add(currentId);
-    chain.unshift(currentId);
+  // 1. Walk up to the root parent
+  let rootId = sessionId;
+  const visitedUp = new Set<string>();
+  while (rootId && !visitedUp.has(rootId)) {
+    visitedUp.add(rootId);
     try {
-      const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(currentId) as
+      const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(rootId) as
         | { parent_session_id: string | null }
         | undefined;
-      currentId = row?.parent_session_id ?? null;
+      if (row?.parent_session_id) {
+        rootId = row.parent_session_id;
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  // 2. Walk down from root to all descendants to get the chronological chain
+  const chain: string[] = [];
+  const visitedDown = new Set<string>();
+  let currentId: string | null = rootId;
+  while (currentId && !visitedDown.has(currentId)) {
+    visitedDown.add(currentId);
+    chain.push(currentId);
+    try {
+      const row = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(currentId) as
+        | { id: string }
+        | undefined;
+      currentId = row?.id ?? null;
     } catch {
       currentId = null;
     }
   }
+  logger.debug("storage", "Resolved session chain successfully", { sessionId, chainLength: chain.length, chain });
   return chain;
 }
 
 export function buildChatEntries(sessionId: string): ChatEntry[] {
   const chain = getSessionChain(sessionId);
+  logger.debug("storage", "Building chat entries from session chain", { sessionId, chainLength: chain.length });
   const toolResults = new Map<string, ToolResult>();
 
   for (const sid of chain) {
@@ -629,6 +653,7 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     });
   }
 
+  logger.debug("storage", "Built chat entries successfully", { sessionId, count: entries.length });
   return entries;
 }
 
