@@ -32,7 +32,10 @@ describe("council flow E2E", () => {
       // loadKeyForProvider reads SILICONFLOW_API_KEY (>= 20 chars) to decide if
       // the provider is reachable. Without it, resolveParticipants returns [] and
       // runCouncil exits early before emitting any council_phase chunks.
-      env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
+      env: {
+        SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY,
+        MUONROI_DEBUG_MOCK_MODEL: "1",
+      },
       cwd: greenfield,
     });
     proc = ctx.proc;
