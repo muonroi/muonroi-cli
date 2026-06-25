@@ -851,7 +851,9 @@ export class MessageProcessor {
     const cwdNote = deps.getPendingCwdNote();
     deps.setPendingCwdNote(null);
     const messageForDb = cwdNote ? `${cwdNote}\n\n${userMessage}` : userMessage;
-    const messageForModel = cwdNote ? `${cwdNote}\n\n${enrichedMessage}` : enrichedMessage;
+    // Append raw input so the model can distinguish system enrichment from user's original text.
+    const rawSuffix = pilCtx.raw && pilCtx.raw !== enrichedMessage ? `\n\n[Raw user input]\n${pilCtx.raw}` : "";
+    const messageForModel = (cwdNote ? `${cwdNote}\n\n${enrichedMessage}` : enrichedMessage) + rawSuffix;
 
     let userModelMessage: ModelMessage;
     let userEnrichedMessage: ModelMessage;
