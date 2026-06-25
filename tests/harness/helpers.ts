@@ -6,7 +6,9 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
@@ -54,8 +56,17 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   const fixtures = opts.fixturesDir ?? DEFAULT_FIXTURES;
   const args = [ENTRY, "--agent-mode", "--mock-llm", fixtures, ...(opts.extraArgs ?? [])];
 
+  let tempHome: string | undefined;
+  let homeDir = opts.cwd;
+  if (!homeDir) {
+    tempHome = mkdtempSync(join(tmpdir(), "muonroi-harness-home-"));
+    homeDir = tempHome;
+  }
+
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
+    HOME: homeDir,
+    USERPROFILE: homeDir,
     // MUONROI_TEST_NO_PERSIST: "1",
     // Suppress the agent-harness shim deprecation warning in the spawned
     // child — this is an internal-callsite spawn, not an external consumer.
@@ -71,7 +82,7 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
     handshakeTimeoutMs: opts.handshakeTimeoutMs,
   });
 
-  const { proc, inWrite, outRead, cleanup } = result;
+  const { proc, inWrite, outRead, cleanup: spawnCleanup } = result;
 
   const driver = createDriver({
     sendKey: (k) => inWrite.write(`${JSON.stringify({ op: "press", key: k })}\n`),
@@ -118,6 +129,17 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
   };
   outRead.on("end", () => emitDisconnect("end"));
   outRead.on("close", () => emitDisconnect("close"));
+
+  const cleanup = () => {
+    spawnCleanup();
+    if (tempHome) {
+      try {
+        rmSync(tempHome, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
 
   return { proc, driver, cleanup };
 }
