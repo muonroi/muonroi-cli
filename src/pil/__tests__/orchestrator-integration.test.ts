@@ -35,7 +35,7 @@ describe("PIL orchestrator contract", () => {
     const ctx = await runPipeline("refactor this function");
     // Layer 2 personality now appends hints, so enriched starts with raw
     expect(ctx.enriched.startsWith("refactor this function")).toBe(true);
-    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers).toHaveLength(7);
   });
 
   it("applyPilSuffix appends OUTPUT RULES suffix for coding taskType (non-null)", () => {

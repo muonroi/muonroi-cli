@@ -105,9 +105,15 @@ const GENERIC_WRAPPER_RE =
 // full DSML invoke block as text and made no real tool call → empty, silent turn.
 // The generic `<invoke` matcher misses it because `<` is followed by the sentinel.
 // Updated 2026-06-24 to cover both U+2502 and U+FF5C (tests use U+2502).
-const DSML_BAR = "[│｜]+"; // matches U+2502 (box-drawing) and U+FF5C (fullwidth)
-const DSML_WRAPPER_RE = new RegExp(`${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?(?:invoke|tool_calls?|parameter)\\b`, "i");
-const DSML_INVOKE_NAME_RE = new RegExp(`${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s+name\\s*=\\s*"([^"]+)"`, "i");
+const DSML_BAR = "[\\s]*[│｜|]+[│｜|\\s]*"; // matches U+2502 (box-drawing), U+FF5C (fullwidth), ASCII pipe |, and spaces
+const DSML_WRAPPER_RE = new RegExp(
+  `${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?(?:invoke|tool_calls?|parameter)\\b`,
+  "i",
+);
+const DSML_INVOKE_NAME_RE = new RegExp(
+  `${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s+name\\s*=\\s*"([^"]+)"`,
+  "i",
+);
 
 /** Build a per-tool detector: `<tool>` then (within a small gap) a `<param>` or `</tool>`. */
 function buildToolRegexes(): RegExp[] {
@@ -180,7 +186,7 @@ export interface ParsedDsmlCall {
 }
 
 // Guard regex: at least one DSML-bar sentinel must exist before we bother scanning
-const DSML_GUARD_RE = /[│｜]/;
+const DSML_GUARD_RE = /[│｜|]/;
 const DSML_INVOKE_BLOCK_RE = new RegExp(
   `${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s+name\\s*=\\s*"([^"]+)"([\\s\\S]*?)(?=${DSML_BAR}\\s*(?:DSML\\s*${DSML_BAR}\\s*)?invoke\\s|$)`,
   "gi",

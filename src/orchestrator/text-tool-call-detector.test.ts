@@ -150,4 +150,24 @@ describe("detectTextEmittedToolCall", () => {
       detectTextEmittedToolCall('<span *ngIf="!story.cover" class="placeholder">{{ title }}</span>').detected,
     ).toBe(false);
   });
+
+  it("detects and parses Gemini-style ASCII DSML leak with spaces and standard pipes", () => {
+    const text = `Tôi cần xác nhận ecosystem có những extension gì trước khi sửa - không đoán, phải đọc source thật.
+
+< | | DSML | | tool_calls>
+< | | DSML | | invoke name="mcp_filesystem__search_files">
+< | | DSML | | parameter name="pattern" string="true">Serilog</ | | DSML | | parameter>
+< | | DSML | | parameter name="path" string="true">D:\\sources\\Core\\muonroi-building-block\\src</ | | DSML | | parameter>
+</ | | DSML | | invoke>
+</ | | DSML | | tool_calls>`;
+    const r = detectTextEmittedToolCall(text);
+    expect(r.detected).toBe(true);
+    expect(r.tool).toBe("mcp_filesystem__search_files");
+
+    const calls = parseDsmlToolCalls(text);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.name).toBe("mcp_filesystem__search_files");
+    expect(calls[0]!.args.pattern).toBe("Serilog");
+    expect(calls[0]!.args.path).toBe("D:\\sources\\Core\\muonroi-building-block\\src");
+  });
 });
