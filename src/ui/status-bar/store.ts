@@ -108,7 +108,6 @@ export function wireStatusBar(): () => void {
 
   const offThresholds = subscribeThresholds((ev) => {
     statusBarStore.setState({
-      session_usd: ev.current_usd,
       month_usd: ev.current_usd,
       cap_usd: ev.cap_usd,
       current_pct: ev.current_pct,
