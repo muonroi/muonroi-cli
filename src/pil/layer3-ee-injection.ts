@@ -156,8 +156,14 @@ interface BridgeResult {
   filtered?: number;
 }
 
-async function queryEeBridge(raw: string): Promise<BridgeResult> {
+async function queryEeBridge(raw: string, taskType?: string | null): Promise<BridgeResult> {
   try {
+    // Enrich query with task context so EE embedding is more precise.
+    // e.g. "analyze: vậy ở...fix?" vs generic "vậy ở...fix?" — the prefix
+    // shifts the embedding toward task-relevant entries and away from generic
+    // action-oriented behavioral patterns that score highly on any NL query.
+    const queryWithTask = taskType ? `[${taskType}] ${raw}` : raw;
+
     // Parallel queries: T0 principles (lower floor, pre-validated abstractions)
     // and T1/T2 behavioral (standard floor, contextual patterns). Running both
     // concurrently keeps total latency at ~1500ms rather than ~3000ms.
@@ -165,8 +171,8 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
     // prior "Progress ✔ DONE / elided" without the agent having to ask "task finished?".
     const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
     const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
-      searchByText(raw, ["experience-principles"], 3, signal),
-      searchByText(raw, ["experience-behavioral"], 4, signal),
+      searchByText(queryWithTask, ["experience-principles"], 3, signal),
+      searchByText(queryWithTask, ["experience-behavioral"], 4, signal),
       searchByText(
         'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="',
         ["experience-behavioral"],
@@ -369,7 +375,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   }
 
   // Legacy path: existing logic continues below — unchanged.
-  const result = await queryEeBridge(ctx.raw);
+  const result = await queryEeBridge(ctx.raw, ctx.taskType);
   const { principlePoints, behavioralPoints, t1Rules } = result;
   const totalPoints = principlePoints.length + behavioralPoints.length;
 
