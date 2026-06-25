@@ -33,9 +33,19 @@ export const handleExpandSlash: SlashHandler = async (_args, ctx) => {
   }
 
   // Read the latest snapshot
-  const latestFile = snapshots[snapshots.length - 1];
+  const latestFile = snapshots[snapshots.length - 1]!;
   const latestPath = path.join(historyDir, latestFile);
   const content = await fs.readFile(latestPath, "utf8");
+
+  // Attempt to read the corresponding .json file for structured messages restore
+  let jsonContent = "";
+  const jsonPath = latestPath.replace(/\.md$/, ".json");
+  try {
+    jsonContent = await fs.readFile(jsonPath, "utf8");
+    await fs.unlink(jsonPath).catch(() => {});
+  } catch {
+    // no JSON snapshot found (legacy md-only snapshot)
+  }
 
   // Delete the snapshot file (prevent double-expand per Pitfall 5)
   await fs.unlink(latestPath);
@@ -43,7 +53,11 @@ export const handleExpandSlash: SlashHandler = async (_args, ctx) => {
   // Count lines for summary
   const lines = content.split("\n").length;
 
-  // Return signal for orchestrator to restore messages
+  if (jsonContent) {
+    return `__EXPAND_JSON__\n${jsonContent}\nRestored from ${latestFile} (${lines} lines). Previous compaction reversed.\n${content}`;
+  }
+
+  // Return signal for orchestrator to restore messages (legacy text fallback)
   return `__EXPAND__\nRestored from ${latestFile} (${lines} lines). Previous compaction reversed.\n${content}`;
 };
 

@@ -20,6 +20,7 @@ export interface CompactionResult {
   tokensBeforeCompress: number;
   tokensAfterCompress: number;
   historyPath: string;
+  summary: string;
 }
 
 /**
@@ -71,6 +72,10 @@ export async function deliberateCompact(
   const fullSerialized = serializeConversation(messages);
   await atomicWriteText(historyPath, fullSerialized);
 
+  // Save full JSON history next to the md file for exact expand/restore
+  const jsonPath = path.join(historyDir, `${timestamp}.json`);
+  await atomicWriteText(jsonPath, JSON.stringify(messages, null, 2));
+
   // Token estimation before
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
@@ -82,5 +87,6 @@ export async function deliberateCompact(
     tokensBeforeCompress: tokensBefore,
     tokensAfterCompress: compressed.tokensAfter,
     historyPath,
+    summary: compressed.summary,
   };
 }
