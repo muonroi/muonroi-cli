@@ -25,7 +25,9 @@ import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 function readMaxToolRoundsFromEnv(): number {
   const settings = loadUserSettings();
   const agentFirst =
-    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
   const raw = process.env.MUONROI_MAX_TOOL_ROUNDS || settings.maxToolRounds;
   if (!raw) return agentFirst ? 200 : 40;
   const n = Number(raw);
@@ -41,7 +43,9 @@ export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
 function readHardMaxToolRoundsFromEnv(): number {
   const settings = loadUserSettings();
   const agentFirst =
-    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
   const raw = process.env.MUONROI_HARD_MAX_TOOL_ROUNDS || settings.hardMaxToolRounds;
   if (!raw) return agentFirst ? 300 : 60;
   const n = Number(raw);
@@ -58,7 +62,9 @@ export const HARD_MAX_TOOL_ROUNDS = readHardMaxToolRoundsFromEnv();
 function readMaxLlmCallsPerTurn(): number {
   const settings = loadUserSettings();
   const agentFirst =
-    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
   const raw = process.env.MUONROI_MAX_LLM_CALLS_PER_TURN || settings.maxLlmCallsPerTurn;
   if (!raw) return agentFirst ? 100 : 12;
   const n = Number(raw);
