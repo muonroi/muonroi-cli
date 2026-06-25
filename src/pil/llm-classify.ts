@@ -358,3 +358,93 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
     }
   };
 }
+
+export type SubSessionAction = "DIRECT_ANSWER" | "ROTATE_SESSION" | "SPAWN_SUB_SESSION";
+
+export interface SubSessionRouteResult {
+  action: SubSessionAction;
+  confidence: number;
+  reason: string;
+}
+
+const ROUTER_SYSTEM_PROMPT =
+  "You are a routing controller for an AI coding agent. Your goal is to decide the execution strategy for the user's prompt based on the conversation history.\n\n" +
+  "Analyze the user's prompt and select one of the following ACTIONS:\n" +
+  '- "DIRECT_ANSWER": The prompt is informational, a quick question, a code review, an explanation, greeting, or thanks. No file creation/modification, test execution, or multi-turn tool runs are needed.\n' +
+  '- "ROTATE_SESSION": The user is starting a completely new topic or task unrelated to the active discussion (e.g. "let\'s switch to writing a python script", "forget the previous bug, show me how to...").\n' +
+  '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n\n' +
+  "Response format: Reply with exactly one comma-separated line containing:\n" +
+  "<ACTION>,<CONFIDENCE>,<REASON>\n\n" +
+  "Examples:\n" +
+  '- "DIRECT_ANSWER,0.95,Simple explanation of how the DB migration works."\n' +
+  '- "ROTATE_SESSION,0.90,Complete shift to a different project/language."\n' +
+  '- "SPAWN_SUB_SESSION,0.98,Requires writing a test suite and fixing multiple files to get it green."\n' +
+  "No other text, only the comma-separated line.";
+
+export async function classifySubSessionAction(
+  factory: ProviderFactory,
+  modelId: string,
+  prompt: string,
+  signal?: AbortSignal,
+): Promise<SubSessionRouteResult | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const runtime = resolveModelRuntime(factory, modelId);
+    const isReasoning = runtime.modelInfo?.reasoning === true;
+    timer = setTimeout(() => controller.abort(), isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS);
+    const combinedSignal = signal
+      ? (AbortSignal.any?.([signal, controller.signal]) ?? controller.signal)
+      : controller.signal;
+
+    const dropMaxTokens = runtime.unsupportedParams?.includes("maxOutputTokens") === true;
+    const maxOut = isReasoning ? REASONING_MAX_OUTPUT_TOKENS : NONREASONING_MAX_OUTPUT_TOKENS;
+
+    let providerOptions = runtime.providerOptions;
+    if (isReasoning && runtime.modelInfo?.supportsReasoningEffort && runtime.modelInfo.provider) {
+      const lowEffort = getProviderCapabilities(runtime.modelInfo.provider).buildProviderOptions({
+        model: runtime.model,
+        reasoningEffort: "low",
+      });
+      providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
+    }
+
+    const result = streamText({
+      model: runtime.model,
+      abortSignal: combinedSignal,
+      system: ROUTER_SYSTEM_PROMPT,
+      prompt: prompt.slice(0, 1000),
+      ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
+      ...(providerOptions ? { providerOptions } : {}),
+    });
+
+    let text = "";
+    let reasoningText = "";
+    for await (const part of result.fullStream) {
+      if (part.type === "text-delta") text += (part as any).textDelta ?? (part as any).text ?? "";
+      else if (part.type === "reasoning-delta") reasoningText += (part as any).textDelta ?? (part as any).text ?? "";
+    }
+
+    const rawResult = text.trim() || reasoningText.trim();
+    if (!rawResult) return null;
+
+    const clean = rawResult.replace(/[`*"]/g, "").trim();
+    const firstLine = clean.split(/\r?\n/)[0] ?? "";
+    const parts = firstLine.split(",");
+    if (parts.length < 2) return null;
+
+    const action = parts[0].trim().toUpperCase() as SubSessionAction;
+    const confidence = Number(parts[1].trim()) || 0.8;
+    const reason = parts.slice(2).join(",").trim() || "No reason given";
+
+    if (action === "DIRECT_ANSWER" || action === "ROTATE_SESSION" || action === "SPAWN_SUB_SESSION") {
+      return { action, confidence, reason };
+    }
+    return null;
+  } catch (err) {
+    console.error(`[pil.llm-classify] classifySubSessionAction failed: ${(err as Error)?.message}`);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

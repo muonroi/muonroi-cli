@@ -133,14 +133,12 @@ describe("Hierarchical Sessions (Silent Rotation Support)", () => {
 
       messagesDb.set("sessionA", [
         {
-          session_id: "sessionA",
           seq: 1,
           role: "user",
           message_json: JSON.stringify({ role: "user", content: "Hello A" }),
           created_at: "2026-06-25T12:00:00Z",
         },
         {
-          session_id: "sessionA",
           seq: 2,
           role: "assistant",
           message_json: JSON.stringify({ role: "assistant", content: "Reply A" }),
@@ -150,14 +148,13 @@ describe("Hierarchical Sessions (Silent Rotation Support)", () => {
 
       messagesDb.set("sessionB", [
         {
-          session_id: "sessionB",
           seq: 1,
+          role: "system",
           // compaction summary (should be skipped since it's the first message of a child)
           message_json: JSON.stringify({ role: "system", content: "[Context checkpoint summary]\nEarlier work" }),
           created_at: "2026-06-25T12:02:00Z",
         },
         {
-          session_id: "sessionB",
           seq: 2,
           role: "user",
           message_json: JSON.stringify({ role: "user", content: "Hello B" }),

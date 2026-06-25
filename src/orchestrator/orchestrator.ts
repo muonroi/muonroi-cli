@@ -2611,7 +2611,32 @@ export class Agent {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
     const currentChars = this.estimateConversationChars();
-    if (currentChars > threshold && this.session && this.sessionStore) {
+    logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
+
+    // 1. Run classifier to decide execution route
+    let routeAction: import("../pil/llm-classify.js").SubSessionAction = "DIRECT_ANSWER";
+    try {
+      const { classifySubSessionAction } = await import("../pil/llm-classify.js");
+      const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
+      if (routeResult) {
+        routeAction = routeResult.action;
+        logger.info("orchestrator", "Routing action selected for user message", {
+          action: routeAction,
+          confidence: routeResult.confidence,
+          reason: routeResult.reason,
+        });
+      }
+    } catch (err) {
+      logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
+    }
+
+    const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
+
+    if (shouldRotate && this.session && this.sessionStore) {
+      logger.info("orchestrator", "Triggering silent session rotation", {
+        parentSessionId: this.session.id,
+        currentChars,
+      });
       yield { type: "content", content: "\n⋯ Xoay vòng session ngầm để tối ưu hóa context (Anti-Mù active)...\n" };
       const parentSessionId = this.session.id;
       try {
@@ -2636,8 +2661,76 @@ export class Agent {
         this.messageSeqs = [null];
 
         this.sessionStore.touchSession(newSession.id, this.bash.getCwd());
+        logger.info("orchestrator", "Silent session rotation completed successfully", {
+          parentSessionId,
+          newSessionId: newSession.id,
+          summaryLength: cr.summary.length,
+          tokensBeforeCompress: cr.tokensBeforeCompress,
+        });
       } catch (err) {
         logger.error("orchestrator", "silent session rotation failed", { error: err });
+      }
+    }
+
+    let isSubSessionForked = false;
+    let parentSessionId: string | null = null;
+
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
+      yield { type: "content", content: "\n⋯ Đang khởi tạo sub-session ngầm để xử lý tác vụ...\n" };
+      parentSessionId = this.session.id;
+      try {
+        const { loadLatestCompaction, getNextMessageSequence, appendCompaction } = await import(
+          "../storage/transcript.js"
+        );
+        const { getDatabase } = await import("../storage/db.js");
+
+        const latest = loadLatestCompaction(parentSessionId);
+
+        const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+        const db = getDatabase();
+        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+
+        let seedMessages: ModelMessage[] = [];
+        let seedSeqs: Array<number | null> = [];
+        if (latest?.summary) {
+          const summaryMsg = createCompactionSummaryMessage(latest.summary);
+          seedMessages = [summaryMsg];
+          seedSeqs = [null];
+          const nextSeq = getNextMessageSequence(newSession.id);
+          appendCompaction(newSession.id, nextSeq, latest.summary, latest.tokensBefore);
+        } else {
+          seedMessages = [...this.messages];
+          seedSeqs = [...this.messageSeqs];
+        }
+
+        // Add sub-session overlay system message
+        const overlayMessage: ModelMessage = {
+          role: "system",
+          content:
+            `You are executing a sub-task delegated by the Main Session in an isolated, temporary Sub-Session.\n` +
+            `Your goal is to satisfy the user's request: "${userMessage}"\n\n` +
+            `Your Operating Boundaries & Rules:\n` +
+            `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
+            `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
+            `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
+            `4. Your final response MUST contain a structured summary (Key Changes, Verification Details, Result Summary).\n` +
+            `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
+        };
+        seedMessages.push(overlayMessage);
+        seedSeqs.push(null);
+
+        this.session = this.sessionStore.getRequiredSession(newSession.id);
+        this.messages = seedMessages;
+        this.messageSeqs = seedSeqs;
+        this.sessionStore.touchSession(newSession.id, this.bash.getCwd());
+
+        isSubSessionForked = true;
+        logger.info("orchestrator", "Forked child sub-session successfully", {
+          parentSessionId,
+          subSessionId: newSession.id,
+        });
+      } catch (err) {
+        logger.error("orchestrator", "Forking child sub-session failed, falling back to main session", { error: err });
       }
     }
 
@@ -2662,6 +2755,58 @@ export class Agent {
           type: "content",
           content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
         };
+      }
+    }
+
+    if (isSubSessionForked && parentSessionId && this.sessionStore) {
+      try {
+        let lastAsstIdx = -1;
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (this.messages[i].role === "assistant") {
+            lastAsstIdx = i;
+            break;
+          }
+        }
+
+        const finalMessages: ModelMessage[] = [];
+        if (lastAsstIdx >= 0) {
+          finalMessages.push(this.messages[lastAsstIdx]);
+          for (let i = lastAsstIdx + 1; i < this.messages.length; i++) {
+            if (this.messages[i].role === "tool") {
+              finalMessages.push(this.messages[i]);
+            }
+          }
+        }
+
+        const subSessionId = this.session?.id ?? "";
+        // Restore parent session
+        this.session = this.sessionStore.getRequiredSession(parentSessionId);
+
+        const { loadTranscriptState } = await import("../storage/transcript.js");
+        const parentState = loadTranscriptState(parentSessionId);
+        this.messages = parentState.messages;
+        this.messageSeqs = parentState.seqs;
+
+        const userModelMessage: ModelMessage = {
+          role: "user",
+          content: userMessage,
+        };
+
+        if (finalMessages.length > 0) {
+          this.appendCompletedTurn(userModelMessage, finalMessages);
+          logger.info("orchestrator", "Absorbed sub-session outcome into parent session", {
+            parentSessionId,
+            subSessionId,
+            absorbedMessagesCount: finalMessages.length,
+          });
+        } else {
+          logger.warn("orchestrator", "No assistant messages found to absorb from sub-session", {
+            parentSessionId,
+            subSessionId,
+          });
+        }
+      } catch (err) {
+        logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
       }
     }
   }
