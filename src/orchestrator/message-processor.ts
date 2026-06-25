@@ -967,6 +967,46 @@ export class MessageProcessor {
       }
     }
 
+    // Fix 3: inject pending recall-feedback nudge as a system message the
+    // model can actually see. Previously recall reminders were yield-content
+    // (UI-only) — the model never read them. Inject at turn start so the
+    // agent can batch-rate hints at the beginning of its next response,
+    // before diving into the user's new task. Deduped by sha like guidance.
+    try {
+      const { sessionRecallLedger, isRecallLedgerEnabled } = await import("../ee/recall-ledger.js");
+      if (isRecallLedgerEnabled()) {
+        const pending = sessionRecallLedger.pending();
+        if (pending.length > 0) {
+          const hintLines = pending
+            .slice(0, 10)
+            .map(
+              (p) =>
+                `  - ee_feedback(id="${p.id}", collection="${p.collection ?? "?"}", verdict=followed|ignored|noise)`,
+            );
+          const more = pending.length > 10 ? `\n  ...and ${pending.length - 10} more` : "";
+          const recallContent =
+            `⚠️ MANDATORY: Rate ${pending.length} unrated EE hint(s) before proceeding.\n` +
+            `You MUST call ee_feedback for each hint below BEFORE doing anything else this turn.\n` +
+            `This is not optional — the Experience Engine brain learns from these ratings.\n` +
+            `Verdict: followed (you used the hint) | ignored (not relevant) | noise (wrong/stale).\n` +
+            `${hintLines.join("\n")}${more}\n` +
+            `First output MUST be the ee_feedback call(s) — then proceed with the task.`;
+
+          const sid = deps.session?.id ?? "_anon";
+          const { createHash: _recallHash } = await import("node:crypto");
+          const recallSha = _recallHash("sha256").update(recallContent).digest("hex").slice(0, 16);
+          const recallKey = `recall_${sid}`;
+          if (_injectedGuidanceSha.get(recallKey) !== recallSha) {
+            _injectedGuidanceSha.set(recallKey, recallSha);
+            deps.messages.push({ role: "system", content: recallContent });
+            deps.messageSeqs.push(null);
+          }
+        }
+      }
+    } catch {
+      /* fail-open — EE unreachable is never a blocker */
+    }
+
     const provider = turnProvider;
     const subagents = loadValidSubAgents();
     const _pilResponseTools = getResponseToolSet(pilCtx, deps.providerId);

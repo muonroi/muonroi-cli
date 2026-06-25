@@ -62,10 +62,15 @@ let _cachedScope: Scope | null = null;
 // Follows the _cachedScope module-level variable pattern.
 let _lastWarningResponse: InterceptResponse | null = null;
 
+// Fix 2: throttle recall-feedback reminder to once per unique pending-set.
+// Tracks the sha of pending IDs so identical reminders don't repeat on every tool call.
+let _lastRecallReminderSha: string | null = null;
+
 /** Reset hook module state — for test teardown only. */
 export function resetHookState(): void {
   _lastWarningResponse = null;
   _cachedScope = null;
+  _lastRecallReminderSha = null;
 }
 
 function emptyResult(): AggregatedHookResult {
@@ -238,9 +243,16 @@ export async function executeEventHooks(
         confidence: m.confidence,
       }));
 
-      // Soft EE recall-feedback nudge: add non-blocking reminder when there are
-      // pending unrated hints. Unlike the previous hard gate, this doesn't block
-      // tool execution — it just adds context so the agent sees the reminder.
+      // Hard EE recall-feedback gate: inject mandatory reminder when there are
+      // pending unrated hints. The agent MUST clear all pending ee_feedback before
+      // proceeding with the task — system prompt in message-processor.ts enforces
+      // this as a first-before-anything directive.
+      //
+      // Fix 2: throttle to once per unique pending-set. The same 9 hints repeating
+      // after each of 10+ tool calls is pure UI noise — the model can't even see
+      // yield-content, and the user must scroll past identical blocks. Show the
+      // reminder ONCE when the set first appears or changes (e.g. after ee_feedback
+      // clears some entries), then stay silent until the set changes again.
       let recallReminder: string | null = null;
       try {
         const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
@@ -249,7 +261,17 @@ export async function executeEventHooks(
         if (isRecallLedgerEnabled()) {
           const pending = sessionRecallLedger.pending();
           if (pending.length > 0) {
-            recallReminder = `⚠️ ${pending.length} unrated EE recall(s) remaining.\n${formatPendingReminder(pending, { max: 5 })}`;
+            const pendingSha = pending
+              .map((p) => p.id)
+              .sort()
+              .join(",");
+            if (pendingSha !== _lastRecallReminderSha) {
+              _lastRecallReminderSha = pendingSha;
+              recallReminder = `⚠️ MANDATORY: ${pending.length} unrated EE recall(s) — call ee_feedback NOW before continuing.\n${formatPendingReminder(pending, { max: 5 })}`;
+            }
+          } else {
+            // All cleared — reset so next batch shows fresh
+            _lastRecallReminderSha = null;
           }
         }
       } catch {
