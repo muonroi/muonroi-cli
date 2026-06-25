@@ -485,105 +485,121 @@ export function revertLatestCompaction(sessionId: string): void {
   });
 }
 
+export function getSessionChain(sessionId: string): string[] {
+  const chain: string[] = [];
+  const visited = new Set<string>();
+  let currentId: string | null = sessionId;
+  const db = getDatabase();
+
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    chain.unshift(currentId);
+    try {
+      const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(currentId) as
+        | { parent_session_id: string | null }
+        | undefined;
+      currentId = row?.parent_session_id ?? null;
+    } catch {
+      currentId = null;
+    }
+  }
+  return chain;
+}
+
 export function buildChatEntries(sessionId: string): ChatEntry[] {
-  const toolResults = loadStoredToolResults(sessionId);
+  const chain = getSessionChain(sessionId);
+  const toolResults = new Map<string, ToolResult>();
+
+  for (const sid of chain) {
+    const results = loadStoredToolResults(sid);
+    for (const [k, v] of results) {
+      toolResults.set(k, v);
+    }
+  }
+
   const callMap = new Map<string, ToolCall>();
   const entries: ChatEntry[] = [];
-  // Response-tool callIds already rendered as a structured_response from a
-  // persisted tool-RESULT row (success path). After the loop we recover any
-  // response tool that was CALLED but produced no result row — i.e. respond_*
-  // whose execution ERRORED (the AI SDK does not persist tool-error parts as
-  // tool-result rows). Its answer lives in the call args; without this it is
-  // dropped on the turn-finalize rebuild and the user sees an empty turn or
-  // only the last council debate round.
   const renderedResponseCallIds = new Set<string>();
   let lastTimestamp: Date | undefined;
 
-  for (const row of buildEffectiveMessageRecords(sessionId)) {
-    const { message, timestamp } = row;
-    lastTimestamp = timestamp;
+  for (let i = 0; i < chain.length; i++) {
+    const sid = chain[i];
+    const records = buildEffectiveMessageRecords(sid);
+    const isChildSession = i > 0;
 
-    if (message.role === "user") {
-      const content = renderUserContent(message.content);
-      if (content) {
-        entries.push({ type: "user", content, timestamp });
+    for (let j = 0; j < records.length; j++) {
+      const { message, timestamp } = records[j];
+      lastTimestamp = timestamp;
+
+      if (message.role === "user") {
+        const content = renderUserContent(message.content);
+        if (content) {
+          entries.push({ type: "user", content, timestamp });
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (message.role === "system") {
-      const summaryText = getCompactionSummaryText(message);
-      const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
-      if (content && !isInternalCouncilMarker(content)) {
-        // A compaction checkpoint is internal context-management, NOT the
-        // assistant's answer. Tag it with a source label so the UI renders it
-        // as a clearly-marked, collapsible checkpoint instead of dumping the
-        // raw "## Goal / ## Context For Suffix" scaffolding as a chat reply.
-        entries.push(
-          summaryText !== null
-            ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
-            : { type: "assistant", content, timestamp },
-        );
-      }
-      continue;
-    }
-
-    if (message.role === "assistant") {
-      const text = renderAssistantContent(message.content, callMap);
-      if (text) {
-        entries.push({ type: "assistant", content: text, timestamp });
-      }
-      continue;
-    }
-
-    if (message.role === "tool" && Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part.type !== "tool-result") continue;
-        // Response tools (respond_general/analyze/plan/...) are the model's
-        // TERMINAL structured answer (identity execute — the payload lives in
-        // the call args and is echoed in the result). The live stream yields
-        // them as a `structured_response` chunk (message-processor.ts:2733),
-        // which the UI renders as the answer block. Persisted history MUST
-        // rebuild the SAME entry: finalizeActiveTurn (app.tsx) replaces the
-        // live message list with getChatEntries() on every normal turn, so if
-        // we rebuilt a respond_* result as a bare tool_result the rendered
-        // answer would be silently dropped the instant streaming ended (live
-        // repro session 9d3d371ca1bd: grok investigated, emitted a 10K-char
-        // respond_general, the answer flashed then vanished on turn finalize —
-        // the user saw only the "→ respond_general" indicator). AI SDK v5/v6
-        // wraps tool outputs as `{type:"json", value:{...}}`; unwrap to expose
-        // the schema-shaped payload to the renderer.
-        if (isResponseTool(part.toolName)) {
-          renderedResponseCallIds.add(part.toolCallId);
-          const rawOutput = part.output as unknown;
-          const unwrapped =
-            rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
-              ? ((rawOutput as { value?: unknown }).value ?? {})
-              : (rawOutput ?? {});
-          entries.push({
-            type: "structured_response",
-            content: "",
-            timestamp,
-            structuredResponse: {
-              taskType: getResponseTaskType(part.toolName) ?? part.toolName,
-              data: unwrapped as Record<string, unknown>,
-            },
-          });
+      if (message.role === "system") {
+        const summaryText = getCompactionSummaryText(message);
+        if (isChildSession && j === 0 && summaryText !== null) {
+          // Skip the first message in a child session if it's the parent compaction summary
+          // to keep the visual timeline clean, since the user already sees the parent history.
           continue;
         }
-        const toolCall = callMap.get(part.toolCallId) ?? toFallbackToolCall(part.toolCallId, part.toolName);
-        const toolResult = toolResults.get(part.toolCallId) ??
-          extractToolResultFromOutput(part.output) ?? {
-            success: isOutputSuccess(part.output),
-            output: JSON.stringify(part.output),
-          };
-        entries.push({
-          type: "tool_result",
-          content: toolResult.success ? toolResult.output || "Success" : toolResult.error || "Error",
-          timestamp,
-          toolCall,
-          toolResult,
-        });
+        const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
+        if (content && !isInternalCouncilMarker(content)) {
+          entries.push(
+            summaryText !== null
+              ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
+              : { type: "assistant", content, timestamp },
+          );
+        }
+        continue;
+      }
+
+      if (message.role === "assistant") {
+        const text = renderAssistantContent(message.content, callMap);
+        if (text) {
+          entries.push({ type: "assistant", content: text, timestamp });
+        }
+        continue;
+      }
+
+      if (message.role === "tool" && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type !== "tool-result") continue;
+          if (isResponseTool(part.toolName)) {
+            renderedResponseCallIds.add(part.toolCallId);
+            const rawOutput = part.output as unknown;
+            const unwrapped =
+              rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+                ? ((rawOutput as { value?: unknown }).value ?? {})
+                : (rawOutput ?? {});
+            entries.push({
+              type: "structured_response",
+              content: "",
+              timestamp,
+              structuredResponse: {
+                taskType: getResponseTaskType(part.toolName) ?? part.toolName,
+                data: unwrapped as Record<string, unknown>,
+              },
+            });
+            continue;
+          }
+          const toolCall = callMap.get(part.toolCallId) ?? toFallbackToolCall(part.toolCallId, part.toolName);
+          const toolResult = toolResults.get(part.toolCallId) ??
+            extractToolResultFromOutput(part.output) ?? {
+              success: isOutputSuccess(part.output),
+              output: JSON.stringify(part.output),
+            };
+          entries.push({
+            type: "tool_result",
+            content: toolResult.success ? toolResult.output || "Success" : toolResult.error || "Error",
+            timestamp,
+            toolCall,
+            toolResult,
+          });
+        }
       }
     }
   }
@@ -696,18 +712,25 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
 }
 
 export function getLastTodoWriteArgs(sessionId: string): string | null {
-  try {
-    const row = getDatabase()
-      .prepare(`
-        SELECT args_json
-        FROM tool_calls
-        WHERE session_id = ? AND tool_name = 'todo_write'
-        ORDER BY id DESC
-        LIMIT 1
-      `)
-      .get(sessionId) as { args_json: string } | undefined;
-    return row?.args_json ?? null;
-  } catch {
-    return null;
+  const chain = getSessionChain(sessionId);
+  const db = getDatabase();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    try {
+      const row = db
+        .prepare(`
+          SELECT args_json
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name = 'todo_write'
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string } | undefined;
+      if (row?.args_json) {
+        return row.args_json;
+      }
+    } catch {
+      // ignore and check parent
+    }
   }
+  return null;
 }

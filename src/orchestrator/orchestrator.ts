@@ -2583,6 +2583,22 @@ export class Agent {
     return executeEventHooks(input, this.bash.getCwd(), signal);
   }
 
+  private estimateConversationChars(): number {
+    let count = 0;
+    for (const m of this.messages) {
+      if (typeof m.content === "string") {
+        count += m.content.length;
+      } else if (Array.isArray(m.content)) {
+        for (const p of m.content) {
+          if (p.type === "text" && p.text) {
+            count += p.text.length;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
   // ========================================================================
   // processMessage — main streaming turn loop (PIL enrichment, routing, LLM
   // stream, tool execution, compaction, hooks, observer notifications)
@@ -2593,6 +2609,38 @@ export class Agent {
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
+    const currentChars = this.estimateConversationChars();
+    if (currentChars > threshold && this.session && this.sessionStore) {
+      yield { type: "content", content: "\n⋯ Xoay vòng session ngầm để tối ưu hóa context (Anti-Mù active)...\n" };
+      const parentSessionId = this.session.id;
+      try {
+        const path = await import("node:path");
+        const flowDir = path.join(this.bash.getCwd(), ".muonroi-flow");
+        const { deliberateCompact } = await import("../flow/compaction/index.js");
+        const { getDatabase } = await import("../storage/db.js");
+        const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");
+
+        const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.requireProvider(), this.modelId);
+
+        const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+        const db = getDatabase();
+        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+
+        const summaryMessage = createCompactionSummaryMessage(cr.summary);
+        const nextSeq = getNextMessageSequence(newSession.id);
+        appendCompaction(newSession.id, nextSeq, cr.summary, cr.tokensBeforeCompress);
+
+        this.session = this.sessionStore.getRequiredSession(newSession.id);
+        this.messages = [summaryMessage];
+        this.messageSeqs = [null];
+
+        this.sessionStore.touchSession(newSession.id, this.bash.getCwd());
+      } catch (err) {
+        logger.error("orchestrator", "silent session rotation failed", { error: err });
+      }
+    }
+
     const processor = new MessageProcessor(this._buildMessageProcessorDeps());
     // Deterministic "task done -> commit" (auto-commit): snapshot the dirty set
     // before the turn so we can commit ONLY the files the agent changes during it

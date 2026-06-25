@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 7;
+const LATEST_DB_VERSION = 8;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -90,6 +90,15 @@ export function applyMigrations(db: SQLiteDatabase): void {
       }
       db.pragma("user_version = 7");
     }
+    if (version < 8) {
+      const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+      const colNames = new Set(cols.map((c) => c.name));
+      if (!colNames.has("parent_session_id")) {
+        db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL");
+      }
+      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent_id ON sessions(parent_session_id)");
+      db.pragma("user_version = 8");
+    }
   });
 
   migrate();
@@ -109,6 +118,7 @@ function createInitialSchema(db: SQLiteDatabase): void {
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
       title TEXT,
       model TEXT NOT NULL,
       mode TEXT NOT NULL,
@@ -177,6 +187,8 @@ function createInitialSchema(db: SQLiteDatabase): void {
 
     CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated
       ON sessions(workspace_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_sessions_parent_id
+      ON sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_messages_session_seq
       ON messages(session_id, seq);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_session_seq
