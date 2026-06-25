@@ -76,6 +76,7 @@ let _tuiActive = false;
 
 export function setTuiActive(active: boolean): void {
   _tuiActive = active;
+  (globalThis as Record<string, unknown>).__muonroiTuiActive = active;
 }
 
 export function appendCrashLog(label: string, msg: string): void {
@@ -878,7 +879,7 @@ function resolveConfig(options: CliOptions) {
   // work; runaway loops abort with the "Reached max tool rounds" error
   // surface so the user can adjust scope. Override via --max-tool-rounds CLI
   // flag or MUONROI_MAX_TOOL_ROUNDS env.
-  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "12", 10) || 12;
+  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "100", 10) || 100;
 
   if (typeof options.apiKey === "string" && process.env.MUONROI_TEST_NO_PERSIST !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.

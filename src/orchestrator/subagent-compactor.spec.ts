@@ -469,5 +469,94 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     const srcValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_src");
     expect((srcValMsg?.content as any)[0].output.value).toBe(highValueSourceOutput);
   });
-});
 
+  it("T1.1 — strips reasoning parts from old assistant turns when stripOldReasoning is enabled", () => {
+    // Build history with reasoning parts in assistant messages
+    const msgs: ModelMessage[] = [
+      { role: "system", content: "You are an agent." },
+      { role: "user", content: "fix the bug" },
+    ];
+    // Add 6 tool turns with reasoning in assistant messages
+    for (let i = 1; i <= 6; i++) {
+      msgs.push({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: `Thinking about step ${i}... ${"x".repeat(3000)}` },
+          { type: "text", text: `Step ${i} analysis` },
+          { type: "tool-call", toolCallId: `call_${i}`, toolName: "bash", input: `echo ${i}` },
+        ],
+      } as unknown as ModelMessage);
+      msgs.push({
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: `call_${i}`, toolName: "bash", output: { type: "text", value: bigText(`R${i}`, 2) } },
+        ],
+      } as unknown as ModelMessage);
+    }
+
+    const out = compactSubAgentMessages(msgs, {
+      thresholdChars: 1000, // force compaction
+      keepLastTurns: 2,
+      stripOldReasoning: true,
+    });
+
+    // Old turns (1-4) should have reasoning stripped
+    const oldAssistants = out.filter(
+      (m, idx) => m.role === "assistant" && idx < out.length - 4, // before the last 2 turn pairs
+    );
+    for (const m of oldAssistants) {
+      const content = m.content as Array<Record<string, unknown>>;
+      if (!Array.isArray(content)) continue;
+      const hasReasoning = content.some((p) => p.type === "reasoning");
+      expect(hasReasoning).toBe(false);
+    }
+
+    // Recent turns (last 2) should still have reasoning
+    const recentAssistants = out.filter(
+      (m, idx) => m.role === "assistant" && idx >= out.length - 4,
+    );
+    for (const m of recentAssistants) {
+      const content = m.content as Array<Record<string, unknown>>;
+      if (!Array.isArray(content)) continue;
+      const hasReasoning = content.some((p) => p.type === "reasoning");
+      expect(hasReasoning).toBe(true);
+    }
+  });
+
+  it("T1.1 — does NOT strip reasoning when stripOldReasoning is false (default)", () => {
+    const msgs: ModelMessage[] = [
+      { role: "system", content: "You are an agent." },
+      { role: "user", content: "fix the bug" },
+    ];
+    for (let i = 1; i <= 4; i++) {
+      msgs.push({
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: `Thinking... ${"x".repeat(3000)}` },
+          { type: "tool-call", toolCallId: `call_${i}`, toolName: "bash", input: `echo ${i}` },
+        ],
+      } as unknown as ModelMessage);
+      msgs.push({
+        role: "tool",
+        content: [
+          { type: "tool-result", toolCallId: `call_${i}`, toolName: "bash", output: { type: "text", value: bigText(`R${i}`, 2) } },
+        ],
+      } as unknown as ModelMessage);
+    }
+
+    const out = compactSubAgentMessages(msgs, {
+      thresholdChars: 1000,
+      keepLastTurns: 1,
+      stripOldReasoning: false, // explicitly off
+    });
+
+    // All assistant messages should still have reasoning parts
+    const assistants = out.filter((m) => m.role === "assistant");
+    for (const m of assistants) {
+      const content = m.content as Array<Record<string, unknown>>;
+      if (!Array.isArray(content)) continue;
+      const hasReasoning = content.some((p) => p.type === "reasoning");
+      expect(hasReasoning).toBe(true);
+    }
+  });
+});
