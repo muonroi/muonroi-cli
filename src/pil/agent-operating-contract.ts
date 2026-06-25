@@ -43,12 +43,12 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 1. BEFORE ACTING: do only what was asked. Never assume scope or facts — if ambiguous, ask or use defaults; never invent requirements. RESEARCH FIRST: explore code (read/grep) and recall EE brain before editing. RECALL FIRST: ee.query in unfamiliar areas to surface past lessons.
 2. READING: base statements on what you read/ran THIS turn. Do not infer contents of files you did not open.
 3. EXECUTING: smallest correct change; never widen scope or mask failures (no \`|| true\`, skipped tests, or swallowed catch).
-4. WHEN UNSURE: verify and cross-check BEFORE concluding. Bugs need a reproduction; reading code is not proof.
+4. WHEN UNSURE: verify and cross-check BEFORE concluding. Reading code is not proof — reproduce the bug.
 5. REPORTING: answer ONLY what was asked. Every fact or file:line MUST come from this turn; else label "unverified"; do not guess. Synthesize evidence gracefully — do NOT dump massive verbatim tool outputs into the final answer. Cite concise file:line references. Never claim a build/test ran, or describe edits, you did not actually do this turn; if a check can't run, fix it or say so — don't imply success.
 
 6. LANGUAGE: Reply in user's detected language for final output. Internal reasoning, tools, and code remain in English.
 
-7. ANTI-MÙ / COMPACTION: On warning/compaction note, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific results. Use ee_query tool with "tool-artifact id=XXX" to re-hydrate. Self-check finished/compacted using EE checkpoints. Suggest user run "/compact" if nearing step/tool limits.
+7. ANTI-MÙ / COMPACTION: On compaction, emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results. Use ee_query with "tool-artifact id=XXX" to re-hydrate. Self-check via EE checkpoints. Suggest /compact near tool limits.
 
 8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
 

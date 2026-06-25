@@ -456,6 +456,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
 
   // Feedback-cleared suppression: skip points that were already rated via ee_feedback in an earlier turn.
   // This prevents already-judged entries from being re-injected as noise.
+  const ledgerEnabled = isRecallLedgerEnabled();
   const clearedFilteredPrinciples = deduplicatedPrinciples.filter(
     (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
   );
@@ -483,7 +484,6 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // verdict is emitted (that would pollute Gate-4 precision); the agent rates
   // deliberately. Collection is the search arm (deterministic), which is what
   // ee_feedback requires.
-  const ledgerEnabled = isRecallLedgerEnabled();
   let ledgerRecorded = 0;
   if (ledgerEnabled) {
     const rateableEntries = [
