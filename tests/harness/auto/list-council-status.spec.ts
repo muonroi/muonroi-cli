@@ -9,7 +9,7 @@
  * To rebuild: `muonroi-cli self-verify --since HEAD~1`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type HarnessContext, spawnHarness } from "../helpers.js";
+import { spawnHarness, type HarnessContext } from "../helpers.js";
 
 describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_PIPE"] === "1")(
   "self-qa auto: list-council-status",
@@ -30,10 +30,10 @@ describe.skipIf(process.platform === "win32" && process.env["MUONROI_SKIP_NAMED_
 
     it("Navigate list around 'council-status'", async () => {
       const { driver } = ctx;
-      await driver.wait_for({ idle: true, timeoutMs: 10000 });
-      driver.press_sequence(["Down", "Down", "Up"]);
-      await driver.wait_for({ idle: true, timeoutMs: 3000 });
-
+      await driver.wait_for({"idle":true,"timeoutMs":10000});
+      driver.press_sequence(["Down","Down","Up"]);
+      await driver.wait_for({"idle":true,"timeoutMs":3000});
+      
       // expect: no error toast
       expect(driver.last_event("toast")?.level).not.toBe("error");
     }, 15000);

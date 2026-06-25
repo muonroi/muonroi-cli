@@ -134,6 +134,7 @@ import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } fr
 import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { openUrl } from "../utils/open-url.js";
+import { logger } from "../utils/logger.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
   getAutoCouncilConfidence,
@@ -709,7 +710,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             text: `Model stalled — re-prompting (attempt ${stallRetryCount}/${maxStallRetries})…`,
           });
         } catch (emitErr) {
-          console.error(`[message-processor] stall-reprompt telemetry failed: ${(emitErr as Error)?.message}`);
+          logger.error("orchestrator", "stall-reprompt telemetry failed", { error: emitErr });
         }
         try {
           if (deps.session) {
@@ -724,7 +725,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             });
           }
         } catch (logErr) {
-          console.error(`[message-processor] stall-reprompt log failed: ${(logErr as Error)?.message}`);
+          logger.error("orchestrator", "stall-reprompt log failed", { error: logErr });
         }
         return backoffMs;
       };
@@ -856,7 +857,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               ...(criticalServerIds && criticalServerIds.length > 0 ? { criticalServerIds } : {}),
             });
           } catch (err) {
-            console.error("[MCP] buildMcpToolSet failed, proceeding with builtins only", err);
+            logger.error("mcp", "buildMcpToolSet failed, proceeding with builtins only", { error: err });
           }
           if (mcpBundle) {
             closeMcp = mcpBundle.close;
@@ -1226,7 +1227,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   return "stop";
                 }
               } catch (err) {
-                console.error(`[Agent] loop auto-decision failed: ${(err as Error)?.message ?? err}`);
+                logger.error("orchestrator", "loop auto-decision failed", { error: err });
               }
             }
 
@@ -1418,7 +1419,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     runId: deps.getActiveRunId() ?? "",
                   });
                 } catch (emitErr) {
-                  console.error(`[message-processor] steer-inject telemetry failed: ${(emitErr as Error)?.message}`);
+                  logger.error("orchestrator", "steer-inject telemetry failed", { error: emitErr });
                 }
               }
               const baseRes = (() => {
@@ -1528,6 +1529,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 /* fail-open, no silent swallow of the decision */
               }
             };
+            // T1.1 + T1.2 — reasoning models (DeepSeek V4 Flash, R1) emit 2K-5K
+            // CoT tokens per turn that accumulate across the multi-step loop.
+            // Strip old reasoning and compact earlier (ratio 0.3 vs 0.5) to
+            // cut ~40-60% of cumulative input tokens.
+            const isReasoningModel = runtime.modelInfo?.reasoning === true;
             const compacted = compactSubAgentMessages(stripped, {
               thresholdChars: topLevelCompactThreshold,
               // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
@@ -1539,8 +1545,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               label: "top-level",
               envelopeChars,
               contextWindowTokens,
+              contextFillRatio: isReasoningModel ? 0.3 : undefined,
               keepToolIds: keepToolIds.length ? keepToolIds : undefined,
               persistArtifact,
+              stripOldReasoning: isReasoningModel,
             });
             if (compacted !== stripped) recordCompaction(sn);
             // Pre-compaction visibility: give the agent one step of notice
@@ -1701,7 +1709,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 finishReason: finishReason ?? "stop",
               });
             } catch (err) {
-              console.error("[Agent:onFinish] failed to emit llm-done", err);
+              logger.error("orchestrator", "failed to emit llm-done", { error: err });
             }
             deps.setCurrentCallId("");
             // Rec #1 persisted forensics: onFinish fires once per top-level turn,
@@ -1711,7 +1719,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             try {
               persistSessionExperience(deps.session?.id ?? null, getSessionExperienceCounts());
             } catch (err) {
-              console.error("[Agent:onFinish] persistSessionExperience failed", err);
+              logger.error("orchestrator", "persistSessionExperience failed", { error: err });
             }
           },
         });
@@ -3388,8 +3396,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           yield { type: "content", content: traceLines.join("\n") };
         }
 
+        // Yield done FIRST so the UI releases isProcessing immediately.
+        // postTurnCompact is a background optimization that must not block
+        // the composer — without this, DeepSeek's 5-30s compaction call
+        // keeps the input in loading state and queued messages hang.
+        //
+        // CRITICAL: postTurnCompact MUST be fire-and-forget (void, NOT await).
+        // Even though yield-done happens first, the for-await loop in
+        // use-app-logic.tsx does NOT exit until the generator returns.
+        // An awaited postTurnCompact blocks the generator's return, which
+        // blocks the for-await loop, which blocks finalizeActiveTurn.
         if (modelInfo?.contextWindow) {
-          await deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal);
+          void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
         yield { type: "done" };
         return;
@@ -3536,8 +3554,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         };
         await deps.fireHook(stopFailureInput, signal).catch(() => {});
 
+        // Yield done FIRST — same rationale as the success path above.
+        // postTurnCompact fire-and-forget so generator returns immediately.
         if (modelInfo?.contextWindow) {
-          await deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal);
+          void deps.postTurnCompact(provider, system, modelInfo.contextWindow, signal).catch(() => {});
         }
         yield { type: "done" };
         return;

@@ -3,6 +3,7 @@ import { runPipeline } from "../pil/pipeline.js";
 import type { StreamChunk } from "../types/index.js";
 import type { MessageProcessorDeps } from "./message-processor.js";
 import { type ComplexitySize, getSessionLastTask, recordSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
+import { logger } from "../utils/logger.js";
 
 export interface PreprocessorResult {
   pilCtx: Awaited<ReturnType<typeof runPipeline>>;
@@ -50,7 +51,7 @@ export async function* prepareTurnContext(
         const { createLlmClassifier } = await import("../pil/llm-classify.js");
         llmFallback = createLlmClassifier(deps.requireProvider(), deps.modelId);
       } catch (err) {
-        console.error(`[pil] LLM fallback wiring failed: ${(err as Error)?.message}`);
+        logger.error("pil", "LLM fallback wiring failed", { error: err });
       }
 
       // Model-driven clarification proposer (for discovery interview).
@@ -61,7 +62,7 @@ export async function* prepareTurnContext(
         const { createModelClarificationProposer } = await import("../pil/discovery.js");
         clarificationProposer = createModelClarificationProposer(deps.requireProvider(), deps.modelId);
       } catch (err) {
-        console.error(`[pil] clarification proposer wiring failed: ${(err as Error)?.message}`);
+        logger.error("pil", "clarification proposer wiring failed", { error: err });
       }
 
       pilCtxResolved = await runPipeline(userMessage, {
