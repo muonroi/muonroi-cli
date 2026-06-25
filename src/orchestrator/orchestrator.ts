@@ -75,8 +75,8 @@ import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
-import type { PermissionMode } from "../utils/permission-mode.js";
 import { logger } from "../utils/logger.js";
+import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
   getAutoCompactThresholdPct,
@@ -149,7 +149,7 @@ import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
-import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
+import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
@@ -284,6 +284,7 @@ export class Agent {
   /** UI-registered live-queue steer drain; see Agent.setSteerDrain. */
   private steerDrain: (() => { text: string }[]) | null = null;
   private maxToolRounds: number;
+  private hardMaxToolRounds: number;
   private mode: AgentMode = "agent";
   private modelId: string;
   private maxTokens: number;
@@ -404,6 +405,7 @@ export class Agent {
       () => this.modelId,
     );
     this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
+    this.hardMaxToolRounds = HARD_MAX_TOOL_ROUNDS;
     const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
@@ -2468,6 +2470,9 @@ export class Agent {
       get maxToolRounds() {
         return self.maxToolRounds;
       },
+      get hardMaxToolRounds() {
+        return self.hardMaxToolRounds;
+      },
       get maxTokens() {
         return self.maxTokens;
       },
@@ -2641,6 +2646,9 @@ export class Agent {
       },
       get maxToolRounds() {
         return self.maxToolRounds;
+      },
+      get hardMaxToolRounds() {
+        return self.hardMaxToolRounds;
       },
       get batchApi() {
         return self.batchApi;

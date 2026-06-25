@@ -52,6 +52,7 @@ function makeDeps(overrides: Partial<BatchTurnRunnerDeps> = {}): {
     bash: makeBashStub(),
     mode: "agent",
     maxToolRounds: 50,
+    hardMaxToolRounds: 60,
     maxTokens: 16_384,
     schedules: {} as unknown as BatchTurnRunnerDeps["schedules"],
     sendTelegramFile: null,
