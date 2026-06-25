@@ -4,7 +4,7 @@
 import type { ModelMessage } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
+import { compactSubAgentMessages, cumulativeMessageChars, sliceMessageHistory } from "./subagent-compactor.js";
 
 function bigText(label: string, kb: number): string {
   const block = `${label}:${"x".repeat(kb * 1000)}`;
@@ -431,7 +431,14 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       } as unknown as ModelMessage,
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call_low", toolName: "read_file", output: { type: "text", value: lowValueOutput } }],
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call_low",
+            toolName: "read_file",
+            output: { type: "text", value: lowValueOutput },
+          },
+        ],
       } as unknown as ModelMessage,
       {
         role: "assistant",
@@ -439,7 +446,14 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       } as unknown as ModelMessage,
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call_err", toolName: "read_file", output: { type: "text", value: highValueOutputWithError } }],
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call_err",
+            toolName: "read_file",
+            output: { type: "text", value: highValueOutputWithError },
+          },
+        ],
       } as unknown as ModelMessage,
       {
         role: "assistant",
@@ -447,7 +461,14 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       } as unknown as ModelMessage,
       {
         role: "tool",
-        content: [{ type: "tool-result", toolCallId: "call_src", toolName: "read_file", output: { type: "text", value: highValueSourceOutput } }],
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call_src",
+            toolName: "read_file",
+            output: { type: "text", value: highValueSourceOutput },
+          },
+        ],
       } as unknown as ModelMessage,
       // Add a couple of low-value turns to push past threshold and keepLast turns (keepLast=1)
       ...toolTurn(9, 10),
@@ -456,17 +477,23 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     (msgs[msgs.length - 1] as any).content[0].toolName = "other_tool";
 
     const out = compactSubAgentMessages(msgs, { thresholdChars: 10_000, keepLastTurns: 1 });
-    
+
     // low-value large read_file MUST be elided
-    const lowValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_low");
+    const lowValMsg = out.find(
+      (m) => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_low",
+    );
     expect((lowValMsg?.content as any)[0].output.value).toMatch(/elided by sub-agent compactor/);
 
     // high-value large error read_file MUST NOT be elided
-    const errValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_err");
+    const errValMsg = out.find(
+      (m) => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_err",
+    );
     expect((errValMsg?.content as any)[0].output.value).toBe(highValueOutputWithError);
 
     // high-value small source read_file MUST NOT be elided
-    const srcValMsg = out.find(m => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_src");
+    const srcValMsg = out.find(
+      (m) => m.role === "tool" && Array.isArray(m.content) && (m.content as any)[0]?.toolCallId === "call_src",
+    );
     expect((srcValMsg?.content as any)[0].output.value).toBe(highValueSourceOutput);
   });
 
@@ -489,7 +516,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       msgs.push({
         role: "tool",
         content: [
-          { type: "tool-result", toolCallId: `call_${i}`, toolName: "bash", output: { type: "text", value: bigText(`R${i}`, 2) } },
+          {
+            type: "tool-result",
+            toolCallId: `call_${i}`,
+            toolName: "bash",
+            output: { type: "text", value: bigText(`R${i}`, 2) },
+          },
         ],
       } as unknown as ModelMessage);
     }
@@ -512,9 +544,7 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
     }
 
     // Recent turns (last 2) should still have reasoning
-    const recentAssistants = out.filter(
-      (m, idx) => m.role === "assistant" && idx >= out.length - 4,
-    );
+    const recentAssistants = out.filter((m, idx) => m.role === "assistant" && idx >= out.length - 4);
     for (const m of recentAssistants) {
       const content = m.content as Array<Record<string, unknown>>;
       if (!Array.isArray(content)) continue;
@@ -539,7 +569,12 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       msgs.push({
         role: "tool",
         content: [
-          { type: "tool-result", toolCallId: `call_${i}`, toolName: "bash", output: { type: "text", value: bigText(`R${i}`, 2) } },
+          {
+            type: "tool-result",
+            toolCallId: `call_${i}`,
+            toolName: "bash",
+            output: { type: "text", value: bigText(`R${i}`, 2) },
+          },
         ],
       } as unknown as ModelMessage);
     }
@@ -558,5 +593,97 @@ describe("subagent-compactor: compactSubAgentMessages", () => {
       const hasReasoning = content.some((p) => p.type === "reasoning");
       expect(hasReasoning).toBe(true);
     }
+  });
+
+  describe("sliceMessageHistory & Step 4 truncation", () => {
+    it("preserves system prompt and user start while slicing excess messages", () => {
+      const msgs: ModelMessage[] = [
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "first prompt" },
+        { role: "assistant", content: "first answer" },
+        { role: "user", content: "second prompt" },
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: "ls" }],
+        } as unknown as ModelMessage,
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "call-1", toolName: "bash", output: "file1" }],
+        } as unknown as ModelMessage,
+        { role: "assistant", content: "second answer" },
+        { role: "user", content: "third prompt" },
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call-2", toolName: "bash", input: "pwd" }],
+        } as unknown as ModelMessage,
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "call-2", toolName: "bash", output: "/dir" }],
+        } as unknown as ModelMessage,
+        { role: "assistant", content: "third answer" },
+      ];
+
+      // Slicing to max 5 messages should start cleanly at a user message
+      const sliced = sliceMessageHistory(msgs, 5);
+      expect(sliced[0].role).toBe("system");
+      expect(sliced[1].role).toBe("user");
+      // Slicing walked backward to find a user message start that satisfies max 5.
+      // Last messages:
+      // assistant: third answer (idx 10) -> tool result 2 (idx 9) -> assistant call 2 (idx 8) -> user third prompt (idx 7).
+      // That is 4 messages. Since kept must start with user, it stops at idx 7.
+      // So kept messages are from idx 7 onwards: [user third prompt, assistant call 2, tool result 2, assistant third answer]
+      expect(sliced).toHaveLength(5); // 1 system + 4 kept messages
+      expect(sliced[1].content).toBe("third prompt");
+    });
+
+    it("does not orphaned tool-calls and tool-results", () => {
+      const msgs: ModelMessage[] = [
+        { role: "system", content: "system prompt" },
+        { role: "user", content: "prompt" },
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call-99", toolName: "bash", input: "whoami" }],
+        } as unknown as ModelMessage,
+        {
+          role: "tool",
+          content: [{ type: "tool-result", toolCallId: "call-99", toolName: "bash", output: "root" }],
+        } as unknown as ModelMessage,
+        { role: "assistant", content: "hello" },
+      ];
+
+      // Even if maxMessages is 2, it shouldn't split assistant call-99 and tool result-99.
+      // Walking backward:
+      // - assistant: hello (count 1)
+      // - tool: result-99 (count 2, pendingToolCalls = {call-99})
+      // - assistant: call-99 (count 3, pendingToolCalls = {})
+      // - user: prompt (count 4, clean user start)
+      // So it must keep 4 messages + 1 system = 5 messages.
+      const sliced = sliceMessageHistory(msgs, 2);
+      expect(sliced).toHaveLength(5);
+      expect(sliced[1].role).toBe("user");
+    });
+
+    it("triggers slicing in compactSubAgentMessages when total exceeds 50K and messages count is > 30", () => {
+      const msgs: ModelMessage[] = [
+        { role: "system", content: "system" },
+        { role: "user", content: "start" },
+      ];
+      // Push 40 messages to exceed 30 messages limit
+      for (let i = 0; i < 20; i++) {
+        msgs.push({ role: "assistant", content: `helper ${i}` });
+        msgs.push({ role: "user", content: `next question ${i}` });
+      }
+
+      // Generate a massive envelope size or message content to exceed 50K total chars
+      const out = compactSubAgentMessages(msgs, {
+        envelopeChars: 60_000, // force exceeds 50K
+        thresholdChars: 200_000, // high threshold to prevent compaction from running on top
+      });
+
+      // The message history should have been sliced (will be much fewer than 42 messages)
+      expect(out.length).toBeLessThan(msgs.length);
+      expect(out[0].role).toBe("system");
+      expect(out[1].role).toBe("user");
+    });
   });
 });

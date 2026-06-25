@@ -184,7 +184,6 @@ export function isHighValueToolResult(
   return false;
 }
 
-
 interface ResolvedOpts {
   thresholdChars: number;
   keepLastTurns: number;
@@ -416,21 +415,28 @@ export function compactSubAgentMessages(
 ): ModelMessage[] {
   const resolved = resolveOpts(opts);
   const { outputPreviewChars, label, envelopeChars } = resolved;
-  // F2 — threshold check uses TRUE prompt size (messages + system + tools).
-  // The envelope (system prompt + JSON-schema for every tool) is re-sent on
-  // every step and was previously invisible to the compactor, so a session
-  // with 20-50K of fixed overhead would never trip the messages-only check.
+
+  // Step 4: Hard-limit message history sent to the model to prevent token bloating
+  // When input (messages + envelope) exceeds 50K characters and messages array is > 30,
+  // we slice the history to keep at most 30 messages (preserving system and user start).
+  let processedMessages = messages;
   const messagesTotal = cumulativeMessageChars(messages);
   const total = messagesTotal + envelopeChars;
-  // G1 + G2 — derive effective threshold and keepLastTurns from context
-  // window utilization. Falls back to static char threshold + keepLast
-  // when no contextWindowTokens supplied (preserves old behaviour).
-  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
-  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
-  if (total < effectiveThresholdChars) return messages as ModelMessage[];
 
-  const keepFrom = findKeepFromIndex(messages, effectiveKeepLastTurns);
-  if (keepFrom <= 0) return messages as ModelMessage[];
+  if (total > 50_000 && messages.length > 30) {
+    processedMessages = sliceMessageHistory(messages, 30);
+  }
+
+  // Calculate effective thresholds and keep last turns using the processed messages
+  const processedMessagesTotal = cumulativeMessageChars(processedMessages);
+  const processedTotal = processedMessagesTotal + envelopeChars;
+
+  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(processedTotal, resolved);
+  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
+  if (processedTotal < effectiveThresholdChars) return processedMessages as ModelMessage[];
+
+  const keepFrom = findKeepFromIndex(processedMessages, effectiveKeepLastTurns);
+  if (keepFrom <= 0) return processedMessages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink
   // already-stubbed results (F1), and strip args off older assistant
@@ -439,8 +445,8 @@ export function compactSubAgentMessages(
   // structure or count.
   let firstUserSeen = false;
   const out: ModelMessage[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
+  for (let i = 0; i < processedMessages.length; i++) {
+    const msg = processedMessages[i]!;
     if (i >= keepFrom) {
       out.push(msg);
       continue;
@@ -543,10 +549,7 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
  * block(s) if the model is Claude (starts with 'claude').
  * Creates a copy of the messages array and the last message to avoid mutating in-place.
  */
-export function applyAnthropicPromptCaching(
-  messages: readonly ModelMessage[],
-  modelId: string,
-): ModelMessage[] {
+export function applyAnthropicPromptCaching(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
   if (!modelId.startsWith("claude")) {
     return messages as ModelMessage[];
   }
@@ -589,3 +592,57 @@ export function applyAnthropicPromptCaching(
   return newMessages;
 }
 
+/**
+ * Safely slice message history to keep at most `maxMessages` messages.
+ * Preserves the system message(s) at the front and ensures that the slice
+ * starts with a "user" message and does not split assistant tool calls and
+ * corresponding tool results.
+ */
+export function sliceMessageHistory(messages: ReadonlyArray<ModelMessage>, maxMessages = 30): ModelMessage[] {
+  if (messages.length <= maxMessages) return messages as ModelMessage[];
+
+  // Find all user message indices (excluding system messages)
+  const userIndices: number[] = [];
+  for (let idx = 0; idx < messages.length; idx++) {
+    if (messages[idx]?.role === "user") {
+      userIndices.push(idx);
+    }
+  }
+
+  if (userIndices.length === 0) {
+    return messages as ModelMessage[];
+  }
+
+  // Group messages into turns.
+  // Each turn is a range [start, end] inclusive.
+  const turns: { start: number; end: number }[] = [];
+  for (let idx = 0; idx < userIndices.length; idx++) {
+    const start = userIndices[idx]!;
+    const end = idx + 1 < userIndices.length ? userIndices[idx + 1]! - 1 : messages.length - 1;
+    turns.push({ start, end });
+  }
+
+  // Accumulate turns from the end, up to maxMessages
+  let keptMessagesCount = 0;
+  let keepFromIndex = -1;
+
+  for (let idx = turns.length - 1; idx >= 0; idx--) {
+    const turn = turns[idx]!;
+    const turnLength = turn.end - turn.start + 1;
+
+    if (keptMessagesCount === 0 || keptMessagesCount + turnLength <= maxMessages) {
+      keptMessagesCount += turnLength;
+      keepFromIndex = turn.start;
+    } else {
+      break;
+    }
+  }
+
+  if (keepFromIndex === -1) {
+    return messages as ModelMessage[];
+  }
+
+  const kept = messages.slice(keepFromIndex);
+  const systemMessages = messages.filter((m) => m.role === "system");
+  return [...systemMessages, ...kept];
+}
