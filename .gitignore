@@ -62,3 +62,30 @@ council.json
 
 # Visual Studio workspace state (IDE-local, never versioned)
 .vs/
+
+# Local analytical and scratch files (not versioned)
+/analyze_app.ts
+/app_original.tsx
+/app_original_utf8.tsx
+/dummy.js
+/dump-session.cjs
+/dump-session2.cjs
+/extract_*
+/find_large_funcs.ts
+/fix_chatfeed.ts
+/fix_chatfeed_any.ts
+/fix_modals.ts
+/get-schema.cjs
+/message_processor_analysis.txt
+/message_processor_original.ts
+/mp_head.txt
+/nul
+/pil_block.ts
+/processor_methods.txt
+/run_*.txt
+/scratch.txt
+/seq*.json
+/skeleton.txt
+/test-stream.ts
+/test-stream2.ts
+
