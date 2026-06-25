@@ -1024,6 +1024,20 @@ export class MessageProcessor {
       deps.getResumeDigest(),
       { chitchat: isChitchat },
     );
+    // F3c — tool-turn system prompt: same context, but skips native-capabilities
+    // and skills sections (~4K tokens) that the model already saw on the first
+    // call.  The orchestrator switches to this on the 2nd+ streamText invocation.
+    const toolTurnParts = buildSystemPromptParts(
+      deps.bash.getCwd(),
+      deps.mode,
+      deps.bash.getSandboxMode(),
+      deps.getPlanContext(),
+      subagents,
+      deps.bash.getSandboxSettings(),
+      deps.providerId,
+      deps.getResumeDigest(),
+      { chitchat: isChitchat, toolTurn: true },
+    );
     if (deps.getResumeDigest()) deps.setResumeDigest(null);
     // Skip vision/playwright guidance unless the user's message has a URL
     // or browser/screenshot vocabulary. ~400 tokens of routing hints
@@ -1036,6 +1050,15 @@ export class MessageProcessor {
     const system = applyModelConstraints(
       applyPilSuffix(
         `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
+        pilCtx,
+        _hasResponseTools,
+      ),
+      turnModelId,
+    );
+    // Tool-turn system: same template as system but with toolTurn-prefix
+    const toolTurnSystem = applyModelConstraints(
+      applyPilSuffix(
+        `${toolTurnParts.staticPrefix}${playwrightGuidance}${toolTurnParts.dynamicSuffix}`,
         pilCtx,
         _hasResponseTools,
       ),
@@ -1127,6 +1150,7 @@ export class MessageProcessor {
         taskHash,
         provider,
         system,
+        toolTurnSystem,
         routerStore,
         attemptedOverflowRecovery,
         patternLoopForceHalt,
