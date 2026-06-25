@@ -47,20 +47,20 @@ export function taskTypeToTier(taskType: string | null): EETier {
 export function taskTypeToMaxTokens(taskType: string | null): number {
   switch (taskType) {
     case "analyze":
-      return 2_048;
-    case "documentation":
-      return 3_072;
-    case "debug":
-      return 3_072;
-    case "refactor":
       return 4_096;
+    case "documentation":
+      return 4_096;
+    case "debug":
+      return 6_144;
+    case "refactor":
+      return 6_144;
     case "plan":
-      return 5_120;
+      return 8_192;
     case "generate":
     case "build":
-      return 8_192;
+      return 12_288;
     default:
-      return 2_048; // conversational — keep short
+      return 4_096; // conversational
   }
 }
 
