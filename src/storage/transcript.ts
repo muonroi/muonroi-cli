@@ -416,16 +416,15 @@ export function markMessageErrored(sessionId: string, seq: number): void {
  */
 export function sweepStalePendingRows(staleAfterMs = 5 * 60 * 1000): { toolCalls: number; messages: number } {
   const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
-  const now = new Date().toISOString();
   try {
     const db = getDatabase();
     const toolCalls = db
       .prepare(`
         UPDATE tool_calls
-        SET status = 'aborted', completed_at = ?
+        SET status = 'aborted', completed_at = started_at
         WHERE status = 'pending' AND started_at < ?
       `)
-      .run(now, cutoff) as { changes: number };
+      .run(cutoff) as { changes: number };
     const messages = db
       .prepare(`
         UPDATE messages
