@@ -9,6 +9,7 @@ import { loadCustomInstructions } from "../utils/instructions";
 import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
+  loadUserSettings,
   loadValidSubAgents,
   type SandboxMode,
   type SandboxSettings,
@@ -20,40 +21,50 @@ import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 // after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
 // with 3 turns (seq 33/81/1) consuming 82% of tokens.
 // Env override allowed range 10..400.
+// Env override allowed range 10..400 (or up to 2000 in agent-first).
 function readMaxToolRoundsFromEnv(): number {
-  const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 40;
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+  const raw = process.env.MUONROI_MAX_TOOL_ROUNDS || settings.maxToolRounds;
+  if (!raw) return agentFirst ? 200 : 40;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 40;
-  return Math.max(10, Math.min(400, Math.floor(n)));
+  if (!Number.isFinite(n)) return agentFirst ? 200 : 40;
+  const maxLimit = agentFirst ? 2000 : 400;
+  return Math.max(10, Math.min(maxLimit, Math.floor(n)));
 }
 export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
 
 // F3b — HARD cap: absolute non-bumpable ceiling per user turn.
-// Fires AFTER the soft cap (MAX_TOOL_ROUNDS default 40) has been bumped
-// by the user. Prevents runaway sessions even when the user says "continue".
-// Env override allowed range 20..400.
+// Fires AFTER the soft cap has been bumped by the user.
+// Env override allowed range 20..400 (or up to 3000 in agent-first).
 function readHardMaxToolRoundsFromEnv(): number {
-  const raw = process.env.MUONROI_HARD_MAX_TOOL_ROUNDS;
-  if (!raw) return 60;
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+  const raw = process.env.MUONROI_HARD_MAX_TOOL_ROUNDS || settings.hardMaxToolRounds;
+  if (!raw) return agentFirst ? 300 : 60;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 60;
-  return Math.max(20, Math.min(400, Math.floor(n)));
+  if (!Number.isFinite(n)) return agentFirst ? 300 : 60;
+  const maxLimit = agentFirst ? 3000 : 400;
+  return Math.max(20, Math.min(maxLimit, Math.floor(n)));
 }
 export const HARD_MAX_TOOL_ROUNDS = readHardMaxToolRoundsFromEnv();
 
 // F3c — per-turn LLM call cap: how many streamText() invocations are
-// allowed per user turn.  Each tool-call round-trip, stall re-prompt, or
-// stream-retry counts as one call.  Once exceeded, the turn fails with a
-// clear diagnostic instead of burning tokens in a runaway cascade.
-// Default 12 — generous enough for 8-10 tool round-trips plus 2 retries.
-// Env override MUONROI_MAX_LLM_CALLS_PER_TURN, range 3..100.
+// allowed per user turn.
+// Default 12 (or 100 in agent-first).
+// Env override MUONROI_MAX_LLM_CALLS_PER_TURN, range 3..100 (or up to 500 in agent-first).
 function readMaxLlmCallsPerTurn(): number {
-  const raw = process.env.MUONROI_MAX_LLM_CALLS_PER_TURN;
-  if (!raw) return 12;
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst || process.env.MUONROI_AGENT_FIRST === "1" || process.env.MUONROI_AGENT_FIRST === "true";
+  const raw = process.env.MUONROI_MAX_LLM_CALLS_PER_TURN || settings.maxLlmCallsPerTurn;
+  if (!raw) return agentFirst ? 100 : 12;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 12;
-  return Math.max(3, Math.min(100, Math.floor(n)));
+  if (!Number.isFinite(n)) return agentFirst ? 100 : 12;
+  const maxLimit = agentFirst ? 500 : 100;
+  return Math.max(3, Math.min(maxLimit, Math.floor(n)));
 }
 export const MAX_LLM_CALLS_PER_TURN = readMaxLlmCallsPerTurn();
 

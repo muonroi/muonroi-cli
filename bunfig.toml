@@ -1,0 +1,6 @@
+[test]
+pathIgnorePatterns = [
+  "**/tests/harness/**",
+  "**/tests/harness-react/**",
+  "**/tests/harness-angular/**"
+]

@@ -180,6 +180,14 @@ export interface UserSettings {
    * defaultModel field stays as the hard pin for legacy paths.
    */
   defaultProvider?: ProviderId;
+  /** When true, the agent prioritizes task completion over strict runaway safety caps. */
+  agentFirst?: boolean;
+  /** Custom soft limit on the number of tool execution steps before pausing. */
+  maxToolRounds?: number;
+  /** Custom hard limit on the number of tool execution steps per turn. */
+  hardMaxToolRounds?: number;
+  /** Custom limit on the number of LLM call round-trips allowed in a single turn. */
+  maxLlmCallsPerTurn?: number;
   /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
   shell?: ShellSettings;
   lsp?: LspSettings;

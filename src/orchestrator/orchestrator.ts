@@ -89,6 +89,7 @@ import {
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
+  loadUserSettings,
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
@@ -404,8 +405,10 @@ export class Agent {
       () => this.bash.getCwd(),
       () => this.modelId,
     );
-    this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
-    this.hardMaxToolRounds = HARD_MAX_TOOL_ROUNDS;
+    const settings = loadUserSettings();
+    this.maxToolRounds = maxToolRounds || settings.maxToolRounds || MAX_TOOL_ROUNDS;
+    const baseHardMax = settings.hardMaxToolRounds || HARD_MAX_TOOL_ROUNDS;
+    this.hardMaxToolRounds = Math.max(Math.floor(this.maxToolRounds * 1.5), baseHardMax);
     const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
