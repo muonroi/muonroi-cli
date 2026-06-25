@@ -163,7 +163,12 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
-import { applyModelConstraints, buildMcpCapabilityBlock, buildSystemPromptParts } from "./prompts";
+import {
+  applyModelConstraints,
+  buildMcpCapabilityBlock,
+  buildSystemPromptParts,
+  MAX_LLM_CALLS_PER_TURN,
+} from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
@@ -480,6 +485,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     MAX_STREAM_RETRIES,
     subagents,
     systemParts,
+    toolTurnSystem,
     playwrightGuidance,
     _hasResponseTools,
     _pilResponseTools,
@@ -522,6 +528,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Bounded by the same maxStallRetries cap so a persistently-dead provider
   // still falls through to the partial-answer rescue.
   let midLoopStallRetryCount = 0;
+
+  // F3c — per-turn LLM call cap: counts every streamText() invocation
+  // (tool round-trip, stall re-prompt, stream retry) and hard-aborts
+  // the turn when exceeded.  Prevents the session 526a83cf22df pattern
+  // where 3 user messages burnt 82% of 2.44M tokens in 36 LLM calls.
+  let llmCallsThisTurn = 0;
 
   // Live-queue steering: messages the user typed mid-turn are drained at a
   // prepareStep boundary and accumulated here, then re-appended (deduped) to
@@ -1009,9 +1021,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // cheap-model cost) layered UNDER the tool-use playbook so the
         // CRITICAL tool rules stay at the very front. Both fixed per turn, so
         // they stay inside the cached prefix.
+        // F3c — tool-turn: use reduced system prompt (skip
+        // native-capabilities + skills already shown in first call).
+        const activeSystem = llmCallsThisTurn > 0 && toolTurnSystem ? toolTurnSystem : system;
         const systemWithWorkbook = shouldInjectCheapModelWorkbook(runtime.modelInfo)
-          ? injectCheapModelWorkbook(system, pilCtx.taskType)
-          : system;
+          ? injectCheapModelWorkbook(activeSystem, pilCtx.taskType)
+          : activeSystem;
         const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
           ? injectCheapModelPlaybook(systemWithWorkbook)
           : systemWithWorkbook;
@@ -1377,6 +1392,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const stall = createStallWatchdog(getProviderStallTimeoutMs(), () => {
           stallTriggered = true;
         });
+        // F3c — hard-cap LLM calls per turn before this streamText()
+        if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
+          stall.dispose();
+          yield {
+            type: "error",
+            content: `Turn aborted: reached the limit of ${MAX_LLM_CALLS_PER_TURN} LLM calls for this message. Try a narrower request or break your task into smaller steps.`,
+            isAuthError: false,
+          };
+          yield { type: "done" };
+          return;
+        }
         const result = streamText({
           model: runtime.model,
           system: systemForModel,

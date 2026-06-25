@@ -41,6 +41,22 @@ function readHardMaxToolRoundsFromEnv(): number {
   return Math.max(20, Math.min(400, Math.floor(n)));
 }
 export const HARD_MAX_TOOL_ROUNDS = readHardMaxToolRoundsFromEnv();
+
+// F3c — per-turn LLM call cap: how many streamText() invocations are
+// allowed per user turn.  Each tool-call round-trip, stall re-prompt, or
+// stream-retry counts as one call.  Once exceeded, the turn fails with a
+// clear diagnostic instead of burning tokens in a runaway cascade.
+// Default 12 — generous enough for 8-10 tool round-trips plus 2 retries.
+// Env override MUONROI_MAX_LLM_CALLS_PER_TURN, range 3..100.
+function readMaxLlmCallsPerTurn(): number {
+  const raw = process.env.MUONROI_MAX_LLM_CALLS_PER_TURN;
+  if (!raw) return 12;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 12;
+  return Math.max(3, Math.min(100, Math.floor(n)));
+}
+export const MAX_LLM_CALLS_PER_TURN = readMaxLlmCallsPerTurn();
+
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
 export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 
@@ -420,6 +436,12 @@ export interface SystemPromptOptions {
    * and can't run the full toolset anyway. Cuts ~6K tokens per sub-agent turn.
    */
   subAgent?: boolean;
+  /**
+   * When true (tool-turn, i.e. second+ LLM call in the same user-turn tool
+   * loop), skip native-capabilities and skills sections that were already
+   * shown in the first call. Cuts ~4K tokens per tool round-trip.
+   */
+  toolTurn?: boolean;
 }
 
 /**
@@ -487,8 +509,9 @@ function staticPrefixCacheKey(
   isChitchat: boolean,
   subagentsHash: string,
   subAgent = false,
+  toolTurn = false,
 ): string {
-  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}`;
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}`;
 }
 
 function computeStaticPrefix(
@@ -498,6 +521,7 @@ function computeStaticPrefix(
   providerId: string,
   chitchat: boolean,
   subAgent = false,
+  toolTurn = false,
 ): { prefix: string } {
   const custom = loadCustomInstructions(cwd);
   const customSection =
@@ -505,7 +529,10 @@ function computeStaticPrefix(
       ? ""
       : `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`;
 
-  const skillsText = chitchat || subAgent ? "" : formatSkillsForPrompt(discoverSkills(cwd));
+  // Tool-turn: skip agent-skills catalog (~2K tokens) and native-capabilities block (~2K tokens).
+  // The agent was already shown these in the first call of this turn and does not need
+  // to re-read them on every tool round-trip.
+  const skillsText = chitchat || subAgent || toolTurn ? "" : formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
 
@@ -522,7 +549,7 @@ function computeStaticPrefix(
   }
 
   const contractSection = buildContractSection({ chitchat });
-  const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
+  const nativeCapabilitiesSection = toolTurn ? "" : buildNativeCapabilitiesSection({ mode, chitchat });
 
   const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${customSection}${skillsSection}${subagentsSection}`;
 
@@ -542,6 +569,7 @@ export function buildSystemPromptParts(
 ): SystemPromptParts {
   const chitchat = options?.chitchat === true;
   const subAgent = options?.subAgent ?? false;
+  const toolTurn = options?.toolTurn === true;
   const pid = providerId ?? "default";
 
   // Subagents rarely change mid-session, but when they do we need a cache miss.
@@ -549,7 +577,7 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent);
+  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent, toolTurn);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
@@ -558,7 +586,7 @@ export function buildSystemPromptParts(
     staticPrefix = cached.prefix;
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent);
+    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent, toolTurn);
     staticPrefix = result.prefix;
     _staticPrefixCache.set(key, {
       prefix: staticPrefix,
