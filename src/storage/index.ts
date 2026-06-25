@@ -11,6 +11,7 @@ export {
   buildChatEntries,
   getLastTodoWriteArgs,
   getNextMessageSequence,
+  getSessionChain,
   loadLatestCompaction,
   loadRawTranscript,
   loadTranscript,
