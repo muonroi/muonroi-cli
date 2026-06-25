@@ -40,7 +40,7 @@
  */
 export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read first; applies to every step]
 
-1. BEFORE ACTING: do only what was asked. Never assume scope or facts — if ambiguous, ask or use defaults; never invent requirements.
+1. BEFORE ACTING: do only what was asked. Never assume scope or facts — if ambiguous, ask or use defaults; never invent requirements. RESEARCH FIRST: explore code (read/grep) and recall EE brain before editing. RECALL FIRST: ee.query in unfamiliar areas to surface past lessons.
 2. READING: base statements on what you read/ran THIS turn. Do not infer contents of files you did not open.
 3. EXECUTING: smallest correct change; never widen scope or mask failures (no \`|| true\`, skipped tests, or swallowed catch).
 4. WHEN UNSURE: verify and cross-check BEFORE concluding. Bugs need a reproduction; reading code is not proof.
