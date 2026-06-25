@@ -14,16 +14,17 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
+import { logger } from "../utils/logger.js";
 
-// F3 — hard cap on tool rounds per user turn. Default reduced 75 → 50
+// F3 — hard cap on tool rounds per user turn. Default reduced 400 → 100
 // after session bca83bcbaad1 logged 178 tool calls in a single turn while
-// monotonically growing billed input. Env override allowed range 10..200.
+// monotonically growing billed input. Env override allowed range 10..400.
 function readMaxToolRoundsFromEnv(): number {
   const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 8;
+  if (!raw) return 100;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 50;
-  return Math.max(10, Math.min(200, Math.floor(n)));
+  if (!Number.isFinite(n)) return 100;
+  return Math.max(10, Math.min(400, Math.floor(n)));
 }
 export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
@@ -68,9 +69,7 @@ export function detectProjectStack(cwd: string): string {
     // Best-effort enrichment: a missing/unreadable cwd simply omits the stack
     // line (the ENVIRONMENT cwd line already surfaces "<unknown>"). Debug-gated
     // so prompt assembly never corrupts the TUI at startup.
-    if (process.env.MUONROI_DEBUG === "1") {
-      console.error(`[orchestrator/prompts] detectProjectStack failed for ${cwd}: ${(err as Error)?.message}`);
-    }
+    logger.error("orchestrator", `detectProjectStack failed for ${cwd}`, { error: err });
     return "";
   }
 

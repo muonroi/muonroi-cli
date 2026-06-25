@@ -76,6 +76,7 @@ import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
+import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
   getAutoCompactThresholdPct,
@@ -428,7 +429,7 @@ export class Agent {
         ]);
         warmMcpClients(filterMcpServersByMessage(loadMcpServers(), ""));
       } catch (err) {
-        console.error(`[orchestrator] MCP pre-warm skipped: ${(err as Error)?.message}`);
+        logger.error("orchestrator", "MCP pre-warm skipped", { error: err });
       }
     })();
 
@@ -1767,7 +1768,7 @@ export class Agent {
       signal,
       this.getCompactionSettings(contextWindow),
       true,
-    ).catch((err) => console.warn("[compact] failed:", (err as Error)?.message));
+    ).catch((err) => logger.warn("orchestrator", "compaction failed", { error: err }));
   }
 
   // ========================================================================
@@ -1840,7 +1841,7 @@ export class Agent {
       }
       runDir = nodePath.join(flowDir, "runs", runId);
     } catch (err) {
-      console.error(`[council] runDir resolution failed (decisions.lock will be skipped): ${(err as Error)?.message}`);
+      logger.error("router", "runDir resolution failed (decisions.lock will be skipped)", { error: err });
     }
 
     try {
@@ -2592,7 +2593,7 @@ export class Agent {
     // through yield* and skips this) — exactly when committing is appropriate.
     if (autoCommitOn) {
       const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
-        console.error(`[auto-commit] unexpected failure: ${(err as Error)?.message}`);
+        logger.error("orchestrator", "auto-commit unexpected failure", { error: err });
         return { committed: false } as AutoCommitResult;
       });
       if (auto.committed) {
@@ -2765,22 +2766,23 @@ export class Agent {
         try {
           return await h(info);
         } catch (err) {
-          console.error(`[Agent] askToolLoopContinue crashed: ${(err as Error)?.message ?? err}`);
+          logger.error("orchestrator", "askToolLoopContinue crashed", { error: err });
           return "stop";
         }
       },
       askSafetyOverride: async (info) => {
         const h = self._safetyOverrideHandler;
         if (!h) {
-          console.warn(
-            `[Agent] askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`,
+          logger.warn(
+            "orchestrator",
+            `askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`,
           );
           return { action: "block" };
         }
         try {
           return await h(info);
         } catch (err) {
-          console.error(`[Agent] askSafetyOverride crashed: ${(err as Error)?.message ?? err}`);
+          logger.error("orchestrator", "askSafetyOverride crashed", { error: err });
           return { action: "block" };
         }
       },
