@@ -679,3 +679,20 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
     },
   };
 }
+
+export function getLastTodoWriteArgs(sessionId: string): string | null {
+  try {
+    const row = getDatabase()
+      .prepare(`
+        SELECT args_json
+        FROM tool_calls
+        WHERE session_id = ? AND tool_name = 'todo_write'
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get(sessionId) as { args_json: string } | undefined;
+    return row?.args_json ?? null;
+  } catch {
+    return null;
+  }
+}

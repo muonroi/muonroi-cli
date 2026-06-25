@@ -9,6 +9,7 @@ export {
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLastTodoWriteArgs,
   getNextMessageSequence,
   loadLatestCompaction,
   loadRawTranscript,

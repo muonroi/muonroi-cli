@@ -42,6 +42,7 @@ import {
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionTotalTokens,
   loadTranscript,
@@ -54,6 +55,7 @@ import {
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
+import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import type {
   AgentMode,
   ChatEntry,
@@ -61,6 +63,7 @@ import type {
   SessionSnapshot,
   StreamChunk,
   SubagentStatus,
+  TaskListSnapshot,
   TaskRequest,
   ToolCall,
   ToolResult,
@@ -873,6 +876,13 @@ export class Agent {
   getChatEntries(): ChatEntry[] {
     if (!this.session) return [];
     return buildChatEntries(this.session.id);
+  }
+
+  getLastTodoSnapshot(): TaskListSnapshot | null {
+    if (!this.session) return null;
+    const argsJson = getLastTodoWriteArgs(this.session.id);
+    if (!argsJson) return null;
+    return snapshotFromTodoWriteArgs(argsJson);
   }
 
   getSessionSnapshot(): SessionSnapshot | null {
