@@ -155,7 +155,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // read_file
   tools.read_file = dynamicTool({
-    description: "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
+    description:
+      "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -228,7 +229,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       "Execute a shell command. Output is automatically cached — every call returns a " +
       "run_id you can re-query via bash_output_get(run_id, mode=tail|head|grep|lines). " +
       "Do NOT pipe `| tail`, `| head`, `| grep`, or `> file` — that hides output from " +
-      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers).",
+      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers). " +
+      'Avoid nesting double-quotes inline for database queries/scripts (e.g. executing raw SQL via `sqlite3 db "SELECT..."`) since they can fail parsing in shell environments; write query scripts to a temporary file first and run them.',
     inputSchema: jsonSchema({
       type: "object",
       properties: {
