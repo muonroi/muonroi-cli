@@ -279,8 +279,8 @@ function approvePairingCode(_code: string): { ok: true; userId: number } | { ok:
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createTurnCoordinator(): any {
   return {
-    reset: () => {},
-    handleEvent: () => {},
+    reset: () => { },
+    handleEvent: () => { },
     run: async (fn: () => Promise<void>) => fn(),
   };
 }
@@ -719,7 +719,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       registry={
         agentRuntime
           ? agentRuntime.registry
-          : { register: () => () => {}, update: () => {}, snapshot: () => ({ nodes: [] }), clear: () => {} }
+          : { register: () => () => { }, update: () => { }, snapshot: () => ({ nodes: [] }), clear: () => { } }
       }
     >
       {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenCode-style copy-on-mouse-up on root surface */}
@@ -920,16 +920,16 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchor during the council debate phase ΓÇö leaving the card
                       scrolled above the fold so the user had to scroll UP to
                       find it. See fix/tui-askcard-anchor. */}
-                  {/* Reasoning pill ΓÇö Claude-style "≡ƒÆ¡ ThinkingΓÇª" while a
-                      reasoning streak is active, then "≡ƒÆ¡ Thought for Ns"
+                  {/* Reasoning pill ΓÇö Claude-style "💭 ThinkingΓÇª" while a
+                      reasoning streak is active, then "💭 Thought for Ns"
                       once the model emits text or a tool call. CoT body is
                       discarded so we never re-render heavy markdown for it. */}
                   {(reasoningActive || lastReasoningElapsedMs > 0) && (
                     <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
                       <text fg={t.textMuted}>
                         {reasoningActive
-                          ? "≡ƒÆ¡ ThinkingΓÇª"
-                          : `≡ƒÆ¡ Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
+                          ? "[Thought] Thinking..."
+                          : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
                       </text>
                       {streamReasoning ? (
                         <box
@@ -1076,7 +1076,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             </box>
           </box>
         ) : (
-          /* ΓöÇΓöÇ Home ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
           <>
             <box flexGrow={1} alignItems="center" paddingLeft={2} paddingRight={2}>
               <box flexGrow={1} minHeight={0} />
@@ -1334,28 +1333,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
 
 // ApiKeyModal extracted to src/ui/modals/api-key-modal.tsx
 
-/* ΓöÇΓöÇ Messages ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
-
 export type { McpRunInfo } from "./components/message-view.js";
 export { computeMcpRunInfo } from "./components/message-view.js";
-
-/* ΓöÇΓöÇ Slash Menu ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
-
-/* ΓöÇΓöÇ Update Modal ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
-
-// UpdateModal extracted to src/ui/modals/update-modal.tsx
-
-// ConnectModal, TelegramTokenModal, TelegramPairModal extracted to src/ui/modals/connect-modal.tsx
-
-/* ΓöÇΓöÇ Model Picker ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
-// sortModelsByTier, groupModelsByTier, TierGroup, ModelPickerModal extracted to src/ui/modals/model-picker-modal.tsx
-
-// SandboxPickerModal extracted to src/ui/modals/sandbox-picker-modal.tsx
-
-// PaymentApprovalPanel, WalletPickerModal extracted to src/ui/modals/wallet-picker-modal.tsx
-
-/* ΓöÇΓöÇ Helpers ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ */
-
 function shouldOpenApiKeyModalForKey(key: {
   name?: string;
   sequence?: string;

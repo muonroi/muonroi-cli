@@ -266,7 +266,7 @@ export function ChatFeed(props: ChatFeedProps) {
         {(reasoningActive || lastReasoningElapsedMs > 0) && (
           <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
             <text fg={t.textMuted}>
-              {reasoningActive ? "💭 Thinking…" : `💭 Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
+              {reasoningActive ? "[Thought] Thinking..." : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
             </text>
             {streamReasoning ? (
               <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">

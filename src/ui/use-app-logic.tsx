@@ -951,7 +951,7 @@ export function useAppLogic(props: AppLogicProps) {
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => agent.getChatEntries());
   const [streamContent, setStreamContent] = useState("");
-  // Reasoning state: track activity + last-elapsed for a "≡ƒÆ¡ Thought for Ns"
+  // Reasoning state: track activity + last-elapsed for a "💭 Thought for Ns"
   // pill instead of dumping CoT into the chat (saves 80ΓÇô120 setState/sec on
   // DeepSeek Flash's verbose reasoning stream ΓÇö was a freeze contributor).
   const [reasoningActive, setReasoningActive] = useState(false);
@@ -1184,7 +1184,7 @@ export function useAppLogic(props: AppLogicProps) {
   // Current todo snapshot (Claude-style sticky checklist). Updated by
   // `task_list_update` chunks emitted after every `todo_write` tool call.
   // Auto-hides ~2s after 100% completion so the panel doesn't linger.
-  const [taskListSnapshot, setTaskListSnapshot] = useState<TaskListSnapshot | null>(null);
+  const [taskListSnapshot, setTaskListSnapshot] = useState<TaskListSnapshot | null>(() => agent.getLastTodoSnapshot());
   const taskListClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string | null>(() => agent.getSessionTitle());
   const [sessionId, setSessionId] = useState<string | null>(() => agent.getSessionId());
@@ -2073,9 +2073,11 @@ export function useAppLogic(props: AppLogicProps) {
     const nextQueued = queuedMessagesRef.current.shift();
     if (nextQueued) {
       setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
-      // KH├öNG set isProcessingRef=false ß╗ƒ ─æ├óy ΓÇö processMessage sß║╜ set n├│ th├ánh true
-      // ß╗ƒ d├▓ng 3030 ngay khi bß║»t ─æß║ºu. Nß║┐u set false tr╞░ß╗¢c, tß║ío window cho input kh├íc
-      // bypass queue v├á g├óy duplicate/replay input qua c├íc turn.
+      // Set isProcessingRef.current = false before calling processMessageRef.current
+      // so it doesn't get blocked by the early return guard at the start of processMessage.
+      // Since Javascript is single-threaded, this synchronous reset is safe and
+      // won't create a race condition window for other inputs.
+      isProcessingRef.current = false;
       void processMessageRef.current(nextQueued.text, nextQueued.displayText);
       return;
     }
@@ -3073,6 +3075,11 @@ export function useAppLogic(props: AppLogicProps) {
   const processMessage = useCallback(
     async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
       if (!text.trim() || isProcessingRef.current) return;
+      if (taskListClearTimerRef.current) {
+        clearTimeout(taskListClearTimerRef.current);
+        taskListClearTimerRef.current = null;
+      }
+      setTaskListSnapshot(null);
       const runId = ++activeRunIdRef.current;
       const isStale = () => activeRunIdRef.current !== runId;
       isProcessingRef.current = true;
@@ -3360,7 +3367,7 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "task_list_update":
                 if (chunk.taskListSnapshot) {
-                  // Clear any pending auto-collapse ΓÇö a fresh update means the
+                  // Clear any pending auto-collapse — a fresh update means the
                   // agent is still working, even if the previous snapshot was
                   // already 100% done.
                   if (taskListClearTimerRef.current) {
@@ -3380,6 +3387,9 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 break;
               case "done":
+                if (turnHadError) {
+                  break;
+                }
                 // Auto-complete any remaining non-completed todos when the turn ends.
                 // Models often write the initial todo list but forget to call todo_write
                 // again with all items marked "completed" at the end of the task.

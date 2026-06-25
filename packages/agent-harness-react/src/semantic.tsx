@@ -60,13 +60,13 @@ function buildHarnessComponents() {
 }
 
 // ---------------------------------------------------------------------------
-// Module init — assign implementations based on compile-time flag
-// ---------------------------------------------------------------------------
+// @ts-expect-error: compile-time define
+const isHarnessEnabled = typeof __MUONROI_HARNESS__ !== "undefined" ? __MUONROI_HARNESS__ : false;
 
 let _Provider: (props: SemanticProviderProps) => ReactNode;
 let _Semantic: (props: SemanticProps) => ReactNode;
 
-if (__MUONROI_HARNESS__) {
+if (isHarnessEnabled) {
   const { Provider, SemanticNode } = buildHarnessComponents();
   _Provider = Provider;
   _Semantic = SemanticNode;

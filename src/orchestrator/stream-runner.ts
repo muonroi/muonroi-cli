@@ -643,12 +643,19 @@ export class StreamRunner {
             /* fail-open */
           }
         };
+        // T1.1 + T1.2 — reasoning models (DeepSeek V4 Flash, R1) emit 2K-5K
+        // CoT tokens per turn that accumulate across the multi-step loop.
+        // Strip old reasoning and compact earlier (ratio 0.3 vs 0.5) to
+        // cut ~40-60% of cumulative input tokens.
+        const isReasoningModel = childRuntime.modelInfo?.reasoning === true;
         const compacted = compactSubAgentMessages(stripped, {
           thresholdChars: compactThreshold,
           keepLastTurns: compactKeepLast,
           contextWindowTokens: childCtxWindow,
+          contextFillRatio: isReasoningModel ? 0.3 : undefined,
           keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
           persistArtifact: persistSubArtifact,
+          stripOldReasoning: isReasoningModel,
         });
         if (compacted !== stripped) recordCompaction(stepNumber);
         // Phase 4A — scope reminder injection for the sub-agent loop.
