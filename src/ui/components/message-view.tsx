@@ -1,9 +1,9 @@
 import { memo } from "react";
-import type { ChatEntry } from "../../types/index";
+import type { ChatEntry, StructuredResponse } from "../../types/index";
 import { Markdown } from "../markdown.js";
 import { PlanView } from "../plan.js";
 import type { Theme } from "../theme.js";
-import { stripStrayModelMacros, trunc } from "../utils/text.js";
+import { stripInvisibleChars, stripStrayModelMacros, trunc } from "../utils/text.js";
 import { describeMcpFsTool, toolArgs, toolLabel, tryParseArg } from "../utils/tools.js";
 import { DiffView, ReadFilePreviewView } from "./diff-view.js";
 import { LspDiagnosticsView, LspResultView } from "./lsp-views.js";
@@ -54,6 +54,8 @@ export function AssistantMessageContent({
   // Strip stray model self-annotation macros (e.g. grok's trailing
   // `\confidence{85}`) that leak into the answer — not instructed in the prompt.
   content = stripStrayModelMacros(content);
+  // Strip invisible/control Unicode characters that mess up terminal rendering.
+  content = stripInvisibleChars(content);
   const lines = content.split("\n");
   const isLong = lines.length > ASSISTANT_MSG_COLLAPSED_LINES;
   // Phase 5 F7 — the FINAL assistant message in a turn IS the answer the
@@ -229,26 +231,51 @@ function MessageViewImpl({
         </box>
       );
 
-    case "assistant":
+    case "assistant": {
+      let fallbackSr: StructuredResponse | null = null;
+      const rawContent = entry.content.trim();
+      if (rawContent.startsWith("{") && rawContent.endsWith("}")) {
+        try {
+          const parsed = JSON.parse(rawContent);
+          if (Array.isArray(parsed.steps) && parsed.steps.length > 0 && parsed.steps[0].action) {
+            fallbackSr = { taskType: "plan", data: parsed };
+          } else if (Array.isArray(parsed.changes) && parsed.changes.length > 0) {
+            fallbackSr = { taskType: "refactor", data: parsed };
+          } else if (parsed.hypothesis && parsed.root_cause) {
+            fallbackSr = { taskType: "debug", data: parsed };
+          } else if (Array.isArray(parsed.findings)) {
+            fallbackSr = { taskType: "analyze", data: parsed };
+          } else if (Array.isArray(parsed.files) && parsed.files.length > 0 && parsed.files[0].path) {
+            fallbackSr = { taskType: "generate", data: parsed };
+          }
+        } catch {
+          // ignore
+        }
+      }
       return (
         <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
           {entry.sourceLabel ? <text fg={t.textMuted}>{entry.sourceLabel}</text> : null}
           {entry.reasoning ? (
             <box paddingLeft={0} marginBottom={1} flexShrink={0} flexDirection="column">
-              <text fg={t.textMuted}>💭 Thought</text>
+              <text fg={t.textMuted}>[Thought] Thought</text>
               <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">
                 <Markdown content={entry.reasoning} t={t} />
               </box>
             </box>
           ) : null}
-          <AssistantMessageContent
-            content={entry.content}
-            t={t}
-            expanded={expandedMessages?.has(index) ?? false}
-            isFinal={isFinalAssistant === true}
-          />
+          {fallbackSr ? (
+            <StructuredResponseView t={t} sr={fallbackSr} modeColor={entry.modeColor || modeColor} />
+          ) : (
+            <AssistantMessageContent
+              content={entry.content}
+              t={t}
+              expanded={expandedMessages?.has(index) ?? false}
+              isFinal={isFinalAssistant === true}
+            />
+          )}
         </box>
       );
+    }
 
     case "tool_call":
       return (

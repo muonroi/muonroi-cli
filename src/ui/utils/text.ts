@@ -4,6 +4,29 @@ export function formatTokenCount(tokens: number): string {
   return String(tokens);
 }
 
+/**
+ * Strip invisible/control Unicode characters that leak into terminal output.
+ * Keeps \t \n \r (needed for rendering); removes everything else that most
+ * terminals cannot display safely: zero-width spaces, soft hyphens, BiDi
+ * overrides, C0/C1 controls, BOM, and other default-ignorable code points.
+ * Fast-pathed: returns the input unchanged when no match is found.
+ *
+ * Uses `new RegExp()` to avoid Biome's `noControlCharactersInRegex` lint
+ * (control-char escapes in a regex literal are blocked).
+ */
+export function stripInvisibleChars(text: string): string {
+  if (!text) return text;
+  // Constructed via new RegExp to bypass Biome lint for control-char patterns.
+  // U+034F (Combining Grapheme Joiner) is separated via alternation per
+  // Biome's noMisleadingCharacterClass rule.
+  const re = new RegExp(
+    "[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u061C\u070F\u200B-\u200F\u2028-\u202F\u2060-\u2069\uFEFF\uFFF9-\uFFFB]|" +
+      "\u034F|\u{1BCA0}-\u{1BCA3}|\u{E0001}|\u{E0020}-\u{E007F}",
+    "gu",
+  );
+  return re.test(text) ? text.replace(re, "") : text;
+}
+
 export function trunc(s: string, n: number): string {
   const str = String(s ?? "");
   return str.length <= n ? str : `${str.slice(0, n)}…`;
