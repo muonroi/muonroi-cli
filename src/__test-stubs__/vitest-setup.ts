@@ -4,6 +4,11 @@
  */
 import { vi } from "vitest";
 
+// vitest 2+ removed vi.mocked(). This shim restores it for the 93+ call sites across the
+// codebase without a codemod. Safe no-op: vi.mocked(item) just returns item (typed cast).
+// @ts-expect-error — vi.mocked is intentionally absent from vitest 4 types.
+vi.mocked ??= ((item, _options) => item) as any;
+
 // @opentui/react is a pre-bundled CJS package that requires 'react-reconciler/constants'
 // without the .js extension — this fails in the vitest ESM environment. None of the unit
 // tests exercise OpenTUI hooks directly (those are covered by E2E harness specs), so mocking
