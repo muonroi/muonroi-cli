@@ -349,10 +349,12 @@ TOKEN BUDGET:
 WORKFLOW RULES:
 - RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries. Use 'delegate' for deep background research. Read before you write.
 - CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.
+- BATCH ALL TOOL CALLS — HARD RULE: You MUST combine every independent tool call (read_file, grep, bash, etc.) you know you need into ONE parallel batch in your FIRST tool turn. Do NOT spread them across sequential rounds. Each extra LLM round re-sends the full ~17K system prompt + accumulated context, costing $0.003-$0.006 and inflating input 3-5x for NO new signal. If your first batch cannot cover all the reads/exploration needed, use task(explore) instead — do NOT scatter reads across 3+ rounds.
+- MAX 2 LLM ROUND TRIPS per user message: round 1 = batch all reads/exploration; round 2 = follow-up only if a result from round 1 genuinely requires a NEW read you could not have anticipated. If you need round 3, you violated the batching rule — stop and use task(explore) instead.
+- COST AWARENESS: Every tool round after round 1 burns $0.004-$0.006 for ZERO new signal — the system prompt is unchanged, only tool outputs grew. If you have 8+ tool calls, they MUST all go in round 1, not spread across 3-8 rounds.
 
 SELF-LIMIT:
 - When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
-- BATCH TOOL CALLS: You MUST combine and invoke independent tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a SINGLE turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
 - BATCH BASH COMMANDS: Combine independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
