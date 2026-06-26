@@ -1028,13 +1028,10 @@ export function getTopLevelCompactThresholdChars(): number {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 10_000 && n <= 1_500_000) return Math.floor(n);
   }
-  // Phase C6 — lowered from 100_000 to 30_000 chars. Forensics on session
-  // f4d66be69216 showed linear ~2-5K token growth per step inside a single
-  // tool turn (27 events, 1.2M total input). At 100K chars (~25K tokens)
-  // compaction only fired after 5-10 steps — by then the prompt cache prefix
-  // had already diverged and billed for every prior tool result. 30K chars
-  // triggers compaction from step 3-4, keeping per-step cost flat.
-  return 30_000;
+  // Reverted to 200_000 per user request — top-level tools typically carry
+  // more useful early context than sub-agents; aggressive compaction was
+  // collapsing valuable trace information too early.
+  return 200_000;
 }
 
 /**
@@ -1049,11 +1046,9 @@ export function getTopLevelCompactKeepLast(): number {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
   }
-  // Phase C6 — lowered from 5 to 3. Symmetric with sub-agent default.
-  // Fewer verbatim tool turns = smaller per-step cache prefix, so
-  // DeepSeek's prompt caching preserves a larger shared prefix across
-  // consecutive steps within the same turn.
-  return 3;
+  // Reverted to 5 — top-level agents make decisions across longer horizons
+  // than sub-agents; keeping more trailing turns preserves decision trace.
+  return 5;
 }
 
 /**
