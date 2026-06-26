@@ -77,7 +77,7 @@
     "opentui"
   ],
   "author": "muonroi",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.72",
     "@ai-sdk/google": "3.0.65",
