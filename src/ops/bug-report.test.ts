@@ -9,26 +9,28 @@ vi.mock("fs/promises", () => {
   const actual = require("fs/promises");
   return {
     ...actual,
-    readFile: vi.fn(),
+    readFile: vi.fn((...args: any[]) => actual.readFile(...args)),
   };
 });
 
 // Mock runDoctor to avoid real network calls
 vi.mock("./doctor.js", () => ({
-  runDoctor: vi.fn().mockResolvedValue([
-    { name: "bun_version", status: "pass", detail: "Bun 1.3.13" },
-    { name: "os", status: "pass", detail: "linux 5.15" },
-    { name: "key_presence", status: "pass", detail: "API key in env" },
-    { name: "ollama", status: "warn", detail: "Ollama unreachable" },
-    { name: "ee", status: "warn", detail: "EE unreachable" },
-    { name: "qdrant", status: "warn", detail: "Qdrant unreachable" },
-    { name: "error_rate", status: "pass", detail: "0 errors in last 24h" },
-  ]),
+  runDoctor: vi.fn(() =>
+    Promise.resolve([
+      { name: "bun_version", status: "pass", detail: "Bun 1.3.13" },
+      { name: "os", status: "pass", detail: "linux 5.15" },
+      { name: "key_presence", status: "pass", detail: "API key in env" },
+      { name: "ollama", status: "warn", detail: "Ollama unreachable" },
+      { name: "ee", status: "warn", detail: "EE unreachable" },
+      { name: "qdrant", status: "warn", detail: "Qdrant unreachable" },
+      { name: "error_rate", status: "pass", detail: "0 errors in last 24h" },
+    ]),
+  ),
 }));
 
 // Mock EE health to avoid real network calls
 vi.mock("../ee/health.js", () => ({
-  health: vi.fn().mockResolvedValue({ ok: false, status: 503 }),
+  health: vi.fn(() => Promise.resolve({ ok: false, status: 503 })),
 }));
 
 /** Helper to get the mocked readFile from the vi.mock above */
@@ -45,7 +47,7 @@ describe("buildBugReport — required sections", () => {
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("returns all required sections", async () => {
@@ -75,7 +77,7 @@ describe("buildBugReport — required sections", () => {
 
 describe("buildBugReport — config_redacted does NOT contain authToken", () => {
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("config_redacted excludes ee.authToken and includes cap.monthly_usd", async () => {
@@ -108,7 +110,7 @@ describe("buildBugReport — config_redacted does NOT contain authToken", () => 
 
 describe("buildBugReport — error_log_tail scrubs API keys", () => {
   afterEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("scrubs sk-ant-* keys from error log lines", async () => {
