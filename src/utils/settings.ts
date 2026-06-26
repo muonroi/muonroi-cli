@@ -1026,12 +1026,15 @@ export function getTopLevelCompactThresholdChars(): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 10_000 && n <= 1_500_000) return Math.floor(n);
   }
-  // Phase C5 — lowered from 200_000 to 100_000 chars (symmetric with the
-  // sub-agent 80→40K reduction). Same evidence applies: tool results are
-  // capped, so the chars threshold rarely trips while token billing climbs.
-  return 100_000;
+  // Phase C6 — lowered from 100_000 to 30_000 chars. Forensics on session
+  // f4d66be69216 showed linear ~2-5K token growth per step inside a single
+  // tool turn (27 events, 1.2M total input). At 100K chars (~25K tokens)
+  // compaction only fired after 5-10 steps — by then the prompt cache prefix
+  // had already diverged and billed for every prior tool result. 30K chars
+  // triggers compaction from step 3-4, keeping per-step cost flat.
+  return 30_000;
 }
 
 /**
@@ -1046,7 +1049,11 @@ export function getTopLevelCompactKeepLast(): number {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
   }
-  return 5;
+  // Phase C6 — lowered from 5 to 3. Symmetric with sub-agent default.
+  // Fewer verbatim tool turns = smaller per-step cache prefix, so
+  // DeepSeek's prompt caching preserves a larger shared prefix across
+  // consecutive steps within the same turn.
+  return 3;
 }
 
 /**

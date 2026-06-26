@@ -61,8 +61,8 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
     it("return the documented defaults when env is unset", () => {
       expect(getSubAgentCompactThresholdChars()).toBe(40_000);
       expect(getSubAgentCompactKeepLast()).toBe(3);
-      expect(getTopLevelCompactThresholdChars()).toBe(100_000);
-      expect(getTopLevelCompactKeepLast()).toBe(5);
+      expect(getTopLevelCompactThresholdChars()).toBe(30_000);
+      expect(getTopLevelCompactKeepLast()).toBe(3);
     });
 
     it("clamp out-of-range env back to the default", () => {
@@ -76,10 +76,10 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
       process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST = "99"; // > 20
       expect(getSubAgentCompactKeepLast()).toBe(3);
 
-      process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "10000"; // < 50_000
-      expect(getTopLevelCompactThresholdChars()).toBe(100_000);
+      process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "5000"; // < 10_000
+      expect(getTopLevelCompactThresholdChars()).toBe(30_000);
       process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST = "99"; // > 30
-      expect(getTopLevelCompactKeepLast()).toBe(5);
+      expect(getTopLevelCompactKeepLast()).toBe(3);
     });
 
     it("honor valid in-range env overrides", () => {
@@ -193,10 +193,10 @@ describe("compaction fires with the REAL default getter values (G4 behavioural g
     expect(JSON.stringify(compacted)).toContain("elided by sub-agent compactor");
   });
 
-  it("top-level: default threshold (100K) elides older tool results on a ~160K load", () => {
+  it("top-level: default threshold (30K) elides older tool results on a ~160K load", () => {
     const messages = buildToolTurns(8, 20_000); // ~160K cumulative, 8 tool turns
     const cumulative = cumulativeMessageChars(messages);
-    expect(cumulative).toBeGreaterThan(100_000);
+    expect(cumulative).toBeGreaterThan(30_000);
     expect(cumulative).toBeLessThan(200_000);
 
     const compacted = compactSubAgentMessages(messages, {
