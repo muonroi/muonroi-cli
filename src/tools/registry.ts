@@ -35,6 +35,7 @@ interface ToolRegistryOpts {
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
+  consultParentSession?: (question: string) => Promise<string>;
   /**
    * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
    * list_vision_cache) are omitted even for vision-proxy models. Used by the
@@ -619,6 +620,29 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       });
     }
 
+    // consult_parent_session
+    if (opts?.consultParentSession) {
+      const consultParentSession = opts.consultParentSession;
+      tools.consult_parent_session = dynamicTool({
+        description:
+          "Consult the parent session for supervision or guidance when stuck, when needing clarification on the overall goal, or when encountering critical errors. ONLY available in sub-sessions.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            question: {
+              type: "string",
+              description: "The specific question or issue you need the parent session to advise on.",
+            },
+          },
+          required: ["question"],
+        }),
+        execute: async (input: any) => {
+          const result = await consultParentSession(input.question);
+          return result;
+        },
+      });
+    }
+
     // delegate
     if (opts?.runDelegation) {
       const runDelegation = opts.runDelegation;
@@ -775,7 +799,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured) and the artifact is not in this session's local cache. Proceed without EE recall — re-read the source directly if you need the elided content.";
             }
             recordRehydration("ee");
-            return truncateOutput(JSON.stringify(resp));
+            const points = resp.points ?? [];
+            const bestHit = points[0];
+            if (bestHit) {
+              const matchedId = query.match(/(?:id\s*=\s*|id\s*\b)([a-zA-Z0-9_:-]+)/i)?.[1] ?? "unknown";
+              return truncateOutput(
+                `[tool-artifact id=${matchedId} — rehydrated from Experience Engine]\n${bestHit.text}`,
+              );
+            }
+            return `[tool-artifact — not found in Experience Engine]`;
           }
           // General recall → /api/recall (recallMode, [id col] index + surface).
           const { recallEE, formatRecallForAgent } = await import("../ee/search.js");

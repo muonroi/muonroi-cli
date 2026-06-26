@@ -75,6 +75,8 @@ export interface SubAgentCapState {
   cumulative: number;
   /** Configured ceiling. */
   max: number;
+  /** Hard cap ceiling (e.g. max * 2). */
+  hardMax?: number;
   /** True once `cumulative >= max` (sub-agent should wrap up). */
   exhausted: boolean;
   /** Number of duplicate-output detections (telemetry / tests). */
@@ -109,7 +111,9 @@ function shortHash(text: string): string {
 }
 
 export function compressForCap(state: SubAgentCapState, raw: string): string {
-  if (state.exhausted) {
+  const hardCeiling = state.hardMax ?? state.max;
+  if (state.exhausted || state.cumulative >= hardCeiling) {
+    state.exhausted = true;
     return `[${state.label} tool budget exhausted (${state.cumulative}/${state.max} chars). Further tool calls will return this stub. Summarize findings now and return.]`;
   }
   state.callIndex += 1;
@@ -133,7 +137,10 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
 
   const ratio = state.cumulative / state.max;
   let out: string;
-  if (ratio >= state.highTierRatio) {
+  if (state.cumulative >= state.max) {
+    const trimmed = trimHead(raw, state.highTierChars, state.label);
+    out = `${trimmed}\n\n[Warning: ${state.label} tool budget exceeded (${state.cumulative}/${state.max} chars). Please finalize your work and summarize findings now.]`;
+  } else if (ratio >= state.highTierRatio) {
     out = trimHead(raw, state.highTierChars, state.label);
   } else if (ratio >= state.midTierRatio) {
     out = trimHeadTail(raw, state.midTierChars, state.label);
@@ -141,7 +148,7 @@ export function compressForCap(state: SubAgentCapState, raw: string): string {
     out = raw;
   }
   state.cumulative += out.length;
-  if (state.cumulative >= state.max) state.exhausted = true;
+  if (state.cumulative >= hardCeiling) state.exhausted = true;
   return out;
 }
 
@@ -215,9 +222,11 @@ export function wrapToolSetWithCap(
   state: SubAgentCapState;
   rewrap: (next: ToolSet) => ToolSet;
 } {
+  const max = Math.max(20_000, opts.maxCumulativeChars ?? DEFAULT_MAX_CUMULATIVE_CHARS);
   const state: SubAgentCapState = {
     cumulative: 0,
-    max: Math.max(20_000, opts.maxCumulativeChars ?? DEFAULT_MAX_CUMULATIVE_CHARS),
+    max,
+    hardMax: max * 2,
     exhausted: false,
     dedupHits: 0,
     seenHashes: new Map(),

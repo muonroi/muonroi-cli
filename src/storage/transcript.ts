@@ -509,21 +509,44 @@ export function getSessionChain(sessionId: string): string[] {
     }
   }
 
-  // 2. Walk down from root to all descendants to get the chronological chain
-  const chain: string[] = [];
-  const visitedDown = new Set<string>();
-  let currentId: string | null = rootId;
-  while (currentId && !visitedDown.has(currentId)) {
-    visitedDown.add(currentId);
-    chain.push(currentId);
+  // 2. Find all descendants of the root session using a BFS queue to handle multiple child branches
+  const allIds = new Set<string>([rootId]);
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
     try {
-      const row = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(currentId) as
-        | { id: string }
-        | undefined;
-      currentId = row?.id ?? null;
-    } catch {
-      currentId = null;
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(currentId) as Array<{
+        id: string;
+      }>;
+      for (const child of children) {
+        if (!allIds.has(child.id)) {
+          allIds.add(child.id);
+          queue.push(child.id);
+        }
+      }
+    } catch (err) {
+      logger.error("storage", `Failed to query child sessions for ${currentId} during walk`, { error: err });
     }
+  }
+
+  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at
+  let chain: string[] = [];
+  try {
+    const placeholders = Array.from(allIds)
+      .map(() => "?")
+      .join(",");
+    const sortedRows = db
+      .prepare(`
+      SELECT id FROM sessions 
+      WHERE id IN (${placeholders}) 
+      ORDER BY created_at ASC
+    `)
+      .all(...Array.from(allIds)) as Array<{ id: string }>;
+    chain = sortedRows.map((r) => r.id);
+  } catch (err) {
+    logger.error("storage", `Failed to sort session chain for root ${rootId}`, { error: err });
+    // Fallback to unsorted array if query fails
+    chain = Array.from(allIds);
   }
   logger.debug("storage", "Resolved session chain successfully", { sessionId, chainLength: chain.length, chain });
   return chain;
@@ -538,6 +561,40 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     const results = loadStoredToolResults(sid);
     for (const [k, v] of results) {
       toolResults.set(k, v);
+    }
+  }
+
+  // Load parent/child session metadata to reconcile user prompt timestamps across rotation/sub-session boundaries
+  const db = getDatabase();
+  const sessionMeta = new Map<string, { parent_session_id: string | null; created_at: string }>();
+  try {
+    if (chain.length > 1) {
+      const placeholders = chain.map(() => "?").join(",");
+      const rows = db
+        .prepare(`SELECT id, parent_session_id, created_at FROM sessions WHERE id IN (${placeholders})`)
+        .all(...chain) as Array<{ id: string; parent_session_id: string | null; created_at: string }>;
+      for (const r of rows) {
+        sessionMeta.set(r.id, { parent_session_id: r.parent_session_id, created_at: r.created_at });
+      }
+    }
+  } catch (err) {
+    logger.error("storage", "Failed to load session metadata for chain in buildChatEntries", { error: err });
+  }
+
+  // Map each child sub-session's initial user prompt to its creation timestamp
+  const childPrompts = new Map<string, Date>();
+  for (let i = 1; i < chain.length; i++) {
+    const sid = chain[i];
+    const meta = sessionMeta.get(sid);
+    if (meta && meta.parent_session_id) {
+      const records = buildEffectiveMessageRecords(sid);
+      const firstUser = records.find((r) => r.message.role === "user");
+      if (firstUser) {
+        const content = renderUserContent(firstUser.message.content);
+        if (content) {
+          childPrompts.set(content, new Date(meta.created_at));
+        }
+      }
     }
   }
 
@@ -557,6 +614,10 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
 
       if (message.role === "user") {
         const content = renderUserContent(message.content);
+        if (isChildSession && childPrompts.has(content)) {
+          // Skip B's user message because it's a duplicate of A's user message
+          continue;
+        }
         if (content) {
           entries.push({ type: "user", content, timestamp });
         }
@@ -652,6 +713,20 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
       },
     });
   }
+
+  // Adjust parent user message timestamps to match their corresponding child session creation time
+  for (const entry of entries) {
+    if (entry.type === "user") {
+      const content = entry.content.trim();
+      const childTime = childPrompts.get(content);
+      if (childTime) {
+        entry.timestamp = childTime;
+      }
+    }
+  }
+
+  // Sort entries chronologically by timestamp (stable sort)
+  entries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
   logger.debug("storage", "Built chat entries successfully", { sessionId, count: entries.length });
   return entries;

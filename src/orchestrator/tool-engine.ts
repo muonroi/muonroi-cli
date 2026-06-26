@@ -278,6 +278,7 @@ const _injectedGuidanceSha = new Map<string, string>();
  * subsequent turns). Method callbacks delegate to Agent private methods.
  */
 export interface MessageProcessorDeps extends TurnRunnerDepsBase {
+  readonly isSubSession?: boolean;
   // ---- Read/write state references --------------------------------------
   // (messages, bash, mode, maxToolRounds, schedules, sendTelegramFile inherited)
   /** Live messageSeqs array (mutated by push; parallel to messages). */
@@ -335,6 +336,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   // ---- Behavior delegators ----------------------------------------------
   requireProvider(): LegacyProvider;
   emitSubagentStatus(status: SubagentStatus | null): void;
+  consultParentSession?: (question: string) => Promise<string>;
   fireHook(
     input: unknown,
     signal?: AbortSignal,
@@ -761,18 +763,23 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let _pendingStructuredResponseLen = -1;
 
       try {
+        const { getDatabase } = await import("../storage/db.js");
+        const db = getDatabase();
+        const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(deps.session.id) as
+          | { parent_session_id: string | null }
+          | undefined;
+        const isSubSession = !!row?.parent_session_id;
+
+        let contextWindow = modelInfo?.contextWindow || 0;
+        if (isSubSession && contextWindow > 0) {
+          contextWindow = Math.min(45000, contextWindow);
+        }
+
         const settings = attemptedOverflowRecovery
-          ? relaxCompactionSettings(deps.getCompactionSettings(modelInfo?.contextWindow))
-          : deps.getCompactionSettings(modelInfo?.contextWindow);
-        if (modelInfo?.contextWindow) {
-          await deps.compactForContext(
-            provider,
-            system,
-            modelInfo.contextWindow,
-            signal,
-            settings,
-            attemptedOverflowRecovery,
-          );
+          ? relaxCompactionSettings(deps.getCompactionSettings(contextWindow))
+          : deps.getCompactionSettings(contextWindow);
+        if (contextWindow) {
+          await deps.compactForContext(provider, system, contextWindow, signal, settings, attemptedOverflowRecovery);
         }
 
         // Vision-tool gate: for vision-proxy (text-only) models the registry
@@ -793,6 +800,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           listDelegations: () => deps.listDelegations(),
           modelId: turnModelId,
           includeVisionTools,
+          consultParentSession: deps.consultParentSession,
         });
         // Top-level cumulative cap state. We accumulate the raw tool set
         // (base + MCP + PIL response tools) across the assembly below,
@@ -936,7 +944,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Apply the top-level cumulative cap once over the fully-assembled
         // raw tool set. State is per-turn; each turn gets a fresh budget.
         const topLevelCap = wrapToolSetWithCap(rawToolSet, {
-          maxCumulativeChars: getTopLevelToolBudgetChars(),
+          maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds),
           midTierRatio: 0.5,
           highTierRatio: 0.8,
           label: "top-level",
@@ -1418,12 +1426,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // See src/orchestrator/tool-args-repair.ts for the transforms.
           experimental_repairToolCall: repairToolCallHook,
           prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
-            // A new step's provider request is about to go out — reset the
-            // per-step chunk counter. Fires after the previous step's chunks
-            // were counted (prepareStep runs post tool-execution), so if THIS
-            // step's request wedges before any byte, chunksThisStep stays 0 and
-            // the mid-loop dead-socket continuation can safely resume from here.
             chunksThisStep = 0;
+            if (deps.isSubSession) {
+              logger.info("orchestrator", "Sub-session executing tool round", {
+                stepNumber: sn,
+                maxToolRounds: deps.maxToolRounds,
+              });
+              deps.emitSubagentStatus({
+                agent: "sub-session",
+                description: `Running sub-session task...`,
+                detail: `[Sub-Session] Executing tool round ${sn + 1} of ${deps.maxToolRounds}...`,
+              });
+            }
             // --- Live-queue steering injection ---------------------------
             // Drain the UI steer queue ONCE per prepareStep call (sn >= 1),
             // accumulate into pendingSteers, and graft pendingSteers onto the
@@ -3614,5 +3628,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     }
   } catch (err) {
     throw err;
+  } finally {
+    if (deps.isSubSession) {
+      deps.emitSubagentStatus(null);
+    }
   }
 }

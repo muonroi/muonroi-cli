@@ -456,7 +456,6 @@ async function startInteractive(
   const { loadMcpServers } = await import("./utils/settings.js");
   await warmMcpClients(loadMcpServers(), !session);
 
-
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
     batchApi,
@@ -1072,7 +1071,8 @@ program
       console.log("Checking for updates...");
       const result = await runUpdate(packageJson.version);
       console.log(result.output);
-      process.exit(result.success ? 0 : 1);
+      process.exitCode = result.success ? 0 : 1;
+      return;
     }
 
     changeDirectoryOrExit(options.directory);
@@ -1318,7 +1318,7 @@ program
     console.log("Checking for updates...");
     const result = await runUpdate(packageJson.version);
     console.log(result.output);
-    process.exit(result.success ? 0 : 1);
+    process.exitCode = result.success ? 0 : 1;
   });
 
 program

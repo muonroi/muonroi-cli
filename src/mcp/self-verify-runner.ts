@@ -27,7 +27,7 @@ export const defaultRunner: Runner = {
   async agentic(opts, log) {
     const { createLLMBrain, runAgenticLoop } = await import("../self-qa/agentic-loop.js");
     const brain = await createLLMBrain({ modelId: opts.llm });
-    return runAgenticLoop({ goal: opts.goal, brain, maxTurns: opts.turns ?? 20, log });
+    return runAgenticLoop({ goal: opts.goal, brain, maxTurns: opts.turns ?? 20, mockLlmDir: opts.mockLlmDir, log });
   },
 };
 

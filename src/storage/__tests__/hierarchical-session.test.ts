@@ -41,12 +41,26 @@ vi.mock("../db", () => {
             }
             return undefined;
           },
-          all: (param: string) => {
+          all: (...params: any[]) => {
             if (lower.includes("from messages")) {
-              return messagesDb.get(param) || [];
+              return messagesDb.get(params[0]) || [];
             }
             if (lower.includes("from tool_results")) {
-              return toolResultsDb.get(param) || [];
+              return toolResultsDb.get(params[0]) || [];
+            }
+            if (lower.includes("from sessions")) {
+              if (lower.includes("where parent_session_id =")) {
+                const results: Array<{ id: string }> = [];
+                for (const [id, val] of sessionsDb.entries()) {
+                  if (val.parent_session_id === params[0]) {
+                    results.push({ id });
+                  }
+                }
+                return results;
+              }
+              if (lower.includes("where id in")) {
+                return params.map((id) => ({ id }));
+              }
             }
             return [];
           },
