@@ -279,8 +279,8 @@ function approvePairingCode(_code: string): { ok: true; userId: number } | { ok:
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function createTurnCoordinator(): any {
   return {
-    reset: () => { },
-    handleEvent: () => { },
+    reset: () => {},
+    handleEvent: () => {},
     run: async (fn: () => Promise<void>) => fn(),
   };
 }
@@ -379,7 +379,7 @@ function getPasteBlockToken(block: Pick<PasteBlock, "id" | "lines" | "isImage">)
   if (block.isImage) {
     return `[Image #${block.id}]`;
   }
-  return `[Pasted #${block.id} ${block.lines}+ lines]`;
+  return `[Pasted text #${block.id} +${block.lines} lines]`;
 }
 
 function getFileMentionToken(block: FileMentionBlock): string {
@@ -719,7 +719,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
       registry={
         agentRuntime
           ? agentRuntime.registry
-          : { register: () => () => { }, update: () => { }, snapshot: () => ({ nodes: [] }), clear: () => { } }
+          : { register: () => () => {}, update: () => {}, snapshot: () => ({ nodes: [] }), clear: () => {} }
       }
     >
       {/* biome-ignore lint/a11y/noStaticElementInteractions: OpenCode-style copy-on-mouse-up on root surface */}
@@ -1335,6 +1335,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
 
 export type { McpRunInfo } from "./components/message-view.js";
 export { computeMcpRunInfo } from "./components/message-view.js";
+
 function shouldOpenApiKeyModalForKey(key: {
   name?: string;
   sequence?: string;

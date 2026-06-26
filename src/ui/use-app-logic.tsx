@@ -385,7 +385,7 @@ function getPasteBlockToken(block: Pick<PasteBlock, "id" | "lines" | "isImage">)
   if (block.isImage) {
     return `[Image #${block.id}]`;
   }
-  return `[Pasted #${block.id} ${block.lines}+ lines]`;
+  return `[Pasted text #${block.id} +${block.lines} lines]`;
 }
 
 function getFileMentionToken(block: FileMentionBlock): string {
@@ -3090,6 +3090,20 @@ export function useAppLogic(props: AppLogicProps) {
       const isStale = () => activeRunIdRef.current !== runId;
       isProcessingRef.current = true;
       setIsProcessing(true);
+
+      const sessionInfo = agent.getSessionInfo();
+      if (sessionInfo?.updatedAt) {
+        const lastUpdated = new Date(sessionInfo.updatedAt).getTime();
+        const diffMs = Date.now() - lastUpdated;
+        const diffMins = Math.floor(diffMs / (60 * 1000));
+        if (diffMins >= 10) {
+          pushToast(
+            "warn",
+            `⚠️ Lần tương tác cuối cách đây ${diffMins} phút. Cache của DeepSeek có thể đã bị giải phóng (Cache Miss).`,
+          );
+        }
+      }
+
       if (!sessionTitle)
         agent
           .generateTitle((displayText ?? text).trim())
@@ -3470,6 +3484,7 @@ export function useAppLogic(props: AppLogicProps) {
       sessionTitle,
       showLiveToolCalls,
       flushPendingAssistantMessage,
+      pushToast,
     ],
   );
 
@@ -6814,7 +6829,7 @@ export function useAppLogic(props: AppLogicProps) {
       }
     }
 
-    const displayText = message.trim();
+    const displayText = raw.trim();
     const fileBlocks = [...fileMentionBlocksRef.current];
     fileMentionBlocksRef.current = [];
     for (const block of fileBlocks) {

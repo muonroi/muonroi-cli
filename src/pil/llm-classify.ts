@@ -13,6 +13,7 @@
  * DeepSeek Flash). Timeout 2500ms — bails fast if the model stalls.
  */
 import { streamText } from "ai";
+import { getModelByTier, getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
@@ -367,17 +368,125 @@ export interface SubSessionRouteResult {
   reason: string;
 }
 
+export function classifySubSessionActionHeuristic(prompt: string): SubSessionRouteResult | null {
+  const trimmed = prompt.trim().toLowerCase();
+  if (!trimmed) return null;
+
+  // Strip trailing punctuation for list-based matching so "hello!" and "cảm ơn!"
+  // still hit the static lists instead of falling through to the LLM classifier.
+  const stripped = trimmed.replace(/[!?.…,;:]+$/g, "").trim();
+
+  // 1. Simple math equations (exact matches like "2+2", "1 + 1")
+  if (/^\d+\s*[+\-*/]\s*\d+$/.test(trimmed)) {
+    return {
+      action: "DIRECT_ANSWER",
+      confidence: 0.99,
+      reason: "Obvious input classified via heuristic (simple math)",
+    };
+  }
+
+  // 2. Greetings (exact matches only, trailing punctuation stripped)
+  const greetings = [
+    "hi",
+    "hello",
+    "hey",
+    "chào",
+    "xin chào",
+    "hi there",
+    "hello there",
+    "chào bạn",
+    "halo",
+    "hola",
+    "bạn ơi",
+  ];
+  if (greetings.includes(stripped)) {
+    return {
+      action: "DIRECT_ANSWER",
+      confidence: 0.99,
+      reason: "Obvious input classified via heuristic (greeting)",
+    };
+  }
+
+  // 3. Thanks (exact matches only, trailing punctuation stripped)
+  const thanks = [
+    "thanks",
+    "thank you",
+    "cảm ơn",
+    "cám ơn",
+    "thank",
+    "thx",
+    "ty",
+    "cảm ơn bạn",
+    "cám ơn bạn",
+    "cảm ơn nhé",
+    "cám ơn nhé",
+  ];
+  if (thanks.includes(stripped)) {
+    return {
+      action: "DIRECT_ANSWER",
+      confidence: 0.99,
+      reason: "Obvious input classified via heuristic (thanks)",
+    };
+  }
+
+  // 4. Help (exact matches only, trailing punctuation stripped)
+  const help = ["help", "hướng dẫn", "cứu", "help me"];
+  if (help.includes(stripped)) {
+    return {
+      action: "DIRECT_ANSWER",
+      confidence: 0.99,
+      reason: "Obvious input classified via heuristic (help)",
+    };
+  }
+
+  // 5. Short conversational words / acknowledgements (exact matches only, trailing punctuation stripped)
+  const conversation = [
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "vâng",
+    "dạ",
+    "ừ",
+    "chắc thế",
+    "ừm",
+    "umm",
+    "cool",
+    "nice",
+    "perfect",
+    "done",
+    "xong",
+    "yep",
+    "yup",
+    "nah",
+    "fine",
+    "tốt",
+    "được",
+    "okie",
+  ];
+  if (conversation.includes(stripped)) {
+    return {
+      action: "DIRECT_ANSWER",
+      confidence: 0.99,
+      reason: "Obvious input classified via heuristic (acknowledgement)",
+    };
+  }
+
+  return null;
+}
+
 const ROUTER_SYSTEM_PROMPT =
-  "You are a routing controller for an AI coding agent. Your goal is to decide the execution strategy for the user's prompt based on the conversation history.\n\n" +
+  "You are a routing controller for an AI coding agent. Your goal is to decide the execution strategy for the user's prompt based on the conversation history and metadata.\n\n" +
   "Analyze the user's prompt and select one of the following ACTIONS:\n" +
   '- "DIRECT_ANSWER": The prompt is informational, a quick question, a code review, an explanation, greeting, or thanks. No file creation/modification, test execution, or multi-turn tool runs are needed.\n' +
-  '- "ROTATE_SESSION": The user is starting a completely new topic or task unrelated to the active discussion (e.g. "let\'s switch to writing a python script", "forget the previous bug, show me how to...").\n' +
+  '- "ROTATE_SESSION": The user is starting a completely new topic or task unrelated to the active discussion (e.g. "let\'s switch to writing a python script", "forget the previous bug, show me how to..."). OR, if the session size (metadata) exceeds the rotation threshold and the active task is completed or the prompt starts a new focus, choose ROTATE_SESSION to prune/summarize the context.\n' +
   '- "SPAWN_SUB_SESSION": The user wants to execute a multi-step task (e.g. "write tests for X and debug it", "refactor the storage layer", "implement feature Y", "fix all compile errors"). This requires running multiple tools (file edits, bash commands, searches).\n\n' +
   "Response format: Reply with exactly one comma-separated line containing:\n" +
   "<ACTION>,<CONFIDENCE>,<REASON>\n\n" +
   "Examples:\n" +
   '- "DIRECT_ANSWER,0.95,Simple explanation of how the DB migration works."\n' +
   '- "ROTATE_SESSION,0.90,Complete shift to a different project/language."\n' +
+  '- "ROTATE_SESSION,0.95,Session size exceeds threshold and current request starts a new task."\n' +
   '- "SPAWN_SUB_SESSION,0.98,Requires writing a test suite and fixing multiple files to get it green."\n' +
   "No other text, only the comma-separated line.";
 
@@ -385,12 +494,27 @@ export async function classifySubSessionAction(
   factory: ProviderFactory,
   modelId: string,
   prompt: string,
+  contextInfo?: {
+    currentChars: number;
+    threshold: number;
+  },
   signal?: AbortSignal,
 ): Promise<SubSessionRouteResult | null> {
+  if (process.env.MUONROI_DISABLE_HEURISTIC_ROUTING !== "1") {
+    const heuristic = classifySubSessionActionHeuristic(prompt);
+    if (heuristic) return heuristic;
+  }
+
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const runtime = resolveModelRuntime(factory, modelId);
+    // Zero-hardcode: query models catalog for a cheap fast-tier model under the same provider.
+    const info = getModelInfo(modelId);
+    const provider = info?.provider;
+    const fastModel = provider ? getModelByTier("fast", provider) || getModelByTier("balanced", provider) : undefined;
+    const classificationModelId = fastModel?.id ?? modelId;
+
+    const runtime = resolveModelRuntime(factory, classificationModelId);
     const isReasoning = runtime.modelInfo?.reasoning === true;
     timer = setTimeout(() => controller.abort(), isReasoning ? REASONING_CLASSIFY_TIMEOUT_MS : LLM_CLASSIFY_TIMEOUT_MS);
     const combinedSignal = signal
@@ -409,11 +533,20 @@ export async function classifySubSessionAction(
       providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
     }
 
+    let promptWithContext = prompt.slice(0, 1000);
+    if (contextInfo) {
+      promptWithContext =
+        `[SESSION METADATA]\n` +
+        `Current session size: ${contextInfo.currentChars} characters.\n` +
+        `Rotation threshold: ${contextInfo.threshold} characters.\n\n` +
+        `[USER PROMPT]\n${promptWithContext}`;
+    }
+
     const result = streamText({
       model: runtime.model,
       abortSignal: combinedSignal,
       system: ROUTER_SYSTEM_PROMPT,
-      prompt: prompt.slice(0, 1000),
+      prompt: promptWithContext,
       ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
       ...(providerOptions ? { providerOptions } : {}),
     });

@@ -1,7 +1,17 @@
+import { exec } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("child_process", async () => {
+  const actual = await vi.importActual<typeof import("child_process")>("child_process");
+  return {
+    ...actual,
+    exec: vi.fn(),
+  };
+});
+
 import {
   buildScriptUninstallPlan,
   getInstallMetadataPath,
@@ -163,5 +173,47 @@ describe("buildScriptUninstallPlan", () => {
     const plan = buildScriptUninstallPlan({ keepConfig: true, keepData: true }, homeDir);
     expect(plan?.removePaths).not.toContain(path.join(homeDir, ".muonroi-cli"));
     expect(plan?.removePaths).toContain(path.join(installDir, currentTarget.binaryName));
+  });
+});
+
+describe("runManagedUpdate", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("handles dev-link update when newer version is available", async () => {
+    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
+      callback(null, "hash\trefs/tags/v2.0.0\n", "");
+      return {} as any;
+    }) as any);
+
+    const { runManagedUpdate } = await import("./install-manager");
+    const result = await runManagedUpdate("1.0.0");
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("A new version of muonroi-cli is available!");
+    expect(result.output).toContain("Current version: v1.0.0");
+    expect(result.output).toContain("Latest version: v2.0.0");
+    expect(result.output).toContain("git -C");
+    expect(result.output).toContain("pull && bun install && bun run build");
+  });
+
+  it("handles dev-link when already up to date", async () => {
+    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
+      callback(null, "hash\trefs/tags/v1.0.0\n", "");
+      return {} as any;
+    }) as any);
+
+    const { runManagedUpdate } = await import("./install-manager");
+    const result = await runManagedUpdate("1.0.0");
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("You are already up to date!");
+    expect(result.output).toContain("Current version: v1.0.0");
+    expect(result.output).toContain("Latest version: v1.0.0");
   });
 });

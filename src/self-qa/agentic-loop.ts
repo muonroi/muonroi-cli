@@ -407,8 +407,14 @@ export async function runAgenticLoop(opts: AgenticLoopOptions): Promise<AgenticR
   let lastFrame: LiveFrame | null = null;
 
   const entry = opts.entry ?? resolve("src/index.ts");
-  const mockDir = opts.mockLlmDir ?? resolve("tests/harness/fixtures/llm");
-  const args = [entry, "--agent-mode", "--mock-llm", mockDir, ...(opts.extraArgs ?? [])];
+  const args = [entry, "--agent-mode"];
+  if (opts.mockLlmDir !== "none") {
+    const mockDir = opts.mockLlmDir ?? resolve("tests/harness/fixtures/llm");
+    args.push("--mock-llm", mockDir);
+  }
+  if (opts.extraArgs) {
+    args.push(...opts.extraArgs);
+  }
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     MUONROI_TEST_NO_PERSIST: "1",
@@ -519,6 +525,9 @@ export async function runAgenticLoop(opts: AgenticLoopOptions): Promise<AgenticR
 
       try {
         await executeDecision(driver, decision);
+        if (decision.action === "type" || decision.action === "press") {
+          await new Promise((res) => setTimeout(res, 300));
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // wait_for timeouts are common — brain gets to see and adapt.

@@ -23,6 +23,7 @@ import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
@@ -334,17 +335,62 @@ function ensureDir(dir: string): void {
 }
 
 function readJson<T>(filePath: string): T | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
-  } catch {
-    return null;
+  const RETRIES = 5;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as any)?.code;
+      if (code === "EBUSY" || code === "EPERM" || err instanceof SyntaxError) {
+        logger.warn(
+          "cli",
+          `Lock contention or syntax error reading ${path.basename(filePath)}, retrying (attempt ${attempt + 1}/${RETRIES})`,
+          { error: err },
+        );
+        // Spin wait briefly to let the lock release or the write complete
+        const end = Date.now() + 20 * (attempt + 1);
+        while (Date.now() < end) {
+          // busy wait
+        }
+      } else {
+        return null;
+      }
+    }
   }
+  return null;
 }
 
 function writeJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const serialized = JSON.stringify(data, null, 2);
+  const RETRIES = 5;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      fs.writeFileSync(filePath, serialized, { mode: 0o600 });
+      return;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as any)?.code;
+      if (code === "EBUSY" || code === "EPERM") {
+        logger.warn(
+          "cli",
+          `Lock contention writing ${path.basename(filePath)}, retrying (attempt ${attempt + 1}/${RETRIES})`,
+          { error: err },
+        );
+        const end = Date.now() + 20 * (attempt + 1);
+        while (Date.now() < end) {
+          // busy wait
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -875,11 +921,11 @@ export function getSubAgentBudgetChars(): number {
   const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 20_000 && n <= 600_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 5_000_000) return Math.floor(n);
   }
   const val = loadUserSettings().subAgentBudgetChars;
-  if (typeof val === "number" && val >= 20_000 && val <= 600_000) return Math.floor(val);
-  return 120_000;
+  if (typeof val === "number" && val >= 20_000 && val <= 5_000_000) return Math.floor(val);
+  return 240_000;
 }
 
 /**
@@ -1009,22 +1055,19 @@ export function getTopLevelCompactKeepLast(): number {
  * higher default so single-tool turns are unaffected. Env override:
  * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
  */
-export function getTopLevelToolBudgetChars(): number {
+export function getTopLevelToolBudgetChars(maxRounds?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 10_000_000) return Math.floor(n);
   }
   const val = loadUserSettings().topLevelToolBudgetChars;
-  if (typeof val === "number" && val >= 50_000 && val <= 1_500_000) return Math.floor(val);
-  // Phase C5 symmetry — lowered from 400_000 to 200_000 chars. Evidence from
-  // session f1eef338c784: top-level tool loop ran 49 turns consuming 3.4M
-  // input tokens before the budget cap (set at 400K chars) meaningfully
-  // constrained tool outputs. At 200K chars the 50% tier fires at 100K chars
-  // (~3 tool turns), and the 80% tier at 160K chars (~5 turns); small tasks
-  // (1-3 turns) are unaffected. The sub-agent budget is 120K, so 200K maintains
-  // a ~1.7x ratio reflecting the broader top-level conversation context.
-  return 200_000;
+  if (typeof val === "number" && val >= 50_000 && val <= 10_000_000) return Math.floor(val);
+
+  // Dynamically scale default based on maxRounds relative to default base (40)
+  const baseRounds = 40;
+  const scale = maxRounds && maxRounds > baseRounds ? maxRounds / baseRounds : 1;
+  return Math.floor(400_000 * scale);
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {

@@ -164,6 +164,53 @@ describe("createWorkspaceLspManager", () => {
 
     await manager.close();
   });
+
+  it("handles missing files gracefully and avoids touchFile on workspaceSymbol", async () => {
+    const root = await createTempWorkspace();
+    const filePath = path.join(root, "nonexistent.ts");
+
+    const sendRequest = vi.fn(async (method: string, params: unknown) => {
+      expect(method).toBe("workspace/symbol");
+      expect(params).toEqual({ query: "my-query" });
+      return [
+        {
+          name: "MySymbol",
+          kind: 1,
+          location: {
+            uri: "file:///demo.ts",
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 8 } },
+          },
+        },
+      ];
+    });
+    const client = createFakeClient({ sendRequest });
+
+    const manager = createWorkspaceLspManager(root, BASE_SETTINGS, {
+      createClient: async () => client,
+    });
+
+    const result = await manager.query({
+      operation: "workspaceSymbol",
+      filePath,
+      query: "my-query",
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("MySymbol");
+    expect(client.openOrChangeFile).not.toHaveBeenCalled();
+
+    const resultDef = await manager.query({
+      operation: "goToDefinition",
+      filePath,
+      line: 1,
+      character: 1,
+    });
+
+    expect(resultDef.success).toBe(true);
+    expect(resultDef.output).toContain("No results found");
+
+    await manager.close();
+  });
 });
 
 async function createTempWorkspace(): Promise<string> {

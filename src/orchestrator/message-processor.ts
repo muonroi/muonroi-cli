@@ -274,6 +274,7 @@ const _injectedGuidanceSha = new Map<string, string>();
  * subsequent turns). Method callbacks delegate to Agent private methods.
  */
 export interface MessageProcessorDeps extends TurnRunnerDepsBase {
+  readonly isSubSession?: boolean;
   // ---- Read/write state references --------------------------------------
   // (messages, bash, mode, maxToolRounds, schedules, sendTelegramFile inherited)
   /** Live messageSeqs array (mutated by push; parallel to messages). */
@@ -331,6 +332,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   // ---- Behavior delegators ----------------------------------------------
   requireProvider(): LegacyProvider;
   emitSubagentStatus(status: SubagentStatus | null): void;
+  consultParentSession?: (question: string) => Promise<string>;
   fireHook(
     input: unknown,
     signal?: AbortSignal,

@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { exec, spawn } from "child_process";
 import { createHash } from "crypto";
 import fs from "fs";
 import os from "os";
@@ -153,6 +153,35 @@ export function getScriptInstallContext(homeDir = os.homedir()): ScriptInstallCo
   return null;
 }
 
+export function fetchLatestGitTag(gitDir: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    exec(`git -C "${gitDir}" ls-remote --tags origin`, (error, stdout) => {
+      if (error) {
+        resolve(null);
+        return;
+      }
+      const lines = stdout.split(/\r?\n/);
+      let maxVersion: string | null = null;
+
+      for (const line of lines) {
+        const match = line.match(/refs\/tags\/(v?[0-9]+\.[0-9]+\.[0-9]+[^\s]*)$/);
+        if (!match) continue;
+        let tag = match[1];
+        if (tag.endsWith("^{}")) {
+          tag = tag.slice(0, -3);
+        }
+        const version = normalizeReleaseVersion(tag);
+        if (!version) continue;
+
+        if (!maxVersion || semverGt(version, maxVersion)) {
+          maxVersion = version;
+        }
+      }
+      resolve(maxVersion);
+    });
+  });
+}
+
 export async function fetchLatestReleaseVersion(): Promise<string | null> {
   const release = await fetchReleaseJson(`${RELEASES_API}/latest`);
   return release ? normalizeReleaseVersion(release.tag_name) : null;
@@ -269,34 +298,71 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
 
   if (method === "script") return runScriptManagedUpdate(currentVersion);
 
+  const root = findGitRoot(path.dirname(runningModulePath()));
+  let latestVersion: string | null = null;
+
+  if (method === "dev-link" && root) {
+    latestVersion = await fetchLatestGitTag(root);
+  } else {
+    latestVersion = await fetchLatestReleaseVersion();
+  }
+
+  const normalizedCurrent = semverValid(currentVersion);
+
+  let statusHeader = "";
+  let hasUpdate = false;
+
+  if (latestVersion && normalizedCurrent) {
+    hasUpdate = semverGt(latestVersion, normalizedCurrent);
+    if (hasUpdate) {
+      statusHeader = `A new version of muonroi-cli is available!\n  Current version: v${normalizedCurrent}\n  Latest version: v${latestVersion}\n\n`;
+    } else {
+      statusHeader = `You are already up to date!\n  Current version: v${normalizedCurrent}\n  Latest version: v${latestVersion}\n\n`;
+    }
+  } else if (normalizedCurrent) {
+    statusHeader = `Current version: v${normalizedCurrent}\nUnable to check the latest version from GitHub.\n\n`;
+  }
+
   const cmd = getUpdateCommandForMethod(method);
   if (cmd) {
     const pm = method === "bun-global" ? "bun" : "npm";
+    const instruction = hasUpdate
+      ? `To update, run this in a fresh terminal:\n\n  ${cmd}\n\nThen restart muonroi-cli.`
+      : `If you want to reinstall, run this in a fresh terminal:\n\n  ${cmd}`;
     return {
       success: true,
-      output: `Installed via ${pm} (global package). To update, run this in a fresh terminal:\n\n  ${cmd}\n\nThen restart muonroi-cli.`,
+      output: `${statusHeader}${instruction}`,
     };
   }
 
   if (method === "compiled") {
     const target = getReleaseTargetForPlatform();
     const asset = target?.assetName ?? "the release asset for your platform";
+    const instruction = hasUpdate
+      ? `Download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary, or rebuild from source.`
+      : `If you want to reinstall, download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary.`;
     return {
       success: true,
-      output: `Standalone binary install. Download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary, or rebuild from source.`,
+      output: `${statusHeader}${instruction}`,
     };
   }
 
   if (method === "dev-link") {
-    const root = findGitRoot(path.dirname(runningModulePath()));
     const target = root ?? "the muonroi-cli checkout";
+    const instruction = hasUpdate
+      ? `To update, pull the latest changes and rebuild:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`
+      : `To rebuild your local installation:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli.`;
     return {
       success: true,
-      output: `Running a linked/source build from ${target}. To update, rebuild it:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`,
+      output: `${statusHeader}${instruction}`,
     };
   }
 
-  return notScriptManaged("update");
+  const fallback = notScriptManaged("update");
+  return {
+    success: fallback.success,
+    output: `${statusHeader}${fallback.output}`,
+  };
 }
 
 export async function runScriptManagedUpdate(currentVersion: string): Promise<ScriptUpdateRunResult> {
@@ -451,7 +517,13 @@ async function fetchReleaseJson(url: string): Promise<GitHubRelease | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-    const res = await fetch(url, { signal: controller.signal, headers: { Accept: "application/vnd.github+json" } });
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "muonroi-cli",
+      },
+    });
     clearTimeout(timer);
     return res.ok ? ((await res.json()) as GitHubRelease) : null;
   } catch {
