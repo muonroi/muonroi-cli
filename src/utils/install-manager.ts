@@ -187,6 +187,26 @@ export async function fetchLatestReleaseVersion(): Promise<string | null> {
   return release ? normalizeReleaseVersion(release.tag_name) : null;
 }
 
+export async function fetchLatestNpmVersion(pkgName = "muonroi-cli"): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const res = await fetch(`https://registry.npmjs.org/${pkgName}/latest`, {
+      signal: controller.signal,
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "muonroi-cli",
+      },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { version?: string };
+    return data.version ? semverValid(data.version) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function parseChecksumsFile(contents: string): Map<string, string> {
   const result = new Map<string, string>();
   for (const rawLine of contents.split(/\r?\n/)) {
@@ -303,8 +323,13 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
 
   if (method === "dev-link" && root) {
     latestVersion = await fetchLatestGitTag(root);
+  } else if (method === "bun-global" || method === "npm-global") {
+    latestVersion = await fetchLatestNpmVersion("muonroi-cli");
   } else {
     latestVersion = await fetchLatestReleaseVersion();
+    if (!latestVersion) {
+      latestVersion = await fetchLatestNpmVersion("muonroi-cli");
+    }
   }
 
   const normalizedCurrent = semverValid(currentVersion);

@@ -1,6 +1,11 @@
 import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
-import { fetchLatestReleaseVersion, runManagedUpdate } from "./install-manager";
+import {
+  detectInstallMethod,
+  fetchLatestNpmVersion,
+  fetchLatestReleaseVersion,
+  runManagedUpdate,
+} from "./install-manager";
 
 export interface UpdateCheckResult {
   currentVersion: string;
@@ -15,7 +20,17 @@ export interface UpdateRunResult {
 
 export async function checkForUpdate(currentVersion: string): Promise<UpdateCheckResult | null> {
   try {
-    const latestVersion = await fetchLatestReleaseVersion();
+    const method = detectInstallMethod();
+    let latestVersion: string | null = null;
+    if (method === "bun-global" || method === "npm-global") {
+      latestVersion = await fetchLatestNpmVersion("muonroi-cli");
+    } else {
+      latestVersion = await fetchLatestReleaseVersion();
+      if (!latestVersion) {
+        latestVersion = await fetchLatestNpmVersion("muonroi-cli");
+      }
+    }
+
     if (!latestVersion || !semverValid(latestVersion)) return null;
 
     const normalizedCurrent = semverValid(currentVersion);

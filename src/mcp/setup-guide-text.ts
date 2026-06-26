@@ -17,7 +17,9 @@ Windows PowerShell:
 
 Bun (requires Bun >= 1.3):
   bun add -g muonroi-cli
-  # (npm install -g is NOT supported — TUI engine uses Bun-only ESM features)
+
+NPM (requires Node >= 20):
+  npm install -g muonroi-cli
 
 The installers fetch a pre-compiled single binary from GitHub Releases.
 
