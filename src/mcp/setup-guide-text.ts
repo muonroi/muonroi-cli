@@ -8,18 +8,19 @@
  */
 export const SETUP_GUIDE_TEXT = `# muonroi-cli Setup Guide
 
-## Install (zero runtime deps — recommended)
+## Install (Recommended — NPM/Bun global install)
+NPM (requires Node >= 20):
+  npm install -g muonroi-cli
+
+Bun (requires Bun >= 1.3):
+  bun add -g muonroi-cli
+
+## Install (Alternative — Prebuilt standalone binary, requires repo access)
 Linux / macOS:
   curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.sh | bash
 
 Windows PowerShell:
   irm https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.ps1 | iex
-
-Bun (requires Bun >= 1.3):
-  bun add -g muonroi-cli
-
-NPM (requires Node >= 20):
-  npm install -g muonroi-cli
 
 The installers fetch a pre-compiled single binary from GitHub Releases.
 

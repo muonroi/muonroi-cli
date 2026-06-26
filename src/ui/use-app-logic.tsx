@@ -1069,7 +1069,7 @@ export function useAppLogic(props: AppLogicProps) {
   const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
 
-  // E2 ΓÇö start/clear post-answer heartbeat. Renders "ΓÅ│ Waiting for next phaseΓÇª
+  // E2 — start/clear post-answer heartbeat. Renders "⏳ Waiting for next phase...
   // elapsed Ns" as a fresh assistant entry that updates in place every second
   // until the next chunk arrives. clearInterCardHeartbeat is idempotent and is
   // also called from the chunk-loop (line ~3402) and on AskCard cancel.
@@ -1082,10 +1082,10 @@ export function useAppLogic(props: AppLogicProps) {
     // usually the last entry, but an askcard answer can insert a `user` message
     // AFTER it (the answer flow runs outside the chunk loop), which left the
     // heartbeat orphaned + frozen in scrollback. Match the precise heartbeat
-    // shape (`ΓÅ│ ΓÇª elapsed Ns`) and remove it wherever it landed in the tail ΓÇö
+    // shape (`⏳ ... elapsed Ns`) and remove it wherever it landed in the tail —
     // the shape is distinctive enough not to hit real assistant content.
     setMessages((prev) => {
-      const HEARTBEAT_RE = /^ΓÅ│ .*ΓÇª elapsed \d+s\s*$/;
+      const HEARTBEAT_RE = /^⏳ .*\.\.\. elapsed \d+s\s*$/;
       const idx = prev.findIndex((e) => e.type === "assistant" && HEARTBEAT_RE.test((e.content ?? "").trim()));
       if (idx === -1) return prev;
       return [...prev.slice(0, idx), ...prev.slice(idx + 1)];
@@ -1096,15 +1096,15 @@ export function useAppLogic(props: AppLogicProps) {
     (label: string) => {
       clearInterCardHeartbeat();
       const startedAt = Date.now();
-      const marker = "ΓÅ│ ";
-      setMessages((prev) => [...prev, buildAssistantEntry(`${marker}${label}ΓÇª elapsed 0s\n`)]);
+      const marker = "⏳ ";
+      setMessages((prev) => [...prev, buildAssistantEntry(`${marker}${label}... elapsed 0s\n`)]);
       const interval = setInterval(() => {
         const elapsed = Math.floor((Date.now() - startedAt) / 1000);
         setMessages((prev) => {
           if (prev.length === 0) return prev;
           const last = prev[prev.length - 1];
           if (!last || last.type !== "assistant" || !last.content?.includes(marker)) return prev;
-          return [...prev.slice(0, -1), { ...last, content: `${marker}${label}ΓÇª elapsed ${elapsed}s\n` }];
+          return [...prev.slice(0, -1), { ...last, content: `${marker}${label}... elapsed ${elapsed}s\n` }];
         });
       }, 1_000);
       interCardHeartbeatRef.current = { interval, marker };
@@ -4642,7 +4642,7 @@ export function useAppLogic(props: AppLogicProps) {
           // Always echo into the message log ΓÇö the home-screen `updateOutput`
           // banner only renders on the splash screen, so an /update run inside an
           // active chat would otherwise produce no visible output at all.
-          setMessages((prev) => [...prev, buildAssistantEntry("Γƒ│ Checking for updatesΓÇª")]);
+          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
           runUpdate(startupConfig.version).then((result) => {
             setIsUpdating(false);
             const text = result.success ? result.output : `Update failed: ${result.output}`;
@@ -5657,7 +5657,7 @@ export function useAppLogic(props: AppLogicProps) {
           setShowUpdateModal(false);
           // Echo into the message log too ΓÇö same reason as the /update command:
           // the updateOutput banner only renders on the home/splash screen.
-          setMessages((prev) => [...prev, buildAssistantEntry("Γƒ│ Checking for updatesΓÇª")]);
+          setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
           runUpdate(startupConfig.version).then((result) => {
             setIsUpdating(false);
             const text = result.success ? result.output : `Update failed: ${result.output}`;

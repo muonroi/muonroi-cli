@@ -195,9 +195,9 @@ describe("runManagedUpdate", () => {
     const result = await runManagedUpdate("1.0.0");
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("A new version of muonroi-cli is available!");
-    expect(result.output).toContain("Current version: v1.0.0");
-    expect(result.output).toContain("Latest version: v2.0.0");
+    expect(result.output).toContain("A new version of `muonroi-cli` is available!");
+    expect(result.output).toContain("Current Version:** `v1.0.0`");
+    expect(result.output).toContain("Latest Version:** `v2.0.0`");
     expect(result.output).toContain("git -C");
     expect(result.output).toContain("pull && bun install && bun run build");
   });
@@ -213,7 +213,22 @@ describe("runManagedUpdate", () => {
 
     expect(result.success).toBe(true);
     expect(result.output).toContain("You are already up to date!");
-    expect(result.output).toContain("Current version: v1.0.0");
-    expect(result.output).toContain("Latest version: v1.0.0");
+    expect(result.output).toContain("Current Version:** `v1.0.0`");
+    expect(result.output).toContain("Latest Version:** `v1.0.0`");
+  });
+
+  it("handles dev-link when local is ahead of latest remote version", async () => {
+    vi.mocked(exec).mockImplementation(((cmd: any, callback: any) => {
+      callback(null, "hash\trefs/tags/v1.0.0\n", "");
+      return {} as any;
+    }) as any);
+
+    const { runManagedUpdate } = await import("./install-manager");
+    const result = await runManagedUpdate("1.1.0");
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Your local installation is newer than the remote release tag.");
+    expect(result.output).toContain("Current Version:** `v1.1.0`");
+    expect(result.output).toContain("Latest Version:** `v1.0.0`");
   });
 });
