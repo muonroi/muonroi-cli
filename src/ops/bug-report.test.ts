@@ -3,13 +3,28 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vite
 // RED phase: import module under test (will fail until bug-report.ts is created)
 import { type BugReportBundle, buildBugReport, formatBugReport } from "./bug-report.js";
 
+const mockFiles = new Map<string, string | Error>();
+
 // Mock fs/promises for controlled test environment
-// bug-report.ts uses named import { readFile } from "fs/promises"
 vi.mock("fs/promises", () => {
   const actual = require("fs/promises");
   return {
     ...actual,
-    readFile: vi.fn((...args: any[]) => actual.readFile(...args)),
+    readFile: vi.fn(async (filePath: any, options?: any) => {
+      const pathStr = String(filePath).replace(/\\/g, "/");
+      // Only intercept our mocked config and log paths to prevent leaking to other tests
+      if (pathStr.endsWith("config.json") && mockFiles.has("config.json")) {
+        const val = mockFiles.get("config.json");
+        if (val instanceof Error) throw val;
+        return val;
+      }
+      if (pathStr.endsWith("errors.log") && mockFiles.has("errors.log")) {
+        const val = mockFiles.get("errors.log");
+        if (val instanceof Error) throw val;
+        return val;
+      }
+      return actual.readFile(filePath, options);
+    }),
   };
 });
 
@@ -33,21 +48,16 @@ vi.mock("../ee/health.js", () => ({
   health: vi.fn(() => Promise.resolve({ ok: false, status: 503 })),
 }));
 
-/** Helper to get the mocked readFile from the vi.mock above */
-async function getMockedReadFile(): Promise<Mock> {
-  const mod = await import("fs/promises");
-  return (mod as unknown as { readFile: Mock }).readFile;
-}
-
 describe("buildBugReport — required sections", () => {
-  beforeEach(async () => {
-    const readFile = await getMockedReadFile();
-    // Default: no config, no error log
-    readFile.mockRejectedValue(new Error("ENOENT: file not found"));
+  beforeEach(() => {
+    mockFiles.clear();
+    // Default: no config, no error log (ENOENT)
+    mockFiles.set("config.json", new Error("ENOENT: file not found"));
+    mockFiles.set("errors.log", new Error("ENOENT: file not found"));
   });
 
   afterEach(() => {
-    vi.resetAllMocks();
+    mockFiles.clear();
   });
 
   it("returns all required sections", async () => {
@@ -76,8 +86,12 @@ describe("buildBugReport — required sections", () => {
 });
 
 describe("buildBugReport — config_redacted does NOT contain authToken", () => {
+  beforeEach(() => {
+    mockFiles.clear();
+  });
+
   afterEach(() => {
-    vi.resetAllMocks();
+    mockFiles.clear();
   });
 
   it("config_redacted excludes ee.authToken and includes cap.monthly_usd", async () => {
@@ -86,12 +100,8 @@ describe("buildBugReport — config_redacted does NOT contain authToken", () => 
       cap: { monthly_usd: 15 },
       router: { confidence_threshold: 0.55 },
     });
-    const readFile = await getMockedReadFile();
-    readFile.mockImplementation((filePath: unknown) => {
-      // Match by filename ending to avoid Windows/Unix path separator issues
-      if (String(filePath).endsWith("config.json")) return Promise.resolve(mockConfig);
-      return Promise.reject(new Error("ENOENT: file not found"));
-    });
+    mockFiles.set("config.json", mockConfig);
+    mockFiles.set("errors.log", new Error("ENOENT: file not found"));
 
     const bundle = await buildBugReport();
 
@@ -109,8 +119,12 @@ describe("buildBugReport — config_redacted does NOT contain authToken", () => 
 });
 
 describe("buildBugReport — error_log_tail scrubs API keys", () => {
+  beforeEach(() => {
+    mockFiles.clear();
+  });
+
   afterEach(() => {
-    vi.resetAllMocks();
+    mockFiles.clear();
   });
 
   it("scrubs sk-ant-* keys from error log lines", async () => {
@@ -119,12 +133,8 @@ describe("buildBugReport — error_log_tail scrubs API keys", () => {
       "2026-04-30T10:01:00Z Normal log line without secrets",
     ].join("\n");
 
-    const readFile = await getMockedReadFile();
-    readFile.mockImplementation((filePath: unknown) => {
-      // Match by filename ending to avoid Windows/Unix path separator issues
-      if (String(filePath).endsWith("errors.log")) return Promise.resolve(errorLogContent);
-      return Promise.reject(new Error("ENOENT: file not found"));
-    });
+    mockFiles.set("errors.log", errorLogContent);
+    mockFiles.set("config.json", new Error("ENOENT: file not found"));
 
     const bundle = await buildBugReport();
 
@@ -144,11 +154,8 @@ describe("buildBugReport — error_log_tail scrubs API keys", () => {
       (_, i) => `2026-04-30T10:00:0${String(i).padStart(2, "0")}Z Log line ${i}`,
     ).join("\n");
 
-    const readFile = await getMockedReadFile();
-    readFile.mockImplementation((filePath: unknown) => {
-      if (String(filePath).endsWith("errors.log")) return Promise.resolve(manyLines);
-      return Promise.reject(new Error("ENOENT: file not found"));
-    });
+    mockFiles.set("errors.log", manyLines);
+    mockFiles.set("config.json", new Error("ENOENT: file not found"));
 
     const bundle = await buildBugReport();
     expect(bundle.error_log_tail.length).toBeLessThanOrEqual(20);
