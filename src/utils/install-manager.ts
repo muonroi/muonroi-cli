@@ -517,11 +517,13 @@ async function fetchReleaseJson(url: string): Promise<GitHubRelease | null> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": "muonroi-cli",
+        ...(token ? { Authorization: `token ${token}` } : {}),
       },
     });
     clearTimeout(timer);
