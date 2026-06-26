@@ -451,6 +451,25 @@ export function rewriteSafetyApprovedToolResults<T extends { role: string; conte
   });
 }
 
+export class SimpleMutex {
+  private queue: Promise<void> = Promise.resolve();
+
+  async run<T>(fn: () => Promise<T> | T): Promise<T> {
+    let resolveLock!: () => void;
+    const lockPromise = new Promise<void>((resolve) => {
+      resolveLock = resolve;
+    });
+    const previous = this.queue;
+    this.queue = lockPromise;
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      resolveLock();
+    }
+  }
+}
+
 import { stripDsmlMarkup } from "./message-processor.js";
 
 // Additional types
@@ -954,6 +973,42 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
           deps.readBudget,
         );
+
+        // Wrap non-read-only tools in a turn-scoped mutex to prevent race conditions during parallel execution.
+        const writeMutex = new SimpleMutex();
+        const READ_ONLY_TOOLS = new Set([
+          "read_file",
+          "grep",
+          "bash_output_get",
+          "process_list",
+          "delegation_read",
+          "delegation_list",
+          "ee_query",
+          "ee_health",
+          "usage_forensics",
+          "lsp_query",
+          "setup_guide",
+          "selfverify_status",
+          "selfverify_result",
+          "selfverify_list",
+          "list_vision_cache",
+        ]);
+
+        for (const name of Object.keys(tools)) {
+          const tool = tools[name];
+          if (
+            tool &&
+            typeof tool.execute === "function" &&
+            !READ_ONLY_TOOLS.has(name) &&
+            !name.startsWith("respond_")
+          ) {
+            const originalExecute = tool.execute;
+            tool.execute = async (input: any, context: any) => {
+              return writeMutex.run(() => originalExecute(input, context));
+            };
+          }
+        }
+
         captureToolSchemas(tools);
         let responseToolCalled = false;
         // A turn must surface exactly ONE final structured answer. Cheap
