@@ -472,6 +472,34 @@ export class SimpleMutex {
 
 import { stripDsmlMarkup } from "./message-processor.js";
 
+/** Tools that produce zero side-effects — safe for Q&A-only (direct-answer) mode. */
+function stripWriteTools(tools: ToolSet): ToolSet {
+  const readonly = new Set([
+    "read_file",
+    "grep",
+    "bash_output_get",
+    "process_list",
+    "delegation_read",
+    "delegation_list",
+    "ee_query",
+    "ee_health",
+    "usage_forensics",
+    "lsp_query",
+    "setup_guide",
+    "selfverify_status",
+    "selfverify_result",
+    "selfverify_list",
+    "list_vision_cache",
+  ]);
+  const result: Record<string, unknown> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    if (readonly.has(name) || name.startsWith("respond_") || name.startsWith("mcp_")) {
+      result[name] = tool;
+    }
+  }
+  return result as ToolSet;
+}
+
 // Additional types
 export interface ToolEngineArgs {
   [key: string]: any;
@@ -843,17 +871,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // history) is preserved.
         const turnCaps = getProviderCapabilities(requireRuntimeProvider(runtime));
         const _priorTurnHadTools = (deps.messages as Array<{ role?: string }>).some((m) => m?.role === "tool");
+        // Direct-answer mode: purely informational Q&A (no code changes).
+        // Strip write tools (bash, edit_file, write_file) AND skip MCP;
+        // only readonly tools remain (read_file, grep, ee_query, etc.).
+        const isDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer === true;
         let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
           ? {}
           : isChitchat && !_priorTurnHadTools
             ? {}
-            : baseToolsRaw;
-        // MCP skip: chitchat / greeting inputs don't need 7 MCP servers'
+            : isDirectAnswer && !_priorTurnHadTools
+              ? stripWriteTools(baseToolsRaw)
+              : baseToolsRaw;
+        // MCP skip: chitchat / direct-answer / greeting inputs don't need 7 MCP servers'
         // worth of tool schemas (~20K input tokens). PIL Layer 1 already
         // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
         if (
           deps.mode === "agent" &&
           (!isChitchat || _priorTurnHadTools) &&
+          !isDirectAnswer &&
           turnCaps.supportsClientTools(runtime.modelInfo)
         ) {
           // Smart MCP filter: drop OPTIONAL MCP servers whose category the

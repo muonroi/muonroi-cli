@@ -128,6 +128,18 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     };
   }
 
+  // Direct-answer mode detection: when the turn is purely informational
+  // (no code changes needed), we can save ~20K MCP schemas + ~1.5K write-tool
+  // schemas per turn by stripping write tools and MCP servers downstream.
+  // Conditions: high-confidence answer request with small/medium complexity.
+  const DA_HIGH_CONF = 0.5; // relaxed from 0.7 — brain-classified deliverable="answer" is already
+  // a strong signal that this is a read-only Q&A. 0.7 threshold would miss
+  // turns where confidence ∈ [0.5, 0.7) but deliverable is clearly an answer
+  // (e.g. single-line Q like "giải thích dòng này" → conf 0.55, right to skip tools).
+  if (ctx.deliverableKind === "answer" && ctx.confidence >= DA_HIGH_CONF && ctx.complexitySize?.size !== "large") {
+    ctx = { ...ctx, directAnswer: true };
+  }
+
   // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
   if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat") {
     const { runDiscovery } = await import("./discovery.js");
