@@ -24,27 +24,38 @@
 
 ### Install
 
-**Recommended — prebuilt standalone binary (zero runtime deps, no prereqs):**
+**Recommended — install globally via NPM (requires Node.js ≥ 20) or Bun (requires Bun ≥ 1.x):**
+
+Using NPM:
+```bash
+npm install -g muonroi-cli
+```
+
+Using Bun:
+```bash
+bun add -g muonroi-cli
+```
+
+Once installed, run:
+```bash
+muonroi-cli
+```
+
+**Alternative — Prebuilt standalone binary (requires access to the GitHub repository):**
 
 Linux / macOS:
 ```bash
+# Note: Requires github authorization if the repository is private
 curl -fsSL https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.sh | bash
 ```
 
 Windows PowerShell:
 ```powershell
+# Note: Requires github authorization if the repository is private
 irm https://raw.githubusercontent.com/muonroi/muonroi-cli/master/install.ps1 | iex
 ```
 
 The installers download a `bun --compile` binary from GitHub Releases — single executable, all native deps bundled, no Node/Bun/build tools required.
-
-**Bun runtime (requires Bun ≥ 1.x):**
-```bash
-bun add -g muonroi-cli
-muonroi-cli
-```
-
-> **⚠ Why no `npm install -g`?** The TUI engine (`@opentui/core`) uses Bun-only `import ... with { type: "file" }` for Tree-sitter syntax highlight queries (`.scm` files). Node ESM cannot load these, so running under bare Node throws `ERR_UNKNOWN_FILE_EXTENSION`. Use the standalone installer (above) or `bun add -g`.
 
 ### First run
 

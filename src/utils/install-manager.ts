@@ -340,20 +340,21 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
   if (latestVersion && normalizedCurrent) {
     hasUpdate = semverGt(latestVersion, normalizedCurrent);
     if (hasUpdate) {
-      statusHeader = `A new version of muonroi-cli is available!\n  Current version: v${normalizedCurrent}\n  Latest version: v${latestVersion}\n\n`;
+      statusHeader = `### 🔄 Update Available\n* **Current Version:** \`v${normalizedCurrent}\`\n* **Latest Version:** \`v${latestVersion}\`\n* **Status:** A new version of \`muonroi-cli\` is available!\n\n`;
+    } else if (semverGt(normalizedCurrent, latestVersion)) {
+      statusHeader = `### 🚀 Ahead of Latest Release\n* **Current Version:** \`v${normalizedCurrent}\`\n* **Latest Version:** \`v${latestVersion}\`\n* **Status:** Your local installation is newer than the remote release tag.\n\n`;
     } else {
-      statusHeader = `You are already up to date!\n  Current version: v${normalizedCurrent}\n  Latest version: v${latestVersion}\n\n`;
+      statusHeader = `### ✅ Up to Date\n* **Current Version:** \`v${normalizedCurrent}\`\n* **Latest Version:** \`v${latestVersion}\`\n* **Status:** You are already up to date!\n\n`;
     }
   } else if (normalizedCurrent) {
-    statusHeader = `Current version: v${normalizedCurrent}\nUnable to check the latest version from GitHub.\n\n`;
+    statusHeader = `### ⚠️ Update Status\n* **Current Version:** \`v${normalizedCurrent}\`\n* **Status:** Unable to check the latest version from GitHub or NPM.\n\n`;
   }
 
   const cmd = getUpdateCommandForMethod(method);
   if (cmd) {
-    const pm = method === "bun-global" ? "bun" : "npm";
     const instruction = hasUpdate
-      ? `To update, run this in a fresh terminal:\n\n  ${cmd}\n\nThen restart muonroi-cli.`
-      : `If you want to reinstall, run this in a fresh terminal:\n\n  ${cmd}`;
+      ? `To update, run this in a fresh terminal:\n\`\`\`bash\n${cmd}\n\`\`\`\nThen restart \`muonroi-cli\`.`
+      : `If you want to reinstall, run this in a fresh terminal:\n\`\`\`bash\n${cmd}\n\`\`\``;
     return {
       success: true,
       output: `${statusHeader}${instruction}`,
@@ -364,8 +365,8 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
     const target = getReleaseTargetForPlatform();
     const asset = target?.assetName ?? "the release asset for your platform";
     const instruction = hasUpdate
-      ? `Download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary, or rebuild from source.`
-      : `If you want to reinstall, download the latest ${asset} from https://github.com/${GITHUB_REPO}/releases/latest and replace the current binary.`;
+      ? `Download the latest \`${asset}\` from [GitHub Releases](https://github.com/${GITHUB_REPO}/releases/latest) and replace the current binary, or rebuild from source.`
+      : `If you want to reinstall, download the latest \`${asset}\` from [GitHub Releases](https://github.com/${GITHUB_REPO}/releases/latest) and replace the current binary.`;
     return {
       success: true,
       output: `${statusHeader}${instruction}`,
@@ -375,8 +376,8 @@ export async function runManagedUpdate(currentVersion: string): Promise<ScriptUp
   if (method === "dev-link") {
     const target = root ?? "the muonroi-cli checkout";
     const instruction = hasUpdate
-      ? `To update, pull the latest changes and rebuild:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`
-      : `To rebuild your local installation:\n\n  git -C "${target}" pull && bun install && bun run build\n\nThen restart muonroi-cli.`;
+      ? `To update, pull the latest changes and rebuild:\n\`\`\`bash\ngit -C "${target}" pull && bun install && bun run build\n\`\`\`\nThen restart \`muonroi-cli\`. (If you also use the compiled muonroi-cli-dev binary, rebuild that separately.)`
+      : `To rebuild your local installation:\n\`\`\`bash\ngit -C "${target}" pull && bun install && bun run build\n\`\`\`\nThen restart \`muonroi-cli\`.`;
     return {
       success: true,
       output: `${statusHeader}${instruction}`,
