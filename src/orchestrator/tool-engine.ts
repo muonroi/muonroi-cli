@@ -1706,6 +1706,36 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
               return withSteers({ messages: attachReminderToMessages(stripped, _pre) });
             }
+            // ---- Read-only tool batching interceptor ----
+            // The system prompt already instructs batching (BATCH ALL TOOL
+            // CALLS — HARD RULE), but models like DeepSeek frequently ignore
+            // it and emit 1 read-only call per step. This injects a concrete,
+            // in-context reminder right before the next LLM call when the
+            // previous step had ≤2 all-read-only tool calls. Cost: ~0 extra
+            // context. Effect: reduces tool rounds 2-3x on the same work.
+            if (sn >= 1) {
+              let _lastAsst: (typeof stepMessages)[0] | null = null;
+              for (let _i = stepMessages.length - 1; _i >= 0; _i--) {
+                if (stepMessages[_i].role === "assistant") {
+                  _lastAsst = stepMessages[_i];
+                  break;
+                }
+              }
+              if (_lastAsst && Array.isArray(_lastAsst.content)) {
+                let _total = 0,
+                  _ro = 0;
+                for (const _p of _lastAsst.content) {
+                  if ((_p as any).type === "tool-call") {
+                    _total++;
+                    if (READ_ONLY_TOOLS.has((_p as any).toolName as string)) _ro++;
+                  }
+                }
+                if (_total > 0 && _ro === _total && _total <= 2) {
+                  const _b = `[Tool batching: you called ${_total} read-only tool(s) last round. Calling them one-at-a-time wastes tokens and delays results. The SDK supports up to ~12 parallel tool calls. In the NEXT response, emit ALL pending read-only calls (read_file, grep, bash_output_get, etc.) in a SINGLE assistant turn — do NOT sequence them across multiple steps.]`;
+                  return withSteers({ messages: attachReminderToMessages(stripped, _b) });
+                }
+              }
+            }
             // Phase 4A — scope reminder injection (REQ-005).
             // Cadence K = 3/5/8 for small/medium/large. Soft-warn fires
             // ONCE per session at floor(ceiling*0.7). Reminder lives in
