@@ -2649,19 +2649,29 @@ export class Agent {
 
     // 1. Run classifier to decide execution route
     let routeAction: import("../pil/llm-classify.js").SubSessionAction = "DIRECT_ANSWER";
-    try {
-      const { classifySubSessionAction } = await import("../pil/llm-classify.js");
-      const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
-      if (routeResult) {
-        routeAction = routeResult.action;
-        logger.info("orchestrator", "Routing action selected for user message", {
-          action: routeAction,
-          confidence: routeResult.confidence,
-          reason: routeResult.reason,
-        });
+    const isMockMode =
+      process.argv.includes("--mock-llm") ||
+      !!(globalThis as any).__muonroiMockModel ||
+      process.env.NODE_ENV === "test";
+    const forceClassify = process.env.MUONROI_FORCE_ROUTING_CLASSIFY === "1";
+
+    if (isMockMode && !forceClassify) {
+      logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
+    } else {
+      try {
+        const { classifySubSessionAction } = await import("../pil/llm-classify.js");
+        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
+        if (routeResult) {
+          routeAction = routeResult.action;
+          logger.info("orchestrator", "Routing action selected for user message", {
+            action: routeAction,
+            confidence: routeResult.confidence,
+            reason: routeResult.reason,
+          });
+        }
+      } catch (err) {
+        logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
       }
-    } catch (err) {
-      logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
     }
 
     const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
