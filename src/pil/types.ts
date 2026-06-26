@@ -103,6 +103,14 @@ export interface PipelineContext {
    */
   deliverableKind?: "answer" | "code" | "report" | null;
   /**
+   * Direct-answer mode: true when deliverableKind === "answer" with high
+   * confidence AND low/medium complexity. Signals the orchestrator to skip
+   * MCP servers and strip write tools (bash, edit_file, write_file, etc.)
+   * because the question is purely informational — no code changes needed.
+   * Saves ~20K MCP schemas + ~1.5K write-tool schemas per turn.
+   */
+  directAnswer?: boolean;
+  /**
    * Diagnostic: when the pipeline returns the fallback context, this records
    * the reason (timeout / schema-reject / exception). Null on the happy path.
    * Helps distinguish "fallback because brain unreachable" from "fallback
