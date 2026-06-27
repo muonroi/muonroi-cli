@@ -490,6 +490,8 @@ function stripWriteTools(tools: ToolSet): ToolSet {
     "selfverify_result",
     "selfverify_list",
     "list_vision_cache",
+    "ee_feedback",
+    "ee_write",
   ]);
   const result: Record<string, unknown> = {};
   for (const [name, tool] of Object.entries(tools)) {
@@ -998,7 +1000,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Apply the top-level cumulative cap once over the fully-assembled
         // raw tool set. State is per-turn; each turn gets a fresh budget.
         const topLevelCap = wrapToolSetWithCap(rawToolSet, {
-          maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds),
+          maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds, contextWindow),
           midTierRatio: 0.5,
           highTierRatio: 0.8,
           label: "top-level",
@@ -1027,6 +1029,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "selfverify_result",
           "selfverify_list",
           "list_vision_cache",
+          "ee_feedback",
+          "ee_write",
         ]);
 
         for (const name of Object.keys(tools)) {
@@ -1227,8 +1231,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // stubs. Symmetric to the B3 sub-agent path; reuses the same module
         // with `label: "top-level"` so the stub text reflects which loop
         // elided the content.
-        const topLevelCompactThreshold = getTopLevelCompactThresholdChars();
-        const topLevelCompactKeepLast = getTopLevelCompactKeepLast();
+        const topLevelCompactThreshold = getTopLevelCompactThresholdChars(contextWindow);
+        const topLevelCompactKeepLast = getTopLevelCompactKeepLast(contextWindow);
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -1671,9 +1675,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             };
             // T1.1 + T1.2 — reasoning models (DeepSeek V4 Flash, R1) emit 2K-5K
             // CoT tokens per turn that accumulate across the multi-step loop.
-            // Strip old reasoning and compact earlier (ratio 0.3 vs 0.5) to
-            // cut ~40-60% of cumulative input tokens.
+            // Strip old reasoning and compact earlier to cut cumulative input.
+            // Small-context reasoning models (< 100K) use ratio 0.2 (fire at
+            // 20% fill) because their per-step overhead (system + tools + CoT)
+            // already consumes ~30-40% of the window, leaving little headroom.
             const isReasoningModel = runtime.modelInfo?.reasoning === true;
+            const reasoningFillRatio = isReasoningModel
+              ? (contextWindowTokens > 0 && contextWindowTokens < 100_000 ? 0.2 : 0.3)
+              : undefined;
             const compacted = compactSubAgentMessages(stripped, {
               thresholdChars: topLevelCompactThreshold,
               // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
@@ -1685,23 +1694,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               label: "top-level",
               envelopeChars,
               contextWindowTokens,
-              contextFillRatio: isReasoningModel ? 0.3 : undefined,
+              contextFillRatio: reasoningFillRatio,
               keepToolIds: keepToolIds.length ? keepToolIds : undefined,
               persistArtifact,
               stripOldReasoning: isReasoningModel,
             });
+
+            const coalesced = coalesceReadOnlyMessages(compacted);
             if (compacted !== stripped) recordCompaction(sn);
             // Pre-compaction visibility: give the agent one step of notice
             // before B4 actually rewrites history into stubs. This is the
             // advance warning that was missing — agent can now decide to
             // summarize, finish, or request preservation. Fires when we did
             // NOT compact this step (compacted === stripped, restored by the
-            // compactSubAgentMessages no-op ref contract) AND the prompt is
-            // approaching the threshold. Must compare CHARS (messages +
-            // envelope), not stripped.length (a message count that never
-            // exceeds a char-scaled threshold) — session 2b7a10219499.
-            const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
-            if (compacted === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
+                      const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
+            if (coalesced === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
               const _cp = buildCheckpointReminder(sn, true);
               const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
               return withSteers({ messages: attachReminderToMessages(stripped, _pre) });
@@ -1796,10 +1803,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   ? `${buildRepetitionReminder(_ceilingSessionId)}\n${_scopePart}`
                   : buildRepetitionReminder(_ceilingSessionId)
                 : _scopePart!;
-              const withReminder = attachReminderToMessages(compacted, _reminder);
+              const withReminder = attachReminderToMessages(coalesced, _reminder);
               return withSteers({ messages: withReminder });
             }
-            if (compacted === stripped && stripped === stepMessages) return withSteers({});
+            if (coalesced === stripped && stripped === stepMessages) return withSteers({});
             // Self-awareness note: tell the model compaction happened so it
             // knows earlier context was elided and can adjust its behavior.
             // Enhanced per EE anti-mù plan (docs/ee-anti-mu-compaction-plan.md Phase 2): include proactive
@@ -1818,9 +1825,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   })()
                 : null;
             if (_compactNote) {
-              return withSteers({ messages: attachReminderToMessages(compacted, _compactNote) });
+              return withSteers({ messages: attachReminderToMessages(coalesced, _compactNote) });
             }
-            return withSteers({ messages: compacted });
+            return withSteers({ messages: coalesced });
           },
           ...(dropParam("temperature") ? {} : { temperature: 0.7 }),
           ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: taskTypeToMaxTokens(pilCtx.taskType) }),
@@ -3753,4 +3760,159 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       deps.emitSubagentStatus(null);
     }
   }
+}
+
+export function coalesceReadOnlyMessages(messages: any[]): any[] {
+  if (!messages || messages.length === 0) return messages;
+
+  const READ_ONLY_TOOLS = new Set([
+    "read_file",
+    "grep",
+    "bash_output_get",
+    "process_list",
+    "delegation_read",
+    "delegation_list",
+    "ee_query",
+    "ee_health",
+    "usage_forensics",
+    "lsp_query",
+    "setup_guide",
+    "selfverify_status",
+    "selfverify_result",
+    "selfverify_list",
+    "list_vision_cache",
+    "ee_feedback",
+    "ee_write",
+  ]);
+
+  const result: any[] = [];
+
+  let lastUserIdx = -1;
+  for (let k = messages.length - 1; k >= 0; k--) {
+    if (messages[k].role === "user") {
+      lastUserIdx = k;
+      break;
+    }
+  }
+
+  if (lastUserIdx === -1) return messages;
+
+  for (let k = 0; k <= lastUserIdx; k++) {
+    result.push(messages[k]);
+  }
+
+  const postUser = messages.slice(lastUserIdx + 1);
+  const groups: Array<{ assistant: any; tool: any }> = [];
+
+  let currentAsst: any = null;
+  for (const msg of postUser) {
+    if (msg.role === "assistant") {
+      if (currentAsst) {
+        groups.push({ assistant: currentAsst, tool: null });
+      }
+      currentAsst = msg;
+    } else if (msg.role === "tool") {
+      if (currentAsst) {
+        groups.push({ assistant: currentAsst, tool: msg });
+        currentAsst = null;
+      } else {
+        result.push(msg);
+      }
+    } else {
+      if (currentAsst) {
+        groups.push({ assistant: currentAsst, tool: null });
+        currentAsst = null;
+      }
+      result.push(msg);
+    }
+  }
+  if (currentAsst) {
+    groups.push({ assistant: currentAsst, tool: null });
+  }
+
+  const coalescedGroups: Array<{ assistant: any; tool: any }> = [];
+
+  for (const group of groups) {
+    const isReadOnly = (() => {
+      if (!group.tool || !group.assistant) return false;
+      const toolCalls = getToolCalls(group.assistant);
+      if (toolCalls.length === 0) return false;
+      return toolCalls.every((tc: any) => {
+        const name = tc.toolName || tc.function?.name;
+        return name && READ_ONLY_TOOLS.has(name);
+      });
+    })();
+
+    if (isReadOnly) {
+      const prev = coalescedGroups[coalescedGroups.length - 1];
+      const prevIsReadOnly = prev && (() => {
+        if (!prev.tool || !prev.assistant) return false;
+        const toolCalls = getToolCalls(prev.assistant);
+        if (toolCalls.length === 0) return false;
+        return toolCalls.every((tc: any) => {
+          const name = tc.toolName || tc.function?.name;
+          return name && READ_ONLY_TOOLS.has(name);
+        });
+      })();
+
+      if (prevIsReadOnly) {
+        prev.assistant = mergeAssistantMessages(prev.assistant, group.assistant);
+        prev.tool = mergeToolMessages(prev.tool, group.tool);
+      } else {
+        coalescedGroups.push({ ...group });
+      }
+    } else {
+      coalescedGroups.push(group);
+    }
+  }
+
+  for (const group of coalescedGroups) {
+    if (group.assistant) result.push(group.assistant);
+    if (group.tool) result.push(group.tool);
+  }
+
+  return result;
+}
+
+function getToolCalls(msg: any): any[] {
+  if (Array.isArray(msg.toolCalls)) return msg.toolCalls;
+  if (Array.isArray(msg.content)) {
+    return msg.content.filter((p: any) => p && p.type === "tool-call");
+  }
+  return [];
+}
+
+function mergeAssistantMessages(msg1: any, msg2: any): any {
+  const parts1 = Array.isArray(msg1.content)
+    ? msg1.content
+    : typeof msg1.content === "string" && msg1.content
+      ? [{ type: "text", text: msg1.content }]
+      : [];
+  const parts2 = Array.isArray(msg2.content)
+    ? msg2.content
+    : typeof msg2.content === "string" && msg2.content
+      ? [{ type: "text", text: msg2.content }]
+      : [];
+
+  const mergedContent = [...parts1, ...parts2];
+
+  const res: any = {
+    role: "assistant",
+    content: mergedContent,
+  };
+
+  if (Array.isArray(msg1.toolCalls) || Array.isArray(msg2.toolCalls)) {
+    res.toolCalls = [...(msg1.toolCalls ?? []), ...(msg2.toolCalls ?? [])];
+  }
+
+  return res;
+}
+
+function mergeToolMessages(msg1: any, msg2: any): any {
+  const parts1 = Array.isArray(msg1.content) ? msg1.content : [];
+  const parts2 = Array.isArray(msg2.content) ? msg2.content : [];
+  return {
+    role: "tool",
+    content: [...parts1, ...parts2],
+  };
 }

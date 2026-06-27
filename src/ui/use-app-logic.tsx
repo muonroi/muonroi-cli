@@ -4526,24 +4526,8 @@ export function useAppLogic(props: AppLogicProps) {
             },
           ]);
           break;
-        case "skills":
-          setMessages((p) => [
-            ...p,
-            {
-              type: "assistant",
-              content: formatSkillsForChat(discoverSkills(agent.getCwd()), agent.getCwd()),
-              timestamp: new Date(),
-            },
-          ]);
-          break;
         case "mcp":
           openMcpModal();
-          break;
-        case "agents":
-          openAgentsModal();
-          break;
-        case "schedule":
-          openScheduleModal();
           break;
         case "review":
           processMessage(REVIEW_PROMPT);
@@ -4557,15 +4541,6 @@ export function useAppLogic(props: AppLogicProps) {
         case "commit-pr":
           processMessage(COMMIT_PR_PROMPT);
           break;
-        case "btw":
-          inputRef.current?.clear();
-          inputRef.current?.insertText("/btw ");
-          try {
-            (inputRef.current as unknown as { focus?: () => void })?.focus?.();
-          } catch {
-            /* opentui versions vary */
-          }
-          break;
         case "council":
           inputRef.current?.clear();
           inputRef.current?.insertText("/council ");
@@ -4575,71 +4550,10 @@ export function useAppLogic(props: AppLogicProps) {
             /* opentui versions vary */
           }
           break;
-        case "debug-on":
-        case "debug-off":
-        case "debug-status":
-        case "debug-last": {
-          const sub = item.id.replace("debug-", "");
-          dispatchSlash("debug", [sub], {
-            cwd: agent.getCwd(),
-            tenantId: "local",
-            defaultProvider: agent.getProviderId(),
-            defaultModel: model,
-            lastPrompt: messages[messages.length - 1]?.content,
-            sessionId: agent.getSessionId() ?? undefined,
-            getLiveEntries: () => messages,
-          }).then((result) => {
-            if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
-          });
-          break;
-        }
-        case "ee-stats":
-        case "ee-gates":
-        case "ee-evolve":
-        case "ee-user": {
-          const sub = item.id.replace("ee-", "");
-          dispatchSlash("ee", [sub], {
-            cwd: agent.getCwd(),
-            tenantId: "local",
-            defaultProvider: agent.getProviderId(),
-            defaultModel: model,
-            lastPrompt: messages[messages.length - 1]?.content,
-            sessionId: agent.getSessionId() ?? undefined,
-            getLiveEntries: () => messages,
-          }).then((result) => {
-            if (result) setMessages((prev) => [...prev, buildAssistantEntry(result)]);
-          });
-          break;
-        }
-        case "ee-search":
-          inputRef.current?.clear();
-          inputRef.current?.insertText("/ee search ");
-          break;
-        case "ee-timeline":
-          inputRef.current?.clear();
-          inputRef.current?.insertText("/ee timeline ");
-          break;
-        case "ee-graph":
-          inputRef.current?.clear();
-          inputRef.current?.insertText("/ee graph ");
-          break;
-        case "ee-route":
-          inputRef.current?.clear();
-          inputRef.current?.insertText("/ee route ");
-          break;
-        case "ee-context-on":
-          handleCommand("/ee-context on");
-          break;
-        case "ee-context-off":
-          handleCommand("/ee-context off");
-          break;
-        case "ee-context-status":
-          handleCommand("/ee-context status");
-          break;
         case "update":
           setIsUpdating(true);
           setUpdateOutput(null);
-          // Always echo into the message log ΓÇö the home-screen `updateOutput`
+          // Always echo into the message log — the home-screen `updateOutput`
           // banner only renders on the splash screen, so an /update run inside an
           // active chat would otherwise produce no visible output at all.
           setMessages((prev) => [...prev, buildAssistantEntry("🔄 Checking for updates...")]);
@@ -4654,19 +4568,8 @@ export function useAppLogic(props: AppLogicProps) {
           agent.clearHistory();
           resetToNewSession();
           break;
-        case "config":
-          setMessages((p) => [
-            ...p,
-            {
-              type: "assistant",
-              content:
-                "To configure providers and council settings, run in a separate terminal:\n\n  muonroi-cli config\n\nThis opens the interactive configuration TUI.",
-              timestamp: new Date(),
-            },
-          ]);
-          break;
-        case "sessions": {
-          // Open the picker (delegates to the same path as typing `/sessions`)
+        case "resume": {
+          // Open the picker (delegates to the same path as typing `/resume`)
           // so the user can pick a session and resume it directly instead of
           // having to remember the id + relaunch by hand.
           try {

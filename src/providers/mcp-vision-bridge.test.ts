@@ -9,24 +9,31 @@ import {
   scrubImagePayloadsInMessages,
 } from "./mcp-vision-bridge.js";
 
-vi.mock("../models/registry.js", () => ({
-  getModelInfo: (id: string) => {
-    if (id.startsWith("deepseek")) return { supportsVision: false };
-    if (id === "claude-sonnet-4-6") return { supportsVision: true };
-    return {};
-  },
-}));
+import * as registry from "../models/registry.js";
+import * as keychain from "./keychain.js";
 
-vi.mock("./keychain.js", () => ({
-  loadKeyForProvider: vi.fn().mockResolvedValue("sk-test-key-12345678901234567890"),
-}));
-
+const realFetch = global.fetch;
 const mockFetch = vi.fn();
-global.fetch = mockFetch as unknown as typeof fetch;
+
+beforeEach(() => {
+  vi.spyOn(keychain, "loadKeyForProvider").mockResolvedValue("sk-test-key-12345678901234567890");
+  vi.spyOn(registry, "getModelInfo").mockImplementation((id: string) => {
+    if (id.startsWith("deepseek")) return { supportsVision: false } as any;
+    if (id === "claude-sonnet-4-6") return { supportsVision: true } as any;
+    return {} as any;
+  });
+  global.fetch = mockFetch as unknown as typeof fetch;
+});
+
+afterEach(() => {
+  global.fetch = realFetch;
+  vi.restoreAllMocks();
+});
 
 describe("bridgeMcpToolResult", () => {
-  beforeEach(() => vi.clearAllMocks());
-  afterEach(() => vi.restoreAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
 
   it("passes through for vision-capable models", async () => {
     const result = await bridgeMcpToolResult(
