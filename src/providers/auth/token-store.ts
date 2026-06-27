@@ -86,11 +86,15 @@ export async function saveTokens(provider: string, tokens: OAuthTokens): Promise
   // accept them. For larger blobs, write to the 0600 file fallback directly.
   if (json.length <= KEYCHAIN_BLOB_LIMIT_BYTES) {
     const kt = await loadKeytar();
+    console.log("saveTokens loadKeytar result:", kt);
     if (kt) {
       try {
+        console.log("saveTokens calling kt.setPassword...", !!kt.setPassword);
         await kt.setPassword(KEYCHAIN_SERVICE, oauthAccount(provider), json);
+        console.log("saveTokens success");
         return;
-      } catch {
+      } catch (err) {
+        console.error("saveTokens error", err);
         // fall through to file
       }
     }

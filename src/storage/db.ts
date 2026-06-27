@@ -26,7 +26,8 @@ let db: SQLiteDatabase | null = null;
 const requireSync = createRequire(import.meta.url);
 
 export function getDatabasePath(): string {
-  const dir = path.join(os.homedir(), ".muonroi-cli");
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
+  const dir = path.join(home, ".muonroi-cli");
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return path.join(dir, "muonroi.db");
 }

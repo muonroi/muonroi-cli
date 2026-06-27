@@ -91,6 +91,10 @@ let _loadAttempted = false;
  * Returns the absolute path if the file is accessible, null otherwise.
  */
 async function resolveCorePath(): Promise<string | null> {
+  if (process.env.MUONROI_TEST_EE_CORE_PATH) {
+    if (process.env.MUONROI_TEST_EE_CORE_PATH === "null") return null;
+    return process.env.MUONROI_TEST_EE_CORE_PATH;
+  }
   const installed = path.join(os.homedir(), ".experience", "experience-core.js");
   try {
     await fs.access(installed);

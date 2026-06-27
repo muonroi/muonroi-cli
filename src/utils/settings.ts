@@ -325,8 +325,9 @@ export interface ProjectSettings {
   lsp?: LspSettings;
 }
 
-const USER_DIR = path.join(os.homedir(), ".muonroi-cli");
-const USER_SETTINGS_PATH = path.join(USER_DIR, "user-settings.json");
+function getUserSettingsPath(): string {
+  return path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
+}
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -438,7 +439,7 @@ export function ensureFootprintGitignored(cwd: string = process.cwd()): void {
 }
 
 export function loadUserSettings(): UserSettings {
-  return readJson<UserSettings>(USER_SETTINGS_PATH) || {};
+  return readJson<UserSettings>(getUserSettingsPath()) || {};
 }
 
 export function saveUserSettings(partial: Partial<UserSettings>): void {
@@ -511,7 +512,7 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
       : {}),
   };
 
-  writeJson(USER_SETTINGS_PATH, next);
+  writeJson(getUserSettingsPath(), next);
 }
 
 export function loadProjectSettings(): ProjectSettings {
@@ -1022,15 +1023,20 @@ export function getSubAgentCompactKeepLast(): number {
  * top-level loops typically carry more useful early context.
  * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
  */
-export function getTopLevelCompactThresholdChars(): number {
+export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 10_000 && n <= 1_500_000) return Math.floor(n);
   }
-  // Reverted to 200_000 per user request — top-level tools typically carry
-  // more useful early context than sub-agents; aggressive compaction was
-  // collapsing valuable trace information too early.
+  // For small-context models (e.g. DeepSeek 64K), scale threshold proportionally
+  // to prevent linear token growth during tool loops. A model with 64K context
+  // gets threshold = 64000 * 4 * 0.35 = 89,600 chars (~22K tokens = 35% of window).
+  // Large-context models (128K+) keep the original 200K default.
+  if (contextWindowTokens && contextWindowTokens > 0) {
+    const dynamicThreshold = Math.floor(contextWindowTokens * 4 * 0.35);
+    return Math.min(200_000, dynamicThreshold);
+  }
   return 200_000;
 }
 
@@ -1040,14 +1046,18 @@ export function getTopLevelCompactThresholdChars(): number {
  * decisions across longer horizons.
  * Env override: MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST.
  */
-export function getTopLevelCompactKeepLast(): number {
+export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST;
   if (envRaw) {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
   }
-  // Reverted to 5 — top-level agents make decisions across longer horizons
-  // than sub-agents; keeping more trailing turns preserves decision trace.
+  // Small-context models (< 100K tokens) benefit from keeping fewer trailing
+  // turns — each verbatim turn with tool results + reasoning tokens costs
+  // 5-15K tokens. Reduce from 5 to 3 for small windows.
+  if (contextWindowTokens && contextWindowTokens < 100_000) {
+    return 3;
+  }
   return 5;
 }
 
@@ -1057,7 +1067,7 @@ export function getTopLevelCompactKeepLast(): number {
  * higher default so single-tool turns are unaffected. Env override:
  * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
  */
-export function getTopLevelToolBudgetChars(maxRounds?: number): number {
+export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
@@ -1069,7 +1079,15 @@ export function getTopLevelToolBudgetChars(maxRounds?: number): number {
   // Dynamically scale default based on maxRounds relative to default base (40)
   const baseRounds = 40;
   const scale = maxRounds && maxRounds > baseRounds ? maxRounds / baseRounds : 1;
-  return Math.floor(400_000 * scale);
+  const baseDefault = Math.floor(400_000 * scale);
+  // For small-context models (e.g. DeepSeek 64K), scale the budget to 60% of
+  // the context window in chars so tiered compression kicks in before the
+  // cumulative tool output exceeds what the model can hold in context.
+  if (contextWindowTokens && contextWindowTokens > 0 && contextWindowTokens < 200_000) {
+    const windowBudget = Math.floor(contextWindowTokens * 4 * 0.6);
+    return Math.min(baseDefault, Math.max(50_000, windowBudget));
+  }
+  return baseDefault;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {

@@ -641,10 +641,10 @@ export class MessageProcessor {
     }
     deps.setPilActive(pilCtx.taskType !== null);
     deps.setPilEnrichmentDelta(
-      pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4),
+      pilCtx.metrics?.suffixInstructionTokens ?? Math.round(((enrichedMessage ?? "").length - userMessage.length) / 4),
     );
     const _pilEnrichmentDeltaSnapshot =
-      pilCtx.metrics?.suffixInstructionTokens ?? Math.round((enrichedMessage.length - userMessage.length) / 4);
+      pilCtx.metrics?.suffixInstructionTokens ?? Math.round(((enrichedMessage ?? "").length - userMessage.length) / 4);
 
     // P1 Item 3 wiring: phase-boundary detection. setPhase returns a snapshot
     // of the prior phase iff the phase NAME just changed. We classify the

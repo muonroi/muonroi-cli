@@ -67,6 +67,7 @@ export interface ExportOptions {
   dryRun?: boolean;
   /** Minimum messages per session to bother emitting (default 4 — skip noise). */
   minMessages?: number;
+  dbOverride?: any;
 }
 
 export interface ExportResult {
@@ -82,12 +83,7 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
   const minMessages = opts.minMessages ?? 4;
   const dryRun = opts.dryRun ?? false;
 
-  const dbPath = path.join(os.homedir(), ".muonroi-cli", "muonroi.db");
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`muonroi.db not found at ${dbPath}`);
-  }
-
-  const db = await openDb(dbPath);
+  const db = opts.dbOverride ?? getDatabase();
   try {
     const cutoff = Date.now() - maxAgeDays * 86400_000;
     const cutoffIso = new Date(cutoff).toISOString();
