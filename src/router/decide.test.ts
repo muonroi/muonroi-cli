@@ -16,33 +16,17 @@ vi.mock("../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
 }));
 
-vi.mock("../models/catalog-client.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../models/catalog-client.js")>();
-  return {
-    ...original,
-    fetchCatalog: async () => {
-      const fs = await import("node:fs");
-      const path = await import("node:path");
-      const raw = fs.readFileSync(path.resolve(process.cwd(), "src/models/catalog.json"), "utf8");
-      const data = JSON.parse(raw);
-      return data.models;
-    },
-  };
-});
+globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
 
-let disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
-
-vi.mock("../utils/settings.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../utils/settings.js")>();
-  return {
-    ...original,
-    isProviderDisabled: (provider: string) => {
-      const res = disabledProvidersList.includes(provider);
-      console.log(`[MOCK] isProviderDisabled("${provider}") => ${res}`);
-      return res;
-    },
-  };
-});
+vi.mock("../utils/settings.js", () => ({
+  getRoleModel: () => undefined,
+  getDefaultProvider: () => "anthropic",
+  isCouncilMultiProviderPreferred: () => false,
+  isProviderDisabled: (provider: string) => {
+    const res = globalThis.disabledProvidersList.includes(provider);
+    return res;
+  },
+}));
 
 let BASE_OPTS: DecideOpts;
 
@@ -50,6 +34,13 @@ describe("decide()", () => {
   let stub: StubHandle;
 
   beforeAll(async () => {
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if (url.toString().includes("catalog.muonroi.com")) {
+        throw new Error("Network unreachable");
+      }
+      return originalFetch(url, init);
+    });
     await loadCatalog();
     const _models = getTestModels();
     const _providers = getTestProviders();
@@ -80,11 +71,12 @@ describe("decide()", () => {
   });
 
   afterAll(async () => {
-    await stub.stop();
+    await stub?.stop();
   });
 
   beforeEach(() => {
-    disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
+    vi.clearAllMocks();
+    globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
     routerStore.setState({
       tier: "hot",
       degraded: false,
@@ -133,11 +125,11 @@ describe("decide()", () => {
   });
 
   it("returns fallback when both warm and cold are unreachable", async () => {
+    globalThis.disabledProvidersList = [];
     // Stub with no handlers -> both return 500 -> null
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
 
-    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
@@ -151,11 +143,11 @@ describe("decide()", () => {
   });
 
   it("returns degraded tier in fallback when store.degraded is true", async () => {
+    globalThis.disabledProvidersList = [];
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
     routerStore.setState({ degraded: true });
 
-    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
@@ -204,9 +196,10 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
 
     const settingsMod = await import("../utils/settings.js");
     vi.spyOn(settingsMod, "isProviderDisabled").mockImplementation((p) => p === "anthropic");
+    vi.spyOn(settingsMod, "getDefaultProvider").mockImplementation(() => "google");
 
-    const fallbackModel = getTestModels().fast;
-    const fallbackProvider = getTestProviders().default;
+    const fallbackModel = "gemini-1.5-flash"; // A fast google model
+    const fallbackProvider = "google";
 
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",

@@ -1,12 +1,6 @@
-import * as fs from "fs";
+import fs from "fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger, redactObject, redactSecrets } from "../logger.js";
-
-vi.mock("fs", () => ({
-  appendFileSync: vi.fn(),
-  existsSync: vi.fn(() => true),
-  mkdirSync: vi.fn(),
-}));
 
 function setTuiActive(active: boolean) {
   (globalThis as Record<string, unknown>).__muonroiTuiActive = active;
@@ -25,14 +19,14 @@ describe("logger utility", () => {
     logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    vi.mocked(fs.appendFileSync).mockClear();
-    vi.mocked(fs.existsSync).mockClear();
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.mkdirSync).mockClear();
+    vi.spyOn(fs, "appendFileSync").mockImplementation(() => undefined);
+    vi.spyOn(fs, "existsSync").mockReturnValue(true);
+    vi.spyOn(fs, "mkdirSync").mockImplementation(() => undefined);
     clearTuiActive();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     logSpy.mockRestore();
     warnSpy.mockRestore();
     errorSpy.mockRestore();
@@ -120,8 +114,8 @@ describe("logger utility", () => {
       expect(logSpy).not.toHaveBeenCalled();
       expect(fs.appendFileSync).toHaveBeenCalledTimes(1);
 
-      const filePath = vi.mocked(fs.appendFileSync).mock.calls[0][0] as string;
-      const logContent = vi.mocked(fs.appendFileSync).mock.calls[0][1] as string;
+      const filePath = (fs.appendFileSync as any).mock.calls[0][0] as string;
+      const logContent = (fs.appendFileSync as any).mock.calls[0][1] as string;
 
       expect(filePath).toContain("debug.log");
       expect(logContent).toContain("[INFO]");
