@@ -27,6 +27,7 @@ import path from "node:path";
 import type { ModelMessage } from "ai";
 
 function experienceRoot(): string {
+  if (process.env.MUONROI_EXPERIENCE_ROOT_OVERRIDE) return process.env.MUONROI_EXPERIENCE_ROOT_OVERRIDE;
   return path.join(os.homedir(), ".experience");
 }
 function emitRoot(): string {

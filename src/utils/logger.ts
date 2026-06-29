@@ -1,18 +1,10 @@
-import * as fs from "fs";
-import * as path from "path";
+import fs from "fs";
 import * as os from "os";
+import * as path from "path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
-export type LogNamespace =
-  | "cli"
-  | "ui"
-  | "orchestrator"
-  | "storage"
-  | "ee"
-  | "mcp"
-  | "pil"
-  | "router";
+export type LogNamespace = "cli" | "ui" | "orchestrator" | "storage" | "ee" | "mcp" | "pil" | "router";
 
 export interface LogContext {
   elapsedMs?: number;
