@@ -305,6 +305,7 @@ describe("Layer 1 unified path", () => {
     });
     expect(result.taskType).toBe("debug");
     expect(result.outputStyle).toBe("balanced");
+    expect(result.gsdPhase).toBe("execute");
     expect(result._brainData?.t0_principles).toHaveLength(1);
     expect(result._brainData?.t1_rules).toEqual(["r1"]);
     expect(result.layers[0].delta).toContain("unified=ok");

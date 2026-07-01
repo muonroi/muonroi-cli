@@ -61,6 +61,9 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { isGsdNativeEnabled } from "../gsd/flags.js";
+import { getGsdLoopHost } from "../gsd/loop-host.js";
+import { syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -629,6 +632,21 @@ export class MessageProcessor {
       yield res.value as StreamChunk;
     }
     const { pilCtx, _stepCeiling, _pilStart, _naturalCeiling, _ceilingTaskType, _ceilingSize } = prepResult!;
+
+    if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
+      try {
+        const depth =
+          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
+          (pilCtx as { complexityTier?: string }).complexityTier ??
+          "standard";
+        const cwd = deps.bash.getCwd();
+        const sessionModel = deps.session?.model ?? "unknown";
+        getGsdLoopHost().ensureHost(cwd, sessionModel);
+        syncWorkflowContext(cwd, sessionModel, depth);
+      } catch (err) {
+        console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
+      }
+    }
 
     // Track whether forced-finalize is needed (set by stopWhen when the
     // ceiling fires). Read AFTER the streamText fullStream finishes.

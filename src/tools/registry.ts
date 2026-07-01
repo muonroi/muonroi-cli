@@ -7,6 +7,7 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
@@ -35,6 +36,8 @@ interface ToolRegistryOpts {
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
+  /** L1 model depth tier — gates gsd_plan_review registration. */
+  depthTier?: "quick" | "standard" | "heavy";
   consultParentSession?: (question: string) => Promise<string>;
   /**
    * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
@@ -497,6 +500,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["file_path", "content"],
       }),
       execute: async (input: any) => {
+        if (!input?.file_path?.trim() || input.content === undefined || input.content === null) {
+          return {
+            success: false,
+            output:
+              'BLOCKED (empty-write_file): write_file requires non-empty "file_path" and "content". ' +
+              'Example: {"file_path":"src/foo.ts","content":"export const x = 1;\\n"}',
+          };
+        }
         const result = await writeFile(input.file_path, input.content, bash.getCwd(), fileTracker);
         return {
           success: result.success,
@@ -521,6 +532,20 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["file_path", "old_string", "new_string"],
       }),
       execute: async (input: any) => {
+        if (
+          !input?.file_path?.trim() ||
+          input.old_string === undefined ||
+          input.old_string === null ||
+          input.new_string === undefined ||
+          input.new_string === null
+        ) {
+          return {
+            success: false,
+            output:
+              "BLOCKED (empty-edit_file): edit_file requires file_path, old_string, and new_string. " +
+              'Example: {"file_path":"src/foo.ts","old_string":"a","new_string":"b"}',
+          };
+        }
         const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd(), fileTracker);
         return {
           success: result.success,
@@ -1080,6 +1105,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // and a seed-time bug once persisted a crashing vitest-worker command). The
     // muonroi-tools MCP server stays only for EXTERNAL agents. See native-tools.ts.
     registerNativeMuonroiTools(tools, { cwd: bash.getCwd() });
+    registerGsdWorkflowTools(tools, {
+      cwd: bash.getCwd(),
+      sessionModelId: opts?.modelId ?? "unknown",
+      sessionId: opts?.sessionId,
+      depth: opts?.depthTier ?? "standard",
+      runTask: opts?.runTask,
+    });
   }
 
   // Vision proxy tools — only for text-only models (DeepSeek, etc.)

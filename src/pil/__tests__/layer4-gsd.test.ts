@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
@@ -26,7 +26,35 @@ function makeCtx(overrides: Partial<PipelineContext> = {}): PipelineContext {
   };
 }
 
+describe("layer4Gsd (native)", () => {
+  it("injects short native hint by default (native on)", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "heavy" }));
+      expect(result.enriched).toContain("[gsd-native]");
+      expect(result.enriched).toContain("gsd_plan_review");
+      expect(result.enriched.length).toBeLessThan(800);
+      const layer = result.layers.find((l) => l.name === "gsd-workflow-structuring");
+      expect(layer!.delta).toContain("native=true");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+});
+
 describe("layer4Gsd (playbook)", () => {
+  const prevNative = process.env.MUONROI_GSD_NATIVE;
+
+  beforeEach(() => {
+    process.env.MUONROI_GSD_NATIVE = "0";
+  });
+
+  afterEach(() => {
+    if (prevNative === undefined) delete process.env.MUONROI_GSD_NATIVE;
+    else process.env.MUONROI_GSD_NATIVE = prevNative;
+  });
   it("skips directive injection when intentKind === 'chitchat'", async () => {
     const before = "hello";
     const result = await layer4Gsd(makeCtx({ raw: before, enriched: before, intentKind: "chitchat" }));
