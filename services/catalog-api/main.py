@@ -152,16 +152,6 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     # DeepSeek native (api.deepseek.com) — verified 2026-06
     "deepseek-v4-flash": {"input": 0.27, "output": 1.1, "cachedInput": 0.027, "cacheWrite": None},
     "deepseek-v4-pro": {"input": 0.55, "output": 2.19, "cachedInput": 0.055, "cacheWrite": None},
-    # Google / Agy OAuth — sourced from Cloud Code pricing page
-    "gemini-3.5-flash-high": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.5-flash-medium": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.5-flash-low": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.1-pro-high": {"input": 2.0, "output": 12.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.1-pro-low": {"input": 2.0, "output": 12.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3-flash": {"input": 0.3, "output": 2.0, "cachedInput": None, "cacheWrite": None},
-    "claude-sonnet-4.6-thinking": {"input": 3.0, "output": 15.0, "cachedInput": None, "cacheWrite": None},
-    "claude-opus-4.6-thinking": {"input": 15.0, "output": 75.0, "cachedInput": None, "cacheWrite": None},
-    "gpt-oss-120b-medium": {"input": 0.2, "output": 0.8, "cachedInput": None, "cacheWrite": None},
     # xAI (Grok)
     "grok-4.3": {"input": 1.25, "output": 2.5, "cachedInput": None, "cacheWrite": None},
     "grok-build-0.1": {"input": 1.0, "output": 2.0, "cachedInput": None, "cacheWrite": None},
@@ -206,59 +196,6 @@ def _get_api_key(name: str) -> str | None:
         if val:
             return val
     return None
-
-
-async def _fetch_siliconflow_pricing(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
-    """Fetch model pricing from SiliconFlow API.
-
-    Response: { data: [ { id, input_price_per_million, output_price_per_million,
-                         cached_input_price_per_million, context_window, ... } ] }
-    """
-    result: dict[str, dict[str, Any]] = {}
-    key = _get_api_key("SILICONFLOW_API_KEY")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-
-    try:
-        resp = await client.get(
-            "https://api.siliconflow.com/v1/models",
-            headers=headers,
-            timeout=httpx.Timeout(8.0),
-        )
-        if not resp.is_success:
-            print(f"  [SF] API returned {resp.status_code} — skipping live fetch", flush=True)
-            return result
-
-        body = resp.json()
-        models = body.get("data") or []
-        for raw in models:
-            mid = raw.get("id")
-            if not mid:
-                continue
-            inp = raw.get("input_price_per_million")
-            if inp is None:
-                continue  # no pricing data for this model
-
-            override: dict[str, Any] = {
-                "input_price_per_million": float(inp),
-                "output_price_per_million": float(raw.get("output_price_per_million", 0)),
-            }
-            ctx = raw.get("context_window")
-            if ctx is not None:
-                override["context_window"] = int(ctx)
-            cached = raw.get("cached_input_price_per_million")
-            if cached is not None:
-                override["cached_input_price_per_million"] = float(cached)
-            result[mid] = override
-
-        print(f"  [SF] Fetched {len(result)} models with pricing", flush=True)
-    except httpx.TimeoutException:
-        print("  [SF] Request timed out — skipping", flush=True)
-    except Exception as exc:
-        print(f"  [SF] Fetch failed: {exc}", flush=True)
-
-    return result
 
 
 async def _fetch_deepseek_pricing(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
@@ -311,20 +248,12 @@ async def refresh_pricing() -> dict:
         print("[pricing] Refreshing live pricing...", flush=True)
 
         async with httpx.AsyncClient() as client:
-            sf_pricing = await _fetch_siliconflow_pricing(client)
-            await _fetch_deepseek_pricing(client)  # just validates, no pricing returned
+            await _fetch_deepseek_pricing(client)  # validates model list; pricing from KNOWN_PRICING
 
-        # Start with live SF pricing
         new_pricing: dict[str, dict[str, Any]] = {}
         changes: list[str] = []
 
-        for mid, override in sf_pricing.items():
-            new_pricing[mid] = dict(override)
-
-        # Apply known pricing as fallback for models NOT covered by live API
         for mid, p in KNOWN_PRICING.items():
-            if mid in new_pricing:
-                continue  # already covered by live API
             override: dict[str, Any] = {
                 "input_price_per_million": p["input"],
                 "output_price_per_million": p["output"],

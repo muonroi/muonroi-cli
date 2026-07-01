@@ -5,6 +5,7 @@ import {
   getModelByTier,
   getModelIds,
   getModelInfo,
+  getModelsForProvider,
   getSupportedReasoningEfforts,
   loadCatalog,
   MODELS,
@@ -120,12 +121,10 @@ describe("tier_routing catalog flag", () => {
     expect(resolveModelForTask("verify", "zai", "glm-5.2", lookup, { parentTier: "premium" })).toBe("glm-5.2");
   });
 
-  test("siliconflow and google models are excluded from tier routing (explicit -m only)", () => {
-    expect(getModelByTier("fast", "siliconflow")).toBeUndefined();
-    expect(getModelByTier("balanced", "siliconflow")).toBeUndefined();
-    expect(getModelByTier("premium", "siliconflow")).toBeUndefined();
-    expect(getModelByTier("fast", "google")).toBeUndefined();
-    expect(getModelInfo("deepseek-ai/DeepSeek-V4-Flash")?.tierRouting).toBe(false);
-    expect(getModelInfo("gemini-3-flash")?.tierRouting).toBe(false);
+  test("siliconflow and google models are absent from catalog", () => {
+    expect(getModelsForProvider("siliconflow")).toHaveLength(0);
+    expect(getModelsForProvider("google")).toHaveLength(0);
+    expect(getModelInfo("deepseek-ai/DeepSeek-V4-Flash")).toBeUndefined();
+    expect(getModelInfo("gemini-3-flash")).toBeUndefined();
   });
 });

@@ -151,7 +151,7 @@ describe.skipIf(!HAS_EE_DESIGN)("init-new EE-driven design preview", () => {
       port = mock.port;
 
       const ctx = await spawnHarness({
-        extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+        extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-v4-flash"],
         env: {
           SILICONFLOW_API_KEY: MOCK_KEY,
           MUONROI_EE_BASE_URL: `http://127.0.0.1:${port}`,
@@ -270,7 +270,7 @@ describe.skipIf(!HAS_EE_DESIGN)("init-new EE-driven design preview", () => {
 
     beforeAll(async () => {
       const ctx = await spawnHarness({
-        extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+        extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-v4-flash"],
         env: {
           SILICONFLOW_API_KEY: MOCK_KEY,
           // Port 1 is reserved + unbound — fetch → ECONNREFUSED instantly.

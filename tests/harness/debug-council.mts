@@ -15,7 +15,7 @@ spawnEnv.SILICONFLOW_API_KEY = MOCK_KEY;
 
 const proc: ChildProcess = spawn(
   "bun",
-  ["run", entry, "--agent-mode", "--mock-llm", fixturesDir, "-k", MOCK_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+  ["run", entry, "--agent-mode", "--mock-llm", fixturesDir, "-k", MOCK_KEY, "-m", "deepseek-v4-flash"],
   { stdio: ["pipe", "pipe", "pipe", "pipe", "pipe"], env: spawnEnv },
 );
 

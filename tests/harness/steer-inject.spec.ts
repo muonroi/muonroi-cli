@@ -32,7 +32,7 @@ describe("live-queue steering — mid-turn injection", () => {
   let h: CostLeakHarness;
 
   beforeAll(async () => {
-    h = await spawnCostLeakHarness(FIXTURE, { modelId: "deepseek-ai/DeepSeek-V4-Flash" });
+    h = await spawnCostLeakHarness(FIXTURE, { modelId: "deepseek-v4-flash" });
   }, 120_000);
 
   afterAll(() => {

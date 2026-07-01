@@ -25,7 +25,7 @@ describe("ideal E2E", () => {
     // instant, so product_status_card emits in <1s, deterministically.
     greenfield = mkdtempSync(join(tmpdir(), "muonroi-ideal-e2e-"));
     const ctx = await spawnHarness({
-      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-v4-flash"],
       env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
       cwd: greenfield,
     });

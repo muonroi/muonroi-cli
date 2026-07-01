@@ -32,8 +32,8 @@ import { spawnHarness } from "./helpers.js";
 function writeDeepSeekFixture(dir: string): void {
   const fixture = {
     model: {
-      provider: "siliconflow",
-      modelId: "deepseek-ai/DeepSeek-V4-Flash",
+      provider: "deepseek",
+      modelId: "deepseek-v4-flash",
       stream: [
         { type: "stream-start", warnings: [] },
         { type: "text-start", id: "t1" },
@@ -75,7 +75,7 @@ describe("C1 TUI: DeepSeek cache field split (promptCacheHitTokens -> cacheReadT
     writeDeepSeekFixture(fixDir);
 
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash", "--mock-llm", fixDir],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash", "--mock-llm", fixDir],
       env: {
         MUONROI_NO_SHELL_HOLD: "1",
       },

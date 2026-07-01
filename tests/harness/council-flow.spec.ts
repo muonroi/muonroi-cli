@@ -28,7 +28,7 @@ describe("council flow E2E", () => {
     // app.tsx deterministically rather than racing the old 30s timeout.
     greenfield = mkdtempSync(join(tmpdir(), "muonroi-council-e2e-"));
     const ctx = await spawnHarness({
-      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-v4-flash"],
       // loadKeyForProvider reads SILICONFLOW_API_KEY (>= 20 chars) to decide if
       // the provider is reachable. Without it, resolveParticipants returns [] and
       // runCouncil exits early before emitting any council_phase chunks.

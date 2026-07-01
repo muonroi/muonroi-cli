@@ -20,7 +20,7 @@ describe("subagents modal E2E", () => {
 
   beforeAll(async () => {
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash"],
     });
     proc = ctx.proc;
     driver = ctx.driver;

@@ -86,8 +86,10 @@ describe("detectProviderForModel", () => {
   test("detects deepseek via catalog", () => expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
   test("prefix fallback for unknown deepseek id", () =>
     expect(detectProviderForModel("deepseek-future-x")).toBe("deepseek"));
-  test("detects siliconflow via catalog", () =>
-    expect(detectProviderForModel("deepseek-ai/DeepSeek-V4-Pro")).toBe("siliconflow"));
+  test("detects siliconflow via prefix fallback for qwen ids", () =>
+    expect(detectProviderForModel("Qwen/Qwen3-8B")).toBe("siliconflow"));
+  test("deepseek-ai ids resolve to deepseek via prefix when absent from catalog", () =>
+    expect(detectProviderForModel("deepseek-ai/DeepSeek-V4-Pro")).toBe("deepseek"));
   test("detects xai via prefix fallback", () => expect(detectProviderForModel("grok-3")).toBe("xai"));
   test("throws for unknown model with no prefix match", () =>
     expect(() => detectProviderForModel("unknown-model")).toThrow("not in catalog and no prefix match"));

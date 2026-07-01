@@ -156,8 +156,8 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       process.env.MUONROI_CROSS_TURN_DEDUP = "0";
 
       handle = await spawnCostLeakHarness({
-        provider: "siliconflow",
-        modelId: "deepseek-ai/DeepSeek-V4-Flash",
+        provider: "deepseek",
+        modelId: "deepseek-v4-flash",
         // PIL Layer 1 classifier does NOT fire a streamText round in this
         // harness (unified-brain flag default OFF + EE bridge uses /api/classify
         // outside the mock model). Empirically the very first round in the

@@ -91,8 +91,8 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST = "1";
 
     handle = await spawnCostLeakHarness({
-      provider: "siliconflow",
-      modelId: "deepseek-ai/DeepSeek-V4-Flash",
+      provider: "deepseek",
+      modelId: "deepseek-v4-flash",
       stream: [
         // Top-level: dispatch to sub-agent.
         buildToolCallRound("task-1", "task", {
