@@ -28,6 +28,23 @@ import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
 
+export type PeakHourMode = "downgrade" | "switch";
+
+export interface PeakHourPolicy {
+  /** Default true — peak-hour routing active. */
+  enabled?: boolean;
+  /**
+   * downgrade: same-provider only (glm-5.2→glm-4.7, v4-pro→v4-flash).
+   * switch: try alternate enabled provider fast/balanced model first.
+   * Default: switch.
+   */
+  mode?: PeakHourMode;
+  /** Inclusive UTC+8 start hour. Z.ai docs: 14. Default 14. */
+  startHourUtc8?: number;
+  /** Exclusive UTC+8 end hour. Z.ai docs: 18. Default 18. */
+  endHourUtc8?: number;
+}
+
 export function getCatalogDefaultModel(): string {
   const provider = getDefaultProvider();
   if (provider) {
@@ -290,6 +307,11 @@ export interface UserSettings {
     /** Switch back to premium for final synthesis. Default: false. */
     premiumSynthesis?: boolean;
   };
+  /**
+   * Peak-hour routing for Z.ai (14:00–18:00 UTC+8 per docs) and DeepSeek
+   * (pro→flash downgrade in the same window to ease concurrency pressure).
+   */
+  peakHourPolicy?: PeakHourPolicy;
   /**
    * Reporter auto-fire settings (B2).
    * Controls whether the reporter posts to Discord automatically on sprint
@@ -1174,6 +1196,26 @@ export function isCouncilMultiProviderPreferred(): boolean {
 
 export function getCouncilExperienceMode(): CouncilExperienceMode {
   return loadUserSettings().councilExperienceMode ?? "advisory";
+}
+
+export function normalizePeakHourPolicy(raw: unknown): PeakHourPolicy {
+  if (!raw || typeof raw !== "object") {
+    return { enabled: true, mode: "switch", startHourUtc8: 14, endHourUtc8: 18 };
+  }
+  const p = raw as PeakHourPolicy;
+  const enabled = p.enabled !== false;
+  const mode: PeakHourMode = p.mode === "downgrade" ? "downgrade" : "switch";
+  const start =
+    typeof p.startHourUtc8 === "number" && p.startHourUtc8 >= 0 && p.startHourUtc8 <= 23
+      ? Math.floor(p.startHourUtc8)
+      : 14;
+  const end =
+    typeof p.endHourUtc8 === "number" && p.endHourUtc8 >= 1 && p.endHourUtc8 <= 24 ? Math.floor(p.endHourUtc8) : 18;
+  return { enabled, mode, startHourUtc8: start, endHourUtc8: end };
+}
+
+export function getPeakHourPolicy(): PeakHourPolicy {
+  return normalizePeakHourPolicy(loadUserSettings().peakHourPolicy);
 }
 
 export function isCouncilCostAware(): boolean {
