@@ -136,6 +136,11 @@ async function isProviderReachable(provider: ProviderId): Promise<boolean> {
   return configured.includes(provider);
 }
 
+/** Plan-council leader — always premium-tier within session provider (telemetry: plan-council). */
+export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<LeaderResolution> {
+  return resolveLeaderModelDetailed(sessionModelId);
+}
+
 export async function resolveLeaderModelDetailed(sessionModelId: string): Promise<LeaderResolution> {
   const sessionProviderId = detectProviderForModel(sessionModelId);
   const configured = getRoleModel("leader");

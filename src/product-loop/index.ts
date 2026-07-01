@@ -232,6 +232,22 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     createdAt: new Date(),
   });
 
+  if (opts.cwd) {
+    try {
+      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
+      if (isGsdNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+        ensureProductPlanningWorkspace(opts.cwd, {
+          idea,
+          sessionModelId: opts.sessionModelId,
+          runId,
+        });
+      }
+    } catch (err) {
+      console.error(`[ideal/hot-path] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+    }
+  }
+
   yield {
     type: "content",
     content: "\n> hot-path: complexity=low → single sprint, no council debate\n",
@@ -669,6 +685,22 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     stack: flags.stack,
     createdAt: new Date(),
   });
+
+  if (opts.cwd) {
+    try {
+      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
+      if (isGsdNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+        ensureProductPlanningWorkspace(opts.cwd, {
+          idea,
+          sessionModelId: opts.sessionModelId,
+          runId,
+        });
+      }
+    } catch (err) {
+      console.error(`[ideal] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+    }
+  }
 
   // Surface a cost-vs-cap preview before the loop kicks off so $50 isn't
   // an arbitrary number — show predicted spend per sprint × max-sprints
@@ -1437,6 +1469,8 @@ async function* runPhasesPath(args: {
     remainingUsd: async () => Math.max(0, manifest.capUsd - (await getProductSpentUsd(ctx.runId))),
     awaitCustomerVerdict,
     sprintRunner,
+    projectCwd: ctx.cwd,
+    idea: ctx.idea,
   } as any);
 
   let phaseOutcome: { pass: boolean; reason?: string } = { pass: false };
