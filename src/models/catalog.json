@@ -1,7 +1,7 @@
 {
-  "version": "2.10",
+  "version": "2.11",
   "updated_at": "2026-07-01",
-  "description": "Local fallback catalog: deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). SiliconFlow and Google models removed. routing.council: default multi-provider debate lineup (implement→deepseek, verify→zai, research→opencode-go). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
+  "description": "Local fallback catalog: deepseek + zai + opencode-go + xai. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -122,6 +122,24 @@
       "default_reasoning_effort": null,
       "description": "Specialized fast coding model optimized for agentic coding workflows. The model powering Grok Build CLI. Well-suited for programming, debugging, and multi-step tasks.",
       "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
+      "supports_vision": true
+    },
+    {
+      "id": "glm-4.6v-flash",
+      "name": "GLM 4.6V Flash (Z.ai Vision)",
+      "provider": "zai",
+      "tier": "fast",
+      "tier_routing": false,
+      "context_window": 128000,
+      "max_output_tokens": 8192,
+      "input_price_per_million": 0.3,
+      "output_price_per_million": 0.9,
+      "reasoning": false,
+      "thinking_type": null,
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Z.ai vision model for screenshots, UI, diagrams. Primary backend for routing.vision_proxy (text-only models like DeepSeek). Explicit -m or proxy only — not tier routing.",
+      "aliases": ["glm-4.6v-flashx"],
       "supports_vision": true
     },
     {
@@ -490,6 +508,15 @@
   ],
   "routing": {
     "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"],
+    "vision_proxy": {
+      "default": { "provider": "zai", "model_id": "glm-4.6v-flash" },
+      "ocr": { "provider": "zai", "model_id": "glm-4.6v-flash" },
+      "design": { "provider": "zai", "model_id": "glm-5.2" },
+      "fallback_chain": [
+        { "provider": "xai", "model_id": "grok-build-0.1" },
+        { "provider": "zai", "model_id": "glm-5.2" }
+      ]
+    },
     "council": {
       "prefer_multi_provider": true,
       "participants": [

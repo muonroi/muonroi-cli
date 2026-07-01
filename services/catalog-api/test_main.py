@@ -213,6 +213,14 @@ def test_real_catalog_provider_policies_peak_hour():
     assert len(cat.routing.council.participants or []) == 3
     roles = {p.role for p in (cat.routing.council.participants or [])}
     assert roles == {"implement", "verify", "research"}
+    assert cat.routing.vision_proxy is not None
+    assert cat.routing.vision_proxy.default is not None
+    assert cat.routing.vision_proxy.default.provider == "zai"
+    assert cat.routing.vision_proxy.default.model_id == "glm-4.6v-flash"
+    assert cat.routing.vision_proxy.design is not None
+    assert cat.routing.vision_proxy.design.model_id == "glm-5.2"
+    assert cat.routing.vision_proxy.fallback_chain is not None
+    assert len(cat.routing.vision_proxy.fallback_chain) >= 1
 
 
 def test_list_models_includes_provider_policies(client: TestClient, monkeypatch, tmp_path: Path):

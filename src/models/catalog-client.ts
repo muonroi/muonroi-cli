@@ -74,9 +74,23 @@ export interface CatalogCouncilRouting {
   participants?: CatalogCouncilParticipant[];
 }
 
+/** One vision-backend slot for the text-only model proxy layer. */
+export interface CatalogVisionProxySlot {
+  provider: string;
+  model_id: string;
+}
+
+export interface CatalogVisionProxyRouting {
+  default?: CatalogVisionProxySlot;
+  ocr?: CatalogVisionProxySlot;
+  design?: CatalogVisionProxySlot;
+  fallback_chain?: CatalogVisionProxySlot[];
+}
+
 export interface CatalogRouting {
   switch_provider_order?: string[];
   council?: CatalogCouncilRouting;
+  vision_proxy?: CatalogVisionProxyRouting;
 }
 
 export interface CatalogDocument {
@@ -187,6 +201,14 @@ const CatalogResponseSchema = z
                   .loose(),
               )
               .optional(),
+          })
+          .optional(),
+        vision_proxy: z
+          .object({
+            default: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            ocr: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            design: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            fallback_chain: z.array(z.object({ provider: z.string().min(1), model_id: z.string().min(1) })).optional(),
           })
           .optional(),
       })

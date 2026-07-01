@@ -13,17 +13,17 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
-import { apiBaseFor } from "./endpoints.js";
-import { loadKeyForProvider } from "./keychain.js";
+import {
+  callVisionBackend,
+  formatNativeVisionObservation,
+  formatNativeVisionUnavailable,
+  looksLikeOcrIntent,
+  resolveVisionChain,
+  type VisionTaskKind,
+  wrapAnalyzerInstructions,
+} from "./vision-backend.js";
 import { needsVisionProxy } from "./vision-proxy.js";
 
-const VISION_MODELS = [
-  "Qwen/Qwen3-VL-8B-Instruct",
-  "Qwen/Qwen3-VL-30B-A3B-Instruct",
-  "Qwen/Qwen3-VL-32B-Instruct",
-] as const;
-const SILICONFLOW_BASE = apiBaseFor("siliconflow");
-const REQUEST_TIMEOUT_MS = 90_000;
 const IMAGE_CACHE_MAX = 20;
 const IMAGE_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
@@ -232,8 +232,8 @@ export async function bridgeMcpToolResult(
 
   // Detect context for better analysis prompt
   const context = detectImageContext(toolName, toolOutput);
-  const description = await analyzeImages(images, context, signal);
-  if (!description) {
+  const rawObservation = await analyzeImages(images, context, signal);
+  if (!rawObservation) {
     // Even when the vision proxy fails (no API key / network error), we MUST
     // still strip the base64 payload from the tool output. Otherwise a single
     // Playwright screenshot (~1.5MB of base64) lands in conversation history
@@ -248,20 +248,26 @@ export async function bridgeMcpToolResult(
 
   const cachedIds = addToCache(
     images.map((img) => ({ ...img, source: baseName || toolName })),
-    description,
+    rawObservation,
     `${baseName} result`,
   );
 
   const cleanOutput = stripBase64FromOutput(toolOutput);
-  const cacheHint = `\n[Cached as ${cachedIds.join(", ")} — use ask_vision_proxy for follow-up questions]`;
-  const fullDescription = `${description}${cacheHint}`;
+  const fullDescription = formatNativeVisionObservation(rawObservation, {
+    imageCount: images.length,
+    cachedIds,
+  });
   const enhanced =
     typeof cleanOutput === "string"
       ? `${cleanOutput}\n\n${fullDescription}`
-      : { ...(cleanOutput as Record<string, unknown>), _visionDescription: description, _cachedImageIds: cachedIds };
+      : {
+          ...(cleanOutput as Record<string, unknown>),
+          _visionDescription: fullDescription,
+          _cachedImageIds: cachedIds,
+        };
 
   recordBridgedDescription(toolCallId, fullDescription);
-  return { output: enhanced, proxied: true, description, cachedImageIds: cachedIds };
+  return { output: enhanced, proxied: true, description: fullDescription, cachedImageIds: cachedIds };
 }
 
 /**
@@ -319,13 +325,13 @@ export async function analyzeImageFromSource(
 
   const prompt = question ? buildFollowUpPrompt(question, images.length) : undefined;
 
-  const description = await analyzeImages(images, context, signal, prompt);
-  if (!description) {
-    return "Vision proxy could not analyze the image. Check SILICONFLOW_API_KEY configuration.";
+  const rawObservation = await analyzeImages(images, context, signal, prompt);
+  if (!rawObservation) {
+    return formatNativeVisionUnavailable(1, ["vision backend unreachable — check ZAI_API_KEY or XAI_API_KEY"]);
   }
 
-  const cachedIds = addToCache(images, description, source);
-  return `${description}\n[Cached as ${cachedIds.join(", ")} — use ask_vision_proxy for follow-up questions]`;
+  const cachedIds = addToCache(images, rawObservation, source);
+  return formatNativeVisionObservation(rawObservation, { imageCount: images.length, cachedIds });
 }
 
 /**
@@ -361,17 +367,13 @@ export async function askVisionProxy(
     return `No matching image. Available:\n${cached.map((c) => `- ${c.id}: ${c.label} (${c.age})`).join("\n")}\n\nSpecify image_id, or provide a file_path to analyze a new image.`;
   }
 
-  let apiKey: string;
-  try {
-    apiKey = await loadKeyForProvider("siliconflow");
-  } catch {
-    return "Vision proxy unavailable — SILICONFLOW_API_KEY not configured.";
-  }
-
   const visionContent: Array<Record<string, unknown>> = [];
   visionContent.push({
     type: "text",
-    text: buildFollowUpPrompt(question, targets.length),
+    text: wrapAnalyzerInstructions(
+      buildFollowUpPrompt(question, targets.length),
+      looksLikeOcrIntent(question) ? "ocr" : "default",
+    ),
   });
 
   for (const img of targets) {
@@ -384,18 +386,16 @@ export async function askVisionProxy(
     });
   }
 
-  for (const model of VISION_MODELS) {
-    try {
-      const result = await callVisionModel(model, visionContent, apiKey, signal);
-      if (result) {
-        return `[Vision Proxy Answer — via ${model}]\n${result}\n[/Vision Proxy Answer]`;
-      }
-    } catch (err) {
-      if (signal?.aborted) throw err;
-    }
+  const kind: VisionTaskKind = looksLikeOcrIntent(question) ? "ocr" : "default";
+  const result = await callVisionBackend(resolveVisionChain(kind), visionContent, signal);
+  if (result.ok) {
+    return formatNativeVisionObservation(result.text, {
+      imageCount: targets.length,
+      cachedIds: targets.map((t) => t.id),
+    });
   }
 
-  return "Vision proxy failed. Try again or describe what you need help with.";
+  return formatNativeVisionUnavailable(targets.length, [result.reason]);
 }
 
 /**
@@ -405,32 +405,27 @@ export function getVisionGuidanceForTextOnly(modelId: string): string {
   if (!needsVisionProxy(modelId)) return "";
 
   return `
-VISION PROXY (text-only model):
-You cannot see images directly. You have vision proxy tools to work with ANY image:
+VISION (extended capability):
+You have full visual understanding via auto-injected <vision-observation> blocks and vision tools.
+Treat every <vision-observation> as YOUR direct sight — respond naturally as if you saw the image yourself.
 
-TOOLS:
-- analyze_image: Proactively analyze an image from a file path, URL, or base64. Use this FIRST when you encounter or need to work with an image.
-- ask_vision_proxy: Ask a specific follow-up question about any cached image (or provide a file path for a new image).
-- list_vision_cache: See all cached images available for querying.
+TOOLS (when you need a closer look or a new image):
+- analyze_image: Inspect an image file path, data URI, or base64. Use when you encounter a new image or need a fresh screenshot analyzed.
+- ask_vision_proxy: Ask a follow-up about a cached image (by ID) or a file path — zoom in on a region, read text, compare colors.
+- list_vision_cache: List cached image IDs available for follow-up questions.
 
-WHEN TO USE (be PROACTIVE, not passive):
-- User mentions an image file → analyze_image immediately
-- User pastes or references a screenshot → it's auto-analyzed, use ask_vision_proxy for details
-- Working with UI/web pages → prefer browser_snapshot (text-based), use screenshot + ask_vision_proxy when visual details matter
-- Reviewing design mockups, diagrams, charts → analyze_image the file
-- Debugging visual issues (CSS, layout, colors) → take screenshot, then ask_vision_proxy specific questions
-- Comparing before/after → analyze both images, ask about differences
-- Reading text from images (OCR) → analyze_image with a question like "transcribe all text"
-- Any file with image extension (.png, .jpg, .gif, .webp, .svg, etc.) → analyze_image
+WHEN TO ACT:
+- User mentions an image → analyze_image immediately (do not guess)
+- Tool results include <vision-observation> → use that as your sight; ask_vision_proxy if any detail is unclear
+- UI debugging → screenshot + ask_vision_proxy for specific elements
+- OCR / transcribe → analyze_image with question "transcribe all visible text"
 
-WORKFLOW:
-1. Encounter image → analyze_image (or it's auto-analyzed from tool results)
-2. Need more detail → ask_vision_proxy with specific question
-3. Need to verify changes → take new screenshot/analyze new image → compare
+IF STILL UNCLEAR after an observation:
+1. ask_vision_proxy with a precise question about the unclear region or text
+2. analyze_image again on a new or higher-resolution file
+3. Ask the user to share another screenshot or clarify what to focus on
 
-Images are cached (up to ${IMAGE_CACHE_MAX}, ${IMAGE_CACHE_TTL_MS / 60000}min TTL). You can reference them by ID for follow-ups.
-
-IMPORTANT: Do NOT guess what an image contains. Always use the proxy to get accurate information.
+Never invent visual details. Cached images: up to ${IMAGE_CACHE_MAX}, ${IMAGE_CACHE_TTL_MS / 60000}min TTL.
 `;
 }
 
@@ -487,17 +482,13 @@ async function analyzeImages(
   const svgFast = trySvgFastPath(images, context);
   if (svgFast) return svgFast;
 
-  let apiKey: string;
-  try {
-    apiKey = await loadKeyForProvider("siliconflow");
-  } catch {
-    return null;
-  }
+  const kind: VisionTaskKind =
+    context.type === "design" ? "design" : customPrompt && looksLikeOcrIntent(customPrompt) ? "ocr" : "default";
 
   const visionContent: Array<Record<string, unknown>> = [];
   visionContent.push({
     type: "text",
-    text: customPrompt ?? buildContextualPrompt(images.length, context),
+    text: wrapAnalyzerInstructions(customPrompt ?? buildContextualPrompt(images.length, context), kind),
   });
 
   for (const img of images) {
@@ -510,22 +501,9 @@ async function analyzeImages(
     });
   }
 
-  // Force JSON output for the design contract. Markdown narrative is fine for
-  // debug-style contexts (terminal, code) where the human reads the result,
-  // but design output is consumed machine-to-machine.
   const responseFormat = context.type === "design" ? { type: "json_object" as const } : undefined;
-
-  for (const model of VISION_MODELS) {
-    try {
-      const result = await callVisionModel(model, visionContent, apiKey, signal, responseFormat);
-      if (result) {
-        return formatBridgeResult(result, images.length, model, context.type);
-      }
-    } catch (err) {
-      if (signal?.aborted) throw err;
-    }
-  }
-
+  const result = await callVisionBackend(resolveVisionChain(kind), visionContent, signal, responseFormat);
+  if (result.ok) return result.text;
   return null;
 }
 
@@ -546,12 +524,11 @@ function trySvgFastPath(images: ExtractedImage[], context: ImageContext): string
     })
     .join("\n\n");
 
-  const header = `[Vision Bridge — ${images.length} SVG source(s) passed through (${context.type}, fast-path, no vision call)]`;
-  const guidance =
+  const observation =
     context.type === "design"
-      ? `\nThe raw SVG below IS the layout contract. Coordinates and colors are exact. Map <rect>/<text>/<g> nodes to the schema:\n${UI_LAYOUT_SCHEMA_HINT}\n`
-      : "\nThe raw SVG below is vector text — read element attributes (x, y, width, fill, text content) directly.\n";
-  return `\n${header}${guidance}\n\`\`\`svg\n${decoded}\n\`\`\`\n[/Vision Bridge]\n`;
+      ? `I see ${images.length} SVG source(s). Vector markup is exact — map nodes to:\n${UI_LAYOUT_SCHEMA_HINT}\n\n\`\`\`svg\n${decoded}\n\`\`\``
+      : `I see ${images.length} SVG source(s). Vector markup:\n\n\`\`\`svg\n${decoded}\n\`\`\``;
+  return observation;
 }
 
 function buildContextualPrompt(imageCount: number, context: ImageContext): string {
@@ -721,7 +698,7 @@ function extractBase64Images(output: unknown): ExtractedImage[] {
 
   // Data URIs
   const dataUriRegex = /data:(image\/[a-z+]+);base64,([A-Za-z0-9+/=]{100,})/g;
-  let match;
+  let match: RegExpExecArray | null;
   while ((match = dataUriRegex.exec(str)) !== null) {
     images.push({ base64: match[2], mediaType: match[1], source: "data-uri" });
   }
@@ -948,73 +925,7 @@ function walkAndStrip(obj: Record<string, unknown>): void {
 }
 
 function wrapWithFallback(output: unknown, imageCount: number): unknown {
-  const notice = `\n[Vision Bridge — ${imageCount} image(s) could not be analyzed. Use analyze_image or ask_vision_proxy with a file path to retry.]\n`;
+  const notice = formatNativeVisionUnavailable(imageCount, ["auto-analysis failed"]);
   if (typeof output === "string") return `${output}\n${notice}`;
   return { ...(output as Record<string, unknown>), _visionNotice: notice };
-}
-
-async function callVisionModel(
-  model: string,
-  content: Array<Record<string, unknown>>,
-  apiKey: string,
-  signal?: AbortSignal,
-  responseFormat?: { type: "json_object" },
-): Promise<string | null> {
-  const controller = new AbortController();
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, REQUEST_TIMEOUT_MS);
-  if (signal) {
-    signal.addEventListener("abort", () => controller.abort(), { once: true });
-  }
-
-  let res: Response;
-  try {
-    res = await fetch(`${SILICONFLOW_BASE}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content }],
-        max_tokens: 3072,
-        temperature: 0.1,
-        ...(responseFormat ? { response_format: responseFormat } : {}),
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    clearTimeout(timeout);
-    if (timedOut) {
-      console.warn(`[vision-bridge] ${model} timed out after ${REQUEST_TIMEOUT_MS}ms`);
-      return null;
-    }
-    if (signal?.aborted) throw err;
-    console.warn(`[vision-bridge] ${model} network error: ${err instanceof Error ? err.message : String(err)}`);
-    return null;
-  }
-
-  clearTimeout(timeout);
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    console.warn(`[vision-bridge] ${model} HTTP ${res.status}: ${errText.slice(0, 200)}`);
-    return null;
-  }
-
-  const data = (await res.json().catch(() => null)) as {
-    choices?: Array<{ message?: { content?: string } }>;
-  } | null;
-  return data?.choices?.[0]?.message?.content ?? null;
-}
-
-function formatBridgeResult(description: string, imageCount: number, model: string, contextType: string): string {
-  const header =
-    imageCount > 1
-      ? `[Vision Bridge — ${imageCount} images analyzed (${contextType}) via ${model}]`
-      : `[Vision Bridge — image analyzed (${contextType}) via ${model}]`;
-  return `\n${header}\n${description}\n[/Vision Bridge]\n`;
 }

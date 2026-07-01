@@ -131,9 +131,22 @@ class CatalogCouncilRouting(BaseModel):
     participants: Optional[list[CatalogCouncilParticipant]] = None
 
 
+class CatalogVisionProxySlot(BaseModel):
+    provider: str
+    model_id: str
+
+
+class CatalogVisionProxyRouting(BaseModel):
+    default: Optional[CatalogVisionProxySlot] = None
+    ocr: Optional[CatalogVisionProxySlot] = None
+    design: Optional[CatalogVisionProxySlot] = None
+    fallback_chain: Optional[list[CatalogVisionProxySlot]] = None
+
+
 class CatalogRouting(BaseModel):
     switch_provider_order: Optional[list[str]] = None
     council: Optional[CatalogCouncilRouting] = None
+    vision_proxy: Optional[CatalogVisionProxyRouting] = None
 
 
 class CatalogResponse(BaseModel):

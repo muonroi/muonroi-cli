@@ -1,6 +1,6 @@
 import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo, ReasoningEffort } from "../types";
-import type { CatalogCouncilRouting, CatalogProviderPeakHour } from "./catalog-client.js";
+import type { CatalogCouncilRouting, CatalogProviderPeakHour, CatalogVisionProxyRouting } from "./catalog-client.js";
 import { catalogModelToModelInfo, fetchCatalogDocument } from "./catalog-client.js";
 
 const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
@@ -16,6 +16,7 @@ export let isLoading = true;
 export let SWITCH_PROVIDER_ORDER: readonly ProviderId[] = DEFAULT_SWITCH_PROVIDER_ORDER;
 const providerPeakHourRules = new Map<string, CatalogProviderPeakHour>();
 let catalogCouncilRouting: CatalogCouncilRouting | undefined;
+let catalogVisionProxyRouting: CatalogVisionProxyRouting | undefined;
 
 /**
  * Load models + routing policies from centralized catalog (API with static fallback).
@@ -33,6 +34,7 @@ export async function loadCatalog(): Promise<void> {
       if (policy.peak_hour) providerPeakHourRules.set(providerId, policy.peak_hour);
     }
     catalogCouncilRouting = doc.routing?.council;
+    catalogVisionProxyRouting = doc.routing?.vision_proxy;
   } catch {
     // On total failure, MODELS stays empty — callers must handle
   } finally {
@@ -47,6 +49,10 @@ export function getProviderPeakHourRule(providerId: string): CatalogProviderPeak
 /** Catalog-defined default council lineup (multi-provider debate slots). */
 export function getCatalogCouncilRouting(): CatalogCouncilRouting | undefined {
   return catalogCouncilRouting;
+}
+
+export function getVisionProxyRouting(): CatalogVisionProxyRouting | undefined {
+  return catalogVisionProxyRouting;
 }
 
 // ---------------------------------------------------------------------------

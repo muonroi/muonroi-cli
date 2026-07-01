@@ -9,6 +9,7 @@ import {
   getModelsForProvider,
   getProviderPeakHourRule,
   getSupportedReasoningEfforts,
+  getVisionProxyRouting,
   loadCatalog,
   MODELS,
   normalizeModelId,
@@ -160,6 +161,16 @@ describe("provider_policies from catalog", () => {
     expect(verify?.model_id).toBe("glm-5.2");
     const research = council?.participants?.find((p) => p.role === "research");
     expect(research?.provider).toBe("opencode-go");
+  });
+
+  test("loads vision_proxy routing for text-only model backend", () => {
+    const vp = getVisionProxyRouting();
+    expect(vp?.default?.provider).toBe("zai");
+    expect(vp?.default?.model_id).toBe("glm-4.6v-flash");
+    expect(vp?.ocr?.model_id).toBe("glm-4.6v-flash");
+    expect(vp?.design?.model_id).toBe("glm-5.2");
+    expect(vp?.fallback_chain?.length).toBeGreaterThanOrEqual(1);
+    expect(vp?.fallback_chain?.[0]?.provider).toBe("xai");
   });
 
   test("loads deepseek official dual peak windows from vendor announcement", () => {
