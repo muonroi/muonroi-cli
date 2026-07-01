@@ -192,3 +192,9 @@ def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
     g47 = next(m for m in cat.models if m.id == "glm-4.7")
     assert g47.tier == "balanced"
     assert g47.routing_tiers == ["fast"]
+    g52 = next(m for m in cat.models if m.id == "glm-5.2")
+    g51 = next(m for m in cat.models if m.id == "glm-5.1")
+    assert cat.models.index(g52) < cat.models.index(g51)
+    assert g51.tier_routing is False
+    v5 = next(m for m in cat.models if m.id == "glm-5v-turbo")
+    assert v5.tier_routing is False

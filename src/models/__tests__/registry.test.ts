@@ -111,4 +111,12 @@ describe("tier_routing catalog flag", () => {
     const lookup = getModelByTier as TierLookup;
     expect(resolveModelForTask("compact", "zai", "glm-4.7", lookup, { parentTier: "balanced" })).toBe("glm-4.7");
   });
+
+  test("zai premium routes to glm-5.2; glm-5v-turbo excluded from auto-routing", () => {
+    expect(getModelByTier("premium", "zai")?.id).toBe("glm-5.2");
+    expect(getModelInfo("glm-5v-turbo")?.tierRouting).toBe(false);
+    expect(getModelInfo("glm-5.1")?.tierRouting).toBe(false);
+    const lookup = getModelByTier as TierLookup;
+    expect(resolveModelForTask("verify", "zai", "glm-5.2", lookup, { parentTier: "premium" })).toBe("glm-5.2");
+  });
 });
