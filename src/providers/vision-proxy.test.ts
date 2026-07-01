@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as registry from "../models/registry.js";
-import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
+import { needsVisionProxy, planImageHandlingForTextOnlyModel, proxyVision } from "./vision-proxy.js";
 
 // Mock will be set up in beforeEach
 
+import * as settings from "../utils/settings.js";
 import * as keychain from "./keychain.js";
 
 // Bun's test runner doesn't ship vi.stubGlobal — swap globalThis.fetch manually.
@@ -47,6 +48,56 @@ describe("needsVisionProxy", () => {
 
   it("returns false for unknown models", () => {
     expect(needsVisionProxy("unknown-model")).toBe(false);
+  });
+});
+
+describe("planImageHandlingForTextOnlyModel", () => {
+  beforeEach(async () => {
+    vi.mocked(registry.getModelInfo).mockRestore();
+    await registry.loadCatalog();
+  });
+
+  it("returns proxy when a vision-proxy chain provider has a key", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "xai") return "sk-xai-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("proxy");
+  });
+
+  it("returns native_model when proxy providers lack keys but another vision model is configured", async () => {
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("native_model");
+    if (plan.strategy === "native_model") {
+      expect(plan.fallback.provider).toBe("opencode-go");
+      expect(plan.fallback.modelId).toBe("opencode/glm-5.2");
+    }
+  });
+
+  it("returns unavailable when no vision keys at all", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockRejectedValue(new Error("no key"));
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("unavailable");
+    if (plan.strategy === "unavailable") {
+      expect(plan.notice).toContain("<vision-observation");
+      expect(plan.notice).toContain("Do NOT guess");
+    }
   });
 });
 
@@ -117,6 +168,29 @@ describe("proxyVision", () => {
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.model).toBe("glm-4.6v-flash");
+  });
+
+  it("returns unavailable envelope when no vision API keys configured", async () => {
+    const fetchSpy = vi.fn();
+    setFetch(fetchSpy as unknown as typeof globalThis.fetch);
+    vi.spyOn(keychain, "loadKeyForProvider").mockRejectedValue(new Error("no key"));
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "analyze" },
+          { type: "image" as const, image: fakeBase64, mediaType: "image/png" },
+        ],
+      },
+    ];
+
+    const result = await proxyVision(messages, "deepseek-v4-flash");
+    expect(result.proxied).toBe(true);
+    const content = result.messages[0].content as Array<{ type: string; text: string }>;
+    expect(content.some((p) => p.text.includes('status="unavailable"'))).toBe(true);
+    expect(content.some((p) => p.text.includes("Do NOT guess"))).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("returns fallback description on API error", async () => {

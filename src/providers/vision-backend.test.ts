@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as registry from "../models/registry.js";
+import * as settings from "../utils/settings.js";
 import * as keychain from "./keychain.js";
 import {
+  findNativeVisionFallback,
   formatNativeVisionObservation,
   formatNativeVisionUnavailable,
+  isVisionBackendAvailable,
   looksLikeOcrIntent,
+  resolveAvailableVisionChain,
   resolveVisionChain,
 } from "./vision-backend.js";
 
@@ -48,6 +52,61 @@ describe("formatNativeVisionObservation", () => {
     expect(out).toContain("direct visual observation");
     expect(out).toContain("ask_vision_proxy");
     expect(out).toContain("img_1");
+  });
+});
+
+describe("resolveAvailableVisionChain", () => {
+  it("returns only slots with configured API keys", async () => {
+    vi.spyOn(registry, "getVisionProxyRouting").mockReturnValue({
+      default: { provider: "zai", model_id: "glm-4.6v-flash" },
+      fallback_chain: [{ provider: "xai", model_id: "grok-build-0.1" }],
+    });
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "xai") return "sk-xai-key-123456789012345678";
+      throw new Error("no key");
+    });
+
+    const chain = await resolveAvailableVisionChain();
+    expect(chain).toEqual([{ provider: "xai", model_id: "grok-build-0.1" }]);
+    expect(await isVisionBackendAvailable()).toBe(true);
+  });
+
+  it("returns empty when no vision provider keys exist", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockRejectedValue(new Error("no key"));
+    expect(await resolveAvailableVisionChain()).toEqual([]);
+    expect(await isVisionBackendAvailable()).toBe(false);
+  });
+});
+
+describe("findNativeVisionFallback", () => {
+  beforeEach(async () => {
+    await registry.loadCatalog();
+  });
+
+  it("picks a vision catalog model when proxy providers lack keys", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "xai") return "sk-xai-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const hit = await findNativeVisionFallback({ excludeModelId: "deepseek-v4-flash" });
+    expect(hit).not.toBeNull();
+    expect(hit!.provider).toBe("xai");
+    expect(hit!.modelId).toMatch(/grok/);
+  });
+
+  it("falls back to non-proxy vision provider when zai/xai keys are missing", async () => {
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const hit = await findNativeVisionFallback({ excludeModelId: "deepseek-v4-flash" });
+    expect(hit).toEqual({
+      modelId: "opencode/glm-5.2",
+      provider: "opencode-go",
+      source: "catalog_vision",
+    });
   });
 });
 
