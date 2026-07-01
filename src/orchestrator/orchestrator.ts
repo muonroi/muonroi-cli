@@ -1569,7 +1569,10 @@ export class Agent {
   }
 
   private _resolveModelForTask(task: ModelTaskKind): string {
-    return resolveModelForTask(task, this.providerId, this.modelId);
+    const parentTier = getModelInfo(this.modelId)?.tier;
+    return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
+      parentTier,
+    });
   }
 
   private async compactForContext(
