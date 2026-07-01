@@ -3,7 +3,7 @@
  * Used by vision-proxy.ts (message path) and mcp-vision-bridge.ts (tool path).
  */
 import type { CatalogVisionProxyRouting, CatalogVisionProxySlot } from "../models/catalog-client.js";
-import { getVisionProxyRouting } from "../models/registry.js";
+import { getModelInfo, getVisionProxyRouting, MODELS, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
 import { apiBaseFor } from "./endpoints.js";
 import { loadKeyForProvider } from "./keychain.js";
 import type { ProviderId } from "./types.js";
@@ -43,6 +43,108 @@ export function resolveVisionChain(kind: VisionTaskKind): CatalogVisionProxySlot
   return chain;
 }
 
+async function slotHasAvailableKey(slot: CatalogVisionProxySlot): Promise<boolean> {
+  try {
+    await loadKeyForProvider(slot.provider as ProviderId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Vision-proxy chain filtered to providers that currently have API keys. */
+export async function resolveAvailableVisionChain(kind: VisionTaskKind = "default"): Promise<CatalogVisionProxySlot[]> {
+  const available: CatalogVisionProxySlot[] = [];
+  for (const slot of resolveVisionChain(kind)) {
+    if (await slotHasAvailableKey(slot)) available.push(slot);
+  }
+  return available;
+}
+
+export async function isVisionBackendAvailable(kind: VisionTaskKind = "default"): Promise<boolean> {
+  return (await resolveAvailableVisionChain(kind)).length > 0;
+}
+
+export interface NativeVisionFallback {
+  modelId: string;
+  provider: ProviderId;
+  source: "vision_proxy_slot" | "catalog_vision";
+}
+
+async function tryNativeVisionModel(
+  modelId: string,
+  source: NativeVisionFallback["source"],
+  excludeModelId?: string,
+): Promise<NativeVisionFallback | null> {
+  if (excludeModelId && modelId === excludeModelId) return null;
+  const info = getModelInfo(modelId);
+  if (!info?.supportsVision) return null;
+  const provider = info.provider as ProviderId;
+  const { isModelDisabled, isProviderDisabled } = await import("../utils/settings.js");
+  if (isProviderDisabled(provider) || isModelDisabled(modelId)) return null;
+  if (!(await slotHasAvailableKey({ provider, model_id: modelId }))) return null;
+  return { modelId, provider, source };
+}
+
+/**
+ * When vision-proxy backends have no keys, pick a catalog vision model (with key)
+ * so images can be sent natively instead of failing on a text-only primary.
+ */
+export async function findNativeVisionFallback(opts?: {
+  excludeModelId?: string;
+}): Promise<NativeVisionFallback | null> {
+  const exclude = opts?.excludeModelId;
+  const seen = new Set<string>();
+
+  for (const kind of ["default", "ocr", "design"] as VisionTaskKind[]) {
+    for (const slot of resolveVisionChain(kind)) {
+      if (seen.has(slot.model_id)) continue;
+      seen.add(slot.model_id);
+      const hit = await tryNativeVisionModel(slot.model_id, "vision_proxy_slot", exclude);
+      if (hit) return hit;
+    }
+  }
+
+  const visionByProvider = new Map<string, typeof MODELS>();
+  for (const m of MODELS) {
+    if (!m.supportsVision || !m.provider) continue;
+    const list = visionByProvider.get(m.provider) ?? [];
+    list.push(m);
+    visionByProvider.set(m.provider, list);
+  }
+
+  for (const provider of SWITCH_PROVIDER_ORDER) {
+    for (const m of visionByProvider.get(provider) ?? []) {
+      if (seen.has(m.id)) continue;
+      seen.add(m.id);
+      const hit = await tryNativeVisionModel(m.id, "catalog_vision", exclude);
+      if (hit) return hit;
+    }
+  }
+
+  for (const m of MODELS) {
+    if (!m.supportsVision) continue;
+    if (seen.has(m.id)) continue;
+    const hit = await tryNativeVisionModel(m.id, "catalog_vision", exclude);
+    if (hit) return hit;
+  }
+
+  return null;
+}
+
+export async function collectVisionUnavailableReasons(kind: VisionTaskKind = "default"): Promise<string[]> {
+  const reasons: string[] = [];
+  for (const slot of resolveVisionChain(kind)) {
+    if (await slotHasAvailableKey(slot)) {
+      reasons.push(`${slot.model_id}@${slot.provider}: API key present but backend unreachable`);
+    } else {
+      reasons.push(`${slot.model_id}@${slot.provider}: no API key`);
+    }
+  }
+  reasons.push("no other vision-capable catalog model has a configured API key");
+  return reasons;
+}
+
 export type VisionCallResult =
   | { ok: true; text: string; model: string; provider: string }
   | { ok: false; reason: string };
@@ -54,6 +156,10 @@ export async function callVisionBackend(
   responseFormat?: { type: "json_object" },
 ): Promise<VisionCallResult> {
   const failureReasons: string[] = [];
+
+  if (chain.length === 0) {
+    return { ok: false, reason: "no vision backend available — configure ZAI_API_KEY or XAI_API_KEY" };
+  }
 
   for (const slot of chain) {
     const provider = slot.provider as ProviderId;
@@ -193,7 +299,8 @@ export function formatNativeVisionUnavailable(imageCount: number, reasons: strin
     '<vision-observation status="unavailable">',
     `${types} could not be analyzed (${detail}).`,
     "Do NOT guess what the image contains.",
-    "- Retry with analyze_image and the file path",
+    "Setup: configure ZAI_API_KEY or XAI_API_KEY for vision proxy, or switch to a vision-capable default model.",
+    "- Retry with analyze_image and the file path once a vision key is configured",
     "- Use ask_vision_proxy if a cached image exists",
     "- Ask the user to re-share the screenshot or describe what you need to see",
     cacheHint,

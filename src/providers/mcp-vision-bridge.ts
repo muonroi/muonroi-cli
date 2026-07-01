@@ -18,7 +18,7 @@ import {
   formatNativeVisionObservation,
   formatNativeVisionUnavailable,
   looksLikeOcrIntent,
-  resolveVisionChain,
+  resolveAvailableVisionChain,
   type VisionTaskKind,
   wrapAnalyzerInstructions,
 } from "./vision-backend.js";
@@ -327,7 +327,8 @@ export async function analyzeImageFromSource(
 
   const rawObservation = await analyzeImages(images, context, signal, prompt);
   if (!rawObservation) {
-    return formatNativeVisionUnavailable(1, ["vision backend unreachable — check ZAI_API_KEY or XAI_API_KEY"]);
+    const { collectVisionUnavailableReasons } = await import("./vision-backend.js");
+    return formatNativeVisionUnavailable(1, await collectVisionUnavailableReasons());
   }
 
   const cachedIds = addToCache(images, rawObservation, source);
@@ -387,7 +388,7 @@ export async function askVisionProxy(
   }
 
   const kind: VisionTaskKind = looksLikeOcrIntent(question) ? "ocr" : "default";
-  const result = await callVisionBackend(resolveVisionChain(kind), visionContent, signal);
+  const result = await callVisionBackend(await resolveAvailableVisionChain(kind), visionContent, signal);
   if (result.ok) {
     return formatNativeVisionObservation(result.text, {
       imageCount: targets.length,
@@ -502,7 +503,12 @@ async function analyzeImages(
   }
 
   const responseFormat = context.type === "design" ? { type: "json_object" as const } : undefined;
-  const result = await callVisionBackend(resolveVisionChain(kind), visionContent, signal, responseFormat);
+  const result = await callVisionBackend(
+    await resolveAvailableVisionChain(kind),
+    visionContent,
+    signal,
+    responseFormat,
+  );
   if (result.ok) return result.text;
   return null;
 }

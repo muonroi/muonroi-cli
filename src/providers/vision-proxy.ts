@@ -11,10 +11,14 @@ import { getModelInfo } from "../models/registry.js";
 import { UI_LAYOUT_SCHEMA_HINT } from "./mcp-vision-bridge.js";
 import {
   callVisionBackend,
+  collectVisionUnavailableReasons,
+  findNativeVisionFallback,
   formatNativeVisionObservation,
   formatNativeVisionUnavailable,
+  isVisionBackendAvailable,
   looksLikeOcrIntent,
-  resolveVisionChain,
+  type NativeVisionFallback,
+  resolveAvailableVisionChain,
   type VisionTaskKind,
   wrapAnalyzerInstructions,
 } from "./vision-backend.js";
@@ -58,6 +62,48 @@ export interface VisionProxyResult {
 export function needsVisionProxy(modelId: string): boolean {
   const info = getModelInfo(modelId);
   return info?.supportsVision === false;
+}
+
+export type ImageHandlingPlan =
+  | { strategy: "proxy" }
+  | { strategy: "native_model"; fallback: NativeVisionFallback }
+  | { strategy: "unavailable"; notice: string };
+
+/**
+ * Decide how to handle images when the active model is text-only:
+ * proxy backend, switch to a native vision model, or surface unavailable.
+ */
+export async function planImageHandlingForTextOnlyModel(opts: {
+  primaryModelId: string;
+  imageCount: number;
+  kind?: VisionTaskKind;
+}): Promise<ImageHandlingPlan> {
+  if (!needsVisionProxy(opts.primaryModelId)) {
+    return { strategy: "proxy" };
+  }
+
+  const kind = opts.kind ?? "default";
+  if (await isVisionBackendAvailable(kind)) {
+    return { strategy: "proxy" };
+  }
+
+  const fallback = await findNativeVisionFallback({ excludeModelId: opts.primaryModelId });
+  if (fallback) {
+    return { strategy: "native_model", fallback };
+  }
+
+  const reasons = await collectVisionUnavailableReasons(kind);
+  return {
+    strategy: "unavailable",
+    notice: formatNativeVisionUnavailable(opts.imageCount, reasons),
+  };
+}
+
+/** True when proxy backend or a native vision model can handle images for this text-only model. */
+export async function canHandleImagesForTextOnlyModel(modelId: string): Promise<boolean> {
+  if (!needsVisionProxy(modelId)) return true;
+  if (await isVisionBackendAvailable()) return true;
+  return (await findNativeVisionFallback({ excludeModelId: modelId })) !== null;
 }
 
 export async function proxyVision(
@@ -143,7 +189,7 @@ async function describeImages(
   }
 
   const responseFormat = designIntent ? { type: "json_object" as const } : undefined;
-  const chain = resolveVisionChain(kind);
+  const chain = await resolveAvailableVisionChain(kind);
   const result = await callVisionBackend(chain, visionContent, signal, responseFormat);
 
   if (result.ok) {
