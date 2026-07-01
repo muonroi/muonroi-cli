@@ -1,7 +1,7 @@
 {
-  "version": "2.5",
+  "version": "2.6",
   "updated_at": "2026-07-01",
-  "description": "Local fallback catalog: deepseek + siliconflow + openai (ChatGPT OAuth) + google (Agy via agy.exe OAuth + cloudcode-pa) + zai (GLM Coding Plan). Official Coding Plan chat models: glm-4.7 (routine), glm-5-turbo (high-throughput), glm-5.2 (complex). tier_routing:false on glm-4.7-flash (free pool), glm-5v-turbo (Pro 429), glm-5/glm-5.1 (non-canonical). Vision on Z.ai: use Vision MCP, not glm-5v-turbo chat. Pricing APPROXIMATE.",
+  "description": "Local fallback catalog: primary providers deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). tier_routing:false on siliconflow + google (deprecated for auto-routing; explicit -m only). Z.ai Coding Plan: glm-4.7 (routine/fast), glm-5-turbo (throughput), glm-5.2 (premium). tier_routing:false on glm-4.7-flash (free pool), glm-5v-turbo (Pro 429), glm-5/glm-5.1. Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -17,7 +17,7 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Native DeepSeek V4 Flash. Tool-call capable. More expensive than SiliconFlow's hosted V4-Flash ($0.14/$0.28) — prefer SF unless rate-limited.",
+      "description": "Native DeepSeek V4 Flash. Tool-call capable. Primary fast-tier model for the deepseek provider.",
       "aliases": ["deepseek-flash-native"],
       "supports_vision": false
     },
@@ -54,7 +54,8 @@
       "default_reasoning_effort": null,
       "description": "DeepSeek V4 Flash on SiliconFlow — cheaper than native. 1M context. Reasoning_tokens share output budget.",
       "aliases": ["deepseek-v4-flash-sf", "deepseek-flash-sf"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "deepseek-ai/DeepSeek-V4-Pro",
@@ -71,7 +72,8 @@
       "default_reasoning_effort": null,
       "description": "DeepSeek V4 Pro on SiliconFlow. Prefer native deepseek-v4-pro for cost ($0.55/$2.19) when key available.",
       "aliases": ["deepseek-v4-pro-sf", "deepseek-pro-sf"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "Qwen/Qwen3-8B",
@@ -88,7 +90,8 @@
       "default_reasoning_effort": null,
       "description": "Cheapest tool-capable SiliconFlow model. Symmetric pricing — ideal for mechanical tool-execution loops. Supports thinking/non-thinking hybrid mode.",
       "aliases": ["qwen3-8b-sf", "alibaba/Qwen3-8B"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
@@ -105,7 +108,8 @@
       "default_reasoning_effort": null,
       "description": "MoE balanced default. 3B active params keeps cost low while 30B total gives strong instruction following + tool use. Recommended SF balanced pick.",
       "aliases": ["qwen3-30b-instruct-sf", "alibaba/Qwen3-30B-A3B-Instruct-2507"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
@@ -122,7 +126,8 @@
       "default_reasoning_effort": null,
       "description": "Coding-specialized Qwen3 MoE. Cheaper than the generic Qwen3-30B variant. Use when pil.taskType is coding (router override pending).",
       "aliases": ["qwen3-coder-sf", "qwen-coder-sf", "alibaba/Qwen3-Coder-30B-A3B-Instruct"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "deepseek-ai/DeepSeek-V3.2",
@@ -139,7 +144,8 @@
       "default_reasoning_effort": null,
       "description": "Cheap DeepSeek reasoning option for balanced-tier turns that benefit from CoT. Tool-capable. Use when Qwen3-30B is not strong enough on reasoning.",
       "aliases": ["deepseek-v3.2-sf"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "deepseek-ai/DeepSeek-R1",
@@ -156,7 +162,8 @@
       "default_reasoning_effort": null,
       "description": "Cheaper premium reasoning alternative to V4-Pro. Tool-capable. Use when V4-Pro is rate-limited or for benchmark parity.",
       "aliases": ["deepseek-r1-sf"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "z-ai/GLM-4.6V",
@@ -173,7 +180,8 @@
       "default_reasoning_effort": null,
       "description": "Vision-language model with confirmed function-calling support. Use when the turn contains image attachments (router vision-override pending).",
       "aliases": ["glm-4.6v-sf"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gpt-5.4-mini",
@@ -241,7 +249,8 @@
       "default_reasoning_effort": "high",
       "description": "Agy-supported Gemini 3.5 Flash High via Agy OAuth (cloudcode-pa backend, not public Generative Language). Multimodal, 1M context. Matches official agy cli model list.",
       "aliases": ["gemini-3.5-flash"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gemini-3.5-flash-medium",
@@ -258,7 +267,8 @@
       "default_reasoning_effort": "medium",
       "description": "Agy-supported Gemini 3.5 Flash Medium via Agy OAuth (cloudcode-pa). Multimodal, 1M context. Matches official agy cli model list.",
       "aliases": ["gemini-3.5-flash-med"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gemini-3.5-flash-low",
@@ -275,7 +285,8 @@
       "default_reasoning_effort": "low",
       "description": "Agy-supported Gemini 3.5 Flash Low via Agy OAuth (cloudcode-pa). Multimodal, 1M context. Matches official agy cli model list.",
       "aliases": ["gemini-3.5-flash-low"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gemini-3.1-pro-high",
@@ -292,7 +303,8 @@
       "default_reasoning_effort": "high",
       "description": "Agy-supported Gemini 3.1 Pro High via Agy OAuth (cloudcode-pa backend). Strongest agentic Gemini. Matches official agy cli model list. Pricing approximate.",
       "aliases": ["gemini-3.1-pro", "gemini-3.1-pro-preview"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gemini-3.1-pro-low",
@@ -309,7 +321,8 @@
       "default_reasoning_effort": "low",
       "description": "Agy-supported Gemini 3.1 Pro Low via Agy OAuth (cloudcode-pa). Matches official agy cli model list.",
       "aliases": ["gemini-3.1-pro-low"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gemini-3-flash",
@@ -326,7 +339,8 @@
       "default_reasoning_effort": null,
       "description": "Agy-supported Gemini 3 Flash via Agy OAuth (cloudcode-pa). Multimodal. Matches official agy cli model list.",
       "aliases": ["gemini-3-flash"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "claude-sonnet-4.6-thinking",
@@ -343,7 +357,8 @@
       "default_reasoning_effort": "medium",
       "description": "Agy-supported Claude Sonnet 4.6 Thinking via Agy OAuth (cloudcode-pa backend proxy). Matches official agy cli model list.",
       "aliases": ["claude-sonnet-4-6-thinking", "claude-4.6-sonnet-thinking"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "claude-opus-4.6-thinking",
@@ -360,7 +375,8 @@
       "default_reasoning_effort": "medium",
       "description": "Agy-supported Claude Opus 4.6 Thinking via Agy OAuth (cloudcode-pa backend proxy). Matches official agy cli model list.",
       "aliases": ["claude-opus-4-6-thinking", "claude-4.6-opus-thinking"],
-      "supports_vision": true
+      "supports_vision": true,
+      "tier_routing": false
     },
     {
       "id": "gpt-oss-120b-medium",
@@ -377,7 +393,8 @@
       "default_reasoning_effort": "medium",
       "description": "Agy-supported GPT-OSS 120B Medium via Agy OAuth (cloudcode-pa). Matches official agy cli model list.",
       "aliases": ["gpt-oss-120b", "gpt-oss-medium"],
-      "supports_vision": false
+      "supports_vision": false,
+      "tier_routing": false
     },
     {
       "id": "grok-4.3",

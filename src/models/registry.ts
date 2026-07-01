@@ -74,10 +74,7 @@ function matchesTier(m: ModelInfo, tier: "fast" | "balanced" | "premium"): boole
 
 export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
   if (preferProvider) {
-    const providerMatch = MODELS.find(
-      (m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m),
-    );
-    if (providerMatch) return providerMatch;
+    return MODELS.find((m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m));
   }
   return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m));
 }
