@@ -95,8 +95,8 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST = "1";
 
     handle = await spawnCostLeakHarness({
-      provider: "siliconflow",
-      modelId: "deepseek-ai/DeepSeek-V4-Flash",
+      provider: "deepseek",
+      modelId: "deepseek-v4-flash",
       stream: [
         buildToolCallRound("c1", join(payloadDir, "big1.txt")),
         buildToolCallRound("c2", join(payloadDir, "big2.txt")),

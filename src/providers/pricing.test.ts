@@ -30,11 +30,11 @@ describe("lookupPricing", () => {
     expect(p!.cached_input_per_million_usd).toBe(0.055);
   });
 
-  it("catalog path: siliconflow model returns pricing from catalog", () => {
-    const p = lookupPricing("siliconflow", "deepseek-ai/DeepSeek-V4-Flash");
+  it("catalog path: zai glm-4.7 returns pricing from catalog", () => {
+    const p = lookupPricing("zai", "glm-4.7");
     expect(p).toBeDefined();
-    expect(p!.input_per_million_usd).toBe(0.14);
-    expect(p!.output_per_million_usd).toBe(0.28);
+    expect(p!.input_per_million_usd).toBe(0.6);
+    expect(p!.output_per_million_usd).toBe(2.2);
   });
 
   // --- Static fallback path (providers not in catalog) ---

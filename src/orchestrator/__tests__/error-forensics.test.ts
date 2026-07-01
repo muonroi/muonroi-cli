@@ -25,7 +25,7 @@ describe("summarizeApiErrorForLog", () => {
       message: "The parameter is invalid. Please check again.",
       url: "https://api.siliconflow.com/v1/chat/completions",
       requestBodyValues: {
-        model: "deepseek-ai/DeepSeek-V4-Flash",
+        model: "deepseek-v4-flash",
         messages: [{ role: "user", content: "secret prompt" }],
         temperature: 0.7,
         tools: [{ type: "function", function: { name: "read_file" } }],

@@ -63,7 +63,7 @@ describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
   it("siliconflow: serializes assistant reasoning part as reasoning_content in request body", async () => {
     const capture: { current: CapturedRequest | null } = { current: null };
     const provider = makeStubProvider("siliconflow", capture);
-    const model = provider("deepseek-ai/DeepSeek-V4-Flash");
+    const model = provider("deepseek-v4-flash");
 
     const result = streamText({
       model,
@@ -138,7 +138,7 @@ describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
   it("emits no reasoning_content key when there are no reasoning parts (no false positives)", async () => {
     const capture: { current: CapturedRequest | null } = { current: null };
     const provider = makeStubProvider("siliconflow", capture);
-    const model = provider("deepseek-ai/DeepSeek-V4-Flash");
+    const model = provider("deepseek-v4-flash");
 
     const result = streamText({
       model,

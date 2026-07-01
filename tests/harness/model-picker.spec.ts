@@ -54,7 +54,7 @@ describe("model-picker E2E", { retry: 0 }, () => {
 
   beforeAll(async () => {
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash"],
     });
     proc = ctx.proc;
     driver = ctx.driver;

@@ -62,7 +62,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     "-k",
     "FAKE_KEY_FOR_TESTS",
     "-m",
-    "deepseek-ai/DeepSeek-V4-Flash",
+    "deepseek-v4-flash",
   ];
   if (useFakeClock) args.push("--agent-fake-clock");
 

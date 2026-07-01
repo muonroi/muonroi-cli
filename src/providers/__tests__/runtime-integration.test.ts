@@ -11,9 +11,8 @@ beforeAll(async () => {
   await loadCatalog();
 });
 
-// Detection cases use catalog hits for active providers (deepseek/siliconflow)
-// and prefix-fallback for legacy ids (anthropic/openai/xai stay in code per
-// src/models/catalog.README.md but are not in the local catalog).
+// Detection cases use catalog hits for active providers (deepseek/zai/xai)
+// and prefix-fallback for legacy ids (anthropic/openai/siliconflow).
 describe("model → provider detection", () => {
   const cases: Array<[string, ProviderId]> = [
     ["claude-sonnet-4-6", "anthropic"],
@@ -23,8 +22,7 @@ describe("model → provider detection", () => {
     ["o3", "openai"],
     ["deepseek-v4-flash", "deepseek"],
     ["deepseek-v4-pro", "deepseek"],
-    ["deepseek-ai/DeepSeek-V4-Flash", "siliconflow"],
-    ["deepseek-ai/DeepSeek-V4-Pro", "siliconflow"],
+    ["deepseek-ai/DeepSeek-V4-Pro", "deepseek"],
     ["alibaba/Qwen3-8B", "siliconflow"],
     ["grok-3", "xai"],
     ["grok-3-mini", "xai"],
@@ -54,24 +52,9 @@ describe("end-to-end: create factory + resolve runtime", () => {
     expect(runtime.providerOptions?.anthropic).toBeUndefined();
   });
 
-  test("siliconflow model resolves with catalog modelInfo populated", () => {
-    const pf = createProviderFactory("siliconflow", {
-      apiKey: MOCK_KEY,
-    });
-    const runtime = resolveModelRuntime(pf.factory, "Qwen/Qwen3-8B");
-    expect(runtime.modelInfo?.provider).toBe("siliconflow");
-    expect(runtime.modelId).toBe("Qwen/Qwen3-8B");
-  });
-
-  test("legacy alibaba/* id resolves to Qwen/* canonical via alias (catalog fix 2026-05-26)", () => {
-    // SiliconFlow's /v1/models endpoint returned Qwen/Qwen3-* but the catalog
-    // shipped alibaba/Qwen3-* in version 2.1; session 500325a9f0a9 failed with
-    // HTTP 400 code 20012 "Model does not exist." Aliases keep the legacy id
-    // routable so user-settings.json and persisted sessions don't break.
+  test("siliconflow model not in catalog throws on resolve", () => {
     const pf = createProviderFactory("siliconflow", { apiKey: MOCK_KEY });
-    const runtime = resolveModelRuntime(pf.factory, "alibaba/Qwen3-30B-A3B-Instruct-2507");
-    expect(runtime.modelInfo?.provider).toBe("siliconflow");
-    expect(runtime.modelId).toBe("Qwen/Qwen3-30B-A3B-Instruct-2507");
+    expect(() => resolveModelRuntime(pf.factory, "Qwen/Qwen3-8B")).toThrow("not found in catalog");
   });
 
   test("openai model not in catalog throws", () => {

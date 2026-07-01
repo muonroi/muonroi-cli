@@ -21,7 +21,7 @@ describe("plan creation → user-halt (ESC) → resume on 'tiếp tục'", () =>
 
   beforeAll(async () => {
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash", "--inject-halt"],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash", "--inject-halt"],
       fixturesDir: "tests/harness/fixtures/llm/plan-resume",
     });
     proc = ctx.proc;

@@ -513,7 +513,7 @@ export class Agent {
       // siliconflow→ (via UI), this.baseURL was still api.deepseek.com from
       // startup, SiliconflowStrategy.createFactory was created with that
       // baseURL, requests landed at api.deepseek.com which rejected the SF-
-      // style model id ("deepseek-ai/DeepSeek-V4-Flash") with "supported API
+      // style model id ("deepseek-v4-flash") with "supported API
       // model names are deepseek-v4-pro or deepseek-v4-flash".
       // A user-supplied custom baseURL is preserved only when it does NOT
       // match any known provider's apiBase (i.e. it's a real override, not

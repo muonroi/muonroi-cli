@@ -140,8 +140,8 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
 
     handle = await spawnCostLeakHarness(
       {
-        provider: "siliconflow",
-        modelId: "deepseek-ai/DeepSeek-V4-Flash",
+        provider: "deepseek",
+        modelId: "deepseek-v4-flash",
         stream: [
           // Round 0: ABSORBER for PIL Layer 1's classifier call (PIL fires
           // before the main agent and consumes one doStream from the queue).

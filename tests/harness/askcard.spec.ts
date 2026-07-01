@@ -20,7 +20,7 @@ describe("askcard E2E", () => {
     // variance that previously made this flow time out — see ideal.spec.ts).
     greenfield = mkdtempSync(join(tmpdir(), "muonroi-askcard-e2e-"));
     const ctx = await spawnHarness({
-      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", MOCK_PROVIDER_KEY, "-m", "deepseek-v4-flash"],
       env: { SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY },
       cwd: greenfield,
     });

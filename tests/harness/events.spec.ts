@@ -499,7 +499,7 @@ describe("harness spawn — sidechannel + driver integration", () => {
 
   beforeAll(async () => {
     const ctx = await spawnHarness({
-      extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", MOCK_KEY, "-m", "deepseek-v4-flash"],
       env: { SILICONFLOW_API_KEY: MOCK_KEY },
     });
     proc = ctx.proc;

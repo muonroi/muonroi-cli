@@ -119,7 +119,7 @@ interface MockRuntimeGlobals {
 
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
-  // (e.g. "deepseek-ai/DeepSeek-V4-Flash") BEFORE invoking the factory.
+  // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
   // Without this, SiliconFlow / DeepSeek / xAI reject the request because
   // the alias is not a valid model id on their API.
   const mockGlobals = globalThis as MockRuntimeGlobals;
