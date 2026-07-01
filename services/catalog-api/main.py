@@ -172,6 +172,20 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     "glm-5": {"input": 1.00, "output": 3.20, "cachedInput": None, "cacheWrite": None},
     "glm-5.1": {"input": 1.40, "output": 4.40, "cachedInput": None, "cacheWrite": None},
     "glm-5.2": {"input": 1.40, "output": 4.40, "cachedInput": None, "cacheWrite": None},
+    # OpenCode Go (Subscription)
+    "opencode/kimi-k2.7-code": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/kimi-k2.6": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/glm-5.2": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/glm-5.1": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/minimax-m3": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/minimax-m2.7": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/qwen-3.7-max": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/qwen-3.7-plus": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/qwen-3.6-plus": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/deepseek-v4-pro": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/deepseek-v4-flash": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/mimo-v2.5": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "opencode/mimo-v2.5-pro": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
 }
 
 

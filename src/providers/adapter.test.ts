@@ -8,14 +8,24 @@ import type { ProviderId } from "./types.js";
 
 describe("createAdapter", () => {
   it("creates an adapter for each ProviderId", () => {
-    const ids: ProviderId[] = ["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama", "zai"];
+    const ids: ProviderId[] = [
+      "anthropic",
+      "openai",
+      "google",
+      "deepseek",
+      "siliconflow",
+      "xai",
+      "ollama",
+      "zai",
+      "opencode-go",
+    ];
     for (const id of ids) {
       const adapter = createAdapter(id, { model: "test-model", apiKey: "test-key-long-enough-for-test" });
       expect(typeof adapter.stream).toBe("function");
     }
   });
 
-  it("ALL_PROVIDER_IDS contains all 8 providers", () => {
+  it("ALL_PROVIDER_IDS contains all 9 providers", () => {
     expect(ALL_PROVIDER_IDS).toEqual([
       "anthropic",
       "openai",
@@ -25,6 +35,7 @@ describe("createAdapter", () => {
       "xai",
       "ollama",
       "zai",
+      "opencode-go",
     ]);
   });
 });
