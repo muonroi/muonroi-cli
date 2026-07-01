@@ -80,6 +80,7 @@ class CatalogModel(BaseModel):
     default_reasoning_effort: Optional[str] = None
     supports_vision: Optional[bool] = None
     tier_routing: Optional[bool] = True
+    routing_tiers: Optional[list[str]] = None
 
 
 class CatalogResponse(BaseModel):
