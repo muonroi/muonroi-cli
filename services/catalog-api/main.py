@@ -79,6 +79,7 @@ class CatalogModel(BaseModel):
     aliases: Optional[list[str]] = None
     default_reasoning_effort: Optional[str] = None
     supports_vision: Optional[bool] = None
+    tier_routing: Optional[bool] = True
 
 
 class CatalogResponse(BaseModel):

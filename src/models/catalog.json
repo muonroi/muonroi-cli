@@ -1,7 +1,7 @@
 {
-  "version": "2.2",
-  "updated_at": "2026-06-04",
-  "description": "Local fallback catalog: deepseek + siliconflow + openai (ChatGPT OAuth) + google (Agy via agy.exe OAuth + cloudcode-pa). Agy supports: Gemini 3.5 Flash (High/Medium/Low), Gemini 3.1 Pro (High/Low), Gemini 3 Flash, Claude Sonnet 4.6 (Thinking), Claude Opus 4.6 (Thinking), GPT-OSS 120B (Medium+). Non-Gemini models under google provider use Agy token for proxied access. Other providers unchanged. Pricing APPROXIMATE.",
+  "version": "2.3",
+  "updated_at": "2026-07-01",
+  "description": "Local fallback catalog: deepseek + siliconflow + openai (ChatGPT OAuth) + google (Agy via agy.exe OAuth + cloudcode-pa) + zai (GLM Coding Plan). Z.ai Coding Plan (Lite/Pro/Max) quota applies to glm-4.7, glm-5-turbo, glm-5.1, glm-5.2 — NOT glm-4.7-flash (separate free-tier rate-limit pool). glm-4.7-flash remains selectable via -m but is excluded from automatic tier routing (tier_routing:false). Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -418,6 +418,7 @@
       "name": "GLM 4.7 Flash (Z.ai)",
       "provider": "zai",
       "tier": "fast",
+      "tier_routing": false,
       "context_window": 203000,
       "max_output_tokens": 8000,
       "input_price_per_million": 0.0,
@@ -426,7 +427,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Free high-speed, cost-effective model for lightweight iterations.",
+      "description": "Z.ai free-tier model (separate rate-limit pool; NOT covered by GLM Coding Plan Pro/Lite/Max quota). Use glm-4.7 for subscription-backed coding. Explicit -m only — excluded from automatic tier routing and compaction.",
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
       "supports_vision": false
     },
@@ -435,6 +436,7 @@
       "name": "GLM 4.5 Air (Z.ai)",
       "provider": "zai",
       "tier": "fast",
+      "tier_routing": false,
       "context_window": 131072,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.2,
@@ -443,7 +445,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Lightweight, highly cost-effective model.",
+      "description": "Z.ai pay-as-you-go API model (billed per token; NOT the GLM Coding Plan subscription pool). Explicit -m only.",
       "aliases": ["glm-4.5-airx"],
       "supports_vision": false
     },
@@ -460,7 +462,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "High-performance coding model from the GLM-4 family.",
+      "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Included in subscription quota — prefer over glm-4.7-flash.",
       "aliases": [],
       "supports_vision": false
     },
@@ -477,7 +479,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "High-throughput and long-chain agent task model, focusing on stability and efficiency.",
+      "description": "GLM Coding Plan model (Lite/Pro/Max). High-throughput agent tasks; consumes subscription quota (2-3x during peak for GLM-5 family per Z.ai policy).",
       "aliases": [],
       "supports_vision": false
     },
@@ -528,7 +530,7 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "Z.ai fifth-generation model designed for long-horizon agentic tasks.",
+      "description": "GLM Coding Plan premium model (Lite/Pro/Max). Long-horizon agentic tasks; subscription quota applies.",
       "aliases": [],
       "supports_vision": false
     },
@@ -545,7 +547,7 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "Z.ai flagship MoE model with 1M-token context window. Excellent at coding and agentic tasks.",
+      "description": "GLM Coding Plan flagship (Lite/Pro/Max). 1M context; subscription quota applies (3x peak / 2x off-peak per Z.ai policy).",
       "aliases": ["glm-5.2[1m]"],
       "supports_vision": true
     },

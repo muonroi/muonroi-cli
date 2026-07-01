@@ -501,6 +501,8 @@ export interface ModelInfo {
   supportsReasoningEffort?: boolean;
   thinkingType?: "enabled" | "adaptive";
   supportsVision?: boolean;
+  /** When false, excluded from getModelByTier / automatic compaction routing. Default: routable. */
+  tierRouting?: boolean;
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

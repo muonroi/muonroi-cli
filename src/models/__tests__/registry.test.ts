@@ -1,6 +1,8 @@
 import { beforeAll, describe, expect, test } from "vitest";
+import { resolveModelForTask, type TierLookup } from "../../orchestrator/sub-agent-model-tier.js";
 import {
   getEffectiveReasoningEffort,
+  getModelByTier,
   getModelIds,
   getModelInfo,
   getSupportedReasoningEfforts,
@@ -91,5 +93,20 @@ describe("getSupportedReasoningEfforts", () => {
   test("returns efforts for reasoning-capable model", () => {
     const efforts = getSupportedReasoningEfforts("deepseek-v4-flash");
     expect(efforts.length).toBeGreaterThan(0);
+  });
+});
+
+describe("tier_routing catalog flag", () => {
+  test("glm-4.7-flash is still addressable but excluded from tier routing", () => {
+    const flash = getModelInfo("glm-4.7-flash");
+    expect(flash).toBeDefined();
+    expect(flash!.tierRouting).toBe(false);
+    expect(getModelByTier("fast", "zai")?.id).not.toBe("glm-4.7-flash");
+  });
+
+  test("zai balanced tier routes to glm-4.7 for compaction when parent is glm-4.7", () => {
+    expect(getModelByTier("balanced", "zai")?.id).toBe("glm-4.7");
+    const lookup = getModelByTier as TierLookup;
+    expect(resolveModelForTask("compact", "zai", "glm-4.7", lookup, { parentTier: "balanced" })).toBe("glm-4.7");
   });
 });
