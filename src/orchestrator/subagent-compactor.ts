@@ -172,6 +172,10 @@ export function isHighValueToolResult(
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
 
+  // Plan context bias (user-halt + "tiếp tục" resume): keep plan text verbatim so
+  // compaction does not drop the APPROVED PLAN the user just approved.
+  if (/APPROVED PLAN|plan v|khuyến nghị hành động|sprint plan|work plan/i.test(preview)) return true;
+
   // Authoritative ecosystem-docs MCP results: the agent is nudged to fetch these
   // FIRST, so eliding them strands it (session 584ba476c07a). Keep verbatim.
   if (HIGH_VALUE_MCP_PREFIXES.some((p) => name.startsWith(p))) return true;
