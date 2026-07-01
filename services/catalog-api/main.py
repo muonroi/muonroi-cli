@@ -39,7 +39,8 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+from typing_extensions import Self
 
 
 # --------------------------------------------------------------------------- #
@@ -83,14 +84,20 @@ class CatalogModel(BaseModel):
     routing_tiers: Optional[list[str]] = None
 
 
+class CatalogPeakHourWindow(BaseModel):
+    start_hour: int
+    end_hour: int
+
+
 class CatalogProviderPeakHour(BaseModel):
     """Peak-hour routing rule — sourced from vendor docs, served via catalog API."""
 
     source_url: str
     source_verified_at: Optional[str] = None
     timezone: str
-    start_hour: int
-    end_hour: int
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    windows: Optional[list[CatalogPeakHourWindow]] = None
     sensitive_model_ids: list[str]
     fallback_model_id: str
     switch_fallback_providers: Optional[list[str]] = None
@@ -98,6 +105,14 @@ class CatalogProviderPeakHour(BaseModel):
     off_peak_quota_multiplier: Optional[float] = None
     policy_basis: Optional[str] = None  # "official" | "heuristic"
     policy_note: Optional[str] = None
+
+    @model_validator(mode="after")
+    def check_window_shape(self) -> Self:
+        if self.windows:
+            return self
+        if self.start_hour is not None and self.end_hour is not None:
+            return self
+        raise ValueError("peak_hour requires windows or start_hour+end_hour")
 
 
 class CatalogProviderPolicy(BaseModel):

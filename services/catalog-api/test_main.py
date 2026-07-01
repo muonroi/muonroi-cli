@@ -199,6 +199,13 @@ def test_real_catalog_provider_policies_peak_hour():
     ds = cat.provider_policies.get("deepseek")
     assert ds is not None and ds.peak_hour is not None
     assert ds.peak_hour.fallback_model_id == "deepseek-v4-flash"
+    assert ds.peak_hour.policy_basis == "official"
+    assert ds.peak_hour.windows is not None
+    assert len(ds.peak_hour.windows) == 2
+    assert ds.peak_hour.windows[0].start_hour == 9
+    assert ds.peak_hour.windows[0].end_hour == 12
+    assert ds.peak_hour.windows[1].start_hour == 14
+    assert ds.peak_hour.windows[1].end_hour == 18
     assert cat.routing is not None
     assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai"]
 

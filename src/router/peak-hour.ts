@@ -2,6 +2,7 @@
  * Peak-hour routing — rules loaded from catalog API `provider_policies.peak_hour`
  * (vendor-sourced metadata). User settings only toggle enabled + switch/downgrade mode.
  */
+import type { CatalogProviderPeakHour } from "../models/catalog-client.js";
 import { getModelByTier, getModelInfo, getProviderPeakHourRule, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -32,6 +33,14 @@ export function hourUtc8(now: Date): number {
   return hourInTimezone(now, "Asia/Shanghai");
 }
 
+export function peakHourWindows(rule: CatalogProviderPeakHour): Array<{ start_hour: number; end_hour: number }> {
+  if (rule.windows?.length) return rule.windows;
+  if (rule.start_hour != null && rule.end_hour != null) {
+    return [{ start_hour: rule.start_hour, end_hour: rule.end_hour }];
+  }
+  return [];
+}
+
 export function isPeakHourForProvider(
   provider: ProviderId,
   now: Date,
@@ -41,7 +50,7 @@ export function isPeakHourForProvider(
   const rule = getProviderPeakHourRule(provider);
   if (!rule) return false;
   const h = hourInTimezone(now, rule.timezone);
-  return h >= rule.start_hour && h < rule.end_hour;
+  return peakHourWindows(rule).some((w) => h >= w.start_hour && h < w.end_hour);
 }
 
 /** @deprecated Use isPeakHourForProvider(provider, ...) — window is per-provider from catalog. */

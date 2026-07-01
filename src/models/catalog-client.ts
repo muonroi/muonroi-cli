@@ -31,13 +31,22 @@ export function getCatalogHeaders(): Record<string, string> {
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/** One peak window within a provider's local timezone (end_hour exclusive). */
+export interface CatalogPeakHourWindow {
+  start_hour: number;
+  end_hour: number;
+}
+
 /** Peak-hour rule for a provider — sourced from vendor docs via catalog API. */
 export interface CatalogProviderPeakHour {
   source_url: string;
   source_verified_at?: string;
   timezone: string;
-  start_hour: number;
-  end_hour: number;
+  /** Single window — used when `windows` is absent (e.g. Z.ai 14–18). */
+  start_hour?: number;
+  end_hour?: number;
+  /** Multiple peak windows (e.g. DeepSeek official: 09–12 and 14–18 UTC+8). */
+  windows?: CatalogPeakHourWindow[];
   sensitive_model_ids: string[];
   fallback_model_id: string;
   switch_fallback_providers?: string[];
@@ -113,13 +122,19 @@ const CatalogModelSchema = z
   })
   .loose();
 
+const CatalogPeakHourWindowSchema = z.object({
+  start_hour: z.number().int().min(0).max(23),
+  end_hour: z.number().int().min(1).max(24),
+});
+
 const CatalogProviderPeakHourSchema = z
   .object({
     source_url: z.string().min(1),
     source_verified_at: z.string().optional(),
     timezone: z.string().min(1),
-    start_hour: z.number().int().min(0).max(23),
-    end_hour: z.number().int().min(1).max(24),
+    start_hour: z.number().int().min(0).max(23).optional(),
+    end_hour: z.number().int().min(1).max(24).optional(),
+    windows: z.array(CatalogPeakHourWindowSchema).min(1).optional(),
     sensitive_model_ids: z.array(z.string().min(1)).min(1),
     fallback_model_id: z.string().min(1),
     switch_fallback_providers: z.array(z.string().min(1)).optional(),
@@ -127,6 +142,9 @@ const CatalogProviderPeakHourSchema = z
     off_peak_quota_multiplier: z.number().optional(),
     policy_basis: z.enum(["official", "heuristic"]).optional(),
     policy_note: z.string().optional(),
+  })
+  .refine((d) => (d.windows?.length ?? 0) > 0 || (d.start_hour != null && d.end_hour != null), {
+    message: "peak_hour requires windows or start_hour+end_hour",
   })
   .loose();
 

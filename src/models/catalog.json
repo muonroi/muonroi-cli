@@ -1,7 +1,7 @@
 {
-  "version": "2.8",
+  "version": "2.9",
   "updated_at": "2026-07-01",
-  "description": "Local fallback catalog: deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). SiliconFlow and Google models removed — use native deepseek / Z.ai / Grok / OpenCode Go only. Z.ai Coding Plan: glm-4.7 (routine/fast), glm-5-turbo (throughput), glm-5.2 (premium). tier_routing:false on glm-4.7-flash (free pool), glm-5v-turbo (Pro 429), glm-5/glm-5.1. provider_policies.peak_hour sourced from vendor docs (Z.ai official window; DeepSeek heuristic). Pricing APPROXIMATE.",
+  "description": "Local fallback catalog: deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). SiliconFlow and Google models removed — use native deepseek / Z.ai / Grok / OpenCode Go only. Z.ai Coding Plan: glm-4.7 (routine/fast), glm-5-turbo (throughput), glm-5.2 (premium). tier_routing:false on glm-4.7-flash (free pool), glm-5v-turbo (Pro 429), glm-5/glm-5.1. provider_policies.peak_hour sourced from vendor docs (Z.ai 14–18 UTC+8; DeepSeek official dual windows 09–12 and 14–18 UTC+8). Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -511,10 +511,9 @@
         "source_url": "https://api-docs.deepseek.com/quick_start/rate_limit",
         "source_verified_at": "2026-07-01",
         "timezone": "Asia/Shanghai",
-        "start_hour": 14,
-        "end_hour": 18,
-        "policy_basis": "heuristic",
-        "policy_note": "DeepSeek documents concurrency limits only (v4-pro 500, v4-flash 2500). Time window aligned with Z.ai UTC+8 peak until vendor publishes time-based policy.",
+        "policy_basis": "official",
+        "policy_note": "Peak-valley pricing per DeepSeek Team announcement (mid-July V4 release). UTC: 01:00–04:00 and 06:00–10:00; UTC+8: 09:00–12:00 and 14:00–18:00. Peak prices 2x regular for v4-pro and v4-flash.",
+        "windows": [{ "start_hour": 9, "end_hour": 12 }, { "start_hour": 14, "end_hour": 18 }],
         "sensitive_model_ids": ["deepseek-v4-pro"],
         "fallback_model_id": "deepseek-v4-flash",
         "switch_fallback_providers": ["zai", "opencode-go", "xai"]
