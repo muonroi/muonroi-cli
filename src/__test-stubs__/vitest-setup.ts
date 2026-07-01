@@ -14,8 +14,10 @@ vi.doMock ??= vi.mock as any;
 vi.doUnmock ??= (() => vi) as any;
 vi.importActual ??= ((moduleName: string) => import(moduleName)) as any;
 
-const originalGlobals = new Map<string, any>();
-vi.stubGlobal ??= (key: string, value: any) => {
+declare const Bun: any;
+
+const originalGlobals = new Map<any, any>();
+vi.stubGlobal ??= (key: any, value: any) => {
   if (!originalGlobals.has(key)) {
     originalGlobals.set(key, (globalThis as any)[key]);
   }
@@ -31,7 +33,7 @@ vi.unstubAllGlobals ??= () => {
 };
 
 const originalEnvs = new Map<string, string | undefined>();
-vi.stubEnv ??= (key: string, value: string) => {
+vi.stubEnv ??= (key: any, value: any) => {
   if (!originalEnvs.has(key)) {
     originalEnvs.set(key, process.env[key]);
   }

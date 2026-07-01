@@ -199,3 +199,75 @@ describe("EEClient - auth", () => {
     expect(body).not.toMatch(/Bearer sk-/);
   });
 });
+
+describe("EEClient - path relativization & payload redaction", () => {
+  beforeEach(() => {
+    resetEEClientState();
+  });
+
+  it("relativizes absolute home paths and backslashes in cwd", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ decision: "allow" }),
+    });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+
+    // Construct a path that contains the user home directory
+    const os = await import("node:os");
+    const home = os.homedir();
+    const testCwd = `${home}/projects/muonroi-cli`;
+
+    const req: InterceptRequest = {
+      toolName: "bash",
+      toolInput: { command: "ls" },
+      cwd: testCwd,
+      tenantId: "local",
+      scope: { kind: "global" },
+    };
+
+    await ee.intercept(req);
+
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string);
+
+    // Check that cwd has been relativized and backslashes normalized to forward slashes
+    expect(body.cwd).toBe("~/projects/muonroi-cli");
+    expect(body.cwd).not.toContain("\\");
+  });
+
+  it("redacts secret patterns in the outgoing payload", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ decision: "allow" }),
+    });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+
+    // Enroll a test secret in the redactor
+    const { redactor } = await import("../utils/redactor.js");
+    redactor.enrollSecret("very-secret-password-123");
+
+    const req: InterceptRequest = {
+      toolName: "bash",
+      toolInput: {
+        command: "run-task",
+        args: ["sk-test-12345678901234567890", "very-secret-password-123"],
+      },
+      cwd: "/tmp",
+      tenantId: "local",
+      scope: { kind: "global" },
+    };
+
+    await ee.intercept(req);
+
+    const [, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const bodyText = opts.body as string;
+
+    // Check that secrets are redacted in the body text
+    expect(bodyText).toContain("sk-***REDACTED***");
+    expect(bodyText).toContain("***REDACTED-ENROLLED***");
+    expect(bodyText).not.toContain("sk-test-12345678901234567890");
+    expect(bodyText).not.toContain("very-secret-password-123");
+  });
+});

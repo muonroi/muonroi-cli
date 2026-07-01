@@ -18,7 +18,20 @@ export interface ExperienceConfig {
 }
 
 function configPath(homeOverride?: string): string {
-  return path.join(homeOverride ?? os.homedir(), ".experience", "config.json");
+  const base = homeOverride ?? os.homedir();
+  const normalizedBase = base.replace(/\\/g, "/");
+  return path.join(normalizedBase, ".experience", "config.json").replace(/\\/g, "/");
+}
+
+export function relativizePath(p: string): string {
+  if (!p) return p;
+  let normalized = p.replace(/\\/g, "/");
+  const home = os.homedir().replace(/\\/g, "/");
+  const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
+  if (normalized.startsWith(normalizedHome)) {
+    normalized = "~" + normalized.slice(normalizedHome.length);
+  }
+  return normalized;
 }
 
 let _token: string | null = null;
@@ -67,7 +80,7 @@ export async function writeExperienceConfig(
     // No existing config (or unreadable) — start fresh.
   }
   const merged = { ...existing, ...patch };
-  await fs.mkdir(path.dirname(p), { recursive: true });
+  await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 });
   await fs.writeFile(p, `${JSON.stringify(merged, null, 2)}\n`, "utf8");
 }
 

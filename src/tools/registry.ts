@@ -847,6 +847,232 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       },
     });
 
+    tools.retrieve_tool_result = dynamicTool({
+      description:
+        "Retrieve the full output of a previous tool call by its tool_call_id. " +
+        "Searches local cache, disk cache, database history (including parent sessions), and remote Experience Engine. " +
+        "Use this to rehydrate elided tool outputs. Optional max_chars and chunk_index allow paginated retrieval.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          tool_call_id: { type: "string", description: "The unique ID of the tool call (e.g. 'call_123')." },
+          max_chars: {
+            type: "number",
+            description: "Optional character limit for the returned chunk (useful for very large outputs).",
+          },
+          chunk_index: {
+            type: "number",
+            description: "Optional chunk index if splitting the output by max_chars (0-based, default 0).",
+          },
+        },
+        required: ["tool_call_id"],
+      }),
+      execute: async (input: any) => {
+        const toolCallId = typeof input.tool_call_id === "string" ? input.tool_call_id.trim() : "";
+        if (!toolCallId) {
+          return "ERROR: tool_call_id is required.";
+        }
+        const maxChars = typeof input.max_chars === "number" ? input.max_chars : undefined;
+        const chunkIndex = typeof input.chunk_index === "number" ? input.chunk_index : 0;
+
+        let content: string | null = null;
+        let source = "";
+
+        // Tier 1: LRU cache
+        try {
+          const { getArtifact } = await import("../ee/artifact-cache.js");
+          const tier1 = getArtifact(toolCallId);
+          if (tier1) {
+            content = tier1.content;
+            source = "Tier 1 LRU cache";
+          }
+        } catch (err) {
+          console.error(`[tools:retrieve_tool_result] Tier 1 LRU check failed: ${(err as Error).message}`);
+        }
+
+        // Tier 2: Disk cache
+        if (!content) {
+          try {
+            const { findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            const tier2 = await findArtifactOnDisk(`id=${toolCallId}`);
+            if (tier2) {
+              content = tier2.content;
+              source = "Tier 2 disk cache";
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 2 disk check failed: ${(err as Error).message}`);
+          }
+        }
+
+        // Tier 3: SQLite database
+        if (!content && opts?.sessionId) {
+          try {
+            const { getSessionChain } = await import("../storage/index.js");
+            const { getDatabase } = await import("../storage/db.js");
+            const chain = getSessionChain(opts.sessionId);
+            const db = getDatabase();
+            for (let i = chain.length - 1; i >= 0; i--) {
+              const row = db
+                .prepare(`
+                SELECT tr.output_json
+                FROM tool_results tr
+                JOIN tool_calls tc ON tc.id = tr.tool_call_row_id
+                WHERE tc.tool_call_id = ? AND tc.session_id = ?
+                LIMIT 1
+              `)
+                .get(toolCallId, chain[i]) as { output_json: string } | undefined;
+
+              if (row?.output_json) {
+                const parsed = JSON.parse(row.output_json);
+                if (parsed && typeof parsed === "object") {
+                  if ("output" in parsed && typeof parsed.output === "string") {
+                    content = parsed.output;
+                  } else if ("error" in parsed && typeof parsed.error === "string") {
+                    content = `ERROR: ${parsed.error}`;
+                  } else {
+                    content = JSON.stringify(parsed);
+                  }
+                } else {
+                  content = String(parsed);
+                }
+                source = `Tier 3 SQLite database (session ${chain[i]})`;
+                break;
+              }
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 3 DB check failed: ${(err as Error).message}`);
+          }
+        }
+
+        // Tier 4: Remote EE (behavioral collection only)
+        if (!content) {
+          try {
+            const { searchEE } = await import("../ee/search.js");
+            const resp = await searchEE(`tool-artifact id=${toolCallId}`, {
+              collections: ["experience-behavioral"],
+              limit: 1,
+            });
+            const bestHit = resp?.points?.[0];
+            if (bestHit?.text) {
+              content = bestHit.text;
+              source = "Tier 4 remote EE (behavioral collection)";
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 4 EE check failed: ${(err as Error).message}`);
+          }
+        }
+
+        if (content === null) {
+          return `ERROR: Tool result not found for tool_call_id: ${toolCallId} in any tier.`;
+        }
+
+        const totalLength = content.length;
+        if (maxChars !== undefined && maxChars > 0) {
+          const totalChunks = Math.ceil(totalLength / maxChars);
+          const start = chunkIndex * maxChars;
+          const end = Math.min(start + maxChars, totalLength);
+          if (start >= totalLength) {
+            return `ERROR: chunk_index ${chunkIndex} is out of bounds. Total chunks available: ${totalChunks} (max_chars: ${maxChars}, total length: ${totalLength}).`;
+          }
+          const chunk = content.slice(start, end);
+          return JSON.stringify(
+            {
+              tool_call_id: toolCallId,
+              source,
+              chunk_index: chunkIndex,
+              total_chunks: totalChunks,
+              chunk_length: chunk.length,
+              total_length: totalLength,
+              content: chunk,
+            },
+            null,
+            2,
+          );
+        }
+
+        return JSON.stringify(
+          {
+            tool_call_id: toolCallId,
+            source,
+            total_length: totalLength,
+            content,
+          },
+          null,
+          2,
+        );
+      },
+    });
+
+    tools.search_session_history = dynamicTool({
+      description:
+        "Search the full message history across all sessions using an FTS5 MATCH expression. " +
+        "Useful to locate past questions, answers, and context across the session lineage.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "FTS5 MATCH expression query (e.g. 'compaction AND error' or 'content:Vitest').",
+          },
+        },
+        required: ["query"],
+      }),
+      execute: async (input: any) => {
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        if (!query) {
+          return "ERROR: query MATCH expression is required.";
+        }
+        try {
+          const { getDatabase } = await import("../storage/db.js");
+          const db = getDatabase();
+          // Wrap FTS search query execution in try-catch to prevent malformed FTS syntax crashes (fixing GAP-03)
+          const rows = db
+            .prepare(`
+            SELECT session_id, seq, role, tool_name, content, tool_args, tool_output
+            FROM session_history_fts
+            WHERE session_history_fts MATCH ?
+            ORDER BY rank
+            LIMIT 50
+          `)
+            .all(query) as Array<{
+            session_id: string;
+            seq: number;
+            role: string;
+            tool_name: string | null;
+            content: string | null;
+            tool_args: string | null;
+            tool_output: string | null;
+          }>;
+
+          if (rows.length === 0) {
+            return `No session history matched the query: "${query}"`;
+          }
+
+          const results = rows.map((row) => ({
+            session_id: row.session_id,
+            seq: row.seq,
+            role: row.role,
+            tool_name: row.tool_name ?? undefined,
+            content: row.content ?? undefined,
+            tool_args: row.tool_args ?? undefined,
+            tool_output: row.tool_output ?? undefined,
+          }));
+
+          return JSON.stringify(
+            {
+              query,
+              match_count: results.length,
+              results,
+            },
+            null,
+            2,
+          );
+        } catch (err) {
+          return `ERROR: FTS MATCH query failed. The FTS syntax might be malformed: ${(err as Error).message}`;
+        }
+      },
+    });
+
     // Native muonroi-tools builtins — ee_health, ee_feedback, usage_forensics,
     // lsp_query, setup_guide, selfverify_*. These run IN-PROCESS; the CLI no
     // longer self-spawns itself as an MCP server to expose them to its own inner

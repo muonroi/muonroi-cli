@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 8;
+const LATEST_DB_VERSION = 9;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -98,6 +98,26 @@ export function applyMigrations(db: SQLiteDatabase): void {
       }
       db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent_id ON sessions(parent_session_id)");
       db.pragma("user_version = 8");
+    }
+    if (version < 9) {
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS session_history_fts USING fts5(
+          session_id UNINDEXED,
+          seq UNINDEXED,
+          role UNINDEXED,
+          tool_name UNINDEXED,
+          content,
+          tool_args,
+          tool_output
+        );
+
+        CREATE TRIGGER IF NOT EXISTS t_sessions_delete_fts
+        AFTER DELETE ON sessions
+        BEGIN
+          DELETE FROM session_history_fts WHERE session_id = old.id;
+        END;
+      `);
+      db.pragma("user_version = 9");
     }
   });
 

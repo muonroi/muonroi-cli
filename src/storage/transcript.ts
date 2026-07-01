@@ -3,7 +3,7 @@ import { getCompactionSummaryText } from "../orchestrator/compaction";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
 import { logger } from "../utils/logger.js";
-import { getDatabase, withTransaction } from "./db";
+import { getDatabase, type SQLiteDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
 import { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 
@@ -207,6 +207,7 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
       const createdAt = new Date().toISOString();
       insertedSeqs.push(seq);
       insertMessage.run(sessionId, seq, message.role, JSON.stringify(message), createdAt);
+      indexMessageInFts(db, sessionId, seq, message.role, JSON.stringify(message));
 
       if (message.role === "assistant" && Array.isArray(message.content)) {
         for (const part of message.content) {
@@ -300,9 +301,13 @@ export function persistToolCallWriteAhead(
         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
       `)
       .run(sessionId, messageSeq, toolCallId, toolName, argsJson, now);
-  } catch {
-    // Fail-open: write-ahead is best-effort. The post-stream UPDATE path
-    // will still finalize the row from `appendMessages(...)`.
+  } catch (err) {
+    logger.error("storage", `[transcript] persistToolCallWriteAhead failed: ${(err as Error).message}`, {
+      sessionId,
+      messageSeq,
+      toolCallId,
+      toolName,
+    });
   }
 }
 
@@ -342,15 +347,19 @@ export function persistToolCallWriteAhead(
 export function persistMessageWriteAhead(sessionId: string, seq: number, role: string, messageJson: string): void {
   const now = new Date().toISOString();
   try {
-    getDatabase()
-      .prepare(`
+    const db = getDatabase();
+    db.prepare(`
         INSERT OR IGNORE INTO messages (
           session_id, seq, role, message_json, created_at, status
         ) VALUES (?, ?, ?, ?, ?, 'pending')
-      `)
-      .run(sessionId, seq, role, messageJson, now);
-  } catch {
-    /* fail-open */
+      `).run(sessionId, seq, role, messageJson, now);
+    indexMessageInFts(db, sessionId, seq, role, messageJson);
+  } catch (err) {
+    logger.error("storage", `[transcript] persistMessageWriteAhead failed: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
   }
 }
 
@@ -370,8 +379,8 @@ export function markMessageCompleted(sessionId: string, seq: number): void {
         WHERE session_id = ? AND seq = ? AND status = 'pending'
       `)
       .run(sessionId, seq);
-  } catch {
-    /* fail-open */
+  } catch (err) {
+    logger.error("storage", `[transcript] markMessageCompleted failed: ${(err as Error).message}`, { sessionId, seq });
   }
 }
 
@@ -392,8 +401,8 @@ export function markMessageErrored(sessionId: string, seq: number): void {
         WHERE session_id = ? AND seq = ? AND status = 'pending'
       `)
       .run(sessionId, seq);
-  } catch {
-    /* fail-open */
+  } catch (err) {
+    logger.error("storage", `[transcript] markMessageErrored failed: ${(err as Error).message}`, { sessionId, seq });
   }
 }
 
@@ -833,4 +842,157 @@ export function getLastTodoWriteArgs(sessionId: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Persist the approved plan text for a session so that "tiếp tục"/"continue"
+ * turns (which are classified as chitchat/general by PIL Pass 0) can re-inject
+ * the APPROVED PLAN section into the system prompt instead of forgetting context.
+ *
+ * Stored as a synthetic tool_call row (tool_name='__approved_plan') so we reuse
+ * the existing schema and getLast* query pattern without a new table/migration.
+ * The planText is stored verbatim in args_json.
+ */
+export function persistApprovedPlan(sessionId: string, planText: string): void {
+  if (!sessionId || !planText) return;
+  const db = getDatabase();
+  const toolCallId = `approved-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT OR REPLACE INTO tool_calls (session_id, message_seq, tool_call_id, tool_name, args_json, status, started_at, completed_at)
+      VALUES (?, 0, ?, '__approved_plan', ?, 'completed', ?, ?)
+    `).run(sessionId, toolCallId, planText, now, now);
+  } catch {
+    /* best-effort persistence; never block the turn */
+  }
+}
+
+/** Load the most recent persisted approved plan for this session (or parent chain). */
+export function getLastApprovedPlan(sessionId: string): string | null {
+  const chain = getSessionChain(sessionId);
+  const db = getDatabase();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    try {
+      // 1) Prefer our synthetic persisted row (written by setPlanContext + persistApprovedPlan).
+      const synthetic = db
+        .prepare(`
+          SELECT args_json
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name = '__approved_plan'
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string } | undefined;
+      if (synthetic?.args_json) {
+        return synthetic.args_json;
+      }
+
+      // 2) Fallback: scan real plan tool_calls (respond_plan / generate_plan) written by
+      //    council, PIL response-tools, or generate_plan UI. Extract a human-readable slice.
+      const planRow = db
+        .prepare(`
+          SELECT args_json, tool_name
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name IN ('respond_plan', 'generate_plan')
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string; tool_name: string } | undefined;
+      if (planRow?.args_json) {
+        try {
+          const parsed = JSON.parse(planRow.args_json);
+          // respond_plan shape typically has { steps, assumptions?, risks? } or { plan: {...} }
+          const candidate = parsed?.plan ?? parsed;
+          if (candidate && (Array.isArray(candidate.steps) || typeof candidate === "object")) {
+            return JSON.stringify(candidate, null, 2);
+          }
+          // generate_plan may carry raw text or { content, steps }
+          if (typeof parsed === "string") return parsed;
+          if (parsed && typeof parsed === "object") return JSON.stringify(parsed, null, 2);
+        } catch {
+          // not JSON — return as-is (may be a raw string payload)
+          if (typeof planRow.args_json === "string" && planRow.args_json.trim().length > 0) {
+            return planRow.args_json;
+          }
+        }
+      }
+    } catch {
+      // ignore and check parent
+    }
+  }
+  return null;
+}
+
+function indexMessageInFts(
+  db: SQLiteDatabase,
+  sessionId: string,
+  seq: number,
+  role: string,
+  messageJsonStr: string,
+): void {
+  db.prepare(`DELETE FROM session_history_fts WHERE session_id = ? AND seq = ?`).run(sessionId, seq);
+
+  let message: any;
+  try {
+    message = JSON.parse(messageJsonStr);
+  } catch (err) {
+    logger.error("storage", `[transcript] Failed to parse message JSON for FTS indexing: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
+    return;
+  }
+
+  let content = "";
+  let toolName = "";
+  let toolArgs = "";
+  let toolOutput = "";
+
+  const msgContent = message.content;
+  if (typeof msgContent === "string") {
+    content = msgContent;
+  } else if (Array.isArray(msgContent)) {
+    const textParts: string[] = [];
+    const toolNames: string[] = [];
+    const argParts: string[] = [];
+    const outputParts: string[] = [];
+
+    for (const part of msgContent) {
+      if (part && typeof part === "object") {
+        if (part.type === "text" && typeof part.text === "string") {
+          textParts.push(part.text);
+        } else if (part.type === "tool-call" && typeof part.toolName === "string") {
+          toolNames.push(part.toolName);
+          if (part.input !== undefined) {
+            argParts.push(typeof part.input === "string" ? part.input : JSON.stringify(part.input));
+          }
+        } else if (part.type === "tool-result" && typeof part.toolName === "string") {
+          toolNames.push(part.toolName);
+          if (part.output !== undefined) {
+            outputParts.push(typeof part.output === "string" ? part.output : JSON.stringify(part.output));
+          }
+        }
+      }
+    }
+    content = textParts.join("\n").trim();
+    toolName = toolNames.join(", ").trim();
+    toolArgs = argParts.join("\n").trim();
+    toolOutput = outputParts.join("\n").trim();
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO session_history_fts (session_id, seq, role, tool_name, content, tool_args, tool_output)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(sessionId, seq, role, toolName || null, content || null, toolArgs || null, toolOutput || null);
+  } catch (err) {
+    logger.error("storage", `[transcript] Failed to execute FTS indexing query: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
+    throw err;
+  }
 }
