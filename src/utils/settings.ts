@@ -317,6 +317,27 @@ export interface UserSettings {
    * Default 400_000 (~100k tokens).
    */
   topLevelToolBudgetChars?: number;
+  /**
+   * Router tier-promotion cap. The session's default model is treated as the
+   * user's cost ceiling: the EE router may DOWNGRADE per turn (cheaper model)
+   * but may not promote to a HIGHER tier than this setting allows without an
+   * explicit opt-in.
+   *
+   * - `"off"`: never promote beyond the default model's own tier.
+   * - `"balanced"` (default): allow promotion up to balanced, never premium.
+   *   Routine tasks the EE brain over-classifies as premium get clamped to
+   *   balanced (or to the default model when the provider has no balanced
+   *   option — e.g. DeepSeek native only has fast + premium).
+   * - `"any"`: restore legacy behavior (router may promote to any tier).
+   *
+   * Evidence: session 89b34ce9a4e8 — default deepseek-v4-flash (fast tier),
+   * stored session.model=flash, but EE warm path returned premium for a
+   * routine "check và commit files" task → 47/47 turns silently ran on
+   * deepseek-v4-pro ($0.353) instead of flash (~$0.06). The per-turn routing
+   * override never flowed through setModel so the sessions row stayed flash
+   * ("session.model lie"). Default cap="balanced" prevents that silent leak.
+   */
+  routingPromoteMax?: "off" | "balanced" | "any";
 }
 
 export interface ProjectSettings {
@@ -1137,6 +1158,17 @@ export function getCouncilExperienceMode(): CouncilExperienceMode {
 
 export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
+}
+
+/**
+ * Router tier-promotion ceiling. See UserSettings.routingPromoteMax.
+ * Default "balanced" — router may promote up to balanced but never silently
+ * to premium. Validated to the three allowed values; any unknown value
+ * falls back to the default.
+ */
+export function getRoutingPromoteMax(): "off" | "balanced" | "any" {
+  const raw = loadUserSettings().routingPromoteMax;
+  return raw === "off" || raw === "balanced" || raw === "any" ? raw : "balanced";
 }
 
 export function getDisabledProviders(): ProviderId[] {

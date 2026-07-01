@@ -741,6 +741,7 @@ export class MessageProcessor {
     const turnStartMs = Date.now();
     let turnModelId = deps.modelId;
     let taskHash: string | null = null;
+    let routeReason: string | null = null;
     const _routeStart = Date.now();
     try {
       const { decide } = await import("../router/decide.js");
@@ -777,6 +778,7 @@ export class MessageProcessor {
         }
       }
       taskHash = routeDecision.taskHash ?? null;
+      routeReason = routeDecision.reason ?? null;
       // Update status bar with router switch info. Also reset back to the
       // session default when the router does NOT switch on this turn —
       // otherwise the bar stays "stuck" showing the previously-routed model
@@ -809,11 +811,18 @@ export class MessageProcessor {
     // Interaction log: model routing
     try {
       if (deps.session) {
+        const promoted = turnModelId !== deps.modelId;
         logInteraction(deps.session.id, "routing", {
           model: turnModelId,
+          eventSubtype: promoted ? "promoted" : "default",
           data: {
             defaultModel: deps.modelId,
             routedModel: turnModelId,
+            promoted,
+            // promo-cap(...) tag appears here when the promotion ceiling clamped
+            // an EE premium pick down to balanced — queryable via event_subtype +
+            // data.reason to audit cost-leak prevention (session 89b34ce9a4e8 class).
+            reason: routeReason,
             taskHash,
             pilTaskType: pilCtx.taskType ?? null,
             pilIntentKind: pilCtx.intentKind ?? null,

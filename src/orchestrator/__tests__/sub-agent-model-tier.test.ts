@@ -50,4 +50,33 @@ describe("sub-agent model tier policy", () => {
     expect(TASK_TIER_PREFS.general.indexOf("balanced")).toBeLessThan(TASK_TIER_PREFS.general.indexOf("premium"));
     expect(TASK_TIER_PREFS.verify.indexOf("premium")).toBeLessThan(TASK_TIER_PREFS.verify.indexOf("balanced"));
   });
+
+  // ── Parent-tier ceiling (cost-leak guard) ──────────────────────────────
+  // Reproduces the 89b34ce9a4e8 class: a verify sub-agent (prefs premium-first)
+  // spawned from a fast-tier parent must NOT promote above the parent tier.
+  // Without this cap, DeepSeek-only setups (no balanced model) sent every
+  // verify sub-agent to deepseek-v4-pro at ~6x the flash cost.
+  it("parent-tier cap: verify sub-agent does not promote above a fast-tier parent", () => {
+    // acme has a full ladder; without the cap, verify → acme-premium.
+    // With parentTier="fast", premium + balanced are both above the ceiling,
+    // so no same-provider model qualifies → falls back to the parent model.
+    expect(resolveModelForTask("verify", "acme", "parent-flash", lookup, { parentTier: "fast" })).toBe("parent-flash");
+  });
+
+  it("parent-tier cap: allows premium when the parent itself is premium", () => {
+    expect(resolveModelForTask("verify", "acme", "parent-premium", lookup, { parentTier: "premium" })).toBe(
+      "acme-premium",
+    );
+  });
+
+  it("parent-tier cap: general sub-agent from a balanced parent stays <= balanced", () => {
+    // general prefs = [balanced, fast, premium]; parentTier=balanced excludes premium.
+    expect(resolveModelForTask("general", "acme", "parent-balanced", lookup, { parentTier: "balanced" })).toBe(
+      "acme-balanced",
+    );
+  });
+
+  it("parent-tier cap: omitted parentTier preserves legacy behavior", () => {
+    expect(resolveModelForTask("verify", "acme", "acme-premium", lookup)).toBe("acme-premium");
+  });
 });
