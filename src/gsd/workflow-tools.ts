@@ -126,7 +126,7 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
         const host = getGsdLoopHost();
         const ctx = loopHostContext(cwd, sessionModelId, depth, {
           sessionId,
-          runPerspectiveFn: runTask ? taskToRunPerspectiveFn(runTask) : undefined,
+          runPerspectiveFn: runTask ? taskToRunPerspectiveFn(runTask, sessionModelId) : undefined,
         });
         await host.firePoint("plan:post", ctx);
         const reviewResult = await host.firePoint("plan-review:post", ctx);

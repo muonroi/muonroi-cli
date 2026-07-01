@@ -44,6 +44,8 @@ export interface TaskRequest {
   description: string;
   prompt: string;
   maxToolRounds?: number;
+  /** When set, bypasses parent-tier cap and uses this model for the sub-agent. */
+  modelId?: string;
 }
 
 export interface TaskRun {

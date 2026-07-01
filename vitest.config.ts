@@ -54,6 +54,9 @@ export default defineConfig({
       // API that vitest's module loader cannot resolve). Run with: `bun test
       // src/ee/__tests__/export-transcripts.test.ts`.
       "src/ee/__tests__/export-transcripts.test.ts",
+      // transcript-fts.test.ts requires bun:sqlite (better-sqlite3 native build unavailable under vitest/node).
+      // Run with: `bun test src/storage/__tests__/transcript-fts.test.ts`.
+      "src/storage/__tests__/transcript-fts.test.ts",
     ],
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 30_000,

@@ -302,15 +302,17 @@ export class StreamRunner {
     // Resolve child model early so we can pass modelId to createBuiltinTools
     // (needed for vision-proxy tools: analyze_image / ask_vision_proxy).
     const childModelId = normalizeModelId(
-      isVision
-        ? VISION_MODEL
-        : isComputer
-          ? COMPUTER_MODEL
-          : custom
-            ? custom.model
-            : this.deps.resolveModelForTask(
-                isExplore ? "explore" : isVerify || isVerifyDetect || isVerifyManifest ? "verify" : "general",
-              ),
+      request.modelId
+        ? request.modelId
+        : isVision
+          ? VISION_MODEL
+          : isComputer
+            ? COMPUTER_MODEL
+            : custom
+              ? custom.model
+              : this.deps.resolveModelForTask(
+                  isExplore ? "explore" : isVerify || isVerifyDetect || isVerifyManifest ? "verify" : "general",
+                ),
     );
 
     // Mirror the file-local `createTools` wrapper from orchestrator.ts —

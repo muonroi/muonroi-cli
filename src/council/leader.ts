@@ -1,3 +1,4 @@
+import { resolveGsdPremiumModel } from "../gsd/model-tier.js";
 import { getCatalogCouncilRouting, getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -138,7 +139,23 @@ async function isProviderReachable(provider: ProviderId): Promise<boolean> {
 
 /** Plan-council leader — always premium-tier within session provider (telemetry: plan-council). */
 export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<LeaderResolution> {
-  return resolveLeaderModelDetailed(sessionModelId);
+  const sessionProviderId = detectProviderForModel(sessionModelId);
+  const sessionDisabled = isProviderDisabled(sessionProviderId as ProviderId);
+  const sessionReachable = !sessionDisabled && (await isProviderReachable(sessionProviderId));
+  if (!sessionReachable) {
+    return { modelId: getRoleModel("leader") ?? sessionModelId };
+  }
+
+  const premiumId = resolveGsdPremiumModel(sessionModelId);
+  const sessionTier = tierOf(sessionModelId);
+  const premiumTier = tierOf(premiumId);
+  if (premiumId !== sessionModelId && premiumTier && sessionTier && TIER_RANK[premiumTier] > TIER_RANK[sessionTier]) {
+    return { modelId: premiumId, promotedFrom: { modelId: sessionModelId, tier: sessionTier } };
+  }
+  if (premiumId !== sessionModelId) {
+    return { modelId: premiumId, defaulted: true };
+  }
+  return { modelId: sessionModelId, defaulted: true };
 }
 
 export async function resolveLeaderModelDetailed(sessionModelId: string): Promise<LeaderResolution> {

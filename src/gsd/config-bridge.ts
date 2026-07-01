@@ -1,7 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { getModelInfo } from "../models/registry.js";
+import { getModelByTier, getModelInfo } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { getRoleModels, type ModelRole } from "../utils/settings.js";
+import { resolveGsdPremiumModel } from "./model-tier.js";
 import { planningArtifact, planningRoot } from "./paths.js";
 
 const ROLE_TO_GSD_KEY: Record<ModelRole, string> = {
@@ -26,7 +27,24 @@ function resolveModelIdForRole(role: ModelRole, sessionModelId: string): string 
       /* fall through */
     }
   }
-  if (role === "leader") return sessionModelId;
+  let providerId: string;
+  try {
+    providerId = detectProviderForModel(sessionModelId);
+  } catch {
+    if (role === "leader") return sessionModelId;
+    return undefined;
+  }
+  if (role === "leader" || role === "verify" || role === "research") {
+    try {
+      return resolveGsdPremiumModel(sessionModelId);
+    } catch {
+      if (role === "leader") return sessionModelId;
+      return undefined;
+    }
+  }
+  if (role === "implement") {
+    return getModelByTier("balanced", providerId)?.id ?? resolveGsdPremiumModel(sessionModelId);
+  }
   return undefined;
 }
 

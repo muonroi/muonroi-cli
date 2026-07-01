@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolvePlanCouncilLeader } from "../council/leader.js";
 import type { ToolResult } from "../types/index.js";
+import { buildGsdPerspectiveTaskRequest } from "./model-tier.js";
 import { planningArtifact } from "./paths.js";
 import {
   buildPerspectivePrompt,
@@ -195,14 +196,10 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
 /** Adapter: wrap orchestrator runTask as perspective runner. */
 export function taskToPerspectiveRunner(
   runTask: (request: import("../types/index.js").TaskRequest) => Promise<ToolResult>,
+  sessionModelId: string,
 ): RunPerspectiveFn {
   return async (prompt, perspective) => {
-    const result = await runTask({
-      agent: "verify",
-      prompt,
-      description: `plan-council:${perspective.id}`,
-      maxToolRounds: 4,
-    });
+    const result = await runTask(buildGsdPerspectiveTaskRequest(prompt, perspective, sessionModelId));
     return result.output ?? "";
   };
 }

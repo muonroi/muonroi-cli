@@ -44,6 +44,7 @@ describe("plan-council", () => {
     writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
     const result = await runPlanCouncil({ cwd: tmp, sessionModelId: SESSION_MODEL, depth: "standard" });
     expect(result.skipped).toBe(false);
+    expect(result.leaderModelId).toBe("deepseek-v4-pro");
     expect(result.perspectives).toHaveLength(2);
     expect(existsSync(planningArtifact(tmp, "PLAN-REVIEW.md"))).toBe(true);
     expect(existsSync(planningArtifact(tmp, "PLAN-VERIFY.md"))).toBe(true);

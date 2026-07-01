@@ -10,6 +10,7 @@ import {
   PHASE_TO_GSD_STATUS,
 } from "./gsd-dispatch.js";
 import { allLoopHostPoints, loadLoopHostContract } from "./gsd-runtime.js";
+import { buildGsdPerspectiveTaskRequest } from "./model-tier.js";
 import { planningArtifact } from "./paths.js";
 import {
   extractPlanTitle,
@@ -281,14 +282,10 @@ export function getGsdLoopHost(): GsdLoopHost {
 
 export function taskToRunPerspectiveFn(
   runTask: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>,
+  sessionModelId: string,
 ): RunPerspectiveFn {
   return async (prompt, perspective) => {
-    const result = await runTask({
-      agent: "verify",
-      prompt,
-      description: `plan-council:${perspective.id}`,
-      maxToolRounds: 4,
-    });
+    const result = await runTask(buildGsdPerspectiveTaskRequest(prompt, perspective, sessionModelId));
     return result.output ?? "";
   };
 }
