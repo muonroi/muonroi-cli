@@ -22,16 +22,18 @@ vi.mock("../ee/bridge.js", () => ({
 
 globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai", "google"];
 
-vi.mock("../utils/settings.js", () => ({
-  getRoleModel: () => undefined,
-  getDefaultProvider: () => "anthropic",
-  getRoutingPromoteMax: () => (globalThis as { routingPromoteMax?: string }).routingPromoteMax ?? "balanced",
-  isCouncilMultiProviderPreferred: () => false,
-  isProviderDisabled: (provider: string) => {
-    const res = globalThis.disabledProvidersList.includes(provider);
-    return res;
-  },
-}));
+vi.mock("../utils/settings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../utils/settings.js")>();
+  return {
+    ...actual,
+    getRoleModel: () => undefined,
+    getDefaultProvider: () => "anthropic",
+    getRoutingPromoteMax: () => (globalThis as { routingPromoteMax?: string }).routingPromoteMax ?? "balanced",
+    isCouncilMultiProviderPreferred: () => false,
+    isProviderDisabled: (provider: string) => globalThis.disabledProvidersList.includes(provider),
+    getPeakHourPolicy: () => ({ enabled: false, mode: "downgrade" as const, startHourUtc8: 14, endHourUtc8: 18 }),
+  };
+});
 
 let BASE_OPTS: DecideOpts;
 

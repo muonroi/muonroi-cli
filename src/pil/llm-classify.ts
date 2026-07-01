@@ -13,10 +13,11 @@
  * DeepSeek Flash). Timeout 2500ms — bails fast if the model stalls.
  */
 import { streamText } from "ai";
-import { getModelByTier, getModelInfo } from "../models/registry.js";
+import { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory } from "../providers/runtime.js";
 import { resolveModelRuntime } from "../providers/runtime.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 import type { OutputStyle, TaskType } from "./types.js";
 
 /**
@@ -511,7 +512,9 @@ export async function classifySubSessionAction(
     // Zero-hardcode: query models catalog for a cheap fast-tier model under the same provider.
     const info = getModelInfo(modelId);
     const provider = info?.provider;
-    const fastModel = provider ? getModelByTier("fast", provider) || getModelByTier("balanced", provider) : undefined;
+    const fastModel = provider
+      ? getRoutedModelByTier("fast", provider) || getRoutedModelByTier("balanced", provider)
+      : undefined;
     const classificationModelId = fastModel?.id ?? modelId;
 
     const runtime = resolveModelRuntime(factory, classificationModelId);

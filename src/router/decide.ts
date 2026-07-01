@@ -8,7 +8,7 @@
 
 import { getDefaultEEClient } from "../ee/intercept.js";
 import type { RouteOutcome } from "../ee/types.js";
-import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { taskTypeToRole } from "../pil/task-tier-map.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -25,6 +25,7 @@ import {
 } from "../utils/settings.js";
 import { classify } from "./classifier/index.js";
 import { callColdRoute } from "./cold.js";
+import { adjustPeakHourModel, getRoutedModelByTier } from "./peak-hour.js";
 import { isInheritProvider } from "./provider-sentinel.js";
 import { routerStore } from "./store.js";
 import type { RouteDecision } from "./types.js";
@@ -151,7 +152,7 @@ function resolveEffectiveDefaults(opts: DecideOpts): { model: string; provider: 
   }
   for (const p of FALLBACK_PROVIDERS) {
     if (!isProviderDisabled(p)) {
-      const m = getModelByTier("balanced", p);
+      const m = getRoutedModelByTier("balanced", p);
       // Guard: getModelByTier may return a model from a different provider
       // when the preferred provider has no model for the requested tier.
       if (m && m.provider === p) return { model: m.id, provider: m.provider ?? p };
@@ -177,7 +178,7 @@ function resolveTierModel(
   }
   for (const p of FALLBACK_PROVIDERS) {
     if (!isProviderDisabled(p)) {
-      const m = getModelByTier(tier, p);
+      const m = getRoutedModelByTier(tier, p);
       // Guard: getModelByTier may return a model from a different provider
       // when the preferred provider has no model for the requested tier.
       if (m && m.provider === p) return { id: m.id, provider: m.provider ?? p };
@@ -188,6 +189,17 @@ function resolveTierModel(
   return undefined;
 }
 
+function applyPeakHourRoute(dec: RouteDecision): RouteDecision {
+  const adj = adjustPeakHourModel(dec.model);
+  if (!adj.adjusted) return dec;
+  return {
+    ...dec,
+    model: adj.modelId,
+    provider: adj.provider,
+    reason: `${dec.reason}|${adj.reason}`,
+  };
+}
+
 // ─── Provider constraint: never route to a provider the user lacks a key for ─
 
 function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDecision {
@@ -196,11 +208,11 @@ function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDe
   // so disabled-provider checks still apply.
   if (isInheritProvider(decision.provider)) {
     const resolved = detectProviderForModel(decision.model);
-    if (resolved && !isProviderDisabled(resolved as ProviderId)) return decision;
+    if (resolved && !isProviderDisabled(resolved as ProviderId)) return applyPeakHourRoute(decision);
     if (resolved && isProviderDisabled(resolved as ProviderId)) {
       return constrainToProvider({ ...decision, provider: resolved }, opts);
     }
-    return decision;
+    return applyPeakHourRoute(decision);
   }
 
   // Provider-only UX: the user enables N providers and pins one as default.
@@ -213,7 +225,7 @@ function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDe
   //     surface a config error elsewhere).
   const decisionDisabled = isProviderDisabled(decision.provider as ProviderId);
   if (!decisionDisabled) {
-    return decision;
+    return applyPeakHourRoute(decision);
   }
 
   if (isProviderDisabled(opts.defaultProvider as ProviderId)) {
@@ -223,7 +235,7 @@ function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDe
     };
   }
 
-  const sameProviderModel = getModelByTier(
+  const sameProviderModel = getRoutedModelByTier(
     decision.tier === "hot" ? "fast" : decision.tier === "cold" ? "premium" : "balanced",
     opts.defaultProvider,
   );
@@ -235,12 +247,12 @@ function constrainToProvider(decision: RouteDecision, opts: DecideOpts): RouteDe
       reason: `${decision.reason}|provider-constrained(forced-default)`,
     };
   }
-  return {
+  return applyPeakHourRoute({
     ...decision,
     model: sameProviderModel?.id ?? opts.defaultModel,
     provider: sameProviderModel?.provider ?? opts.defaultProvider,
     reason: `${decision.reason}|provider-constrained`,
-  };
+  });
 }
 
 // ─── Route feedback (HTTP path) ─────────────────────────────────────────────
@@ -312,7 +324,7 @@ function applyPromotionCap(dec: RouteDecision, defaultModel: string): RouteDecis
         : (["fast"] as const);
   for (const t of targetTiers) {
     if (TIER_RANK[t] > maxAllowedRank) continue;
-    const m = getModelByTier(t, provider);
+    const m = getRoutedModelByTier(t, provider);
     if (m && m.provider === provider) {
       return {
         ...dec,
@@ -464,11 +476,12 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
           multiProviderPreferred: isCouncilMultiProviderPreferred(),
         })
       ) {
+        const peak = adjustPeakHourModel(roleModelId);
         const d: RouteDecision = {
           tier: "hot",
-          model: roleModelId,
-          provider,
-          reason: `role:${role}→${roleModelId}`,
+          model: peak.modelId,
+          provider: peak.provider,
+          reason: peak.adjusted ? `role:${role}→${peak.modelId}|${peak.reason}` : `role:${role}→${roleModelId}`,
           source: "role",
         };
         const checked = await capCheck(d, opts, /* exempt */ true);
@@ -487,7 +500,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   if (pilTier && pilConf >= 0.6) {
     // Use effective (non-disabled) provider when default is disabled
     const effective = resolveTierModel(pilTier, opts.defaultProvider);
-    let tierModel = effective ?? getModelByTier(pilTier, opts.defaultProvider);
+    let tierModel = effective ?? getRoutedModelByTier(pilTier, opts.defaultProvider);
     // Guard: getModelByTier may cross to another provider when defaultProvider
     // has no model for the requested tier. If that cross-provider is disabled,
     // pin to the default model on the default provider instead.
@@ -499,13 +512,17 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     ) {
       tierModel = undefined;
     }
+    const pilModel = tierModel?.id ?? opts.defaultModel;
+    const peak = adjustPeakHourModel(pilModel);
     const d: RouteDecision = {
       tier: "hot",
-      model: tierModel?.id ?? opts.defaultModel,
-      provider: tierModel?.provider ?? opts.defaultProvider,
-      reason: effective
-        ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)`
-        : `pil:${pilTier}(${pilConf.toFixed(2)})`,
+      model: peak.modelId,
+      provider: tierModel?.provider ?? peak.provider,
+      reason: peak.adjusted
+        ? `${effective ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)` : `pil:${pilTier}(${pilConf.toFixed(2)})`}|${peak.reason}`
+        : effective
+          ? `pil:${pilTier}(${pilConf.toFixed(2)})-rerouted(disabled-default)`
+          : `pil:${pilTier}(${pilConf.toFixed(2)})`,
       confidence: pilConf,
       source: "pil",
     };
@@ -525,7 +542,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   if (c.tier === "hot") {
     // Use effective (non-disabled) provider when default is disabled
     const effective = c.tierHint ? resolveTierModel(c.tierHint, opts.defaultProvider) : undefined;
-    let tierModel = effective ?? (c.tierHint ? getModelByTier(c.tierHint, opts.defaultProvider) : undefined);
+    let tierModel = effective ?? (c.tierHint ? getRoutedModelByTier(c.tierHint, opts.defaultProvider) : undefined);
     // Same guard as the PIL branch above: drop cross-provider fallback when
     // the cross-provider is disabled, so we don't switch to a provider the
     // user has turned off in the splash modal.
@@ -537,11 +554,17 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
     ) {
       tierModel = undefined;
     }
+    const hotModel = tierModel?.id ?? opts.defaultModel;
+    const peak = adjustPeakHourModel(hotModel);
     const d: RouteDecision = {
       tier: "hot",
-      model: tierModel?.id ?? opts.defaultModel,
-      provider: tierModel?.provider ?? opts.defaultProvider,
-      reason: effective ? `${c.reason}-rerouted(disabled-default)` : c.reason,
+      model: peak.modelId,
+      provider: tierModel?.provider ?? peak.provider,
+      reason: peak.adjusted
+        ? `${effective ? `${c.reason}-rerouted(disabled-default)` : c.reason}|${peak.reason}`
+        : effective
+          ? `${c.reason}-rerouted(disabled-default)`
+          : c.reason,
       confidence: c.confidence,
     };
     const checked = await capCheck(d, opts);
@@ -585,12 +608,14 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
 
   // Step 4: Final fallback when EE entirely unreachable
   const effective = resolveEffectiveDefaults(opts);
+  const peak = adjustPeakHourModel(effective.model);
   const fallback: RouteDecision = {
     tier: routerStore.getState().degraded ? "degraded" : "hot",
-    model: effective.model,
-    provider: effective.provider,
-    reason:
-      effective.provider !== opts.defaultProvider
+    model: peak.modelId,
+    provider: peak.provider,
+    reason: peak.adjusted
+      ? `${effective.provider !== opts.defaultProvider ? "fallback:ee-unreachable+rerouted(disabled-default)" : "fallback:ee-unreachable"}|${peak.reason}`
+      : effective.provider !== opts.defaultProvider
         ? "fallback:ee-unreachable+rerouted(disabled-default)"
         : "fallback:ee-unreachable",
   };

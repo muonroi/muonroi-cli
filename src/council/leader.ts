@@ -1,7 +1,8 @@
-import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 
 const TIER_RANK: Record<string, number> = { fast: 1, balanced: 2, premium: 3 };
@@ -81,7 +82,7 @@ export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string
   } catch {
     return leaderModelId;
   }
-  const candidate = getModelByTier(targetTier, leaderProvider);
+  const candidate = getRoutedModelByTier(targetTier, leaderProvider);
 
   // Only accept a candidate that's on the same provider as the leader.
   // getModelByTier may fall back to "any provider" — reject that to avoid

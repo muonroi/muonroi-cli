@@ -6,7 +6,7 @@
  */
 import { routeModel as bridgeRouteModel } from "../ee/bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
-import { getModelByTier } from "../models/registry.js";
+import { getRoutedModelByTier } from "./peak-hour.js";
 import { PROVIDER_INHERIT } from "./provider-sentinel.js";
 import type { RouteDecision } from "./types.js";
 
@@ -51,7 +51,7 @@ export async function callWarmRoute(
     // EE returns a model only for catalog-backed runtimes; otherwise resolve the
     // concrete model from the catalog for the session provider + decided tier.
     const catalogTier = TIER_TO_CATALOG_TIER[bridgeResult.tier as keyof typeof TIER_TO_CATALOG_TIER] ?? "balanced";
-    const model = bridgeResult.model || getModelByTier(catalogTier, opts.defaultProvider)?.id;
+    const model = bridgeResult.model || getRoutedModelByTier(catalogTier, opts.defaultProvider)?.id;
     if (model) {
       return {
         tier: bridgeResult.tier === "fast" ? "hot" : bridgeResult.tier === "premium" ? "cold" : "warm",

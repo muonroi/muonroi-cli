@@ -16,7 +16,7 @@
  *  - verify          : validation/verification → premium first; rigor matters
  *                      more than cost here, so we do NOT downgrade by default.
  */
-import { getModelByTier } from "../models/registry.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 
 export type ModelTaskKind = "compact" | "explore" | "general" | "title" | "verify";
 
@@ -60,7 +60,7 @@ export function resolveModelForTask(
   task: ModelTaskKind,
   providerId: string,
   fallbackModelId: string,
-  lookup: TierLookup = getModelByTier as TierLookup,
+  lookup: TierLookup = getRoutedModelByTier as TierLookup,
   opts?: { parentTier?: "fast" | "balanced" | "premium" },
 ): string {
   const ceilingRank = opts?.parentTier ? TIER_RANK[opts.parentTier] : undefined;
