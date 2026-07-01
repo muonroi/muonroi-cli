@@ -12,6 +12,8 @@ import {
 const PEAK_POLICY: PeakHourPolicy = { enabled: true, mode: "downgrade" };
 const OFF_PEAK_NOON_UTC8 = new Date("2026-07-01T04:00:00.000Z"); // 12:00 UTC+8
 const PEAK_1500_UTC8 = new Date("2026-07-01T07:00:00.000Z"); // 15:00 UTC+8
+const PEAK_1000_UTC8 = new Date("2026-07-01T02:00:00.000Z"); // 10:00 UTC+8 — DeepSeek morning window
+const OFF_PEAK_1300_UTC8 = new Date("2026-07-01T05:00:00.000Z"); // 13:00 UTC+8 — gap between DeepSeek windows
 
 beforeAll(async () => {
   await loadCatalog();
@@ -29,6 +31,15 @@ describe("isPeakHourForProvider", () => {
 
   it("returns false when user policy disabled", () => {
     expect(isPeakHourForProvider("zai", PEAK_1500_UTC8, { ...PEAK_POLICY, enabled: false })).toBe(false);
+  });
+
+  it("returns true for deepseek morning window 09:00–12:00 UTC+8", () => {
+    expect(isPeakHourForProvider("deepseek", PEAK_1000_UTC8, PEAK_POLICY)).toBe(true);
+    expect(isPeakHourForProvider("zai", PEAK_1000_UTC8, PEAK_POLICY)).toBe(false);
+  });
+
+  it("returns false for deepseek in midday gap 12:00–14:00 UTC+8", () => {
+    expect(isPeakHourForProvider("deepseek", OFF_PEAK_1300_UTC8, PEAK_POLICY)).toBe(false);
   });
 });
 
@@ -52,11 +63,23 @@ describe("adjustPeakHourModel", () => {
     expect(adj.modelId).toBe("glm-4.7");
   });
 
-  it("downgrades deepseek-v4-pro to deepseek-v4-flash during peak", () => {
+  it("downgrades deepseek-v4-pro to deepseek-v4-flash during afternoon peak", () => {
     const adj = adjustPeakHourModel("deepseek-v4-pro", { now: PEAK_1500_UTC8, policy: PEAK_POLICY });
     expect(adj.adjusted).toBe(true);
     expect(adj.modelId).toBe("deepseek-v4-flash");
     expect(adj.provider).toBe("deepseek");
+  });
+
+  it("downgrades deepseek-v4-pro during morning peak window", () => {
+    const adj = adjustPeakHourModel("deepseek-v4-pro", { now: PEAK_1000_UTC8, policy: PEAK_POLICY });
+    expect(adj.adjusted).toBe(true);
+    expect(adj.modelId).toBe("deepseek-v4-flash");
+  });
+
+  it("leaves deepseek-v4-pro unchanged in midday gap", () => {
+    const adj = adjustPeakHourModel("deepseek-v4-pro", { now: OFF_PEAK_1300_UTC8, policy: PEAK_POLICY });
+    expect(adj.adjusted).toBe(false);
+    expect(adj.modelId).toBe("deepseek-v4-pro");
   });
 
   it("leaves glm-4.7 unchanged during peak", () => {

@@ -147,11 +147,15 @@ describe("provider_policies from catalog", () => {
     expect(rule!.source_url).toContain("docs.z.ai");
   });
 
-  test("loads deepseek peak-hour rule with heuristic basis", () => {
+  test("loads deepseek official dual peak windows from vendor announcement", () => {
     const rule = getProviderPeakHourRule("deepseek");
     expect(rule).toBeDefined();
     expect(rule!.sensitive_model_ids).toContain("deepseek-v4-pro");
     expect(rule!.fallback_model_id).toBe("deepseek-v4-flash");
-    expect(rule!.policy_basis).toBe("heuristic");
+    expect(rule!.policy_basis).toBe("official");
+    expect(rule!.windows).toEqual([
+      { start_hour: 9, end_hour: 12 },
+      { start_hour: 14, end_hour: 18 },
+    ]);
   });
 });
