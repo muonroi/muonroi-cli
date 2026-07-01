@@ -1,4 +1,4 @@
-import { getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { getCatalogCouncilRouting, getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
@@ -214,6 +214,56 @@ export function hasMultiProviderConfig(roleModels: Partial<Record<ModelRole, str
   return providers.size >= 2;
 }
 
+/**
+ * Count debate roles available for auto-council gating.
+ * Uses explicit roleModels when ≥2 configured; otherwise catalog council slots.
+ */
+export function getEffectiveCouncilRoleCount(): number {
+  const explicit = Object.values(getRoleModels()).filter(Boolean).length;
+  if (explicit >= 2) return explicit;
+  const catalog = getCatalogCouncilRouting();
+  if (catalog?.participants?.length && catalog.participants.length >= 2) {
+    return catalog.participants.length;
+  }
+  return explicit;
+}
+
+async function resolveCatalogCouncilParticipants(): Promise<Array<{ role: ModelRole; model: string }>> {
+  const config = getCatalogCouncilRouting();
+  if (!config?.participants?.length) return [];
+
+  const candidates: Array<{ role: ModelRole; model: string }> = [];
+  const usedModels = new Set<string>();
+
+  for (const slot of config.participants) {
+    const role = slot.role;
+    const provider = slot.provider as ProviderId;
+    if (isProviderDisabled(provider)) continue;
+    if (!(await isProviderReachable(provider))) continue;
+
+    let modelId: string | undefined;
+    if (slot.model_id) {
+      const info = getModelInfo(slot.model_id);
+      if (info?.provider === provider) modelId = slot.model_id;
+    }
+    if (!modelId && slot.tier) {
+      const m = getRoutedModelByTier(slot.tier, provider);
+      if (m?.provider === provider) modelId = m.id;
+    }
+    if (!modelId) {
+      const models = getModelsForProvider(provider);
+      const routable = models.find((m) => m.tierRouting !== false);
+      modelId = routable?.id ?? models[0]?.id;
+    }
+    if (!modelId || usedModels.has(modelId)) continue;
+
+    candidates.push({ role, model: modelId });
+    usedModels.add(modelId);
+  }
+
+  return candidates.length >= 2 ? candidates : [];
+}
+
 export async function resolveParticipants(
   sessionModelId: string,
   preferMultiProvider: boolean,
@@ -233,6 +283,12 @@ export async function resolveParticipants(
       if (canReach) candidates.push({ role, model: modelId });
     }
     if (candidates.length >= 2) return candidates;
+  }
+
+  // Catalog-defined multi-provider lineup (default for deepseek+zai+opencode-go+xai stack).
+  if (preferMultiProvider) {
+    const catalogCandidates = await resolveCatalogCouncilParticipants();
+    if (catalogCandidates.length >= 2) return catalogCandidates;
   }
 
   const mainProviderId = detectProviderForModel(sessionModelId);

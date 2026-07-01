@@ -10,6 +10,7 @@ import type {
   NormalizedLspSettings,
 } from "../lsp/types";
 import {
+  getCatalogCouncilRouting,
   getEffectiveReasoningEffort,
   getFirstCatalogModel,
   getFirstCatalogProvider,
@@ -1187,7 +1188,9 @@ export function getAutoCouncilMinRoles(): number {
 }
 
 export function isCouncilMultiProviderPreferred(): boolean {
-  return loadUserSettings().councilPreferMultiProvider ?? false;
+  const user = loadUserSettings().councilPreferMultiProvider;
+  if (user !== undefined) return user;
+  return getCatalogCouncilRouting()?.prefer_multi_provider ?? true;
 }
 
 export function getCouncilExperienceMode(): CouncilExperienceMode {

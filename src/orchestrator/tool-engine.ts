@@ -51,6 +51,7 @@
 //   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
@@ -141,7 +142,6 @@ import {
   getAutoCouncilMinRoles,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
-  getRoleModels,
   getSteerInjectionEnabled,
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
@@ -613,8 +613,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // and stay productive. `plan` keeps the old behaviour (architectural
   // decisions deserve debate regardless of length).
   const autoCouncilTypes = new Set(["plan", "analyze"]);
-  const councilRoles = getRoleModels();
-  const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
+  const configuredRoleCount = getEffectiveCouncilRoleCount();
   const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
@@ -1681,7 +1680,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // already consumes ~30-40% of the window, leaving little headroom.
             const isReasoningModel = runtime.modelInfo?.reasoning === true;
             const reasoningFillRatio = isReasoningModel
-              ? (contextWindowTokens > 0 && contextWindowTokens < 100_000 ? 0.2 : 0.3)
+              ? contextWindowTokens > 0 && contextWindowTokens < 100_000
+                ? 0.2
+                : 0.3
               : undefined;
             const compacted = compactSubAgentMessages(stripped, {
               thresholdChars: topLevelCompactThreshold,
@@ -1707,7 +1708,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // advance warning that was missing — agent can now decide to
             // summarize, finish, or request preservation. Fires when we did
             // NOT compact this step (compacted === stripped, restored by the
-                      const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
+            const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
             if (coalesced === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
               const _cp = buildCheckpointReminder(sn, true);
               const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
@@ -3845,15 +3846,17 @@ export function coalesceReadOnlyMessages(messages: any[]): any[] {
 
     if (isReadOnly) {
       const prev = coalescedGroups[coalescedGroups.length - 1];
-      const prevIsReadOnly = prev && (() => {
-        if (!prev.tool || !prev.assistant) return false;
-        const toolCalls = getToolCalls(prev.assistant);
-        if (toolCalls.length === 0) return false;
-        return toolCalls.every((tc: any) => {
-          const name = tc.toolName || tc.function?.name;
-          return name && READ_ONLY_TOOLS.has(name);
-        });
-      })();
+      const prevIsReadOnly =
+        prev &&
+        (() => {
+          if (!prev.tool || !prev.assistant) return false;
+          const toolCalls = getToolCalls(prev.assistant);
+          if (toolCalls.length === 0) return false;
+          return toolCalls.every((tc: any) => {
+            const name = tc.toolName || tc.function?.name;
+            return name && READ_ONLY_TOOLS.has(name);
+          });
+        })();
 
       if (prevIsReadOnly) {
         prev.assistant = mergeAssistantMessages(prev.assistant, group.assistant);

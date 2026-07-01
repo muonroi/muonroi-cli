@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "vitest";
 import { resolveModelForTask, type TierLookup } from "../../orchestrator/sub-agent-model-tier.js";
 import {
+  getCatalogCouncilRouting,
   getEffectiveReasoningEffort,
   getModelByTier,
   getModelIds,
@@ -145,6 +146,20 @@ describe("provider_policies from catalog", () => {
     expect(rule!.sensitive_model_ids).toContain("glm-5.2");
     expect(rule!.fallback_model_id).toBe("glm-4.7");
     expect(rule!.source_url).toContain("docs.z.ai");
+  });
+
+  test("loads council multi-provider lineup from routing.council", () => {
+    const council = getCatalogCouncilRouting();
+    expect(council?.prefer_multi_provider).toBe(true);
+    expect(council?.participants).toHaveLength(3);
+    const implement = council?.participants?.find((p) => p.role === "implement");
+    expect(implement?.provider).toBe("deepseek");
+    expect(implement?.model_id).toBe("deepseek-v4-flash");
+    const verify = council?.participants?.find((p) => p.role === "verify");
+    expect(verify?.provider).toBe("zai");
+    expect(verify?.model_id).toBe("glm-5.2");
+    const research = council?.participants?.find((p) => p.role === "research");
+    expect(research?.provider).toBe("opencode-go");
   });
 
   test("loads deepseek official dual peak windows from vendor announcement", () => {
