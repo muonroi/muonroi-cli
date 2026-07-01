@@ -85,6 +85,8 @@ const ADAPTER_FACTORIES: Record<ProviderId, AdapterFactory> = {
   xai: (config) =>
     createOpenAICompatibleAdapter({ ...config, id: "xai", baseURL: config.baseURL ?? apiBaseFor("xai") }),
   ollama: (config) => createOllamaAdapter(config),
+  zai: (config) =>
+    createOpenAICompatibleAdapter({ ...config, id: "zai", baseURL: config.baseURL ?? apiBaseFor("zai") }),
 };
 
 /**

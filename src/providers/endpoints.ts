@@ -45,6 +45,10 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     apiBase: "http://localhost:11434",
     consoleUrl: "(no key needed for Ollama)",
   },
+  zai: {
+    apiBase: "https://api.z.ai/api/coding/paas/v4",
+    consoleUrl: "https://z.ai/coding-plan",
+  },
 };
 
 /** Fast lookup: provider id → API base URL. */
@@ -61,8 +65,9 @@ export function consoleUrlFor(provider: ProviderId): string {
  * Default base URLs for OpenAI-compatible providers only. Used by adapters
  * that share the OpenAI SDK shape (deepseek, siliconflow, xai).
  */
-export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "siliconflow" | "xai", string> = {
+export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "siliconflow" | "xai" | "zai", string> = {
   deepseek: PROVIDER_ENDPOINTS.deepseek.apiBase,
   siliconflow: PROVIDER_ENDPOINTS.siliconflow.apiBase,
   xai: PROVIDER_ENDPOINTS.xai.apiBase,
+  zai: PROVIDER_ENDPOINTS.zai.apiBase,
 };

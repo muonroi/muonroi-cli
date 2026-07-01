@@ -27,6 +27,7 @@ const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
   deepseek: "deepseek",
   siliconflow: "siliconflow",
   xai: "xai",
+  zai: "zai",
 };
 
 const KEYCHAIN_SERVICE = "muonroi-cli";
@@ -39,6 +40,7 @@ const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
   siliconflow: "siliconflow",
   xai: "xai",
   ollama: "ollama",
+  zai: "zai",
 };
 
 const ENV_BY_PROVIDER: Record<ProviderId, string> = {
@@ -49,6 +51,7 @@ const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   siliconflow: "SILICONFLOW_API_KEY",
   xai: "XAI_API_KEY",
   ollama: "OLLAMA_API_KEY",
+  zai: "ZAI_API_KEY",
 };
 
 /**

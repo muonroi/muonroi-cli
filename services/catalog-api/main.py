@@ -163,6 +163,15 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     # xAI (Grok)
     "grok-4.3": {"input": 1.25, "output": 2.5, "cachedInput": None, "cacheWrite": None},
     "grok-build-0.1": {"input": 1.0, "output": 2.0, "cachedInput": None, "cacheWrite": None},
+    # Z.ai (GLM)
+    "glm-4.7-flash": {"input": 0.0, "output": 0.0, "cachedInput": None, "cacheWrite": None},
+    "glm-4.5-air": {"input": 0.20, "output": 1.10, "cachedInput": None, "cacheWrite": None},
+    "glm-4.7": {"input": 0.60, "output": 2.20, "cachedInput": None, "cacheWrite": None},
+    "glm-5-turbo": {"input": 0.10, "output": 0.30, "cachedInput": None, "cacheWrite": None},
+    "glm-5v-turbo": {"input": 0.30, "output": 0.90, "cachedInput": None, "cacheWrite": None},
+    "glm-5": {"input": 1.00, "output": 3.20, "cachedInput": None, "cacheWrite": None},
+    "glm-5.1": {"input": 1.40, "output": 4.40, "cachedInput": None, "cacheWrite": None},
+    "glm-5.2": {"input": 1.40, "output": 4.40, "cachedInput": None, "cacheWrite": None},
 }
 
 

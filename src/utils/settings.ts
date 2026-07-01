@@ -259,6 +259,7 @@ export interface UserSettings {
     siliconflow?: ProviderKeyConfig;
     xai?: ProviderKeyConfig;
     ollama?: { baseURL?: string };
+    zai?: ProviderKeyConfig;
   };
   /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
   disabledProviders?: ProviderId[];
@@ -635,6 +636,15 @@ export function getProviderConfigs(
     configs.xai = {
       apiKey: xaiKey,
       baseURL: p.xai?.baseURL ?? apiBaseFor("xai"),
+    };
+  }
+
+  // Z.ai (OpenAI-compatible)
+  const zaiKey = process.env.ZAI_API_KEY ?? p.zai?.apiKey;
+  if (zaiKey) {
+    configs.zai = {
+      apiKey: zaiKey,
+      baseURL: p.zai?.baseURL ?? apiBaseFor("zai"),
     };
   }
 

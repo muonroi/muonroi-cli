@@ -66,7 +66,7 @@ export type ProviderStream = AsyncGenerator<StreamChunk, void, unknown>;
  * 'google' maps to Gemini/Agy via @ai-sdk/google; 'deepseek' and 'siliconflow'
  * share the OpenAI-compatible adapter with different baseURLs.
  */
-export type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "xai" | "ollama";
+export type ProviderId = "anthropic" | "openai" | "google" | "deepseek" | "siliconflow" | "xai" | "ollama" | "zai";
 
 /**
  * Single source of truth for the canonical ordering of all provider IDs.
@@ -83,6 +83,7 @@ export const ALL_PROVIDER_IDS = [
   "siliconflow",
   "xai",
   "ollama",
+  "zai",
 ] as const satisfies readonly ProviderId[];
 
 /** Convenience iterator over the canonical provider list. */

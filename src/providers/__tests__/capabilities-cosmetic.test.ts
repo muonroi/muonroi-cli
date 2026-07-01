@@ -37,6 +37,9 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("ollama → keyless placeholder", () => {
       expect(getProviderCapabilities("ollama").consoleSignupURL()).toBe("(no key needed for Ollama)");
     });
+    it("zai → https://z.ai/coding-plan", () => {
+      expect(getProviderCapabilities("zai").consoleSignupURL()).toBe("https://z.ai/coding-plan");
+    });
     it("unknown provider id falls back to default anthropic console", () => {
       expect(getProviderCapabilities("does-not-exist").consoleSignupURL()).toBe(
         "https://console.anthropic.com/settings/keys",
@@ -80,6 +83,11 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
       expect(layout.readField).toBe("cachedInputTokens");
       expect(layout.creationSupported).toBe(false);
     });
+    it("zai → default layout", () => {
+      const layout = getProviderCapabilities("zai").cacheMetricLayout();
+      expect(layout.readField).toBe("cachedInputTokens");
+      expect(layout.creationSupported).toBe(false);
+    });
   });
 
   describe("systemPromptStyle", () => {
@@ -104,12 +112,24 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("ollama → generic", () => {
       expect(getProviderCapabilities("ollama").systemPromptStyle()).toBe("generic");
     });
+    it("zai → generic", () => {
+      expect(getProviderCapabilities("zai").systemPromptStyle()).toBe("generic");
+    });
   });
 
   describe("ALL_PROVIDER_IDS single source of truth", () => {
-    it("contains exactly 7 providers in canonical order", async () => {
+    it("contains exactly 8 providers in canonical order", async () => {
       const { ALL_PROVIDER_IDS } = await import("../types.js");
-      expect(ALL_PROVIDER_IDS).toEqual(["anthropic", "openai", "google", "deepseek", "siliconflow", "xai", "ollama"]);
+      expect(ALL_PROVIDER_IDS).toEqual([
+        "anthropic",
+        "openai",
+        "google",
+        "deepseek",
+        "siliconflow",
+        "xai",
+        "ollama",
+        "zai",
+      ]);
     });
     it("iterProviders returns the same canonical list", async () => {
       const { ALL_PROVIDER_IDS, iterProviders } = await import("../types.js");
