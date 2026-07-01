@@ -37,9 +37,8 @@ export const handleCompactSlash: SlashHandler = async (_args, ctx) => {
   }
 
   // Return signal for orchestrator to perform compaction
-  // The orchestrator intercepts __COMPACT__ and calls deliberateCompact()
-  // with its own this.messages and this.systemPrompt
-  return `__COMPACT__\nRun: ${runId}\nReady for two-pass compaction.`;
+  const instructions = _args.length > 0 ? `\nInstructions: ${_args.join(" ")}` : "";
+  return `__COMPACT__\nRun: ${runId}${instructions}\nReady for two-pass compaction.`;
 };
 
 // Self-register on module import

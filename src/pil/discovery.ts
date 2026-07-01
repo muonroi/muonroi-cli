@@ -10,6 +10,7 @@ import type {
   ModelClarificationProposer,
   ProjectContext,
 } from "./discovery-types.js";
+import { scoreSufficiency } from "./layer1-intent.js";
 import { isMetaAnalysisPrompt } from "./layer6-output.js";
 import { scanProjectContext } from "./layer15-context-scan.js";
 import { modelCardToQuestion, resolveGapsNonInteractive } from "./layer16-clarity.js";
@@ -270,6 +271,9 @@ async function proposeModelCards(
       ? `Bounded contexts: ${projectContext.boundedContexts.map((b) => `${b.name} (${b.path})`).join(", ")}`
       : "",
     projectContext.eePatterns?.length ? `EE patterns: ${projectContext.eePatterns.slice(0, 3).join(" | ")}` : "",
+    projectContext.recentModifiedFiles?.length
+      ? `User's active/modified files (git status): ${projectContext.recentModifiedFiles.join(", ")}`
+      : "",
     recentTurnsSummary ? `\nRecent Conversation History:\n${recentTurnsSummary}` : "",
   ]
     .filter(Boolean)
@@ -298,6 +302,12 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
       const contextStr = input.additionalContext
         ? `\nCurrent CLI enrichment / context (use this to decide what is already known):\n${input.additionalContext}`
         : "";
+
+      const sufficiency = scoreSufficiency({ rawText: input.raw });
+      const forceDirective = !sufficiency.sufficient
+        ? `\nCRITICAL: A local heuristic determined this prompt is highly underspecified (missing: ${sufficiency.missing.join(", ")}). You MUST return at least one card asking the user to clarify these missing aspects. Do NOT return an empty array [] under any circumstances.`
+        : "";
+
       const special = isMetaAnalysisPrompt(input.raw)
         ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
         : "";
@@ -309,7 +319,7 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
       const prompt = `You are the AI agent executing inside muonroi-cli.
 ${envHeader}User request: "${input.raw}"
 Task type from CLI: ${input.l1.taskType}
-${contextStr}
+${contextStr}${forceDirective}
 
 You design question cards shown to the user *before* you start working.
 Each card is a structured question with selectable options.

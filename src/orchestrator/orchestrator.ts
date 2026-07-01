@@ -49,6 +49,7 @@ import {
   loadTranscriptState,
   logInteraction,
   markMessageCompleted,
+  persistApprovedPlan,
   recordUsageEvent,
   SessionStore,
 } from "../storage/index.js";
@@ -255,6 +256,7 @@ function createTools(
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
     modelId: _opts?.modelId,
+    sessionId: _opts?.sessionId,
   });
 }
 
@@ -566,6 +568,16 @@ export class Agent {
 
   setPlanContext(ctx: string | null): void {
     this.planContext = ctx;
+    // Persist so that bare continuation phrases ("tiếp tục", "continue") after
+    // interrupt or cross-process resume can re-hydrate the APPROVED PLAN section
+    // instead of forgetting context and re-asking for details.
+    if (this.session && ctx) {
+      try {
+        persistApprovedPlan(this.session.id, ctx);
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   setSendTelegramFile(fn: ((filePath: string) => Promise<ToolResult>) | null): void {
@@ -3155,19 +3167,30 @@ export class Agent {
     const recent = this.messages.slice(-6);
     const parts: string[] = [];
     for (const msg of recent) {
-      if (msg.role !== "user" && msg.role !== "assistant") continue;
-      const text =
-        typeof msg.content === "string"
-          ? msg.content
-          : Array.isArray(msg.content)
+      if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") continue;
+
+      let text = "";
+      if (msg.role === "tool") {
+        text = Array.isArray(msg.content)
+          ? msg.content.map((p: any) => (typeof p.result === "string" ? p.result : JSON.stringify(p.result))).join(" ")
+          : typeof msg.content === "string"
             ? msg.content
-                .filter((p: { type: string }) => p.type === "text")
-                .map((p: { type: string; text?: string }) => p.text ?? "")
-                .join("")
-            : "";
+            : JSON.stringify(msg.content);
+      } else {
+        text =
+          typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content
+                  .filter((p: { type: string }) => p.type === "text")
+                  .map((p: { type: string; text?: string }) => p.text ?? "")
+                  .join("")
+              : "";
+      }
+
       if (!text) continue;
-      const snippet = text.length > 80 ? `${text.slice(0, 77)}...` : text;
-      parts.push(`[${msg.role}]: ${snippet}`);
+      const snippet = text.length > 300 ? `${text.slice(0, 297)}...` : text;
+      parts.push(`[${msg.role}]: ${snippet.replace(/\n/g, " ")}`);
     }
     return parts.length > 0 ? parts.join(" | ") : null;
   }

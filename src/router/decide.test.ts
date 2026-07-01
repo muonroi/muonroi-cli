@@ -7,6 +7,10 @@ import { loadCatalog } from "../models/registry.js";
 import { type DecideOpts, decide } from "./decide.js";
 import { routerStore } from "./store.js";
 
+declare global {
+  var disabledProvidersList: string[];
+}
+
 // Mock bridge to always return null so tests go through HTTP path
 vi.mock("../ee/bridge.js", () => ({
   routeModel: vi.fn().mockResolvedValue(null),

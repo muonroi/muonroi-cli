@@ -50,19 +50,19 @@ class InMemoryDatabase {
   private applySingleStatement(stmt: string): void {
     const upper = stmt.trim().toUpperCase();
 
-    if (upper.startsWith("CREATE TABLE")) {
+    if (upper.startsWith("CREATE TABLE") || upper.startsWith("CREATE VIRTUAL TABLE")) {
       this.applyCreateTable(stmt);
     } else if (upper.startsWith("ALTER TABLE") && upper.includes("ADD COLUMN")) {
       this.applyAlterTable(stmt);
-    } else if (upper.startsWith("CREATE INDEX") || upper.startsWith("PRAGMA")) {
-      // Ignore indexes and pragma in exec (pragma handled separately)
+    } else if (upper.startsWith("CREATE INDEX") || upper.startsWith("PRAGMA") || upper.startsWith("CREATE TRIGGER")) {
+      // Ignore indexes, pragma, and triggers in exec
     }
     // INSERT, SELECT, etc. handled in prepare()
   }
 
   private applyCreateTable(stmt: string): void {
     // Extract table name
-    const match = stmt.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(/i);
+    const match = stmt.match(/CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
     if (!match) return;
     const tableName = match[1].toLowerCase();
     if (this.tables.has(tableName)) return; // IF NOT EXISTS
@@ -391,5 +391,20 @@ describe("DB migrations", () => {
     expect(usageRows).toHaveLength(1);
     expect(usageRows[0].pil_active).toBe(1);
     expect(usageRows[0].enrichment_delta).toBe(-120);
+  });
+
+  it("Test 6: DB starting at version 0 creates session_history_fts virtual table", () => {
+    const { db, raw } = makeDb();
+    applyMigrations(db);
+
+    const table = raw.tables.get("session_history_fts");
+    expect(table).toBeDefined();
+    expect(table!.has("session_id")).toBe(true);
+    expect(table!.has("seq")).toBe(true);
+    expect(table!.has("role")).toBe(true);
+    expect(table!.has("tool_name")).toBe(true);
+    expect(table!.has("content")).toBe(true);
+    expect(table!.has("tool_args")).toBe(true);
+    expect(table!.has("tool_output")).toBe(true);
   });
 });

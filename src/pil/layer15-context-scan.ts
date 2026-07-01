@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoundedContext, ProjectContext, RelevantModule } from "./discovery-types.js";
@@ -136,15 +137,27 @@ export async function scanProjectContext(raw: string, cwd: string): Promise<Proj
   } catch {
     /* EE unavailable */
   }
+  let recentModifiedFiles: string[] = [];
+  try {
+    const gitOut = execSync("git status --porcelain", { cwd, encoding: "utf-8", stdio: "pipe" });
+    recentModifiedFiles = gitOut
+      .split("\n")
+      .map((line) => line.slice(3).trim())
+      .filter((line) => line.length > 0)
+      .slice(0, 10);
+  } catch {
+    // Not a git repo or git not installed
+  }
 
   return {
     language,
     framework,
     packageManager,
-    domain: language,
+    domain: null,
     boundedContexts,
     eePatterns,
     relevantModules,
+    recentModifiedFiles,
     scannedAt: Date.now(),
     cwd,
   };

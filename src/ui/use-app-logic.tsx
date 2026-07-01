@@ -3467,6 +3467,15 @@ export function useAppLogic(props: AppLogicProps) {
 
         if (!isStale()) {
           finalizeActiveTurn({ wasInterrupted, hadError: turnHadError });
+
+          // If the agent proactively requested compaction (e.g., hit max tool rounds),
+          // automatically dispatch the slash command to run the compaction pass.
+          const finalContent = contentAccRef.current.trim();
+          if (finalContent.startsWith("/compact ") || finalContent === "/compact") {
+            setTimeout(() => {
+              if (processMessageRef.current) processMessageRef.current(finalContent);
+            }, 100);
+          }
         }
         if (wasInterrupted) {
           interruptedRunIdRef.current = null;
@@ -3840,9 +3849,19 @@ export function useAppLogic(props: AppLogicProps) {
             if (result === null) return;
 
             if (result.startsWith("__COMPACT__")) {
+              const match = result.match(/Instructions:\s*(.+)/);
+              const instructions = match ? match[1].trim() : "";
               const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
               try {
-                const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                const cr = await deliberateCompact(
+                  flowDir,
+                  agent.getMessages(),
+                  "",
+                  4096,
+                  agent.getProviderId(),
+                  model,
+                  instructions,
+                );
                 const sessionId = agent.getSessionId();
                 if (sessionId) {
                   const nextSeq = getNextMessageSequence(sessionId);
@@ -4608,9 +4627,19 @@ export function useAppLogic(props: AppLogicProps) {
             .then(async (result) => {
               if (result === null) return;
               if (result.startsWith("__COMPACT__")) {
+                const match = result.match(/Instructions:\s*(.+)/);
+                const instructions = match ? match[1].trim() : "";
                 const flowDir = path.join(agent.getCwd(), ".muonroi-flow");
                 try {
-                  const cr = await deliberateCompact(flowDir, agent.getMessages(), "", 4096);
+                  const cr = await deliberateCompact(
+                    flowDir,
+                    agent.getMessages(),
+                    "",
+                    4096,
+                    agent.getProviderId(),
+                    model,
+                    instructions,
+                  );
                   const sessionId = agent.getSessionId();
                   if (sessionId) {
                     const nextSeq = getNextMessageSequence(sessionId);
@@ -4745,14 +4774,11 @@ export function useAppLogic(props: AppLogicProps) {
     [
       agent,
       handleExit,
-      handleCommand,
       model,
       messages,
-      openAgentsModal,
       openMcpModal,
       openSandboxPicker,
       openWalletPicker,
-      openScheduleModal,
       processMessage,
       resetToNewSession,
       startupConfig.version,

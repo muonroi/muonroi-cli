@@ -78,6 +78,14 @@ describe("session-experience tracker", () => {
     expect(m).toMatch(/ee_query "tool-artifact id=XXX"/);
   });
 
+  it("stores and retrieves elision summaries", () => {
+    recordElision("call_sum", "grep", 5000, 3, "Grep found 12 matches");
+    const s = getSessionExperience();
+    const elision = s.elisions.find((e) => e.toolCallId === "call_sum");
+    expect(elision).toBeDefined();
+    expect(elision!.summary).toBe("Grep found 12 matches");
+  });
+
   it("caps the elision log at 200 (FIFO) without unbounded growth", () => {
     for (let i = 0; i < 250; i++) recordElision(`c_${i}`, "bash", 500, i);
     const s = getSessionExperience();

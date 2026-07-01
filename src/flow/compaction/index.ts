@@ -38,9 +38,10 @@ export async function deliberateCompact(
   tokenBudget: number,
   provider?: unknown,
   modelId?: string,
+  customInstructions?: string,
 ): Promise<CompactionResult> {
   // Pass 1: Extract decisions/facts/constraints
-  const extracted = extractDecisions(messages);
+  const extracted = await extractDecisions(messages, provider, modelId, customInstructions);
   const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;
 
   // Append to decisions.md
@@ -80,7 +81,7 @@ export async function deliberateCompact(
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
   // Pass 2: Compress
-  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId);
+  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId, customInstructions);
 
   return {
     decisionsExtracted: totalExtracted,
