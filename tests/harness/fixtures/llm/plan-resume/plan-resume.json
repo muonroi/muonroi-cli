@@ -1,0 +1,13 @@
+{
+  "model": {
+    "provider": "mock",
+    "modelId": "plan-resume-mock",
+    "stream": [
+      {
+        "type": "text-delta",
+        "delta": "APPROVED PLAN:\n1. Tạo component Counter.\n2. Thêm nút increment.\n3. Thêm nút reset.\n"
+      },
+      { "type": "finish", "finishReason": "stop" }
+    ]
+  }
+}
