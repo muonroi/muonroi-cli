@@ -18,7 +18,9 @@
  */
 
 import { getWhoAmIProfile, routeTask } from "../ee/bridge.js";
+import { isGsdNativeEnabled } from "../gsd/flags.js";
 import type { GsdPhase } from "../gsd/types.js";
+import { readState } from "../gsd/workflow-engine.js";
 import type { ComplexityTier } from "../playbook/complexity.js";
 import { buildDirective } from "../playbook/directives.js";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
@@ -76,10 +78,10 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   let phase: GsdPhase | null = (ctx.gsdPhase as GsdPhase) ?? null;
   let routeSource = "preset";
 
-  // Skip brain routeTask when L1's unified call already supplied brain data:
-  // any phase L1 derived is already on ctx.gsdPhase, and a separate routeTask
-  // round-trip would duplicate the brain hit the unified endpoint replaces.
-  if (!phase && !ctx._brainData) {
+  // Skip brain routeTask when L1 unified pilContext already supplied gsd_phase
+  // (on ctx.gsdPhase) or brain retrieval data (_brainData) — a separate routeTask
+  // round-trip would duplicate the unified endpoint.
+  if (!phase && !ctx._brainData && !ctx.gsdPhase) {
     const eeRoute = await routeTask(ctx.raw).catch((err) => {
       logEeFailure("pil.layer4.routeTask", classifyEeError(err), err);
       return null;
@@ -151,13 +153,35 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   // language the model detected (the old regex only caught Vietnamese).
   const ecosystem = ctx.ecosystemScope === true;
   const replyLanguage = ctx.replyLanguage ?? undefined;
-  const directive = buildDirective({ tier, phase, informational, ecosystem, replyLanguage });
+  const native = isGsdNativeEnabled();
+  let trimmed: string;
+  let blocking = false;
+  let appliedTier = tier;
 
-  // truncateToBudget takes a TOKEN budget (×CHARS_PER_TOKEN internally). Floor it
-  // at DIRECTIVE_MIN_TOKENS so the full directive always survives, even at the
-  // default tokenBudget=500 where the bare fraction would gut it.
-  const directiveTokenBudget = Math.max(Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION), DIRECTIVE_MIN_TOKENS);
-  const trimmed = truncateToBudget(directive.text, directiveTokenBudget);
+  if (native && !informational) {
+    const cwd = process.cwd();
+    const wf = readState(cwd);
+    const heavyLine = tier === "heavy" ? " Heavy: gsd_plan_review before edits." : "";
+    const nativeHint = [
+      "[gsd-native] Tools: gsd_status, gsd_discuss, gsd_plan, gsd_plan_review, gsd_execute, gsd_verify, gsd_ship.",
+      `Depth=${tier}. standard/heavy: gsd_plan_review before gsd_execute; then gsd_verify → gsd_ship.${heavyLine}`,
+      wf.phase ? `phase=${wf.phase}` : "gsd_status bootstraps .planning/",
+      wf.planVerified ? "plan-verified=yes" : "plan-verified=pending",
+    ].join(" ");
+    trimmed = truncateToBudget(nativeHint, 200);
+    blocking = tier === "heavy";
+    appliedTier = tier;
+  } else {
+    const directive = buildDirective({ tier, phase, informational, ecosystem, replyLanguage, nativeGsd: native });
+    const directiveTokenBudget = Math.max(
+      Math.floor(ctx.tokenBudget * DIRECTIVE_BUDGET_FRACTION),
+      DIRECTIVE_MIN_TOKENS,
+    );
+    trimmed = truncateToBudget(directive.text, directiveTokenBudget);
+    blocking = directive.blocking;
+    appliedTier = directive.tier;
+  }
+
   const depthSource = ctx.modelDepthTier ? "model" : "default";
 
   return {
@@ -172,11 +196,12 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
         name: "gsd-workflow-structuring",
         applied: true,
         delta: [
-          `tier=${directive.tier}`,
+          `tier=${appliedTier}`,
+          `native=${native}`,
           `depth=${depthSource}`,
           `phase=${phase ?? "none"}`,
           `route=${routeSource}`,
-          `blocking=${directive.blocking}`,
+          `blocking=${blocking}`,
           `chars=${trimmed.length}`,
         ].join(" "),
       },
