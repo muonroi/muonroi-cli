@@ -119,4 +119,13 @@ describe("tier_routing catalog flag", () => {
     const lookup = getModelByTier as TierLookup;
     expect(resolveModelForTask("verify", "zai", "glm-5.2", lookup, { parentTier: "premium" })).toBe("glm-5.2");
   });
+
+  test("siliconflow and google models are excluded from tier routing (explicit -m only)", () => {
+    expect(getModelByTier("fast", "siliconflow")).toBeUndefined();
+    expect(getModelByTier("balanced", "siliconflow")).toBeUndefined();
+    expect(getModelByTier("premium", "siliconflow")).toBeUndefined();
+    expect(getModelByTier("fast", "google")).toBeUndefined();
+    expect(getModelInfo("deepseek-ai/DeepSeek-V4-Flash")?.tierRouting).toBe(false);
+    expect(getModelInfo("gemini-3-flash")?.tierRouting).toBe(false);
+  });
 });
