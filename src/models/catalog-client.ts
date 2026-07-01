@@ -49,6 +49,8 @@ export interface CatalogModel {
   aliases?: string[];
   default_reasoning_effort?: string | null;
   supports_vision?: boolean;
+  /** When false, model is selectable via -m but skipped by tier routing. */
+  tier_routing?: boolean;
 }
 
 interface CatalogResponse {
@@ -82,6 +84,7 @@ const CatalogModelSchema = z
     aliases: z.array(z.string()).optional(),
     default_reasoning_effort: z.string().nullable().optional(),
     supports_vision: z.boolean().optional(),
+    tier_routing: z.boolean().optional(),
   })
   .loose();
 
@@ -230,5 +233,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     defaultReasoningEffort: (m.default_reasoning_effort as ReasoningEffort) ?? undefined,
     thinkingType: m.thinking_type as ModelInfo["thinkingType"],
     supportsVision: m.supports_vision ?? true,
+    tierRouting: m.tier_routing ?? true,
   };
 }

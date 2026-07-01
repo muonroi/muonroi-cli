@@ -179,3 +179,13 @@ def test_real_catalog_validates():
     cat = catalog_main.load_catalog(str(real))
     assert len(cat.models) > 0
     assert cat.version
+
+
+def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
+    """glm-4.7-flash must carry tier_routing=false so CLI compaction skips the free pool."""
+    real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
+    monkeypatch.setenv("CATALOG_JSON_PATH", str(real))
+    catalog_main.load_catalog.cache_clear()
+    cat = catalog_main.load_catalog(str(real))
+    flash = next(m for m in cat.models if m.id == "glm-4.7-flash")
+    assert flash.tier_routing is False
