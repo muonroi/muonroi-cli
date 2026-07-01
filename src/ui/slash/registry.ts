@@ -31,6 +31,11 @@ export function registerSlash(name: string, handler: SlashHandler): void {
   registry.set(name, handler);
 }
 
+/** Unregister a slash command handler (used for tests). */
+export function unregisterSlash(name: string): void {
+  registry.delete(name);
+}
+
 /**
  * Dispatch a slash command by name.
  * Returns null if command not registered (caller falls back to legacy switch).

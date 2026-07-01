@@ -240,7 +240,7 @@ export function buildCheckpointReminder(iteration: number, hasEECheckpoint: bool
  * compared `stripped.length` (a message count, ~tens) against a char-scaled
  * threshold (~156000), so the warning could never fire — session 2b7a10219499.
  */
-export function shouldPreWarnCompaction(promptChars: number, thresholdChars: number, ratio = 0.6): boolean {
+export function shouldPreWarnCompaction(promptChars: number, thresholdChars: number, ratio = 0.60): boolean {
   if (thresholdChars <= 0 || promptChars <= 0) return false;
   return promptChars >= Math.floor(thresholdChars * ratio);
 }

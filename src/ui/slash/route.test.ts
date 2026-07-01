@@ -3,7 +3,7 @@ import { type StubHandle, startStubEEServer } from "../../__test-stubs__/ee-serv
 import { createEEClient } from "../../ee/client.js";
 import { setDefaultEEClient } from "../../ee/intercept.js";
 import { midstreamPolicy } from "../../usage/midstream.js";
-import { dispatchSlash, listSlashCommands, registerSlash, type SlashContext } from "./registry.js";
+import { dispatchSlash, listSlashCommands, registerSlash, unregisterSlash, type SlashContext } from "./registry.js";
 
 // Import route.ts to trigger self-registration
 import "./route.js";
@@ -21,6 +21,7 @@ describe("slash registry", () => {
     registerSlash("test-cmd", (_args, _ctx) => "test-result");
     const result = await dispatchSlash("test-cmd", [], CTX);
     expect(result).toBe("test-result");
+    unregisterSlash("test-cmd");
   });
 
   it("dispatchSlash returns null for unregistered command", async () => {

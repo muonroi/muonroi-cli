@@ -4462,11 +4462,14 @@ export function useAppLogic(props: AppLogicProps) {
             const emsg = err instanceof Error ? err.message : String(err);
             appendCrashLog("SLASH", `/${name}: ${err instanceof Error ? err.stack || err.message : emsg}`);
             setMessages((prev) => [...prev, buildAssistantEntry(`/${name} failed: ${emsg}`)]);
+          })
+          .finally(() => {
             isProcessingRef.current = false;
             setIsProcessing(false);
           });
         return true;
       }
+
       return false;
     },
     [
@@ -4730,6 +4733,8 @@ export function useAppLogic(props: AppLogicProps) {
               const emsg = err instanceof Error ? err.message : String(err);
               appendCrashLog("SLASH", `/${item.id}: ${err instanceof Error ? err.stack || err.message : emsg}`);
               setMessages((prev) => [...prev, buildAssistantEntry(`/${item.id} failed: ${emsg}`)]);
+            })
+            .finally(() => {
               isProcessingRef.current = false;
               setIsProcessing(false);
             });
