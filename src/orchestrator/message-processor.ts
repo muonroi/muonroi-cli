@@ -90,6 +90,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
+import { isContinuationPhrase } from "../pil/layer1-intent.js";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
@@ -117,6 +118,7 @@ import { reportRouteOutcome } from "../router/decide.js";
 import { decideStepRouting, eeSamrGuidance, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
 import {
+  getLastApprovedPlan,
   getNextMessageSequence,
   logInteraction,
   markMessageErrored,
@@ -1111,7 +1113,15 @@ export class MessageProcessor {
       });
     }
 
-    deps.setPlanContext(null);
+    // Phase 5 continuation fix: do not clear planContext on bare "tiếp tục"/"continue".
+    // Re-hydrate from persisted approved plan if needed (cross-process or after abort).
+    const _isCont = isContinuationPhrase(userMessage);
+    if (!_isCont) {
+      deps.setPlanContext(null);
+    } else if (!deps.getPlanContext()) {
+      const _p = getLastApprovedPlan(deps.session?.id ?? "");
+      if (_p) deps.setPlanContext(_p);
+    }
     const attemptedOverflowRecovery = false;
     // Stream-retry state: track how many transient retries have been attempted
     // for the current turn. Reset to 0 on each new user turn (we're in processMessage).
