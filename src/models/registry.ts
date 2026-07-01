@@ -1,7 +1,11 @@
+import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo, ReasoningEffort } from "../types";
-import { catalogModelToModelInfo, fetchCatalog } from "./catalog-client.js";
+import type { CatalogProviderPeakHour } from "./catalog-client.js";
+import { catalogModelToModelInfo, fetchCatalogDocument } from "./catalog-client.js";
 
 const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+
+const DEFAULT_SWITCH_PROVIDER_ORDER: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
 
 // ---------------------------------------------------------------------------
 // Centralized model registry — populated by loadCatalog() at boot
@@ -9,21 +13,33 @@ const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhig
 
 export let MODELS: ModelInfo[] = [];
 export let isLoading = true;
+export let SWITCH_PROVIDER_ORDER: readonly ProviderId[] = DEFAULT_SWITCH_PROVIDER_ORDER;
+const providerPeakHourRules = new Map<string, CatalogProviderPeakHour>();
 
 /**
- * Load models from centralized catalog (CP endpoint with static fallback).
- * Called once at boot. No provider API keys needed.
+ * Load models + routing policies from centralized catalog (API with static fallback).
  */
 export async function loadCatalog(): Promise<void> {
   isLoading = true;
   try {
-    const catalog = await fetchCatalog();
-    MODELS = catalog.map(catalogModelToModelInfo);
+    const doc = await fetchCatalogDocument();
+    MODELS = doc.models.map(catalogModelToModelInfo);
+    SWITCH_PROVIDER_ORDER = (doc.routing?.switch_provider_order as ProviderId[] | undefined) ?? [
+      ...DEFAULT_SWITCH_PROVIDER_ORDER,
+    ];
+    providerPeakHourRules.clear();
+    for (const [providerId, policy] of Object.entries(doc.provider_policies ?? {})) {
+      if (policy.peak_hour) providerPeakHourRules.set(providerId, policy.peak_hour);
+    }
   } catch {
     // On total failure, MODELS stays empty — callers must handle
   } finally {
     isLoading = false;
   }
+}
+
+export function getProviderPeakHourRule(providerId: string): CatalogProviderPeakHour | undefined {
+  return providerPeakHourRules.get(providerId);
 }
 
 // ---------------------------------------------------------------------------

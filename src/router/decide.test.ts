@@ -31,7 +31,7 @@ vi.mock("../utils/settings.js", async (importOriginal) => {
     getRoutingPromoteMax: () => (globalThis as { routingPromoteMax?: string }).routingPromoteMax ?? "balanced",
     isCouncilMultiProviderPreferred: () => false,
     isProviderDisabled: (provider: string) => globalThis.disabledProvidersList.includes(provider),
-    getPeakHourPolicy: () => ({ enabled: false, mode: "downgrade" as const, startHourUtc8: 14, endHourUtc8: 18 }),
+    getPeakHourPolicy: () => ({ enabled: false, mode: "downgrade" as const }),
   };
 });
 

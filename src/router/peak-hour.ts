@@ -1,15 +1,8 @@
 /**
- * Peak-hour routing for Z.ai (GLM Coding Plan) and DeepSeek.
- *
- * Z.ai official window: 14:00–18:00 UTC+8 — GLM-5.2 / GLM-5-Turbo consume 3×
- * quota during peak (docs.z.ai/devpack/overview). Routine work should stay on
- * glm-4.7; premium GLM-5 family models are downgraded or switched.
- *
- * DeepSeek has no published time window — only concurrency caps (v4-pro 500,
- * v4-flash 2500 per api-docs.deepseek.com). During the same UTC+8 window we
- * downgrade v4-pro → v4-flash to reduce concurrency pressure.
+ * Peak-hour routing — rules loaded from catalog API `provider_policies.peak_hour`
+ * (vendor-sourced metadata). User settings only toggle enabled + switch/downgrade mode.
  */
-import { getModelByTier, getModelInfo } from "../models/registry.js";
+import { getModelByTier, getModelInfo, getProviderPeakHourRule, SWITCH_PROVIDER_ORDER } from "../models/registry.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo } from "../types/index.js";
@@ -24,18 +17,9 @@ export interface PeakHourAdjustment {
   reason?: string;
 }
 
-const ZAI_PEAK_SENSITIVE = new Set(["glm-5.2", "glm-5-turbo", "glm-5", "glm-5.1", "glm-5v-turbo"]);
-const ZAI_PEAK_ROUTINE = "glm-4.7";
-
-const DEEPSEEK_PEAK_SENSITIVE = new Set(["deepseek-v4-pro"]);
-const DEEPSEEK_PEAK_ROUTINE = "deepseek-v4-flash";
-
-/** Fallback provider order when mode=switch (user's primary stack). */
-const SWITCH_PROVIDER_ORDER: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
-
-export function hourUtc8(now: Date): number {
+export function hourInTimezone(now: Date, timezone: string): number {
   const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Shanghai",
+    timeZone: timezone,
     hour: "numeric",
     hour12: false,
   }).formatToParts(now);
@@ -43,22 +27,39 @@ export function hourUtc8(now: Date): number {
   return hour ? Number(hour) : 0;
 }
 
-export function isPeakHourUtc8(now: Date, policy: PeakHourPolicy): boolean {
-  if (policy.enabled === false) return false;
-  const start = policy.startHourUtc8 ?? 14;
-  const end = policy.endHourUtc8 ?? 18;
-  const h = hourUtc8(now);
-  return h >= start && h < end;
+/** @deprecated Use hourInTimezone — kept for tests referencing UTC+8. */
+export function hourUtc8(now: Date): number {
+  return hourInTimezone(now, "Asia/Shanghai");
+}
+
+export function isPeakHourForProvider(
+  provider: ProviderId,
+  now: Date,
+  userPolicy: PeakHourPolicy = getPeakHourPolicy(),
+): boolean {
+  if (userPolicy.enabled === false) return false;
+  const rule = getProviderPeakHourRule(provider);
+  if (!rule) return false;
+  const h = hourInTimezone(now, rule.timezone);
+  return h >= rule.start_hour && h < rule.end_hour;
+}
+
+/** @deprecated Use isPeakHourForProvider(provider, ...) — window is per-provider from catalog. */
+export function isPeakHourUtc8(now: Date, userPolicy: PeakHourPolicy): boolean {
+  return isPeakHourForProvider("zai", now, userPolicy) || isPeakHourForProvider("deepseek", now, userPolicy);
 }
 
 function sameProviderDowngrade(modelId: string, provider: ProviderId): string | null {
-  if (provider === "zai" && ZAI_PEAK_SENSITIVE.has(modelId)) return ZAI_PEAK_ROUTINE;
-  if (provider === "deepseek" && DEEPSEEK_PEAK_SENSITIVE.has(modelId)) return DEEPSEEK_PEAK_ROUTINE;
-  return null;
+  const rule = getProviderPeakHourRule(provider);
+  if (!rule) return null;
+  if (!rule.sensitive_model_ids.includes(modelId)) return null;
+  return rule.fallback_model_id;
 }
 
 function pickSwitchFallback(excludeProvider: ProviderId): ModelInfo | undefined {
-  for (const p of SWITCH_PROVIDER_ORDER) {
+  const rule = getProviderPeakHourRule(excludeProvider);
+  const order = (rule?.switch_fallback_providers as ProviderId[] | undefined) ?? SWITCH_PROVIDER_ORDER;
+  for (const p of order) {
     if (p === excludeProvider) continue;
     if (isProviderDisabled(p)) continue;
     const m = getModelByTier("fast", p) ?? getModelByTier("balanced", p);
@@ -68,24 +69,24 @@ function pickSwitchFallback(excludeProvider: ProviderId): ModelInfo | undefined 
 }
 
 /**
- * Adjust a concrete model id for peak-hour policy. No-op outside the window or
- * when policy is disabled.
+ * Adjust a concrete model id for peak-hour policy. No-op outside the provider's
+ * catalog-defined window or when user policy is disabled.
  */
 export function adjustPeakHourModel(
   modelId: string,
   opts?: { now?: Date; policy?: PeakHourPolicy },
 ): PeakHourAdjustment {
-  const policy = opts?.policy ?? getPeakHourPolicy();
+  const userPolicy = opts?.policy ?? getPeakHourPolicy();
   const now = opts?.now ?? new Date();
   const provider = detectProviderForModel(modelId) as ProviderId;
 
-  if (!isPeakHourUtc8(now, policy)) {
+  if (!isPeakHourForProvider(provider, now, userPolicy)) {
     return { modelId, provider, adjusted: false };
   }
 
   const downgraded = sameProviderDowngrade(modelId, provider);
   if (downgraded) {
-    if (policy.mode === "switch") {
+    if (userPolicy.mode === "switch") {
       const alt = pickSwitchFallback(provider);
       if (alt && alt.id !== modelId) {
         return {

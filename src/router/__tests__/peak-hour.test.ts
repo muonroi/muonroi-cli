@@ -1,9 +1,15 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
 import type { PeakHourPolicy } from "../../utils/settings.js";
-import { adjustPeakHourModel, getRoutedModelByTier, hourUtc8, isPeakHourUtc8 } from "../peak-hour.js";
+import {
+  adjustPeakHourModel,
+  getRoutedModelByTier,
+  hourUtc8,
+  isPeakHourForProvider,
+  isPeakHourUtc8,
+} from "../peak-hour.js";
 
-const PEAK_POLICY: PeakHourPolicy = { enabled: true, mode: "downgrade", startHourUtc8: 14, endHourUtc8: 18 };
+const PEAK_POLICY: PeakHourPolicy = { enabled: true, mode: "downgrade" };
 const OFF_PEAK_NOON_UTC8 = new Date("2026-07-01T04:00:00.000Z"); // 12:00 UTC+8
 const PEAK_1500_UTC8 = new Date("2026-07-01T07:00:00.000Z"); // 15:00 UTC+8
 
@@ -11,18 +17,25 @@ beforeAll(async () => {
   await loadCatalog();
 });
 
-describe("isPeakHourUtc8", () => {
-  it("returns true inside 14:00–18:00 UTC+8 window", () => {
-    expect(isPeakHourUtc8(PEAK_1500_UTC8, PEAK_POLICY)).toBe(true);
+describe("isPeakHourForProvider", () => {
+  it("returns true for zai inside catalog-defined 14:00–18:00 Asia/Shanghai window", () => {
+    expect(isPeakHourForProvider("zai", PEAK_1500_UTC8, PEAK_POLICY)).toBe(true);
     expect(hourUtc8(PEAK_1500_UTC8)).toBe(15);
   });
 
   it("returns false outside the window", () => {
-    expect(isPeakHourUtc8(OFF_PEAK_NOON_UTC8, PEAK_POLICY)).toBe(false);
+    expect(isPeakHourForProvider("zai", OFF_PEAK_NOON_UTC8, PEAK_POLICY)).toBe(false);
   });
 
-  it("returns false when policy disabled", () => {
-    expect(isPeakHourUtc8(PEAK_1500_UTC8, { ...PEAK_POLICY, enabled: false })).toBe(false);
+  it("returns false when user policy disabled", () => {
+    expect(isPeakHourForProvider("zai", PEAK_1500_UTC8, { ...PEAK_POLICY, enabled: false })).toBe(false);
+  });
+});
+
+describe("isPeakHourUtc8 (deprecated aggregate)", () => {
+  it("delegates to per-provider catalog windows", () => {
+    expect(isPeakHourUtc8(PEAK_1500_UTC8, PEAK_POLICY)).toBe(true);
+    expect(isPeakHourUtc8(OFF_PEAK_NOON_UTC8, PEAK_POLICY)).toBe(false);
   });
 });
 
