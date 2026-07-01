@@ -260,6 +260,7 @@ export interface UserSettings {
     xai?: ProviderKeyConfig;
     ollama?: { baseURL?: string };
     zai?: ProviderKeyConfig;
+    "opencode-go"?: ProviderKeyConfig;
   };
   /** Providers the user has explicitly disabled in the model picker (still configured but hidden). */
   disabledProviders?: ProviderId[];
@@ -645,6 +646,15 @@ export function getProviderConfigs(
     configs.zai = {
       apiKey: zaiKey,
       baseURL: p.zai?.baseURL ?? apiBaseFor("zai"),
+    };
+  }
+
+  // OpenCode Go (OpenAI-compatible)
+  const opencodeGoKey = process.env.OPENCODE_GO_API_KEY ?? p["opencode-go"]?.apiKey;
+  if (opencodeGoKey) {
+    configs["opencode-go"] = {
+      apiKey: opencodeGoKey,
+      baseURL: p["opencode-go"]?.baseURL ?? apiBaseFor("opencode-go"),
     };
   }
 

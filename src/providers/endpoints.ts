@@ -49,6 +49,10 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     apiBase: "https://api.z.ai/api/coding/paas/v4",
     consoleUrl: "https://z.ai/coding-plan",
   },
+  "opencode-go": {
+    apiBase: "https://opencode.ai/zen/go/v1",
+    consoleUrl: "https://opencode.ai",
+  },
 };
 
 /** Fast lookup: provider id → API base URL. */
@@ -65,9 +69,10 @@ export function consoleUrlFor(provider: ProviderId): string {
  * Default base URLs for OpenAI-compatible providers only. Used by adapters
  * that share the OpenAI SDK shape (deepseek, siliconflow, xai).
  */
-export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "siliconflow" | "xai" | "zai", string> = {
+export const OPENAI_COMPATIBLE_BASE_URLS: Record<"deepseek" | "siliconflow" | "xai" | "zai" | "opencode-go", string> = {
   deepseek: PROVIDER_ENDPOINTS.deepseek.apiBase,
   siliconflow: PROVIDER_ENDPOINTS.siliconflow.apiBase,
   xai: PROVIDER_ENDPOINTS.xai.apiBase,
   zai: PROVIDER_ENDPOINTS.zai.apiBase,
+  "opencode-go": PROVIDER_ENDPOINTS["opencode-go"].apiBase,
 };

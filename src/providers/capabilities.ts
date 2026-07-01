@@ -346,6 +346,15 @@ class ZaiProviderCapabilities extends ReliableProviderCapabilities {
   }
 }
 
+/**
+ * OpenCode Go — defaults are reliable; only the console URL differs.
+ */
+class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
+  override consoleSignupURL(): string {
+    return consoleUrlFor("opencode-go");
+  }
+}
+
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   anthropic: new AnthropicProviderCapabilities(),
   openai: new OpenAIProviderCapabilities(),
@@ -355,6 +364,7 @@ const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   siliconflow: new SiliconflowProviderCapabilities(),
   ollama: new OllamaProviderCapabilities(),
   zai: new ZaiProviderCapabilities(),
+  "opencode-go": new OpenCodeGoProviderCapabilities(),
 };
 
 /**
