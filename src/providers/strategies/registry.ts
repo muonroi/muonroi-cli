@@ -14,6 +14,7 @@ import { OllamaStrategy } from "./ollama.strategy.js";
 import { OpenAIStrategy } from "./openai.strategy.js";
 import { SiliconflowStrategy } from "./siliconflow.strategy.js";
 import { XAIStrategy } from "./xai.strategy.js";
+import { ZaiStrategy } from "./zai.strategy.js";
 
 const STRATEGIES: Record<ProviderId, ProviderStrategy> = {
   anthropic: new AnthropicStrategy(),
@@ -23,6 +24,7 @@ const STRATEGIES: Record<ProviderId, ProviderStrategy> = {
   siliconflow: new SiliconflowStrategy(),
   xai: new XAIStrategy(),
   ollama: new OllamaStrategy(),
+  zai: new ZaiStrategy(),
 };
 
 /**

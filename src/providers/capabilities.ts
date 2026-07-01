@@ -337,6 +337,15 @@ class GoogleProviderCapabilities extends ReliableProviderCapabilities {
   }
 }
 
+/**
+ * Z.ai — defaults are reliable; only the console URL differs.
+ */
+class ZaiProviderCapabilities extends ReliableProviderCapabilities {
+  override consoleSignupURL(): string {
+    return consoleUrlFor("zai");
+  }
+}
+
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   anthropic: new AnthropicProviderCapabilities(),
   openai: new OpenAIProviderCapabilities(),
@@ -345,6 +354,7 @@ const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   deepseek: new DeepSeekProviderCapabilities(),
   siliconflow: new SiliconflowProviderCapabilities(),
   ollama: new OllamaProviderCapabilities(),
+  zai: new ZaiProviderCapabilities(),
 };
 
 /**

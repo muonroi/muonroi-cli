@@ -22,7 +22,7 @@ import { A, captureKey, divider, enterRawMode, hiddenPrompt, maskKey } from "./t
  * until their integration is hardened — the router can still target them
  * programmatically. To re-expose one, add its id here.
  */
-const VISIBLE_PROVIDERS: ProviderId[] = ["deepseek", "siliconflow"];
+const VISIBLE_PROVIDERS: ProviderId[] = ["deepseek", "siliconflow", "zai"];
 const ALL_PROVIDERS: ProviderId[] = [...VISIBLE_PROVIDERS, "ollama"];
 void KEYCHAIN_PROVIDER_IDS;
 
