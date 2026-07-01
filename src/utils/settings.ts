@@ -23,6 +23,7 @@ import { apiBaseFor, PROVIDER_ENDPOINTS } from "../providers/endpoints.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
+import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
@@ -180,6 +181,14 @@ export interface UserSettings {
    * defaultModel field stays as the hard pin for legacy paths.
    */
   defaultProvider?: ProviderId;
+  /** When true, the agent prioritizes task completion over strict runaway safety caps. */
+  agentFirst?: boolean;
+  /** Custom soft limit on the number of tool execution steps before pausing. */
+  maxToolRounds?: number;
+  /** Custom hard limit on the number of tool execution steps per turn. */
+  hardMaxToolRounds?: number;
+  /** Custom limit on the number of LLM call round-trips allowed in a single turn. */
+  maxLlmCallsPerTurn?: number;
   /** Shell used by the bash tool. On Windows, defaults to Git Bash when present. */
   shell?: ShellSettings;
   lsp?: LspSettings;
@@ -308,6 +317,27 @@ export interface UserSettings {
    * Default 400_000 (~100k tokens).
    */
   topLevelToolBudgetChars?: number;
+  /**
+   * Router tier-promotion cap. The session's default model is treated as the
+   * user's cost ceiling: the EE router may DOWNGRADE per turn (cheaper model)
+   * but may not promote to a HIGHER tier than this setting allows without an
+   * explicit opt-in.
+   *
+   * - `"off"`: never promote beyond the default model's own tier.
+   * - `"balanced"` (default): allow promotion up to balanced, never premium.
+   *   Routine tasks the EE brain over-classifies as premium get clamped to
+   *   balanced (or to the default model when the provider has no balanced
+   *   option — e.g. DeepSeek native only has fast + premium).
+   * - `"any"`: restore legacy behavior (router may promote to any tier).
+   *
+   * Evidence: session 89b34ce9a4e8 — default deepseek-v4-flash (fast tier),
+   * stored session.model=flash, but EE warm path returned premium for a
+   * routine "check và commit files" task → 47/47 turns silently ran on
+   * deepseek-v4-pro ($0.353) instead of flash (~$0.06). The per-turn routing
+   * override never flowed through setModel so the sessions row stayed flash
+   * ("session.model lie"). Default cap="balanced" prevents that silent leak.
+   */
+  routingPromoteMax?: "off" | "balanced" | "any";
 }
 
 export interface ProjectSettings {
@@ -316,8 +346,9 @@ export interface ProjectSettings {
   lsp?: LspSettings;
 }
 
-const USER_DIR = path.join(os.homedir(), ".muonroi-cli");
-const USER_SETTINGS_PATH = path.join(USER_DIR, "user-settings.json");
+function getUserSettingsPath(): string {
+  return path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
+}
 
 function ensureDir(dir: string): void {
   if (!fs.existsSync(dir)) {
@@ -326,17 +357,62 @@ function ensureDir(dir: string): void {
 }
 
 function readJson<T>(filePath: string): T | null {
-  try {
-    if (!fs.existsSync(filePath)) return null;
-    return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
-  } catch {
-    return null;
+  const RETRIES = 5;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      if (!fs.existsSync(filePath)) return null;
+      return JSON.parse(fs.readFileSync(filePath, "utf-8")) as T;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as any)?.code;
+      if (code === "EBUSY" || code === "EPERM" || err instanceof SyntaxError) {
+        logger.warn(
+          "cli",
+          `Lock contention or syntax error reading ${path.basename(filePath)}, retrying (attempt ${attempt + 1}/${RETRIES})`,
+          { error: err },
+        );
+        // Spin wait briefly to let the lock release or the write complete
+        const end = Date.now() + 20 * (attempt + 1);
+        while (Date.now() < end) {
+          // busy wait
+        }
+      } else {
+        return null;
+      }
+    }
   }
+  return null;
 }
 
 function writeJson(filePath: string, data: unknown): void {
   ensureDir(path.dirname(filePath));
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const serialized = JSON.stringify(data, null, 2);
+  const RETRIES = 5;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < RETRIES; attempt++) {
+    try {
+      fs.writeFileSync(filePath, serialized, { mode: 0o600 });
+      return;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as any)?.code;
+      if (code === "EBUSY" || code === "EPERM") {
+        logger.warn(
+          "cli",
+          `Lock contention writing ${path.basename(filePath)}, retrying (attempt ${attempt + 1}/${RETRIES})`,
+          { error: err },
+        );
+        const end = Date.now() + 20 * (attempt + 1);
+        while (Date.now() < end) {
+          // busy wait
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -384,7 +460,7 @@ export function ensureFootprintGitignored(cwd: string = process.cwd()): void {
 }
 
 export function loadUserSettings(): UserSettings {
-  return readJson<UserSettings>(USER_SETTINGS_PATH) || {};
+  return readJson<UserSettings>(getUserSettingsPath()) || {};
 }
 
 export function saveUserSettings(partial: Partial<UserSettings>): void {
@@ -457,7 +533,7 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
       : {}),
   };
 
-  writeJson(USER_SETTINGS_PATH, next);
+  writeJson(getUserSettingsPath(), next);
 }
 
 export function loadProjectSettings(): ProjectSettings {
@@ -867,11 +943,11 @@ export function getSubAgentBudgetChars(): number {
   const envRaw = process.env.MUONROI_SUB_AGENT_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 20_000 && n <= 600_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 20_000 && n <= 5_000_000) return Math.floor(n);
   }
   const val = loadUserSettings().subAgentBudgetChars;
-  if (typeof val === "number" && val >= 20_000 && val <= 600_000) return Math.floor(val);
-  return 120_000;
+  if (typeof val === "number" && val >= 20_000 && val <= 5_000_000) return Math.floor(val);
+  return 240_000;
 }
 
 /**
@@ -968,16 +1044,21 @@ export function getSubAgentCompactKeepLast(): number {
  * top-level loops typically carry more useful early context.
  * Env override: MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS.
  */
-export function getTopLevelCompactThresholdChars(): number {
+export function getTopLevelCompactThresholdChars(contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 10_000 && n <= 1_500_000) return Math.floor(n);
   }
-  // Phase C5 — lowered from 200_000 to 100_000 chars (symmetric with the
-  // sub-agent 80→40K reduction). Same evidence applies: tool results are
-  // capped, so the chars threshold rarely trips while token billing climbs.
-  return 100_000;
+  // For small-context models (e.g. DeepSeek 64K), scale threshold proportionally
+  // to prevent linear token growth during tool loops. A model with 64K context
+  // gets threshold = 64000 * 4 * 0.35 = 89,600 chars (~22K tokens = 35% of window).
+  // Large-context models (128K+) keep the original 200K default.
+  if (contextWindowTokens && contextWindowTokens > 0) {
+    const dynamicThreshold = Math.floor(contextWindowTokens * 4 * 0.35);
+    return Math.min(200_000, dynamicThreshold);
+  }
+  return 200_000;
 }
 
 /**
@@ -986,11 +1067,17 @@ export function getTopLevelCompactThresholdChars(): number {
  * decisions across longer horizons.
  * Env override: MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST.
  */
-export function getTopLevelCompactKeepLast(): number {
+export function getTopLevelCompactKeepLast(contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST;
   if (envRaw) {
     const n = Number(envRaw);
     if (Number.isFinite(n) && n >= 1 && n <= 30) return Math.floor(n);
+  }
+  // Small-context models (< 100K tokens) benefit from keeping fewer trailing
+  // turns — each verbatim turn with tool results + reasoning tokens costs
+  // 5-15K tokens. Reduce from 5 to 3 for small windows.
+  if (contextWindowTokens && contextWindowTokens < 100_000) {
+    return 3;
   }
   return 5;
 }
@@ -1001,22 +1088,27 @@ export function getTopLevelCompactKeepLast(): number {
  * higher default so single-tool turns are unaffected. Env override:
  * MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS.
  */
-export function getTopLevelToolBudgetChars(): number {
+export function getTopLevelToolBudgetChars(maxRounds?: number, contextWindowTokens?: number): number {
   const envRaw = process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS;
   if (envRaw) {
     const n = Number(envRaw);
-    if (Number.isFinite(n) && n >= 50_000 && n <= 1_500_000) return Math.floor(n);
+    if (Number.isFinite(n) && n >= 50_000 && n <= 10_000_000) return Math.floor(n);
   }
   const val = loadUserSettings().topLevelToolBudgetChars;
-  if (typeof val === "number" && val >= 50_000 && val <= 1_500_000) return Math.floor(val);
-  // Phase C5 symmetry — lowered from 400_000 to 200_000 chars. Evidence from
-  // session f1eef338c784: top-level tool loop ran 49 turns consuming 3.4M
-  // input tokens before the budget cap (set at 400K chars) meaningfully
-  // constrained tool outputs. At 200K chars the 50% tier fires at 100K chars
-  // (~3 tool turns), and the 80% tier at 160K chars (~5 turns); small tasks
-  // (1-3 turns) are unaffected. The sub-agent budget is 120K, so 200K maintains
-  // a ~1.7x ratio reflecting the broader top-level conversation context.
-  return 200_000;
+  if (typeof val === "number" && val >= 50_000 && val <= 10_000_000) return Math.floor(val);
+
+  // Dynamically scale default based on maxRounds relative to default base (40)
+  const baseRounds = 40;
+  const scale = maxRounds && maxRounds > baseRounds ? maxRounds / baseRounds : 1;
+  const baseDefault = Math.floor(400_000 * scale);
+  // For small-context models (e.g. DeepSeek 64K), scale the budget to 60% of
+  // the context window in chars so tiered compression kicks in before the
+  // cumulative tool output exceeds what the model can hold in context.
+  if (contextWindowTokens && contextWindowTokens > 0 && contextWindowTokens < 200_000) {
+    const windowBudget = Math.floor(contextWindowTokens * 4 * 0.6);
+    return Math.min(baseDefault, Math.max(50_000, windowBudget));
+  }
+  return baseDefault;
 }
 
 export function getRoleModel(role: ModelRole): string | undefined {
@@ -1066,6 +1158,17 @@ export function getCouncilExperienceMode(): CouncilExperienceMode {
 
 export function isCouncilCostAware(): boolean {
   return loadUserSettings().councilCostAware ?? true;
+}
+
+/**
+ * Router tier-promotion ceiling. See UserSettings.routingPromoteMax.
+ * Default "balanced" — router may promote up to balanced but never silently
+ * to premium. Validated to the three allowed values; any unknown value
+ * falls back to the default.
+ */
+export function getRoutingPromoteMax(): "off" | "balanced" | "any" {
+  const raw = loadUserSettings().routingPromoteMax;
+  return raw === "off" || raw === "balanced" || raw === "any" ? raw : "balanced";
 }
 
 export function getDisabledProviders(): ProviderId[] {

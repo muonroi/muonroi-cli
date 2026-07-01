@@ -38,6 +38,8 @@ export interface TurnRunnerDepsBase {
   readonly bash: BashTool;
   readonly mode: AgentMode;
   readonly maxToolRounds: number;
+  /** Absolute non-bumpable ceiling per turn — fires after the user bumps past maxToolRounds. */
+  readonly hardMaxToolRounds: number;
   readonly schedules: import("../tools/schedule").ScheduleManager;
   readonly sendTelegramFile: ((filePath: string) => Promise<ToolResult>) | null;
 

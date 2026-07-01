@@ -21,6 +21,7 @@
  * cannot inject shell commands.
  */
 import { execFile } from "node:child_process";
+import { logger } from "../utils/logger.js";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LspDiagnostic, LspDiagnosticFile } from "../lsp/types.js";
@@ -135,14 +136,15 @@ export async function gateStagedPaths(
       new Promise<typeof TIMED_OUT>((r) => setTimeout(() => r(TIMED_OUT), budgetMs)),
     ]);
     if (outcome === TIMED_OUT) {
-      console.error(`[commit-gate] LSP gate exceeded ${budgetMs}ms — allowing commit (fail-open)`);
+      logger.error("orchestrator", `[commit-gate] LSP gate exceeded ${budgetMs}ms — allowing commit (fail-open)`);
       return { ok: true };
     }
     if (errorFiles.length === 0) return { ok: true };
     const summary = summarizeDiagnostics(errorFiles) ?? `${errorFiles.length} file(s) have LSP errors`;
     return { ok: false, summary };
   } catch (err) {
-    console.error(`[commit-gate] gate failed open: ${(err as Error)?.message}`, {
+    logger.error("orchestrator", "gate failed open", {
+      error: err,
       stack: (err as Error)?.stack?.split("\n").slice(0, 3),
     });
     return { ok: true };
@@ -306,7 +308,7 @@ export async function maybeAutoCommitTurn(opts: {
 
   const add = await git(cwd, ["add", "--", ...newPaths]);
   if (!add.ok) {
-    console.error(`[auto-commit] git add failed for ${newPaths.length} path(s) in ${cwd}`);
+    logger.error("orchestrator", `[auto-commit] git add failed for ${newPaths.length} path(s) in ${cwd}`);
     return { committed: false, reason: "add-failed" };
   }
 
@@ -315,7 +317,7 @@ export async function maybeAutoCommitTurn(opts: {
   // will see/fix it next turn. Staged paths stay staged (idempotent).
   const gate = await gateStagedPaths(cwd, newPaths);
   if (!gate.ok) {
-    console.error(`[auto-commit] skipped — staged files have LSP errors:\n${gate.summary}`);
+    logger.error("orchestrator", `[auto-commit] skipped — staged files have LSP errors:\n${gate.summary}`);
     return { committed: false, reason: "lsp-errors", detail: gate.summary };
   }
 
@@ -332,7 +334,7 @@ export async function maybeAutoCommitTurn(opts: {
     ...newPaths,
   ]);
   if (!commit.ok) {
-    console.error(`[auto-commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
+    logger.error("orchestrator", `[auto-commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
     return { committed: false, reason: "commit-failed" };
   }
 
@@ -356,7 +358,7 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
 
   const add = await git(cwd, ["add", "--", ...safe]);
   if (!add.ok) {
-    console.error(`[git_commit] git add failed for ${safe.length} path(s) in ${cwd}`);
+    logger.error("orchestrator", `[git_commit] git add failed for ${safe.length} path(s) in ${cwd}`);
     return { committed: false, reason: "add-failed" };
   }
   // Only commit if these paths actually have staged changes (idempotent across
@@ -378,7 +380,7 @@ export async function commitSpecificPaths(cwd: string, paths: string[], message:
     : ["-m", subject, "-m", AUTO_COMMIT_ATTRIBUTION];
   const commit = await git(cwd, ["commit", ...mArgs, "--", ...safe]);
   if (!commit.ok) {
-    console.error(`[git_commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
+    logger.error("orchestrator", `[git_commit] git commit failed in ${cwd} (a pre-commit/commit-msg hook may have rejected it)`);
     return { committed: false, reason: "commit-failed" };
   }
   const head = await git(cwd, ["rev-parse", "--short", "HEAD"]);

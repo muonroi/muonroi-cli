@@ -25,6 +25,8 @@ export interface RecallLedger {
   record(entries: EERecallEntry[] | undefined, query: string): void;
   /** Clear one id once it has been rated. Returns true if it was actually pending. */
   clear(id: string): boolean;
+  /** Check if an id was ever cleared (fed back) in this session. Used by PIL Layer 3 to suppress re-injection. */
+  wasCleared(id: string): boolean;
   /** Oldest-first list of still-unrated recalls. */
   pending(): PendingRecall[];
   pendingCount(): number;
@@ -33,6 +35,8 @@ export interface RecallLedger {
 
 export function createRecallLedger(): RecallLedger {
   const map = new Map<string, PendingRecall>();
+  // Tracks ids that have been fed back, so PIL Layer 3 can suppress re-injection.
+  const cleared = new Set<string>();
   return {
     record(entries, query) {
       if (!Array.isArray(entries)) return;
@@ -53,7 +57,13 @@ export function createRecallLedger(): RecallLedger {
       }
     },
     clear(id) {
-      return map.delete(String(id ?? "").trim());
+      const nid = String(id ?? "").trim();
+      const deleted = map.delete(nid);
+      if (deleted) cleared.add(nid);
+      return deleted;
+    },
+    wasCleared(id) {
+      return cleared.has(String(id ?? "").trim());
     },
     pending() {
       return [...map.values()].sort((a, b) => a.ts - b.ts);
@@ -63,6 +73,7 @@ export function createRecallLedger(): RecallLedger {
     },
     reset() {
       map.clear();
+      cleared.clear();
     },
   };
 }

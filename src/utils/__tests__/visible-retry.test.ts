@@ -1,9 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withVisibleRetry } from "../visible-retry.js";
 
 describe("withVisibleRetry", () => {
+  let setTimeoutSpy: ReturnType<typeof vi.spyOn>;
+
   beforeEach(() => {
-    vi.useFakeTimers();
+    // Intercept setTimeout to execute immediately (in a microtask) so tests run instantly
+    setTimeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((cb: any) => {
+      Promise.resolve().then(() => cb());
+      return {} as any;
+    });
+  });
+
+  afterEach(() => {
+    setTimeoutSpy.mockRestore();
   });
 
   it("returns result on first try if no error", async () => {
@@ -11,6 +21,7 @@ describe("withVisibleRetry", () => {
     const result = await withVisibleRetry(fn);
     expect(result).toBe("success");
     expect(fn).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
 
   it("retries on 429 status code with backoff", async () => {
@@ -25,17 +36,11 @@ describe("withVisibleRetry", () => {
     };
 
     const promise = withVisibleRetry(fn, { onRetry });
-
-    // First call fails
-    await Promise.resolve();
-    expect(fn).toHaveBeenCalledTimes(1);
-
-    // Advance timers through the delay
-    vi.advanceTimersByTimeAsync(2000);
     await promise;
 
     expect(fn).toHaveBeenCalledTimes(2);
     expect(retryLog).toEqual(["attempt=0,total=6,delayMs=2000"]);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
   });
 
   it("does NOT retry on 400 (non-retryable)", async () => {
@@ -50,6 +55,7 @@ describe("withVisibleRetry", () => {
     await expect(result).rejects.toThrow("Bad Request");
     expect(fn).toHaveBeenCalledTimes(1);
     expect(onRetry).not.toHaveBeenCalled();
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
 
   it("throws final error after maxAttempts exhausted", async () => {
@@ -60,17 +66,11 @@ describe("withVisibleRetry", () => {
     const onRetry = vi.fn();
 
     const promise = withVisibleRetry(fn, { maxAttempts: 2, onRetry });
-
-    // First call fails
-    await Promise.resolve();
-    expect(fn).toHaveBeenCalledTimes(1);
-
-    // Advance and let second attempt fail
-    vi.advanceTimersByTimeAsync(2000);
     await promise.catch(() => {});
 
     expect(fn).toHaveBeenCalledTimes(2);
     expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
   });
 
   it("respects custom onRetry hook", async () => {
@@ -86,7 +86,6 @@ describe("withVisibleRetry", () => {
       onRetry,
     });
 
-    vi.advanceTimersByTimeAsync(500);
     await promise;
 
     expect(onRetry).toHaveBeenCalledOnce();
@@ -109,15 +108,11 @@ describe("withVisibleRetry", () => {
     };
 
     const promise = withVisibleRetry(fn, { maxAttempts: 3, onRetry });
-
-    vi.advanceTimersByTimeAsync(2000);
-    await Promise.resolve();
-
-    vi.advanceTimersByTimeAsync(4000);
     await promise;
 
     expect(fn).toHaveBeenCalledTimes(3);
     expect(delays).toEqual([2000, 4000]);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
   });
 
   it("retries on 500+ status codes", async () => {
@@ -129,7 +124,6 @@ describe("withVisibleRetry", () => {
     const onRetry = vi.fn();
     const promise = withVisibleRetry(fn, { onRetry });
 
-    vi.advanceTimersByTimeAsync(2000);
     await promise;
 
     expect(onRetry).toHaveBeenCalledOnce();
@@ -145,8 +139,6 @@ describe("withVisibleRetry", () => {
     const onRetry = vi.fn();
     const promise = withVisibleRetry(fn, { onRetry });
 
-    await Promise.resolve();
-    vi.advanceTimersByTimeAsync(2000);
     await promise;
 
     expect(onRetry).toHaveBeenCalledOnce();
@@ -160,8 +152,6 @@ describe("withVisibleRetry", () => {
     const onRetry = vi.fn();
     const promise = withVisibleRetry(fn, { onRetry });
 
-    await Promise.resolve();
-    vi.advanceTimersByTimeAsync(2000);
     await promise;
 
     expect(onRetry).toHaveBeenCalledOnce();
@@ -184,12 +174,9 @@ describe("withVisibleRetry", () => {
       onRetry,
     });
 
-    await Promise.resolve();
-    vi.advanceTimersByTimeAsync(100);
-    await Promise.resolve();
-    vi.advanceTimersByTimeAsync(200);
     await promise;
 
     expect(delays).toEqual([100, 200]);
+    expect(setTimeoutSpy).toHaveBeenCalledTimes(2);
   });
 });

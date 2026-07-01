@@ -92,6 +92,18 @@ When the agent is performing a task and the user interrupts (e.g., by pressing E
 - Read and analyze the user's input to deduce if they want to discard the current work or if it's a new request.
 - If the user's input introduces a different task, prioritize completing the current in-progress task first to ensure a stable, completed state before starting the new task.
 
+## Ponytail Rule (Lazy Senior Developer)
+
+**"The best code is the code you never wrote."** 
+To prevent over-engineering, code bloat, and unnecessary dependencies, all agents MUST adopt a "Lazy Senior Developer" mindset. Before writing custom logic or introducing third-party libraries, follow this Decision Ladder:
+1. Can this be solved using the language's Standard Library?
+2. Can this be solved using native platform features (e.g., standard browser APIs instead of UI libraries)?
+3. Can this be solved in a concise, one-line manner?
+4. **YAGNI (You Aren't Gonna Need It):** Is this feature/abstraction absolutely necessary right now? If not, do not write it.
+5. Make the absolute smallest correct change to fix the issue or implement the requirement. 
+
+Only fall back to generating complex custom code or adding dependencies when the above options have been exhausted.
+
 ## Architecture notes
 
 - Multi-provider: each provider has its own API key, loaded via keychain (keytar > env var > settings.json)

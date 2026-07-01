@@ -7,6 +7,8 @@ import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js"
 import { containsEncryptedReasoning } from "./reasoning";
 import { countTokens } from "./token-counter.js";
 
+import { logger } from "../utils/logger.js";
+
 /**
  * A single action the compaction proposer model wants to take on one message.
  */
@@ -53,24 +55,31 @@ export async function proposeCompaction(
     });
 
     const text = result.text.trim();
-    // Attempt to parse top-level JSON object. The model might wrap in markdown fences — strip those.
-    const jsonStr = text.replace(/^```(?:json)?\s*|\s*```$/gi, "").trim();
-    const parsed: CompactionProposal = JSON.parse(jsonStr);
+    // Attempt to parse JSON object robustly, even if the model wraps it in conversational text or markdown fences.
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      logger.warn("orchestrator", "Failed to extract JSON from proposer output", { text });
+      return null;
+    }
+    const parsed: CompactionProposal = JSON.parse(jsonMatch[0]);
 
     // Validate shape
     if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
+      logger.warn("orchestrator", "Invalid JSON shape from proposer", { parsed });
       return null;
     }
     // Validate each action
     for (const action of parsed.actions) {
       if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
+        logger.warn("orchestrator", "Invalid action shape from proposer", { action });
         return null;
       }
     }
 
     return parsed;
-  } catch {
+  } catch (err) {
     // Proposer failure is non-fatal — caller falls back to heuristic or no-compact
+    logger.warn("orchestrator", "Proposer failure", { error: err });
     return null;
   }
 }

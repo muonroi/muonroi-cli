@@ -81,7 +81,9 @@ export function installReactHarness(opts: ReactHarnessOptions): ReactHarnessHand
   function tick(): void {
     if (cancelled) return;
 
-    if (__MUONROI_HARNESS__) {
+    // @ts-expect-error: compile-time define
+    const isHarnessEnabled = typeof __MUONROI_HARNESS__ !== "undefined" ? __MUONROI_HARNESS__ : false;
+    if (isHarnessEnabled) {
       const snap = opts.registry.snapshot();
       const hash = stableHash({ focus: snap.focus ?? null, modals: snap.modals ?? null, nodes: snap.nodes });
 

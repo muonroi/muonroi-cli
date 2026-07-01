@@ -44,6 +44,34 @@ async function findGitRoot(start: string): Promise<string | null> {
   return null;
 }
 
+export function sanitizeRemoteUrl(remoteUrl: string): string {
+  const trimmed = remoteUrl.trim();
+
+  // If it starts with a scheme like http://, https://, ssh://, git:// etc.
+  if (/^[a-zA-Z0-9+-.]+:\/\//.test(trimmed)) {
+    try {
+      const parsed = new URL(trimmed);
+      if (
+        parsed.protocol === "http:" ||
+        parsed.protocol === "https:" ||
+        parsed.protocol === "git+http:" ||
+        parsed.protocol === "git+https:"
+      ) {
+        parsed.username = "";
+        parsed.password = "";
+      }
+      return parsed.toString();
+    } catch {
+      // Fallback for valid scheme prefix but invalid URL syntax
+      return trimmed.replace(/^([^:]+:\/\/)[^@]+@/, "$1");
+    }
+  }
+
+  // Prevent parsing exceptions on SSH remotes (e.g. git@github.com:...)
+  // SCP-like SSH remotes do not start with a scheme + "://"
+  return trimmed;
+}
+
 export async function buildScope(opts: { cwd: string }): Promise<Scope> {
   if (cached && cachedFor === opts.cwd) return cached;
   const root = await findGitRoot(opts.cwd);
@@ -54,7 +82,8 @@ export async function buildScope(opts: { cwd: string }): Promise<Scope> {
   }
   const head = await fs.readFile(path.join(root, ".git", "HEAD"), "utf8").catch(() => "");
   const cfg = await fs.readFile(path.join(root, ".git", "config"), "utf8").catch(() => "");
-  const { remote } = parseGitConfig(cfg);
+  const { remote: rawRemote } = parseGitConfig(cfg);
+  const remote = rawRemote ? sanitizeRemoteUrl(rawRemote) : undefined;
   const { branch } = parseHEAD(head);
 
   // Ecosystem detection — check if remote matches any configured pattern

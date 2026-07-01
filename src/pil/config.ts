@@ -62,3 +62,10 @@ export function getMaxInterviewQuestions(): number {
   const v = Number(process.env.MUONROI_PIL_MAX_QUESTIONS);
   return Number.isFinite(v) && v >= 1 && v <= 5 ? v : 3;
 }
+
+export function isPonytailModeEnabled(): boolean {
+  if (process.env.MUONROI_PONYTAIL_DISABLE === "1") return false;
+  if (process.env.MUONROI_PONYTAIL_DISABLE === "0") return true;
+  if (process.env.VITEST === "true" || process.env.NODE_ENV === "test") return false;
+  return true;
+}

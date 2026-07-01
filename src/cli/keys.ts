@@ -56,9 +56,7 @@ const CHAT_SECRET_IDS: readonly ChatSecretId[] = ["discord-token", "discord-guil
 function isChatSecretId(value: string): value is ChatSecretId {
   return (CHAT_SECRET_IDS as readonly string[]).includes(value);
 }
-
-const SETTINGS_PATH = path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
-
+const getSettingsPath = () => path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
 function maskKey(key: string): string {
   if (key.length <= 10) return "***";
   return `${key.slice(0, 6)}…${key.slice(-4)}`;
@@ -847,7 +845,7 @@ export async function runKeysLogout(provider: string): Promise<void> {
 export async function runKeysCleanupSettings(): Promise<void> {
   let raw: string;
   try {
-    raw = await fs.readFile(SETTINGS_PATH, "utf8");
+    raw = await fs.readFile(getSettingsPath(), "utf8");
   } catch (e: unknown) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") {
       console.log("No user-settings.json found — nothing to clean.");
@@ -860,12 +858,12 @@ export async function runKeysCleanupSettings(): Promise<void> {
   try {
     json = JSON.parse(raw);
   } catch {
-    console.error(`Settings file is not valid JSON: ${SETTINGS_PATH}`);
+    console.error(`Settings file is not valid JSON: ${getSettingsPath()}`);
     process.exit(1);
   }
 
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const backup = `${SETTINGS_PATH}.bak.${ts}`;
+  const backup = `${getSettingsPath()}.bak.${ts}`;
   await fs.writeFile(backup, raw, "utf8");
 
   let removed = 0;
@@ -889,9 +887,9 @@ export async function runKeysCleanupSettings(): Promise<void> {
     }
   }
 
-  await fs.writeFile(SETTINGS_PATH, `${JSON.stringify(json, null, 2)}\n`, "utf8");
+  await fs.writeFile(getSettingsPath(), `${JSON.stringify(json, null, 2)}\n`, "utf8");
   console.log(`Backed up to: ${backup}`);
-  console.log(`Removed ${removed} plaintext key field(s) from: ${SETTINGS_PATH}`);
+  console.log(`Removed ${removed} plaintext key field(s) from: ${getSettingsPath()}`);
   if (removed === 0) {
     console.log("(File was already clean.)");
   }

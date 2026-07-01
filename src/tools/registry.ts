@@ -35,6 +35,7 @@ interface ToolRegistryOpts {
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
+  consultParentSession?: (question: string) => Promise<string>;
   /**
    * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
    * list_vision_cache) are omitted even for vision-proxy models. Used by the
@@ -155,7 +156,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // read_file
   tools.read_file = dynamicTool({
-    description: "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
+    description:
+      "Read file contents. For large files, you MUST use start_line and end_line to extract only the needed sections (e.g. specific functions). Reading full large files will quickly exhaust your context budget. Use grep or lsp first to find line numbers.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -228,7 +230,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       "Execute a shell command. Output is automatically cached — every call returns a " +
       "run_id you can re-query via bash_output_get(run_id, mode=tail|head|grep|lines). " +
       "Do NOT pipe `| tail`, `| head`, `| grep`, or `> file` — that hides output from " +
-      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers).",
+      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers). " +
+      'Avoid nesting double-quotes inline for database queries/scripts (e.g. executing raw SQL via `sqlite3 db "SELECT..."`) since they can fail parsing in shell environments; write query scripts to a temporary file first and run them.',
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -617,6 +620,29 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       });
     }
 
+    // consult_parent_session
+    if (opts?.consultParentSession) {
+      const consultParentSession = opts.consultParentSession;
+      tools.consult_parent_session = dynamicTool({
+        description:
+          "Consult the parent session for supervision or guidance when stuck, when needing clarification on the overall goal, or when encountering critical errors. ONLY available in sub-sessions.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            question: {
+              type: "string",
+              description: "The specific question or issue you need the parent session to advise on.",
+            },
+          },
+          required: ["question"],
+        }),
+        execute: async (input: any) => {
+          const result = await consultParentSession(input.question);
+          return result;
+        },
+      });
+    }
+
     // delegate
     if (opts?.runDelegation) {
       const runDelegation = opts.runDelegation;
@@ -773,7 +799,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured) and the artifact is not in this session's local cache. Proceed without EE recall — re-read the source directly if you need the elided content.";
             }
             recordRehydration("ee");
-            return truncateOutput(JSON.stringify(resp));
+            const points = resp.points ?? [];
+            const bestHit = points[0];
+            if (bestHit) {
+              const matchedId = query.match(/(?:id\s*=\s*|id\s*\b)([a-zA-Z0-9_:-]+)/i)?.[1] ?? "unknown";
+              return truncateOutput(
+                `[tool-artifact id=${matchedId} — rehydrated from Experience Engine]\n${bestHit.text}`,
+              );
+            }
+            return `[tool-artifact — not found in Experience Engine]`;
           }
           // General recall → /api/recall (recallMode, [id col] index + surface).
           const { recallEE, formatRecallForAgent } = await import("../ee/search.js");
@@ -809,6 +843,232 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             stack: (err as Error)?.stack?.split("\n").slice(0, 3),
           });
           return `[ee_unavailable] EE recall threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
+        }
+      },
+    });
+
+    tools.retrieve_tool_result = dynamicTool({
+      description:
+        "Retrieve the full output of a previous tool call by its tool_call_id. " +
+        "Searches local cache, disk cache, database history (including parent sessions), and remote Experience Engine. " +
+        "Use this to rehydrate elided tool outputs. Optional max_chars and chunk_index allow paginated retrieval.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          tool_call_id: { type: "string", description: "The unique ID of the tool call (e.g. 'call_123')." },
+          max_chars: {
+            type: "number",
+            description: "Optional character limit for the returned chunk (useful for very large outputs).",
+          },
+          chunk_index: {
+            type: "number",
+            description: "Optional chunk index if splitting the output by max_chars (0-based, default 0).",
+          },
+        },
+        required: ["tool_call_id"],
+      }),
+      execute: async (input: any) => {
+        const toolCallId = typeof input.tool_call_id === "string" ? input.tool_call_id.trim() : "";
+        if (!toolCallId) {
+          return "ERROR: tool_call_id is required.";
+        }
+        const maxChars = typeof input.max_chars === "number" ? input.max_chars : undefined;
+        const chunkIndex = typeof input.chunk_index === "number" ? input.chunk_index : 0;
+
+        let content: string | null = null;
+        let source = "";
+
+        // Tier 1: LRU cache
+        try {
+          const { getArtifact } = await import("../ee/artifact-cache.js");
+          const tier1 = getArtifact(toolCallId);
+          if (tier1) {
+            content = tier1.content;
+            source = "Tier 1 LRU cache";
+          }
+        } catch (err) {
+          console.error(`[tools:retrieve_tool_result] Tier 1 LRU check failed: ${(err as Error).message}`);
+        }
+
+        // Tier 2: Disk cache
+        if (!content) {
+          try {
+            const { findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+            const tier2 = await findArtifactOnDisk(`id=${toolCallId}`);
+            if (tier2) {
+              content = tier2.content;
+              source = "Tier 2 disk cache";
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 2 disk check failed: ${(err as Error).message}`);
+          }
+        }
+
+        // Tier 3: SQLite database
+        if (!content && opts?.sessionId) {
+          try {
+            const { getSessionChain } = await import("../storage/index.js");
+            const { getDatabase } = await import("../storage/db.js");
+            const chain = getSessionChain(opts.sessionId);
+            const db = getDatabase();
+            for (let i = chain.length - 1; i >= 0; i--) {
+              const row = db
+                .prepare(`
+                SELECT tr.output_json
+                FROM tool_results tr
+                JOIN tool_calls tc ON tc.id = tr.tool_call_row_id
+                WHERE tc.tool_call_id = ? AND tc.session_id = ?
+                LIMIT 1
+              `)
+                .get(toolCallId, chain[i]) as { output_json: string } | undefined;
+
+              if (row?.output_json) {
+                const parsed = JSON.parse(row.output_json);
+                if (parsed && typeof parsed === "object") {
+                  if ("output" in parsed && typeof parsed.output === "string") {
+                    content = parsed.output;
+                  } else if ("error" in parsed && typeof parsed.error === "string") {
+                    content = `ERROR: ${parsed.error}`;
+                  } else {
+                    content = JSON.stringify(parsed);
+                  }
+                } else {
+                  content = String(parsed);
+                }
+                source = `Tier 3 SQLite database (session ${chain[i]})`;
+                break;
+              }
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 3 DB check failed: ${(err as Error).message}`);
+          }
+        }
+
+        // Tier 4: Remote EE (behavioral collection only)
+        if (!content) {
+          try {
+            const { searchEE } = await import("../ee/search.js");
+            const resp = await searchEE(`tool-artifact id=${toolCallId}`, {
+              collections: ["experience-behavioral"],
+              limit: 1,
+            });
+            const bestHit = resp?.points?.[0];
+            if (bestHit?.text) {
+              content = bestHit.text;
+              source = "Tier 4 remote EE (behavioral collection)";
+            }
+          } catch (err) {
+            console.error(`[tools:retrieve_tool_result] Tier 4 EE check failed: ${(err as Error).message}`);
+          }
+        }
+
+        if (content === null) {
+          return `ERROR: Tool result not found for tool_call_id: ${toolCallId} in any tier.`;
+        }
+
+        const totalLength = content.length;
+        if (maxChars !== undefined && maxChars > 0) {
+          const totalChunks = Math.ceil(totalLength / maxChars);
+          const start = chunkIndex * maxChars;
+          const end = Math.min(start + maxChars, totalLength);
+          if (start >= totalLength) {
+            return `ERROR: chunk_index ${chunkIndex} is out of bounds. Total chunks available: ${totalChunks} (max_chars: ${maxChars}, total length: ${totalLength}).`;
+          }
+          const chunk = content.slice(start, end);
+          return JSON.stringify(
+            {
+              tool_call_id: toolCallId,
+              source,
+              chunk_index: chunkIndex,
+              total_chunks: totalChunks,
+              chunk_length: chunk.length,
+              total_length: totalLength,
+              content: chunk,
+            },
+            null,
+            2,
+          );
+        }
+
+        return JSON.stringify(
+          {
+            tool_call_id: toolCallId,
+            source,
+            total_length: totalLength,
+            content,
+          },
+          null,
+          2,
+        );
+      },
+    });
+
+    tools.search_session_history = dynamicTool({
+      description:
+        "Search the full message history across all sessions using an FTS5 MATCH expression. " +
+        "Useful to locate past questions, answers, and context across the session lineage.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "FTS5 MATCH expression query (e.g. 'compaction AND error' or 'content:Vitest').",
+          },
+        },
+        required: ["query"],
+      }),
+      execute: async (input: any) => {
+        const query = typeof input.query === "string" ? input.query.trim() : "";
+        if (!query) {
+          return "ERROR: query MATCH expression is required.";
+        }
+        try {
+          const { getDatabase } = await import("../storage/db.js");
+          const db = getDatabase();
+          // Wrap FTS search query execution in try-catch to prevent malformed FTS syntax crashes (fixing GAP-03)
+          const rows = db
+            .prepare(`
+            SELECT session_id, seq, role, tool_name, content, tool_args, tool_output
+            FROM session_history_fts
+            WHERE session_history_fts MATCH ?
+            ORDER BY rank
+            LIMIT 50
+          `)
+            .all(query) as Array<{
+            session_id: string;
+            seq: number;
+            role: string;
+            tool_name: string | null;
+            content: string | null;
+            tool_args: string | null;
+            tool_output: string | null;
+          }>;
+
+          if (rows.length === 0) {
+            return `No session history matched the query: "${query}"`;
+          }
+
+          const results = rows.map((row) => ({
+            session_id: row.session_id,
+            seq: row.seq,
+            role: row.role,
+            tool_name: row.tool_name ?? undefined,
+            content: row.content ?? undefined,
+            tool_args: row.tool_args ?? undefined,
+            tool_output: row.tool_output ?? undefined,
+          }));
+
+          return JSON.stringify(
+            {
+              query,
+              match_count: results.length,
+              results,
+            },
+            null,
+            2,
+          );
+        } catch (err) {
+          return `ERROR: FTS MATCH query failed. The FTS syntax might be malformed: ${(err as Error).message}`;
         }
       },
     });

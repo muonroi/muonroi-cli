@@ -117,7 +117,9 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       const text = generates.length > 0 ? generates[Math.min(genIdx, generates.length - 1)]! : "{}";
       genIdx += 1;
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
-        process.stderr.write(`[mock-model] doGenerate #${genIdx} → ${text.length} chars\n`);
+        process.stderr.write(
+          `[mock-model] doGenerate #${genIdx} → ${text.length} chars\nCALLER:\n${new Error().stack}\n`,
+        );
       }
       return {
         content: [{ type: "text" as const, text }],
@@ -273,13 +275,118 @@ export interface LoadedMockModelHandle extends MockModelHandle {
  * string payloads here so the rest of the pipeline sees a uniform shape.
  */
 function normalizeStreamChunks(chunks: StreamChunks): StreamChunks {
-  return chunks.map((c) => {
-    if (c && (c as { type?: string }).type === "error") {
-      const raw = (c as { error?: unknown }).error;
-      return { ...(c as object), error: buildFixtureError(raw) } as typeof c;
+  const normalized = chunks.map((c) => {
+    if (!c) return c;
+    const part = c as any;
+    if (part.type === "error") {
+      const raw = part.error;
+      return { ...part, error: buildFixtureError(raw) } as typeof c;
+    }
+    if (part.type === "text-delta") {
+      const delta = part.delta ?? part.textDelta ?? part.text ?? "";
+      const id = part.id ?? "txt-0";
+      return { ...part, id, delta } as typeof c;
+    }
+    if (part.type === "reasoning-delta") {
+      const delta = part.delta ?? part.textDelta ?? part.text ?? "";
+      const id = part.id ?? "reasoning-0";
+      return { ...part, id, delta } as typeof c;
     }
     return c;
   });
+
+  const result: StreamChunks = [];
+  const textIds = new Set<string>();
+  const reasoningIds = new Set<string>();
+
+  for (const part of normalized) {
+    if (!part) continue;
+    const p = part as any;
+    if (p.type === "text-delta") {
+      textIds.add(p.id ?? "txt-0");
+    } else if (p.type === "reasoning-delta") {
+      reasoningIds.add(p.id ?? "reasoning-0");
+    }
+  }
+
+  const seenTextStart = new Set<string>();
+  const seenTextEnd = new Set<string>();
+  const seenReasoningStart = new Set<string>();
+  const seenReasoningEnd = new Set<string>();
+
+  for (const part of normalized) {
+    if (!part) continue;
+    const p = part as any;
+    if (p.type === "text-start") {
+      seenTextStart.add(p.id);
+    } else if (p.type === "text-end") {
+      seenTextEnd.add(p.id);
+    } else if (p.type === "reasoning-start") {
+      seenReasoningStart.add(p.id);
+    } else if (p.type === "reasoning-end") {
+      seenReasoningEnd.add(p.id);
+    }
+  }
+
+  const firstTextDeltaIdx = new Map<string, number>();
+  const lastTextDeltaIdx = new Map<string, number>();
+  const firstReasoningDeltaIdx = new Map<string, number>();
+  const lastReasoningDeltaIdx = new Map<string, number>();
+
+  for (let i = 0; i < normalized.length; i++) {
+    const p = normalized[i] as any;
+    if (!p) continue;
+    if (p.type === "text-delta") {
+      const id = p.id ?? "txt-0";
+      if (!firstTextDeltaIdx.has(id)) firstTextDeltaIdx.set(id, i);
+      lastTextDeltaIdx.set(id, i);
+    } else if (p.type === "reasoning-delta") {
+      const id = p.id ?? "reasoning-0";
+      if (!firstReasoningDeltaIdx.has(id)) firstReasoningDeltaIdx.set(id, i);
+      lastReasoningDeltaIdx.set(id, i);
+    }
+  }
+
+  for (let i = 0; i < normalized.length; i++) {
+    const p = normalized[i] as any;
+    if (!p) {
+      result.push(p);
+      continue;
+    }
+
+    if (p.type === "text-delta") {
+      const id = p.id ?? "txt-0";
+      if (firstTextDeltaIdx.get(id) === i && !seenTextStart.has(id)) {
+        result.push({ type: "text-start", id });
+      }
+    } else if (p.type === "reasoning-delta") {
+      const id = p.id ?? "reasoning-0";
+      if (firstReasoningDeltaIdx.get(id) === i && !seenReasoningStart.has(id)) {
+        result.push({ type: "reasoning-start", id });
+      }
+    }
+
+    if (p.type === "finish") {
+      const usage = p.usage ?? buildUsage(10, 10);
+      result.push({ ...p, usage });
+    } else {
+      result.push(p);
+    }
+
+    if (p.type === "text-delta") {
+      const id = p.id ?? "txt-0";
+      if (lastTextDeltaIdx.get(id) === i && !seenTextEnd.has(id)) {
+        result.push({ type: "text-end", id });
+      }
+    } else if (p.type === "reasoning-delta") {
+      const id = p.id ?? "reasoning-0";
+      if (lastReasoningDeltaIdx.get(id) === i && !seenReasoningEnd.has(id)) {
+        result.push({ type: "reasoning-end", id });
+      }
+    }
+  }
+
+  return result;
 }
 
 /**

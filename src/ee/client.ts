@@ -1,4 +1,6 @@
+import * as os from "node:os";
 import { classifyEeError, logEeFailure } from "../utils/ee-logger.js";
+import { redactor } from "../utils/redactor.js";
 import { drainQueue, enqueue } from "./offline-queue.js";
 import type {
   ColdRouteRequest,
@@ -30,6 +32,26 @@ import type {
 } from "./types.js";
 
 const DEFAULT_BASE = "http://localhost:8082";
+
+function relativizePath(p: string): string {
+  if (!p) return p;
+  let normalized = p.replace(/\\/g, "/");
+  const home = os.homedir().replace(/\\/g, "/");
+  const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
+  if (normalized.startsWith(normalizedHome)) {
+    normalized = "~" + normalized.slice(normalizedHome.length);
+  }
+  return normalized;
+}
+
+function redactPayload<T>(payload: T): T {
+  if (!payload) return payload;
+  try {
+    return JSON.parse(redactor.redact(JSON.stringify(payload))) as T;
+  } catch {
+    return payload;
+  }
+}
 
 /**
  * Intercept timeout budget.
@@ -263,8 +285,12 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     async intercept(req: InterceptRequest): Promise<InterceptResponse> {
+      const redactedReq = {
+        ...req,
+        cwd: relativizePath(req.cwd),
+      };
       // 1. Cache hit — skip network entirely
-      const cached = getCached(req);
+      const cached = getCached(redactedReq);
       if (cached) return cached;
 
       // 2. Circuit breaker — skip if open
@@ -276,7 +302,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         const resp = await f(`${baseUrl}/api/intercept`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify({ ...req, skipRoute: true }),
+          body: JSON.stringify(redactPayload({ ...redactedReq, skipRoute: true })),
           signal: AbortSignal.timeout(interceptTimeoutMs),
         });
         if (!resp.ok) {
@@ -290,7 +316,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         const raw = (await resp.json()) as Record<string, unknown>;
         const result = normalizeInterceptResponse(raw);
         recordCircuitSuccess({ fetchImpl: f, headers: headers(), baseUrl });
-        setCached(req, result);
+        setCached(redactedReq, result);
         return result;
       } catch (err) {
         logUnreachable((err as Error).name ?? "error");
@@ -300,10 +326,14 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     async posttool(payload: PostToolPayload): Promise<void> {
+      const redactedPayload = {
+        ...payload,
+        cwd: relativizePath(payload.cwd),
+      };
       await f(`${baseUrl}/api/posttool`, {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify(redactPayload(redactedPayload)),
         signal: AbortSignal.timeout(postToolTimeoutMs),
       }).catch((err) => {
         logEeFailure("client.posttool", classifyEeError(err), err);
@@ -313,13 +343,17 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
     async routeModel(req: RouteModelRequest, signal?: AbortSignal): Promise<RouteModelResponse | null> {
       try {
+        const redactedReq = {
+          ...req,
+          cwd: relativizePath(req.cwd),
+        };
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 250);
         if (signal) signal.addEventListener("abort", () => ctrl.abort());
         const resp = await f(`${baseUrl}/api/route-model`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(req),
+          body: JSON.stringify(redactPayload(redactedReq)),
           signal: ctrl.signal,
         });
         clearTimeout(t);
@@ -332,13 +366,17 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
     async coldRoute(req: ColdRouteRequest, signal?: AbortSignal): Promise<ColdRouteResponse | null> {
       try {
+        const redactedReq = {
+          ...req,
+          cwd: relativizePath(req.cwd),
+        };
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 1000);
         if (signal) signal.addEventListener("abort", () => ctrl.abort());
         const resp = await f(`${baseUrl}/api/cold-route`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(req),
+          body: JSON.stringify(redactPayload(redactedReq)),
           signal: ctrl.signal,
         });
         clearTimeout(t);
@@ -350,13 +388,14 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
     },
 
     feedback(payload: FeedbackPayload): void {
+      const redactedPayload = redactPayload(payload);
       f(`${baseUrl}/api/feedback`, {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify(redactedPayload),
       }).catch((err) => {
         logEeFailure("client.feedback", classifyEeError(err), err);
-        void enqueue({ endpoint: "/api/feedback", body: payload, enqueuedAt: Date.now() });
+        void enqueue({ endpoint: "/api/feedback", body: redactedPayload, enqueuedAt: Date.now() });
       });
     },
 
@@ -371,7 +410,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       collection: string;
       reason: "wrong_repo" | "wrong_language" | "wrong_task" | "stale_rule";
     }): void {
-      const body = { ...payload, verdict: "IRRELEVANT" as const };
+      const body = redactPayload({ ...payload, verdict: "IRRELEVANT" as const });
       f(`${baseUrl}/api/feedback`, {
         method: "POST",
         headers: headers(),
@@ -395,10 +434,11 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
     // ─── P0: Route feedback (fire-and-forget) ─────────────────────────────────
     routeFeedback(payload: RouteFeedbackPayload): void {
+      const redactedPayload = redactPayload(payload);
       f(`${baseUrl}/api/route-feedback`, {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify(payload),
+        body: JSON.stringify(redactedPayload),
       }).catch((err) => {
         logEeFailure("client.routeFeedback", classifyEeError(err), err);
         /* fire-and-forget */
@@ -407,40 +447,53 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
 
     // ─── P1: Prompt-stale reconciliation ──────────────────────────────────────
     async promptStale(req: PromptStaleRequest): Promise<PromptStaleResponse | null> {
+      const redactedReq = redactPayload({
+        ...req,
+        nextPromptMeta: req.nextPromptMeta
+          ? {
+              ...req.nextPromptMeta,
+              cwd: req.nextPromptMeta.cwd ? relativizePath(req.nextPromptMeta.cwd) : undefined,
+            }
+          : undefined,
+      });
       try {
         const resp = await f(`${baseUrl}/api/prompt-stale`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(req),
+          body: JSON.stringify(redactedReq),
           signal: AbortSignal.timeout(2000),
         });
         if (!resp.ok) {
-          void enqueue({ endpoint: "/api/prompt-stale", body: req, enqueuedAt: Date.now() });
+          void enqueue({ endpoint: "/api/prompt-stale", body: redactedReq, enqueuedAt: Date.now() });
           return null;
         }
         return (await resp.json()) as PromptStaleResponse;
       } catch {
-        void enqueue({ endpoint: "/api/prompt-stale", body: req, enqueuedAt: Date.now() });
+        void enqueue({ endpoint: "/api/prompt-stale", body: redactedReq, enqueuedAt: Date.now() });
         return null;
       }
     },
 
     // ─── P1: Session extract ──────────────────────────────────────────────────
     async extract(req: ExtractRequest, signal?: AbortSignal): Promise<ExtractResponse | null> {
+      const redactedReq = redactPayload({
+        ...req,
+        projectPath: relativizePath(req.projectPath),
+      });
       try {
         const resp = await f(`${baseUrl}/api/extract`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(req),
+          body: JSON.stringify(redactedReq),
           signal: signal ?? AbortSignal.timeout(10_000),
         });
         if (!resp.ok) {
-          void enqueue({ endpoint: "/api/extract", body: req, enqueuedAt: Date.now() });
+          void enqueue({ endpoint: "/api/extract", body: redactedReq, enqueuedAt: Date.now() });
           return null;
         }
         return (await resp.json()) as ExtractResponse;
       } catch {
-        void enqueue({ endpoint: "/api/extract", body: req, enqueuedAt: Date.now() });
+        void enqueue({ endpoint: "/api/extract", body: redactedReq, enqueuedAt: Date.now() });
         return null;
       }
     },
@@ -596,9 +649,10 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       opts: import("./types.js").EERecallOptions = {},
     ): Promise<import("./types.js").EERecallResponse | null> {
       const body: Record<string, unknown> = { query };
-      if (opts.cwd) body.cwd = opts.cwd;
+      if (opts.cwd) body.cwd = relativizePath(opts.cwd);
       if (opts.project) body.project_slug = opts.project;
       if (opts.sourceSession) body.sourceSession = opts.sourceSession;
+      const redactedBody = redactPayload(body);
       // Server bounds the recall pipeline at ~8s internally (handleRecall's
       // AbortSignal.timeout(8000)); embedding + 3-leg search + network push real
       // wall-time past that (measured ~9.3s on a warm VPS). An 8s client ceiling
@@ -609,7 +663,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         const resp = await f(`${baseUrl}/api/recall`, {
           method: "POST",
           headers: headers(),
-          body: JSON.stringify(body),
+          body: JSON.stringify(redactedBody),
           signal: opts.signal ?? AbortSignal.timeout(timeoutMs),
         });
         if (!resp.ok) return null;

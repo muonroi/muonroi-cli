@@ -10,6 +10,7 @@ export interface ProjectContext {
   boundedContexts: BoundedContext[];
   eePatterns: string[];
   relevantModules: RelevantModule[];
+  recentModifiedFiles?: string[];
   scannedAt: number;
   cwd: string;
 }

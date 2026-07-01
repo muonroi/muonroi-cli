@@ -29,6 +29,7 @@ export interface ElisionRecord {
   chars: number;
   /** prepareStep step number at which it was elided. */
   step: number;
+  summary?: string;
 }
 
 export interface SessionExperience {
@@ -73,13 +74,20 @@ export function recordCompaction(step: number): void {
 }
 
 /** Record a single tool output the compactor rewrote into a stub. */
-export function recordElision(toolCallId: string, toolName: string, chars: number, step: number): void {
+export function recordElision(
+  toolCallId: string,
+  toolName: string,
+  chars: number,
+  step: number,
+  summary?: string,
+): void {
   if (!toolCallId) return;
   state.elisions.push({
     toolCallId,
     toolName: toolName || "",
     chars: Number.isFinite(chars) && chars > 0 ? Math.floor(chars) : 0,
     step: Number.isFinite(step) ? step : 0,
+    summary,
   });
   // FIFO trim — keep the most recent MAX_ELISIONS.
   if (state.elisions.length > MAX_ELISIONS) {

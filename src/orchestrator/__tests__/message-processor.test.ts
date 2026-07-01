@@ -48,6 +48,7 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
     modelId: "deepseek-ai/DeepSeek-V4-Flash",
     providerId: "siliconflow",
     maxToolRounds: 50,
+    hardMaxToolRounds: 60,
     batchApi: false,
     permissionMode: "safe",
     schedules: {} as MessageProcessorDeps["schedules"],

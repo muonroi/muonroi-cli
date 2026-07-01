@@ -252,6 +252,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         goal: { type: "string" },
         llm: { type: "string" },
         turns: { type: "number" },
+        mockLlmDir: { type: "string", description: "Use 'none' to run child TUI against real LLM APIs" },
       },
       required: ["mode"],
     }),
@@ -261,7 +262,15 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         if (!input?.goal || !input?.llm) return errLine("invalid_args", "agentic mode requires both goal and llm");
         const { getModelInfo } = await import("../models/registry.js");
         if (!getModelInfo(input.llm)) return errLine("unknown_model", `llm '${input.llm}' is not in catalog.json`);
-        return json({ runId: jm.start({ kind: "agentic", goal: input.goal, llm: input.llm, turns: input.turns }) });
+        return json({
+          runId: jm.start({
+            kind: "agentic",
+            goal: input.goal,
+            llm: input.llm,
+            turns: input.turns,
+            mockLlmDir: input.mockLlmDir,
+          }),
+        });
       }
       return json({
         runId: jm.start({ kind: "tier1", since: input?.since, max: input?.max, emit: input?.emit, out: input?.out }),

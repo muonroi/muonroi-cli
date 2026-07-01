@@ -26,10 +26,10 @@ beforeEach(() => {
 });
 
 describe("runPipeline()", () => {
-  it("returns PipelineContext with 6 LayerResults for normal input", async () => {
+  it("returns PipelineContext with 7 LayerResults for normal input", async () => {
     const ctx = await runPipeline("refactor this function");
     expect(ctx.raw).toBe("refactor this function");
-    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers).toHaveLength(7);
   });
 
   it("returns enriched that starts with raw (layers may append hints)", async () => {
@@ -56,26 +56,27 @@ describe("runPipeline()", () => {
     const ctx = await runPipeline("");
     expect(ctx.raw).toBe("");
     expect(ctx.enriched.startsWith(ctx.raw)).toBe(true);
-    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers).toHaveLength(7);
   });
 
   it("conversational turn (taskType=null) skips layers 2-5 with delta=skipped:null-taskType", async () => {
     mockClassify.mockReturnValue({ tier: "abstain", confidence: 0.2, reason: "low-confidence" });
     const ctx = await runPipeline("hello how are you");
-    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers).toHaveLength(7);
     expect(ctx.layers[1].delta).toBe("skipped:null-taskType");
     expect(ctx.layers[2].delta).toBe("skipped:null-taskType");
     expect(ctx.layers[3].delta).toBe("skipped:null-taskType");
     expect(ctx.layers[4].delta).toBe("skipped:null-taskType");
+    expect(ctx.layers[5].delta).toBe("skipped:null-taskType");
     expect(ctx.taskType).toBeNull();
   });
 
-  it("coding task runs all 6 layers normally (no skip)", async () => {
+  it("coding task runs all 7 layers normally (no skip)", async () => {
     const ctx = await runPipeline("refactor this function");
-    expect(ctx.layers).toHaveLength(6);
+    expect(ctx.layers).toHaveLength(7);
     expect(ctx.taskType).toBe("refactor");
-    // layers 2-5 should NOT have skipped delta
-    for (let i = 1; i <= 4; i++) {
+    // layers 2-5 (which include indices 1 to 5) should NOT have skipped delta
+    for (let i = 1; i <= 5; i++) {
       expect(ctx.layers[i].delta).not.toBe("skipped:null-taskType");
     }
   });

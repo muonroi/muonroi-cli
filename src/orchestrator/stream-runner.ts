@@ -101,7 +101,7 @@ import {
 import { recordCompaction, recordElision } from "./session-experience.js";
 import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { compactSubAgentMessages, applyAnthropicPromptCaching } from "./subagent-compactor.js";
+import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 
 /**
@@ -316,7 +316,10 @@ export class StreamRunner {
     // Mirror the file-local `createTools` wrapper from orchestrator.ts —
     // pass modelId so registry can inject analyze_image/ask_vision_proxy for
     // text-only child models (needsVisionProxy).
-    const childBaseToolsRaw = createBuiltinTools(childBash, childMode, { modelId: childModelId });
+    const childBaseToolsRaw = createBuiltinTools(childBash, childMode, {
+      modelId: childModelId,
+      sessionId: this.deps.getSessionId(),
+    });
     // Wrap with the cumulative cap so the sub-agent's tool loop cannot
     // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
     // tiered compression schedule. The cap is per-invocation; each sub-agent
@@ -446,7 +449,7 @@ export class StreamRunner {
     const childMessages: ModelMessage[] = [{ role: "user", content: childPrompt }];
 
     // The main agent manages its sub-agents, so don't apply an arbitrary hard limit.
-    const maxSteps = request.maxToolRounds ?? (this.deps.getMaxToolRounds() * 2);
+    const maxSteps = request.maxToolRounds ?? this.deps.getMaxToolRounds() * 2;
 
     // F1 parity — derive per-turn providerOptions so the sub-agent OpenAI calls
     // carry a stable session-derived promptCacheKey (every tool round routes to
@@ -623,18 +626,24 @@ export class StreamRunner {
             break;
           }
         }
-        // Idea 4 persist for sub-agent elisions (best-effort; may lack full session but EE can still index the artifact content).
-        const persistSubArtifact = (toolCallId: string, toolName: string, fullContent: string, reason: string) => {
+
+        const persistSubArtifact = (
+          toolCallId: string,
+          toolName: string,
+          fullContent: string,
+          reason: string,
+          summary?: string,
+        ) => {
           // Local-first durable cache so ee_query rehydrates even when EE is down.
           recordArtifact(toolCallId, toolName, fullContent);
-          recordElision(toolCallId, toolName, fullContent.length, stepNumber);
+          recordElision(toolCallId, toolName, fullContent.length, stepNumber, summary);
           try {
             getDefaultEEClient()
               .extract(
                 {
                   transcript: fullContent.slice(0, 4000),
                   projectPath: process.cwd(),
-                  meta: { source: "tool-artifact", toolCallId, toolName, reason },
+                  meta: { source: "tool-artifact", toolCallId, toolName, reason, summary },
                 },
                 AbortSignal.timeout(600),
               )
@@ -643,12 +652,20 @@ export class StreamRunner {
             /* fail-open */
           }
         };
+
+        // T1.1 + T1.2 — reasoning models (DeepSeek V4 Flash, R1) emit 2K-5K
+        // CoT tokens per turn that accumulate across the multi-step loop.
+        // Strip old reasoning and compact earlier (ratio 0.3 vs 0.5) to
+        // cut ~40-60% of cumulative input tokens.
+        const isReasoningModel = childRuntime.modelInfo?.reasoning === true;
         const compacted = compactSubAgentMessages(stripped, {
           thresholdChars: compactThreshold,
           keepLastTurns: compactKeepLast,
           contextWindowTokens: childCtxWindow,
+          contextFillRatio: isReasoningModel ? 0.3 : undefined,
           keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
           persistArtifact: persistSubArtifact,
+          stripOldReasoning: isReasoningModel,
         });
         if (compacted !== stripped) recordCompaction(stepNumber);
         // Phase 4A — scope reminder injection for the sub-agent loop.
@@ -865,7 +882,9 @@ export class StreamRunner {
             {
               role: "user",
               content:
-                "You've reached your investigation budget and have not written your findings yet. Stop now — do NOT call any more tools. Write your final synthesis FOR THE PARENT AGENT: lead with the answer to the delegated task, cite the concrete file:line behind each claim, then note any gaps or the recommended next step. Be concise; the parent only ingests this message.",
+                "You've reached your tool execution budget (max steps) for this turn and have not written your final answer yet. Stop now — do NOT call any more tools.\n\n" +
+                "Option A: If you have enough findings, write your final synthesis FOR THE PARENT AGENT: lead with the answer to the delegated task, cite the concrete file:line behind each claim, then note any gaps or the recommended next step. Be concise; the parent only ingests this message.\n\n" +
+                "Option B: If you need to continue working but are blocked by this limit, you can request the system to compact the context and start a fresh turn. To do this, reply with EXACTLY this format and nothing else:\n/compact <instructions on what to focus on after compaction>",
             },
           ],
           tools: {},

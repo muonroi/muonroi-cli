@@ -104,8 +104,15 @@ export function createWorkspaceLspManager(
   }
 
   async function touchFile(filePath: string, waitForDiagnostics = true): Promise<LspDiagnosticFile[]> {
-    const content = await readFile(filePath, "utf8");
-    return syncFile(filePath, content, false, waitForDiagnostics);
+    try {
+      const content = await readFile(filePath, "utf8");
+      return await syncFile(filePath, content, false, waitForDiagnostics);
+    } catch (err) {
+      if (err instanceof Error && (err as any).code === "ENOENT") {
+        return [];
+      }
+      throw err;
+    }
   }
 
   async function syncFile(
@@ -155,7 +162,7 @@ export function createWorkspaceLspManager(
       };
     }
 
-    const lspDiagnostics = await touchFile(normalizedPath, true);
+    const lspDiagnostics = input.operation === "workspaceSymbol" ? [] : await touchFile(normalizedPath, true);
     const params = createOperationParams(input, normalizedPath);
     const timeoutMs = settings.requestTimeoutMs;
     const results = (

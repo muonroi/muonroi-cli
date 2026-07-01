@@ -1,0 +1,7 @@
+[test]
+preload = ["./src/__test-stubs__/vitest-setup.ts"]
+pathIgnorePatterns = [
+  "**/tests/harness/**",
+  "**/tests/harness-react/**",
+  "**/tests/harness-angular/**"
+]

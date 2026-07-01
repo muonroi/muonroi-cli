@@ -28,11 +28,24 @@ let MESSAGE_ROWS: Row[] = [];
 
 vi.mock("./db", () => ({
   getDatabase: () => ({
-    prepare: (sql: string) => ({
-      all: () => (sql.includes("FROM messages") ? MESSAGE_ROWS : []),
-      get: () => undefined,
-      run: () => undefined,
-    }),
+    prepare: (sql: string) => {
+      const lower = sql.toLowerCase();
+      return {
+        all: (...params: any[]) => {
+          if (lower.includes("from messages")) {
+            return MESSAGE_ROWS;
+          }
+          if (lower.includes("from sessions")) {
+            if (lower.includes("where id in")) {
+              return params.map((id) => ({ id }));
+            }
+          }
+          return [];
+        },
+        get: () => undefined,
+        run: () => undefined,
+      };
+    },
   }),
   withTransaction: <T>(fn: (db: unknown) => T) => fn({}),
 }));

@@ -156,8 +156,14 @@ interface BridgeResult {
   filtered?: number;
 }
 
-async function queryEeBridge(raw: string): Promise<BridgeResult> {
+async function queryEeBridge(raw: string, taskType?: string | null): Promise<BridgeResult> {
   try {
+    // Enrich query with task context so EE embedding is more precise.
+    // e.g. "analyze: vậy ở...fix?" vs generic "vậy ở...fix?" — the prefix
+    // shifts the embedding toward task-relevant entries and away from generic
+    // action-oriented behavioral patterns that score highly on any NL query.
+    const queryWithTask = taskType ? `[${taskType}] ${raw}` : raw;
+
     // Parallel queries: T0 principles (lower floor, pre-validated abstractions)
     // and T1/T2 behavioral (standard floor, contextual patterns). Running both
     // concurrently keeps total latency at ~1500ms rather than ~3000ms.
@@ -165,8 +171,8 @@ async function queryEeBridge(raw: string): Promise<BridgeResult> {
     // prior "Progress ✔ DONE / elided" without the agent having to ask "task finished?".
     const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
     const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
-      searchByText(raw, ["experience-principles"], 3, signal),
-      searchByText(raw, ["experience-behavioral"], 4, signal),
+      searchByText(queryWithTask, ["experience-principles"], 3, signal),
+      searchByText(queryWithTask, ["experience-behavioral"], 4, signal),
       searchByText(
         'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="',
         ["experience-behavioral"],
@@ -241,14 +247,19 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
     // mapping (t0 = principles, t2 = behavioral). The server (PIL schema_version
     // 1.1+) may override per-point — e.g. a selfqa hit merged into the behavioral
     // bucket carries collection="experience-selfqa" so ee_feedback resolves it.
-    const principleItems = ctx._brainData.t0_principles.map((p) => ({
+    let principleItems = ctx._brainData.t0_principles.map((p) => ({
       ...p,
       collection: p.collection ?? "experience-principles",
     }));
-    const behavioralItems = ctx._brainData.t2_patterns.map((p) => ({
+    let behavioralItems = ctx._brainData.t2_patterns.map((p) => ({
       ...p,
       collection: p.collection ?? "experience-behavioral",
     }));
+    // Suppress already-fedback entries so they don't re-inject as noise.
+    if (isRecallLedgerEnabled()) {
+      principleItems = principleItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
+      behavioralItems = behavioralItems.filter((p) => !sessionRecallLedger.wasCleared(String(p.id)));
+    }
     // Render the [id:..] handle inline (mirrors formatPrincipleRules/Hints) so the
     // [id collection] reminder below refers to handles the agent can actually see.
     const renderLine = (p: { text: string; id?: string }): string =>
@@ -364,7 +375,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   }
 
   // Legacy path: existing logic continues below — unchanged.
-  const result = await queryEeBridge(ctx.raw);
+  const result = await queryEeBridge(ctx.raw, ctx.taskType);
   const { principlePoints, behavioralPoints, t1Rules } = result;
   const totalPoints = principlePoints.length + behavioralPoints.length;
 
@@ -443,7 +454,19 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
         })
       : result.checkpointPoints || [];
 
-  const allPoints = [...deduplicatedPrinciples, ...deduplicatedBehavioral, ...deduplicatedCheckpoints];
+  // Feedback-cleared suppression: skip points that were already rated via ee_feedback in an earlier turn.
+  // This prevents already-judged entries from being re-injected as noise.
+  const ledgerEnabled = isRecallLedgerEnabled();
+  const clearedFilteredPrinciples = deduplicatedPrinciples.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const clearedFilteredBehavioral = deduplicatedBehavioral.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const clearedFilteredCheckpoints = deduplicatedCheckpoints.filter(
+    (p) => !(ledgerEnabled && sessionRecallLedger.wasCleared(String(p.id))),
+  );
+  const allPoints = [...clearedFilteredPrinciples, ...clearedFilteredBehavioral, ...clearedFilteredCheckpoints];
 
   // STALE-01: Register injected point IDs for prompt-stale reconciliation.
   updateLastSurfacedState(allPoints.map((p) => String(p.id)));
@@ -461,7 +484,6 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // verdict is emitted (that would pollute Gate-4 precision); the agent rates
   // deliberately. Collection is the search arm (deterministic), which is what
   // ee_feedback requires.
-  const ledgerEnabled = isRecallLedgerEnabled();
   let ledgerRecorded = 0;
   if (ledgerEnabled) {
     const rateableEntries = [

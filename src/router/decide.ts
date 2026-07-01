@@ -17,7 +17,12 @@ import { downgradeChain, emitDowngrade, getDowngradeChain } from "../usage/downg
 import { release, reserve } from "../usage/ledger.js";
 import { midstreamPolicy } from "../usage/midstream.js";
 import { CapBreachError } from "../usage/types.js";
-import { getRoleModel, isCouncilMultiProviderPreferred, isProviderDisabled } from "../utils/settings.js";
+import {
+  getRoleModel,
+  getRoutingPromoteMax,
+  isCouncilMultiProviderPreferred,
+  isProviderDisabled,
+} from "../utils/settings.js";
 import { classify } from "./classifier/index.js";
 import { callColdRoute } from "./cold.js";
 import { isInheritProvider } from "./provider-sentinel.js";
@@ -32,6 +37,14 @@ export interface DecideOpts {
   signal?: AbortSignal;
   defaultModel: string;
   defaultProvider: string;
+  /**
+   * Optional session id for audit logging. When provided, a `routing`
+   * interaction event is emitted whenever the turn's routed model differs from
+   * `defaultModel` (the stored session.model) — making per-turn overrides
+   * observable instead of silent. Fixes the "session.model lie": a user on
+   * flash could not see when the router silently promoted them to pro.
+   */
+  sessionId?: string;
   /** Override home directory for ledger (testing). */
   homeOverride?: string;
   /** PIL enrichment signals — forwarded to EE context. */
@@ -242,12 +255,85 @@ export function reportRouteOutcome(taskHash: string, outcome: RouteOutcome, dura
   });
 }
 
+// ─── Tier-promotion cap (cost-ceiling guard) ───────────────────────────────
+
+const TIER_RANK: Record<"fast" | "balanced" | "premium", number> = {
+  fast: 0,
+  balanced: 1,
+  premium: 2,
+};
+
+/**
+ * Enforce the user's tier-promotion ceiling. The session default model is the
+ * cost ceiling: the router may downgrade per turn but may not silently promote
+ * beyond `routingPromoteMax` (default "balanced"). See settings.ts.
+ *
+ * When the decision would promote, clamp down to the max allowed tier on the
+ * SAME provider. If no same-provider model exists at the ceiling tier, fall
+ * back to the session default model (the user's explicit pick). The clamp is
+ * skipped for: the `"any"` opt-in, the role path (explicit user roleModels
+ * config is itself the opt-in), cap-halt decisions, and provider-constrained
+ * disabled-provider recoveries (those already move toward the default).
+ */
+function applyPromotionCap(dec: RouteDecision, defaultModel: string): RouteDecision {
+  if (dec.model === "HALT" || dec.model === defaultModel) return dec;
+  const cap = getRoutingPromoteMax();
+  if (cap === "any") return dec;
+
+  const capRank = cap === "off" ? null : TIER_RANK[cap]; // "balanced" → 1
+  const defaultTier = getModelInfo(defaultModel)?.tier;
+  // "off" means ceiling = the default model's own tier.
+  const maxAllowedRank = capRank === null ? (defaultTier ? TIER_RANK[defaultTier] : 0) : capRank;
+
+  const decInfo = getModelInfo(dec.model);
+  const decTier = decInfo?.tier;
+  if (!decTier || TIER_RANK[decTier] <= maxAllowedRank) return dec;
+
+  // Promotion exceeds the ceiling — clamp DOWN to the max allowed tier on the
+  // same provider. Walk down from the ceiling so we pick the highest permitted.
+  const provider = decInfo?.provider ?? detectProviderForModel(dec.model);
+  const targetTiers: ("fast" | "balanced" | "premium")[] =
+    capRank === null
+      ? defaultTier
+        ? [defaultTier]
+        : ["fast"]
+      : maxAllowedRank >= 1
+        ? (["balanced", "fast"] as const)
+        : (["fast"] as const);
+  for (const t of targetTiers) {
+    if (TIER_RANK[t] > maxAllowedRank) continue;
+    const m = getModelByTier(t, provider);
+    if (m && m.provider === provider) {
+      return {
+        ...dec,
+        model: m.id,
+        reason: `${dec.reason} | promo-cap(${decTier}→${t})`,
+      };
+    }
+  }
+  // No cheaper model on the same provider — fall back to the session default.
+  return {
+    ...dec,
+    model: defaultModel,
+    reason: `${dec.reason} | promo-cap(${decTier}→default:${defaultModel})`,
+  };
+}
+
 /**
  * Apply cap-check to a RouteDecision. Walks the downgrade chain if
  * the reservation would breach the cap. Returns the (possibly downgraded) decision.
+ *
+ * `opts` carries both the ledger homeOverride and the session defaultModel used
+ * by the promotion cap. `exempt` skips the promotion cap — used only for the
+ * role path, where the user's explicit roleModels config is itself the opt-in.
  */
-async function capCheck(dec: RouteDecision, homeOverride?: string): Promise<RouteDecision> {
-  let current = { ...dec };
+async function capCheck(
+  dec: RouteDecision,
+  opts: { homeOverride?: string; defaultModel: string },
+  exempt?: boolean,
+): Promise<RouteDecision> {
+  let current = exempt ? { ...dec } : applyPromotionCap({ ...dec }, opts.defaultModel);
+  const homeOverride = opts.homeOverride;
   let attempts = 0;
 
   while (attempts++ < getDowngradeChain().length) {
@@ -375,7 +461,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
           reason: `role:${role}→${roleModelId}`,
           source: "role",
         };
-        const checked = await capCheck(d, opts.homeOverride);
+        const checked = await capCheck(d, opts, /* exempt */ true);
         routerStore.setState({ tier: checked.tier, lastDecision: checked, taskHash: null, source: "role" });
         if (cacheKey && !checked.cap_overridden) setCachedRoute(cacheKey, checked);
         return checked;
@@ -413,7 +499,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       confidence: pilConf,
       source: "pil",
     };
-    const checked = await capCheck(d, opts.homeOverride);
+    const checked = await capCheck(d, opts);
     routerStore.setState({
       tier: checked.tier,
       lastDecision: checked,
@@ -448,7 +534,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
       reason: effective ? `${c.reason}-rerouted(disabled-default)` : c.reason,
       confidence: c.confidence,
     };
-    const checked = await capCheck(d, opts.homeOverride);
+    const checked = await capCheck(d, opts);
     routerStore.setState({
       tier: checked.tier,
       lastDecision: checked,
@@ -462,7 +548,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 2: Warm path (EE /api/route-model, 250ms timeout)
   const w = await callWarmRoute(prompt, { ...opts, context: routeCtx });
   if (w) {
-    const checked = await capCheck(constrainToProvider(w, opts), opts.homeOverride);
+    const checked = await capCheck(constrainToProvider(w, opts), opts);
     routerStore.setState({
       tier: checked.tier,
       lastDecision: checked,
@@ -476,7 +562,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
   // Step 3: Cold path (EE /api/cold-route, 1s timeout)
   const cd = await callColdRoute(prompt, { ...opts, context: routeCtx });
   if (cd) {
-    const checked = await capCheck(constrainToProvider(cd, opts), opts.homeOverride);
+    const checked = await capCheck(constrainToProvider(cd, opts), opts);
     routerStore.setState({
       tier: "cold",
       lastDecision: checked,
@@ -498,7 +584,7 @@ export async function decide(prompt: string, opts: DecideOpts): Promise<RouteDec
         ? "fallback:ee-unreachable+rerouted(disabled-default)"
         : "fallback:ee-unreachable",
   };
-  const checked = await capCheck(fallback, opts.homeOverride);
+  const checked = await capCheck(fallback, opts);
   routerStore.setState({
     lastDecision: checked,
     taskHash: null,

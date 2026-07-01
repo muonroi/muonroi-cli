@@ -189,7 +189,7 @@ export function checkGitSafetyCommand(command: string, gitSafetyKey: string): Sa
 // Inline require to avoid circular dependency at module load.
 function require_inline_safety_deps() {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const mod = require("./git-safety.js") as typeof import("../tools/git-safety.js");
+  const mod = require("../tools/git-safety.js") as typeof import("../tools/git-safety.js");
   return mod;
 }
 
