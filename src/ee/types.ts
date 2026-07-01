@@ -121,6 +121,11 @@ export interface RouteModelRequest {
     projectSize?: "small" | "medium" | "large";
     filesTouched?: number;
     mode?: string;
+    turnIndex?: number;
+    messageCount?: number;
+    compactionCount?: number;
+    totalSavedTokens?: number;
+    compactionSummary?: string;
   };
   runtime?: "claude" | "gemini" | "codex" | "opencode";
 }

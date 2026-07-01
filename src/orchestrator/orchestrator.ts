@@ -2547,6 +2547,7 @@ export class Agent {
       setLastProviderOptionsShape: (shape) => {
         self._lastProviderOptionsShape = shape;
       },
+      getCompactionStats: () => self.getCompactionStats(),
       getBatchClientOptions: (signal) => self.getBatchClientOptions(signal),
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
@@ -3038,6 +3039,7 @@ export class Agent {
         self._compactedThisTurn = v;
       },
       getCompactedThisTurn: () => self._compactedThisTurn,
+      getCompactionStats: () => self.getCompactionStats(),
       setTurnUserGoalExcerpt: (v) => {
         self._turnUserGoalExcerpt = v;
       },
