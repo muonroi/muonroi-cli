@@ -40,6 +40,9 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("zai → https://z.ai/coding-plan", () => {
       expect(getProviderCapabilities("zai").consoleSignupURL()).toBe("https://z.ai/coding-plan");
     });
+    it("opencode-go → https://opencode.ai", () => {
+      expect(getProviderCapabilities("opencode-go").consoleSignupURL()).toBe("https://opencode.ai");
+    });
     it("unknown provider id falls back to default anthropic console", () => {
       expect(getProviderCapabilities("does-not-exist").consoleSignupURL()).toBe(
         "https://console.anthropic.com/settings/keys",
