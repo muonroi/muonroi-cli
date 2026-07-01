@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
-
 import * as registry from "../models/registry.js";
+import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
 
 // Mock will be set up in beforeEach
 
@@ -76,7 +75,7 @@ describe("proxyVision", () => {
     expect(result.imageCount).toBe(0);
   });
 
-  it("proxies images through SiliconFlow for text-only model", async () => {
+  it("proxies images through catalog vision backend (Z.ai) for text-only model", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () =>
@@ -104,11 +103,12 @@ describe("proxyVision", () => {
     expect(processed.role).toBe("user");
     const content = processed.content as Array<{ type: string; text: string }>;
     expect(content.every((p) => p.type === "text")).toBe(true);
-    expect(content.some((p) => p.text.includes("Vision Proxy"))).toBe(true);
+    expect(content.some((p) => p.text.includes("<vision-observation>"))).toBe(true);
     expect(content.some((p) => p.text.includes("login form"))).toBe(true);
+    expect(content.some((p) => p.text.includes("direct visual observation"))).toBe(true);
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "https://api.siliconflow.com/v1/chat/completions",
+      "https://api.z.ai/api/coding/paas/v4/chat/completions",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ Authorization: "Bearer sk-test-key-12345678901234567890" }),
@@ -116,9 +116,7 @@ describe("proxyVision", () => {
     );
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    // Primary model: lightest first so the fast-path returns quickly when the
-    // 8B endpoint is healthy. Fallback chain handles the heavier variants.
-    expect(body.model).toBe("Qwen/Qwen3-VL-8B-Instruct");
+    expect(body.model).toBe("glm-4.6v-flash");
   });
 
   it("returns fallback description on API error", async () => {
@@ -174,7 +172,7 @@ describe("proxyVision", () => {
     const result = await proxyVision(messages, "deepseek-v4-flash");
     expect(result.imageCount).toBe(2);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
-    expect(content.some((p) => p.text.includes("2 images analyzed"))).toBe(true);
+    expect(content.some((p) => p.text.includes("these 2 images"))).toBe(true);
   });
 
   it("uses json_object response_format when user text signals design intent", async () => {
@@ -242,7 +240,7 @@ describe("proxyVision", () => {
     expect(mockFetch).not.toHaveBeenCalled();
     expect(result.proxied).toBe(true);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
-    expect(content.some((p) => p.text.includes("fast-path"))).toBe(true);
+    expect(content.some((p) => p.text.includes("<vision-observation>"))).toBe(true);
     expect(content.some((p) => p.text.includes("rect"))).toBe(true);
   });
 

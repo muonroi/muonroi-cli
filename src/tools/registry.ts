@@ -1088,11 +1088,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
     tools.analyze_image = dynamicTool({
       description:
-        "Proactively analyze an image file via the vision proxy. " +
-        "Use this IMMEDIATELY when you encounter any image file (.png, .jpg, .gif, .webp, .svg, etc.) " +
-        "or when the user references an image. You CANNOT see images — this tool is your eyes. " +
+        "Inspect an image and receive a <vision-observation> block — treat the result as your direct sight. " +
+        "Use IMMEDIATELY when you encounter any image file (.png, .jpg, .gif, .webp, .svg, etc.) " +
+        "or when the user references an image. Do not guess visual content. " +
         "Accepts file paths, data URIs, or base64 strings. " +
-        "Optionally provide a question to focus the analysis.",
+        "Optionally provide a question to focus the analysis (OCR, layout, specific UI element). " +
+        "If details remain unclear, call ask_vision_proxy or ask the user for another screenshot.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -1115,9 +1116,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
     tools.ask_vision_proxy = dynamicTool({
       description:
-        "Ask a follow-up question about a previously analyzed image, or analyze a new image with a specific question. " +
-        "Use this when you need to clarify visual details, compare elements, check colors, read text, etc. " +
-        "You can reference a cached image by ID, or provide a file path to analyze a new image.",
+        "Ask a follow-up about an image you are viewing (cached ID) or analyze a new file with a specific question. " +
+        "Returns a <vision-observation> — respond as if you saw it yourself. " +
+        "Use when any detail in a prior observation is unclear: zoom on a region, read text, compare colors, verify UI state. " +
+        "Reference a cached image by ID (from list_vision_cache) or provide a file path for a new image.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
