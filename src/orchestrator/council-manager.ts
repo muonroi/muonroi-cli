@@ -201,6 +201,7 @@ export class CouncilManager {
     // Build tool set with bash, grep, read_file for codebase research
     const researchTools = createBuiltinTools(this.deps.getBash(), this.deps.getMode(), {
       // research phase intentionally has no runTask/runDelegation handlers
+      sessionId: this.deps.getSessionId() ?? undefined,
     });
 
     const systemPrompt =

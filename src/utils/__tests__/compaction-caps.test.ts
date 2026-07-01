@@ -61,7 +61,7 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
     it("return the documented defaults when env is unset", () => {
       expect(getSubAgentCompactThresholdChars()).toBe(40_000);
       expect(getSubAgentCompactKeepLast()).toBe(3);
-      expect(getTopLevelCompactThresholdChars()).toBe(100_000);
+      expect(getTopLevelCompactThresholdChars()).toBe(200_000);
       expect(getTopLevelCompactKeepLast()).toBe(5);
     });
 
@@ -76,8 +76,8 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
       process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST = "99"; // > 20
       expect(getSubAgentCompactKeepLast()).toBe(3);
 
-      process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "10000"; // < 50_000
-      expect(getTopLevelCompactThresholdChars()).toBe(100_000);
+      process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "5000"; // < 10_000
+      expect(getTopLevelCompactThresholdChars()).toBe(200_000);
       process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST = "99"; // > 30
       expect(getTopLevelCompactKeepLast()).toBe(5);
     });
@@ -95,24 +95,24 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
   });
 
   describe("budget getters (env override → user-settings → default)", () => {
-    it("getSubAgentBudgetChars: default 120_000 when env unset and no user override", () => {
+    it("getSubAgentBudgetChars: default 240_000 when env unset and no user override", () => {
       // Deterministic on a clean checkout / CI (no user-settings.json). When a
       // dev machine HAS an explicit override the getter must honor it instead —
       // the default-drift case is what CI guards.
       const override = loadUserSettings().subAgentBudgetChars;
-      if (typeof override === "number" && override >= 20_000 && override <= 600_000) {
+      if (typeof override === "number" && override >= 20_000 && override <= 5_000_000) {
         expect(getSubAgentBudgetChars()).toBe(Math.floor(override));
       } else {
-        expect(getSubAgentBudgetChars()).toBe(120_000);
+        expect(getSubAgentBudgetChars()).toBe(240_000);
       }
     });
 
-    it("getTopLevelToolBudgetChars: default 200_000 when env unset and no user override", () => {
+    it("getTopLevelToolBudgetChars: default 400_000 when env unset and no user override", () => {
       const override = loadUserSettings().topLevelToolBudgetChars;
-      if (typeof override === "number" && override >= 50_000 && override <= 1_500_000) {
+      if (typeof override === "number" && override >= 50_000 && override <= 10_000_000) {
         expect(getTopLevelToolBudgetChars()).toBe(Math.floor(override));
       } else {
-        expect(getTopLevelToolBudgetChars()).toBe(200_000);
+        expect(getTopLevelToolBudgetChars()).toBe(400_000);
       }
     });
 
@@ -124,17 +124,17 @@ describe("compaction cap getters — production contract (G4 drift guard)", () =
     });
 
     it("reject out-of-range env (result stays within the documented range)", () => {
-      process.env.MUONROI_SUB_AGENT_BUDGET_CHARS = "999999999"; // > 600_000
+      process.env.MUONROI_SUB_AGENT_BUDGET_CHARS = "999999999"; // > 5_000_000
       const sub = getSubAgentBudgetChars();
       expect(sub).not.toBe(999_999_999);
       expect(sub).toBeGreaterThanOrEqual(20_000);
-      expect(sub).toBeLessThanOrEqual(600_000);
+      expect(sub).toBeLessThanOrEqual(5_000_000);
 
       process.env.MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS = "1000"; // < 50_000
       const top = getTopLevelToolBudgetChars();
       expect(top).not.toBe(1000);
       expect(top).toBeGreaterThanOrEqual(50_000);
-      expect(top).toBeLessThanOrEqual(1_500_000);
+      expect(top).toBeLessThanOrEqual(10_000_000);
     });
   });
 });
@@ -193,11 +193,10 @@ describe("compaction fires with the REAL default getter values (G4 behavioural g
     expect(JSON.stringify(compacted)).toContain("elided by sub-agent compactor");
   });
 
-  it("top-level: default threshold (100K) elides older tool results on a ~160K load", () => {
-    const messages = buildToolTurns(8, 20_000); // ~160K cumulative, 8 tool turns
+  it("top-level: default threshold (200K) elides older tool results on a ~240K load", () => {
+    const messages = buildToolTurns(12, 20_000); // ~240K cumulative, 12 tool turns
     const cumulative = cumulativeMessageChars(messages);
-    expect(cumulative).toBeGreaterThan(100_000);
-    expect(cumulative).toBeLessThan(200_000);
+    expect(cumulative).toBeGreaterThan(200_000);
 
     const compacted = compactSubAgentMessages(messages, {
       thresholdChars: getTopLevelCompactThresholdChars(),

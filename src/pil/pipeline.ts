@@ -23,6 +23,7 @@ import { appendPilLog } from "./budget-log.js";
 import { isDiscoveryEnabled } from "./config.js";
 import { scoreComplexitySize } from "./layer1_5-complexity-size.js";
 import { layer1Intent } from "./layer1-intent.js";
+import { layer2_5Ponytail } from "./layer2_5-ponytail.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
 import { layer4Gsd } from "./layer4-gsd.js";
@@ -71,6 +72,7 @@ function pipelineTimeoutMs(): number {
 
 const SKIPPED_LAYERS: Array<{ timingName: string; deltaName: string }> = [
   { timingName: "layer2-personality", deltaName: "personality-adaptation" },
+  { timingName: "layer2_5-ponytail", deltaName: "ponytail-mode" },
   { timingName: "layer3-ee-injection", deltaName: "ee-experience-injection" },
   { timingName: "layer4-gsd-structuring", deltaName: "gsd-workflow-structuring" },
   { timingName: "layer5-context-enrichment", deltaName: "context-enrichment" },
@@ -124,6 +126,18 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
           }
         : ctx._intentTrace,
     };
+  }
+
+  // Direct-answer mode detection: when the turn is purely informational
+  // (no code changes needed), we can save ~20K MCP schemas + ~1.5K write-tool
+  // schemas per turn by stripping write tools and MCP servers downstream.
+  // Conditions: high-confidence answer request with small/medium complexity.
+  const DA_HIGH_CONF = 0.5; // relaxed from 0.7 — brain-classified deliverable="answer" is already
+  // a strong signal that this is a read-only Q&A. 0.7 threshold would miss
+  // turns where confidence ∈ [0.5, 0.7) but deliverable is clearly an answer
+  // (e.g. single-line Q like "giải thích dòng này" → conf 0.55, right to skip tools).
+  if (ctx.deliverableKind === "answer" && ctx.confidence >= DA_HIGH_CONF && ctx.complexitySize?.size !== "large") {
+    ctx = { ...ctx, directAnswer: true };
   }
 
   // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout)
@@ -180,6 +194,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
 
   if (ctx.taskType !== null) {
     await timed("layer2-personality", layer2Personality);
+    await timed("layer2_5-ponytail", layer2_5Ponytail);
     // Issue #2: meta-analysis turns used to skip layer3 (EE recall) + layer5
     // (context) to cut overhead — but that starved exactly the self-evaluation
     // turns where behavioral/principle recall matters most. Run the full

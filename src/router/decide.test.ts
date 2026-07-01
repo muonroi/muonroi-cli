@@ -7,6 +7,10 @@ import { loadCatalog } from "../models/registry.js";
 import { type DecideOpts, decide } from "./decide.js";
 import { routerStore } from "./store.js";
 
+declare global {
+  var disabledProvidersList: string[];
+}
+
 // Mock bridge to always return null so tests go through HTTP path
 vi.mock("../ee/bridge.js", () => ({
   routeModel: vi.fn().mockResolvedValue(null),
@@ -16,33 +20,18 @@ vi.mock("../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
 }));
 
-vi.mock("../models/catalog-client.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../models/catalog-client.js")>();
-  return {
-    ...original,
-    fetchCatalog: async () => {
-      const fs = await import("node:fs");
-      const path = await import("node:path");
-      const raw = fs.readFileSync(path.resolve(process.cwd(), "src/models/catalog.json"), "utf8");
-      const data = JSON.parse(raw);
-      return data.models;
-    },
-  };
-});
+globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
 
-let disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
-
-vi.mock("../utils/settings.js", async (importOriginal) => {
-  const original = await importOriginal<typeof import("../utils/settings.js")>();
-  return {
-    ...original,
-    isProviderDisabled: (provider: string) => {
-      const res = disabledProvidersList.includes(provider);
-      console.log(`[MOCK] isProviderDisabled("${provider}") => ${res}`);
-      return res;
-    },
-  };
-});
+vi.mock("../utils/settings.js", () => ({
+  getRoleModel: () => undefined,
+  getDefaultProvider: () => "anthropic",
+  getRoutingPromoteMax: () => (globalThis as { routingPromoteMax?: string }).routingPromoteMax ?? "balanced",
+  isCouncilMultiProviderPreferred: () => false,
+  isProviderDisabled: (provider: string) => {
+    const res = globalThis.disabledProvidersList.includes(provider);
+    return res;
+  },
+}));
 
 let BASE_OPTS: DecideOpts;
 
@@ -50,6 +39,13 @@ describe("decide()", () => {
   let stub: StubHandle;
 
   beforeAll(async () => {
+    const originalFetch = globalThis.fetch;
+    vi.stubGlobal("fetch", async (url: string | URL | Request, init?: RequestInit) => {
+      if (url.toString().includes("catalog.muonroi.com")) {
+        throw new Error("Network unreachable");
+      }
+      return originalFetch(url, init);
+    });
     await loadCatalog();
     const _models = getTestModels();
     const _providers = getTestProviders();
@@ -80,11 +76,13 @@ describe("decide()", () => {
   });
 
   afterAll(async () => {
-    await stub.stop();
+    await stub?.stop();
   });
 
   beforeEach(() => {
-    disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
+    vi.clearAllMocks();
+    globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
     routerStore.setState({
       tier: "hot",
       degraded: false,
@@ -123,9 +121,12 @@ describe("decide()", () => {
       BASE_OPTS,
     );
     expect(result.tier).toBe("cold");
-    // Note: with current Agy-updated catalog the fallback picks a google premium model (gemini-3.1-pro-high)
-    // instead of the BASE default in this ee-null path. Check tier + reason instead of exact id.
-    expect(result.model).toBe("gemini-3.1-pro-high");
+    // Promotion cap (default "balanced", defaultModel deepseek-v4-flash = fast tier)
+    // clamps the EE cold-path premium pick (gemini-3.1-pro-high) DOWN to the
+    // balanced tier on the same provider (gemini-3.5-flash-medium). This is
+    // the cost-leak guard: routine tasks must not silently promote to premium.
+    expect(result.model).toBe("gemini-3.5-flash-medium");
+    expect(result.reason).toContain("promo-cap");
 
     // Restore
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
@@ -133,11 +134,11 @@ describe("decide()", () => {
   });
 
   it("returns fallback when both warm and cold are unreachable", async () => {
+    globalThis.disabledProvidersList = [];
     // Stub with no handlers -> both return 500 -> null
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
 
-    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
@@ -151,11 +152,11 @@ describe("decide()", () => {
   });
 
   it("returns degraded tier in fallback when store.degraded is true", async () => {
+    globalThis.disabledProvidersList = [];
     const deadStub = await startStubEEServer({});
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${deadStub.port}` }));
     routerStore.setState({ degraded: true });
 
-    disabledProvidersList = [];
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
       BASE_OPTS,
@@ -204,9 +205,10 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
 
     const settingsMod = await import("../utils/settings.js");
     vi.spyOn(settingsMod, "isProviderDisabled").mockImplementation((p) => p === "anthropic");
+    vi.spyOn(settingsMod, "getDefaultProvider").mockImplementation(() => "google");
 
-    const fallbackModel = getTestModels().fast;
-    const fallbackProvider = getTestProviders().default;
+    const fallbackModel = "gemini-1.5-flash"; // A fast google model
+    const fallbackProvider = "google";
 
     const result = await decide(
       "I need to analyze and restructure the payment processing module with proper error boundaries and retry logic across multiple services",
@@ -221,6 +223,50 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
 
     expect(result.model).not.toBe("claude-sonnet-4-6");
     expect(result.reason).toContain("provider-constrained");
+  });
+
+  it("promotion cap: clamps cold premium pick to balanced by default; 'any' opt-in allows premium", async () => {
+    // Cold path returns a premium-tier model (gemini-3.1-pro-high on google).
+    // defaultModel = deepseek-v4-flash (fast). With default cap "balanced", the
+    // premium pick must clamp to a same-provider balanced model.
+    // Reproduces the 89b34ce9a4e8 leak class: EE returned premium for a routine
+    // task; without the cap every turn silently ran on pro.
+    const coldPremium = await startStubEEServer({
+      routeModel: undefined,
+      coldRoute: () => ({
+        model: "gemini-3.1-pro-high",
+        tier: "premium" as const,
+        reason: "ee-cold-premium",
+        taskHash: "test-hash",
+      }),
+    });
+    // google enabled so the cold pick survives constrainToProvider.
+    globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai"];
+    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldPremium.port}` }));
+
+    // Default cap = "balanced": premium → balanced clamp + reason tag.
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
+    const clamped = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    expect(clamped.model).toBe("gemini-3.5-flash-medium"); // google balanced
+    expect(clamped.reason).toContain("promo-cap");
+
+    // Opt-in "any" restores legacy promotion — premium pick is honored as-is.
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "any";
+    routerStore.setState({ tier: "hot", degraded: false, lastDecision: null, lastHealthCheckAtMs: 0 });
+    const promoted = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    expect(promoted.model).toBe("gemini-3.1-pro-high");
+    expect(promoted.reason).not.toContain("promo-cap");
+
+    // Opt-in "off": ceiling = default model tier (fast). No balanced on google
+    // path is irrelevant — the clamp walks down to fast on the same provider.
+    (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "off";
+    routerStore.setState({ tier: "hot", degraded: false, lastDecision: null, lastHealthCheckAtMs: 0 });
+    const floored = await decide("check và commit các file trong todo plan", BASE_OPTS);
+    expect(floored.model).toBe("gemini-3.5-flash-high"); // google fast
+    expect(floored.reason).toContain("promo-cap");
+
+    setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${stub.port}` }));
+    await coldPremium.stop();
   });
 });
 

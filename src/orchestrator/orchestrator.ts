@@ -42,18 +42,21 @@ import {
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionTotalTokens,
   loadTranscript,
   loadTranscriptState,
   logInteraction,
   markMessageCompleted,
+  persistApprovedPlan,
   recordUsageEvent,
   SessionStore,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import { type ScheduleDaemonStatus, ScheduleManager, type StoredSchedule } from "../tools/schedule";
+import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import type {
   AgentMode,
   ChatEntry,
@@ -61,6 +64,7 @@ import type {
   SessionSnapshot,
   StreamChunk,
   SubagentStatus,
+  TaskListSnapshot,
   TaskRequest,
   ToolCall,
   ToolResult,
@@ -72,6 +76,7 @@ import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
+import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
@@ -85,6 +90,7 @@ import {
   isAutoCompactAfterTurnEnabled,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
+  loadUserSettings,
   type ModelRole,
   type SandboxMode,
   type SandboxSettings,
@@ -145,7 +151,7 @@ import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { MessageProcessor, type MessageProcessorDeps } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
-import { buildSystemPrompt, MAX_TOOL_ROUNDS } from "./prompts";
+import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
@@ -250,6 +256,7 @@ function createTools(
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
     modelId: _opts?.modelId,
+    sessionId: _opts?.sessionId,
   });
 }
 
@@ -280,6 +287,7 @@ export class Agent {
   /** UI-registered live-queue steer drain; see Agent.setSteerDrain. */
   private steerDrain: (() => { text: string }[]) | null = null;
   private maxToolRounds: number;
+  private hardMaxToolRounds: number;
   private mode: AgentMode = "agent";
   private modelId: string;
   private maxTokens: number;
@@ -399,7 +407,10 @@ export class Agent {
       () => this.bash.getCwd(),
       () => this.modelId,
     );
-    this.maxToolRounds = maxToolRounds || MAX_TOOL_ROUNDS;
+    const settings = loadUserSettings();
+    this.maxToolRounds = maxToolRounds || settings.maxToolRounds || MAX_TOOL_ROUNDS;
+    const baseHardMax = settings.hardMaxToolRounds || HARD_MAX_TOOL_ROUNDS;
+    this.hardMaxToolRounds = Math.max(Math.floor(this.maxToolRounds * 1.5), baseHardMax);
     const envMax = Number(process.env.MUONROI_MAX_TOKENS);
     this.maxTokens = Number.isFinite(envMax) && envMax > 0 ? envMax : 16_384;
     this.batchApi = options.batchApi ?? false;
@@ -425,7 +436,7 @@ export class Agent {
         ]);
         warmMcpClients(filterMcpServersByMessage(loadMcpServers(), ""));
       } catch (err) {
-        console.error(`[orchestrator] MCP pre-warm skipped: ${(err as Error)?.message}`);
+        logger.error("orchestrator", "MCP pre-warm skipped", { error: err });
       }
     })();
 
@@ -557,6 +568,16 @@ export class Agent {
 
   setPlanContext(ctx: string | null): void {
     this.planContext = ctx;
+    // Persist so that bare continuation phrases ("tiếp tục", "continue") after
+    // interrupt or cross-process resume can re-hydrate the APPROVED PLAN section
+    // instead of forgetting context and re-asking for details.
+    if (this.session && ctx) {
+      try {
+        persistApprovedPlan(this.session.id, ctx);
+      } catch {
+        /* best-effort */
+      }
+    }
   }
 
   setSendTelegramFile(fn: ((filePath: string) => Promise<ToolResult>) | null): void {
@@ -601,6 +622,11 @@ export class Agent {
 
   getMessages(): ModelMessage[] {
     return this.messages;
+  }
+
+  setMessages(messages: ModelMessage[]): void {
+    this.messages = messages;
+    this.messageSeqs = messages.map(() => null);
   }
 
   async listSchedules(): Promise<StoredSchedule[]> {
@@ -873,6 +899,13 @@ export class Agent {
   getChatEntries(): ChatEntry[] {
     if (!this.session) return [];
     return buildChatEntries(this.session.id);
+  }
+
+  getLastTodoSnapshot(): TaskListSnapshot | null {
+    if (!this.session) return null;
+    const argsJson = getLastTodoWriteArgs(this.session.id);
+    if (!argsJson) return null;
+    return snapshotFromTodoWriteArgs(argsJson);
   }
 
   getSessionSnapshot(): SessionSnapshot | null {
@@ -1509,6 +1542,22 @@ export class Agent {
       keepRecentTokens = Math.floor(keepRecentTokens * 0.85);
     }
 
+    // For sub-sessions, reduce keepRecentTokens to 8000 to keep active history light
+    try {
+      if (this.session) {
+        const { getDatabase } = require("../storage/db.js");
+        const db = getDatabase();
+        const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(this.session.id) as
+          | { parent_session_id: string | null }
+          | undefined;
+        if (row?.parent_session_id) {
+          keepRecentTokens = 8000;
+        }
+      }
+    } catch {
+      // Ignored
+    }
+
     return {
       reserveTokens: Math.max(this.maxTokens, DEFAULT_RESERVE_TOKENS),
       keepRecentTokens,
@@ -1520,7 +1569,10 @@ export class Agent {
   }
 
   private _resolveModelForTask(task: ModelTaskKind): string {
-    return resolveModelForTask(task, this.providerId, this.modelId);
+    const parentTier = getModelInfo(this.modelId)?.tier;
+    return resolveModelForTask(task, this.providerId, this.modelId, undefined, {
+      parentTier,
+    });
   }
 
   private async compactForContext(
@@ -1586,11 +1638,29 @@ export class Agent {
     const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactStartedAt = Date.now();
+    const isSubSession = await (async () => {
+      try {
+        if (!this.session) return false;
+        const { getDatabase } = await import("../storage/db.js");
+        const db = getDatabase();
+        const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(this.session.id) as
+          | { parent_session_id: string | null }
+          | undefined;
+        return !!row?.parent_session_id;
+      } catch {
+        return false;
+      }
+    })();
+
+    const customInstructions = isSubSession
+      ? "This is a temporary sub-session. Under sub-sessions, it is CRITICAL to preserve active files being worked on, compiler/linter error states, and exact line coordinates in the summary. Do not omit details of files edited, tests run, or compiler diagnostics, as the model needs this specific context to continue working without re-reading the files."
+      : undefined;
+
     const { summary, usage: compactUsage } = await generateCompactionSummary(
       provider,
       compactModelId,
       preparation,
-      undefined,
+      customInstructions,
       signal,
     );
 
@@ -1757,7 +1827,7 @@ export class Agent {
       signal,
       this.getCompactionSettings(contextWindow),
       true,
-    ).catch((err) => console.warn("[compact] failed:", (err as Error)?.message));
+    ).catch((err) => logger.warn("orchestrator", "compaction failed", { error: err }));
   }
 
   // ========================================================================
@@ -1830,7 +1900,7 @@ export class Agent {
       }
       runDir = nodePath.join(flowDir, "runs", runId);
     } catch (err) {
-      console.error(`[council] runDir resolution failed (decisions.lock will be skipped): ${(err as Error)?.message}`);
+      logger.error("router", "runDir resolution failed (decisions.lock will be skipped)", { error: err });
     }
 
     try {
@@ -2457,6 +2527,9 @@ export class Agent {
       get maxToolRounds() {
         return self.maxToolRounds;
       },
+      get hardMaxToolRounds() {
+        return self.hardMaxToolRounds;
+      },
       get maxTokens() {
         return self.maxTokens;
       },
@@ -2559,6 +2632,22 @@ export class Agent {
     return executeEventHooks(input, this.bash.getCwd(), signal);
   }
 
+  private estimateConversationChars(): number {
+    let count = 0;
+    for (const m of this.messages) {
+      if (typeof m.content === "string") {
+        count += m.content.length;
+      } else if (Array.isArray(m.content)) {
+        for (const p of m.content) {
+          if (p.type === "text" && p.text) {
+            count += p.text.length;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
   // ========================================================================
   // processMessage — main streaming turn loop (PIL enrichment, routing, LLM
   // stream, tool execution, compaction, hooks, observer notifications)
@@ -2569,27 +2658,266 @@ export class Agent {
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const processor = new MessageProcessor(this._buildMessageProcessorDeps());
-    // Deterministic "task done -> commit" (auto-commit): snapshot the dirty set
-    // before the turn so we can commit ONLY the files the agent changes during it
-    // (and never the user's pre-existing work-in-progress). Gated off under tests
-    // and via MUONROI_AUTO_COMMIT=0.
+    const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
+    const currentChars = this.estimateConversationChars();
+    logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
+
+    // 1. Run classifier to decide execution route
+    let routeAction: import("../pil/llm-classify.js").SubSessionAction = "DIRECT_ANSWER";
+    const isMockMode =
+      process.argv.includes("--mock-llm") ||
+      !!(globalThis as any).__muonroiMockModel ||
+      process.env.NODE_ENV === "test";
+    const forceClassify = process.env.MUONROI_FORCE_ROUTING_CLASSIFY === "1";
+
+    if (isMockMode && !forceClassify) {
+      logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
+    } else {
+      try {
+        const { classifySubSessionAction } = await import("../pil/llm-classify.js");
+        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
+        if (routeResult) {
+          routeAction = routeResult.action;
+          logger.info("orchestrator", "Routing action selected for user message", {
+            action: routeAction,
+            confidence: routeResult.confidence,
+            reason: routeResult.reason,
+          });
+        }
+      } catch (err) {
+        logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
+      }
+    }
+
+    const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
+
+    if (shouldRotate && this.session && this.sessionStore) {
+      logger.info("orchestrator", "Triggering silent session rotation", {
+        parentSessionId: this.session.id,
+        currentChars,
+      });
+      yield { type: "content", content: "\n⋯ Xoay vòng session ngầm để tối ưu hóa context (Anti-Mù active)...\n" };
+      const parentSessionId = this.session.id;
+      try {
+        const path = await import("node:path");
+        const flowDir = path.join(this.bash.getCwd(), ".muonroi-flow");
+        const { deliberateCompact } = await import("../flow/compaction/index.js");
+        const { getDatabase } = await import("../storage/db.js");
+        const { appendCompaction, getNextMessageSequence } = await import("../storage/transcript.js");
+
+        const cr = await deliberateCompact(flowDir, this.messages, "", 4096, this.requireProvider(), this.modelId);
+
+        const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+        const db = getDatabase();
+        db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+
+        const summaryMessage = createCompactionSummaryMessage(cr.summary);
+        const nextSeq = getNextMessageSequence(newSession.id);
+        appendCompaction(newSession.id, nextSeq, cr.summary, cr.tokensBeforeCompress);
+
+        this.session = this.sessionStore.getRequiredSession(newSession.id);
+        this.messages = [summaryMessage];
+        this.messageSeqs = [null];
+
+        this.sessionStore.touchSession(newSession.id, this.bash.getCwd());
+        logger.info("orchestrator", "Silent session rotation completed successfully", {
+          parentSessionId,
+          newSessionId: newSession.id,
+          summaryLength: cr.summary.length,
+          tokensBeforeCompress: cr.tokensBeforeCompress,
+        });
+      } catch (err) {
+        logger.error("orchestrator", "silent session rotation failed", { error: err });
+      }
+    }
+
+    let isSubSessionForked = false;
+    let parentSessionId: string | null = null;
+    let subSessionId: string | null = null;
+
+    if (routeAction === "SPAWN_SUB_SESSION" && this.session && this.sessionStore) {
+      yield { type: "content", content: "\n⋯ Đang khởi tạo sub-session ngầm để xử lý tác vụ...\n" };
+      parentSessionId = this.session.id;
+      try {
+        const { loadLatestCompaction, getNextMessageSequence, appendCompaction, loadTranscriptState } = await import(
+          "../storage/transcript.js"
+        );
+        const { getDatabase } = await import("../storage/db.js");
+        const db = getDatabase();
+
+        // Check if there is already an active child session for this parent session
+        const activeSubSession = db
+          .prepare(
+            "SELECT id, updated_at FROM sessions WHERE parent_session_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+          )
+          .get(parentSessionId) as { id: string; updated_at: string } | undefined;
+
+        let shouldResume = false;
+        if (activeSubSession) {
+          const updatedAt = new Date(activeSubSession.updated_at).getTime();
+          const now = Date.now();
+          const diffMins = (now - updatedAt) / (60 * 1000);
+          if (diffMins > 15) {
+            // Stale: mark as abandoned
+            db.prepare("UPDATE sessions SET status = 'abandoned', updated_at = ? WHERE id = ?").run(
+              new Date().toISOString(),
+              activeSubSession.id,
+            );
+            logger.info("orchestrator", "Stale sub-session found, marked as abandoned", {
+              parentSessionId,
+              subSessionId: activeSubSession.id,
+              diffMins,
+            });
+          } else {
+            shouldResume = true;
+            subSessionId = activeSubSession.id;
+          }
+        }
+
+        if (shouldResume && subSessionId) {
+          yield { type: "content", content: "\n⋯ Phát hiện sub-session trước đó bị gián đoạn, đang khôi phục...\n" };
+          this.session = this.sessionStore.getRequiredSession(subSessionId);
+          const childState = loadTranscriptState(subSessionId);
+          this.messages = childState.messages;
+          this.messageSeqs = childState.seqs;
+          this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
+          isSubSessionForked = true;
+          logger.info("orchestrator", "Resumed child sub-session successfully", {
+            parentSessionId,
+            subSessionId,
+          });
+        } else {
+          const latest = loadLatestCompaction(parentSessionId);
+          const newSession = this.sessionStore.createSession(this.modelId, this.mode, this.bash.getCwd());
+          db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
+          subSessionId = newSession.id;
+
+          let seedMessages: ModelMessage[] = [];
+          let seedSeqs: Array<number | null> = [];
+          if (latest?.summary) {
+            const summaryMsg = createCompactionSummaryMessage(latest.summary);
+            seedMessages = [summaryMsg];
+            seedSeqs = [null];
+            const nextSeq = getNextMessageSequence(subSessionId);
+            appendCompaction(subSessionId, nextSeq, latest.summary, latest.tokensBefore);
+          } else {
+            seedMessages = [...this.messages];
+            seedSeqs = [...this.messageSeqs];
+          }
+
+          // Add sub-session overlay system message
+          const overlayMessage: ModelMessage = {
+            role: "system",
+            content:
+              `You are executing a sub-task delegated by the Main Session in an isolated, temporary Sub-Session.\n` +
+              `Your goal is to satisfy the user's request: "${userMessage}"\n\n` +
+              `Your Operating Boundaries & Rules:\n` +
+              `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
+              `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
+              `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
+              `4. Your final response MUST contain a structured summary (Key Changes, Verification Details, Result Summary).\n` +
+              `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
+          };
+          seedMessages.push(overlayMessage);
+          seedSeqs.push(null);
+
+          this.session = this.sessionStore.getRequiredSession(subSessionId);
+          this.messages = seedMessages;
+          this.messageSeqs = seedSeqs;
+          this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
+
+          isSubSessionForked = true;
+          logger.info("orchestrator", "Forked child sub-session successfully", {
+            parentSessionId,
+            subSessionId,
+          });
+        }
+      } catch (err) {
+        logger.error("orchestrator", "Forking child sub-session failed, falling back to main session", { error: err });
+      }
+    }
+
+    let processor = new MessageProcessor(this._buildMessageProcessorDeps());
     const autoCommitOn = isAutoCommitEnabled();
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
-    yield* processor.run(userMessage, observer, images);
-    // Reached only when the turn completed normally (an abort/throw propagates
-    // through yield* and skips this) — exactly when committing is appropriate.
-    if (autoCommitOn) {
-      const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
-        console.error(`[auto-commit] unexpected failure: ${(err as Error)?.message}`);
-        return { committed: false } as AutoCommitResult;
-      });
-      if (auto.committed) {
-        yield {
-          type: "content",
-          content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
-        };
+
+    try {
+      let attempts = 0;
+      const maxAttempts = 3;
+      const messagesSnapshot = [...this.messages];
+      const seqsSnapshot = [...this.messageSeqs];
+
+      while (attempts < maxAttempts) {
+        try {
+          attempts++;
+          yield* processor.run(userMessage, observer, images);
+          break;
+        } catch (err) {
+          if (isSubSessionForked && isTransientError(err) && attempts < maxAttempts && subSessionId) {
+            logger.warn("orchestrator", "Transient error in sub-session, retrying", {
+              attempt: attempts,
+              error: err,
+            });
+            yield {
+              type: "content",
+              content: `\n⚠️ Có lỗi mạng hoặc rate limit xảy ra trong sub-session (lần thử ${attempts}/${maxAttempts}). Đang thử lại...\n`,
+            };
+            this.messages = [...messagesSnapshot];
+            this.messageSeqs = [...seqsSnapshot];
+            processor = new MessageProcessor(this._buildMessageProcessorDeps());
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (autoCommitOn) {
+        const auto = await maybeAutoCommitTurn({ cwd, dirtyBefore, userMessage }).catch((err) => {
+          logger.error("orchestrator", "auto-commit unexpected failure", { error: err });
+          return { committed: false } as AutoCommitResult;
+        });
+        if (auto.committed) {
+          yield {
+            type: "content",
+            content: `\n✓ Auto-committed ${auto.fileCount} file(s) → ${auto.sha} (${AUTO_COMMIT_ATTRIBUTION})\n`,
+          };
+        }
+      }
+    } finally {
+      if (isSubSessionForked && parentSessionId && this.sessionStore) {
+        try {
+          const finalMessages = salvageSubSessionOutput(this.messages);
+
+          // Restore parent session
+          this.session = this.sessionStore.getRequiredSession(parentSessionId);
+
+          const { loadTranscriptState } = await import("../storage/transcript.js");
+          const parentState = loadTranscriptState(parentSessionId);
+          this.messages = parentState.messages;
+          this.messageSeqs = parentState.seqs;
+
+          const userModelMessage: ModelMessage = {
+            role: "user",
+            content: userMessage,
+          };
+
+          if (finalMessages.length > 0) {
+            this.appendCompletedTurn(userModelMessage, finalMessages);
+            logger.info("orchestrator", "Absorbed sub-session outcome into parent session", {
+              parentSessionId,
+              subSessionId,
+              absorbedMessagesCount: finalMessages.length,
+            });
+          } else {
+            logger.warn("orchestrator", "No assistant messages found to absorb from sub-session", {
+              parentSessionId,
+              subSessionId,
+            });
+          }
+        } catch (err) {
+          logger.error("orchestrator", "Failed to absorb sub-session final summary", { error: err });
+        }
       }
     }
   }
@@ -2630,6 +2958,9 @@ export class Agent {
       },
       get maxToolRounds() {
         return self.maxToolRounds;
+      },
+      get hardMaxToolRounds() {
+        return self.hardMaxToolRounds;
       },
       get batchApi() {
         return self.batchApi;
@@ -2725,6 +3056,48 @@ export class Agent {
       },
       requireProvider: () => self.requireProvider(),
       emitSubagentStatus: (s) => self.emitSubagentStatus(s),
+      consultParentSession: async (question: string) => {
+        if (!self.session) {
+          return "No active session found to consult.";
+        }
+        const { getDatabase } = await import("../storage/db.js");
+        const db = getDatabase();
+        const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(self.session.id) as
+          | { parent_session_id: string | null }
+          | undefined;
+        if (!row?.parent_session_id) {
+          return "No parent session found to consult.";
+        }
+        const parentSessionId = row.parent_session_id;
+
+        const { loadTranscriptState } = await import("../storage/transcript.js");
+        const parentState = loadTranscriptState(parentSessionId);
+
+        const { serializeConversation } = await import("./compaction.js");
+        const serializedParent = serializeConversation(parentState.messages);
+
+        const systemPrompt =
+          `You are the Main Session of an AI coding assistant.\n` +
+          `A child sub-session has been spawned to execute a sub-task and is requesting your advice/guidance.\n` +
+          `Below is your conversation history (Main Session Context):\n\n` +
+          `${serializedParent}\n\n` +
+          `Provide clear, actionable guidance to resolve the child's query.`;
+
+        const { generateText } = await import("ai");
+        const provider = self.requireProvider();
+        const modelId = self.modelId;
+        const runtime = resolveModelRuntime(provider, modelId);
+
+        const result = await generateText({
+          model: runtime.model,
+          system: systemPrompt,
+          prompt: `Child Sub-session is stuck. Question:\n${question}`,
+          temperature: 0.2,
+          ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+        });
+
+        return result.text;
+      },
       fireHook: (input, signal) =>
         self.fireHook(input as Parameters<Agent["fireHook"]>[0], signal) as ReturnType<
           MessageProcessorDeps["fireHook"]
@@ -2755,22 +3128,23 @@ export class Agent {
         try {
           return await h(info);
         } catch (err) {
-          console.error(`[Agent] askToolLoopContinue crashed: ${(err as Error)?.message ?? err}`);
+          logger.error("orchestrator", "askToolLoopContinue crashed", { error: err });
           return "stop";
         }
       },
       askSafetyOverride: async (info) => {
         const h = self._safetyOverrideHandler;
         if (!h) {
-          console.warn(
-            `[Agent] askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`,
+          logger.warn(
+            "orchestrator",
+            `askSafetyOverride called but no handler registered — blocking ${info.kind}: ${info.reason}`,
           );
           return { action: "block" };
         }
         try {
           return await h(info);
         } catch (err) {
-          console.error(`[Agent] askSafetyOverride crashed: ${(err as Error)?.message ?? err}`);
+          logger.error("orchestrator", "askSafetyOverride crashed", { error: err });
           return { action: "block" };
         }
       },
@@ -2796,19 +3170,30 @@ export class Agent {
     const recent = this.messages.slice(-6);
     const parts: string[] = [];
     for (const msg of recent) {
-      if (msg.role !== "user" && msg.role !== "assistant") continue;
-      const text =
-        typeof msg.content === "string"
-          ? msg.content
-          : Array.isArray(msg.content)
+      if (msg.role !== "user" && msg.role !== "assistant" && msg.role !== "tool") continue;
+
+      let text = "";
+      if (msg.role === "tool") {
+        text = Array.isArray(msg.content)
+          ? msg.content.map((p: any) => (typeof p.result === "string" ? p.result : JSON.stringify(p.result))).join(" ")
+          : typeof msg.content === "string"
             ? msg.content
-                .filter((p: { type: string }) => p.type === "text")
-                .map((p: { type: string; text?: string }) => p.text ?? "")
-                .join("")
-            : "";
+            : JSON.stringify(msg.content);
+      } else {
+        text =
+          typeof msg.content === "string"
+            ? msg.content
+            : Array.isArray(msg.content)
+              ? msg.content
+                  .filter((p: { type: string }) => p.type === "text")
+                  .map((p: { type: string; text?: string }) => p.text ?? "")
+                  .join("")
+              : "";
+      }
+
       if (!text) continue;
-      const snippet = text.length > 80 ? `${text.slice(0, 77)}...` : text;
-      parts.push(`[${msg.role}]: ${snippet}`);
+      const snippet = text.length > 300 ? `${text.slice(0, 297)}...` : text;
+      parts.push(`[${msg.role}]: ${snippet.replace(/\n/g, " ")}`);
     }
     return parts.length > 0 ? parts.join(" | ") : null;
   }
@@ -2943,4 +3328,41 @@ export class Agent {
       }
     }
   }
+}
+
+function isTransientError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("fetch failed") ||
+    msg.includes("rate limit") ||
+    msg.includes("429") ||
+    msg.includes("503") ||
+    msg.includes("502") ||
+    msg.includes("network") ||
+    msg.includes("timeout") ||
+    msg.includes("econnreset") ||
+    msg.includes("econnrefused")
+  );
+}
+
+function salvageSubSessionOutput(messages: ModelMessage[]): ModelMessage[] {
+  let lastAsstIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "assistant") {
+      lastAsstIdx = i;
+      break;
+    }
+  }
+
+  const finalMessages: ModelMessage[] = [];
+  if (lastAsstIdx >= 0) {
+    finalMessages.push(messages[lastAsstIdx]);
+    for (let i = lastAsstIdx + 1; i < messages.length; i++) {
+      if (messages[i].role === "tool") {
+        finalMessages.push(messages[i]);
+      }
+    }
+  }
+  return finalMessages;
 }

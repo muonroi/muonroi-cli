@@ -32,7 +32,11 @@ describe("checkForUpdate", () => {
     expect(result!.currentVersion).toBe("1.0.0");
     expect(mockFetch).toHaveBeenCalledWith(
       RELEASE_URL,
-      expect.objectContaining({ headers: { Accept: "application/vnd.github+json" } }),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Accept: "application/vnd.github+json",
+        }),
+      }),
     );
   });
 

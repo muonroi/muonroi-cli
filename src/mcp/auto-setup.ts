@@ -45,14 +45,6 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     url: "https://docs-mcp.muonroi.com/mcp",
   },
   {
-    id: "filesystem",
-    label: "Filesystem",
-    enabled: true,
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
-  },
-  {
     id: "playwright",
     label: "Playwright",
     enabled: true,

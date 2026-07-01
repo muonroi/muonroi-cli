@@ -6,8 +6,10 @@ import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
 import { loadCustomInstructions } from "../utils/instructions";
+import { logger } from "../utils/logger.js";
 import {
   type CustomSubagentConfig,
+  loadUserSettings,
   loadValidSubAgents,
   type SandboxMode,
   type SandboxSettings,
@@ -15,17 +17,63 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
 
-// F3 — hard cap on tool rounds per user turn. Default reduced 75 → 50
-// after session bca83bcbaad1 logged 178 tool calls in a single turn while
-// monotonically growing billed input. Env override allowed range 10..200.
+// F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
+// after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
+// with 3 turns (seq 33/81/1) consuming 82% of tokens.
+// Env override allowed range 10..400.
+// Env override allowed range 10..400 (or up to 2000 in agent-first).
 function readMaxToolRoundsFromEnv(): number {
-  const raw = process.env.MUONROI_MAX_TOOL_ROUNDS;
-  if (!raw) return 8;
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
+  const raw = process.env.MUONROI_MAX_TOOL_ROUNDS || settings.maxToolRounds;
+  if (!raw) return agentFirst ? 200 : 40;
   const n = Number(raw);
-  if (!Number.isFinite(n)) return 50;
-  return Math.max(10, Math.min(200, Math.floor(n)));
+  if (!Number.isFinite(n)) return agentFirst ? 200 : 40;
+  const maxLimit = agentFirst ? 2000 : 400;
+  return Math.max(10, Math.min(maxLimit, Math.floor(n)));
 }
 export const MAX_TOOL_ROUNDS = readMaxToolRoundsFromEnv();
+
+// F3b — HARD cap: absolute non-bumpable ceiling per user turn.
+// Fires AFTER the soft cap has been bumped by the user.
+// Env override allowed range 20..400 (or up to 3000 in agent-first).
+function readHardMaxToolRoundsFromEnv(): number {
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
+  const raw = process.env.MUONROI_HARD_MAX_TOOL_ROUNDS || settings.hardMaxToolRounds;
+  if (!raw) return agentFirst ? 300 : 60;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return agentFirst ? 300 : 60;
+  const maxLimit = agentFirst ? 3000 : 400;
+  return Math.max(20, Math.min(maxLimit, Math.floor(n)));
+}
+export const HARD_MAX_TOOL_ROUNDS = readHardMaxToolRoundsFromEnv();
+
+// F3c — per-turn LLM call cap: how many streamText() invocations are
+// allowed per user turn.
+// Default 12 (or 100 in agent-first).
+// Env override MUONROI_MAX_LLM_CALLS_PER_TURN, range 3..100 (or up to 500 in agent-first).
+function readMaxLlmCallsPerTurn(): number {
+  const settings = loadUserSettings();
+  const agentFirst =
+    settings.agentFirst !== false &&
+    process.env.MUONROI_AGENT_FIRST !== "0" &&
+    process.env.MUONROI_AGENT_FIRST !== "false";
+  const raw = process.env.MUONROI_MAX_LLM_CALLS_PER_TURN || settings.maxLlmCallsPerTurn;
+  if (!raw) return agentFirst ? 100 : 12;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return agentFirst ? 100 : 12;
+  const maxLimit = agentFirst ? 500 : 100;
+  return Math.max(3, Math.min(maxLimit, Math.floor(n)));
+}
+export const MAX_LLM_CALLS_PER_TURN = readMaxLlmCallsPerTurn();
+
 export const VISION_MODEL = "grok-4-1-fast-reasoning";
 export const COMPUTER_MODEL = "grok-4.20-0309-reasoning";
 
@@ -68,9 +116,7 @@ export function detectProjectStack(cwd: string): string {
     // Best-effort enrichment: a missing/unreadable cwd simply omits the stack
     // line (the ENVIRONMENT cwd line already surfaces "<unknown>"). Debug-gated
     // so prompt assembly never corrupts the TUI at startup.
-    if (process.env.MUONROI_DEBUG === "1") {
-      console.error(`[orchestrator/prompts] detectProjectStack failed for ${cwd}: ${(err as Error)?.message}`);
-    }
+    logger.error("orchestrator", `detectProjectStack failed for ${cwd}`, { error: err });
     return "";
   }
 
@@ -303,10 +349,13 @@ TOKEN BUDGET:
 WORKFLOW RULES:
 - RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries. Use 'delegate' for deep background research. Read before you write.
 - CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.
+- PRIORITIZE RECENT CONTEXT OVER HISTORY: When receiving short, ambiguous, or general continuation prompts from the user (such as "implement nhé", "tiếp tục", "go ahead", "tiếp tục nhé"), ALWAYS prioritize the most recently discussed design decisions, proposals, or topics from the immediate preceding turn(s). Do not regress or default back to earlier, older, or already completed tasks/topics that dominated the earlier parts of the session.
+- BATCH ALL TOOL CALLS — HARD RULE: You MUST combine every independent tool call (read_file, grep, bash, etc.) you know you need into ONE parallel batch in your FIRST tool turn. Do NOT spread them across sequential rounds. Each extra LLM round re-sends the full ~17K system prompt + accumulated context, costing $0.003-$0.006 and inflating input 3-5x for NO new signal. If your first batch cannot cover all the reads/exploration needed, use task(explore) instead — do NOT scatter reads across 3+ rounds.
+- MAX 2 LLM ROUND TRIPS per user message: round 1 = batch all reads/exploration; round 2 = follow-up only if a result from round 1 genuinely requires a NEW read you could not have anticipated. If you need round 3, you violated the batching rule — stop and use task(explore) instead.
+- COST AWARENESS: Every tool round after round 1 burns $0.004-$0.006 for ZERO new signal — the system prompt is unchanged, only tool outputs grew. If you have 8+ tool calls, they MUST all go in round 1, not spread across 3-8 rounds.
 
 SELF-LIMIT:
 - When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
-- BATCH TOOL CALLS: You MUST combine and invoke independent tool calls in parallel (e.g. read multiple files, or run grep and read a file concurrently) in a SINGLE turn. Do not wait for the result of one tool call before invoking another if you already know both are needed. This dramatically reduces conversation turns, roundtrip latency, and input token accumulation.
 - BATCH BASH COMMANDS: Combine independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
@@ -407,6 +456,12 @@ export interface SystemPromptOptions {
    * and can't run the full toolset anyway. Cuts ~6K tokens per sub-agent turn.
    */
   subAgent?: boolean;
+  /**
+   * When true (tool-turn, i.e. second+ LLM call in the same user-turn tool
+   * loop), skip native-capabilities and skills sections that were already
+   * shown in the first call. Cuts ~4K tokens per tool round-trip.
+   */
+  toolTurn?: boolean;
 }
 
 /**
@@ -474,8 +529,9 @@ function staticPrefixCacheKey(
   isChitchat: boolean,
   subagentsHash: string,
   subAgent = false,
+  toolTurn = false,
 ): string {
-  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}`;
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}`;
 }
 
 function computeStaticPrefix(
@@ -485,6 +541,7 @@ function computeStaticPrefix(
   providerId: string,
   chitchat: boolean,
   subAgent = false,
+  toolTurn = false,
 ): { prefix: string } {
   const custom = loadCustomInstructions(cwd);
   const customSection =
@@ -492,7 +549,10 @@ function computeStaticPrefix(
       ? ""
       : `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`;
 
-  const skillsText = chitchat || subAgent ? "" : formatSkillsForPrompt(discoverSkills(cwd));
+  // Tool-turn: skip agent-skills catalog (~2K tokens) and native-capabilities block (~2K tokens).
+  // The agent was already shown these in the first call of this turn and does not need
+  // to re-read them on every tool round-trip.
+  const skillsText = chitchat || subAgent || toolTurn ? "" : formatSkillsForPrompt(discoverSkills(cwd));
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
 
@@ -509,7 +569,7 @@ function computeStaticPrefix(
   }
 
   const contractSection = buildContractSection({ chitchat });
-  const nativeCapabilitiesSection = buildNativeCapabilitiesSection({ mode, chitchat });
+  const nativeCapabilitiesSection = toolTurn ? "" : buildNativeCapabilitiesSection({ mode, chitchat });
 
   const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${customSection}${skillsSection}${subagentsSection}`;
 
@@ -529,6 +589,7 @@ export function buildSystemPromptParts(
 ): SystemPromptParts {
   const chitchat = options?.chitchat === true;
   const subAgent = options?.subAgent ?? false;
+  const toolTurn = options?.toolTurn === true;
   const pid = providerId ?? "default";
 
   // Subagents rarely change mid-session, but when they do we need a cache miss.
@@ -536,7 +597,7 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent);
+  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent, toolTurn);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
@@ -545,7 +606,7 @@ export function buildSystemPromptParts(
     staticPrefix = cached.prefix;
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent);
+    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent, toolTurn);
     staticPrefix = result.prefix;
     _staticPrefixCache.set(key, {
       prefix: staticPrefix,

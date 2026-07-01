@@ -3,7 +3,7 @@
   "workspaces": [
     "packages/*"
   ],
-  "version": "1.7.2",
+  "version": "1.8.4",
   "description": "BYOK AI coding agent with multi-model council debate, role-based routing, and auto-compact.",
   "repository": {
     "type": "git",
@@ -59,6 +59,13 @@
     "dist/",
     "!dist/**/*.exe",
     "!dist/**/*.map",
+    "!dist/**/__tests__/**",
+    "!dist/**/__test-helpers__/**",
+    "!dist/**/__test-stubs__/**",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts",
+    "!dist/**/*.spec.js",
+    "!dist/**/*.spec.d.ts",
     "scripts/postinstall.cjs"
   ],
   "keywords": [
@@ -70,7 +77,7 @@
     "opentui"
   ],
   "author": "muonroi",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.72",
     "@ai-sdk/google": "3.0.65",

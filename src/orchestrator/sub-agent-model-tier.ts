@@ -39,18 +39,33 @@ export type TierLookup = (
   preferProvider?: string,
 ) => { id: string; provider: string } | undefined;
 
+const TIER_RANK: Record<"fast" | "balanced" | "premium", number> = { fast: 0, balanced: 1, premium: 2 };
+
 /**
  * Resolve the model id for a task kind on a given provider. Walks the tier
  * preference list, accepting only same-provider matches, and falls back to
  * `fallbackModelId` (the parent model) when nothing matches.
+ *
+ * `opts.parentTier` (the top-level / parent model's tier) acts as a ceiling:
+ * a delegated sub-task never runs on a HIGHER tier than the parent. Without
+ * this cap, a `verify` sub-agent (prefs `["premium","balanced"]`) spawned from
+ * a flash (fast) parent silently promotes to premium — e.g. on a DeepSeek-only
+ * setup (no balanced model) every verify sub-agent lands on deepseek-v4-pro.
+ * The parent already did the hard thinking; the sub-task should not exceed it.
+ *
+ * The cap is skipped when `parentTier` is omitted (preserves legacy behavior
+ * for callers that have not been threaded yet).
  */
 export function resolveModelForTask(
   task: ModelTaskKind,
   providerId: string,
   fallbackModelId: string,
   lookup: TierLookup = getModelByTier as TierLookup,
+  opts?: { parentTier?: "fast" | "balanced" | "premium" },
 ): string {
+  const ceilingRank = opts?.parentTier ? TIER_RANK[opts.parentTier] : undefined;
   for (const tier of TASK_TIER_PREFS[task] ?? ["balanced"]) {
+    if (ceilingRank !== undefined && TIER_RANK[tier] > ceilingRank) continue;
     const m = lookup(tier, providerId);
     if (m?.provider === providerId) return m.id;
   }

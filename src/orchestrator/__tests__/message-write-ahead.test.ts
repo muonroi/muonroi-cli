@@ -70,8 +70,12 @@ describe("A5: write-ahead messages persistence", () => {
     it("inserts a messages row with status='pending' BEFORE streamText fires", () => {
       persistMessageWriteAhead("session-xyz", 7, "user", JSON.stringify({ role: "user", content: "hello" }));
 
-      expect(preparedCalls).toHaveLength(1);
-      const call = preparedCalls[0]!;
+      // persistMessageWriteAhead also indexes the row into session_history_fts
+      // (DELETE + INSERT on the FTS table) — those are FTS-indexing prepares,
+      // not write-ahead prepares. Filter to the messages-table INSERT only.
+      const messageInserts = preparedCalls.filter((c) => /INSERT OR IGNORE INTO messages/.test(c.sql));
+      expect(messageInserts).toHaveLength(1);
+      const call = messageInserts[0]!;
       expect(call.sql).toMatch(/INSERT OR IGNORE INTO messages/);
       expect(call.sql).toMatch(/'pending'/);
 
@@ -85,7 +89,8 @@ describe("A5: write-ahead messages persistence", () => {
 
     it("uses INSERT OR IGNORE so a duplicate write-ahead does not clobber a finalized row", () => {
       persistMessageWriteAhead("s", 1, "user", "{}");
-      expect(preparedCalls[0]!.sql).toContain("INSERT OR IGNORE");
+      const messageInserts = preparedCalls.filter((c) => /INSERT OR IGNORE INTO messages/.test(c.sql));
+      expect(messageInserts[0]!.sql).toContain("INSERT OR IGNORE");
     });
 
     it("is fail-open: a thrown SQL error does NOT propagate to the orchestrator", () => {

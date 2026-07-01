@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // We test the module under test after creating it
-import { buildScope, resetScopeCache, scopeLabel } from "./scope.js";
+import { buildScope, resetScopeCache, sanitizeRemoteUrl, scopeLabel } from "./scope.js";
 
 describe("buildScope", () => {
   let tmpDir: string;
@@ -108,5 +108,28 @@ describe("scopeLabel", () => {
         branch: "main",
       }),
     ).toBe("branch:https://github.com/x/y#main");
+  });
+});
+
+describe("sanitizeRemoteUrl", () => {
+  it("strips credentials from http/https remote URLs", () => {
+    expect(sanitizeRemoteUrl("https://user:password@github.com/foo/bar.git")).toBe("https://github.com/foo/bar.git");
+    expect(sanitizeRemoteUrl("http://user@github.com/foo/bar.git")).toBe("http://github.com/foo/bar.git");
+    expect(sanitizeRemoteUrl("https://github.com/foo/bar.git")).toBe("https://github.com/foo/bar.git");
+  });
+
+  it("strips credentials from git+http/git+https remote URLs", () => {
+    expect(sanitizeRemoteUrl("git+https://user:password@github.com/foo/bar.git")).toBe(
+      "git+https://github.com/foo/bar.git",
+    );
+  });
+
+  it("does not strip user from ssh protocol URLs", () => {
+    expect(sanitizeRemoteUrl("ssh://git@github.com/foo/bar.git")).toBe("ssh://git@github.com/foo/bar.git");
+  });
+
+  it("does not throw on SSH shortcut formats and preserves them", () => {
+    expect(sanitizeRemoteUrl("git@github.com:foo/bar.git")).toBe("git@github.com:foo/bar.git");
+    expect(sanitizeRemoteUrl("github.com:foo/bar.git")).toBe("github.com:foo/bar.git");
   });
 });

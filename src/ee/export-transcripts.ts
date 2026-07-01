@@ -14,7 +14,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-
+import { getDatabase } from "../storage/db.js";
 import { emitTranscriptToDisk, getEmitRoot } from "./transcript-emit.js";
 
 type Row = { session_id: string; seq: number; role: string; message_json: string };
@@ -67,6 +67,7 @@ export interface ExportOptions {
   dryRun?: boolean;
   /** Minimum messages per session to bother emitting (default 4 — skip noise). */
   minMessages?: number;
+  dbOverride?: any;
 }
 
 export interface ExportResult {
@@ -82,21 +83,18 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
   const minMessages = opts.minMessages ?? 4;
   const dryRun = opts.dryRun ?? false;
 
-  const dbPath = path.join(os.homedir(), ".muonroi-cli", "muonroi.db");
-  if (!fs.existsSync(dbPath)) {
-    throw new Error(`muonroi.db not found at ${dbPath}`);
-  }
-
-  const db = await openDb(dbPath);
+  const db = opts.dbOverride ?? getDatabase();
   try {
     const cutoff = Date.now() - maxAgeDays * 86400_000;
     const cutoffIso = new Date(cutoff).toISOString();
 
     // Pull sessions touched in window. cwd_last is the cwd at session-end —
     // critical for EE scope detection so framework/lang resolve correctly.
-    const sessions = db.all(
-      `SELECT id, updated_at, cwd_last FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
-    ) as unknown as Array<{ id: string; updated_at: string; cwd_last: string | null }>;
+    const sessions = db
+      .prepare(
+        `SELECT id, updated_at, cwd_last FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
+      )
+      .all() as unknown as Array<{ id: string; updated_at: string; cwd_last: string | null }>;
 
     const out: ExportResult = {
       totalSessions: sessions.length,
@@ -107,9 +105,11 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
     };
 
     for (const s of sessions) {
-      const rows = db.all(
-        `SELECT session_id, seq, role, message_json FROM messages WHERE session_id = '${s.id.replace(/'/g, "''")}' ORDER BY seq ASC`,
-      ) as unknown as Row[];
+      const rows = db
+        .prepare(
+          `SELECT session_id, seq, role, message_json FROM messages WHERE session_id = '${s.id.replace(/'/g, "''")}' ORDER BY seq ASC`,
+        )
+        .all() as unknown as Row[];
 
       if (rows.length === 0) {
         out.skippedEmpty++;

@@ -26,26 +26,30 @@ describe("discovery askcard E2E", () => {
 
   beforeAll(async () => {
     greenfield = mkdtempSync(join(tmpdir(), "muonroi-discovery-askcard-"));
-    const ctx = await spawnHarness({ cwd: greenfield });
+    const ctx = await spawnHarness({
+      cwd: greenfield,
+      fixturesDir: join(__dirname, "fixtures/llm-discovery-askcard"),
+    });
     proc = ctx.proc;
+    proc.stderr?.on("data", (d) => console.log("STDERR:", d.toString()));
     driver = ctx.driver;
     cleanup = ctx.cleanup;
     await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
+    await driver.wait_for({ selector: "id=composer", timeoutMs: 5_000 });
   }, 120_000);
 
   afterAll(() => {
     proc?.kill();
     cleanup?.();
     try {
-      rmSync(greenfield, { recursive: true, force: true });
+      // rmSync(greenfield, { recursive: true, force: true });
     } catch {
       /* best-effort temp cleanup */
     }
   });
 
   it("composer accepts input on startup", () => {
-    expect(driver.query("role=textbox")?.role).toBe("textbox");
+    expect(driver.query("id=composer")?.role).toBe("textbox");
   });
 
   it("shows discovery askcard for a vague request", async () => {

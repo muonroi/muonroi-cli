@@ -1,19 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
 
-vi.mock("../models/registry.js", () => ({
-  getModelInfo: (id: string) => {
-    if (id === "deepseek-v4-flash") return { id, supportsVision: false };
-    if (id === "deepseek-v4-pro") return { id, supportsVision: false };
-    if (id === "claude-sonnet-4-6") return { id, supportsVision: true };
-    if (id === "gpt-4o") return { id }; // undefined = defaults to true
-    return null;
-  },
-}));
+import * as registry from "../models/registry.js";
 
-vi.mock("./keychain.js", () => ({
-  loadKeyForProvider: vi.fn().mockResolvedValue("sk-test-key-12345678901234567890"),
-}));
+// Mock will be set up in beforeEach
+
+import * as keychain from "./keychain.js";
 
 // Bun's test runner doesn't ship vi.stubGlobal — swap globalThis.fetch manually.
 const realFetch = globalThis.fetch;
@@ -23,6 +15,22 @@ function setFetch(impl: typeof globalThis.fetch): void {
 function restoreFetch(): void {
   globalThis.fetch = realFetch;
 }
+
+beforeEach(() => {
+  vi.spyOn(keychain, "loadKeyForProvider").mockResolvedValue("sk-test-key-12345678901234567890");
+  vi.spyOn(registry, "getModelInfo").mockImplementation((id: string) => {
+    if (id === "deepseek-v4-flash") return { id, supportsVision: false } as any;
+    if (id === "deepseek-v4-pro") return { id, supportsVision: false } as any;
+    if (id === "claude-sonnet-4-6") return { id, supportsVision: true } as any;
+    if (id === "gpt-4o") return { id } as any; // undefined = defaults to true
+    return null as any;
+  });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  restoreFetch();
+});
 
 describe("needsVisionProxy", () => {
   it("returns true for deepseek models", () => {

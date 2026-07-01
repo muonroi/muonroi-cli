@@ -105,8 +105,8 @@ describe("sweepStalePendingRows", () => {
     vi.spyOn(Date, "now").mockReturnValue(fixedNow);
     sweepStalePendingRows(60_000);
     const toolCallCall = preparedCalls.find((c) => c.sql.toLowerCase().includes("update tool_calls"));
-    // run args: [now, cutoff]
-    const cutoff = toolCallCall?.runArgs[1] as string;
+    // run args: [cutoff]
+    const cutoff = toolCallCall?.runArgs[0] as string;
     expect(cutoff).toBe("2026-05-22T09:59:00.000Z");
   });
 });

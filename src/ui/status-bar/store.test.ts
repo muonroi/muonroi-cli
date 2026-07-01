@@ -100,7 +100,7 @@ describe("wireStatusBar", () => {
     off();
   });
 
-  it("threshold event updates session_usd and month_usd", () => {
+  it("threshold event updates month_usd (not session_usd)", () => {
     const off = wireStatusBar();
     thresholdCallback!({
       level: 80,
@@ -111,8 +111,8 @@ describe("wireStatusBar", () => {
     });
 
     const s = statusBarStore.getState();
-    expect(s.session_usd).toBe(12.5);
     expect(s.month_usd).toBe(12.5);
+    expect(s.session_usd).toBe(0); // orchestrator owns session_usd, not thresholds
     off();
   });
 

@@ -97,7 +97,21 @@ export interface SubAgentCompactorOptions {
    * stub (full raw content available here). Fire-and-forget EE persist under
    * source:"tool-artifact" so layer3/ee.query can later fetch "full tool result id=xxx".
    */
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void;
+  /**
+   * T1.1 — strip reasoning parts from old assistant turns (older than
+   * keepLastTurns). Reasoning tokens (CoT / <think>) from prior turns are
+   * never re-read by the model but accumulate O(N) chars per turn, costing
+   * full input billing on every subsequent step. Default true for reasoning
+   * models, false otherwise.
+   */
+  stripOldReasoning?: boolean;
 }
 
 /**
@@ -158,6 +172,10 @@ export function isHighValueToolResult(
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
 
+  // Plan context bias (user-halt + "tiếp tục" resume): keep plan text verbatim so
+  // compaction does not drop the APPROVED PLAN the user just approved.
+  if (/APPROVED PLAN|plan v|khuyến nghị hành động|sprint plan|work plan/i.test(preview)) return true;
+
   // Authoritative ecosystem-docs MCP results: the agent is nudged to fetch these
   // FIRST, so eliding them strands it (session 584ba476c07a). Keep verbatim.
   if (HIGH_VALUE_MCP_PREFIXES.some((p) => name.startsWith(p))) return true;
@@ -176,7 +194,6 @@ export function isHighValueToolResult(
   return false;
 }
 
-
 interface ResolvedOpts {
   thresholdChars: number;
   keepLastTurns: number;
@@ -186,7 +203,14 @@ interface ResolvedOpts {
   contextWindowTokens: number;
   contextFillRatio: number;
   keepToolIds: Set<string>;
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void;
+  stripOldReasoning: boolean;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -201,6 +225,7 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     contextFillRatio: Math.min(0.95, Math.max(0.1, o?.contextFillRatio ?? 0.5)),
     keepToolIds: keepIds,
     persistArtifact: o?.persistArtifact,
+    stripOldReasoning: o?.stripOldReasoning ?? false,
   };
 }
 
@@ -349,12 +374,48 @@ function isStubbedToolResult(msg: ModelMessage): boolean {
   return false;
 }
 
+function generateShortSummary(toolName: string, content: string): string {
+  if (content.length < 500) return `${toolName}: ${content.length} chars`;
+  const clean = content.trim().replace(/\s+/g, " ");
+  if (!clean) return `Empty ${toolName} output`;
+
+  const fileMatch = content.match(/File Path: `file:\/\/\/(.+?)`/);
+  if (fileMatch) {
+    const parts = fileMatch[1].split(/[/\\]/);
+    const filename = parts[parts.length - 1];
+    return `Read ${filename} (${clean.length} chars)`;
+  }
+
+  const grepMatch = content.match(/"LineContent"/);
+  if (grepMatch) {
+    try {
+      const lines = content.trim().split("\n");
+      let count = 0;
+      for (const line of lines) {
+        if (line.includes(`"LineContent"`)) count++;
+      }
+      return `Grep found ${count} matches`;
+    } catch {
+      // fallback
+    }
+  }
+
+  const excerpt = clean.slice(0, 60);
+  return `${toolName}: ${excerpt}${clean.length > 60 ? "..." : ""}`;
+}
+
 function rewriteOlderToolMessage(
   msg: ModelMessage,
   previewChars: number,
   label: string,
   keepToolIds: Set<string>,
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void,
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void,
 ): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
@@ -369,10 +430,11 @@ function rewriteOlderToolMessage(
     }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
     const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
+    const summary = generateShortSummary(tr.toolName, rawPreview);
     // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
     if (persistArtifact && fullLen > 200) {
       try {
-        persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor");
+        persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor", summary);
       } catch {
         /* fail-open */
       }
@@ -387,6 +449,10 @@ function rewriteOlderToolMessage(
   // ModelMessage union narrowing: cast through unknown to satisfy TS without
   // dragging in the full provider-utils type graph at this layer.
   return { ...msg, content: rewritten } as unknown as ModelMessage;
+}
+
+export function buildSlimContext(msgs: ModelMessage[]): ModelMessage[] {
+  return msgs.slice(-6); // goal + last 2 turns + refs (YAGNI)
 }
 
 /**
@@ -406,21 +472,28 @@ export function compactSubAgentMessages(
 ): ModelMessage[] {
   const resolved = resolveOpts(opts);
   const { outputPreviewChars, label, envelopeChars } = resolved;
-  // F2 — threshold check uses TRUE prompt size (messages + system + tools).
-  // The envelope (system prompt + JSON-schema for every tool) is re-sent on
-  // every step and was previously invisible to the compactor, so a session
-  // with 20-50K of fixed overhead would never trip the messages-only check.
+
+  // Step 4: Hard-limit message history sent to the model to prevent token bloating
+  // When input (messages + envelope) exceeds 50K characters and messages array is > 30,
+  // we slice the history to keep at most 30 messages (preserving system and user start).
+  let processedMessages = messages;
   const messagesTotal = cumulativeMessageChars(messages);
   const total = messagesTotal + envelopeChars;
-  // G1 + G2 — derive effective threshold and keepLastTurns from context
-  // window utilization. Falls back to static char threshold + keepLast
-  // when no contextWindowTokens supplied (preserves old behaviour).
-  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(total, resolved);
-  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
-  if (total < effectiveThresholdChars) return messages as ModelMessage[];
 
-  const keepFrom = findKeepFromIndex(messages, effectiveKeepLastTurns);
-  if (keepFrom <= 0) return messages as ModelMessage[];
+  if (total > 50_000 && messages.length > 30) {
+    processedMessages = sliceMessageHistory(messages, 30);
+  }
+
+  // Calculate effective thresholds and keep last turns using the processed messages
+  const processedMessagesTotal = cumulativeMessageChars(processedMessages);
+  const processedTotal = processedMessagesTotal + envelopeChars;
+
+  const { effectiveThresholdChars, effectiveKeepLastTurns } = computeDynamicParams(processedTotal, resolved);
+  // No-op: return the input BY REFERENCE (contract above) so `compacted === input`.
+  if (processedTotal < effectiveThresholdChars) return processedMessages as ModelMessage[];
+
+  const keepFrom = findKeepFromIndex(processedMessages, effectiveKeepLastTurns);
+  if (keepFrom <= 0) return processedMessages as ModelMessage[];
 
   // Walk older messages; rewrite fresh tool results into stubs, super-shrink
   // already-stubbed results (F1), and strip args off older assistant
@@ -429,8 +502,8 @@ export function compactSubAgentMessages(
   // structure or count.
   let firstUserSeen = false;
   const out: ModelMessage[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
+  for (let i = 0; i < processedMessages.length; i++) {
+    const msg = processedMessages[i]!;
     if (i >= keepFrom) {
       out.push(msg);
       continue;
@@ -460,16 +533,41 @@ export function compactSubAgentMessages(
       continue;
     }
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      // F1 — strip args off older assistant tool-call shells. 50+ of these
-      // accumulate ~10-30K chars of args (file paths, bash commands) that
-      // the model does not need once the matching result has been elided.
-      // We keep toolCallId + toolName so pairing with tool-result is intact.
-      out.push(stripAssistantToolCallArgs(msg));
+      // T1.1 — strip reasoning parts from older assistant turns. DeepSeek V4
+      // Flash / R1 emit 2K-5K reasoning tokens per turn that accumulate
+      // across the multi-step loop. These are never re-read by the model
+      // but cost full input billing on every subsequent round. Strip them
+      // from turns older than keepLastTurns to cut ~30-50% of input tokens.
+      // Then F1 — strip args off older assistant tool-call shells.
+      let processed = resolved.stripOldReasoning ? stripAssistantReasoning(msg) : msg;
+      processed = stripAssistantToolCallArgs(processed);
+      out.push(processed);
       continue;
     }
     out.push(msg);
   }
   return out;
+}
+
+/**
+ * T1.1 — strip reasoning parts from an assistant message. Reasoning tokens
+ * (CoT / `<think>`) from older turns have zero re-read value for the model
+ * on subsequent steps but they accumulate O(N) chars per turn and are billed
+ * as full input tokens. Removing them from turns older than keepLastTurns
+ * cuts ~30-50% of cumulative input in multi-step loops with reasoning models
+ * (DeepSeek V4 Flash, R1, etc.).
+ *
+ * Preserves text + tool-call parts (the structural skeleton the model needs
+ * to maintain coherent tool-call↔tool-result pairing).
+ */
+function stripAssistantReasoning(msg: ModelMessage): ModelMessage {
+  if (!Array.isArray(msg.content)) return msg;
+  const parts = msg.content as ReadonlyArray<Record<string, unknown>>;
+  const filtered = parts.filter((part) => part.type !== "reasoning");
+  if (filtered.length === parts.length) return msg; // nothing stripped
+  // Edge case: if ALL parts were reasoning (no text/tool-call), keep the
+  // message with an empty content array to preserve message-count pairing.
+  return { ...msg, content: filtered } as unknown as ModelMessage;
 }
 
 function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
@@ -508,10 +606,7 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
  * block(s) if the model is Claude (starts with 'claude').
  * Creates a copy of the messages array and the last message to avoid mutating in-place.
  */
-export function applyAnthropicPromptCaching(
-  messages: readonly ModelMessage[],
-  modelId: string,
-): ModelMessage[] {
+export function applyAnthropicPromptCaching(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
   if (!modelId.startsWith("claude")) {
     return messages as ModelMessage[];
   }
@@ -554,3 +649,57 @@ export function applyAnthropicPromptCaching(
   return newMessages;
 }
 
+/**
+ * Safely slice message history to keep at most `maxMessages` messages.
+ * Preserves the system message(s) at the front and ensures that the slice
+ * starts with a "user" message and does not split assistant tool calls and
+ * corresponding tool results.
+ */
+export function sliceMessageHistory(messages: ReadonlyArray<ModelMessage>, maxMessages = 30): ModelMessage[] {
+  if (messages.length <= maxMessages) return messages as ModelMessage[];
+
+  // Find all user message indices (excluding system messages)
+  const userIndices: number[] = [];
+  for (let idx = 0; idx < messages.length; idx++) {
+    if (messages[idx]?.role === "user") {
+      userIndices.push(idx);
+    }
+  }
+
+  if (userIndices.length === 0) {
+    return messages as ModelMessage[];
+  }
+
+  // Group messages into turns.
+  // Each turn is a range [start, end] inclusive.
+  const turns: { start: number; end: number }[] = [];
+  for (let idx = 0; idx < userIndices.length; idx++) {
+    const start = userIndices[idx]!;
+    const end = idx + 1 < userIndices.length ? userIndices[idx + 1]! - 1 : messages.length - 1;
+    turns.push({ start, end });
+  }
+
+  // Accumulate turns from the end, up to maxMessages
+  let keptMessagesCount = 0;
+  let keepFromIndex = -1;
+
+  for (let idx = turns.length - 1; idx >= 0; idx--) {
+    const turn = turns[idx]!;
+    const turnLength = turn.end - turn.start + 1;
+
+    if (keptMessagesCount === 0 || keptMessagesCount + turnLength <= maxMessages) {
+      keptMessagesCount += turnLength;
+      keepFromIndex = turn.start;
+    } else {
+      break;
+    }
+  }
+
+  if (keepFromIndex === -1) {
+    return messages as ModelMessage[];
+  }
+
+  const kept = messages.slice(keepFromIndex);
+  const systemMessages = messages.filter((m) => m.role === "system");
+  return [...systemMessages, ...kept];
+}

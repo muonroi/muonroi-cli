@@ -63,11 +63,11 @@ export async function appendProductLedger(
   const filePath = getProductLedgerPath(productRunId, homeOverride);
   await ensureDirectory(filePath);
 
-  // Ensure file exists for lockfile to target
+  // Ensure file exists for lockfile to target without truncating it concurrently
   try {
     await fs.access(filePath);
   } catch {
-    await fs.writeFile(filePath, "");
+    await fs.appendFile(filePath, "");
   }
 
   const releaseLock = await lockfile.lock(filePath, {

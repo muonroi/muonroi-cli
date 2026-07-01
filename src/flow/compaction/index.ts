@@ -20,6 +20,7 @@ export interface CompactionResult {
   tokensBeforeCompress: number;
   tokensAfterCompress: number;
   historyPath: string;
+  summary: string;
 }
 
 /**
@@ -37,9 +38,10 @@ export async function deliberateCompact(
   tokenBudget: number,
   provider?: unknown,
   modelId?: string,
+  customInstructions?: string,
 ): Promise<CompactionResult> {
   // Pass 1: Extract decisions/facts/constraints
-  const extracted = extractDecisions(messages);
+  const extracted = await extractDecisions(messages, provider, modelId, customInstructions);
   const totalExtracted = extracted.decisions.length + extracted.facts.length + extracted.constraints.length;
 
   // Append to decisions.md
@@ -71,16 +73,21 @@ export async function deliberateCompact(
   const fullSerialized = serializeConversation(messages);
   await atomicWriteText(historyPath, fullSerialized);
 
+  // Save full JSON history next to the md file for exact expand/restore
+  const jsonPath = path.join(historyDir, `${timestamp}.json`);
+  await atomicWriteText(jsonPath, JSON.stringify(messages, null, 2));
+
   // Token estimation before
   const tokensBefore = estimateConversationTokens(systemPrompt, messages);
 
   // Pass 2: Compress
-  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId);
+  const compressed = await compressChat(messages, systemPrompt, tokenBudget, provider, modelId, customInstructions);
 
   return {
     decisionsExtracted: totalExtracted,
     tokensBeforeCompress: tokensBefore,
     tokensAfterCompress: compressed.tokensAfter,
     historyPath,
+    summary: compressed.summary,
   };
 }

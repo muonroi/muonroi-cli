@@ -76,6 +76,7 @@ let _tuiActive = false;
 
 export function setTuiActive(active: boolean): void {
   _tuiActive = active;
+  (globalThis as Record<string, unknown>).__muonroiTuiActive = active;
 }
 
 export function appendCrashLog(label: string, msg: string): void {
@@ -454,7 +455,6 @@ async function startInteractive(
   const { warmMcpClients } = await import("./mcp/client-pool.js");
   const { loadMcpServers } = await import("./utils/settings.js");
   await warmMcpClients(loadMcpServers(), !session);
-
 
   const agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
     session,
@@ -878,7 +878,7 @@ function resolveConfig(options: CliOptions) {
   // work; runaway loops abort with the "Reached max tool rounds" error
   // surface so the user can adjust scope. Override via --max-tool-rounds CLI
   // flag or MUONROI_MAX_TOOL_ROUNDS env.
-  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "12", 10) || 12;
+  const maxToolRounds = parseInt(stringOption(options.maxToolRounds) || "100", 10) || 100;
 
   if (typeof options.apiKey === "string" && process.env.MUONROI_TEST_NO_PERSIST !== "1") {
     // Persist to OS keychain (per-provider) instead of plaintext settings.json.
@@ -1071,7 +1071,8 @@ program
       console.log("Checking for updates...");
       const result = await runUpdate(packageJson.version);
       console.log(result.output);
-      process.exit(result.success ? 0 : 1);
+      process.exitCode = result.success ? 0 : 1;
+      return;
     }
 
     changeDirectoryOrExit(options.directory);
@@ -1317,7 +1318,7 @@ program
     console.log("Checking for updates...");
     const result = await runUpdate(packageJson.version);
     console.log(result.output);
-    process.exit(result.success ? 0 : 1);
+    process.exitCode = result.success ? 0 : 1;
   });
 
 program

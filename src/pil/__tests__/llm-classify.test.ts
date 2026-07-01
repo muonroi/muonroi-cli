@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
-import { createLlmClassifier } from "../llm-classify.js";
+import { classifySubSessionAction, createLlmClassifier } from "../llm-classify.js";
 
 describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
   beforeAll(async () => {
@@ -231,5 +231,93 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = bareHandle.uninstall;
     const bareClassify = createLlmClassifier((() => bareHandle.model) as never, "deepseek-v4-flash");
     expect((await bareClassify("fix it"))?.deliverableKind).toBeNull();
+  });
+});
+
+describe("classifySubSessionAction", () => {
+  let cleanup: (() => void) | null = null;
+  afterEach(() => {
+    cleanup?.();
+    cleanup = null;
+  });
+
+  it("correctly parses SPAWN_SUB_SESSION from model response", async () => {
+    const handle = installMockModel({
+      fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.98,Requires writing a test suite") },
+    });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "fix all compile errors");
+    expect(result).not.toBeNull();
+    expect(result?.action).toBe("SPAWN_SUB_SESSION");
+    expect(result?.confidence).toBe(0.98);
+    expect(result?.reason).toBe("Requires writing a test suite");
+  });
+
+  it("correctly parses DIRECT_ANSWER from model response", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("DIRECT_ANSWER,0.95,Simple query") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "explain database index");
+    expect(result?.action).toBe("DIRECT_ANSWER");
+    expect(result?.confidence).toBe(0.95);
+  });
+
+  it("correctly routes greetings, thanks, or simple math via heuristic without calling LLM", async () => {
+    const factory = (() => {
+      throw new Error("Should not be called because of heuristic short-circuit");
+    }) as never;
+
+    const resultMath = await classifySubSessionAction(factory, "deepseek-v4-flash", "2+2");
+    expect(resultMath?.action).toBe("DIRECT_ANSWER");
+    expect(resultMath?.confidence).toBe(0.99);
+    expect(resultMath?.reason).toContain("heuristic (simple math)");
+
+    const resultGreeting = await classifySubSessionAction(factory, "deepseek-v4-flash", "hello");
+    expect(resultGreeting?.action).toBe("DIRECT_ANSWER");
+    expect(resultGreeting?.confidence).toBe(0.99);
+    expect(resultGreeting?.reason).toContain("heuristic (greeting)");
+
+    const resultThanks = await classifySubSessionAction(factory, "deepseek-v4-flash", "thank you");
+    expect(resultThanks?.action).toBe("DIRECT_ANSWER");
+    expect(resultThanks?.confidence).toBe(0.99);
+    expect(resultThanks?.reason).toContain("heuristic (thanks)");
+  });
+
+  it("does not route greetings/thanks via heuristic if they contain other text (fuzzy bypass prevention)", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.95,Delete file task") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "hello, delete file X");
+    expect(result?.action).toBe("SPAWN_SUB_SESSION");
+  });
+
+  it("bypasses heuristic when MUONROI_DISABLE_HEURISTIC_ROUTING is set to 1", async () => {
+    process.env.MUONROI_DISABLE_HEURISTIC_ROUTING = "1";
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("SPAWN_SUB_SESSION,0.95,Forced class") } });
+    cleanup = handle.uninstall;
+    try {
+      const factory = (() => handle.model) as never;
+      const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "hello");
+      expect(result?.action).toBe("SPAWN_SUB_SESSION");
+    } finally {
+      delete process.env.MUONROI_DISABLE_HEURISTIC_ROUTING;
+    }
+  });
+
+  it("correctly parses ROTATE_SESSION from model response", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("ROTATE_SESSION,0.90,New topic") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "switch topic");
+    expect(result?.action).toBe("ROTATE_SESSION");
+  });
+
+  it("returns null when the reply cannot be parsed", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("bad response") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const result = await classifySubSessionAction(factory, "deepseek-v4-flash", "test");
+    expect(result).toBeNull();
   });
 });

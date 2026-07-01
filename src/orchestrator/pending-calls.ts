@@ -23,6 +23,7 @@ import * as crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { getSessionDir } from "../storage/session-dir.js";
+import { logger } from "../utils/logger.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -219,7 +220,7 @@ export function createPendingCallsLog(sessionId: string): PendingCallsLog {
             // Suppress unused variable warning for finalExists in case A/B above.
             void finalExists;
           } catch (err) {
-            console.warn(`[muonroi-cli] reconcile: could not clean staged path ${tmp}: ${(err as Error).message}`);
+            logger.warn("orchestrator", `reconcile: could not clean staged path ${tmp}`, { error: err });
           }
         }
 

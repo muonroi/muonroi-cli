@@ -107,8 +107,8 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
     expect(shouldInjectSoftWarn(4, 6, sid)).toBe(false);
 
     // Verify the soft-warn handoff wires the prefix as documented:
-    // Source: src/orchestrator/message-processor.ts (search "approaching ceiling")
-    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
+    // Source: src/orchestrator/tool-engine.ts (search "approaching ceiling")
+    const msgProc = readFileSync(resolve("src/orchestrator/tool-engine.ts"), "utf8");
     expect(msgProc).toContain("approaching ceiling");
   });
 
@@ -123,17 +123,17 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
     expect(cleanedPrompt).not.toContain("--budget-rounds");
 
     // Wiring assertion — the literal toast text "override active: ceiling 20"
-    // is produced by message-processor.ts (see commit history; pattern is
+    // is produced by preprocessor.ts (see commit history; pattern is
     // `override active: ceiling ${N}, default was ...`). Verify the toast
     // template is present so grep marker `override active: ceiling 20` in
     // THIS spec file pairs with the live emission site.
-    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
+    const msgProc = readFileSync(resolve("src/orchestrator/preprocessor.ts"), "utf8");
     expect(msgProc).toContain("override active: ceiling");
   });
 
   // ---- Assertion 3 (wiring): soft-ceiling reminder wired ----
   it("soft ceiling: 'past natural budget' re-anchor reminder wired in orchestrator", () => {
-    const msgProc = readFileSync(resolve("src/orchestrator/message-processor.ts"), "utf8");
+    const msgProc = readFileSync(resolve("src/orchestrator/tool-engine.ts"), "utf8");
     // Phase 5 Fix 5 — the Phase 4 hard-halt toast was removed. The matrix
     // ceiling is now a soft signal: past _naturalCeiling the orchestrator
     // injects a strong re-anchor reminder telling the model to emit final

@@ -2,7 +2,8 @@ import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
-import { getDatabase, withTransaction } from "./db";
+import { logger } from "../utils/logger.js";
+import { getDatabase, type SQLiteDatabase, withTransaction } from "./db";
 import { extractToolResultFromOutput, getOutputKind, isOutputSuccess } from "./tool-results";
 import { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 
@@ -206,6 +207,7 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
       const createdAt = new Date().toISOString();
       insertedSeqs.push(seq);
       insertMessage.run(sessionId, seq, message.role, JSON.stringify(message), createdAt);
+      indexMessageInFts(db, sessionId, seq, message.role, JSON.stringify(message));
 
       if (message.role === "assistant" && Array.isArray(message.content)) {
         for (const part of message.content) {
@@ -299,9 +301,13 @@ export function persistToolCallWriteAhead(
         ) VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)
       `)
       .run(sessionId, messageSeq, toolCallId, toolName, argsJson, now);
-  } catch {
-    // Fail-open: write-ahead is best-effort. The post-stream UPDATE path
-    // will still finalize the row from `appendMessages(...)`.
+  } catch (err) {
+    logger.error("storage", `[transcript] persistToolCallWriteAhead failed: ${(err as Error).message}`, {
+      sessionId,
+      messageSeq,
+      toolCallId,
+      toolName,
+    });
   }
 }
 
@@ -341,15 +347,19 @@ export function persistToolCallWriteAhead(
 export function persistMessageWriteAhead(sessionId: string, seq: number, role: string, messageJson: string): void {
   const now = new Date().toISOString();
   try {
-    getDatabase()
-      .prepare(`
+    const db = getDatabase();
+    db.prepare(`
         INSERT OR IGNORE INTO messages (
           session_id, seq, role, message_json, created_at, status
         ) VALUES (?, ?, ?, ?, ?, 'pending')
-      `)
-      .run(sessionId, seq, role, messageJson, now);
-  } catch {
-    /* fail-open */
+      `).run(sessionId, seq, role, messageJson, now);
+    indexMessageInFts(db, sessionId, seq, role, messageJson);
+  } catch (err) {
+    logger.error("storage", `[transcript] persistMessageWriteAhead failed: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
   }
 }
 
@@ -369,8 +379,8 @@ export function markMessageCompleted(sessionId: string, seq: number): void {
         WHERE session_id = ? AND seq = ? AND status = 'pending'
       `)
       .run(sessionId, seq);
-  } catch {
-    /* fail-open */
+  } catch (err) {
+    logger.error("storage", `[transcript] markMessageCompleted failed: ${(err as Error).message}`, { sessionId, seq });
   }
 }
 
@@ -391,8 +401,8 @@ export function markMessageErrored(sessionId: string, seq: number): void {
         WHERE session_id = ? AND seq = ? AND status = 'pending'
       `)
       .run(sessionId, seq);
-  } catch {
-    /* fail-open */
+  } catch (err) {
+    logger.error("storage", `[transcript] markMessageErrored failed: ${(err as Error).message}`, { sessionId, seq });
   }
 }
 
@@ -416,16 +426,15 @@ export function markMessageErrored(sessionId: string, seq: number): void {
  */
 export function sweepStalePendingRows(staleAfterMs = 5 * 60 * 1000): { toolCalls: number; messages: number } {
   const cutoff = new Date(Date.now() - staleAfterMs).toISOString();
-  const now = new Date().toISOString();
   try {
     const db = getDatabase();
     const toolCalls = db
       .prepare(`
         UPDATE tool_calls
-        SET status = 'aborted', completed_at = ?
+        SET status = 'aborted', completed_at = started_at
         WHERE status = 'pending' AND started_at < ?
       `)
-      .run(now, cutoff) as { changes: number };
+      .run(cutoff) as { changes: number };
     const messages = db
       .prepare(`
         UPDATE messages
@@ -470,105 +479,221 @@ export function appendCompaction(sessionId: string, firstKeptSeq: number, summar
   });
 }
 
+export function revertLatestCompaction(sessionId: string): void {
+  withTransaction((db) => {
+    db.prepare(`
+      DELETE FROM compactions 
+      WHERE session_id = ? 
+      AND id = (SELECT MAX(id) FROM compactions WHERE session_id = ?)
+    `).run(sessionId, sessionId);
+
+    db.prepare(`
+      UPDATE sessions
+      SET updated_at = ?
+      WHERE id = ?
+    `).run(new Date().toISOString(), sessionId);
+  });
+}
+
+export function getSessionChain(sessionId: string): string[] {
+  logger.debug("storage", "Resolving session chain", { sessionId });
+  const db = getDatabase();
+
+  // 1. Walk up to the root parent
+  let rootId = sessionId;
+  const visitedUp = new Set<string>();
+  while (rootId && !visitedUp.has(rootId)) {
+    visitedUp.add(rootId);
+    try {
+      const row = db.prepare("SELECT parent_session_id FROM sessions WHERE id = ?").get(rootId) as
+        | { parent_session_id: string | null }
+        | undefined;
+      if (row?.parent_session_id) {
+        rootId = row.parent_session_id;
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+
+  // 2. Find all descendants of the root session using a BFS queue to handle multiple child branches
+  const allIds = new Set<string>([rootId]);
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    try {
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(currentId) as Array<{
+        id: string;
+      }>;
+      for (const child of children) {
+        if (!allIds.has(child.id)) {
+          allIds.add(child.id);
+          queue.push(child.id);
+        }
+      }
+    } catch (err) {
+      logger.error("storage", `Failed to query child sessions for ${currentId} during walk`, { error: err });
+    }
+  }
+
+  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at
+  let chain: string[] = [];
+  try {
+    const placeholders = Array.from(allIds)
+      .map(() => "?")
+      .join(",");
+    const sortedRows = db
+      .prepare(`
+      SELECT id FROM sessions 
+      WHERE id IN (${placeholders}) 
+      ORDER BY created_at ASC
+    `)
+      .all(...Array.from(allIds)) as Array<{ id: string }>;
+    chain = sortedRows.map((r) => r.id);
+  } catch (err) {
+    logger.error("storage", `Failed to sort session chain for root ${rootId}`, { error: err });
+    // Fallback to unsorted array if query fails
+    chain = Array.from(allIds);
+  }
+  logger.debug("storage", "Resolved session chain successfully", { sessionId, chainLength: chain.length, chain });
+  return chain;
+}
+
 export function buildChatEntries(sessionId: string): ChatEntry[] {
-  const toolResults = loadStoredToolResults(sessionId);
+  const chain = getSessionChain(sessionId);
+  logger.debug("storage", "Building chat entries from session chain", { sessionId, chainLength: chain.length });
+  const toolResults = new Map<string, ToolResult>();
+
+  for (const sid of chain) {
+    const results = loadStoredToolResults(sid);
+    for (const [k, v] of results) {
+      toolResults.set(k, v);
+    }
+  }
+
+  // Load parent/child session metadata to reconcile user prompt timestamps across rotation/sub-session boundaries
+  const db = getDatabase();
+  const sessionMeta = new Map<string, { parent_session_id: string | null; created_at: string }>();
+  try {
+    if (chain.length > 1) {
+      const placeholders = chain.map(() => "?").join(",");
+      const rows = db
+        .prepare(`SELECT id, parent_session_id, created_at FROM sessions WHERE id IN (${placeholders})`)
+        .all(...chain) as Array<{ id: string; parent_session_id: string | null; created_at: string }>;
+      for (const r of rows) {
+        sessionMeta.set(r.id, { parent_session_id: r.parent_session_id, created_at: r.created_at });
+      }
+    }
+  } catch (err) {
+    logger.error("storage", "Failed to load session metadata for chain in buildChatEntries", { error: err });
+  }
+
+  // Map each child sub-session's initial user prompt to its creation timestamp
+  const childPrompts = new Map<string, Date>();
+  for (let i = 1; i < chain.length; i++) {
+    const sid = chain[i];
+    const meta = sessionMeta.get(sid);
+    if (meta && meta.parent_session_id) {
+      const records = buildEffectiveMessageRecords(sid);
+      const firstUser = records.find((r) => r.message.role === "user");
+      if (firstUser) {
+        const content = renderUserContent(firstUser.message.content);
+        if (content) {
+          childPrompts.set(content, new Date(meta.created_at));
+        }
+      }
+    }
+  }
+
   const callMap = new Map<string, ToolCall>();
   const entries: ChatEntry[] = [];
-  // Response-tool callIds already rendered as a structured_response from a
-  // persisted tool-RESULT row (success path). After the loop we recover any
-  // response tool that was CALLED but produced no result row — i.e. respond_*
-  // whose execution ERRORED (the AI SDK does not persist tool-error parts as
-  // tool-result rows). Its answer lives in the call args; without this it is
-  // dropped on the turn-finalize rebuild and the user sees an empty turn or
-  // only the last council debate round.
   const renderedResponseCallIds = new Set<string>();
   let lastTimestamp: Date | undefined;
 
-  for (const row of buildEffectiveMessageRecords(sessionId)) {
-    const { message, timestamp } = row;
-    lastTimestamp = timestamp;
+  for (let i = 0; i < chain.length; i++) {
+    const sid = chain[i];
+    const records = buildEffectiveMessageRecords(sid);
+    const isChildSession = i > 0;
 
-    if (message.role === "user") {
-      const content = renderUserContent(message.content);
-      if (content) {
-        entries.push({ type: "user", content, timestamp });
-      }
-      continue;
-    }
+    for (let j = 0; j < records.length; j++) {
+      const { message, timestamp } = records[j];
+      lastTimestamp = timestamp;
 
-    if (message.role === "system") {
-      const summaryText = getCompactionSummaryText(message);
-      const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
-      if (content && !isInternalCouncilMarker(content)) {
-        // A compaction checkpoint is internal context-management, NOT the
-        // assistant's answer. Tag it with a source label so the UI renders it
-        // as a clearly-marked, collapsible checkpoint instead of dumping the
-        // raw "## Goal / ## Context For Suffix" scaffolding as a chat reply.
-        entries.push(
-          summaryText !== null
-            ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
-            : { type: "assistant", content, timestamp },
-        );
-      }
-      continue;
-    }
-
-    if (message.role === "assistant") {
-      const text = renderAssistantContent(message.content, callMap);
-      if (text) {
-        entries.push({ type: "assistant", content: text, timestamp });
-      }
-      continue;
-    }
-
-    if (message.role === "tool" && Array.isArray(message.content)) {
-      for (const part of message.content) {
-        if (part.type !== "tool-result") continue;
-        // Response tools (respond_general/analyze/plan/...) are the model's
-        // TERMINAL structured answer (identity execute — the payload lives in
-        // the call args and is echoed in the result). The live stream yields
-        // them as a `structured_response` chunk (message-processor.ts:2733),
-        // which the UI renders as the answer block. Persisted history MUST
-        // rebuild the SAME entry: finalizeActiveTurn (app.tsx) replaces the
-        // live message list with getChatEntries() on every normal turn, so if
-        // we rebuilt a respond_* result as a bare tool_result the rendered
-        // answer would be silently dropped the instant streaming ended (live
-        // repro session 9d3d371ca1bd: grok investigated, emitted a 10K-char
-        // respond_general, the answer flashed then vanished on turn finalize —
-        // the user saw only the "→ respond_general" indicator). AI SDK v5/v6
-        // wraps tool outputs as `{type:"json", value:{...}}`; unwrap to expose
-        // the schema-shaped payload to the renderer.
-        if (isResponseTool(part.toolName)) {
-          renderedResponseCallIds.add(part.toolCallId);
-          const rawOutput = part.output as unknown;
-          const unwrapped =
-            rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
-              ? ((rawOutput as { value?: unknown }).value ?? {})
-              : (rawOutput ?? {});
-          entries.push({
-            type: "structured_response",
-            content: "",
-            timestamp,
-            structuredResponse: {
-              taskType: getResponseTaskType(part.toolName) ?? part.toolName,
-              data: unwrapped as Record<string, unknown>,
-            },
-          });
+      if (message.role === "user") {
+        const content = renderUserContent(message.content);
+        if (isChildSession && childPrompts.has(content)) {
+          // Skip B's user message because it's a duplicate of A's user message
           continue;
         }
-        const toolCall = callMap.get(part.toolCallId) ?? toFallbackToolCall(part.toolCallId, part.toolName);
-        const toolResult = toolResults.get(part.toolCallId) ??
-          extractToolResultFromOutput(part.output) ?? {
-            success: isOutputSuccess(part.output),
-            output: JSON.stringify(part.output),
-          };
-        entries.push({
-          type: "tool_result",
-          content: toolResult.success ? toolResult.output || "Success" : toolResult.error || "Error",
-          timestamp,
-          toolCall,
-          toolResult,
-        });
+        if (content) {
+          entries.push({ type: "user", content, timestamp });
+        }
+        continue;
+      }
+
+      if (message.role === "system") {
+        const summaryText = getCompactionSummaryText(message);
+        if (isChildSession && j === 0 && summaryText !== null) {
+          // Skip the first message in a child session if it's the parent compaction summary
+          // to keep the visual timeline clean, since the user already sees the parent history.
+          continue;
+        }
+        const content = summaryText ?? (typeof message.content === "string" ? message.content.trim() : "");
+        if (content && !isInternalCouncilMarker(content)) {
+          entries.push(
+            summaryText !== null
+              ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
+              : { type: "assistant", content, timestamp },
+          );
+        }
+        continue;
+      }
+
+      if (message.role === "assistant") {
+        const text = renderAssistantContent(message.content, callMap);
+        if (text) {
+          entries.push({ type: "assistant", content: text, timestamp });
+        }
+        continue;
+      }
+
+      if (message.role === "tool" && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (part.type !== "tool-result") continue;
+          if (isResponseTool(part.toolName)) {
+            renderedResponseCallIds.add(part.toolCallId);
+            const rawOutput = part.output as unknown;
+            const unwrapped =
+              rawOutput && typeof rawOutput === "object" && (rawOutput as { type?: string }).type === "json"
+                ? ((rawOutput as { value?: unknown }).value ?? {})
+                : (rawOutput ?? {});
+            entries.push({
+              type: "structured_response",
+              content: "",
+              timestamp,
+              structuredResponse: {
+                taskType: getResponseTaskType(part.toolName) ?? part.toolName,
+                data: unwrapped as Record<string, unknown>,
+              },
+            });
+            continue;
+          }
+          const toolCall = callMap.get(part.toolCallId) ?? toFallbackToolCall(part.toolCallId, part.toolName);
+          const toolResult = toolResults.get(part.toolCallId) ??
+            extractToolResultFromOutput(part.output) ?? {
+              success: isOutputSuccess(part.output),
+              output: JSON.stringify(part.output),
+            };
+          entries.push({
+            type: "tool_result",
+            content: toolResult.success ? toolResult.output || "Success" : toolResult.error || "Error",
+            timestamp,
+            toolCall,
+            toolResult,
+          });
+        }
       }
     }
   }
@@ -598,6 +723,21 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
     });
   }
 
+  // Adjust parent user message timestamps to match their corresponding child session creation time
+  for (const entry of entries) {
+    if (entry.type === "user") {
+      const content = entry.content.trim();
+      const childTime = childPrompts.get(content);
+      if (childTime) {
+        entry.timestamp = childTime;
+      }
+    }
+  }
+
+  // Sort entries chronologically by timestamp (stable sort)
+  entries.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+
+  logger.debug("storage", "Built chat entries successfully", { sessionId, count: entries.length });
   return entries;
 }
 
@@ -678,4 +818,181 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
       arguments: "{}",
     },
   };
+}
+
+export function getLastTodoWriteArgs(sessionId: string): string | null {
+  const chain = getSessionChain(sessionId);
+  const db = getDatabase();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    try {
+      const row = db
+        .prepare(`
+          SELECT args_json
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name = 'todo_write'
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string } | undefined;
+      if (row?.args_json) {
+        return row.args_json;
+      }
+    } catch {
+      // ignore and check parent
+    }
+  }
+  return null;
+}
+
+/**
+ * Persist the approved plan text for a session so that "tiếp tục"/"continue"
+ * turns (which are classified as chitchat/general by PIL Pass 0) can re-inject
+ * the APPROVED PLAN section into the system prompt instead of forgetting context.
+ *
+ * Stored as a synthetic tool_call row (tool_name='__approved_plan') so we reuse
+ * the existing schema and getLast* query pattern without a new table/migration.
+ * The planText is stored verbatim in args_json.
+ */
+export function persistApprovedPlan(sessionId: string, planText: string): void {
+  if (!sessionId || !planText) return;
+  const db = getDatabase();
+  const toolCallId = `approved-plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const now = new Date().toISOString();
+  try {
+    db.prepare(`
+      INSERT OR REPLACE INTO tool_calls (session_id, message_seq, tool_call_id, tool_name, args_json, status, started_at, completed_at)
+      VALUES (?, 0, ?, '__approved_plan', ?, 'completed', ?, ?)
+    `).run(sessionId, toolCallId, planText, now, now);
+  } catch {
+    /* best-effort persistence; never block the turn */
+  }
+}
+
+/** Load the most recent persisted approved plan for this session (or parent chain). */
+export function getLastApprovedPlan(sessionId: string): string | null {
+  const chain = getSessionChain(sessionId);
+  const db = getDatabase();
+  for (let i = chain.length - 1; i >= 0; i--) {
+    try {
+      // 1) Prefer our synthetic persisted row (written by setPlanContext + persistApprovedPlan).
+      const synthetic = db
+        .prepare(`
+          SELECT args_json
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name = '__approved_plan'
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string } | undefined;
+      if (synthetic?.args_json) {
+        return synthetic.args_json;
+      }
+
+      // 2) Fallback: scan real plan tool_calls (respond_plan / generate_plan) written by
+      //    council, PIL response-tools, or generate_plan UI. Extract a human-readable slice.
+      const planRow = db
+        .prepare(`
+          SELECT args_json, tool_name
+          FROM tool_calls
+          WHERE session_id = ? AND tool_name IN ('respond_plan', 'generate_plan')
+          ORDER BY id DESC
+          LIMIT 1
+        `)
+        .get(chain[i]) as { args_json: string; tool_name: string } | undefined;
+      if (planRow?.args_json) {
+        try {
+          const parsed = JSON.parse(planRow.args_json);
+          // respond_plan shape typically has { steps, assumptions?, risks? } or { plan: {...} }
+          const candidate = parsed?.plan ?? parsed;
+          if (candidate && (Array.isArray(candidate.steps) || typeof candidate === "object")) {
+            return JSON.stringify(candidate, null, 2);
+          }
+          // generate_plan may carry raw text or { content, steps }
+          if (typeof parsed === "string") return parsed;
+          if (parsed && typeof parsed === "object") return JSON.stringify(parsed, null, 2);
+        } catch {
+          // not JSON — return as-is (may be a raw string payload)
+          if (typeof planRow.args_json === "string" && planRow.args_json.trim().length > 0) {
+            return planRow.args_json;
+          }
+        }
+      }
+    } catch {
+      // ignore and check parent
+    }
+  }
+  return null;
+}
+
+function indexMessageInFts(
+  db: SQLiteDatabase,
+  sessionId: string,
+  seq: number,
+  role: string,
+  messageJsonStr: string,
+): void {
+  db.prepare(`DELETE FROM session_history_fts WHERE session_id = ? AND seq = ?`).run(sessionId, seq);
+
+  let message: any;
+  try {
+    message = JSON.parse(messageJsonStr);
+  } catch (err) {
+    logger.error("storage", `[transcript] Failed to parse message JSON for FTS indexing: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
+    return;
+  }
+
+  let content = "";
+  let toolName = "";
+  let toolArgs = "";
+  let toolOutput = "";
+
+  const msgContent = message.content;
+  if (typeof msgContent === "string") {
+    content = msgContent;
+  } else if (Array.isArray(msgContent)) {
+    const textParts: string[] = [];
+    const toolNames: string[] = [];
+    const argParts: string[] = [];
+    const outputParts: string[] = [];
+
+    for (const part of msgContent) {
+      if (part && typeof part === "object") {
+        if (part.type === "text" && typeof part.text === "string") {
+          textParts.push(part.text);
+        } else if (part.type === "tool-call" && typeof part.toolName === "string") {
+          toolNames.push(part.toolName);
+          if (part.input !== undefined) {
+            argParts.push(typeof part.input === "string" ? part.input : JSON.stringify(part.input));
+          }
+        } else if (part.type === "tool-result" && typeof part.toolName === "string") {
+          toolNames.push(part.toolName);
+          if (part.output !== undefined) {
+            outputParts.push(typeof part.output === "string" ? part.output : JSON.stringify(part.output));
+          }
+        }
+      }
+    }
+    content = textParts.join("\n").trim();
+    toolName = toolNames.join(", ").trim();
+    toolArgs = argParts.join("\n").trim();
+    toolOutput = outputParts.join("\n").trim();
+  }
+
+  try {
+    db.prepare(`
+      INSERT INTO session_history_fts (session_id, seq, role, tool_name, content, tool_args, tool_output)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(sessionId, seq, role, toolName || null, content || null, toolArgs || null, toolOutput || null);
+  } catch (err) {
+    logger.error("storage", `[transcript] Failed to execute FTS indexing query: ${(err as Error).message}`, {
+      sessionId,
+      seq,
+      role,
+    });
+    throw err;
+  }
 }

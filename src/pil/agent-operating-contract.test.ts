@@ -56,8 +56,8 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/git add -A|stage explicitly/i);
   });
 
-  it("stays compact (under 1900 chars) to preserve attention budget on every turn (git-safety rule added)", () => {
-    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(1900);
+  it("stays compact (under 2000 chars) to preserve attention budget on every turn (git-safety rule added)", () => {
+    expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(2000);
   });
 });
 

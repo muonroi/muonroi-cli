@@ -26,6 +26,7 @@ export interface StartAgenticOpts {
   goal: string;
   llm: string;
   turns?: number;
+  mockLlmDir?: string;
 }
 
 export type StartOpts = StartTier1Opts | StartAgenticOpts;
