@@ -121,7 +121,7 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
   });
 
   describe("ALL_PROVIDER_IDS single source of truth", () => {
-    it("contains exactly 8 providers in canonical order", async () => {
+    it("contains exactly 9 providers in canonical order", async () => {
       const { ALL_PROVIDER_IDS } = await import("../types.js");
       expect(ALL_PROVIDER_IDS).toEqual([
         "anthropic",
@@ -132,6 +132,7 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
         "xai",
         "ollama",
         "zai",
+        "opencode-go",
       ]);
     });
     it("iterProviders returns the same canonical list", async () => {

@@ -192,7 +192,7 @@ async function hasOAuthForModel(modelId: string): Promise<boolean> {
  * Supported splash providers — mirrors SPLASH_PROVIDERS in ui/app.tsx.
  * The wizard only surfaces these; other providers still work programmatically.
  */
-const WIZARD_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow", "zai"];
+const WIZARD_PROVIDERS: readonly ProviderId[] = ["deepseek", "siliconflow", "zai", "opencode-go"];
 
 async function firstRunWizard(currentModel?: string): Promise<string | null> {
   let rl: ReturnType<typeof createInterface> | undefined;
