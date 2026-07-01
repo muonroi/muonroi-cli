@@ -6,10 +6,12 @@ import {
   getModelIds,
   getModelInfo,
   getModelsForProvider,
+  getProviderPeakHourRule,
   getSupportedReasoningEfforts,
   loadCatalog,
   MODELS,
   normalizeModelId,
+  SWITCH_PROVIDER_ORDER,
 } from "../registry";
 
 beforeAll(async () => {
@@ -126,5 +128,30 @@ describe("tier_routing catalog flag", () => {
     expect(getModelsForProvider("google")).toHaveLength(0);
     expect(getModelInfo("deepseek-ai/DeepSeek-V4-Flash")).toBeUndefined();
     expect(getModelInfo("gemini-3-flash")).toBeUndefined();
+  });
+});
+
+describe("provider_policies from catalog", () => {
+  test("loads switch provider order from routing", () => {
+    expect(SWITCH_PROVIDER_ORDER).toEqual(["deepseek", "zai", "opencode-go", "xai"]);
+  });
+
+  test("loads zai peak-hour rule from vendor-sourced catalog metadata", () => {
+    const rule = getProviderPeakHourRule("zai");
+    expect(rule).toBeDefined();
+    expect(rule!.timezone).toBe("Asia/Shanghai");
+    expect(rule!.start_hour).toBe(14);
+    expect(rule!.end_hour).toBe(18);
+    expect(rule!.sensitive_model_ids).toContain("glm-5.2");
+    expect(rule!.fallback_model_id).toBe("glm-4.7");
+    expect(rule!.source_url).toContain("docs.z.ai");
+  });
+
+  test("loads deepseek peak-hour rule with heuristic basis", () => {
+    const rule = getProviderPeakHourRule("deepseek");
+    expect(rule).toBeDefined();
+    expect(rule!.sensitive_model_ids).toContain("deepseek-v4-pro");
+    expect(rule!.fallback_model_id).toBe("deepseek-v4-flash");
+    expect(rule!.policy_basis).toBe("heuristic");
   });
 });

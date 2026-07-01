@@ -83,11 +83,38 @@ class CatalogModel(BaseModel):
     routing_tiers: Optional[list[str]] = None
 
 
+class CatalogProviderPeakHour(BaseModel):
+    """Peak-hour routing rule — sourced from vendor docs, served via catalog API."""
+
+    source_url: str
+    source_verified_at: Optional[str] = None
+    timezone: str
+    start_hour: int
+    end_hour: int
+    sensitive_model_ids: list[str]
+    fallback_model_id: str
+    switch_fallback_providers: Optional[list[str]] = None
+    peak_quota_multiplier: Optional[float] = None
+    off_peak_quota_multiplier: Optional[float] = None
+    policy_basis: Optional[str] = None  # "official" | "heuristic"
+    policy_note: Optional[str] = None
+
+
+class CatalogProviderPolicy(BaseModel):
+    peak_hour: Optional[CatalogProviderPeakHour] = None
+
+
+class CatalogRouting(BaseModel):
+    switch_provider_order: Optional[list[str]] = None
+
+
 class CatalogResponse(BaseModel):
     version: str
     updated_at: str
     description: Optional[str] = None
     models: list[CatalogModel]
+    routing: Optional[CatalogRouting] = None
+    provider_policies: Optional[dict[str, CatalogProviderPolicy]] = None
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +132,11 @@ def load_catalog(path_str: str) -> CatalogResponse:
 
 
 def _etag(payload: CatalogResponse) -> str:
-    basis = f"{payload.version}:{payload.updated_at}:{len(payload.models)}"
+    policy_keys = sorted((payload.provider_policies or {}).keys())
+    basis = (
+        f"{payload.version}:{payload.updated_at}:{len(payload.models)}:"
+        f"{','.join(policy_keys)}"
+    )
     return '"' + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16] + '"'
 
 
@@ -425,6 +456,8 @@ def list_models(
         updated_at=cat.updated_at,
         description=cat.description,
         models=models,
+        routing=cat.routing,
+        provider_policies=cat.provider_policies,
     )
 
 

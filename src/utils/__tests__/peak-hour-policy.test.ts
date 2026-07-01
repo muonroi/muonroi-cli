@@ -2,12 +2,10 @@ import { describe, expect, it } from "vitest";
 import { normalizePeakHourPolicy } from "../settings.js";
 
 describe("normalizePeakHourPolicy", () => {
-  it("defaults to enabled switch mode 14–18 UTC+8", () => {
+  it("defaults to enabled switch mode (window from catalog provider_policies)", () => {
     expect(normalizePeakHourPolicy(undefined)).toEqual({
       enabled: true,
       mode: "switch",
-      startHourUtc8: 14,
-      endHourUtc8: 18,
     });
   });
 
