@@ -1,5 +1,5 @@
 {
-  "version": "2.3",
+  "version": "2.4",
   "updated_at": "2026-07-01",
   "description": "Local fallback catalog: deepseek + siliconflow + openai (ChatGPT OAuth) + google (Agy via agy.exe OAuth + cloudcode-pa) + zai (GLM Coding Plan). Z.ai Coding Plan (Lite/Pro/Max) quota applies to glm-4.7, glm-5-turbo, glm-5.1, glm-5.2 — NOT glm-4.7-flash (separate free-tier rate-limit pool). glm-4.7-flash remains selectable via -m but is excluded from automatic tier routing (tier_routing:false). Pricing APPROXIMATE.",
   "models": [
@@ -454,6 +454,7 @@
       "name": "GLM 4.7 (Z.ai)",
       "provider": "zai",
       "tier": "balanced",
+      "routing_tiers": ["fast"],
       "context_window": 203000,
       "max_output_tokens": 16000,
       "input_price_per_million": 0.6,
@@ -462,7 +463,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Included in subscription quota — prefer over glm-4.7-flash.",
+      "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Primary balanced model; also routes as fast-tier for compaction/title (replaces glm-4.7-flash in auto-routing). Z.ai docs: use for routine tasks.",
       "aliases": [],
       "supports_vision": false
     },

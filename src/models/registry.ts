@@ -68,12 +68,18 @@ function isTierRoutable(m: ModelInfo): boolean {
   return m.tierRouting !== false;
 }
 
+function matchesTier(m: ModelInfo, tier: "fast" | "balanced" | "premium"): boolean {
+  return m.tier === tier || m.routingTiers?.includes(tier) === true;
+}
+
 export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
   if (preferProvider) {
-    const providerMatch = MODELS.find((m) => m.tier === tier && m.provider === preferProvider && isTierRoutable(m));
+    const providerMatch = MODELS.find(
+      (m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m),
+    );
     if (providerMatch) return providerMatch;
   }
-  return MODELS.find((m) => m.tier === tier && isTierRoutable(m));
+  return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m));
 }
 
 export function getModelsForProvider(providerId: string): ModelInfo[] {

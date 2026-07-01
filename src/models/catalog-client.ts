@@ -51,6 +51,8 @@ export interface CatalogModel {
   supports_vision?: boolean;
   /** When false, model is selectable via -m but skipped by tier routing. */
   tier_routing?: boolean;
+  /** Additional tiers for automatic routing (primary tier remains `tier`). */
+  routing_tiers?: string[];
 }
 
 interface CatalogResponse {
@@ -85,6 +87,7 @@ const CatalogModelSchema = z
     default_reasoning_effort: z.string().nullable().optional(),
     supports_vision: z.boolean().optional(),
     tier_routing: z.boolean().optional(),
+    routing_tiers: z.array(z.string()).optional(),
   })
   .loose();
 
@@ -234,5 +237,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     thinkingType: m.thinking_type as ModelInfo["thinkingType"],
     supportsVision: m.supports_vision ?? true,
     tierRouting: m.tier_routing ?? true,
+    routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
   };
 }

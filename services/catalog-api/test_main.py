@@ -189,3 +189,6 @@ def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
     cat = catalog_main.load_catalog(str(real))
     flash = next(m for m in cat.models if m.id == "glm-4.7-flash")
     assert flash.tier_routing is False
+    g47 = next(m for m in cat.models if m.id == "glm-4.7")
+    assert g47.tier == "balanced"
+    assert g47.routing_tiers == ["fast"]

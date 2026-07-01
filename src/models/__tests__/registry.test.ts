@@ -104,7 +104,9 @@ describe("tier_routing catalog flag", () => {
     expect(getModelByTier("fast", "zai")?.id).not.toBe("glm-4.7-flash");
   });
 
-  test("zai balanced tier routes to glm-4.7 for compaction when parent is glm-4.7", () => {
+  test("zai fast tier routes to glm-4.7 via routing_tiers (Coding Plan routine model)", () => {
+    expect(getModelInfo("glm-4.7")?.tier).toBe("balanced");
+    expect(getModelByTier("fast", "zai")?.id).toBe("glm-4.7");
     expect(getModelByTier("balanced", "zai")?.id).toBe("glm-4.7");
     const lookup = getModelByTier as TierLookup;
     expect(resolveModelForTask("compact", "zai", "glm-4.7", lookup, { parentTier: "balanced" })).toBe("glm-4.7");
