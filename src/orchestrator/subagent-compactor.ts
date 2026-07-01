@@ -97,7 +97,13 @@ export interface SubAgentCompactorOptions {
    * stub (full raw content available here). Fire-and-forget EE persist under
    * source:"tool-artifact" so layer3/ee.query can later fetch "full tool result id=xxx".
    */
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void;
   /**
    * T1.1 — strip reasoning parts from old assistant turns (older than
    * keepLastTurns). Reasoning tokens (CoT / <think>) from prior turns are
@@ -193,7 +199,13 @@ interface ResolvedOpts {
   contextWindowTokens: number;
   contextFillRatio: number;
   keepToolIds: Set<string>;
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void;
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void;
   stripOldReasoning: boolean;
 }
 
@@ -358,12 +370,48 @@ function isStubbedToolResult(msg: ModelMessage): boolean {
   return false;
 }
 
+function generateShortSummary(toolName: string, content: string): string {
+  if (content.length < 500) return `${toolName}: ${content.length} chars`;
+  const clean = content.trim().replace(/\s+/g, " ");
+  if (!clean) return `Empty ${toolName} output`;
+
+  const fileMatch = content.match(/File Path: `file:\/\/\/(.+?)`/);
+  if (fileMatch) {
+    const parts = fileMatch[1].split(/[/\\]/);
+    const filename = parts[parts.length - 1];
+    return `Read ${filename} (${clean.length} chars)`;
+  }
+
+  const grepMatch = content.match(/"LineContent"/);
+  if (grepMatch) {
+    try {
+      const lines = content.trim().split("\n");
+      let count = 0;
+      for (const line of lines) {
+        if (line.includes(`"LineContent"`)) count++;
+      }
+      return `Grep found ${count} matches`;
+    } catch {
+      // fallback
+    }
+  }
+
+  const excerpt = clean.slice(0, 60);
+  return `${toolName}: ${excerpt}${clean.length > 60 ? "..." : ""}`;
+}
+
 function rewriteOlderToolMessage(
   msg: ModelMessage,
   previewChars: number,
   label: string,
   keepToolIds: Set<string>,
-  persistArtifact?: (toolCallId: string, toolName: string, fullContent: string, reason: string) => void,
+  persistArtifact?: (
+    toolCallId: string,
+    toolName: string,
+    fullContent: string,
+    reason: string,
+    summary?: string,
+  ) => void,
 ): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
@@ -378,10 +426,11 @@ function rewriteOlderToolMessage(
     }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
     const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
+    const summary = generateShortSummary(tr.toolName, rawPreview);
     // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
     if (persistArtifact && fullLen > 200) {
       try {
-        persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor");
+        persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor", summary);
       } catch {
         /* fail-open */
       }
@@ -396,6 +445,10 @@ function rewriteOlderToolMessage(
   // ModelMessage union narrowing: cast through unknown to satisfy TS without
   // dragging in the full provider-utils type graph at this layer.
   return { ...msg, content: rewritten } as unknown as ModelMessage;
+}
+
+export function buildSlimContext(msgs: ModelMessage[]): ModelMessage[] {
+  return msgs.slice(-6); // goal + last 2 turns + refs (YAGNI)
 }
 
 /**
