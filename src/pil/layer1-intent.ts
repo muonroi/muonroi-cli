@@ -11,6 +11,7 @@
  */
 
 import { classifyViaBrain, pilContext } from "../ee/bridge.js";
+import type { GsdPhase } from "../gsd/types.js";
 import { classify } from "../router/classifier/index.js";
 import {
   getUnifiedPilBudgetMs,
@@ -20,6 +21,11 @@ import {
 } from "./config.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
+
+function mapBrainGsdPhase(value: string | null | undefined): GsdPhase | null {
+  if (value === "discuss" || value === "execute") return value;
+  return null;
+}
 
 // ---------------------------------------------------------------------------
 // P2: Complexity heuristic — pure, sync, no I/O
@@ -733,6 +739,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         // stays null → layer3 legacy path (behaviour unchanged). Gate:
         // MUONROI_LLM_FIRST_BRAIN=0 reverts.
         let llmFirstBrainData: BrainData | null = null;
+        let llmFirstGsdPhase: GsdPhase | null = mapBrainGsdPhase(ctx.gsdPhase);
         if (isLlmFirstBrainEnabled() && intentKind !== "chitchat") {
           let brainRaw = ctx.raw;
           if (ctx.sessionId) {
@@ -762,6 +769,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
               t2_patterns: resp.t2_patterns,
               retrieval_skipped_reason: resp.retrieval_skipped_reason,
             };
+            llmFirstGsdPhase = mapBrainGsdPhase(resp.gsd_phase) ?? llmFirstGsdPhase;
             intentTrace.pass3UnifiedSucceeded = true;
           }
         }
@@ -769,6 +777,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         return {
           ...ctx,
           taskType: llmRes.taskType,
+          gsdPhase: llmFirstGsdPhase,
           domain,
           confidence: llmRes.confidence,
           outputStyle,
@@ -1219,6 +1228,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       isUnifiedPilEnabled() && intentKind !== "chitchat" && (taskType === null || confidence < HIGH_CONF_THRESHOLD);
 
     let unifiedFailed = false;
+    let brainGsdPhase: GsdPhase | null = mapBrainGsdPhase(ctx.gsdPhase);
     if (needsBrain) {
       // Step 8 (ee-anti-mu): enrich the raw passed to pilContext for sessions that may have
       // experienced compaction (or any sessionId-bearing turn) so the brain sees EE checkpoints
@@ -1244,6 +1254,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           styleSource = "brain-unified";
         }
         if (resp.confidence) confidence = resp.confidence;
+        brainGsdPhase = mapBrainGsdPhase(resp.gsd_phase) ?? brainGsdPhase;
         brainData = {
           t0_principles: resp.t0_principles,
           t1_rules: resp.t1_rules,
@@ -1531,6 +1542,7 @@ Prompt: "${ctx.raw.slice(0, 300)}"`,
     return {
       ...ctx,
       taskType,
+      gsdPhase: brainGsdPhase,
       domain,
       confidence,
       outputStyle,

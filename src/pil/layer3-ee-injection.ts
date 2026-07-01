@@ -21,6 +21,8 @@ import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
 import { formatPendingReminder, isRecallLedgerEnabled, sessionRecallLedger } from "../ee/recall-ledger.js";
 import { getRenderSink } from "../ee/render.js";
+import { PLANNING_CHECKPOINT_QUERY } from "../gsd/ee-closure.js";
+import { isGsdNativeEnabled } from "../gsd/flags.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
 import { truncateToBudget } from "./budget.js";
@@ -170,15 +172,13 @@ async function queryEeBridge(raw: string, taskType?: string | null): Promise<Bri
     // Phase 3 (ee-anti-mu): third arm for compaction checkpoints so PIL can surface
     // prior "Progress ✔ DONE / elided" without the agent having to ask "task finished?".
     const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
+    const planningQuery = isGsdNativeEnabled()
+      ? `${PLANNING_CHECKPOINT_QUERY} OR compaction checkpoint`
+      : 'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="';
     const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
       searchByText(queryWithTask, ["experience-principles"], 3, signal),
       searchByText(queryWithTask, ["experience-behavioral"], 4, signal),
-      searchByText(
-        'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="',
-        ["experience-behavioral"],
-        3,
-        signal,
-      ).catch(() => []),
+      searchByText(planningQuery, ["experience-behavioral"], 3, signal).catch(() => []),
     ]);
 
     const principlePoints = principleRaw.filter((p) => (p.score ?? 0) >= PIL_PRINCIPLES_FLOOR);

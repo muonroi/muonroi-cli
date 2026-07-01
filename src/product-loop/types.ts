@@ -441,6 +441,9 @@ export interface RunPhasesOptions {
   }) => Promise<Omit<CustomerDecision, "seq" | "timestampUtc" | "phaseId" | "sprintN">>;
   suppressPush?: boolean;
   backoffDelays?: number[];
+  /** Project repo cwd — hosts `.planning/` when MUONROI_GSD_NATIVE=1 */
+  projectCwd?: string;
+  idea?: string;
 }
 
 // ── P6: Backlog types ────────────────────────────────────────────────────────

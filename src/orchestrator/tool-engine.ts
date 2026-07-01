@@ -840,6 +840,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           cachedImageCount: listCachedImages().length,
           priorTurnHadTools: (deps.messages as Array<{ role?: string }>).some((m) => m?.role === "tool"),
         });
+        const depthTier =
+          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
+          ((pilCtx as { complexityTier?: string | null }).complexityTier as
+            | "quick"
+            | "standard"
+            | "heavy"
+            | undefined) ??
+          "standard";
         const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
           runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
           runDelegation: (request, abortSignal) =>
@@ -847,6 +855,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           readDelegation: (id) => deps.readDelegation(id),
           listDelegations: () => deps.listDelegations(),
           modelId: turnModelId,
+          depthTier,
+          sessionId: deps.session?.id,
           includeVisionTools,
           consultParentSession: deps.consultParentSession,
         });

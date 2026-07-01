@@ -88,6 +88,7 @@
     "@ai-sdk/provider-utils": "4.0.24",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@npmcli/arborist": "^9.4.3",
+    "@opengsd/gsd-core": "1.7.0-rc.1",
     "@opentui/core": "0.1.107",
     "@opentui/react": "0.1.107",
     "@qdrant/js-client-rest": "1.17.0",

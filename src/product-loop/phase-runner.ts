@@ -1,5 +1,7 @@
 import * as path from "node:path";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
+import { isGsdNativeEnabled } from "../gsd/flags.js";
+import { orderPhasesForExecution, syncPhasePlanToRoadmap } from "../gsd/phase-dag.js";
 import type { StreamChunk } from "../types/index.js";
 import { buildSprintContext, digestSprintIntoPhase, handoffPhaseToNext } from "./context-policy.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
@@ -317,9 +319,16 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       backoffDelays: args.backoffDelays,
     });
     await writePhasePlan(args.flowDir, args.runId, plan);
+    if (isGsdNativeEnabled() && args.projectCwd) {
+      syncPhasePlanToRoadmap(args.projectCwd, args.idea ?? args.clarifiedSpec.problemStatement, plan);
+    }
   }
 
-  for (const phase of orderByDeps(plan.phases)) {
+  const orderedPhases = args.projectCwd
+    ? orderPhasesForExecution(args.projectCwd, plan.phases)
+    : orderByDeps(plan.phases);
+
+  for (const phase of orderedPhases) {
     const status = await readPhaseStatus(args.flowDir, args.runId, phase.id);
     if (status === "done" || status === "blocked") continue;
     if (!(await dependsResolved(args.flowDir, args.runId, phase))) {
