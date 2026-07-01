@@ -63,6 +63,7 @@ function makeDeps(overrides: Partial<BatchTurnRunnerDeps> = {}): {
       counters.compactedFlags.push(v);
     },
     setLastProviderOptionsShape: () => {},
+    getCompactionStats: () => ({ count: 0, totalSaved: 0 }),
     getBatchClientOptions: () => ({ apiKey: "test-key" }),
     getCompactionSettings: (_cw): CompactionSettings =>
       ({

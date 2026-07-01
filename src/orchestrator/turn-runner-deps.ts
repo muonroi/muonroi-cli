@@ -47,6 +47,7 @@ export interface TurnRunnerDepsBase {
   getCompactedThisTurn(): boolean;
   setCompactedThisTurn(v: boolean): void;
   setLastProviderOptionsShape(shape: string | null): void;
+  getCompactionStats(): { count: number; totalSaved: number };
 
   // ---- Compaction behavior delegators -----------------------------------
   getCompactionSettings(contextWindow?: number): CompactionSettings;

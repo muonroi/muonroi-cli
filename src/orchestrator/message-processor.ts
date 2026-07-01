@@ -745,6 +745,14 @@ export class MessageProcessor {
     const _routeStart = Date.now();
     try {
       const { decide } = await import("../router/decide.js");
+      const compactionMsg = deps.messages.find(
+        (m) => typeof m.content === "string" && m.content.startsWith("[Context checkpoint summary]"),
+      );
+      const compactionSummary =
+        compactionMsg && typeof compactionMsg.content === "string"
+          ? compactionMsg.content.slice("[Context checkpoint summary]".length).trim()
+          : null;
+
       const routeDecision = await decide(userMessage, {
         tenantId: "local",
         cwd: deps.bash.getCwd(),
@@ -760,6 +768,11 @@ export class MessageProcessor {
           projectSize: deps.estimateProjectSize(),
           filesTouched: deps.countFilesTouched(),
           mode: deps.mode,
+          turnIndex: deps.messages.filter((m) => m.role === "user").length,
+          messageCount: deps.messages.length,
+          compactionCount: deps.getCompactionStats().count,
+          totalSavedTokens: deps.getCompactionStats().totalSaved,
+          compactionSummary,
         },
       });
       if (routeDecision.model && routeDecision.model !== "HALT") {

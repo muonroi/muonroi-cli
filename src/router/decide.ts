@@ -58,6 +58,11 @@ export interface DecideOpts {
     projectSize?: "small" | "medium" | "large" | null;
     filesTouched?: number;
     mode?: string | null;
+    turnIndex?: number;
+    messageCount?: number;
+    compactionCount?: number;
+    totalSavedTokens?: number;
+    compactionSummary?: string | null;
   };
 }
 
@@ -122,6 +127,11 @@ function buildRouteContext(cwd: string, pil?: DecideOpts["pil"]): Record<string,
   if (pil?.projectSize) ctx.projectSize = pil.projectSize;
   if (pil?.filesTouched && pil.filesTouched > 0) ctx.filesTouched = pil.filesTouched;
   if (pil?.mode) ctx.mode = pil.mode;
+  if (pil?.turnIndex !== undefined) ctx.turnIndex = pil.turnIndex;
+  if (pil?.messageCount !== undefined) ctx.messageCount = pil.messageCount;
+  if (pil?.compactionCount !== undefined) ctx.compactionCount = pil.compactionCount;
+  if (pil?.totalSavedTokens !== undefined) ctx.totalSavedTokens = pil.totalSavedTokens;
+  if (pil?.compactionSummary) ctx.compactionSummary = pil.compactionSummary;
 
   return ctx;
 }

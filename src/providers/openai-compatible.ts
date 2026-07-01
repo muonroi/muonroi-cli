@@ -32,6 +32,12 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
     // placeholder because the SDK always emits an Authorization header from it.
     apiKey: config.apiKey ?? (config.oauthHeaders ? "oauth" : undefined),
     ...(config.oauthHeaders ? { headers: config.oauthHeaders } : {}),
+    transformRequestBody: (body) => {
+      const next = { ...body };
+      delete next.reasoning_effort;
+      delete next.verbosity;
+      return next;
+    },
   });
 
   return {

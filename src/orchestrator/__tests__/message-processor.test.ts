@@ -81,6 +81,7 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
     setLastPromptBreakdown: () => {},
     setCompactedThisTurn: () => {},
     getCompactedThisTurn: () => false,
+    getCompactionStats: () => ({ count: 0, totalSaved: 0 }),
     setTurnUserGoalExcerpt: () => {},
     setTurnAssistantReasoning: () => {},
     appendTurnAssistantReasoning: () => {},
