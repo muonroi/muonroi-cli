@@ -49,8 +49,9 @@ export function createOpenAICompatibleAdapter(config: ProviderConfig & { id: str
             : undefined,
         });
       }
+      const cleanModel = config.model.startsWith("opencode/") ? config.model.slice(9) : config.model;
       const result = streamText({
-        model: provider(config.model),
+        model: provider(cleanModel),
         messages: req.messages,
         tools: req.tools as any,
         toolChoice: req.toolChoice as any,

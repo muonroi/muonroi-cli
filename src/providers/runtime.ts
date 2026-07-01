@@ -307,6 +307,7 @@ export function detectProviderForModel(modelId: string): ProviderId {
   if (id.startsWith("grok")) return "xai";
   if (id.includes("qwen") || id.includes("internlm")) return "siliconflow";
   if (id.includes("glm") || id.startsWith("z-ai") || id.startsWith("zai")) return "zai";
+  if (id.startsWith("opencode")) return "opencode-go";
   if (id.startsWith("llama") || id.startsWith("mistral") || id.startsWith("phi-")) return "ollama";
   if (id.startsWith("claude")) return "anthropic";
   throw new Error(

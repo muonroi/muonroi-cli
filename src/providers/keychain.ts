@@ -28,6 +28,7 @@ const SETTINGS_KEY_MAP: Partial<Record<ProviderId, string>> = {
   siliconflow: "siliconflow",
   xai: "xai",
   zai: "zai",
+  "opencode-go": "opencode-go",
 };
 
 const KEYCHAIN_SERVICE = "muonroi-cli";
@@ -41,6 +42,7 @@ const ACCOUNT_BY_PROVIDER: Record<ProviderId, string> = {
   xai: "xai",
   ollama: "ollama",
   zai: "zai",
+  "opencode-go": "opencode-go",
 };
 
 const ENV_BY_PROVIDER: Record<ProviderId, string> = {
@@ -52,6 +54,7 @@ const ENV_BY_PROVIDER: Record<ProviderId, string> = {
   xai: "XAI_API_KEY",
   ollama: "OLLAMA_API_KEY",
   zai: "ZAI_API_KEY",
+  "opencode-go": "OPENCODE_GO_API_KEY",
 };
 
 /**
