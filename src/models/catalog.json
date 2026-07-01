@@ -1,7 +1,7 @@
 {
-  "version": "2.9",
+  "version": "2.10",
   "updated_at": "2026-07-01",
-  "description": "Local fallback catalog: deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). SiliconFlow and Google models removed — use native deepseek / Z.ai / Grok / OpenCode Go only. Z.ai Coding Plan: glm-4.7 (routine/fast), glm-5-turbo (throughput), glm-5.2 (premium). tier_routing:false on glm-4.7-flash (free pool), glm-5v-turbo (Pro 429), glm-5/glm-5.1. provider_policies.peak_hour sourced from vendor docs (Z.ai 14–18 UTC+8; DeepSeek official dual windows 09–12 and 14–18 UTC+8). Pricing APPROXIMATE.",
+  "description": "Local fallback catalog: deepseek + zai (GLM Coding Plan) + opencode-go + xai (Grok). SiliconFlow and Google models removed. routing.council: default multi-provider debate lineup (implement→deepseek, verify→zai, research→opencode-go). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -489,7 +489,30 @@
     }
   ],
   "routing": {
-    "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"]
+    "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"],
+    "council": {
+      "prefer_multi_provider": true,
+      "participants": [
+        {
+          "role": "implement",
+          "provider": "deepseek",
+          "tier": "balanced",
+          "model_id": "deepseek-v4-flash"
+        },
+        {
+          "role": "verify",
+          "provider": "zai",
+          "tier": "premium",
+          "model_id": "glm-5.2"
+        },
+        {
+          "role": "research",
+          "provider": "opencode-go",
+          "tier": "balanced",
+          "model_id": "opencode/kimi-k2.7-code"
+        }
+      ]
+    }
   },
   "provider_policies": {
     "zai": {

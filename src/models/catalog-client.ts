@@ -60,8 +60,23 @@ export interface CatalogProviderPolicy {
   peak_hour?: CatalogProviderPeakHour;
 }
 
+/** Default council debate slot — one role mapped to a provider + model. */
+export interface CatalogCouncilParticipant {
+  role: "implement" | "verify" | "research";
+  provider: string;
+  tier?: "fast" | "balanced" | "premium";
+  model_id?: string;
+}
+
+export interface CatalogCouncilRouting {
+  /** Default true — spread implement/verify/research across providers when user has no roleModels. */
+  prefer_multi_provider?: boolean;
+  participants?: CatalogCouncilParticipant[];
+}
+
 export interface CatalogRouting {
   switch_provider_order?: string[];
+  council?: CatalogCouncilRouting;
 }
 
 export interface CatalogDocument {
@@ -157,6 +172,23 @@ const CatalogResponseSchema = z
     routing: z
       .object({
         switch_provider_order: z.array(z.string().min(1)).optional(),
+        council: z
+          .object({
+            prefer_multi_provider: z.boolean().optional(),
+            participants: z
+              .array(
+                z
+                  .object({
+                    role: z.enum(["implement", "verify", "research"]),
+                    provider: z.string().min(1),
+                    tier: z.enum(["fast", "balanced", "premium"]).optional(),
+                    model_id: z.string().min(1).optional(),
+                  })
+                  .loose(),
+              )
+              .optional(),
+          })
+          .optional(),
       })
       .optional(),
     provider_policies: z

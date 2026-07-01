@@ -208,6 +208,11 @@ def test_real_catalog_provider_policies_peak_hour():
     assert ds.peak_hour.windows[1].end_hour == 18
     assert cat.routing is not None
     assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai"]
+    assert cat.routing.council is not None
+    assert cat.routing.council.prefer_multi_provider is True
+    assert len(cat.routing.council.participants or []) == 3
+    roles = {p.role for p in (cat.routing.council.participants or [])}
+    assert roles == {"implement", "verify", "research"}
 
 
 def test_list_models_includes_provider_policies(client: TestClient, monkeypatch, tmp_path: Path):

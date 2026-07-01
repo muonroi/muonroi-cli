@@ -19,7 +19,8 @@ export const handleCouncilSlash: SlashHandler = async (args, ctx) => {
   if (!topic) {
     return (
       "/council [rounds] <topic> — multi-model discussion\n" +
-      "Default: uses models from the same provider. Set councilPreferMultiProvider + roleModels for cross-provider.\n" +
+      "Default: multi-provider lineup from catalog (implement/verify/research across providers).\n" +
+      "Override via roleModels in settings, or councilPreferMultiProvider: false for same-provider.\n" +
       "Example: /council 3 REST vs gRPC for our microservices"
     );
   }

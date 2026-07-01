@@ -119,8 +119,21 @@ class CatalogProviderPolicy(BaseModel):
     peak_hour: Optional[CatalogProviderPeakHour] = None
 
 
+class CatalogCouncilParticipant(BaseModel):
+    role: str
+    provider: str
+    tier: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+class CatalogCouncilRouting(BaseModel):
+    prefer_multi_provider: Optional[bool] = True
+    participants: Optional[list[CatalogCouncilParticipant]] = None
+
+
 class CatalogRouting(BaseModel):
     switch_provider_order: Optional[list[str]] = None
+    council: Optional[CatalogCouncilRouting] = None
 
 
 class CatalogResponse(BaseModel):
