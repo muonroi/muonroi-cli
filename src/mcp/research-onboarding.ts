@@ -79,10 +79,10 @@ async function promptForKeyWithRetry(io: {
 }
 
 export async function runResearchOnboarding(io: OnboardingIO): Promise<OnboardingResult> {
-  io.log("\nWeb research is available via MCP servers:\n");
-  io.log("  - context7 - version-pinned library docs (free, no key)\n");
-  io.log("  - fetch - URL to markdown extraction (free, no key)\n");
-  io.log("  - tavily - LLM-tuned web search (free tier 1k/mo, needs API key)\n");
+  io.log("\nWeb research tools (native builtins):\n");
+  io.log("  - fetch_url — fetch any public URL and return clean markdown/text (always available)\n");
+  io.log("  - web_search — Tavily-powered web search (free tier, needs API key)\n");
+  io.log("  - context7 / muonroi-docs — still available via MCP (library + ecosystem docs)\n");
   io.log("\nTip: if you keep keys in Bitwarden, run `muonroi-cli mcp import-bw tavily` instead.\n\n");
   const yn = (await io.askYesNo("Enable Tavily web search now? [Y/n]: ")).trim().toLowerCase();
   let tavilyEnabled = false;
@@ -110,9 +110,10 @@ export async function runResearchMigrationPrompt(io: MigrationIO): Promise<Migra
   if (settings.webResearchPrompted === true) {
     return { shown: false, tavilyEnabled: false };
   }
-  io.log("\nNew: web research is available.\n");
-  io.log("  - context7 (library docs) and fetch (URL extraction) - already enabled.\n");
-  io.log("  - Tavily web search needs a free API key (tavily.com).\n\n");
+  io.log("\nNew: web research tools are available natively.\n");
+  io.log("  - fetch_url (URL → markdown) is always available.\n");
+  io.log("  - web_search (Tavily) needs a free API key (tavily.com).\n");
+  io.log("  - context7 + muonroi-docs remain as optional MCP for specialized docs.\n\n");
   const choice = (await io.askChoice("Set up Tavily now? [Y/n/never]: ")).trim().toLowerCase();
   let tavilyEnabled = false;
   if (choice === "y" || choice === "yes" || choice === "") {

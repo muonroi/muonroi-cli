@@ -1590,7 +1590,7 @@ const mcp = program.command("mcp").description("Manage MCP server configuration"
 
 mcp
   .command("setup-research")
-  .description("Configure web research MCP servers (context7, fetch, tavily)")
+  .description("Configure web research (native fetch_url + web_search; optional MCPs for context7/muonroi-docs)")
   .action(async () => {
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const ask = (q: string): Promise<string> => new Promise((resolve) => rl.question(q, (a) => resolve(a)));

@@ -12,8 +12,8 @@ const servers = [
   { id: "fetch" },
   { id: "tavily" },
   { id: "chrome-devtools" },
-  { id: "playwright" },
   { id: "figma" },
+  // memory, playwright, figma removed from defaults (native EE + fetch_url/web_search; can be added manually)
 ];
 
 const ids = (s: Array<{ id: string }>): string[] => s.map((x) => x.id);
@@ -29,8 +29,8 @@ describe("filterMcpServersByMessage", () => {
   it("keeps browser servers when a browser signal is present", () => {
     const out = filterMcpServersByMessage(servers, "take a screenshot of the dashboard");
     expect(ids(out)).toContain("chrome-devtools");
-    expect(ids(out)).toContain("playwright");
     expect(ids(out)).toContain("figma");
+    // playwright/figma can be added manually; not seeded by default anymore
   });
 
   it("keeps docs/web servers when a docs signal is present", () => {

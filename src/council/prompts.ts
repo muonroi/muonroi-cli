@@ -700,16 +700,18 @@ ${ctx.allExchanges}${extraContext}`,
 /**
  * Builds the system prompt for the research role.
  *
- * When `hasUrl` is true, injects a mandatory instruction to invoke a Playwright
- * or Chrome-DevTools tool before reporting Frontend Findings (CQ-04).
+ * When `hasUrl` is true, injects a mandatory instruction to use fetch_url (preferred
+ * for content) or a browser tool (playwright/chrome when screenshots or heavy JS interaction
+ * are required) before reporting Frontend Findings (CQ-04).
  *
  * Output format enforces 3 labelled sections with citation requirements (CQ-05).
  */
 export function buildResearchSystemPrompt(hasUrl: boolean, internetFirst = false): string {
   const urlInstruction = hasUrl
     ? `\n## URL Research Requirement\n` +
-      `This topic contains a URL. You MUST invoke a Playwright or Chrome-DevTools tool ` +
-      `to navigate to it before reporting Frontend Findings. Do not skip this step.\n`
+      `This topic contains a URL. You MUST use the native fetch_url tool (preferred for most pages) ` +
+      `or a browser tool (playwright/chrome-devtools when you need screenshots, rendered layout, or interaction) ` +
+      `before reporting Frontend Findings. Do not skip this step.\n`
     : "";
 
   const modeBlock = internetFirst
@@ -736,8 +738,8 @@ export function buildResearchSystemPrompt(hasUrl: boolean, internetFirst = false
     `If no internet search was performed, write: ` +
     `_No internet research performed (tavily/web-fetch unavailable or not needed)._\n\n` +
     `## Frontend Findings (live)\n` +
-    `Each finding must cite [snapshot:uid] from a Playwright screenshot or Chrome-DevTools inspection.\n` +
-    `If no URL was present or browser tool was not invoked, write: _No live frontend inspection performed._\n\n` +
+    `Each finding must cite [snapshot:uid] from a Playwright/Chrome-DevTools screenshot/inspection **if** a browser tool was used.\n` +
+    `For ordinary pages, cite the result of fetch_url. If no URL inspection happened, write: _No live frontend inspection performed._\n\n` +
     `Do NOT speculate. Only report what you verified with tools.`
   );
 }

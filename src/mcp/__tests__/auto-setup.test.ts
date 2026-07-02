@@ -26,11 +26,12 @@ describe("ensureDefaultMcpServers — research servers", () => {
     else process.env.USERPROFILE = origUserProfile;
   });
 
-  it("registers context7 + fetch + tavily for a fresh user", async () => {
+  it("registers context7 (and legacy fetch/tavily entries) for a fresh user", async () => {
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();
     const ids = merged.map((s) => s.id);
     expect(ids).toContain("context7");
+    // fetch + tavily now default to disabled (native fetch_url + web_search are always present)
     expect(ids).toContain("fetch");
     expect(ids).toContain("tavily");
   });
@@ -119,13 +120,13 @@ describe("ensureDefaultMcpServers — research servers", () => {
     expect(merged.find((s) => s.id === "context7")).toBeDefined();
   });
 
-  it("context7 and fetch default to enabled", async () => {
+  it("context7 defaults to enabled; fetch (legacy) now defaults to disabled (native fetch_url wins)", async () => {
     const { ensureDefaultMcpServers } = await import("../auto-setup.js");
     const merged = ensureDefaultMcpServers();
     const c7 = merged.find((s) => s.id === "context7");
     const fetchEntry = merged.find((s) => s.id === "fetch");
     expect(c7?.enabled).toBe(true);
-    expect(fetchEntry?.enabled).toBe(true);
+    expect(fetchEntry?.enabled).toBe(false);
   });
 
   it("tavily defaults to disabled (key not yet provided)", async () => {

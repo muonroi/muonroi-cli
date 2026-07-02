@@ -598,12 +598,12 @@ export function createCouncilLLM(
 
       // Warn early if internet-first mode is requested but no internet/browser tools are loaded.
       const internetToolAvailable = Object.keys(allTools).some((n) =>
-        /tavily|web[_-]?fetch|web[_-]?search|playwright|chrome|context7|firecrawl|exa/i.test(n),
+        /fetch_url|web_search|tavily|web[_-]?fetch|web[_-]?search|playwright|chrome|context7|firecrawl|exa/i.test(n),
       );
       const internetGapWarning =
         internetFirst && !internetToolAvailable
-          ? `\n\n## Research Gap\n- Internet-first mode requested but no browser/search tool ` +
-            `(tavily, web-fetch, playwright, chrome-devtools, context7) is available. ` +
+          ? `\n\n## Research Gap\n- Internet-first mode requested but no web research tool ` +
+            `(fetch_url, web_search, tavily, playwright, context7, etc.) is available. ` +
             `Findings will be limited to what the model already knows.`
           : "";
 
@@ -701,7 +701,7 @@ export function createCouncilLLM(
         if (hasUrl) {
           // Use result.toolCalls (flat array across all steps) — more reliably typed than steps[].toolCalls
           const browserUsed = researchToolCalls.some(
-            (tc) => tc.toolName.includes("playwright") || tc.toolName.includes("chrome"),
+            (tc) => tc.toolName.includes("playwright") || tc.toolName.includes("chrome") || tc.toolName === "fetch_url",
           );
           if (!browserUsed) {
             stats.calls++;
