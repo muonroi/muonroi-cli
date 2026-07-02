@@ -1,18 +1,24 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolvePlanCouncilLeader } from "../council/leader.js";
 import type { ToolResult } from "../types/index.js";
-import { buildCouncilContextBundle, renderCouncilContextBlock } from "./council-context.js";
+import { buildCouncilContextBundle, type CouncilContextBundle } from "./council-context.js";
 import { buildGsdPerspectiveTaskRequest } from "./model-tier.js";
 import { planningArtifact } from "./paths.js";
 import {
+  buildDebateTopic,
   buildPerspectivePrompt,
+  perspectivesForDepth,
   type PlanPerspective,
   type PlanPerspectiveId,
-  perspectivesForDepth,
 } from "./plan-council-prompts.js";
+import {
+  extractStructuredVerdict,
+  type PlanCouncilVerdict,
+} from "./verdict-schema.js";
 import { advancePhase, setStateField } from "./workflow-engine.js";
 
 export type PerspectiveVerdict = "approve" | "revise" | "block";
+export type VerdictSource = "structured" | "heuristic-fallback" | "parse-failed";
 
 export interface PerspectiveResult {
   id: PlanPerspectiveId;
@@ -20,6 +26,8 @@ export interface PerspectiveResult {
   verdict: PerspectiveVerdict;
   concerns: string[];
   evidence: string[];
+  /** Where the verdict came from — model-emitted JSON or heuristic fallback. */
+  source: VerdictSource;
   raw?: string;
 }
 
@@ -35,6 +43,10 @@ export interface PlanCouncilResult {
   contextBundleChars?: number;
   /** True when prior PLAN-REVIEW concerns were surfaced to council. */
   hadPriorConcerns?: boolean;
+  /** Where the merged verdict came from. */
+  verdictSource?: VerdictSource;
+  /** True when no structured verdict could be extracted (debate path). */
+  verdictParseFailed?: boolean;
 }
 
 export type RunPerspectiveFn = (prompt: string, perspective: PlanPerspective) => Promise<string>;
@@ -79,38 +91,53 @@ function heuristicReview(planBody: string, perspective: PlanPerspective): Perspe
   }
 
   const verdict: PerspectiveVerdict = concerns.length >= 3 ? "block" : concerns.length >= 1 ? "revise" : "approve";
-  return { id: perspective.id, role: perspective.role, verdict, concerns, evidence };
+  return { id: perspective.id, role: perspective.role, verdict, concerns, evidence, source: "heuristic-fallback" };
+}
+
+function fromStructured(
+  perspective: PlanPerspective,
+  parsed: PlanCouncilVerdict,
+  raw?: string,
+): PerspectiveResult {
+  return {
+    id: perspective.id,
+    role: perspective.role,
+    verdict: parsed.verdict,
+    concerns: parsed.concerns.map(String),
+    evidence: parsed.evidence.map(String),
+    source: "structured",
+    raw,
+  };
 }
 
 async function runPerspective(
   planBody: string,
   perspective: PlanPerspective,
   runFn: RunPerspectiveFn | undefined,
-  bundle?: import("./council-context.js").CouncilContextBundle,
+  bundle?: CouncilContextBundle,
 ): Promise<PerspectiveResult> {
+  // No runner — heuristic path (test scaffolding / offline runs).
   if (!runFn) {
     return heuristicReview(planBody, perspective);
   }
   try {
     const raw = await runFn(buildPerspectivePrompt(perspective, planBody, bundle), perspective);
-    const parsed = JSON.parse(raw) as {
-      verdict?: string;
-      concerns?: string[];
-      evidence?: string[];
-    };
-    const verdict = (
-      ["approve", "revise", "block"].includes(parsed.verdict ?? "") ? parsed.verdict : "revise"
-    ) as PerspectiveVerdict;
-    return {
-      id: perspective.id,
-      role: perspective.role,
-      verdict,
-      concerns: Array.isArray(parsed.concerns) ? parsed.concerns.map(String) : [],
-      evidence: Array.isArray(parsed.evidence) ? parsed.evidence.map(String) : [],
-      raw,
-    };
+    const parsed = extractStructuredVerdict(raw);
+    if (!parsed) {
+      // Tolerant parse failed — DO NOT silently approve. Fall back to heuristic
+      // so the perspective still contributes a verdict, and flag the source so
+      // telemetry can detect prompt-compliance regressions.
+      console.error(
+        `[gsd] plan-council perspective ${perspective.id} emitted no structured verdict — using heuristic fallback`,
+      );
+      const fallback = heuristicReview(planBody, perspective);
+      return { ...fallback, source: "heuristic-fallback", raw };
+    }
+    return fromStructured(perspective, parsed, raw);
   } catch (err) {
-    console.error(`[gsd] plan-council perspective ${perspective.id} failed: ${(err as Error).message}`);
+    console.error(
+      `[gsd] plan-council perspective ${perspective.id} failed: ${(err as Error).message}`,
+    );
     return heuristicReview(planBody, perspective);
   }
 }
@@ -125,18 +152,24 @@ function formatPlanReview(results: PerspectiveResult[], leaderModelId: string, c
   const sections = results.map((r) => {
     const concerns = r.concerns.length ? r.concerns.map((c) => `- ${c}`).join("\n") : "- (none)";
     const evidence = r.evidence.length ? r.evidence.map((e) => `- ${e}`).join("\n") : "- (none)";
-    return `## ${r.role} (${r.id})\n\n**Verdict:** ${r.verdict}\n\n**Concerns:**\n${concerns}\n\n**Evidence:**\n${evidence}\n`;
+    return `## ${r.role} (${r.id})\n\n**Verdict:** ${r.verdict} (source: ${r.source})\n\n**Concerns:**\n${concerns}\n\n**Evidence:**\n${evidence}\n`;
   });
   return ["# PLAN-REVIEW", "", `Leader: \`${leaderModelId}\``, `Revision cycle: ${cycle}`, "", ...sections].join("\n");
 }
 
-function formatPlanVerify(verdict: PerspectiveVerdict | "pass", results: PerspectiveResult[]): string {
+function formatPlanVerify(
+  verdict: PerspectiveVerdict | "pass",
+  results: PerspectiveResult[],
+  opts: { source: VerdictSource; parseFailed: boolean },
+): string {
   const allConcerns = results.flatMap((r) => r.concerns);
   return [
     "# PLAN-VERIFY",
     "",
     `verdict: ${verdict}`,
-    `revisionRequired: ${verdict === "revise" ? "yes" : "no"}`,
+    `revisionRequired: ${verdict === "revise" || verdict === "block" ? "yes" : "no"}`,
+    `verdictSource: ${opts.source}`,
+    `verdictParseFailed: ${opts.parseFailed ? "yes" : "no"}`,
     "",
     "## Summary",
     verdict === "pass"
@@ -146,6 +179,21 @@ function formatPlanVerify(verdict: PerspectiveVerdict | "pass", results: Perspec
     "## Concerns",
     allConcerns.length ? allConcerns.map((c) => `- ${c}`).join("\n") : "- (none)",
   ].join("\n");
+}
+
+function applyVerdict(
+  cwd: string,
+  verdict: PerspectiveVerdict | "pass",
+): void {
+  if (verdict === "pass") {
+    setStateField(cwd, "Plan Verified", "yes");
+    advancePhase(cwd, "execute");
+  } else {
+    setStateField(cwd, "Plan Verified", "no");
+    if (verdict === "revise") {
+      advancePhase(cwd, "plan");
+    }
+  }
 }
 
 export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncilResult> {
@@ -163,23 +211,16 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       perspectives: [],
       verdict: "block",
       revisionRequired: true,
+      verdictSource: "heuristic-fallback",
     };
   }
 
+  // ---------- Debate path (production wiring: runCouncilV2 synthesis) ----------
   if (opts.runDebate) {
     const leader = await resolvePlanCouncilLeader(sessionModelId);
     const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
+    const topic = buildDebateTopic(planBody, bundle);
 
-    const topicLines = [
-      "Review and debate the proposed plan to determine if it is complete, correct, safe, and optimal for the task.",
-      "",
-      renderCouncilContextBlock(bundle),
-      "",
-      "### Proposed PLAN.md:",
-      planBody.trim(),
-    ];
-
-    const topic = topicLines.join("\n");
     let synthesis = "";
     try {
       synthesis = await opts.runDebate(topic);
@@ -187,12 +228,19 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       console.error(`[gsd] plan review debate failed: ${(err as Error).message}`);
     }
 
-    let verdict: PerspectiveVerdict | "pass" = "pass";
-    if (/revision\s+required|should\s+revise|must\s+revise/i.test(synthesis)) {
-      verdict = "revise";
-    } else if (/block/i.test(synthesis)) {
-      verdict = "block";
-    }
+    const parsed = extractStructuredVerdict(synthesis);
+    const parseFailed = parsed === null;
+    // Model-first: if we could not extract structured verdict, DO NOT regex
+    // the prose. Force a conservative revise so the loop iterates and the
+    // leader gets another chance to emit valid JSON (the prior-concerns
+    // directive re-states the contract).
+    const verdict: PerspectiveVerdict | "pass" = parseFailed ? "revise" : parsed!.verdict;
+    const source: VerdictSource = parseFailed ? "parse-failed" : "structured";
+    const concerns = parsed?.concerns.map(String) ?? [
+      "Council leader did not emit a structured verdict block — forcing revision.",
+    ];
+    const evidence = parsed?.evidence.map(String) ?? [];
+    const rationale = parsed?.rationale ?? "";
 
     const planReviewPath = planningArtifact(cwd, "PLAN-REVIEW.md");
     const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
@@ -202,36 +250,41 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       "",
       `Leader: \`${leader.modelId}\``,
       `Revision cycle: ${revisionCycle}`,
+      `Verdict source: ${source}${parseFailed ? " (parse failed — forced revise)" : ""}`,
       "",
       "## Council Debate Synthesis",
       "",
-      synthesis || "No synthesis generated.",
+      synthesis.trim() || "No synthesis generated.",
+      rationale ? `\n**Rationale:** ${rationale}` : "",
+      "",
+      "## Merged Concerns",
+      "",
+      concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
     ].join("\n");
 
     const verifyContent = [
       "# PLAN-VERIFY",
       "",
       `verdict: ${verdict}`,
-      `revisionRequired: ${verdict === "revise" ? "yes" : "no"}`,
+      `revisionRequired: ${verdict === "revise" || verdict === "block" ? "yes" : "no"}`,
+      `verdictSource: ${source}`,
+      `verdictParseFailed: ${parseFailed ? "yes" : "no"}`,
       "",
       "## Summary",
       verdict === "pass"
-        ? "All perspectives approved via native council debate."
-        : `Council requested revision/block: ${verdict}.`,
+        ? "Council leader approved via structured verdict."
+        : parseFailed
+          ? "Structured verdict missing — forced revision so the leader re-emits valid JSON."
+          : `Council requested ${verdict}.`,
+      "",
+      "## Concerns",
+      concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
     ].join("\n");
 
     writeFileSync(planReviewPath, reviewContent, "utf8");
     writeFileSync(planVerifyPath, verifyContent, "utf8");
 
-    if (verdict === "pass") {
-      setStateField(cwd, "Plan Verified", "yes");
-      advancePhase(cwd, "execute");
-    } else {
-      setStateField(cwd, "Plan Verified", "no");
-      if (verdict === "revise") {
-        advancePhase(cwd, "plan");
-      }
-    }
+    applyVerdict(cwd, verdict);
 
     return {
       skipped: false,
@@ -243,32 +296,36 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       revisionRequired: verdict === "revise" || verdict === "block",
       contextBundleChars: bundle.totalChars,
       hadPriorConcerns: bundle.hadPriorConcerns,
+      verdictSource: source,
+      verdictParseFailed: parseFailed,
     };
   }
 
+  // ---------- Perspective path (parallel sub-agents) ----------
   const leader = await resolvePlanCouncilLeader(sessionModelId);
   const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
-  const results: PerspectiveResult[] = [];
-  for (const p of perspectives) {
-    results.push(await runPerspective(planBody, p, runPerspectiveFn, bundle));
-  }
+
+  // Perspectives are independent — run in parallel, preserve declared order.
+  const settled = await Promise.all(
+    perspectives.map((p) => runPerspective(planBody, p, runPerspectiveFn, bundle)),
+  );
+  const results: PerspectiveResult[] = settled;
 
   const verdict = mergeVerdict(results);
+  const anyParseFailed = results.some((r) => r.source === "heuristic-fallback");
+  const source: VerdictSource = anyParseFailed ? "heuristic-fallback" : "structured";
+
   const planReviewPath = planningArtifact(cwd, "PLAN-REVIEW.md");
   const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
 
   writeFileSync(planReviewPath, formatPlanReview(results, leader.modelId, revisionCycle), "utf8");
-  writeFileSync(planVerifyPath, formatPlanVerify(verdict, results), "utf8");
+  writeFileSync(
+    planVerifyPath,
+    formatPlanVerify(verdict, results, { source, parseFailed: false }),
+    "utf8",
+  );
 
-  if (verdict === "pass") {
-    setStateField(cwd, "Plan Verified", "yes");
-    advancePhase(cwd, "execute");
-  } else {
-    setStateField(cwd, "Plan Verified", "no");
-    if (verdict === "revise") {
-      advancePhase(cwd, "plan");
-    }
-  }
+  applyVerdict(cwd, verdict);
 
   return {
     skipped: false,
@@ -280,6 +337,8 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     revisionRequired: verdict === "revise" || verdict === "block",
     contextBundleChars: bundle.totalChars,
     hadPriorConcerns: bundle.hadPriorConcerns,
+    verdictSource: source,
+    verdictParseFailed: false,
   };
 }
 
