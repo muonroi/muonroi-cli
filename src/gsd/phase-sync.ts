@@ -222,8 +222,8 @@ export function syncTaskPhaseOnVerifyPass(
 
   const phaseNum = resolvePhaseNumberForComplete(cwd, phaseDirName);
   try {
-    writePhaseVerificationPassed(cwd, phaseDirName, phaseNum, opts?.evidence);
     writePhaseSummaryStub(cwd, phaseDirName, opts?.evidence);
+    writePhaseVerificationPassed(cwd, phaseDirName, phaseNum, opts?.evidence);
     steps.push({ op: "write-verification", ok: true });
   } catch (err) {
     steps.push({ op: "write-verification", ok: false, error: (err as Error).message });

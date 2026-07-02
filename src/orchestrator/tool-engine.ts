@@ -859,6 +859,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           sessionId: deps.session?.id,
           includeVisionTools,
           consultParentSession: deps.consultParentSession,
+          runDebate: async (topic: string) => {
+            const gen = deps.runCouncilV2(topic, {
+              skipClarification: true,
+              userModelMessage: { role: "user", content: `/council ${topic}` },
+            });
+            for await (const chunk of gen) {
+              // Drain the generator
+            }
+            return deps.councilManager.lastSynthesis ?? "";
+          },
         });
         // Top-level cumulative cap state. We accumulate the raw tool set
         // (base + MCP + PIL response tools) across the assembly below,

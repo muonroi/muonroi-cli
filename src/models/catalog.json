@@ -19,7 +19,8 @@
       "default_reasoning_effort": null,
       "description": "Native DeepSeek V4 Flash. Tool-call capable. Primary fast-tier model for the deepseek provider.",
       "aliases": ["deepseek-flash-native"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "deepseek-v4-pro",
@@ -37,7 +38,8 @@
       "default_reasoning_effort": null,
       "description": "Native DeepSeek V4 Pro. Tool-call capable. Premium-tier default for the deepseek provider.",
       "aliases": ["deepseek-pro-native"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"]
     },
     {
       "id": "gpt-5.4-mini",
@@ -54,7 +56,8 @@
       "default_reasoning_effort": "low",
       "description": "OpenAI GPT-5.4 mini via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-mini-oauth"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "gpt-5.4",
@@ -71,7 +74,8 @@
       "default_reasoning_effort": "medium",
       "description": "OpenAI GPT-5.4 via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-oauth"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "gpt-5.3-codex",
@@ -88,7 +92,8 @@
       "default_reasoning_effort": "medium",
       "description": "OpenAI GPT-5.3 Codex (coding-specialized) via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.3-codex-oauth", "codex"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify"]
     },
     {
       "id": "grok-4.3",
@@ -105,7 +110,8 @@
       "default_reasoning_effort": "medium",
       "description": "xAI's current flagship. Excellent agentic tool-calling, low hallucination, supports reasoning + non-reasoning mode. 1M token context. Recommended default for Grok CLI.",
       "aliases": ["grok-4.3", "grok-latest", "grok-4"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "grok-build-0.1",
@@ -122,7 +128,8 @@
       "default_reasoning_effort": null,
       "description": "Specialized fast coding model optimized for agentic coding workflows. The model powering Grok Build CLI. Well-suited for programming, debugging, and multi-step tasks.",
       "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["research", "implement"]
     },
     {
       "id": "glm-4.6v-flash",
@@ -158,7 +165,8 @@
       "default_reasoning_effort": null,
       "description": "Z.ai free-tier model (separate rate-limit pool; NOT covered by GLM Coding Plan Pro/Lite/Max quota). Use glm-4.7 for subscription-backed coding. Explicit -m only — excluded from automatic tier routing and compaction.",
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "glm-4.5-air",
@@ -176,7 +184,8 @@
       "default_reasoning_effort": null,
       "description": "Z.ai pay-as-you-go API model (billed per token; NOT the GLM Coding Plan subscription pool). Explicit -m only.",
       "aliases": ["glm-4.5-airx"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research", "verify"]
     },
     {
       "id": "glm-4.7",
@@ -194,7 +203,8 @@
       "default_reasoning_effort": null,
       "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Primary balanced model; also routes as fast-tier for compaction/title (replaces glm-4.7-flash in auto-routing). Z.ai docs: use for routine tasks.",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement"]
     },
     {
       "id": "glm-5-turbo",
@@ -211,7 +221,8 @@
       "default_reasoning_effort": null,
       "description": "GLM Coding Plan model (Lite/Pro/Max). High-throughput agent tasks; consumes subscription quota (2-3x during peak for GLM-5 family per Z.ai policy).",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "research"]
     },
     {
       "id": "glm-5v-turbo",
@@ -247,7 +258,8 @@
       "default_reasoning_effort": null,
       "description": "Legacy GLM-5 base model (not in the official Coding Plan trio). Use glm-4.7 / glm-5-turbo / glm-5.2. Explicit -m only.",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "glm-5.2",
@@ -264,7 +276,8 @@
       "default_reasoning_effort": "medium",
       "description": "GLM Coding Plan flagship for complex reasoning and large engineering (Z.ai: Opus-level). Default premium route; 3x peak / 2x off-peak quota per Z.ai policy.",
       "aliases": ["glm-5.2[1m]"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "glm-5.1",
@@ -282,7 +295,8 @@
       "default_reasoning_effort": "medium",
       "description": "Superseded by glm-5.2 for Coding Plan premium routing. Still callable via -m on the coding endpoint.",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "research"]
     },
     {
       "id": "opencode/kimi-k2.7-code",
@@ -299,7 +313,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription model specialized for coding from Moonshot/Kimi.",
       "aliases": ["kimi-k2.7-code-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify"]
     },
     {
       "id": "opencode/kimi-k2.6",
@@ -316,7 +331,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of Moonshot's Kimi K2.6 model.",
       "aliases": ["kimi-k2.6-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "opencode/glm-5.2",
@@ -333,7 +349,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.2 MoE with 1M-token context window.",
       "aliases": ["glm-5.2-go"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "opencode/glm-5.1",
@@ -350,7 +367,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.1 fifth-generation model.",
       "aliases": ["glm-5.1-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "research"]
     },
     {
       "id": "opencode/minimax-m3",
@@ -401,7 +419,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of Qwen's top-tier reasoning coding model.",
       "aliases": ["qwen-3.7-max-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "opencode/qwen-3.7-plus",
@@ -418,7 +437,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of Qwen 3.7 Plus coding model.",
       "aliases": ["qwen-3.7-plus-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify", "research"]
     },
     {
       "id": "opencode/qwen-3.6-plus",
@@ -452,7 +472,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of DeepSeek's flagship coding model.",
       "aliases": ["deepseek-v4-pro-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"]
     },
     {
       "id": "opencode/deepseek-v4-flash",
@@ -469,7 +490,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of DeepSeek's fast reasoning model.",
       "aliases": ["deepseek-v4-flash-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "opencode/mimo-v2.5",

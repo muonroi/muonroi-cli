@@ -507,6 +507,7 @@ export interface ModelInfo {
   tierRouting?: boolean;
   /** Extra tiers this model may satisfy in getModelByTier (primary tier remains `tier`). */
   routingTiers?: ModelTier[];
+  roles?: string[];
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

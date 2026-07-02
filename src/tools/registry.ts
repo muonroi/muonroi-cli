@@ -54,6 +54,7 @@ interface ToolRegistryOpts {
    * isolated state (legacy per-closure behaviour).
    */
   sessionId?: string;
+  runDebate?: (topic: string) => Promise<string>;
 }
 
 /**
@@ -1111,6 +1112,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       sessionId: opts?.sessionId,
       depth: opts?.depthTier ?? "standard",
       runTask: opts?.runTask,
+      runDebate: opts?.runDebate,
     });
   }
 

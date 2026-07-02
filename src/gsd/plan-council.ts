@@ -41,6 +41,7 @@ export interface PlanCouncilOpts {
   /** Optional LLM runner for perspective sub-agents (tests use heuristic when omitted). */
   runPerspectiveFn?: RunPerspectiveFn;
   revisionCycle?: number;
+  runDebate?: (topic: string) => Promise<string>;
 }
 
 function readPlanBody(cwd: string): string {
@@ -156,6 +157,94 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       perspectives: [],
       verdict: "block",
       revisionRequired: true,
+    };
+  }
+
+  if (opts.runDebate) {
+    const leader = await resolvePlanCouncilLeader(sessionModelId);
+    let contextBody = "";
+    const contextPath = planningArtifact(cwd, "CONTEXT.md");
+    if (existsSync(contextPath)) {
+      try {
+        contextBody = readFileSync(contextPath, "utf8").trim();
+      } catch (err) {
+        console.error(`[gsd] failed to read CONTEXT.md: ${(err as Error).message}`);
+      }
+    }
+
+    const topicLines = [
+      "Review and debate the proposed plan to determine if it is complete, correct, safe, and optimal for the task.",
+      "",
+      "### Proposed PLAN.md:",
+      planBody.trim(),
+    ];
+
+    if (contextBody) {
+      topicLines.push("", "### Context & Discussion (CONTEXT.md):", contextBody);
+    }
+
+    const topic = topicLines.join("\n");
+    let synthesis = "";
+    try {
+      synthesis = await opts.runDebate(topic);
+    } catch (err) {
+      console.error(`[gsd] plan review debate failed: ${(err as Error).message}`);
+    }
+
+    let verdict: PerspectiveVerdict | "pass" = "pass";
+    if (/revision\s+required|should\s+revise|must\s+revise/i.test(synthesis)) {
+      verdict = "revise";
+    } else if (/block/i.test(synthesis)) {
+      verdict = "block";
+    }
+
+    const planReviewPath = planningArtifact(cwd, "PLAN-REVIEW.md");
+    const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
+
+    const reviewContent = [
+      "# PLAN-REVIEW",
+      "",
+      `Leader: \`${leader.modelId}\``,
+      `Revision cycle: ${revisionCycle}`,
+      "",
+      "## Council Debate Synthesis",
+      "",
+      synthesis || "No synthesis generated.",
+    ].join("\n");
+
+    const verifyContent = [
+      "# PLAN-VERIFY",
+      "",
+      `verdict: ${verdict}`,
+      `revisionRequired: ${verdict === "revise" ? "yes" : "no"}`,
+      "",
+      "## Summary",
+      verdict === "pass"
+        ? "All perspectives approved via native council debate."
+        : `Council requested revision/block: ${verdict}.`,
+    ].join("\n");
+
+    writeFileSync(planReviewPath, reviewContent, "utf8");
+    writeFileSync(planVerifyPath, verifyContent, "utf8");
+
+    if (verdict === "pass") {
+      setStateField(cwd, "Plan Verified", "yes");
+      advancePhase(cwd, "execute");
+    } else {
+      setStateField(cwd, "Plan Verified", "no");
+      if (verdict === "revise") {
+        advancePhase(cwd, "plan");
+      }
+    }
+
+    return {
+      skipped: false,
+      perspectives: [],
+      planReviewPath,
+      planVerifyPath,
+      verdict,
+      leaderModelId: leader.modelId,
+      revisionRequired: verdict === "revise" || verdict === "block",
     };
   }
 

@@ -124,6 +124,7 @@ export interface CatalogModel {
   tier_routing?: boolean;
   /** Additional tiers for automatic routing (primary tier remains `tier`). */
   routing_tiers?: string[];
+  roles?: string[];
 }
 
 // ─── Schema validation (catalog drift / corruption guard) ───────────────────
@@ -148,6 +149,7 @@ const CatalogModelSchema = z
     supports_vision: z.boolean().optional(),
     tier_routing: z.boolean().optional(),
     routing_tiers: z.array(z.string()).optional(),
+    roles: z.array(z.string()).optional(),
   })
   .loose();
 
@@ -367,5 +369,6 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     supportsVision: m.supports_vision ?? true,
     tierRouting: m.tier_routing ?? true,
     routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
+    roles: m.roles,
   };
 }

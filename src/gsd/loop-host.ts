@@ -37,6 +37,7 @@ export interface LoopHostContext {
   planTitle?: string;
   shipNotes?: string[];
   commitMessage?: string;
+  runDebate?: (topic: string) => Promise<string>;
 }
 
 export interface LoopPointResult {
@@ -187,6 +188,7 @@ export class GsdLoopHost {
         depth: ctx.depth,
         runPerspectiveFn: ctx.runPerspectiveFn,
         revisionCycle: ctx.revisionCycle,
+        runDebate: ctx.runDebate,
       });
       logGsdNativeEvent(ctx.sessionId ?? "gsd-native", {
         phase: ctx.phase ?? readState(ctx.cwd).phase,
@@ -306,6 +308,7 @@ export function loopHostContext(
     | "planTitle"
     | "shipNotes"
     | "commitMessage"
+    | "runDebate"
   >,
 ): LoopHostContext {
   return {
@@ -322,5 +325,6 @@ export function loopHostContext(
     planTitle: opts?.planTitle,
     shipNotes: opts?.shipNotes,
     commitMessage: opts?.commitMessage,
+    runDebate: opts?.runDebate,
   };
 }

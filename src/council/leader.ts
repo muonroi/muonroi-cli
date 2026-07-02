@@ -146,6 +146,11 @@ export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<
     return { modelId: getRoleModel("leader") ?? sessionModelId };
   }
 
+  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  if (catalogLeader) {
+    return { modelId: catalogLeader.id };
+  }
+
   const premiumId = resolveGsdPremiumModel(sessionModelId);
   const sessionTier = tierOf(sessionModelId);
   const premiumTier = tierOf(premiumId);
@@ -168,6 +173,14 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
   const sessionReachable = !sessionDisabled && (await isProviderReachable(sessionProviderId));
   if (!sessionReachable) {
     return { modelId: configured ?? sessionModelId };
+  }
+
+  // 1. If not manually configured, and session provider has a catalog model with "leader" role, use it!
+  if (!configured) {
+    const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+    if (catalogLeader) {
+      return { modelId: catalogLeader.id };
+    }
   }
 
   // Build candidate set ON THE SESSION PROVIDER ONLY.
@@ -223,6 +236,9 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
 export function resolveLeaderModel(sessionModelId: string): string {
   const configured = getRoleModel("leader");
   if (configured) return configured;
+  const sessionProviderId = detectProviderForModel(sessionModelId);
+  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  if (catalogLeader) return catalogLeader.id;
   // See resolveLeaderModelDetailed for why we no longer silently upgrade to
   // the premium tier on the session provider (user may not have access).
   return sessionModelId;
@@ -353,8 +369,11 @@ async function resolveSameProviderCandidates(
   const candidates: Array<{ role: ModelRole; model: string }> = [];
 
   for (const role of roles) {
-    const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
-    let picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
+    let picked = providerModels.find((m) => m.roles?.includes(role) && !usedModels.has(m.id));
+    if (!picked) {
+      const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
+      picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
+    }
     if (!picked) picked = providerModels.find((m) => !usedModels.has(m.id));
     if (!picked) picked = providerModels[0];
 
