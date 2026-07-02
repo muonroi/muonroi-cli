@@ -1,4 +1,5 @@
 import { getModelInfo } from "../models/registry.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import type { StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
@@ -272,6 +273,37 @@ async function openingWithRetry(
   return { text: "", attempts: MAX_OPENING_ATTEMPTS, error: lastError };
 }
 
+/**
+ * Pick a debate fallback model on a DIFFERENT provider than `failedModel`.
+ *
+ * When a participant's model fails BOTH same-model attempts (e.g. opencode-go
+ * proxy overload "Upstream request failed", or a param-reject that survives the
+ * adapter-level degrade), retrying the same endpoint just fails again — live
+ * session renders showed the same speaker dropped 3× in a row, silently
+ * shrinking the debate. Falling back to any pooled council model on another
+ * provider keeps that voice in the discussion. Returns undefined when every
+ * pooled model resolves to the same provider (nothing to fall back to).
+ */
+function pickDebateFallbackModel(failedModel: string, pool: string[]): string | undefined {
+  let failedProvider: string | undefined;
+  try {
+    failedProvider = detectProviderForModel(failedModel);
+  } catch {
+    failedProvider = undefined;
+  }
+  for (const candidate of pool) {
+    if (candidate === failedModel) continue;
+    let candidateProvider: string | undefined;
+    try {
+      candidateProvider = detectProviderForModel(candidate);
+    } catch {
+      continue;
+    }
+    if (candidateProvider && candidateProvider !== failedProvider) return candidate;
+  }
+  return undefined;
+}
+
 async function debateWithRetry(
   llm: CouncilLLM,
   model: string,
@@ -280,6 +312,7 @@ async function debateWithRetry(
   signal: AbortSignal | undefined,
   traceCb: (t: string) => void,
   toolBudget: ToolBudget,
+  fallbackPool: string[] = [],
 ): Promise<{
   text: string;
   toolCalls: Array<{ toolName: string; result?: unknown }>;
@@ -315,27 +348,50 @@ async function debateWithRetry(
   // Retry once — if first attempt was tool-enabled and came back empty, the
   // reasoning model likely hit the step cap on a tool call without producing
   // text. Retry WITHOUT tools to guarantee analytical output.
+  let retryError: string;
+  let retryToolCalls: Array<{ toolName: string; result?: unknown }> = [];
   try {
     const retry = await llm.debate(model, system, prompt, signal, traceCb, { enableVerificationTools: false });
     const text = (retry.text ?? "").trim();
     if (text.length > 0) {
       return { text: retry.text, toolCalls: retry.toolCalls ?? [], attempts: 2 };
     }
-    return {
-      text: "",
-      toolCalls: retry.toolCalls ?? [],
-      failureReason: `provider returned empty completion on both attempts (initial: ${firstError})`,
-      attempts: 2,
-    };
+    retryToolCalls = retry.toolCalls ?? [];
+    retryError = "provider returned empty completion";
   } catch (err) {
-    const retryMsg = err instanceof Error ? err.message : String(err);
-    return {
-      text: "",
-      toolCalls: [],
-      failureReason: `both attempts failed — initial: ${firstError}; retry: ${retryMsg}`,
-      attempts: 2,
-    };
+    retryError = err instanceof Error ? err.message : String(err);
   }
+
+  // Both same-model attempts failed. Before dropping this speaker from the
+  // debate, try ONE cross-provider fallback — the primary endpoint is either
+  // overloaded (opencode-go "Upstream request failed") or param-rejecting, and
+  // a third same-model hit would just fail identically. Skip when the caller
+  // aborted (user cancellation must not be papered over by a fallback call).
+  if (!signal?.aborted) {
+    const fallbackModel = pickDebateFallbackModel(model, fallbackPool);
+    if (fallbackModel) {
+      try {
+        const fb = await llm.debate(fallbackModel, system, prompt, signal, traceCb, {
+          enableVerificationTools: false,
+        });
+        const text = (fb.text ?? "").trim();
+        if (text.length > 0) {
+          traceCb(`[debate] ${model} failed both attempts; recovered via fallback ${fallbackModel}`);
+          return { text: fb.text, toolCalls: fb.toolCalls ?? [], attempts: 3 };
+        }
+      } catch (err) {
+        const fbMsg = err instanceof Error ? err.message : String(err);
+        traceCb(`[debate] fallback ${fallbackModel} for ${model} also failed: ${fbMsg}`);
+      }
+    }
+  }
+
+  return {
+    text: "",
+    toolCalls: retryToolCalls,
+    failureReason: `both attempts failed — initial: ${firstError}; retry: ${retryError}`,
+    attempts: 2,
+  };
 }
 
 export async function* runDebate(
@@ -344,6 +400,12 @@ export async function* runDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
+  // Cross-provider fallback pool for debateWithRetry: leader + every
+  // participant model, deduped. When a speaker's model fails both same-model
+  // attempts, debateWithRetry retries once on the first pooled model whose
+  // provider differs, so an overloaded provider (opencode-go) can't silently
+  // drop a voice from the debate.
+  const fallbackPool = Array.from(new Set([leaderModelId, ...participants.map((p) => p.model)]));
   // Correlation id for the observe-only council-turn-length telemetry (groups
   // per-turn length samples by run). sessionId in production; a stable literal
   // for direct callers/tests that omit runId.
@@ -647,6 +709,7 @@ export async function* runDebate(
                   signal,
                   (t) => aTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
@@ -678,6 +741,7 @@ export async function* runDebate(
                   signal,
                   (t) => bTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;
@@ -715,6 +779,7 @@ export async function* runDebate(
                   signal,
                   (t) => aTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
@@ -748,6 +813,7 @@ export async function* runDebate(
                   signal,
                   (t) => bTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;

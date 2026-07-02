@@ -39,6 +39,14 @@ export interface ClarifiedSpec {
   }>;
   /** Populated by P6 when the spec is converted to a Backlog. */
   backlogId?: string;
+  /**
+   * Ongoing-task / conversation context captured at council entry. Attached in
+   * council/index.ts on BOTH the explicit `/council` path and auto-council, so
+   * every debate stage (not just the opening statement) stays anchored to the
+   * parent task and the decisions already made earlier in the session. Optional
+   * for backward compat — empty when the council runs with no prior context.
+   */
+  parentContext?: string;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────

@@ -185,18 +185,66 @@ function isAnyProviderApiBase(url: string | null | undefined): boolean {
   return false;
 }
 
+const TITLE_SYSTEM_PROMPT = `You are a session-naming assistant. Given the first message a user sent to an AI coding assistant, produce a short session title.
+
+Rules:
+- 5-7 words that capture the essence of the request (the goal, not the phrasing).
+- Same language as the user's message (English request → English title, Vietnamese → Vietnamese, etc.).
+- Title Case for languages that use it; natural casing otherwise.
+- No surrounding quotes, no trailing punctuation, no emoji, no markdown.
+- Output ONLY the title text — nothing else.`;
+
+/** Deterministic fallback title: truncated first user message. */
+function fallbackTitle(userMessage: string): string {
+  return userMessage.slice(0, 60).trim() || "New session";
+}
+
+/** Strip quotes/backticks, collapse whitespace, drop trailing punctuation, cap at ~60 chars. */
+function sanitizeTitle(raw: string): string {
+  let t = raw.trim().split("\n")[0]?.trim() ?? "";
+  t = t.replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "");
+  t = t
+    .replace(/\s+/g, " ")
+    .replace(/[.,:;!?…]+$/g, "")
+    .trim();
+  if (t.length > 60) t = t.slice(0, 60).trim();
+  return t;
+}
+
 /**
- * Generate a session title using the Anthropic provider.
- * Kept as a lightweight stub for Phase 0 — title generation ships in Phase 1.
+ * Generate a session title with a single lightweight LLM call on the current
+ * session model. Falls back to a truncated first-message title on any failure.
  */
-function genTitle(
-  _provider: LegacyProvider,
+async function genTitle(
+  provider: LegacyProvider,
   userMessage: string,
+  modelId: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
-  // Phase 0 stub: return a truncated version of the first user message as title.
-  // Phase 1 will replace this with a real LLM-based title generation call.
-  const title = userMessage.slice(0, 60).trim() || "New session";
-  return Promise.resolve({ title, modelId: getCurrentModel() });
+  try {
+    const { generateText } = await import("ai");
+    const runtime = resolveModelRuntime(provider, modelId);
+    const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
+
+    const { text, usage } = await generateText({
+      model: runtime.model,
+      system: TITLE_SYSTEM_PROMPT,
+      prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
+      temperature: 0.3,
+      ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    });
+
+    const title = sanitizeTitle(text ?? "");
+    if (title) {
+      return { title, modelId, usage };
+    }
+    console.error(`[orchestrator/genTitle] title generation returned empty text (model=${modelId}); using fallback`);
+  } catch (err) {
+    console.error(
+      `[orchestrator/genTitle] title generation failed (model=${modelId}): ${(err as Error)?.message}; using fallback`,
+    );
+  }
+  return { title: fallbackTitle(userMessage), modelId };
 }
 
 /**
@@ -690,7 +738,7 @@ export class Agent {
       return "New session";
     }
 
-    const generated = await genTitle(provider, userMessage);
+    const generated = await genTitle(provider, userMessage, this.modelId);
     this.recordUsage(generated.usage, "title", generated.modelId);
     if (this.sessionStore && this.session && !this.session.title && generated.title) {
       this.sessionStore.setTitle(this.session.id, generated.title);

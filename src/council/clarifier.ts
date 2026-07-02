@@ -442,13 +442,18 @@ export async function* runClarification(
   return spec;
 }
 
-export function buildSpecFromTopic(topic: string, _conversationContext: string): ClarifiedSpec {
+export function buildSpecFromTopic(topic: string, conversationContext: string): ClarifiedSpec {
   return {
     problemStatement: topic,
     constraints: [],
     successCriteria: [`Address the topic: ${topic.slice(0, 100)}`],
     scope: "Determined by conversation context",
     rawQA: [],
+    // Carry the session/task context onto the spec so every debate stage (not
+    // just the opening) can stay anchored to the parent task. Previously this
+    // argument was dropped (prefixed `_`), which is why auto-council debates saw
+    // only the isolated sub-task and drifted off-topic.
+    parentContext: conversationContext?.trim() || undefined,
   };
 }
 

@@ -111,8 +111,8 @@ export function buildPreflightQuestion(pf: {
     question: `Approve discussion plan for: ${pf.problemStatement}`,
     context: pf.participants.length > 0 ? `Participants: ${pf.participants.map((p) => p.role).join(", ")}` : undefined,
     options: [
-      { label: "Approve", value: "approve", kind: "choice", description: "Start the debate now" },
-      { label: "Reject", value: "reject", kind: "choice", description: "Cancel and rewrite the topic" },
+      { label: "Approve", value: "approve", kind: "choice", description: "Looks good — start the debate" },
+      { label: "Reject", value: "reject", kind: "choice", description: "Hold off — go back and rephrase the topic" },
     ],
     isRequired: true,
     defaultIndex: 0,

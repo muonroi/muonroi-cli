@@ -259,6 +259,15 @@ export async function* runCouncil(
       yield { type: "content", content: `\n> Auto-council: skipping clarification (PIL pre-classified).\n` };
     }
 
+    // Guarantee context continuity on BOTH paths: the explicit `/council`
+    // clarifier (synthesizeSpec / inferSpecFromTopicOnly) does not always set
+    // parentContext, and the skip path sets it via buildSpecFromTopic. Attach it
+    // centrally here so every downstream debate stage sees the ongoing task
+    // context regardless of how the council was triggered.
+    if (!spec.parentContext) {
+      spec.parentContext = conversationContext?.trim() || undefined;
+    }
+
     // Cancelled during clarification — don't pop the preflight approval card.
     if (userAborted()) break;
 

@@ -45,7 +45,11 @@ const AnalyzeSchema = z.object({
 });
 
 const DocsSchema = z.object({
-  content: z.string().describe("Markdown documentation"),
+  content: z
+    .string()
+    .describe(
+      "Markdown documentation written for a human reader — clear, concrete prose that explains what things do and why they matter, not boilerplate section-by-section filler. Prefer a short working example over an abstract description; only add headings the content actually earns.",
+    ),
   examples: z
     .array(
       z.object({
@@ -71,7 +75,7 @@ const GeneralSchema = z.object({
   response: z
     .string()
     .describe(
-      "Complete, full-length answer. Use rich markdown formatting (headings, bullet points, bold text, code blocks) to structure the information clearly. Avoid dense walls of text or long unformatted paragraphs. Ensure the output is highly readable and scannable for a developer. For analysis or meta questions, include all findings and evidence citations (file:line). Truncation defeats the purpose.",
+      "Your complete answer, written the way a sharp colleague would explain it — direct, specific, and in plain language. Lead with the answer itself, then the supporting detail. Use markdown where it genuinely helps (code blocks for code, a list when items are truly parallel, a heading only when the answer has real sections) — never as decoration, and never force prose into bullet fragments or a fixed template. Vary sentence rhythm; skip filler openers like 'Certainly' or 'Below is a summary'. For analysis or meta questions, keep every finding and its evidence citation (file:line) — do not truncate.",
     ),
   reasoning: z.string().optional().describe("Optional brief internal reasoning (not shown as primary answer)"),
 });
@@ -177,7 +181,7 @@ export function buildResponseTools(taskType: string): ToolSet {
   const toolName = `${RESPONSE_TOOL_PREFIX}${taskType}`;
   return {
     [toolName]: {
-      description: `Return your ${taskType} response as structured JSON. Always use this tool to respond.`,
+      description: `Return your ${taskType} response as structured JSON. Always use this tool to respond. Write every prose field in a natural, conversational-but-professional voice — the way you would explain it to a colleague — not in stiff, templated report language.`,
       inputSchema: schema,
       execute: async (input: unknown) => input,
     },

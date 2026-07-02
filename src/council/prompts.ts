@@ -229,7 +229,35 @@ function personaOf(role: string, stance?: DebateStance): { label: string; lens: 
       focus: stance.focus ?? "",
     };
   }
-  return { label: `${role} specialist`, lens: `your ${role} perspective`, focus: "" };
+  return {
+    label: `${role} specialist`,
+    lens: `the ${role} discipline — what a proposal costs, breaks, or unlocks in your domain, judged with a practitioner's scar tissue`,
+    focus: "",
+  };
+}
+
+/**
+ * Ongoing-task context block, threaded from `spec.parentContext`. Both the
+ * explicit `/council` path and auto-council attach the session/task context onto
+ * the spec (see council/index.ts), so EVERY debate stage — rebuttal, follow-up,
+ * leader evaluation, synthesis — stays anchored to the parent task and the
+ * decisions already made, instead of drifting off the isolated sub-task.
+ *
+ * `buildOpeningPrompt` already injects `conversationContext` directly, so it does
+ * NOT call this (avoids double-inclusion in the opening statement). Capped so a
+ * long session context cannot blow the per-turn debate prompt budget.
+ */
+function ongoingContextBlock(spec: ClarifiedSpec, cap = 4000): string {
+  const ctx = spec.parentContext?.trim();
+  if (!ctx) return "";
+  const body = ctx.length > cap ? `${ctx.slice(0, cap)}\n…(earlier context truncated)` : ctx;
+  return (
+    `\n## Ongoing Task Context\n` +
+    `You are mid-way through a larger task — this debate continues that work; it does not restart it. ` +
+    `Treat every decision recorded below as settled input: build directly on it, and make your arguments advance the parent task from where it stands now. ` +
+    `Do not reopen settled decisions, do not propose starting over, and do not wander onto any problem other than the one this step serves.\n` +
+    `${body}\n\n---\n\n`
+  );
 }
 
 export function buildOpeningPrompt(ctx: {
@@ -250,8 +278,10 @@ export function buildOpeningPrompt(ctx: {
   const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
-      `You are the "${me.label}". Your lens: ${me.lens}.\n` +
-      `You are entering a discussion with the "${them.label}" (${them.lens}).\n` +
+      `You are the "${me.label}", and you own that chair. Your lens: ${me.lens}. ` +
+      `Speak like someone who has watched this exact class of problem fail before — not like a document.\n` +
+      `You are entering a discussion with the "${them.label}" (${them.lens}). ` +
+      `They are sharp and they will push back; a claim you cannot defend is a claim you should not open with.\n` +
       focusLine +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_OPENING +
@@ -264,9 +294,10 @@ export function buildOpeningPrompt(ctx: {
       `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
       `Scope: ${ctx.spec.scope}\n\n` +
-      `Share your analysis from your stated lens. Focus on the success criteria — address each one. ` +
-      `End by asking the "${them.label}" for their perspective on your analysis.`,
-    prompt: `Analyze the problem through your stated lens. Be specific, evidence-based, and stay within your stance — do not drift into another role's perspective.`,
+      `Deliver your opening analysis in your own voice. Take the success criteria one by one: say plainly ` +
+      `which are easy, which are hard, and where — from your seat — the bodies are buried. ` +
+      `Close by putting one pointed question to the "${them.label}": the question you most need answered before you would sign off.`,
+    prompt: `Open the debate from your stated lens. Stake out a real position — a stance nobody could disagree with is not a stance. Be specific and evidence-based, and do not drift into another role's perspective; your value here is depth, not coverage.`,
   };
 }
 
@@ -284,7 +315,8 @@ export function buildResponsePrompt(ctx: {
   const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}).\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) responding to the "${them.label}" (lens: ${them.lens}). ` +
+      `This is a working session between peers — candid, specific, zero diplomacy theater.\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_RESPONSE +
       concisenessRule(160) +
@@ -292,11 +324,12 @@ export function buildResponsePrompt(ctx: {
       `\n## Discussion Brief\n` +
       `Problem: ${ctx.spec.problemStatement}\n` +
       `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n\n` +
-      `Give your honest take:\n` +
-      `- Where you agree, say so briefly and build on it\n` +
-      `- Where you disagree, explain why with your own reasoning\n` +
-      `- Share what they might be missing from your stated lens\n\n` +
-      `End with a question back to them.\n\n` +
+      ongoingContextBlock(ctx.spec) +
+      `React the way a good colleague does:\n` +
+      `- Where they are right, concede fast — one line — then build their point somewhere they did not take it\n` +
+      `- Where they are wrong, say so plainly and name the exact assumption that breaks\n` +
+      `- Name the blind spot: the thing your lens sees that theirs structurally cannot\n\n` +
+      `End by pressing them with one sharp question — aimed at the weakest joint in their argument.\n\n` +
       `Do NOT include round numbers (e.g. "Round N", "Round 2 Response", "Reply #3") ` +
       `or any numeric counter referring to the discussion round in your output. ` +
       `The orchestrator already prints round headers above your response.`,
@@ -323,23 +356,25 @@ export function buildFollowupPrompt(ctx: {
   const stackLock = buildStackLockSection(ctx.spec);
   return {
     system:
-      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}).\n` +
+      `You are the "${me.label}" (lens: ${me.lens}) continuing a discussion (round ${ctx.round}) with the "${them.label}" (lens: ${them.lens}). ` +
+      `The easy points are settled; what remains is the hard residue — spend your words only there.\n` +
       ENGLISH_ONLY_RULE +
       EVIDENCE_RULE_FOLLOWUP +
       concisenessRule(140) +
       (stackLock ? `\n${stackLock}\n` : "") +
       `\n` +
+      ongoingContextBlock(ctx.spec) +
       (ctx.runningSummary
-        ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Do not repeat agreed positions.\n\n`
+        ? `## Discussion State So Far\n${ctx.runningSummary}\n\nFocus on UNRESOLVED points only. Restating agreed positions is dead weight — the summary above already holds them.\n\n`
         : "") +
       `## Success Criteria (what we need to resolve)\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
       `\n\n` +
-      `Read their latest response. Then:\n` +
-      `- If they raised valid points, acknowledge them and update your thinking\n` +
-      `- If you still disagree, bring new evidence or a different angle\n` +
-      `- If you've changed your mind, say so explicitly\n\n` +
-      `Stay within your lens; do not drift into the other specialist's role. ` +
+      `Read their latest response like a peer, not a debater scoring points. Then:\n` +
+      `- If they landed a real hit, say so and update — changing your mind on evidence is strength, not defeat\n` +
+      `- If you still disagree, do not repeat yourself louder; bring NEW evidence or attack from an angle you have not used\n` +
+      `- If you have genuinely converged, declare it in one sentence and stop arguing\n\n` +
+      `Stay in your lane — your lens, not theirs. ` +
       `Be concise. End with: do you agree on where we've landed?\n\n` +
       `Do NOT include round numbers (e.g. "Round N", "Response Round 2", "Round 4") ` +
       `or any numeric counter referring to the discussion round in your output. ` +
@@ -372,6 +407,7 @@ export function buildLeaderEvaluationPrompt(ctx: { spec: ClarifiedSpec; exchange
       `\n## Success Criteria to Evaluate\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
       `\n\n` +
+      ongoingContextBlock(ctx.spec) +
       `For EACH criterion, determine:\n` +
       `- Is it adequately addressed by the debate? (met/not-met)\n` +
       `- What evidence from the debate supports this?\n\n` +
@@ -416,11 +452,11 @@ export function buildRoundSummaryPrompt(
     system:
       `Summarize this discussion in 3-5 bullet points.` +
       ENGLISH_ONLY_RULE +
-      `\nFocus on:\n` +
-      `1. Points where participants AGREE\n` +
-      `2. Points still in DISPUTE (with each side's core argument)\n` +
-      `3. New EVIDENCE or perspectives raised this round\n` +
-      `Be concise — one line per bullet. No preamble. ` +
+      `\nYou are the debate's working memory — later turns see ONLY your bullets, so anything you drop is lost. Capture:\n` +
+      `1. AGREED — points both sides now share\n` +
+      `2. DISPUTED — live disagreements, with each side's strongest single argument (not their weakest)\n` +
+      `3. NEW — evidence, verified facts, or angles that first surfaced this round\n` +
+      `Be concise — one line per bullet. No preamble, no color commentary. ` +
       `Do NOT write "Round N" or any round-number counter in your bullets — this summary is fed into later turns, where round labels read as robotic noise. Refer to points by their content.`,
     prompt: `Round ${round} discussion on: ${topic}\n\n${allExchanges}`,
   };
@@ -528,7 +564,8 @@ export function buildDebatePlanPrompt(spec: ClarifiedSpec): { system: string; pr
       `## Topic\n${spec.problemStatement}\n\n` +
       `## Constraints\n${spec.constraints.map((c) => `- ${c}`).join("\n") || "- (none)"}\n\n` +
       `## Success Criteria\n${spec.successCriteria.map((c) => `- ${c}`).join("\n")}\n\n` +
-      `## Scope\n${spec.scope || "(unspecified)"}`,
+      `## Scope\n${spec.scope || "(unspecified)"}` +
+      ongoingContextBlock(spec),
   };
 }
 
@@ -618,22 +655,26 @@ export function buildSynthesisPrompt(ctx: {
     finalShape.kind === "decision" || finalShape.kind === "implementation_plan"
       ? `\n## Decisiveness (recommendation/verdict)\n` +
         `Lead with the single choice you would make if the user said "you decide" — name it in the first sentence of the recommendation. ` +
-        `Do NOT hedge with "it depends", "both have merits", or an unranked list of options. ` +
+        `Do NOT hedge with "it depends", "both have merits", or an unranked list of options; the user hired a panel to get a call, not a menu. ` +
         `If the debate genuinely did not converge, say so in one sentence and STILL give your best single recommendation plus the one condition that would change it.\n`
       : "";
   let system =
-    `You are the team lead synthesizing a multi-specialist discussion.\n\n` +
+    `You are the team lead synthesizing a multi-specialist discussion. The panel has argued; now you rule. ` +
+    `Work like an editor-in-chief: keep what survived scrutiny, cut what got refuted, credit the dissent worth keeping, ` +
+    `and hand the user something they can act on without re-reading the debate.\n\n` +
     `## Original Brief\n` +
     `Problem: ${ctx.spec.problemStatement}\n` +
     `Constraints: ${ctx.spec.constraints.join("; ")}\n` +
     `Success Criteria: ${ctx.spec.successCriteria.join("; ")}\n` +
+    ongoingContextBlock(ctx.spec) +
     intent +
     (stackLockForSynth ? `\n${stackLockForSynth}\n` : "") +
     guardrailBlock +
     decisiveness +
-    `\nProduce the answer the user requested — do NOT default to an implementation plan ` +
+    `\nProduce the answer the user actually asked for — do NOT default to an implementation plan ` +
     `unless the output shape explicitly asks for actionItems/plan. ` +
-    `Stay grounded in the discussion; do not invent facts; mark unverified claims explicitly.\n\n` +
+    `Stay grounded in what was actually said in the debate: you may sharpen and arbitrate, but never invent facts ` +
+    `the specialists did not raise, and mark unverified claims explicitly.\n\n` +
     `## Language Rule (mandatory)\n` +
     `The debate above is entirely in English (debate language is forced). The user wrote the ` +
     `Problem Statement above in their own native language. You must:\n` +
@@ -656,7 +697,7 @@ export function buildSynthesisPrompt(ctx: {
     `}\n\n` +
     `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
     headingLines +
-    `\n\nBe decisive but evidence-grounded.`;
+    `\n\nBe decisive but evidence-grounded — a verdict without evidence is noise; evidence without a verdict is homework handed back to the user.`;
 
   if (styleDirective) {
     system = `${styleDirective}\n\n${system}`;

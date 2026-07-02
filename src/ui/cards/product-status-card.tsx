@@ -88,7 +88,7 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
           <box>
             <text fg={t.textMuted}>{"Burn:     "}</text>
             <text fg={costColor}>{costSpark}</text>
-            <text fg={t.textDim}>{` (per-sprint)`}</text>
+            <text fg={t.textDim}>{` spend per sprint`}</text>
           </box>
         )}
         <Semantic id={`ideal-phase-criteria`} role="listitem" name="Criteria">
@@ -106,7 +106,7 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
           <box>
             <text fg={t.textMuted}>{"Trend:    "}</text>
             <text fg={t.planOptionCheck}>{criteriaSpark}</text>
-            <text fg={t.textDim}>{` met-ratio per sprint`}</text>
+            <text fg={t.textDim}>{` criteria met per sprint`}</text>
           </box>
         )}
       </box>
