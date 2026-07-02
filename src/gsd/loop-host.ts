@@ -199,6 +199,8 @@ export class GsdLoopHost {
         leaderModelId: council.leaderModelId,
         councilContextChars: council.contextBundleChars,
         councilHadPriorConcerns: council.hadPriorConcerns,
+        councilVerdictSource: council.verdictSource,
+        councilVerdictParseFailed: council.verdictParseFailed,
       });
     });
 

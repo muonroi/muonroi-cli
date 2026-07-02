@@ -13,6 +13,8 @@ export interface GsdNativeTelemetry {
   leaderModelId?: string;
   councilContextChars?: number;
   councilHadPriorConcerns?: boolean;
+  councilVerdictSource?: "structured" | "heuristic-fallback" | "parse-failed";
+  councilVerdictParseFailed?: boolean;
   phaseNumber?: string;
   shipNotes?: string[];
 }
