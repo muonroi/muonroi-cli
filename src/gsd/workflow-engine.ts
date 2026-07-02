@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { ensurePlanningWorkspace } from "./config-bridge.js";
-import { dispatchInitProgress, dispatchStateJson, dispatchStateUpdate } from "./gsd-dispatch.js";
+import { dispatchInitProgress, dispatchStateJson, dispatchStateUpdate, invalidateGsdCache } from "./gsd-dispatch.js";
 import { loadStateDocument } from "./gsd-runtime.js";
 import { latestPhaseDir, planningArtifact } from "./paths.js";
 import type { GsdPhase } from "./types.js";
@@ -190,6 +190,9 @@ export function setStateField(cwd: string, field: string, value: string): Workfl
     return readState(cwd);
   }
   writeStateFile(cwd, next);
+  // STATE.md just changed on disk → drop cached subprocess reads so the next
+  // dispatch / readState-with-progress sees the new mtime bucket.
+  invalidateGsdCache(cwd);
   return readState(cwd);
 }
 

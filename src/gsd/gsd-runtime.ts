@@ -21,9 +21,15 @@ export interface LoopHostContractEntry {
   coreArtifacts: { produces: string[]; consumes: string[] };
 }
 
+// Static for the lifetime of the installed @opengsd/gsd-core version —
+// safe to memoise process-wide. Invalidated only on hot-reload (not wired).
+let _loopHostContractCache: LoopHostContractEntry[] | null = null;
+
 export function loadLoopHostContract(): LoopHostContractEntry[] {
+  if (_loopHostContractCache) return _loopHostContractCache;
   const mod = loadGsdLib<{ LOOP_HOST_CONTRACT: LoopHostContractEntry[] }>("loop-host-contract");
-  return mod.LOOP_HOST_CONTRACT;
+  _loopHostContractCache = mod.LOOP_HOST_CONTRACT;
+  return _loopHostContractCache;
 }
 
 export function allLoopHostPoints(): string[] {

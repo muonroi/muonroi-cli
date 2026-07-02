@@ -70,4 +70,39 @@ describe("plan-council", () => {
     expect(result.verdict).not.toBe("pass");
     expect(canExecute(tmp, "standard").allowed).toBe(false);
   });
+
+  it("surfaces prior PLAN-REVIEW concerns + CONTEXT/RESEARCH to debate topic", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-ctx-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    writeFileSync(planningArtifact(tmp, "CONTEXT.md"), "Gray area: should we cache at SDK or app layer?", "utf8");
+    writeFileSync(planningArtifact(tmp, "RESEARCH.md"), "Finding: SDK cache hook exists at src/sdk.ts:42", "utf8");
+    writeFileSync(
+      planningArtifact(tmp, "PLAN-REVIEW.md"),
+      "# PLAN-REVIEW\n\n## Concerns\n\n- Plan misses retry path\n- No timeout policy\n",
+      "utf8",
+    );
+
+    const seen = new Set<string>();
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      revisionCycle: 1,
+      runPerspectiveFn: async (prompt) => {
+        // Capture what each perspective actually received.
+        seen.add(prompt);
+        return JSON.stringify({ verdict: "approve", concerns: [], evidence: [] });
+      },
+    });
+
+    // Every perspective prompt must include the GSD context block + prior concerns directive.
+    for (const prompt of seen) {
+      expect(prompt).toContain("GSD Context");
+      expect(prompt).toContain("Prior council concerns");
+      expect(prompt).toContain("Plan misses retry path");
+    }
+    expect(result.hadPriorConcerns).toBe(true);
+    expect(result.contextBundleChars ?? 0).toBeGreaterThan(0);
+  });
 });

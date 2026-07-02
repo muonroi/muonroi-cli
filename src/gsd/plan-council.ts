@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolvePlanCouncilLeader } from "../council/leader.js";
 import type { ToolResult } from "../types/index.js";
+import { buildCouncilContextBundle, renderCouncilContextBlock } from "./council-context.js";
 import { buildGsdPerspectiveTaskRequest } from "./model-tier.js";
 import { planningArtifact } from "./paths.js";
 import {
@@ -30,6 +31,10 @@ export interface PlanCouncilResult {
   verdict: PerspectiveVerdict | "pass";
   leaderModelId?: string;
   revisionRequired: boolean;
+  /** Chars of GSD context fed to council (telemetry — surfaces grounding quality). */
+  contextBundleChars?: number;
+  /** True when prior PLAN-REVIEW concerns were surfaced to council. */
+  hadPriorConcerns?: boolean;
 }
 
 export type RunPerspectiveFn = (prompt: string, perspective: PlanPerspective) => Promise<string>;
@@ -80,13 +85,14 @@ function heuristicReview(planBody: string, perspective: PlanPerspective): Perspe
 async function runPerspective(
   planBody: string,
   perspective: PlanPerspective,
-  runFn?: RunPerspectiveFn,
+  runFn: RunPerspectiveFn | undefined,
+  bundle?: import("./council-context.js").CouncilContextBundle,
 ): Promise<PerspectiveResult> {
   if (!runFn) {
     return heuristicReview(planBody, perspective);
   }
   try {
-    const raw = await runFn(buildPerspectivePrompt(perspective, planBody), perspective);
+    const raw = await runFn(buildPerspectivePrompt(perspective, planBody, bundle), perspective);
     const parsed = JSON.parse(raw) as {
       verdict?: string;
       concerns?: string[];
@@ -162,26 +168,16 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
 
   if (opts.runDebate) {
     const leader = await resolvePlanCouncilLeader(sessionModelId);
-    let contextBody = "";
-    const contextPath = planningArtifact(cwd, "CONTEXT.md");
-    if (existsSync(contextPath)) {
-      try {
-        contextBody = readFileSync(contextPath, "utf8").trim();
-      } catch (err) {
-        console.error(`[gsd] failed to read CONTEXT.md: ${(err as Error).message}`);
-      }
-    }
+    const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
 
     const topicLines = [
       "Review and debate the proposed plan to determine if it is complete, correct, safe, and optimal for the task.",
       "",
+      renderCouncilContextBlock(bundle),
+      "",
       "### Proposed PLAN.md:",
       planBody.trim(),
     ];
-
-    if (contextBody) {
-      topicLines.push("", "### Context & Discussion (CONTEXT.md):", contextBody);
-    }
 
     const topic = topicLines.join("\n");
     let synthesis = "";
@@ -245,13 +241,16 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       verdict,
       leaderModelId: leader.modelId,
       revisionRequired: verdict === "revise" || verdict === "block",
+      contextBundleChars: bundle.totalChars,
+      hadPriorConcerns: bundle.hadPriorConcerns,
     };
   }
 
   const leader = await resolvePlanCouncilLeader(sessionModelId);
+  const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
   const results: PerspectiveResult[] = [];
   for (const p of perspectives) {
-    results.push(await runPerspective(planBody, p, runPerspectiveFn));
+    results.push(await runPerspective(planBody, p, runPerspectiveFn, bundle));
   }
 
   const verdict = mergeVerdict(results);
@@ -279,6 +278,8 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     verdict,
     leaderModelId: leader.modelId,
     revisionRequired: verdict === "revise" || verdict === "block",
+    contextBundleChars: bundle.totalChars,
+    hadPriorConcerns: bundle.hadPriorConcerns,
   };
 }
 

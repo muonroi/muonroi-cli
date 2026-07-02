@@ -25,7 +25,13 @@ describe("gsd-native E2E smoke", () => {
 
   afterAll(() => {
     ctx?.cleanup();
-    if (greenfield) rmSync(greenfield, { recursive: true, force: true });
+    if (greenfield) {
+      try {
+        rmSync(greenfield, { recursive: true, force: true });
+      } catch {
+        /* best-effort — EBUSY on Windows when child handles linger */
+      }
+    }
   });
 
   it("boots agent-mode TUI with MUONROI_GSD_NATIVE=1", async () => {

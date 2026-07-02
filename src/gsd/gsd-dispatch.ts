@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gsdCoreLibDir, loadGsdLib } from "./gsd-runtime.js";
+import { planningArtifact } from "./paths.js";
 
 const require = createRequire(import.meta.url);
 
@@ -82,7 +84,7 @@ export function dispatchLoopRenderHooks(cwd: string, point: string): GsdDispatch
 
 /** gsd-tools init progress — milestone/phase progress JSON. */
 export function dispatchInitProgress(cwd: string): GsdDispatchResult {
-  return runGsdTools(cwd, ["init", "progress"]);
+  return readThroughCache(cwd, "init.progress", () => runGsdTools(cwd, ["init", "progress"]));
 }
 
 /** gsd-tools config-ensure-section — bootstrap .planning/config.json. */
@@ -90,9 +92,61 @@ export function dispatchConfigEnsure(cwd: string): GsdDispatchResult {
   return runGsdTools(cwd, ["config-ensure-section"]);
 }
 
+// ----- Per-cwd read-through cache for init.progress / state.json -----
+// These subprocess outputs only change when STATE.md changes, so we memoise
+// keyed on STATE.md mtime. Any in-process write (setStateField / dispatchStateUpdate)
+// MUST call invalidateGsdCache(cwd) to prevent stale reads.
+
+interface CacheEntry {
+  stateMtimeMs: number;
+  value: GsdDispatchResult;
+}
+
+const _dispatchCache = new Map<string, Map<string, CacheEntry>>();
+
+function stateMtimeMs(cwd: string): number {
+  try {
+    const p = planningArtifact(cwd, "STATE.md");
+    return existsSync(p) ? statSync(p).mtimeMs : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function readThroughCache(cwd: string, key: string, produce: () => GsdDispatchResult): GsdDispatchResult {
+  const mtime = stateMtimeMs(cwd);
+  let bucket = _dispatchCache.get(cwd);
+  if (!bucket) {
+    bucket = new Map();
+    _dispatchCache.set(cwd, bucket);
+  }
+  const hit = bucket.get(key);
+  if (hit && hit.stateMtimeMs === mtime) {
+    return hit.value;
+  }
+  const value = produce();
+  // Only cache successful reads — failures usually mean .planning/ absent;
+  // caching them would mask a subsequent bootstrap.
+  if (value.ok) {
+    bucket.set(key, { stateMtimeMs: mtime, value });
+  } else {
+    bucket.delete(key);
+  }
+  return value;
+}
+
+/** Drop cached dispatch results for a cwd. Call after ANY write to STATE.md. */
+export function invalidateGsdCache(cwd: string): void {
+  _dispatchCache.delete(cwd);
+}
+
 /** gsd-tools state update <field> <value> — uses gsd-core state-transition module. */
 export function dispatchStateUpdate(cwd: string, field: string, value: string): GsdDispatchResult {
-  return runGsdTools(cwd, ["state", "update", field, value]);
+  const result = runGsdTools(cwd, ["state", "update", field, value]);
+  // State writes mutate STATE.md → drop cached reads so the next dispatch
+  // sees fresh data.
+  invalidateGsdCache(cwd);
+  return result;
 }
 
 export interface RoadmapPhaseEntry {
@@ -162,9 +216,11 @@ export function dispatchRoadmapAnalyze(cwd: string): GsdDispatchResult<RoadmapAn
 
 /** gsd-tools state json — frontmatter snapshot. */
 export function dispatchStateJson(cwd: string): GsdDispatchResult<Record<string, unknown>> {
-  const result = runGsdTools(cwd, ["state", "json"]);
-  if (!result.ok) return result as GsdDispatchResult<Record<string, unknown>>;
-  return { ok: true, data: result.data as Record<string, unknown>, raw: result.raw };
+  return readThroughCache(cwd, "state.json", () => {
+    const result = runGsdTools(cwd, ["state", "json"]);
+    if (!result.ok) return result as GsdDispatchResult<Record<string, unknown>>;
+    return { ok: true, data: result.data as Record<string, unknown>, raw: result.raw };
+  }) as GsdDispatchResult<Record<string, unknown>>;
 }
 
 /** In-process loop hook resolution (no subprocess) — for tests and low-latency paths. */

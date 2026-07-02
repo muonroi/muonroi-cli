@@ -1,3 +1,6 @@
+import type { CouncilContextBundle } from "./council-context.js";
+import { renderCouncilContextBlock } from "./council-context.js";
+
 export type PlanPerspectiveId = "architect" | "skeptic" | "research" | "security" | "implementer";
 
 export interface PlanPerspective {
@@ -42,15 +45,23 @@ export function perspectivesForDepth(depth: string): PlanPerspective[] {
   return PLAN_PERSPECTIVES;
 }
 
-export function buildPerspectivePrompt(perspective: PlanPerspective, planBody: string): string {
-  return [
-    `You are the ${perspective.role} on a plan review council.`,
-    `Mandate: ${perspective.mandate}`,
+export function buildPerspectivePrompt(
+  perspective: PlanPerspective,
+  planBody: string,
+  bundle?: CouncilContextBundle,
+): string {
+  const lines = [`You are the ${perspective.role} on a plan review council.`, `Mandate: ${perspective.mandate}`];
+  if (bundle) {
+    lines.push("", renderCouncilContextBlock(bundle, { forPerspective: perspective.id }));
+  }
+  lines.push(
+    "",
     "Review the draft PLAN.md below. Return ONLY valid JSON:",
     '{ "verdict": "approve" | "revise" | "block", "concerns": string[], "evidence": string[] }',
     "",
     "--- PLAN.md ---",
     planBody,
     "--- END PLAN ---",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }

@@ -11,6 +11,8 @@ export interface GsdNativeTelemetry {
   verifyVerdict?: string | null;
   councilPerspectives?: number;
   leaderModelId?: string;
+  councilContextChars?: number;
+  councilHadPriorConcerns?: boolean;
   phaseNumber?: string;
   shipNotes?: string[];
 }

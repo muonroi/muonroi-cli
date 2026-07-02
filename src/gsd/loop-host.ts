@@ -197,6 +197,8 @@ export class GsdLoopHost {
         planVerified: council.verdict === "pass",
         councilPerspectives: council.perspectives.length,
         leaderModelId: council.leaderModelId,
+        councilContextChars: council.contextBundleChars,
+        councilHadPriorConcerns: council.hadPriorConcerns,
       });
     });
 

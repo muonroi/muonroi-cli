@@ -12,7 +12,6 @@ import {
   canShip,
   readState,
   setStateField,
-  syncWorkflowContext,
 } from "./workflow-engine.js";
 
 export const GSD_WORKFLOW_TOOL_NAMES = [
@@ -54,10 +53,13 @@ export function registerGsdWorkflowTools(tools: ToolSet, opts: GsdWorkflowToolOp
 
   tools.gsd_status = dynamicTool({
     description:
-      "Read native GSD workflow progress: STATE.md phase, depth, plan-verify status, and gsd-tools init.progress summary. Use to orient mid-task.",
+      "Read native GSD workflow progress: STATE.md phase, depth, plan-verify status, and gsd-tools init.progress summary. Use to orient mid-task. Pure read — does not advance phase or write STATE.md.",
     inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
     execute: async () => {
-      syncWorkflowContext(cwd, sessionModelId, depth);
+      // Pure read: bootstrap .planning/ only if absent (idempotent — no write when it exists).
+      // Turn-start sync (message-processor) handles depth/STATE writes; gsd_status must NOT
+      // mutate STATE.md mtime, or the dispatch cache (keyed on STATE mtime) would thrash.
+      ensurePlanningWorkspace(cwd, sessionModelId);
       return json(buildGsdStatusPayload(cwd, depth));
     },
   });
