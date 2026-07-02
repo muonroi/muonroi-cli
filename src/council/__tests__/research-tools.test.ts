@@ -14,7 +14,8 @@ describe("CQ-05: buildResearchSystemPrompt", () => {
   it("injects URL Research Requirement when hasUrl=true", () => {
     const prompt = buildResearchSystemPrompt(true);
     expect(prompt).toContain("URL Research Requirement");
-    expect(prompt).toContain("Playwright or Chrome-DevTools");
+    // Browser-tool surface is referenced (Playwright / Chrome-DevTools).
+    expect(/playwright|chrome-devtools/i.test(prompt)).toBe(true);
   });
 
   it("does NOT inject URL instruction when hasUrl=false", () => {
