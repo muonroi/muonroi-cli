@@ -503,7 +503,7 @@ export class Agent {
   setModel(model: string): void {
     this.modelId = normalizeModelId(model);
     const newProviderId = detectProviderForModel(this.modelId);
-    if (newProviderId !== this.providerId && this.apiKey) {
+    if (newProviderId !== this.providerId) {
       this.providerId = newProviderId;
       setProviderHint(this.providerId);
       // Drop this.baseURL when it points at a DIFFERENT provider's default
@@ -519,9 +519,20 @@ export class Agent {
       // match any known provider's apiBase (i.e. it's a real override, not
       // a stale default).
       const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
-      const effectiveBaseURL = staleBaseURL ? undefined : (this.baseURL ?? undefined);
       if (staleBaseURL) this.baseURL = null;
-      this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
+      // Provider changed — DEFER factory construction. The current this.apiKey
+      // belongs to the PREVIOUS provider (or is the "oauth" OAuth sentinel) and
+      // is invalid for the new one. Rebuilding here with it sent provider A's
+      // key to provider B → 401 "Authentication Fails, your api key … is
+      // invalid" on the next chat, for EVERY TUI provider switch (evidence:
+      // routing log routed to "deepseek-v4-flash via deepseek" with a
+      // non-deepseek key; and the "oauth" leak in session ff932f8568e8). Clear
+      // the stale key, null the provider, and re-arm _initOAuthProvider, which
+      // resolves the NEW provider's own key (or OAuth tokens) before the next
+      // turn (message-processor calls initOAuthProvider at turn start).
+      this.apiKey = null;
+      this.provider = null;
+      this._oauthInitDone = false;
     }
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
@@ -3269,29 +3280,71 @@ export class Agent {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
 
-    // Only upgrade when there is no explicit API key — OAuth is an alternative
-    // auth path, not an override when the user deliberately passed a key.
-    // The boot wizard in src/index.ts uses the literal "oauth" as a sentinel
-    // to signal "no API key but OAuth tokens exist", so treat that as "no
-    // key" here.
-    if (this.apiKey && this.apiKey !== "oauth") return;
+    // Re-resolve auth for the CURRENT provider. Runs when either:
+    //  (a) no explicit API key / the "oauth" sentinel is held — OAuth may
+    //      apply (the boot wizard in src/index.ts uses the literal "oauth" to
+    //      mean "no key but OAuth tokens exist"); OR
+    //  (b) setModel deferred provider construction on a provider switch
+    //      (this.provider === null) — the PREVIOUS provider's key was cleared
+    //      and must be re-resolved from the NEW provider's own credentials.
+    const providerDeferred = this.provider === null;
+    const keyIsSentinelOrEmpty = !this.apiKey || this.apiKey === "oauth";
+    if (!providerDeferred && !keyIsSentinelOrEmpty) return;
 
     try {
       const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
       const ids = await listOAuthProviderIds();
-      if (!ids.includes(this.providerId)) return;
 
-      const effectiveBaseURL =
-        this.baseURL &&
-        this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
-          ? this.baseURL
-          : undefined;
-      const result = await createProviderFactoryAsync(this.providerId, {
-        baseURL: effectiveBaseURL ?? undefined,
-      });
-      this.provider = result.factory;
+      // OAuth path: the provider supports OAuth AND we don't hold a real API
+      // key, so inject subscription tokens as Bearer headers.
+      if (ids.includes(this.providerId) && keyIsSentinelOrEmpty) {
+        const effectiveBaseURL =
+          this.baseURL &&
+          this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
+            ? this.baseURL
+            : undefined;
+        const result = await createProviderFactoryAsync(this.providerId, {
+          baseURL: effectiveBaseURL ?? undefined,
+        });
+        this.apiKey = "oauth";
+        this.provider = result.factory;
+        return;
+      }
+
+      // API-key path: resolve THIS provider's own stored key. Reached when the
+      // provider isn't OAuth-capable, or when a provider switch deferred
+      // construction (we must swap in the NEW provider's key — never reuse the
+      // previous provider's, which 401'd on every TUI provider switch). If no
+      // key exists for a deferred switch, leave the provider null so
+      // requireProvider() surfaces a clear "API key required".
+      try {
+        const key = await loadKeyForProvider(this.providerId);
+        if (key) {
+          this.apiKey = key;
+          const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
+          if (staleBaseURL) this.baseURL = null;
+          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined);
+        } else if (providerDeferred) {
+          this.provider = null;
+        }
+      } catch (err) {
+        // ProviderKeyMissingError (or keychain failure) — no usable key. For a
+        // deferred provider switch, null the provider so the next turn fails
+        // loudly ("API key required") instead of 401-ing on a wrong/sentinel
+        // key. For a non-deferred empty-key case, leave the existing provider
+        // untouched (fail-open, as before).
+        if (providerDeferred) {
+          console.error(
+            `[orchestrator] no API key for provider '${this.providerId}' after model switch: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          this.provider = null;
+        }
+      }
     } catch {
-      // Fail-open — provider remains null; requireProvider() will surface the error
+      // Registry unavailable — fail-open; the existing provider (if any) is
+      // left untouched and requireProvider() will surface any error.
     }
   }
 
