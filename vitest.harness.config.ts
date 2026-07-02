@@ -29,6 +29,11 @@ export default defineConfig({
       },
     ],
   },
+  // zod v4 ships ESM-only; vitest's SSR transform fails to resolve the named
+  // `z` export at module-eval time (predicate.ts, catalog-client.ts). See
+  // vitest.config.ts for the same fix on the unit-test path.
+  optimizeDeps: { include: ["zod"] },
+  ssr: { noExternal: ["zod"] },
   test: {
     include: ["tests/harness/**/*.spec.ts"],
     exclude: ["dist/**", "node_modules/**", "tmp/**", ".claude/**", ".cursor/**"],

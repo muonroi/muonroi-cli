@@ -24,6 +24,13 @@ export default defineConfig({
       },
     ],
   },
+  // zod v4 ships ESM-only; vitest's SSR transform fails to resolve the named
+  // `z` export at module-eval time when an importer (e.g. catalog-client) is
+  // itself transformed. Pre-bundle zod so the export is concrete. Without this,
+  // every suite that transitively imports catalog-client fails with
+  // "undefined is not an object (evaluating 'z.object')".
+  optimizeDeps: { include: ["zod"] },
+  ssr: { noExternal: ["zod"] },
   test: {
     fileParallelism: false,
     include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}", "tests/perf/**/*.bench.ts"],
