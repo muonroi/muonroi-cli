@@ -7,14 +7,11 @@ import { planningArtifact } from "./paths.js";
 import {
   buildDebateTopic,
   buildPerspectivePrompt,
-  perspectivesForDepth,
   type PlanPerspective,
   type PlanPerspectiveId,
+  perspectivesForDepth,
 } from "./plan-council-prompts.js";
-import {
-  extractStructuredVerdict,
-  type PlanCouncilVerdict,
-} from "./verdict-schema.js";
+import { extractStructuredVerdict, type PlanCouncilVerdict } from "./verdict-schema.js";
 import { advancePhase, setStateField } from "./workflow-engine.js";
 
 export type PerspectiveVerdict = "approve" | "revise" | "block";
@@ -94,11 +91,7 @@ function heuristicReview(planBody: string, perspective: PlanPerspective): Perspe
   return { id: perspective.id, role: perspective.role, verdict, concerns, evidence, source: "heuristic-fallback" };
 }
 
-function fromStructured(
-  perspective: PlanPerspective,
-  parsed: PlanCouncilVerdict,
-  raw?: string,
-): PerspectiveResult {
+function fromStructured(perspective: PlanPerspective, parsed: PlanCouncilVerdict, raw?: string): PerspectiveResult {
   return {
     id: perspective.id,
     role: perspective.role,
@@ -135,9 +128,7 @@ async function runPerspective(
     }
     return fromStructured(perspective, parsed, raw);
   } catch (err) {
-    console.error(
-      `[gsd] plan-council perspective ${perspective.id} failed: ${(err as Error).message}`,
-    );
+    console.error(`[gsd] plan-council perspective ${perspective.id} failed: ${(err as Error).message}`);
     return heuristicReview(planBody, perspective);
   }
 }
@@ -181,10 +172,7 @@ function formatPlanVerify(
   ].join("\n");
 }
 
-function applyVerdict(
-  cwd: string,
-  verdict: PerspectiveVerdict | "pass",
-): void {
+function applyVerdict(cwd: string, verdict: PerspectiveVerdict | "pass"): void {
   if (verdict === "pass") {
     setStateField(cwd, "Plan Verified", "yes");
     advancePhase(cwd, "execute");
@@ -234,7 +222,10 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
     // the prose. Force a conservative revise so the loop iterates and the
     // leader gets another chance to emit valid JSON (the prior-concerns
     // directive re-states the contract).
-    const verdict: PerspectiveVerdict | "pass" = parseFailed ? "revise" : parsed!.verdict;
+    // Map "approve" → "pass" so the merged verdict matches the union the rest
+    // of the pipeline expects (applyVerdict keys the gate on `=== "pass"`).
+    const rawVerdict = parseFailed ? "revise" : parsed!.verdict;
+    const verdict: PerspectiveVerdict | "pass" = rawVerdict === "approve" ? "pass" : rawVerdict;
     const source: VerdictSource = parseFailed ? "parse-failed" : "structured";
     const concerns = parsed?.concerns.map(String) ?? [
       "Council leader did not emit a structured verdict block — forcing revision.",
@@ -306,9 +297,7 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
   const bundle = buildCouncilContextBundle(cwd, { depth, revisionCycle });
 
   // Perspectives are independent — run in parallel, preserve declared order.
-  const settled = await Promise.all(
-    perspectives.map((p) => runPerspective(planBody, p, runPerspectiveFn, bundle)),
-  );
+  const settled = await Promise.all(perspectives.map((p) => runPerspective(planBody, p, runPerspectiveFn, bundle)));
   const results: PerspectiveResult[] = settled;
 
   const verdict = mergeVerdict(results);
@@ -319,11 +308,7 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
   const planVerifyPath = planningArtifact(cwd, "PLAN-VERIFY.md");
 
   writeFileSync(planReviewPath, formatPlanReview(results, leader.modelId, revisionCycle), "utf8");
-  writeFileSync(
-    planVerifyPath,
-    formatPlanVerify(verdict, results, { source, parseFailed: false }),
-    "utf8",
-  );
+  writeFileSync(planVerifyPath, formatPlanVerify(verdict, results, { source, parseFailed: false }), "utf8");
 
   applyVerdict(cwd, verdict);
 

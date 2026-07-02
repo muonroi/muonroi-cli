@@ -105,4 +105,134 @@ describe("plan-council", () => {
     expect(result.hadPriorConcerns).toBe(true);
     expect(result.contextBundleChars ?? 0).toBeGreaterThan(0);
   });
+
+  it("debate path uses model-first structured verdict (no regex on prose)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () =>
+        [
+          "We considered retry, security, and scope. No blockers.",
+          "```council-verdict",
+          '{"verdict":"approve","concerns":[],"evidence":["PLAN.md covers retry"],"rationale":"plan is complete"}',
+          "```",
+        ].join("\n"),
+    });
+
+    expect(result.skipped).toBe(false);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    expect(result.verdictParseFailed).toBe(false);
+    // Prose containing "block" / "revision" tokens MUST NOT flip the verdict
+    // anymore — only the structured block decides.
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("debate path: prose containing 'block' / 'revision required' does not override structured approve", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-adv-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () =>
+        [
+          "This plan is NOT a block. No revision required. Nothing here should revise.",
+          "```council-verdict",
+          '{"verdict":"approve","concerns":[]}',
+          "```",
+        ].join("\n"),
+    });
+
+    // The adversarial prose used to false-match the old regex; model-first
+    // extraction must ignore the prose entirely.
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+  });
+
+  it("debate path: parse-fail forces conservative revise (never silent approve)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-fail-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () => "The plan looks great, I approve it wholeheartedly. Ship it now!", // no JSON block
+    });
+
+    expect(result.verdict).toBe("revise");
+    expect(result.verdictSource).toBe("parse-failed");
+    expect(result.verdictParseFailed).toBe(true);
+    expect(canExecute(tmp, "standard").allowed).toBe(false);
+    const verify = readFileSync(planningArtifact(tmp, "PLAN-VERIFY.md"), "utf8");
+    expect(verify).toContain("verdictParseFailed: yes");
+  });
+
+  it("perspective path parses structured verdict from each perspective", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-st-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn: async () =>
+        '```council-verdict\n{"verdict":"approve","concerns":[],"evidence":["src/foo.ts:1"]}\n```',
+    });
+
+    expect(result.verdict).toBe("pass");
+    expect(result.perspectives.every((p) => p.source === "structured")).toBe(true);
+    expect(result.perspectives[0]?.evidence).toContain("src/foo.ts:1");
+  });
+
+  it("perspective path falls back to heuristic when perspective emits no JSON", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-st-fail-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn: async () => "I cannot decide, the plan seems okay to me.",
+    });
+
+    // No structured verdict → heuristic fallback applies (source flag set).
+    expect(result.perspectives.every((p) => p.source === "heuristic-fallback")).toBe(true);
+    expect(result.verdictSource).toBe("heuristic-fallback");
+  });
+
+  it("perspective path runs perspectives in parallel (not serial)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-par-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const delay = 120;
+    const start = Date.now();
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard", // 2 perspectives
+      runPerspectiveFn: async () => {
+        await new Promise((r) => setTimeout(r, delay));
+        return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+      },
+    });
+    const elapsed = Date.now() - start;
+
+    expect(result.perspectives).toHaveLength(2);
+    // Serial would be >= 2*delay. Parallel is ~delay + scheduling slack.
+    // Allow generous headroom for CI scheduling but assert < 1.8x serial.
+    expect(elapsed).toBeLessThan(delay * 2);
+  });
 });

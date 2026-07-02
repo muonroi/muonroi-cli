@@ -40,7 +40,7 @@ interface FenceMatch {
   body: string;
 }
 
-const FENCE_RE = /```([a-zA-Z0-9_-+]+)?\s*\n([\s\S]*?)\n?```/g;
+const FENCE_RE = /```([a-zA-Z0-9_+-]+)?\s*\n([\s\S]*?)\n?```/g;
 
 /** All fenced blocks in document order, with their (lower-cased) label. */
 function findFencedBlocks(raw: string): FenceMatch[] {
