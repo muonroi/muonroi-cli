@@ -1,7 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { TaskListItem, TaskListSnapshot } from "../types/index.js";
 import { slugify } from "../utils/slugify.js";
 import { logGsdNativeEvent } from "./ee-closure.js";
+import { isGsdNativeEnabled } from "./flags.js";
 import {
   dispatchPhaseAdd,
   dispatchPhaseComplete,
@@ -10,7 +12,7 @@ import {
   type PhaseAddResult,
 } from "./gsd-dispatch.js";
 import { phaseDirPath, planningArtifact, planningPhasesRoot } from "./paths.js";
-import { readWorkflowKind, setStateField } from "./workflow-engine.js";
+import { readState, readWorkflowKind, setStateField } from "./workflow-engine.js";
 
 export interface PhaseSyncStep {
   op: string;
@@ -270,5 +272,102 @@ export function mirrorVerifyMdToPhaseDir(cwd: string, phaseDirName: string): voi
     copyFileSync(src, dest);
   } catch (err) {
     console.error(`[gsd-phase-sync] mirror VERIFY.md failed: ${(err as Error).message}`);
+  }
+}
+
+/** Automatically append user AskCard answers as clarifications to CONTEXT.md under GSD. */
+export function appendClarificationToContext(cwd: string, question: string, answer: string): void {
+  const planningDir = join(cwd, ".planning");
+  if (!existsSync(planningDir)) return;
+  const contextPath = join(planningDir, "CONTEXT.md");
+  let prior = "";
+  if (existsSync(contextPath)) {
+    prior = readFileSync(contextPath, "utf8");
+  } else {
+    prior = "# CONTEXT\n\n## Clarifications\n\n";
+  }
+  const cleanQuestion = question.replace(/^Question:\s*/i, "").trim();
+  const entry = `### Clarification\n**Q**: ${cleanQuestion}\n**A**: ${answer.trim()}\n\n`;
+  writeFileSync(contextPath, prior + entry, "utf8");
+}
+
+/** Build TaskListSnapshot directly from GSD PLAN.md and STATE.md for automatic TUI checklist synchronization. */
+export function getTaskListSnapshotFromGsd(cwd: string): TaskListSnapshot | null {
+  if (!isGsdNativeEnabled()) return null;
+  const planPath = join(cwd, ".planning", "PLAN.md");
+  if (!existsSync(planPath)) return null;
+
+  try {
+    const content = readFileSync(planPath, "utf8");
+    const state = readState(cwd);
+    const lines = content.split(/\r?\n/);
+    const items: TaskListItem[] = [];
+
+    // Regex to match markdown checklist items or numbered list items
+    const checkboxRegex = /^\s*[-*+]\s*\[([ xX/])\]\s*(.+)$/;
+    const numberedRegex = /^\s*(\d+)\.\s*(.+)$/;
+
+    let itemIndex = 0;
+    for (const line of lines) {
+      const checkboxMatch = line.match(checkboxRegex);
+      if (checkboxMatch) {
+        const marker = checkboxMatch[1];
+        const subject = checkboxMatch[2].trim();
+        let status: "pending" | "in_progress" | "completed" = "pending";
+        if (marker === "x" || marker === "X") {
+          status = "completed";
+        } else if (marker === "/") {
+          status = "in_progress";
+        }
+        items.push({
+          id: `gsd_${itemIndex++}`,
+          subject,
+          status,
+        });
+        continue;
+      }
+
+      const numberedMatch = line.match(numberedRegex);
+      if (numberedMatch) {
+        const subject = numberedMatch[2].trim();
+        items.push({
+          id: `gsd_${itemIndex++}`,
+          subject,
+          status: "pending",
+        });
+      }
+    }
+
+    if (items.length === 0) return null;
+
+    // Adjust statuses based on active phase
+    if (state.phase === "execute" && !items.some((it) => it.status === "in_progress")) {
+      const firstPending = items.find((it) => it.status === "pending");
+      if (firstPending) {
+        firstPending.status = "in_progress";
+      }
+    } else if (state.phase === "verify" || state.phase === "review") {
+      for (const item of items) {
+        if (item.status === "in_progress" || item.status === "pending") {
+          item.status = "completed";
+        }
+      }
+    }
+
+    const counts = {
+      completed: items.filter((it) => it.status === "completed").length,
+      inProgress: items.filter((it) => it.status === "in_progress").length,
+      pending: items.filter((it) => it.status === "pending").length,
+      total: items.length,
+    };
+
+    return {
+      items,
+      counts,
+      ts: Date.now(),
+    };
+  } catch (err) {
+    console.error(`[gsd-plan-parser] failed to parse PLAN.md: ${(err as Error).message}`);
+    return null;
   }
 }

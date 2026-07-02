@@ -71,11 +71,36 @@ function stripMcpInputSchema<T extends { inputSchema?: unknown; description?: st
   };
 }
 
+function getMcpStdioRunner(): { command: string; prefixArgs: string[] } {
+  // Prefer Bun's runner because:
+  // - The CLI is launched via `bun run`
+  // - npx .cmd shims have been observed to cause immediate "Connection closed"
+  //   (MCPClientError) for StdioClientTransport on Windows + Bun (see probe results).
+  // - bun x resolves + spawns package bins with clean stdio pipes.
+  return { command: "bun", prefixArgs: ["x", "-y"] };
+}
+
+/**
+ * Upgrade legacy "npx" (or npm exec) invocations recorded in user settings
+ * to the bun-based runner. This heals persisted configs from before the fix
+ * without requiring the user to re-run setup.
+ */
+function normalizeStdioCommand(command: string, args: string[] | undefined): { command: string; args: string[] } {
+  const a = args ?? [];
+  if (command === "npx" || (command === "npm" && a[0] === "exec")) {
+    const r = getMcpStdioRunner();
+    const pkgArgs = a.filter((x) => x !== "-y");
+    return { command: r.command, args: [...r.prefixArgs, ...pkgArgs] };
+  }
+  return { command, args: a };
+}
+
 function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider) {
   if (server.transport === "stdio") {
+    const { command, args } = normalizeStdioCommand(server.command ?? "", server.args);
     return new StdioClientTransport({
-      command: server.command ?? "",
-      args: server.args,
+      command,
+      args,
       env: server.env ? { ...getDefaultEnvironment(), ...server.env } : undefined,
       cwd: server.cwd,
       stderr: "pipe",
@@ -147,6 +172,18 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
   // Hydrate env vars from the OS keychain before spawning — e.g. inject
   // TAVILY_API_KEY for the tavily MCP if stored via the research-onboarding wizard.
   const server = await hydrateServerEnv(rawServer);
+
+  // Fast-fail for servers that require keys but have none. Prevents "Connection closed"
+  // with zero actionable info. The server binary may start and list tools, but first
+  // use would fail — better to give clear guidance at warmup time.
+  if (server.id === "tavily") {
+    const key = server.env?.TAVILY_API_KEY;
+    if (!key || key.length < 16) {
+      throw new Error(
+        "Tavily is enabled but TAVILY_API_KEY is missing. Run `muonroi-cli mcp setup-research` or `muonroi-cli mcp key tavily`, or disable the server in /mcp config.",
+      );
+    }
+  }
 
   let authProvider: OAuthClientProvider | undefined;
   let cleanup: (() => void) | undefined;

@@ -97,7 +97,7 @@ export class CouncilManager {
   }
 
   // ---- Public responder API (delegated from Agent.respondToCouncilQuestion etc) ----
-  respondToQuestion(questionId: string, answer: string): void {
+  respondToQuestion(questionId: string, answer: string, questionText?: string): void {
     if (process.env.MUONROI_DEBUG_LEADER === "1") {
       process.stderr.write(
         `[responder] respondToCouncilQuestion: ${JSON.stringify({
@@ -112,6 +112,14 @@ export class CouncilManager {
     if (resolver) {
       resolver(answer);
       this._questionResolvers.delete(questionId);
+      if (questionText) {
+        import("../gsd/phase-sync.js")
+          .then(({ appendClarificationToContext }) => {
+            const cwd = this.deps.getBash().getCwd();
+            appendClarificationToContext(cwd, questionText, answer);
+          })
+          .catch(() => {});
+      }
     } else {
       // Headless auto-answer: response arrived before the generator registered
       // its resolver. Buffer it; `createQuestionResponder` will drain it.

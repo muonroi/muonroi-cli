@@ -5367,7 +5367,7 @@ export function useAppLogic(props: AppLogicProps) {
               ans.kind === "choice" || ans.kind === "freetext" ? cardOptions[cardIdx]?.label : undefined;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
-            agent.respondToCouncilQuestion(qid, ans.text);
+            agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
             setMessages((prev) => [
               ...prev,
               buildUserEntry(
@@ -5437,7 +5437,7 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
-            agent.respondToCouncilQuestion(qid, "");
+            agent.respondToCouncilQuestion(qid, "", pendingQuestion.question);
             // Task 2.4 ΓÇö emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -6782,7 +6782,7 @@ export function useAppLogic(props: AppLogicProps) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
-      agent.respondToCouncilQuestion(qid, message.trim());
+      agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
     }

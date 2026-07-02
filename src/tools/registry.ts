@@ -349,7 +349,23 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
       }
 
-      if (input.background) {
+      const isLongRunning = (c: string): boolean => {
+        const lower = c.toLowerCase().trim();
+        return (
+          /\bvite\b/.test(lower) ||
+          /\bnodemon\b/.test(lower) ||
+          /\bwebpack-dev-server\b/.test(lower) ||
+          /\bnext\s+dev\b/.test(lower) ||
+          /\bwatch\b/.test(lower) ||
+          /--watch\b/.test(lower) ||
+          /\b-w\b/.test(lower) ||
+          /\bdev-server\b/.test(lower) ||
+          /\blive-server\b/.test(lower) ||
+          /\bhttp-server\b/.test(lower)
+        );
+      };
+
+      if (input.background || isLongRunning(cmd)) {
         const result = await bash.startBackground(input.command);
         return formatResult(result);
       }

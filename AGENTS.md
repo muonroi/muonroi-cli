@@ -118,3 +118,9 @@ Only fall back to generating complex custom code or adding dependencies when the
 - Auto-compact: after every turn, context is silently compressed to keep token costs flat
 - Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)
 
+## Background Execution Rule (Task & Subagent Spawning)
+
+To avoid timeouts, hanging, or blocking the main developer thread, all agents must leverage asynchronous background execution:
+- **Subagents**: When invoking a subagent via `invoke_subagent`, immediately stop calling tools and end the turn. Do not poll the inbox or wait in a loop.
+- **Long-Running Bash Commands**: Proactively spawn long-running shell processes in the background (e.g., set a small `WaitMsBeforeAsync` or run in the background). Let the CLI system track logs, details, and allow the user to inspect or terminate them via the TUI, rather than blocking the active thread.
+

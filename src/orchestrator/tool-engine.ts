@@ -2398,9 +2398,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // dedicated chunk so the sticky checklist panel can re-render
               // without parsing tool args itself. Skipped when the snapshot
               // doesn't parse (malformed args) so the UI is never poisoned.
-              if (tc.function.name === "todo_write" && tr.success) {
-                const snap = snapshotFromTodoWriteArgs(tc.function.arguments);
-                if (snap) yield { type: "task_list_update", taskListSnapshot: snap };
+              if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("gsd_"))) {
+                try {
+                  const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+                  const snap = getTaskListSnapshotFromGsd(deps.bash.getCwd());
+                  if (snap) {
+                    yield { type: "task_list_update", taskListSnapshot: snap };
+                  } else if (tc.function.name === "todo_write") {
+                    const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
+                    if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
+                  }
+                } catch (err) {
+                  if (tc.function.name === "todo_write") {
+                    const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
+                    if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
+                  }
+                }
               }
               break;
             }

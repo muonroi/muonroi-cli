@@ -344,27 +344,9 @@ correlation.
 
 ### All LiveEvent kinds (protocol version 0.4.0)
 
-> Authoritative reference: [`reference/protocol-schema`](https://docs.muonroi.com/docs/cli/reference/protocol-schema) on docs.muonroi.com — covers all **18** kinds including `usage`, `disconnect`, `stream-retry` and the `{t:"idle"}` sentinel. The table below summarizes the most commonly-used 14.
+See authoritative schema in `docs/agent-harness/PROTOCOL.md` and https://docs.muonroi.com (covers 18+ kinds + `usage`, idle sentinel etc).
 
-| kind | When emitted | Key payload fields |
-|---|---|---|
-| `route-decision` | /ideal dispatched → routing decision made | `path`, `complexity`, `forceCouncil`, `runId` |
-| `council-step` | Council phase changes state | `phaseId`, `phaseKind`, `state`, `label`, `elapsedMs` |
-| `council-speaker` | Per-role speaker turn starts/ends | `role`, `status` ("start"\|"done"), `round`, `correlationId` |
-| `council-turn-length` | A council speaker's turn output is fully assembled (observe-only, no truncation) | `role`, `round` (0=opening), `charCount`, `wordCount`, `model`, `correlationId` |
-| `askcard-open` | Council question card appears | `questionId`, `question`, `phase`, `optionCount` |
-| `askcard-answered` | User answers question card | `questionId`, `answerKind`, `answerText` |
-| `askcard-cancel` | User presses Escape on question card | `questionId` |
-| `sprint-stage` | Sprint enters a new stage | `sprintIndex`, `stage` ("planning"\|"implementation"\|"verification"\|"judgment"), `runId` |
-| `sprint-halt` | CB-gate fires — sprint halted | `sprintN`, `reason`, `runId` |
-| `sprint-plan-committed` | Leader/council commits final sprint plan, before first sprint fires | `runId`, `projectDir`, `sprintCount`, `sprintIds`, `source` ("leader"\|"council"\|"auto"), `ts` |
-| `llm-token` | Text delta from model (opt-in only) | `correlationId`, `delta`, `tokenIndex` |
-| `llm-done` | LLM call completes | `correlationId`, `totalChars`, `finishReason` |
-| `toast` | Error/info toast displayed | `level`, `text` |
-| `stream.delta` | Streaming text chunk | `target`, `text` |
-| `ee-timeout` | Experience Engine call exceeded its budget | `source`, `elapsedMs`, `budgetMs`, `ts` |
-| `ee-error` | Experience Engine call failed with a non-timeout error | `source`, `name`, `message`, `ts` |
-| `steer-inject` | A queued mid-turn message is injected into the running turn at a prepareStep boundary | `count`, `atStep`, `runId` |
+Commonly used: `route-decision`, `council-step` / `council-speaker`, `askcard-*`, `sprint-stage` / `sprint-halt` / `sprint-plan-committed`, `toast`, `ee-timeout` / `ee-error`, `steer-inject`, `llm-done`. `llm-token` is opt-in only (very high volume).
 
 ## Selector grammar quick reference
 
@@ -411,26 +393,13 @@ Then drive via tool calls: `tui.start`, `tui.snapshot`, `tui.press`, `tui.type`,
 
 ## WSL setup (one-time)
 
-If `wsl -d Ubuntu -- bash -lc 'which bun'` returns empty:
+See the one-time WSL + bun install steps in `docs/agent-harness` notes or the spike docs. Key points:
 
-```powershell
-# 1. Install bun in WSL user-local (no sudo, no unzip required)
-wsl -d Ubuntu -- bash -c 'mkdir -p ~/.npm-global && npm config set prefix ~/.npm-global && npm install -g bun'
+- Install bun *inside* WSL (user-local via npm prefix).
+- Clone a Linux-side checkout (`~/muonroi-cli`) — do **not** run harness tests over `/mnt/d` bind mount (wrong native modules).
+- Always `git pull` before harness runs in WSL.
 
-# 2. Put bun on PATH for login shells
-wsl -d Ubuntu -- bash -c 'echo "export PATH=\"\$HOME/.npm-global/bin:\$PATH\"" >> ~/.bashrc'
-wsl -d Ubuntu -- bash -c 'echo "export PATH=\"\$HOME/.npm-global/bin:\$PATH\"" >> ~/.profile'
-wsl -d Ubuntu -- bash -c 'mkdir -p ~/.local/bin && ln -sf ~/.npm-global/bin/bun ~/.local/bin/bun && ln -sf ~/.npm-global/bin/bunx ~/.local/bin/bunx'
-
-# 3. Clone repo into WSL home (separate from /mnt/d to keep Linux node_modules isolated)
-wsl -d Ubuntu -- bash -lc 'cd ~ && git clone https://github.com/muonroi/muonroi-cli.git && cd muonroi-cli && bun install'
-
-# 4. Verify
-wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && bunx vitest run tests/harness/mcp-integration.spec.ts'
-# expected: 2 passed
-```
-
-**Why not run from `/mnt/d/sources/Core/muonroi-cli`?** node_modules installed on Windows contains Windows-specific native bindings (rolldown, esbuild). Linux needs its own copy. Cloning into `~/muonroi-cli` keeps the two checkouts isolated. Git stays in sync — pull before each test.
+Full commands are in git history / previous Claude sessions or `scripts/wsl-test-harness.sh`.
 
 ## Known caveats (read before debugging "test failures")
 
@@ -495,149 +464,43 @@ stay ≤ 80K input tokens on any single call.
 
 ## Verifying provider-layer behavior with the mock model (H1)
 
-Forensics tells you what happened *after* a real session. To verify a
-provider-layer fix *before* burning real tokens, install
-`MockLanguageModelV3` from `ai/test` in front of the orchestrator's
-`streamText` calls and assert against the recorded `doStreamCalls`.
+Use `installMockModel` + `textOnlyStream` / `toolCallStream` from `src/agent-harness/mock-model.ts` + `shouldDropParam` + recording helpers to assert provider call shape *before* real tokens.
 
-The harness pieces live in:
+See `tests/harness/cost-leak-*.spec.ts` and `tests/harness/recording.ts` for patterns. Always `loadCatalog()` in beforeAll. Prefer `shouldDropParam(runtime, "maxOutputTokens")` over inlining `unsupportedParams`.
 
-- `src/agent-harness/mock-model.ts` — `createMockModel`, `installMockModel`, `textOnlyStream`, `toolCallStream` (one of the few files still living directly under `src/agent-harness/` after the package split)
-- `src/providers/runtime.ts` — `resolveModelRuntime()` short-circuits when `globalThis.__muonroiMockModel` is set
-- `src/providers/runtime.ts` — `shouldDropParam(runtime, param)` — central rule used by orchestrator AND specs (do NOT inline this logic in specs)
-- `tests/harness/recording.ts` — `inspectAll`, `inspectByRole`, `cumulativePromptChars`, `assertParamAbsent`, `assertParamPresent`, `getProviderOption`
+Key env caps (and their Phase targets) are documented in `src/orchestrator` and usage forensics. Full coverage table and anti-patterns in git history / previous sessions.
 
-### Pattern: write a cost-leak spec
+## When you finish a feature (pre-PR checklist)
 
-```ts
-// tests/harness/cost-leak-<id>.spec.ts
-import { streamText } from "ai";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import { installMockModel, textOnlyStream } from "../../src/agent-harness/mock-model.js";
-import { loadCatalog } from "../../src/models/registry.js";
-import { resolveModelRuntime, shouldDropParam } from "../../src/providers/runtime.js";
-import { assertParamAbsent, inspectAll } from "./recording.js";
+1. `bunx tsc --noEmit` (0 errors)
+2. `bunx vitest run` (Windows) + `wsl ... bunx vitest run tests/harness/` for POSIX E2E
+3. For UI/harness surfaces: ensure `<Semantic>` wrapper + `tests/harness/*.spec.ts`
+4. Run `bun run lint:semantic` (and `lint:harness-skips`)
+5. Self-verify on touched watched surfaces when relevant.
 
-describe("<leak id>: <one-line claim>", () => {
-  beforeAll(async () => { await loadCatalog(); });
-  let cleanup: (() => void) | null = null;
-  afterEach(() => { cleanup?.(); cleanup = null; });
+### Adding a new TUI component (quick)
 
-  it("<expected behaviour>", async () => {
-    const handle = installMockModel({
-      fixture: { stream: textOnlyStream("done") },
-      unsupportedParams: ["maxOutputTokens"],   // simulate OAuth registry
-      defaultProviderOptions: { store: false },  // simulate provider quirks
-    });
-    cleanup = handle.uninstall;
-
-    const runtime = resolveModelRuntime(/* stub factory */, "gpt-5.4");
-    const result = streamText({
-      model: runtime.model,
-      system: "You are the Explore sub-agent.",
-      messages: [{ role: "user", content: "go" }],
-      ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: 8192 }),
-      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-    });
-    for await (const _ of result.fullStream) { /* drain */ }
-
-    assertParamAbsent(inspectAll(handle)[0]!, "maxOutputTokens");
-  });
-});
-```
-
-Run only the harness suite — natively on Windows (named pipes) and POSIX
-(fd 3/4); WSL fallback identical:
-
-```powershell
-bunx vitest -c vitest.harness.config.ts run tests/harness/
-```
-
-### Coverage map by leak
-
-| Leak | Spec | What it asserts |
-|---|---|---|
-| **G1** — OAuth backend rejects `max_output_tokens` | `cost-leak-g1.spec.ts` ✅ | `assertParamAbsent(call, "maxOutputTokens")` when `unsupportedParams` includes it; control test asserts param IS present otherwise. |
-| **F1** — Stable OpenAI `promptCacheKey` | `cost-leak-f1.spec.ts` ✅ | `getProviderOption(call, "openai", "promptCacheKey")` returns a deterministic sha256 prefix across all rounds in the same session. |
-| **B3** — Sub-agent `prepareStep` compaction | `cost-leak-b3.spec.ts` ✅ | `cumulativePromptChars(handle)` stays well below the uncompacted control; older tool_result parts visibly rewritten to `[elided by sub-agent compactor]` stubs. |
-| **B4** — Top-level `prepareStep` compaction | `cost-leak-b4.spec.ts` ✅ | Same as B3 but with `label: "top-level"` — assertion text checks `elided by top-level compactor`. |
-| **C1** — DeepSeek cache split field | `src/orchestrator/__tests__/usage-normalizer-c1.test.ts` ✅ | DeepSeek-shaped usage with `prompt_cache_hit_tokens` is read into `cacheReadTokens`; control: OpenAI shape unchanged. |
-
-### Anti-patterns
-
-- **Do NOT inline `runtime.unsupportedParams?.includes(...)`** in specs. Always go through `shouldDropParam` so a future refactor of the rule updates both production and tests together.
-- **Do NOT depend on `globalThis.__muonroiMockModel` from the parent test process when you also spawn a TUI child** — the mock lives in the process that imports it. For TUI E2E, the fixture file's `model` block is loaded by the child via `loadMockModelFromDir` in `src/index.ts`.
-- **Do NOT skip `loadCatalog()` in `beforeAll`** — without it, `getModelInfo(modelId)` returns `undefined` and the `providerOptions` merge block silently no-ops.
-
-Optional env overrides for the caps:
-
-| Env | Range | Default | Effect |
-|---|---|---|---|
-| `MUONROI_MAX_TOOL_OUTPUT_CHARS` | 10_000–200_000 | 32_000 | Per-call tool-output cap (applies to every tool returning text). |
-| `MUONROI_SUB_AGENT_BUDGET_CHARS` | 20_000–600_000 | 120_000 | Cumulative budget the `task` sub-agent may receive across one invocation. Tiers at 30%/70% (aggressive). |
-| `MUONROI_TOP_LEVEL_TOOL_BUDGET_CHARS` | 50_000–1_500_000 | 200_000 | Cumulative budget for the TOP-LEVEL agentic tool loop, fresh per turn. Tiers at 50%/80% (loose — single-tool turns unaffected). Kicks in when sub-agent path fails and the top-level loop has to fall back to direct tool calls. |
-| `MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS` | 20_000–500_000 | 80_000 | Phase B3 — cumulative message-chars above which the sub-agent `prepareStep` compactor rewrites older tool_result parts into short summary stubs. |
-| `MUONROI_SUBAGENT_COMPACT_KEEP_LAST` | 1–20 | 3 | Phase B3 — trailing tool turns kept verbatim during sub-agent compaction. |
-| `MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS` | 10_000–1_500_000 | 200_000 | Phase B4 — single-turn tool-step history accumulation. Default keeps compaction conservative so top-level agents retain useful early context across longer decision horizons. |
-| `MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST` | 1–30 | 5 | Phase B4 — trailing tool turns kept verbatim during top-level compaction. Higher than sub-agent default because top-level agents make decisions across longer horizons. |
-| `MUONROI_CROSS_TURN_DEDUP` | `0` / `1` | `1` | Phase C3 — session-scoped dedup of identical tool outputs across user turns. Set to `0` to disable. When enabled, the second time the agent produces an identical tool result (e.g. `read_file` on the same file in turn 2), the content is replaced with `[tool_result identical to earlier turn — dedup ref sha1=..., originally from tool=... turn=...]`. LRU cap 200 entries per session, min 500 chars to qualify. |
-| (ee-anti-mu) checkpoint injection | layer3 8% of tokenBudget + buildCheckpointReminder <180 chars | — | Phase 5 polish: checkpoints use existing attachReminder + layer3 budget; no new caps. Layer 3 + layer1 enrichment + ee.query (MCP) give agent self-managed "task finished?" visibility after B3/B4. |
-| `MUONROI_DEBUG_SUBAGENT` | `0` / `1` | `0` | Emit detailed stderr telemetry from `task` sub-agents: streamText start config, per-part stream counts, finish reason, error parts, full catch-block error shape (name/statusCode/cause/responseBody/stack). Use when diagnosing silent task failures (e.g. "No output generated" with reasoning models). |
-| `MUONROI_STEER_INJECTION` | `0` / `1` | `1` | Live-queue steering — inject a message typed mid-turn into the running turn at the next prepareStep boundary (vs the legacy "run after the turn finishes" queue). `0` restores the deferred queue. |
-
-## When you finish a feature
-
-Before opening a PR:
-1. `bunx tsc --noEmit` — 0 errors
-2. `bunx vitest run` from Windows — full unit + headless suite. PIL suite is fully green (the 4 pre-existing PIL failures were resolved in commit `955b8c6`). On Linux, two unrelated flaky failures may surface: `src/mcp/smoke.test.ts` "discovers tools from stdio MCP echo stub" (needs node + MCP framing; already `skipIf` Windows/CI) and `packages/agent-harness-core/__tests__/browser-bundle.spec.ts` "contains no Node built-ins" (esbuild EPIPE teardown race). Neither blocks merge.
-3. `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest run tests/harness/'` — POSIX E2E confirmed
-4. If you added a TUI element: confirm `<Semantic>` is wrapping it (otherwise harness can't see it)
-5. If you added a slash command or modal: write an E2E spec under `tests/harness/`
-
-### Adding a new TUI component
-
-1. Wrap the user-visible root with `<Semantic id="..." role="..." name="...">`. Pick `role` from the union in `src/agent-harness/protocol.ts`.
-2. If it's a list/picker, wrap items with `role="listitem"` and mirror `selected` from your active-index state.
-3. If it accepts input, mirror `value` (and `focus` when relevant).
-4. If it's a modal, set `isModal`.
-5. Add `tests/harness/<feature>.spec.ts` following the composer pattern.
-6. Run the spec: `bunx vitest -c vitest.harness.config.ts run tests/harness/<feature>.spec.ts` — works natively on Windows (named pipes) and POSIX (fd 3/4). WSL fallback: `wsl -d Ubuntu -- bash -lc 'cd ~/muonroi-cli && git pull && bunx vitest -c vitest.harness.config.ts run tests/harness/<feature>.spec.ts'`.
-7. If the flow requires multiple LLM round-trips, extend the corresponding fixture in `tests/harness/fixtures/llm/` (sequence mode — see `mock-llm.ts`).
-8. Run `bun run lint:semantic` — it warns on `.tsx` files under `src/ui/` whose root is not `<Semantic>`. Address warnings before merging. To suppress a file that is intentionally unwrapped (child component, utility, test), add its repo-relative path to `scripts/.semantic-wrap-allow.txt`.
+- Wrap root with `<Semantic id="..." role="..." name="..." isModal?>`
+- Mirror `focus`/`value`/`selected` for interactive elements.
+- Add matching harness spec + fixture if LLM involved.
+- Run the spec on both Windows (named pipe) + WSL.
+- Update `scripts/.semantic-wrap-allow.txt` only for intentional non-wrapped files.
 
 ## Multi-framework package layout
 
-As of Phase 6, the harness is split into four independently-publishable packages under `packages/`:
+Harness is split (Phase 6):
 
-| Package | npm name | Purpose |
-|---|---|---|
-| `packages/agent-harness-core` | `@muonroi/agent-harness-core` | Protocol types, selector/predicate engine, `Driver`, WebSocket transport, `findUnwrappedComponents` lint helper. Framework-agnostic. |
-| `packages/agent-harness-opentui` | `@muonroi/agent-harness-opentui` | OpenTUI adapter — `SemanticRegistry`, `reconciler-hook`, `input-bridge`, agent-mode bootstrap. Used by `src/index.ts` in this repo. |
-| `packages/agent-harness-react` | `@muonroi/agent-harness-react` | React DOM adapter — `<Semantic>`, `<SemanticProvider>`, `installReactHarness()`. Peer-requires React ≥ 18. |
-| `packages/agent-harness-angular` | `@muonroi/agent-harness-angular` | Angular 16+ adapter — `[muonroiSemantic]` directive, `SemanticRegistryService`, `SemanticSnapshotService`. |
+- `@muonroi/agent-harness-core` — protocol, driver, selector, predicate (framework agnostic)
+- `@muonroi/agent-harness-opentui` — OpenTUI `Semantic` + reconciler + agent-mode (used here)
+- `@muonroi/agent-harness-react` + `-angular` — adapters for other UI frameworks
 
-The backwards-compatibility shim at `src/agent-harness/` re-exports everything from `@muonroi/agent-harness-core` and `@muonroi/agent-harness-opentui` so existing imports inside this repo continue to work unchanged.
-
-### Adding a new framework adapter
-
-1. Copy `packages/agent-harness-react` (or `-angular`) as a starting point.
-2. Implement a `SemanticRegistry`-compatible tree builder that calls `registry.register(node)` on mount and `registry.unregister(id)` on unmount.
-3. Snapshot the tree and emit it as a `LiveFrame` via `snapshotToLiveFrame(registry, seq, ts)` from `@muonroi/agent-harness-core`.
-4. Wire commands (`press`, `type`, `focus`) from the transport back into your framework's DOM/event system.
-5. Export a single `install<Framework>Harness(opts)` entry-point that sets up the registry, transport, and teardown handle.
-6. Add a per-package `README.md` (see `packages/agent-harness-react/README.md` as template).
-7. Add the package to `bun.workspaces` in the root `package.json`.
-
-Per-package README files:
-- `packages/agent-harness-core/README.md`
-- `packages/agent-harness-opentui/README.md`
-- `packages/agent-harness-react/README.md`
-- `packages/agent-harness-angular/README.md`
+Shim at `src/agent-harness/` re-exports for in-repo use. See per-pkg READMEs in `packages/`.
 
 ## References
 
-- Design doc: `docs/superpowers/specs/2026-05-14-agent-harness-design.md`
-- Implementation plan (executed): `docs/superpowers/plans/2026-05-14-agent-harness.md`
+- `docs/superpowers/specs/2026-05-14-agent-harness-design.md`
+- `docs/superpowers/plans/2026-05-14-agent-harness.md`
+- `docs/agent-harness/PROTOCOL.md`, `TRANSPORTS.md`
 - Protocol schema: `docs/agent-harness/PROTOCOL.md`, `docs/agent-harness/schema.json`
 - Transport spec: `docs/agent-harness/TRANSPORTS.md`
 - Spike findings: `docs/agent-harness/spike-0a-findings.md` (OpenTUI hook), `spike-0c-findings.md` (POSIX stdio), `spike-0d-mcp-sdk.md` (MCP SDK API)

@@ -903,6 +903,15 @@ export class Agent {
 
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
+
+    try {
+      const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+      const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
+      if (gsdSnap) return gsdSnap;
+    } catch (err) {
+      // fail-open to legacy todo_write args
+    }
+
     const argsJson = getLastTodoWriteArgs(this.session.id);
     if (!argsJson) return null;
     return snapshotFromTodoWriteArgs(argsJson);
@@ -1840,8 +1849,8 @@ export class Agent {
   // hooks used by orchestrator.agent.test.ts).
   // ========================================================================
 
-  respondToCouncilQuestion(questionId: string, answer: string): void {
-    this.councilManager.respondToQuestion(questionId, answer);
+  respondToCouncilQuestion(questionId: string, answer: string, questionText?: string): void {
+    this.councilManager.respondToQuestion(questionId, answer, questionText);
   }
 
   respondToCouncilPreflight(preflightId: string, approved: boolean): void {

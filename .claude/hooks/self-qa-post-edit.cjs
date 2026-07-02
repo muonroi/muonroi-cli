@@ -9,7 +9,7 @@
  *
  * Design notes:
  *  - Hook MUST exit fast (Claude hook timeout is 5-10s). We spawn the child
- *    detached + unref() so the bun process keeps running after we exit.
+ *    detached + unref() so the bun self-verify keeps running after we exit.
  *  - Throttle: if a run started < 60s ago we skip (avoids spam during rapid
  *    edits to the same file). Marker file: `.claude/self-qa-running.lock`.
  *  - Notification on stderr — Claude surfaces stderr as agent context.
@@ -17,7 +17,7 @@
  */
 "use strict";
 
-const { spawn } = require("node:child_process");
+const { spawn, execSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -27,6 +27,15 @@ const LOCK_FILE = path.join(REPO_ROOT, ".claude", "self-qa-running.lock");
 const RESULT_FILE = path.join(REPO_ROOT, ".claude", "self-qa-last.json");
 const STDERR_FILE = path.join(REPO_ROOT, ".claude", "self-qa-last.stderr");
 const THROTTLE_MS = 60_000;
+
+function hasCommand(cmd) {
+  try {
+    execSync(`${cmd} --version`, { stdio: "ignore", timeout: 1500 });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function bail(code) {
   process.exit(code);
@@ -57,6 +66,13 @@ if (rel.toLowerCase().startsWith(repoPosix.toLowerCase())) {
 }
 const watched = WATCH_DIRS.some((d) => rel.startsWith(d));
 if (!watched) bail(0);
+
+const hasBun = hasCommand("bun");
+if (!hasBun) {
+  // Silent for the case where Claude hook shell couldn't find bun either.
+  // We still allow the hook to "succeed" (no error status) but skip work.
+  bail(0);
+}
 
 // Throttle: skip if a run is in-flight or completed within THROTTLE_MS.
 try {
@@ -92,6 +108,12 @@ const child = spawn(
     shell: process.platform === "win32",
   },
 );
+
+child.on("error", (e) => {
+  const msg = "self-qa spawn error: " + (e && e.message ? e.message : String(e)) + "\n";
+  try { fs.writeFileSync(STDERR_FILE, msg, { flag: "a" }); } catch {}
+});
+
 child.unref();
 
 process.stderr.write(

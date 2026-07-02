@@ -49,24 +49,24 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     label: "Playwright",
     enabled: true,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "@playwright/mcp"],
+    command: "bun",
+    args: ["x", "-y", "@playwright/mcp"],
   },
   {
     id: "memory",
     label: "Memory",
     enabled: false,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-memory"],
+    command: "bun",
+    args: ["x", "-y", "@modelcontextprotocol/server-memory"],
   },
   {
     id: "figma",
     label: "Figma",
     enabled: false,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "figma-developer-mcp", "--stdio"],
+    command: "bun",
+    args: ["x", "-y", "figma-developer-mcp", "--stdio"],
     env: { FIGMA_API_KEY: "" },
   },
   {
@@ -81,16 +81,16 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     label: "Fetch (URL → markdown)",
     enabled: true,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "mcp-fetch-server"],
+    command: "bun",
+    args: ["x", "-y", "mcp-fetch-server"],
   },
   {
     id: "tavily",
     label: "Tavily Web Search",
     enabled: false,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "tavily-mcp"],
+    command: "bun",
+    args: ["x", "-y", "tavily-mcp"],
     env: { TAVILY_API_KEY: "" },
   },
 ];
@@ -116,10 +116,36 @@ function migrateServers(servers: McpServerConfig[]): boolean {
   return changed;
 }
 
+/**
+ * Migrate any legacy "npx" stdio entries (from older default seeds or manual config)
+ * to "bun x" form. npx shims frequently produce immediate "Connection closed"
+ * under Bun on Windows; bun x gives clean stdio pipes. Idempotent.
+ */
+function migrateNpxToBunx(servers: McpServerConfig[]): boolean {
+  let changed = false;
+  for (const server of servers) {
+    if (server.transport === "stdio" && server.command === "npx") {
+      server.command = "bun";
+      const rest = (server.args ?? []).filter((a) => a !== "-y");
+      server.args = ["x", "-y", ...rest];
+      changed = true;
+    }
+  }
+  if (changed) {
+    console.error(
+      "[mcp:auto-setup] migrated legacy npx-based MCP servers to bun x (fixes Connection closed on Bun/Windows)",
+    );
+  }
+  return changed;
+}
+
 export function ensureDefaultMcpServers(): McpServerConfig[] {
   try {
     const existing = loadMcpServers();
     let dirty = migrateServers(existing);
+
+    // Upgrade legacy npx runners (most important fix for "Connection closed" during warm-up).
+    if (migrateNpxToBunx(existing)) dirty = true;
 
     // muonroi-tools is no longer self-spawned by the CLI — its capabilities
     // (ee_query/ee_feedback/ee_health/usage_forensics/lsp_query/setup_guide/
