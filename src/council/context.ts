@@ -119,7 +119,7 @@ function getCompactionText(msg: MessageLike): string | null {
   return msg.content;
 }
 
-function extractUserText(content: string | unknown): string {
+function extractText(content: string | unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content
@@ -130,9 +130,23 @@ function extractUserText(content: string | unknown): string {
   return "";
 }
 
+/** Filter assistant messages to exclude tool-call-only turns (tool_use + tool_result
+ *  pairs that carry no analytical text). An assistant turn with ≥80 chars of text
+ *  content is considered "analytical" (contains decisions, analysis, code, or plans). */
+function isAnalyticalAssistant(content: string | unknown): boolean {
+  const text = extractText(content);
+  return text.trim().length >= 80;
+}
+
+/** Maximum total characters for the built context string. Raised from 12K to 32K
+ *  (~8K tokens) so council participants get meaningful session history rather than
+ *  only 5 user-message snippets. */
+const MAX_CONTEXT_CHARS = 32_000;
+
 export function buildCouncilContext(messages: MessageLike[]): string {
   const parts: string[] = [];
 
+  // 1. Compaction summary (first message if it's a system compaction)
   if (messages.length > 0 && isCompactionSummary(messages[0])) {
     const summary = getCompactionText(messages[0]);
     if (summary) {
@@ -140,34 +154,56 @@ export function buildCouncilContext(messages: MessageLike[]): string {
     }
   }
 
-  const userMessages: string[] = [];
-  for (let i = messages.length - 1; i >= 0 && userMessages.length < 5; i--) {
+  // 2. Recent conversation turns — scan BOTH user + analytical assistant messages
+  //    from the tail, capturing at most 8 meaningful entries.
+  //    Previously only captured 5 user messages — lost ALL assistant analysis,
+  //    code changes, and decisions made during the session.
+  const conversationTurns: string[] = [];
+  for (let i = messages.length - 1; i >= 0 && conversationTurns.length < 8; i--) {
     const msg = messages[i];
     if (msg.role === "user") {
-      const text = extractUserText(msg.content);
+      const text = extractText(msg.content);
       if (text.trim()) {
-        userMessages.unshift(`- ${text.slice(0, 2000).trim()}`);
+        conversationTurns.unshift(`[User] ${text.slice(0, 3000).trim()}`);
+      }
+    } else if (msg.role === "assistant" && isAnalyticalAssistant(msg.content)) {
+      const text = extractText(msg.content);
+      if (text.trim()) {
+        // Cap assistant text to 1500 chars — enough to convey analysis/decisions
+        // without blowing the context budget on long code outputs.
+        conversationTurns.unshift(`[Assistant] ${text.slice(0, 1500).trim()}`);
       }
     }
   }
-  if (userMessages.length > 0) {
-    parts.push(`## Recent User Messages\n${userMessages.join("\n")}`);
+  if (conversationTurns.length > 0) {
+    parts.push(`## Recent Conversation\n${conversationTurns.join("\n\n")}`);
   }
 
-  const councilMemories: string[] = [];
+  // 3. Key decisions from system messages (task outcomes, decisions, plans)
+  const decisionMsgs: string[] = [];
   for (const msg of messages) {
-    if (msg.role === "system" && typeof msg.content === "string" && msg.content.includes("[Council Memory]")) {
-      councilMemories.push(msg.content);
+    if (msg.role !== "system" || typeof msg.content !== "string") continue;
+    const c = msg.content;
+    if (
+      c.includes("[Council Memory]") ||
+      c.includes("[Council Decision]") ||
+      c.includes("[Council Action Items]") ||
+      c.includes("[Council Plan Update]") ||
+      c.includes("[Decision]") ||
+      c.includes("[Task Completed]") ||
+      c.includes("[NEEDS HUMAN REVIEW]")
+    ) {
+      decisionMsgs.push(c);
     }
   }
-  if (councilMemories.length > 0) {
-    const digests = councilMemories.slice(-2).map(formatCouncilMemoryDigest);
-    parts.push(`## Previous Council Outcomes (cite by role/round)\n${digests.join("\n\n")}`);
+  if (decisionMsgs.length > 0) {
+    const digests = decisionMsgs.slice(-4).map(formatCouncilMemoryDigest);
+    parts.push(`## Key Decisions\n${digests.join("\n\n")}`);
   }
 
   const combined = parts.join("\n\n---\n\n");
-  if (combined.length > 12000) {
-    return `${combined.slice(0, 12000)}\n\n[... context truncated to fit token budget]`;
+  if (combined.length > MAX_CONTEXT_CHARS) {
+    return `${combined.slice(0, MAX_CONTEXT_CHARS)}\n\n[... context truncated to fit token budget]`;
   }
   return combined;
 }
