@@ -20,7 +20,7 @@
       "description": "Native DeepSeek V4 Flash. Tool-call capable. Primary fast-tier model for the deepseek provider.",
       "aliases": ["deepseek-flash-native"],
       "supports_vision": false,
-      "roles": ["research"]
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "deepseek-v4-pro",
@@ -57,7 +57,7 @@
       "description": "OpenAI GPT-5.4 mini via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-mini-oauth"],
       "supports_vision": false,
-      "roles": ["research"]
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "gpt-5.4",
@@ -222,7 +222,7 @@
       "description": "GLM Coding Plan model (Lite/Pro/Max). High-throughput agent tasks; consumes subscription quota (2-3x during peak for GLM-5 family per Z.ai policy).",
       "aliases": [],
       "supports_vision": false,
-      "roles": ["implement", "research"]
+      "roles": ["implement", "research", "verify"]
     },
     {
       "id": "glm-5v-turbo",
@@ -491,7 +491,7 @@
       "description": "Subscription version of DeepSeek's fast reasoning model.",
       "aliases": ["deepseek-v4-flash-go"],
       "supports_vision": false,
-      "roles": ["research"]
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "opencode/mimo-v2.5",
