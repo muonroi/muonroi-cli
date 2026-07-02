@@ -79,7 +79,7 @@ function makeOpts(flowDir: string) {
     flowDir,
     idea: "build a todo app",
     subcommand: "start",
-    sessionModelId: "test-model",
+    sessionModelId: "deepseek-v4-flash",
     sessionId: "test-session",
     // mode="new" bypasses Mode C auto-detection
     mode: "new",
