@@ -10,6 +10,7 @@ import type {
   DebatePlan,
   DebateState,
   EnhancedCouncilOutcome,
+  PostDebateActionId,
   PreflightResponder,
 } from "./types.js";
 
@@ -276,10 +277,33 @@ function parseOutcome(synthesisText: string, debatePlan?: DebatePlan): EnhancedC
         }
       }
 
+      // Model-first post-debate options. Keep only entries whose action is in
+      // the wired vocabulary; drop malformed items so a hallucinated action id
+      // can't reach the handler switch. Empty → index.ts uses its fallback set.
+      const VALID_ACTIONS = new Set(["ask_followup", "generate_plan", "implement", "save_exit", "continue_session"]);
+      const nextActions = Array.isArray(parsed.nextActions)
+        ? (parsed.nextActions as unknown[])
+            .filter(
+              (a): a is { action: string; label: string; reason?: string } =>
+                !!a &&
+                typeof a === "object" &&
+                typeof (a as { action?: unknown }).action === "string" &&
+                VALID_ACTIONS.has((a as { action: string }).action) &&
+                typeof (a as { label?: unknown }).label === "string" &&
+                (a as { label: string }).label.trim().length > 0,
+            )
+            .map((a) => ({
+              action: a.action as PostDebateActionId,
+              label: a.label.trim(),
+              reason: typeof a.reason === "string" ? a.reason.trim() : undefined,
+            }))
+        : undefined;
+
       return {
         type,
         summary,
         sections: Object.keys(sections).length > 0 ? sections : undefined,
+        nextActions: nextActions && nextActions.length > 0 ? nextActions : undefined,
         // Legacy fields — synthesizer may still emit them when shape calls for them.
         agreed: Array.isArray(parsed.agreed) ? (parsed.agreed as string[]) : undefined,
         tradeoffs: Array.isArray(parsed.tradeoffs) ? (parsed.tradeoffs as string[]) : undefined,

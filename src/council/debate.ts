@@ -304,6 +304,58 @@ function pickDebateFallbackModel(failedModel: string, pool: string[]): string | 
   return undefined;
 }
 
+/**
+ * Marker the CouncilLLM.research catch-block embeds in its return string when a
+ * provider crashes (it returns a string, never throws — see llm.ts:737). Used
+ * to detect a failed research pass so we can fall back to another provider.
+ */
+const RESEARCH_FAILED_MARKER = "[Research failed:";
+
+/**
+ * Runs council research on `primaryModel`; if the provider crashes (the
+ * `[Research failed: …]` marker), retries ONCE on a pooled model resolving to a
+ * DIFFERENT provider before giving up. Mirrors {@link pickDebateFallbackModel}.
+ *
+ * Motivating evidence: session de4bafe5ecb7 routed research to opencode-go
+ * (Console Go "Upstream request failed") with no fallback. Research returned
+ * only the failure marker → participants had zero citations to tag → evidence
+ * density hard-zeroed → the debate scored "Low confidence 0%" despite being
+ * substantive. debateWithRetry already had cross-provider fallback; research
+ * did not.
+ */
+async function researchWithFallback(
+  llm: CouncilLLM,
+  primaryModel: string,
+  topic: string,
+  conversationContext: string,
+  signal: AbortSignal | undefined,
+  traceCb: (t: string) => void,
+  options: { internetFirst?: boolean },
+  fallbackPool: string[],
+): Promise<string> {
+  const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
+  if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
+
+  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool);
+  if (!fallbackModel) return primary;
+
+  traceCb(`[research] ${primaryModel} failed; retrying via ${fallbackModel} (different provider)`);
+  try {
+    const fb = await llm.research(fallbackModel, topic, conversationContext, signal, traceCb, options);
+    if (!fb.includes(RESEARCH_FAILED_MARKER)) {
+      traceCb(`[research] recovered via fallback ${fallbackModel}`);
+      return fb;
+    }
+    // Both providers failed — surface the primary's marker so the existing
+    // "research produced nothing" rendering still fires.
+    return primary;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    traceCb(`[research] fallback ${fallbackModel} also failed: ${msg}`);
+    return primary;
+  }
+}
+
 async function debateWithRetry(
   llm: CouncilLLM,
   model: string,
@@ -456,13 +508,15 @@ export async function* runDebate(
     const researchTraces: string[] = [];
     researchFindings = yield* tracedAsync(
       () =>
-        llm.research(
+        researchWithFallback(
+          llm,
           researchCandidate.model,
           spec.problemStatement,
           conversationContext,
           signal,
           (t) => researchTraces.push(t),
           { internetFirst },
+          fallbackPool,
         ),
       {
         phase: "research",
@@ -1034,8 +1088,15 @@ export async function* runDebate(
         const midTraces: string[] = [];
         const findings = yield* tracedAsync(
           () =>
-            llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal, (t) =>
-              midTraces.push(t),
+            researchWithFallback(
+              llm,
+              researchCandidate.model,
+              evaluation.researchQuery!,
+              enrichedContext,
+              signal,
+              (t) => midTraces.push(t),
+              {},
+              fallbackPool,
             ),
           {
             phase: "research",
@@ -1202,6 +1263,11 @@ export async function* runDebate(
   // we don't want a converged final round (which has fewer fact-claims to
   // tag) to wipe out evidence work done earlier in the debate.
   const finalEvidenceDensity = Math.max(cumulativeDensity, lastEvidenceDensity ?? 0);
+  // Count of claims participants explicitly TAGGED ([CONFIRMED]/[REFUTED]/
+  // [UNVERIFIED]) across the whole debate. Lets the confidence badge tell
+  // "measured 0% grounding" apart from "no tags emitted → not measurable"
+  // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
+  const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
 
   return {
     spec,
@@ -1212,6 +1278,7 @@ export async function* runDebate(
     active,
     archive,
     finalEvidenceDensity,
+    finalTaggedClaims,
   };
 }
 

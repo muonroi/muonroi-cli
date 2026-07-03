@@ -3288,7 +3288,12 @@ export function useAppLogic(props: AppLogicProps) {
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
-                  if (cs.state === "start" && cs.label) {
+                  // Placeholder "composing…" bubbles only make sense for debate
+                  // speaker turns (opening/exchange) that later swap for a real
+                  // CouncilMessageBubble. For clarify/plan/research/evaluate/
+                  // synthesis the live status line already covers it, so a
+                  // placeholder there is redundant noise at council start.
+                  if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                     const placeholderRole = cs.label;
                     const isLeader = /^leader\b/i.test(placeholderRole);
                     const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
@@ -4098,7 +4103,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "council_status" && chunk.councilStatus) {
                     const cs = chunk.councilStatus;
-                    if (cs.state === "start" && cs.label) {
+                    // Placeholder "composing…" only for debate speaker turns
+                    // (opening/exchange) — see the council_status handler above.
+                    if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                       const placeholderRole = cs.label;
                       const isLeader = /^leader\b/i.test(placeholderRole);
                       const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
@@ -4351,7 +4358,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "council_status" && chunk.councilStatus) {
                     const cs = chunk.councilStatus;
-                    if (cs.state === "start" && cs.label) {
+                    // Placeholder "composing…" only for debate speaker turns
+                    // (opening/exchange) — see the council_status handler above.
+                    if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                       const placeholderRole = cs.label;
                       const isLeader = /^leader\b/i.test(placeholderRole);
                       const styleForRole = isLeader ? null : resolveStyle(placeholderRole);

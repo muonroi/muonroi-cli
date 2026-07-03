@@ -13,8 +13,9 @@
  * needed): "opencode-*" → opencode-go, "deepseek-*" → deepseek.
  */
 import { describe, expect, it } from "vitest";
+import type { StreamChunk } from "../../types/index.js";
 import { runDebate } from "../debate.js";
-import type { ClarifiedSpec, CouncilConfig, CouncilLLM, CouncilParticipant, StreamChunk } from "../types.js";
+import type { ClarifiedSpec, CouncilConfig, CouncilLLM, CouncilParticipant } from "../types.js";
 
 const FALLBACK_TEXT = "Recovered debate turn from the fallback provider.";
 const GOOD_TEXT = "Healthy debate turn from the primary provider.";
@@ -97,5 +98,59 @@ describe("debate cross-provider fallback (real runDebate)", () => {
       return cm?.round === 1 && cm?.speaker?.role === "architect";
     }) as { councilMessage?: { text?: string } } | undefined;
     expect(architectDebateTurn?.councilMessage?.text).toBe(FALLBACK_TEXT);
+  });
+});
+
+const RESEARCH_FAILED =
+  "## Source Code Findings\n[Research failed: Error from provider (Console Go): Upstream request failed]";
+const RESEARCH_OK = "## Source Code Findings\n- Found the render cascade in app.tsx.";
+
+describe("research cross-provider fallback (real runDebate)", () => {
+  it("recovers a crashed opencode-go research pass via a different-provider model", async () => {
+    const researchCalls: string[] = [];
+    const llm = {
+      generate: async () => GOOD_TEXT,
+      // The opencode-go research model returns the failure MARKER (it never
+      // throws — mirrors CouncilLLM.research's catch block). Any other provider
+      // returns real findings.
+      research: async (model: string) => {
+        researchCalls.push(model);
+        return model.startsWith("opencode") ? RESEARCH_FAILED : RESEARCH_OK;
+      },
+      debate: async () => ({ text: GOOD_TEXT, toolCalls: [] }),
+    } as unknown as CouncilLLM;
+
+    const participants = [
+      { role: "research", model: "opencode-kimi", position: "", stance: { name: "research", lens: "evidence" } },
+      { role: "architect", model: "deepseek-chat", position: "", stance: { name: "architect", lens: "design" } },
+    ] as unknown as CouncilParticipant[];
+
+    // Force research ON (leaderNeedsResearch) and OFF the skip override so the
+    // research phase actually fires and routes to the "research" participant.
+    const config = {
+      ...makeConfig(participants),
+      researchSkipOverride: false,
+      leaderNeedsResearch: true,
+    } as unknown as CouncilConfig;
+
+    const messages: StreamChunk[] = [];
+    const gen = runDebate(makeSpec(), config, llm);
+    for await (const chunk of gen) {
+      if ((chunk as { type?: string }).type === "council_message") messages.push(chunk);
+    }
+
+    // Primary opencode research was attempted AND the different-provider
+    // fallback (deepseek-leader from the pool) recovered it.
+    expect(researchCalls.some((m) => m.startsWith("opencode"))).toBe(true);
+    expect(researchCalls.some((m) => !m.startsWith("opencode"))).toBe(true);
+
+    // The research council_message carries the recovered findings, not the
+    // failure marker — so participants have real evidence to cite.
+    const researchMsg = messages.find((c) => {
+      const cm = (c as { councilMessage?: { kind?: string } }).councilMessage;
+      return cm?.kind === "research";
+    }) as { councilMessage?: { text?: string } } | undefined;
+    expect(researchMsg?.councilMessage?.text).toBe(RESEARCH_OK);
+    expect(researchMsg?.councilMessage?.text).not.toContain("Research failed");
   });
 });
