@@ -1971,6 +1971,10 @@ export class Agent {
       logger.error("router", "runDir resolution failed (decisions.lock will be skipped)", { error: err });
     }
 
+    // Captures the post-debate action so we can auto-continue on
+    // "continue_session" (user chose to keep working with the debate result).
+    let chosenAction: string | undefined;
+
     try {
       const gen = runCouncil(
         topic,
@@ -1988,6 +1992,9 @@ export class Agent {
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
           runDir, // B1 — persist decisions.lock.md for the /council slash path
+          onPostDebateAction: (action) => {
+            chosenAction = action;
+          },
         },
       );
 
@@ -2004,6 +2011,27 @@ export class Agent {
 
       if (options?.userModelMessage && synthesis) {
         this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+      }
+
+      // "continue_session": keep working in THIS session with the debate result.
+      // Re-enter processMessage with the synthesis as context so the agent
+      // continues the original task — this also writes real message rows, which
+      // is what makes the session resumable (the /council slash path otherwise
+      // leaves no messages and is filtered from the resume picker). Guarded by
+      // ownsController so it fires ONLY on the top-level slash path, never when
+      // nested inside processMessage (auto-council) or drained by the runDebate
+      // tool — those callers manage their own continuation.
+      if (ownsController && chosenAction === "continue_session" && synthesis) {
+        yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
+        this.councilManager.setContinuation(true);
+        try {
+          yield* this.processMessage(
+            `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
+            options?.observer,
+          );
+        } finally {
+          this.councilManager.setContinuation(false);
+        }
       }
     } finally {
       if (ownsController && this.abortController?.signal === signal) {

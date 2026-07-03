@@ -84,6 +84,12 @@ export interface RunCouncilOptions {
    * Typically <flowDir>/runs/<runId>. When absent the lock file is skipped.
    */
   runDir?: string;
+  /**
+   * Fired with the post-debate action the user chose (e.g. "continue_session",
+   * "save_exit"). Lets the caller (runCouncilV2) auto-continue an agent turn on
+   * "continue_session" instead of ending at the composer. Called at most once.
+   */
+  onPostDebateAction?: (action: string) => void;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -510,6 +516,10 @@ export async function* runCouncil(
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
   const synthesisFailReason = planResult.value.synthesisFailReason;
+  // Post-debate action the user picked (hoisted so the completed-status guard +
+  // the caller's auto-continue can both read it). Undefined until the card is
+  // answered.
+  let postDebateAction: string | undefined;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -735,6 +745,8 @@ export async function* runCouncil(
       } as StreamChunk;
 
       const answer = await respondToQuestion(questionId);
+      postDebateAction = answer;
+      options?.onPostDebateAction?.(answer);
       // Echo the human-readable option label, never the raw action id
       // (`continue_session`, `save_exit`, …) — the id is an internal routing
       // token users should never see. Free-text follow-ups (no matching option)
@@ -1016,8 +1028,10 @@ export async function* runCouncil(
     }
   }
 
-  // Update session status to completed
-  if (sessionId) {
+  // Update session status to completed — EXCEPT when the user chose
+  // "continue_session", where the agent keeps working in this session; marking
+  // it completed here is what dropped it from the resume picker.
+  if (sessionId && postDebateAction !== "continue_session") {
     try {
       new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
     } catch {
