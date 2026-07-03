@@ -816,7 +816,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
                   {councilPhases.length > 0 && (
                     <Semantic id="council-phases" role="listbox" name="Council Phases">
-                      <CouncilPhaseTimeline phases={councilPhases} theme={t} />
+                      <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
                     </Semantic>
                   )}
                   {productStatus && <ProductStatusCard data={productStatus} theme={t} />}

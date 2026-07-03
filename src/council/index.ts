@@ -735,7 +735,12 @@ export async function* runCouncil(
       } as StreamChunk;
 
       const answer = await respondToQuestion(questionId);
-      yield { type: "content", content: `\n  ↳ ${answer}\n` };
+      // Echo the human-readable option label, never the raw action id
+      // (`continue_session`, `save_exit`, …) — the id is an internal routing
+      // token users should never see. Free-text follow-ups (no matching option)
+      // echo verbatim.
+      const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
+      yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
 
       // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
       const knownValues = new Set([

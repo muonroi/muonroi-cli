@@ -47,6 +47,12 @@ export function formatAnswerForLog(
   if (!label || label === verb) return verb;
   // Single line — labels carry value + rationale tail; keep echo to the value.
   const valueOnly = label.split("—")[0].trim().replace(/\s+/g, " ");
+  // Internal snake_case action ids (continue_session, save_exit, generate_plan,
+  // ask_followup…) are routing tokens the user should NEVER see. When the value
+  // is such an id, echo the human label alone instead of "continue_session · …".
+  // Short human verbs (accept, skip, override) have no underscore and keep the
+  // value-prefixed forensics form below.
+  if (/_/.test(verb)) return valueOnly || verb;
   if (ctx?.questionId) {
     return `${verb} · ${ctx.questionId}=${valueOnly}`;
   }

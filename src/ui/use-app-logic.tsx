@@ -86,6 +86,7 @@ import {
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
+import { setRetryReporter } from "../utils/visible-retry.js";
 import { buildVerifyPrompt } from "../verify/entrypoint";
 import {
   buildSubagentBrowseRows,
@@ -660,6 +661,15 @@ export function useAppLogic(props: AppLogicProps) {
     toastIdRef.current += 1;
     setActiveToast({ level, text, id: toastIdRef.current });
   }, []);
+
+  // Route visible-retry progress ("[retry] rate-limited (429) — waiting Xs …")
+  // through the toast surface. Without this it falls back to a raw
+  // process.stderr.write, which under OpenTUI's raw-mode alt-screen paints over
+  // the composer input frame (user-reported bad UX).
+  useEffect(() => {
+    setRetryReporter((message, level) => pushToast(level === "warn" ? "warn" : "info", message));
+    return () => setRetryReporter(null);
+  }, [pushToast]);
 
   // Stable handler ΓÇö only reads from refs, never recreated, so the patched
   // emitEvent reference below remains valid for the lifetime of the runtime.
