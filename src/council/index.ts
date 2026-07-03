@@ -187,7 +187,11 @@ export async function* runCouncil(
   }
   yield {
     type: "content",
-    content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
+    // Show models only — the `implement/verify/research` roles are internal
+    // cost-tier routing slots, NOT debate personas (those are task-adaptive and
+    // shown in the Debate Plan card once assigned). Printing the slot names here
+    // misleadingly implied implementation intent on analysis/decision topics.
+    content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
   };
 
   const baseContext = buildCouncilContext(messages);
@@ -272,9 +276,12 @@ export async function* runCouncil(
     if (userAborted()) break;
 
     const researchNeeded = true;
+    // ROI: when the clarifier judged the spec ready (high confidence, no gaps),
+    // the approve card is a rubber-stamp — auto-approve after showing the brief.
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
+      autoApprove: spec.ready === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -298,7 +305,7 @@ export async function* runCouncil(
   // Leader-LLM decides if research is required. If yes, give the user a chance
   // to skip — research is the slowest part of council and trivial questions
   // (e.g. "what did we just decide?") should not pay that cost.
-  let researchSkipOverride = false;
+  const researchSkipOverride = false;
   // Hoisted so the leader's research decision can be reused by runDebate instead
   // of re-running the classifier LLM call (see CouncilConfig.leaderNeedsResearch).
   // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
@@ -312,40 +319,15 @@ export async function* runCouncil(
     } while (!needStep.done);
     leaderNeedsResearch = needStep.value;
 
+    // ROI: the leader already decided research is needed and the card's default
+    // was always "run research" — asking the user to confirm is a rubber-stamp
+    // (measured 0 information at real cost). Auto-proceed with research; the
+    // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
+    // stays false. (Deliberately no card — see council-UX ROI pass.)
     if (leaderNeedsResearch) {
-      const { randomUUID } = await import("crypto");
-      const overrideId = randomUUID();
-      yield {
-        type: "council_question",
-        content:
-          `\n## Research decision\nLeader recommends a research phase before debate` +
-          (internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)") +
-          `. Want to skip it?`,
-        councilQuestion: {
-          questionId: overrideId,
-          phase: "post-debate",
-          question: "Skip the research phase?",
-          context: internetFirst
-            ? "Workspace is empty — research will search the internet. Skip if you already have the answer."
-            : "Research will grep/read the codebase. Skip for trivial topics that don't need code evidence.",
-          isRequired: false,
-          options: [
-            {
-              label: "No — run research (recommended)",
-              description: "Leader thinks evidence is needed.",
-              value: "no",
-              kind: "choice",
-            },
-            { label: "Yes — skip research", description: "Go straight to debate.", value: "yes", kind: "choice" },
-          ],
-          defaultIndex: 0,
-        },
-      } as StreamChunk;
-      const overrideAnswer = await respondToQuestion(overrideId);
-      researchSkipOverride = overrideAnswer === "yes";
       yield {
         type: "content",
-        content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n`,
+        content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
       };
     }
   } catch (err) {

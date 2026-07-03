@@ -109,7 +109,7 @@ export function buildPreflightQuestion(pf: {
     questionId: pf.preflightId,
     phase: "preflight",
     question: `Approve discussion plan for: ${pf.problemStatement}`,
-    context: pf.participants.length > 0 ? `Participants: ${pf.participants.map((p) => p.role).join(", ")}` : undefined,
+    context: pf.participants.length > 0 ? `Panel: ${pf.participants.map((p) => p.model).join(", ")}` : undefined,
     options: [
       { label: "Approve", value: "approve", kind: "choice", description: "Looks good — start the debate" },
       { label: "Reject", value: "reject", kind: "choice", description: "Hold off — go back and rephrase the topic" },

@@ -28,6 +28,14 @@ export function buildClarificationPrompt(
       `Ask the minimum that unblocks a focused discussion — typically 0-2. A well-scoped topic, or one ` +
       `whose context already answers the gaps, needs ZERO questions: return []. Do NOT pad to a quota, ` +
       `and never ask a question whose answer is already in the topic or the project context.\n\n` +
+      `## Ask ONLY when the answer forks the debate (ROI gate — critical)\n` +
+      `Before emitting ANY question, ask yourself: "If the user said 'you decide', would I be confident?" ` +
+      `If YES and picking wrong would be cheap to correct once the debate surfaces it, DO NOT ask — return [] ` +
+      `and let the debate proceed on your recommended reading. A card that merely asks the user to CONFIRM the ` +
+      `default you already recommend is pure noise: it cost a real user 60s for zero new information. Only ask ` +
+      `when the answer MATERIALLY changes what the experts debate — e.g. two incompatible scopes that produce ` +
+      `entirely different debates — AND you genuinely cannot pick for them. When in doubt, return [] and proceed ` +
+      `on your best reading; the debate itself will expose any wrong assumption far more cheaply than a gate.\n\n` +
       `## Existing-repo grounding (IMPORTANT)\n` +
       `If a "## Current Project" section is present you are working in an EXISTING repository — NOT a ` +
       `greenfield project. Ground every question and every option in what that snapshot actually shows ` +
