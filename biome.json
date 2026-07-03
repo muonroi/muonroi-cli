@@ -49,5 +49,17 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["src/ui/**", "packages/agent-harness-opentui/**"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useValidAriaRole": "off"
+          }
+        }
+      }
+    }
+  ]
 }

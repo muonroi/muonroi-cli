@@ -198,3 +198,61 @@ export async function findUnwrappedComponents(opts: FindUnwrappedOptions): Promi
   }
   return results;
 }
+
+// ---------------------------------------------------------------------------
+// Interactive-without-semantic detection
+//
+// A component that wires interactive handlers (submit / input / paste / click /
+// keybindings / focus) but never references a semantic wrapper is invisible AND
+// undrivable by the agent harness — the highest-value drift to catch, because
+// it is exactly the surface a user (or agent) is meant to operate.
+//
+// A file counts as "instrumented" if it references <Semantic> directly OR
+// imports from a primitives module (the role-fixed wrappers) OR from the
+// agent-harness package. This is a heuristic (regex, not AST) but tuned for
+// low false positives: it only fires when an interactive marker is present.
+// ---------------------------------------------------------------------------
+
+const INTERACTIVE_RE = /\b(onSubmit|onInput|onChange|onPaste|onClick|onMouseDown|onKeyDown|keyBindings)\b|\bfocused=/;
+const INSTRUMENTED_RE = /<Semantic\b|["'][^"']*\/primitives|from\s+["']@muonroi\/agent-harness/;
+
+function checkInteractive(filePath: string): { line: number; marker: string } | null {
+  const src = readFileSync(filePath, "utf-8");
+  const m = INTERACTIVE_RE.exec(src);
+  if (!m || m.index === undefined) return null;
+  if (INSTRUMENTED_RE.test(src)) return null;
+  const line = src.slice(0, m.index).split("\n").length;
+  return { line, marker: m[0] };
+}
+
+export interface InteractiveResult {
+  /** Relative path (forward slashes). */
+  path: string;
+  /** 1-based line of the first interactive marker. */
+  line: number;
+  /** The interactive prop that triggered the finding. */
+  marker: string;
+}
+
+/**
+ * Walk .tsx files matching `opts.patterns` and return those that wire an
+ * interactive handler but never reference a semantic wrapper (raw `<Semantic>`
+ * or a primitives import). Pure function — no console output, no process.exit.
+ */
+export async function findInteractiveWithoutSemantic(opts: FindUnwrappedOptions): Promise<InteractiveResult[]> {
+  const { rootDir, patterns, allowlistPath } = opts;
+
+  const allowlist = allowlistPath ? loadAllowlist(allowlistPath) : [];
+  const files = collectByPatterns(rootDir, patterns);
+
+  const results: InteractiveResult[] = [];
+  for (const absPath of files) {
+    const relPath = relative(rootDir, absPath).replace(/\\/g, "/");
+    if (isAllowed(relPath, allowlist)) continue;
+    const finding = checkInteractive(absPath);
+    if (finding) {
+      results.push({ path: relPath, line: finding.line, marker: finding.marker });
+    }
+  }
+  return results;
+}
