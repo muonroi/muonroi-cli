@@ -91,6 +91,7 @@ import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
+import { CouncilDebatePill } from "./components/council-debate-pill.js";
 import { CouncilInfoCardView } from "./components/council-info-card.js";
 import { CouncilLeaderBubble } from "./components/council-leader-bubble.js";
 import { CouncilMessageBubble } from "./components/council-message-bubble.js";
@@ -593,6 +594,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilCardState,
     councilInfoCards,
     councilMessages,
+    councilTranscriptExpanded,
     councilPhases,
     councilPlaceholders,
     councilProgress,
@@ -843,14 +845,49 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       />
                     </Semantic>
                   ))}
-                  {councilMessages.map((cm, idx) => {
-                    const side: "left" | "right" =
-                      cm.kind === "debate" && cm.partner
-                        ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
-                        : "left";
+                  {(() => {
+                    // Fold the debate back-and-forth (leader + debate + research
+                    // turns) into a collapsible pill; render synthesis inline
+                    // below so the deliverable stays visible. Preserve each
+                    // turn's ORIGINAL index for stable Semantic ids (the harness
+                    // queries `council-msg-N`).
+                    type Turn = { cm: (typeof councilMessages)[number]; idx: number };
+                    const turns: Turn[] = councilMessages.map((cm, idx) => ({ cm, idx }));
+                    const debateTurns = turns.filter(({ cm }) => cm.kind !== "synthesis");
+                    const synthesisTurns = turns.filter(({ cm }) => cm.kind === "synthesis");
+                    const debateActive = isProcessing && synthesisTurns.length === 0;
+                    const lastDebate = debateTurns.length > 0 ? debateTurns[debateTurns.length - 1]!.cm : null;
+                    const tailText = lastDebate
+                      ? lastDebate.text
+                          .split("\n")
+                          .filter((l) => l.trim().length > 0)
+                          .slice(-3)
+                          .join(" · ")
+                      : "";
 
-                    const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
-                    if (cm.kind === "leader") {
+                    const renderTurn = ({ cm, idx }: Turn) => {
+                      const side: "left" | "right" =
+                        cm.kind === "debate" && cm.partner
+                          ? getSide(makePairKey(cm.speaker.role, cm.partner.role), cm.speaker.role)
+                          : "left";
+                      const semName = `${cm.kind}:${cm.speaker?.role ?? "?"}`;
+                      if (cm.kind === "leader") {
+                        return (
+                          <Semantic
+                            key={`sem-cm-${idx}`}
+                            id={`council-msg-${idx}`}
+                            role="listitem"
+                            name={semName}
+                            value={cm.text}
+                          >
+                            <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                          </Semantic>
+                        );
+                      }
+                      const pairKey = cm.partner
+                        ? makePairKey(cm.speaker.role, cm.partner.role)
+                        : `solo::${cm.speaker.role}`;
+                      const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
                       return (
                         <Semantic
                           key={`sem-cm-${idx}`}
@@ -859,48 +896,58 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           name={semName}
                           value={cm.text}
                         >
-                          <CouncilLeaderBubble key={idx} msg={cm} terminalCols={width} />
+                          <CouncilMessageBubble
+                            key={idx}
+                            msg={cm}
+                            terminalCols={width}
+                            side={side}
+                            resolveStyle={resolveStyle}
+                            partnerLastText={partnerLastText}
+                            partnerRole={cm.partner?.role}
+                            theme={t}
+                          />
                         </Semantic>
                       );
-                    }
-                    if (cm.kind === "synthesis") {
-                      return (
-                        <Semantic
-                          key={`sem-cm-${idx}`}
-                          id={`council-msg-${idx}`}
-                          role="listitem"
-                          name={semName}
-                          value={cm.text}
-                        >
-                          <CouncilSynthesisBanner key={idx} msg={cm} />
-                        </Semantic>
-                      );
-                    }
-                    const pairKey = cm.partner
-                      ? makePairKey(cm.speaker.role, cm.partner.role)
-                      : `solo::${cm.speaker.role}`;
-                    const partnerLastText = cm.partner ? getPartnerLast(pairKey, cm.partner.role) : undefined;
+                    };
+
                     return (
-                      <Semantic
-                        key={`sem-cm-${idx}`}
-                        id={`council-msg-${idx}`}
-                        role="listitem"
-                        name={semName}
-                        value={cm.text}
-                      >
-                        <CouncilMessageBubble
-                          key={idx}
-                          msg={cm}
-                          terminalCols={width}
-                          side={side}
-                          resolveStyle={resolveStyle}
-                          partnerLastText={partnerLastText}
-                          partnerRole={cm.partner?.role}
-                          theme={t}
-                        />
-                      </Semantic>
+                      <>
+                        {debateTurns.length > 0 && (
+                          <Semantic
+                            id="council-debate-pill"
+                            role="log"
+                            name="Council debate transcript"
+                            props={{
+                              expanded: councilTranscriptExpanded,
+                              active: debateActive,
+                              count: debateTurns.length,
+                            }}
+                          >
+                            <CouncilDebatePill
+                              count={debateTurns.length}
+                              active={debateActive}
+                              expanded={councilTranscriptExpanded}
+                              tailText={tailText}
+                              theme={t}
+                            >
+                              {councilTranscriptExpanded ? debateTurns.map(renderTurn) : null}
+                            </CouncilDebatePill>
+                          </Semantic>
+                        )}
+                        {synthesisTurns.map(({ cm, idx }) => (
+                          <Semantic
+                            key={`sem-cm-${idx}`}
+                            id={`council-msg-${idx}`}
+                            role="listitem"
+                            name={`${cm.kind}:${cm.speaker?.role ?? "?"}`}
+                            value={cm.text}
+                          >
+                            <CouncilSynthesisBanner key={idx} msg={cm} />
+                          </Semantic>
+                        ))}
+                      </>
                     );
-                  })}
+                  })()}
                   {Array.from(councilPlaceholders.entries()).map(([id, p]) => (
                     <CouncilPlaceholderBubble
                       key={id}

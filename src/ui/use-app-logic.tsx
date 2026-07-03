@@ -1055,6 +1055,10 @@ export function useAppLogic(props: AppLogicProps) {
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
   const [councilMessages, setCouncilMessages] = useState<CouncilMessage[]>([]);
+  // Debate transcript pill: collapsed by default (shows a live tail while the
+  // debate runs, a one-line summary once done). Ctrl+O expands to the full
+  // back-and-forth. Synthesis renders outside the pill so it stays visible.
+  const [councilTranscriptExpanded, setCouncilTranscriptExpanded] = useState(false);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
@@ -4923,6 +4927,15 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+O — toggle the council debate transcript pill between the collapsed
+      // summary/tail and the full back-and-forth. Global (unbound elsewhere); a
+      // no-op visually when no debate turns exist, so an unconditional toggle is
+      // safe and avoids threading councilMessages into this useCallback.
+      if (key.name === "o" && key.ctrl && !key.meta) {
+        setCouncilTranscriptExpanded((v) => !v);
+        return;
+      }
+
       // Point-to-existing form intercepts all input while open.
       if (pointToExistingForm) {
         if (pointToExistingForm.step === "input") {
@@ -6877,6 +6890,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilCardState,
     councilInfoCards,
     councilMessages,
+    councilTranscriptExpanded,
     councilPhases,
     councilPlaceholders,
     councilProgress,
