@@ -1,7 +1,32 @@
 #!/usr/bin/env sh
-# Self-verify pre-push gate.
-# Only fires when the push includes changes under src/ui/, src/self-qa/, or
-# src/agent-harness/ — these are the surfaces unit tests can't fully cover.
-#
-# Skip with: git push --no-verify
+# Pre-push gates for surfaces unit tests can't fully cover.
+# Skip everything with: git push --no-verify
+
+# ---------------------------------------------------------------------------
+# Gate 1 — Semantic-instrumentation lint (fast, ~1-2s; runs first, fail-fast).
+# Blocks a push that leaves a UI surface uninstrumented: a component whose root
+# JSX isn't wrapped in <Semantic>/a primitive, or an interactive element that
+# references no semantic wrapper at all. Only fires when the push touches a UI /
+# harness surface. Suppress a known exception via scripts/.semantic-wrap-allow.txt.
+# ---------------------------------------------------------------------------
+RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)
+if [ -n "$RANGE" ]; then
+  CHANGED=$(git diff --name-only "$RANGE"...HEAD)
+  SEMANTIC_MATCH=$(printf '%s\n' "$CHANGED" | grep -E '^src/ui/|^packages/agent-harness-(react|angular|opentui)/' || true)
+else
+  # No upstream (new branch) — run the check unconditionally; it's cheap.
+  SEMANTIC_MATCH="run-anyway"
+fi
+if [ -n "$SEMANTIC_MATCH" ]; then
+  echo "[pre-push] UI/harness surface changed → strict semantic-instrumentation lint"
+  bun run lint:semantic:strict || {
+    echo "[pre-push] semantic lint failed — wrap the surface or allowlist it. Skip: git push --no-verify"
+    exit 1
+  }
+fi
+
+# ---------------------------------------------------------------------------
+# Gate 2 — Self-verify. Fires when the push includes changes under src/ui/,
+# src/self-qa/, or src/agent-harness/ — surfaces unit tests can't fully cover.
+# ---------------------------------------------------------------------------
 node scripts/self-verify-pre-push.cjs
