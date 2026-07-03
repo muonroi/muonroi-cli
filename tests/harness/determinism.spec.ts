@@ -114,7 +114,13 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
               seq: number;
               ts: number;
             };
-            return JSON.stringify(rest);
+            // Strip `props.scrollTop` anywhere in the node tree: it is a
+            // render-timing artifact (the log's scroll-to-bottom after the
+            // assistant message commits races the capture tick, so it reads 0
+            // or 1 depending on OS scheduler jitter) — semantically identical
+            // across runs, exactly like seq/ts. Leaving it in made the cross-run
+            // equality assertion flake under load (observed: scrollTop 0 vs 1).
+            return JSON.stringify(rest, (k, v) => (k === "scrollTop" ? undefined : v));
           })()
         : "";
       resolve([normalized]);
@@ -128,8 +134,14 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     // the assistant turn. The timer is reset at idle#1 so a late boot does not
     // eat into the reply budget (which would risk capturing a mid-stream
     // partial). settle() (not reject) keeps the determinism check authoritative.
-    const BOOT_BUDGET_MS = 60_000;
-    const REPLY_BUDGET_MS = 15_000;
+    // Budgets widened for CI: on a shared 2-core runner cold boot reaches
+    // ~46s and the mock assistant turn can lag under contention. If REPLY_BUDGET
+    // fired BEFORE the turn fully settled it would capture a partial final frame,
+    // which then differs across the 5 runs and fails the cross-run equality
+    // assertion (the branch's original flake). The settle still anchors on the
+    // second idle when it arrives; these are only the safety fallbacks.
+    const BOOT_BUDGET_MS = 90_000;
+    const REPLY_BUDGET_MS = 45_000;
     let safetyTimer = setTimeout(() => {
       if (!settled) settle();
     }, BOOT_BUDGET_MS);

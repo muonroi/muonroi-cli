@@ -47,9 +47,14 @@ export default defineConfig({
     // hook/test timeouts to not be the binding (and wrong) constraint, they
     // must comfortably exceed handshake(90s) + idle(15s) + textbox(5s).
     // Measured: 60s testTimeout was marginal (the error-states "toast" test
-    // legitimately takes ~46s under load).
-    testTimeout: 120_000,
-    hookTimeout: 120_000,
+    // legitimately takes ~46s under load). CI-load-sensitive specs (council-flow,
+    // discovery-askcard, session-rotation-delegation, determinism) widen their
+    // OWN internal waits + per-it timeouts to absorb the 25–46s cold boot on a
+    // shared 2-core runner; this outer ceiling is raised to 240s so it stays
+    // non-binding for specs that rely on the default. Passing tests still resolve
+    // the moment their condition is met — this only widens the ceiling.
+    testTimeout: 240_000,
+    hookTimeout: 240_000,
     // Real-subprocess E2E under CPU starvation is inherently transient:
     // a child can be momentarily starved and miss a round/render within an
     // attempt's window. `retry` re-runs the failed test on a fresh attempt

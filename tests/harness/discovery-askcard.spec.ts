@@ -34,8 +34,11 @@ describe("discovery askcard E2E", () => {
     proc.stderr?.on("data", (d) => console.log("STDERR:", d.toString()));
     driver = ctx.driver;
     cleanup = ctx.cleanup;
-    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    await driver.wait_for({ selector: "id=composer", timeoutMs: 5_000 });
+    // CI runners (shared 2-core) cold-boot the agent-mode TUI in 25–46s under
+    // contention — far longer than a dev box — so the boot-gate idle wait must
+    // comfortably exceed that, else the beforeAll times out before React mounts.
+    await driver.wait_for({ idle: true, timeoutMs: 60_000 });
+    await driver.wait_for({ selector: "id=composer", timeoutMs: 10_000 });
   }, 120_000);
 
   afterAll(() => {
@@ -54,19 +57,21 @@ describe("discovery askcard E2E", () => {
 
   it("shows discovery askcard for a vague request", async () => {
     driver.type("build a web app");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
+    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
     driver.press("Enter");
-    // PIL discovery runs model → returns 2 cards → askcard modal appears
-    await driver.wait_for({ event: "askcard-open", timeoutMs: 25_000 });
-    await driver.wait_for({ selector: "id=askcard", timeoutMs: 5_000 });
+    // PIL discovery runs model → returns 2 cards → askcard modal appears.
+    // Under CI CPU contention the first model round-trip is slow, so allow a
+    // wide window (the per-it timeout below must exceed the sum of these waits).
+    await driver.wait_for({ event: "askcard-open", timeoutMs: 90_000 });
+    await driver.wait_for({ selector: "id=askcard", timeoutMs: 10_000 });
     expect(driver.query("id=askcard")?.role).toBe("dialog");
-  }, 35_000);
+  }, 150_000);
 
   it("can navigate discovery askcard options", async () => {
-    await driver.wait_for({ selector: "id=askcard", timeoutMs: 10_000 });
+    await driver.wait_for({ selector: "id=askcard", timeoutMs: 30_000 });
     driver.press("Down");
-    await driver.wait_for({ idle: true, timeoutMs: 5_000 });
+    await driver.wait_for({ idle: true, timeoutMs: 10_000 });
     const selected = driver.queryAll("role=button").find((n) => n.selected);
     expect(selected).toBeDefined();
-  }, 15_000);
+  }, 60_000);
 });

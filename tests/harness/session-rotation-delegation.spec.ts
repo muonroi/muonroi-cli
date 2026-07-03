@@ -90,16 +90,17 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
       },
     });
 
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
+    // CI cold-boot (25–46s under 2-core contention) can exceed a 15s idle gate.
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 60_000 });
+    await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
 
     // Type the prompt
     ctx.driver.type("create verification script");
     ctx.driver.press("Enter");
 
     // Wait for LLM response
-    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 15_000 });
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 10_000 });
+    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
 
     // Exit gracefully to ensure DB commits
     ctx.driver.type("/exit");
@@ -147,7 +148,7 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
 
     db.close();
     ctx.cleanup();
-  }, 45_000);
+  }, 150_000);
 
   it("triggers ROTATE_SESSION: rotates session silently when threshold exceeded", async () => {
     // Round 0 (Classifier): ROTATE_SESSION
@@ -206,14 +207,15 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
       },
     });
 
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
-    await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
+    // CI cold-boot (25–46s under 2-core contention) can exceed a 15s idle gate.
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 60_000 });
+    await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
 
     ctx.driver.type("switch to a different topic");
     ctx.driver.press("Enter");
 
-    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 15_000 });
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 10_000 });
+    await ctx.driver.wait_for({ selector: "role=log", timeoutMs: 30_000 });
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 30_000 });
 
     ctx.driver.type("/exit");
     ctx.driver.press("Enter");
@@ -237,5 +239,5 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
 
     db.close();
     ctx.cleanup();
-  }, 45_000);
+  }, 150_000);
 });

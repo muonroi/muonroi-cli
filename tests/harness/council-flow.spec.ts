@@ -42,9 +42,10 @@ describe("council flow E2E", () => {
     driver = ctx.driver;
     cleanup = ctx.cleanup;
 
-    await driver.wait_for({ idle: true, timeoutMs: 15_000 });
+    // CI cold-boot (25–46s under 2-core contention) can exceed a 15s idle gate.
+    await driver.wait_for({ idle: true, timeoutMs: 60_000 });
     // POSIX race: idle can fire on the empty seq=0 frame before React mounts.
-    await driver.wait_for({ selector: "role=textbox", timeoutMs: 5_000 });
+    await driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
   }, 120_000);
 
   afterAll(() => {
@@ -94,9 +95,11 @@ describe("council flow E2E", () => {
     await driver.wait_for({ idle: true, timeoutMs: 5_000 });
     driver.press("Enter");
     // council_phase for "Clarification" fires before runPreflight blocks.
+    // Widened for CI: the council preflight + first model round-trip is slow
+    // under 2-core contention (this test carries the 240s config testTimeout).
     await driver.wait_for({
       selector: "id=council-phases",
-      timeoutMs: 30_000,
+      timeoutMs: 90_000,
     });
     expect(driver.query("id=council-phases")).toBeTruthy();
   });
