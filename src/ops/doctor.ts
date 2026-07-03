@@ -148,7 +148,7 @@ async function checkEEDetailed(): Promise<CheckResult> {
     if (!serverOk) {
       const hint =
         result.mode === "thin-client"
-          ? "Hint: check VPS 72.61.127.154:8082 is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
+          ? "Hint: check VPS experience.muonroi.com is reachable; verify ~/.experience/config.json serverBaseUrl + serverReadAuthToken"
           : "Hint: start EE locally or configure thin-client in ~/.experience/config.json";
       return {
         name: "ee.health",

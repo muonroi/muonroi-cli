@@ -95,7 +95,7 @@ describe("doctor EE health checks (CQ-16c/16d)", () => {
     const results = await runDoctor();
     const eeHealth = results.find((r) => r.name === "ee.health");
     expect(eeHealth?.status).toBe("warn");
-    expect(eeHealth?.detail).toContain("72.61.127.154");
+    expect(eeHealth?.detail).toContain("experience.muonroi.com");
   });
 
   it("ee.health does NOT report unreachable when server is up but gates degraded (VERIFY F9)", async () => {

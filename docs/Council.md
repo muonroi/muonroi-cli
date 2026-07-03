@@ -70,7 +70,7 @@ Fail-open: if PIL throws, council continues without context.
 
 `queryExperience(topic, domain, signal)` in `src/ee/council-bridge.ts`.
 
-Single `searchByText` call to `experience-behavioral` + `experience-principles` collections on EE VPS (`72.61.127.154:8082`). Hard latency cap: 1.5s on the critical path. Falls back to `{ warnings: [] }` on timeout or VPS unreachable.
+Single `searchByText` call to `experience-behavioral` + `experience-principles` collections on EE VPS (`experience.muonroi.com`). Hard latency cap: 1.5s on the critical path. Falls back to `{ warnings: [] }` on timeout or VPS unreachable.
 
 Controlled by `council.experienceMode` setting (`off` | `advisory` | `enforcing`, default: `advisory`). Set via `/gsd-settings`.
 

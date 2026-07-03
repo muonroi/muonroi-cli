@@ -21,7 +21,7 @@ cd D:/sources/Core/muonroi-cli
 bun run ee:ingest-bb -- \
   --bb-root D:/sources/Core/muonroi-building-block \
   --templates-root D:/sources/Core \
-  --ee-url http://72.61.127.154:8082
+  --ee-url https://experience.muonroi.com
 ```
 
 Auth: reads `EE_AUTH_TOKEN` from env first; falls back to `~/.experience/config.json:serverAuthToken`.

@@ -4,7 +4,7 @@
 
 ## Why
 
-`muonroi-building-block` (BB) is a .NET meta-framework with **60+ packages** across 4 families (Core, Governance, RuleEngine, Infrastructure) with OSS/Commercial boundary. The Experience Engine (EE) at `72.61.127.154:8082` already has rich behavioral rules for BB (rule engine, tenancy, auth, caching, EFCore — all top-k scores ≥0.65), but they are interleaved with rules from other projects in a single `experience-behavioral` collection. `/ideal` cannot do BB-aware retrieval today.
+`muonroi-building-block` (BB) is a .NET meta-framework with **60+ packages** across 4 families (Core, Governance, RuleEngine, Infrastructure) with OSS/Commercial boundary. The Experience Engine (EE) at `experience.muonroi.com` already has rich behavioral rules for BB (rule engine, tenancy, auth, caching, EFCore — all top-k scores ≥0.65), but they are interleaved with rules from other projects in a single `experience-behavioral` collection. `/ideal` cannot do BB-aware retrieval today.
 
 Three concrete problems surfaced by the EE coverage probe (2026-05-15):
 
@@ -64,7 +64,7 @@ LOW — additive normalization at intercept ingress. Existing data stays; we add
 
 ### Acceptance
 
-`curl -sH "Authorization: Bearer $READ" "http://72.61.127.154:8082/api/stats?since=30d"` returns `bySlug["muonroi-building-block"].intercepts >= 80` (sum of current 30+ buckets).
+`curl -sH "Authorization: Bearer $READ" "https://experience.muonroi.com/api/stats?since=30d"` returns `bySlug["muonroi-building-block"].intercepts >= 80` (sum of current 30+ buckets).
 
 ---
 

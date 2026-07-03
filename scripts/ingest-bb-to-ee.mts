@@ -38,7 +38,7 @@ const { values: args } = parseArgs({
     "templates-root": { type: "string" },
     "dry-run": { type: "boolean", default: false },
     "collection-filter": { type: "string" },
-    "ee-url": { type: "string", default: "http://72.61.127.154:8082" },
+    "ee-url": { type: "string", default: "https://experience.muonroi.com" },
     help: { type: "boolean", default: false },
   },
   allowPositionals: false,
@@ -54,7 +54,7 @@ Options:
   --templates-root    Path to the directory containing Muonroi.*Template repos
   --dry-run           Print what would be ingested; no HTTP POST
   --collection-filter Ingest only this collection (bb-behavioral | bb-recipes | experience-principles)
-  --ee-url            EE base URL (default: http://72.61.127.154:8082)
+  --ee-url            EE base URL (default: https://experience.muonroi.com)
 `);
   process.exit(0);
 }
@@ -63,7 +63,7 @@ const BB_ROOT = args["bb-root"] ?? "D:/sources/Core/muonroi-building-block";
 const TEMPLATES_ROOT = args["templates-root"] ?? "D:/sources/Core";
 const DRY_RUN = args["dry-run"] ?? false;
 const COLLECTION_FILTER = args["collection-filter"] ?? null;
-const EE_URL = args["ee-url"] ?? "http://72.61.127.154:8082";
+const EE_URL = args["ee-url"] ?? "https://experience.muonroi.com";
 
 const STATE_FILE = resolve(process.cwd(), ".ee-ingest-state.json");
 

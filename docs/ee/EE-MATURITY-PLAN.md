@@ -1,7 +1,7 @@
 # Experience Engine Maturity Plan
 
 > Created: 2026-06-26 | Status: In Progress
-> Target VPS: phila@72.61.127.154
+> Target VPS: experience.muonroi.com
 
 ## Assessment
 
