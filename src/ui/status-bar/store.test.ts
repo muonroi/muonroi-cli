@@ -39,7 +39,7 @@ vi.mock("../../usage/downgrade.js", () => ({
   },
 }));
 
-import { __resetStatusBarStoreForTests, statusBarStore, wireStatusBar } from "./store.js";
+import { __resetStatusBarStoreForTests, statusBarStore, wireStatusBar } from "../../state/status-bar-store.js";
 
 describe("statusBarStore", () => {
   beforeEach(() => {

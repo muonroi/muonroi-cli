@@ -37,6 +37,7 @@ import {
   resolveModelRuntime as resolveRuntime,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
+import { statusBarStore } from "../state/status-bar-store.js";
 import {
   appendCompaction,
   appendMessages,
@@ -72,7 +73,6 @@ import type {
   VerifyRecipe,
   WorkspaceInfo,
 } from "../types/index";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";

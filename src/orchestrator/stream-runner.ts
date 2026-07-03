@@ -56,10 +56,10 @@ import {
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
+import { statusBarStore } from "../state/status-bar-store.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { __resetStatusBarStoreForTests, statusBarStore } from "../../status-bar/store.js";
+import { __resetStatusBarStoreForTests, statusBarStore } from "../../../state/status-bar-store.js";
 import type { SlashContext } from "../registry.js";
 
 // Import to trigger self-registration

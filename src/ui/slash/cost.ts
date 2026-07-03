@@ -10,7 +10,7 @@
 
 import { healthDetailed } from "../../ee/health.js";
 import { getDefaultEEClient } from "../../ee/intercept.js";
-import { statusBarStore } from "../status-bar/store.js";
+import { statusBarStore } from "../../state/status-bar-store.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 

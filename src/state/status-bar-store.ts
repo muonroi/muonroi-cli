@@ -1,16 +1,19 @@
 /**
- * src/ui/status-bar/store.ts
+ * src/state/status-bar-store.ts
  *
  * Status bar store: subscribable atom holding model/provider/tier/tokens/USD/degraded.
  * wireStatusBar() connects to routerStore (Plan 03), subscribeThresholds (Plan 04),
  * and subscribeDowngrade (Plan 05).
+ *
+ * Presentation-agnostic state — lives outside src/ui so the headless core
+ * (orchestrator/tool-engine/stream-runner) can read it without importing ui/.
  */
 
-import { getCircuitState } from "../../ee/client.js";
-import { routerStore } from "../../router/store.js";
-import { subscribeDowngrade } from "../../usage/downgrade.js";
-import { subscribeThresholds } from "../../usage/thresholds.js";
-import { activeRunStore } from "../state/active-run.js";
+import { getCircuitState } from "../ee/client.js";
+import { routerStore } from "../router/store.js";
+import { subscribeDowngrade } from "../usage/downgrade.js";
+import { subscribeThresholds } from "../usage/thresholds.js";
+import { activeRunStore } from "./active-run.js";
 
 export interface SprintProgressSegment {
   /** Active sprint index (1-based). */
@@ -185,8 +188,8 @@ export function wireStatusBar(): () => void {
     }
     try {
       // Lazy import to avoid circular dependency at module load time.
-      const { readBacklog } = await import("../../product-loop/backlog-store.js");
-      const { readSprintPlan } = await import("../../product-loop/sprint-store.js");
+      const { readBacklog } = await import("../product-loop/backlog-store.js");
+      const { readSprintPlan } = await import("../product-loop/sprint-store.js");
       const [backlog, sprintPlan] = await Promise.all([
         readBacklog(run.flowDir, run.runId).catch(() => null),
         readSprintPlan(run.flowDir, run.runId).catch(() => null),
