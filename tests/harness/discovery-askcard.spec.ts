@@ -29,6 +29,14 @@ describe("discovery askcard E2E", () => {
     const ctx = await spawnHarness({
       cwd: greenfield,
       fixturesDir: join(__dirname, "fixtures/llm-discovery-askcard"),
+      env: {
+        // Force EE unreachable so PIL discovery routing is deterministic (the
+        // LLM-mock fallback) rather than an EE-informed decision. On CI the
+        // default EE URL is reachable, so the classifier routed away from the
+        // discovery-askcard path and id=askcard never opened → 90s timeout.
+        // Mirrors determinism.spec + council-flow.spec.
+        MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
+      },
     });
     proc = ctx.proc;
     proc.stderr?.on("data", (d) => console.log("STDERR:", d.toString()));

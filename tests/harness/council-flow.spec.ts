@@ -35,6 +35,14 @@ describe("council flow E2E", () => {
       env: {
         SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY,
         MUONROI_DEBUG_MOCK_MODEL: "1",
+        // Force EE unreachable so the PIL classifier takes its deterministic
+        // fallback (council path) instead of an EE-informed routing decision.
+        // On CI (unlike a dev box) the default EE URL resolves to a reachable
+        // host, so the classifier routed this prompt to the sprint/hot-path
+        // (observed events: route-decision → sprint-plan-committed) and
+        // id=council-phases never rendered → 90s wait_for timeout. Mirrors the
+        // proven determinism.spec pattern.
+        MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
       },
       cwd: greenfield,
     });

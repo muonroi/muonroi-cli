@@ -87,6 +87,12 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
       env: {
         MUONROI_FORCE_ROUTING_CLASSIFY: "1",
         MUONROI_NO_SHELL_HOLD: "1",
+        // Force EE unreachable so the routing classifier round-trip is the
+        // deterministic mock path (no EE-informed variance / network latency).
+        // On CI the default EE URL is reachable, adding latency + nondeterminism
+        // that stalled the sub-session spawn/rotate flow past its budget so the
+        // child session never committed → DB assertion failed.
+        MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
       },
     });
 
@@ -204,6 +210,12 @@ describe("E2E Harness - Sub-Session Delegation & Silent Session Rotation", () =>
       env: {
         MUONROI_FORCE_ROUTING_CLASSIFY: "1",
         MUONROI_NO_SHELL_HOLD: "1",
+        // Force EE unreachable so the routing classifier round-trip is the
+        // deterministic mock path (no EE-informed variance / network latency).
+        // On CI the default EE URL is reachable, adding latency + nondeterminism
+        // that stalled the sub-session spawn/rotate flow past its budget so the
+        // child session never committed → DB assertion failed.
+        MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
       },
     });
 
