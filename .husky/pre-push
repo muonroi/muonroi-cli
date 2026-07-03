@@ -9,7 +9,10 @@
 # references no semantic wrapper at all. Only fires when the push touches a UI /
 # harness surface. Suppress a known exception via scripts/.semantic-wrap-allow.txt.
 # ---------------------------------------------------------------------------
-RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)
+# NOTE: husky runs this hook with `sh -e`. `git rev-parse @{upstream}` exits 128
+# when the branch has no upstream (e.g. the first `git push -u`), which would
+# abort the whole hook under set -e — so swallow the failure with `|| true`.
+RANGE=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
 if [ -n "$RANGE" ]; then
   CHANGED=$(git diff --name-only "$RANGE"...HEAD)
   SEMANTIC_MATCH=$(printf '%s\n' "$CHANGED" | grep -E '^src/ui/|^packages/agent-harness-(react|angular|opentui)/' || true)
