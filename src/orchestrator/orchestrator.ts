@@ -1999,9 +1999,21 @@ export class Agent {
       );
 
       let result: IteratorResult<StreamChunk, string | null>;
+      // Hold back runCouncil's terminal `done`. The /council slash consumer
+      // (use-app-logic.tsx) does `for await (chunk of gen) { if (chunk.type ===
+      // "done") break; }` — so forwarding runCouncil's end-of-debate `done`
+      // strands THIS generator before the continue_session auto-continue below
+      // ever runs (the generator is suspended at the yield and never resumes).
+      // Swallow it here and re-emit our own `done` after the optional
+      // continuation so the consumer terminates at the right boundary.
+      let innerDoneSeen = false;
       do {
         result = await gen.next();
         if (!result.done && result.value) {
+          if (result.value.type === "done") {
+            innerDoneSeen = true;
+            continue;
+          }
           yield result.value;
         }
       } while (!result.done);
@@ -2025,6 +2037,9 @@ export class Agent {
         yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
         this.councilManager.setContinuation(true);
         try {
+          // processMessage emits its own terminal `done`, which becomes the
+          // consumer's break boundary — so the UI stops AFTER the continuation
+          // turn, not before it.
           yield* this.processMessage(
             `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
             options?.observer,
@@ -2032,6 +2047,10 @@ export class Agent {
         } finally {
           this.councilManager.setContinuation(false);
         }
+      } else if (innerDoneSeen) {
+        // Non-continuation paths (save_exit, nested auto-council, sprint drain)
+        // still need the terminal `done` the consumer expects.
+        yield { type: "done" };
       }
     } finally {
       if (ownsController && this.abortController?.signal === signal) {
