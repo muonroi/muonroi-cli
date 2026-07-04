@@ -558,6 +558,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   } = args;
 
   // Put all extracted code here:
+  // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
+  // the history and keep going instead of stopping and asking the user
+  // to /compact. Turn-scoped (not per-stream-attempt) so a stream-error
+  // retry or stall reprompt (`continue streamAttempt`) cannot reset the
+  // counter and exceed the intended cap of 2 auto-compactions per turn.
+  let toolLimitAutoRecoverCount = 0;
+  const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
   let stallTriggered = false;
   // Time-to-first-byte stall RE-PROMPT: some providers (observed:
   // xai/grok-build-0.1) accept the request then never send the first byte —
@@ -1324,11 +1331,6 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
           runtime.modelId,
         );
-        // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
-        // the history and keep going instead of stopping and asking the user
-        // to /compact. Persists across stopWhen invocations within this turn.
-        let toolLimitAutoRecoverCount = 0;
-        const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
