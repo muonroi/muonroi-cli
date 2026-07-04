@@ -49,6 +49,8 @@ export interface PipelineContext {
   sessionId?: string | null;
   /** GSD-native triage tier (set by layer4 — sourced from modelDepthTier when present). */
   complexityTier?: ComplexityTier | null;
+  /** True when layer4 classified this turn as a heavy GSD task the mutation gate must block until plan-review passes. */
+  gsdGateBlocking?: boolean | null;
   /**
    * Model-decided work depth (quick | standard | heavy), set by layer1's
    * model-first classifier (the 5th classify word). This is the agent-first

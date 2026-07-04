@@ -188,6 +188,7 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
     ...ctx,
     gsdPhase: phase,
     complexityTier: tier,
+    gsdGateBlocking: blocking,
     grayAreas,
     enriched: `${ctx.enriched}\n${trimmed}`,
     layers: [

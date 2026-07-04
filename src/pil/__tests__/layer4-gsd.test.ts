@@ -228,6 +228,18 @@ describe("layer4Gsd (playbook)", () => {
     expect(result.gsdPhase).toBe("discuss");
   });
 
+  it("sets gsdGateBlocking=true when the model classifies depth=heavy", async () => {
+    const result = await layer4Gsd(
+      makeCtx({ raw: "refactor the entire auth subsystem end to end", modelDepthTier: "heavy" }),
+    );
+    expect(result.gsdGateBlocking).toBe(true);
+  });
+
+  it("leaves gsdGateBlocking falsy on a quick/standard ctx", async () => {
+    const result = await layer4Gsd(makeCtx({ raw: "what does this function do?", modelDepthTier: "quick" }));
+    expect(result.gsdGateBlocking).toBeFalsy();
+  });
+
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
     const { routeTask } = await import("../../ee/bridge.js");
     vi.mocked(routeTask).mockClear();
