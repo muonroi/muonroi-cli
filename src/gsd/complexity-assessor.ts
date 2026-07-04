@@ -109,14 +109,25 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
       source: "parse-failed-fallback",
     };
   }
-  const leader = await resolvePlanCouncilLeader(input.sessionModelId);
-  const path = writeAssessment(input.cwd, verdict, leader.modelId);
-  return {
-    depth: verdict.depth,
-    autoCouncil: verdict.autoCouncil,
-    rationale: verdict.rationale,
-    assessed: true,
-    source: "assessor",
-    assessmentPath: path,
-  };
+  try {
+    const leader = await resolvePlanCouncilLeader(input.sessionModelId);
+    const path = writeAssessment(input.cwd, verdict, leader.modelId);
+    return {
+      depth: verdict.depth,
+      autoCouncil: verdict.autoCouncil,
+      rationale: verdict.rationale,
+      assessed: true,
+      source: "assessor",
+      assessmentPath: path,
+    };
+  } catch (err) {
+    console.error(`[gsd] complexity assessor finalize failed, keeping priorDepth: ${(err as Error).message}`);
+    return {
+      depth: input.priorDepth,
+      autoCouncil: false,
+      rationale: "",
+      assessed: false,
+      source: "parse-failed-fallback",
+    };
+  }
 }

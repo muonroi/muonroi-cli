@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../council/leader.js", () => ({ resolvePlanCouncilLeader: vi.fn(async () => ({ modelId: "leader" })) }));
 
+import { resolvePlanCouncilLeader } from "../../council/leader.js";
 import { assessComplexity, shouldAssess } from "../complexity-assessor.js";
 
 describe("shouldAssess pre-filter", () => {
@@ -70,5 +71,41 @@ describe("assessComplexity", () => {
     });
     expect(r.depth).toBe("standard");
     expect(r.source).toBe("parse-failed-fallback");
+  });
+
+  it("does not throw and keeps priorDepth when runAssessor rejects", async () => {
+    const runAssessor = vi.fn(async () => {
+      throw new Error("upstream call failed");
+    });
+    const r = await assessComplexity({
+      cwd,
+      raw: "x",
+      priorDepth: "heavy",
+      confidence: 0.9,
+      sessionModelId: "m",
+      runAssessor,
+    });
+    expect(r.assessed).toBe(false);
+    expect(r.depth).toBe("heavy");
+    expect(r.source).toBe("parse-failed-fallback");
+  });
+
+  it("does not throw and keeps priorDepth when leader resolution fails after a valid verdict", async () => {
+    vi.mocked(resolvePlanCouncilLeader).mockRejectedValueOnce(new Error("uncataloged model id"));
+    const runAssessor = vi.fn(
+      async () => '```complexity-verdict\n{"depth":"heavy","autoCouncil":true,"rationale":"multi-file"}\n```',
+    );
+    const r = await assessComplexity({
+      cwd,
+      raw: "rebuild routing",
+      priorDepth: "standard",
+      confidence: 0.9,
+      sessionModelId: "m",
+      runAssessor,
+    });
+    expect(r.assessed).toBe(false);
+    expect(r.depth).toBe("standard");
+    expect(r.source).toBe("parse-failed-fallback");
+    expect(existsSync(join(cwd, ".planning", "ASSESSMENT.md"))).toBe(false);
   });
 });
