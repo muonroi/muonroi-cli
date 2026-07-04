@@ -80,6 +80,7 @@ import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
+  getAutoCompactMinNewTokens,
   getAutoCompactThresholdPct,
   getCouncilRounds,
   getCurrentModel,
@@ -140,6 +141,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  isCompactionThrash,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
   proposeCompaction,
@@ -397,6 +399,9 @@ export class Agent {
   private _turnUserGoalExcerpt = "";
   /** Compaction statistics tracking count and total tokens saved. */
   private _compactionStats: { count: number; totalSaved: number } = { count: 0, totalSaved: 0 };
+  /** Token count immediately after the last successful compaction (or null if none yet this
+   *  session). Used by the cross-turn anti-thrash guard in postTurnCompact. */
+  private _lastCompactionTokensAfter: number | null = null;
   /**
    * Pinned message sequences. A pinned user message is preserved verbatim across
    * compaction — it is re-injected as a system note immediately after the
@@ -874,6 +879,7 @@ export class Agent {
     });
 
     this._compactionStats = { count: 0, totalSaved: 0 };
+    this._lastCompactionTokensAfter = null;
     this._pinnedSeqs.clear();
 
     if (!this.sessionStore) {
@@ -1814,6 +1820,7 @@ export class Agent {
     // grossSaved tells the user how many context tokens were reclaimed — a real benefit that
     // reduces subsequent turn costs.
     const tokensAfter = estimateConversationTokens(system, this.messages);
+    this._lastCompactionTokensAfter = tokensAfter;
     const saved = Math.max(0, preparation.tokensBefore - tokensAfter);
     const pct = preparation.tokensBefore > 0 ? ((saved / preparation.tokensBefore) * 100).toFixed(1) : "0.0";
     this._compactionStats.count++;
@@ -1885,6 +1892,13 @@ export class Agent {
         tokens,
         thresholdPct,
         minMeaningfulTokens,
+      });
+    }
+    const minNew = getAutoCompactMinNewTokens();
+    if (isCompactionThrash(tokens, this._lastCompactionTokensAfter, minNew)) {
+      return log(false, `anti-thrash (only ${tokens - (this._lastCompactionTokensAfter ?? 0)} new < ${minNew})`, {
+        tokens,
+        lastAfter: this._lastCompactionTokensAfter,
       });
     }
     log(true, `over-threshold (${tokens} >= ${minMeaningfulTokens})`, { tokens, thresholdPct, minMeaningfulTokens });
