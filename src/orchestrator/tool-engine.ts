@@ -220,6 +220,7 @@ import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import { shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
@@ -1323,12 +1324,45 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
           runtime.modelId,
         );
+        // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
+        // the history and keep going instead of stopping and asking the user
+        // to /compact. Persists across stopWhen invocations within this turn.
+        let toolLimitAutoRecoverCount = 0;
+        const TOOL_LIMIT_AUTO_RECOVER_CAP = 2;
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
         const _baseDynamicStopWhen = createToolLoopCapPredicate({
           initialCap: deps.maxToolRounds,
           ask: async (info) => {
+            // Auto-recover a "cap" (tool-round ceiling) halt: compact the history and keep
+            // going, instead of stopping and telling the user to /compact
+            // (prompts.ts). Capped so a runaway turn still terminates;
+            // pattern-loop halts are excluded (agent is stuck).
+            if (shouldAutoRecoverToolLimit(info, toolLimitAutoRecoverCount, TOOL_LIMIT_AUTO_RECOVER_CAP)) {
+              toolLimitAutoRecoverCount++;
+              try {
+                const _cw = runtime.modelInfo?.contextWindow ?? 0;
+                if (_cw > 0) {
+                  await deps.compactForContext(provider, system, _cw, signal, deps.getCompactionSettings(_cw), false);
+                }
+              } catch (err) {
+                logger.error("orchestrator", "tool-limit auto-recover compaction failed", {
+                  message: err instanceof Error ? err.message : String(err),
+                });
+              }
+              const _ar2 = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                | { emitEvent: (e: unknown) => void }
+                | undefined;
+              _ar2?.emitEvent({
+                t: "event",
+                kind: "toast",
+                level: "info",
+                text: `đạt giới hạn bước — đã tự nén ngữ cảnh và tiếp tục (lần ${toolLimitAutoRecoverCount}/${TOOL_LIMIT_AUTO_RECOVER_CAP})`,
+              });
+              return "continue";
+            }
+
             if (info.kind === "pattern") {
               if (patternLoopInjectCount < 1) {
                 patternLoopInjectCount++;
