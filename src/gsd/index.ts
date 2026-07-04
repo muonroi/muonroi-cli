@@ -34,6 +34,9 @@ export {
 } from "./product-workspace.js";
 export { runTaskShip } from "./ship-bridge.js";
 export { detectGsdPhase, GSD_PHASES, type GsdPhase, isGsdPhase, type WorkflowKind } from "./types.js";
+export { buildVerifyContextBundle, type VerifyContextBundle } from "./verify-context.js";
+export { runVerifyCouncil, type VerifyCouncilResult } from "./verify-council.js";
+export { type VerifyPerspective, verifyPerspectivesForDepth } from "./verify-council-prompts.js";
 export {
   advancePhase,
   buildGsdStatusPayload,
