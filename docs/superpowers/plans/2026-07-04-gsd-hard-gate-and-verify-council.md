@@ -1,1207 +1,622 @@
-# GSD Hard-Gate Backbone + Council-Verified Verify — Implementation Plan
+# GSD Native Backbone — Complexity Assessor + Hard-Gate + Council-Verified Verify — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make GSD the enforced reliability backbone: a hard runtime gate blocks `edit_file`/`write_file`/`bash` on heavy tasks until `discuss→plan→plan-review` completes, and the `verify` phase gains an independent council adjudication layer on top of the deterministic test floor.
+**Goal:** Make GSD the enforced, native reliability backbone as ONE continuous state pipeline: a leader-tier complexity assessor enriches the existing native depth decision, the chosen depth assembles the GSD workflow (none/quick/full) through the GSD SDK, a hard gate (delegating to the SDK's own `canExecute`) blocks edits until plan-review passes at gated depths, and the `verify` phase gains an independent council layer on top of the deterministic test floor.
 
-**Architecture:** Two cohesive threads. (1) **Hard gate** — a pure `evaluateMutationGate(cwd, tier, toolName)` reads GSD phase state (`readState` + `readPlanVerifyVerdict`) and is injected at the existing turn-scoped write-mutex wrapper in `tool-engine.ts`; it returns a directive ToolResult (never throws) so the model self-corrects. Auto-route is fixed so implementation-intent tasks actually enter GSD. (2) **Verify-council** — mirrors the proven `runPlanCouncil` machinery (`extractStructuredVerdict`, `verdict-schema`, `resolvePlanCouncilLeader`, debate via `runCouncilV2`) with a verify-specific context bundle (plan bundle + git diff + VERIFY.md evidence) and a verify-specific perspective set. Deterministic tests remain the gating floor; council only adjudicates goal-achievement when the floor passes.
+**Architecture — one native pipeline, every step reads/writes `.planning/` through the GSD SDK (no parallel mechanism, no workaround):**
 
-**Tech Stack:** TypeScript (ESM, `.js` import specifiers), `ai` SDK `dynamicTool`, Zod v4, Vitest (`bunx vitest run`) + harness config (`vitest.harness.config.ts`), MCP harness for E2E.
+```
+turn start
+ → layer1 llm-classify (model-first, existing)  → pilCtx.modelDepthTier + confidence   [cheap pre-filter]
+ → [if tier ≥ standard OR confidence low] Complexity Assessor (leader-tier; reads conversation
+      + EE recall + repo signals) → overrides pilCtx.modelDepthTier; writes .planning/ASSESSMENT.md
+ → syncWorkflowContext(cwd, model, depth) → setStateField(cwd,"Depth",depth)   [native SDK depth slot — unchanged]
+ → assessor.autoCouncil drives the auto-council routing decision (replaces the raw heavy-tier heuristic)
+ → GSD workflow assembled FROM the SDK Depth:
+      quick    → canExecute fast-path: NO gate, NO plan-review, NO verify-council
+      standard → gate via canExecute (plan→plan-review→execute); verify-council 2 perspectives
+      heavy    → gate; full plan-review council; verify-council 4 perspectives
+ → buildCouncilContextBundle reads ASSESSMENT.md + CONTEXT + RESEARCH + PLAN + PLAN-REVIEW
+      → plan-review council (existing runPlanCouncil)
+ → mutation gate = SDK canExecute(cwd, depth), injected at the write-mutex choke point
+ → gsd_verify: deterministic floor → runVerifyCouncil (reads the SAME bundle + git diff + evidence)
+```
+
+The assessor is NOT a bolt-on: it feeds the one existing native `modelDepthTier` slot (`layer1-intent.ts:790-792` → `message-processor.ts:636-649`). The gate does NOT reimplement phase logic — it calls the SDK's `canExecute`. The council context (`ASSESSMENT.md`) is the next step's input, chaining the pipeline.
+
+**Tech Stack:** TypeScript (ESM, `.js` specifiers), `ai` SDK `dynamicTool`, Zod v4, Vitest + harness config, MCP harness for E2E. GSD SDK surface: `readState`/`advancePhase`/`setStateField`/`syncWorkflowContext`/`canExecute`/`readPlanVerifyVerdict`/`planningArtifact`/`getGsdLoopHost` + council reuse (`resolvePlanCouncilLeader`, `extractStructuredVerdict`, `buildCouncilContextBundle`).
 
 ## Global Constraints
 
-- **Zero Hardcode Rule:** no model/provider ID or price string literals in production code — resolve via `catalog.json` / `getModelInfo` / settings; throw if unresolvable. Model tier for council leader comes from `resolvePlanCouncilLeader` only.
-- **No Silent Catch Rule:** every `catch` logs module + operation + `err.message`. Namespace from `LogNamespace` union: `cli|ui|orchestrator|storage|ee|mcp|pil|router` — there is **no** `gsd` or `council` namespace; use `console.error("[gsd] …")` (the GSD modules already use bare `console.error` with a `[gsd]` prefix — match that, do NOT invent a logger namespace).
-- **Core/UI separation:** `src/gsd/**`, `src/pil/**`, `src/orchestrator/**` may import `src/state` but MUST NOT import `src/ui` or `opentui/react`.
+- **Native SDK only, no workaround:** every state read/write goes through the GSD SDK (`src/gsd/*` exports). The gate delegates to `canExecute`; the assessor writes depth through `syncWorkflowContext` and its artifact through `planningArtifact`. Do NOT add a parallel depth store, a second STATE file, or an in-memory shadow of GSD phase.
+- **One continuous pipeline:** each new step consumes the prior step's `.planning/` artifacts and produces artifacts the next step reads. The assessor's `ASSESSMENT.md` MUST be folded into `buildCouncilContextBundle` so plan-review and verify councils see it. No disjoint side-channels.
+- **Zero Hardcode Rule:** no model/provider ID or price literals. Assessor + council leader models resolve via `resolvePlanCouncilLeader` / catalog / settings only; throw if unresolvable.
+- **No Silent Catch Rule:** every `catch` logs context + `err.message`. GSD modules use bare `console.error("[gsd] …")` — match that (there is no `gsd`/`council` LogNamespace).
+- **Core/UI separation:** `src/gsd/**`, `src/pil/**`, `src/orchestrator/**` may import `src/state` but NOT `src/ui`/`opentui/react`.
+- **Agent discretion preserved:** depth is model-decided (layer1 + assessor), never a regex scan. `quick` legitimately skips GSD; `none`/chitchat never gates. The gate only backstops genuinely gated depths (standard/heavy), overridable by `gsd_execute --force`.
 - **Pre-Push Test Gate:** full `bunx vitest run` = 0 failures before any push. Harness E2E via `bunx vitest -c vitest.harness.config.ts run tests/harness/`.
-- **Verify mutating changes in a throwaway temp git repo**, never the repo root.
-- **Reply Vietnamese, reason English; code/comments/commits/PRs English.**
-- Commit trailers MUST end with:
+- **Verify mutating changes in a throwaway temp git repo**, never repo root.
+- **Reply Vietnamese, reason English; code/comments/commits/PRs English.** Commit-subject ≤ 72 chars (husky). Commit body MUST end with:
   ```
   Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
   Claude-Session: https://claude.ai/code/session_01CuJVuD6u5ybAFmyJarL4pQ
   ```
-- Gate default: **opt-in-safe** — a clean checkout with no `.planning/` behaves identically to today for non-heavy tasks. The gate only arms on `depthTier === "heavy"`.
+- Gate default opt-in-safe: a clean checkout with no `.planning/` behaves identically to today for non-gated depths.
 
 ---
 
 ## File Structure
 
+**Done (T1–T2):** `src/pil/types.ts` (+`gsdGateBlocking`), `src/pil/layer4-gsd.ts` (propagate + mis-gate fix).
+
 **New files:**
-- `src/gsd/mutation-gate.ts` — pure `evaluateMutationGate()` + `MutationGateDecision`. No I/O beyond the synchronous `readState`/`readPlanVerifyVerdict` it calls.
+- `src/gsd/complexity-assessor.ts` — `assessComplexity()`: leader-tier structured verdict `{depth, autoCouncil, rationale}`; pure of I/O except the SDK writes it delegates. Includes the `shouldAssess()` pre-filter predicate.
+- `src/gsd/assessment-schema.ts` — Zod `ComplexityVerdictSchema` + `extractComplexityVerdict()` (mirror `verdict-schema.ts` extraction) + `ASSESSMENT_OUTPUT_CONTRACT`.
+- `src/gsd/__tests__/complexity-assessor.test.ts`, `src/gsd/__tests__/assessment-schema.test.ts`
+- `src/gsd/mutation-gate.ts` — `evaluateMutationGate()` delegating to `canExecute`.
 - `src/gsd/__tests__/mutation-gate.test.ts`
-- `src/gsd/verify-council.ts` — `runVerifyCouncil()` (mirror of `runPlanCouncil`).
-- `src/gsd/verify-council-prompts.ts` — verify perspectives + prompt builders.
-- `src/gsd/verify-context.ts` — `buildVerifyContextBundle()` (extends council-context with diff + evidence).
-- `src/gsd/__tests__/verify-council.test.ts`
-- `src/gsd/__tests__/verify-context.test.ts`
-- `tests/harness/gsd-hard-gate.spec.ts` — E2E.
+- `src/gsd/verify-context.ts`, `src/gsd/verify-council-prompts.ts`, `src/gsd/verify-council.ts` + their tests.
+- `tests/harness/gsd-native-backbone.spec.ts` + fixture.
 
 **Modified files:**
-- `src/pil/types.ts` — add `gsdGateBlocking?: boolean | null` to `PipelineContext`.
-- `src/pil/layer4-gsd.ts:144-148` (mis-gate fix), `:164-171` (heavy directive), `:187-191` (propagate `gsdGateBlocking`).
-- `src/pil/__tests__/layer4-gsd.test.ts` — new cases.
-- `src/gsd/flags.ts` — add `isGsdHardGateEnabled()`.
-- `src/orchestrator/tool-engine.ts` — inject gate at the write-mutex wrapper (~`:1042-1077`); resolve auto-council↔GSD ordering (~`:626,638-642,695-701`).
-- `src/gsd/workflow-tools.ts:169-205` (`gsd_verify`) — wire Layer-2 verify-council after the deterministic floor.
+- `src/gsd/flags.ts` — `isGsdHardGateEnabled()`, `isComplexityAssessorEnabled()`.
+- `src/gsd/council-context.ts` — read `ASSESSMENT.md`, add an assessment section to `CouncilContextBundle` + `renderCouncilContextBlock`.
+- `src/orchestrator/message-processor.ts:636-649` — call the assessor before `syncWorkflowContext`; thread `autoCouncil`.
+- `src/orchestrator/tool-engine.ts` — inject the gate at the write-mutex wrapper (~`:1042-1077`); consume the assessor's `autoCouncil` for the auto-council decision (~`:626,638-642`).
+- `src/gsd/workflow-tools.ts:169-205` (`gsd_verify`) — Layer-2 verify-council after the floor.
 - `src/gsd/index.ts` — export new public surface.
-- `CLAUDE.md` — document the gate contract + env flags.
+- `CLAUDE.md` — document the native pipeline + gate contract + env flags.
 
 ---
 
-## Interfaces (cross-task contract — copy signatures verbatim)
+## Interfaces (cross-task contract — copy verbatim)
 
 ```ts
-// src/gsd/mutation-gate.ts
-export interface MutationGateDecision {
-  blocked: boolean;
-  /** Directive shown to the model as a ToolResult when blocked. Empty when allowed. */
-  reason: string;
+// src/gsd/assessment-schema.ts
+import { z } from "zod";
+export const ComplexityVerdictSchema = z.object({
+  depth: z.enum(["quick", "standard", "heavy"]),
+  autoCouncil: z.boolean().catch(false),
+  rationale: z.string().catch(""),
+});
+export type ComplexityVerdict = z.infer<typeof ComplexityVerdictSchema>;
+export function extractComplexityVerdict(raw: string): ComplexityVerdict | null;
+export const ASSESSMENT_OUTPUT_CONTRACT: string;
+
+// src/gsd/complexity-assessor.ts
+export interface AssessInput {
+  cwd: string;
+  raw: string;                    // pilCtx.raw
+  priorDepth: "quick" | "standard" | "heavy";  // layer1 modelDepthTier
+  confidence: number;             // layer1 confidence (pre-filter)
+  conversationDigest?: string;    // short recent-turns digest
+  eeContext?: string;             // EE recall block (already fetched upstream if available)
+  sessionModelId: string;
+  runAssessor?: (prompt: string) => Promise<string>;  // leader-tier caller; omitted in tests → heuristic
 }
-export function evaluateMutationGate(
-  cwd: string,
-  opts: { tier: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
-): MutationGateDecision;
+export interface AssessResult {
+  depth: "quick" | "standard" | "heavy";
+  autoCouncil: boolean;
+  rationale: string;
+  assessed: boolean;              // false when pre-filter short-circuited (kept priorDepth)
+  source: "assessor" | "prefilter-skip" | "parse-failed-fallback";
+  assessmentPath?: string;        // .planning/ASSESSMENT.md when written
+}
+/** Pre-filter: run the assessor only when the layer1 call is uncertain or the task is non-trivial. */
+export function shouldAssess(priorDepth: string, confidence: number): boolean;
+export function assessComplexity(input: AssessInput): Promise<AssessResult>;
 
 // src/gsd/flags.ts
 export function isGsdHardGateEnabled(): boolean;
+export function isComplexityAssessorEnabled(): boolean;
 
-// src/gsd/verify-context.ts
-export interface VerifyContextBundle {
-  base: import("./council-context.js").CouncilContextBundle;
-  diff: string;
-  diffChars: number;
-  evidence: string;
-  planVerdict: "pass" | "revise" | "block" | null;
-}
-export function buildVerifyContextBundle(
-  cwd: string,
-  opts: { depth: string; evidence?: string; diff?: string },
-): VerifyContextBundle;
-
-// src/gsd/verify-council-prompts.ts
-export type VerifyPerspectiveId = "acceptance" | "correctness" | "regression" | "security";
-export interface VerifyPerspective { id: VerifyPerspectiveId; role: string; mandate: string; }
-export function verifyPerspectivesForDepth(depth: string): VerifyPerspective[];
-export function buildVerifyPerspectivePrompt(p: VerifyPerspective, b: VerifyContextBundle): string;
-export function buildVerifyDebateTopic(b: VerifyContextBundle): string;
-
-// src/gsd/verify-council.ts
-export interface VerifyCouncilResult {
-  skipped: boolean;
-  verdict: "pass" | "revise" | "block";
-  concerns: string[];
-  verifyCouncilPath?: string;
-  leaderModelId?: string;
-  verdictSource: "structured" | "heuristic-fallback" | "parse-failed";
-}
-export function runVerifyCouncil(opts: {
-  cwd: string;
-  sessionModelId: string;
-  depth: string;
-  evidence?: string;
-  runPerspectiveFn?: (prompt: string, p: import("./verify-council-prompts.js").VerifyPerspective) => Promise<string>;
-  runDebate?: (topic: string) => Promise<string>;
-}): Promise<VerifyCouncilResult>;
-```
-
-Reused verbatim from existing code (do NOT redefine): `readState`, `readPlanVerifyVerdict`, `advancePhase`, `setStateField` (`workflow-engine.ts`); `extractStructuredVerdict`, `PlanCouncilVerdict`, `VERDICT_OUTPUT_CONTRACT` (`verdict-schema.ts`); `buildCouncilContextBundle`, `renderCouncilContextBlock`, `CouncilContextBundle` (`council-context.ts`); `resolvePlanCouncilLeader` (`council/leader.ts`); `planningArtifact` (`paths.ts`); `isGsdNativeEnabled` (`flags.ts`).
-
----
-
-### Task 1: `gsdGateBlocking` on PipelineContext + propagate from layer4
-
-**Files:**
-- Modify: `src/pil/types.ts` (add field near `complexityTier`)
-- Modify: `src/pil/layer4-gsd.ts:172` (assign local), `:187-191` (return field)
-- Test: `src/pil/__tests__/layer4-gsd.test.ts`
-
-**Interfaces:**
-- Produces: `PipelineContext.gsdGateBlocking?: boolean | null` — read by Task 4's gate.
-
-- [ ] **Step 1: Write the failing test** — append to `src/pil/__tests__/layer4-gsd.test.ts`:
-
-```ts
-it("sets gsdGateBlocking=true on a heavy implementation ctx", async () => {
-  const ctx = makeCtx({ raw: "refactor the entire auth subsystem end to end", deliverableKind: "code" });
-  const out = await runLayer4Gsd(ctx); // use the file's existing entry point / helper name
-  expect(out.gsdGateBlocking).toBe(true);
-});
-
-it("leaves gsdGateBlocking falsy on a standard/informational ctx", async () => {
-  const ctx = makeCtx({ raw: "what does this function do?", deliverableKind: "report" });
-  const out = await runLayer4Gsd(ctx);
-  expect(out.gsdGateBlocking).toBeFalsy();
-});
-```
-
-> Match the existing test's helper names (`makeCtx`, the exported layer-4 entry). Read the top of the spec first to reuse its scaffolding rather than inventing new helpers.
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: FAIL — `gsdGateBlocking` is `undefined`.
-
-- [ ] **Step 3: Add the field to `PipelineContext`** in `src/pil/types.ts` (immediately after the `complexityTier` field):
-
-```ts
-  /** True when layer4 classified this turn as a heavy GSD task the mutation gate must block until plan-review passes. */
-  gsdGateBlocking?: boolean | null;
-```
-
-- [ ] **Step 4: Propagate in `layer4-gsd.ts`** — in the return object (the block currently spreading `...ctx` with `gsdPhase`/`complexityTier`, ~`:187-191`), add:
-
-```ts
-    gsdGateBlocking: blocking,
-```
-
-`blocking` is already computed as `const blocking = tier === "heavy"` (~`:172`). No other change.
-
-- [ ] **Step 5: Run tests**
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/pil/types.ts src/pil/layer4-gsd.ts src/pil/__tests__/layer4-gsd.test.ts
-git commit -m "feat(gsd): expose gsdGateBlocking on PipelineContext for the mutation gate"
-```
-
----
-
-### Task 2: Fix the report/implementation auto-route mis-gate
-
-**Files:**
-- Modify: `src/pil/layer4-gsd.ts:144-148`
-- Test: `src/pil/__tests__/layer4-gsd.test.ts`
-
-**Interfaces:**
-- Consumes: `isImplementationIntent` (already imported at `layer4-gsd.ts:28` from `./layer6-output.js`).
-
-**Background:** current code routes any `deliverableKind !== "code"` to the informational (question) directive, so a *"plan how to implement X"* the model tagged `deliverableKind: "report"` never enters GSD.
-
-- [ ] **Step 1: Write failing tests** — append:
-
-```ts
-it("treats a 'plan to implement' report as NON-informational (enters GSD)", async () => {
-  const ctx = makeCtx({ raw: "make a plan to implement OAuth device flow", deliverableKind: "report" });
-  const out = await runLayer4Gsd(ctx);
-  // enters the native GSD hint path → gsdPhase set, not the pure-question directive
-  expect(out.gsdPhase).toBeTruthy();
-});
-
-it("keeps a genuine summary report informational", async () => {
-  const ctx = makeCtx({ raw: "đọc và tóm tắt kiến trúc module council", deliverableKind: "report" });
-  const out = await runLayer4Gsd(ctx);
-  expect(out.gsdPhase).toBeFalsy();
-});
-```
-
-- [ ] **Step 2: Run to verify the first fails**
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: FAIL on the "plan to implement" case (currently informational).
-
-- [ ] **Step 3: Apply the fix** at `layer4-gsd.ts:144-148` — add the implementation-intent override to the deliverable branch:
-
-```ts
-  const informational = ctx.deliverableKind
-    ? ctx.deliverableKind !== "code" && !isImplementationIntent(ctx.raw)
-    : isMetaAnalysisPrompt(ctx.raw) ||
-      (ctx.taskType === "general" && ctx.intentKind === "task") ||
-      (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
-```
-
-- [ ] **Step 4: Run the full layer4 spec** (guards the existing `deliverableKind='report' is informational` case at `:178-189`)
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: PASS — both new cases and the existing summary-report case green. If "đọc và tóm tắt" now trips `isImplementationIntent`, STOP and report: the regex over-matches and Task 2 needs a tighter guard (do not weaken the test).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/pil/layer4-gsd.ts src/pil/__tests__/layer4-gsd.test.ts
-git commit -m "fix(gsd): route implementation-intent reports into GSD instead of the question path"
-```
-
----
-
-### Task 3: Strengthen the heavy directive to a MANDATORY sequence
-
-**Files:**
-- Modify: `src/pil/layer4-gsd.ts:164-171`
-- Test: `src/pil/__tests__/layer4-gsd.test.ts`
-
-- [ ] **Step 1: Write failing test** — append:
-
-```ts
-it("emits the MANDATORY discuss→plan→plan_review sequence on heavy", async () => {
-  const ctx = makeCtx({ raw: "rebuild the entire routing layer from scratch", deliverableKind: "code" });
-  const out = await runLayer4Gsd(ctx);
-  expect(out.enriched).toContain("MANDATORY");
-  expect(out.enriched).toContain("gsd_plan_review");
-  expect(out.enriched).toContain("BLOCKED");
-  expect(out.enriched.length).toBeLessThan(800); // existing budget assertion at :37
-});
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: FAIL — current soft `heavyLine` lacks "MANDATORY"/"BLOCKED".
-
-- [ ] **Step 3: Replace the heavy directive** (`heavyLine` at `:164`, kept within the `truncateToBudget(nativeHint, 200)` cap at `:171`):
-
-```ts
-  const heavyLine =
-    " MANDATORY (heavy): gsd_status → gsd_discuss → gsd_plan → gsd_plan_review BEFORE any edit_file/write_file/bash. Mutation tools are BLOCKED until plan-review passes. Start with gsd_status now.";
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `bunx vitest run src/pil/__tests__/layer4-gsd.test.ts`
-Expected: PASS (including the `< 800` budget assertion).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/pil/layer4-gsd.ts src/pil/__tests__/layer4-gsd.test.ts
-git commit -m "feat(gsd): align heavy directive with the runtime mutation gate"
-```
-
----
-
-### Task 4: `evaluateMutationGate` + wire it at the write-mutex choke point
-
-**Files:**
-- Create: `src/gsd/mutation-gate.ts`
-- Create: `src/gsd/__tests__/mutation-gate.test.ts`
-- Modify: `src/gsd/flags.ts` (add `isGsdHardGateEnabled`)
-- Modify: `src/orchestrator/tool-engine.ts` (write-mutex wrapper, ~`:1042-1077`)
-- Modify: `src/gsd/index.ts` (export)
-
-**Interfaces:**
-- Consumes: `readState`, `readPlanVerifyVerdict` (`workflow-engine.js`), `isGsdNativeEnabled` (`flags.js`).
-- Produces: `evaluateMutationGate`, `MutationGateDecision`, `isGsdHardGateEnabled`.
-
-- [ ] **Step 1: Add the flag** to `src/gsd/flags.ts` (mirror the existing `isGsdNativeEnabled` env pattern — read the file first to match its exact shape):
-
-```ts
-/** Hard mutation gate — default ON when GSD native is on; opt out with MUONROI_GSD_HARD_GATE=0. */
-export function isGsdHardGateEnabled(): boolean {
-  if (!isGsdNativeEnabled()) return false;
-  return process.env.MUONROI_GSD_HARD_GATE !== "0";
-}
-```
-
-- [ ] **Step 2: Write the failing test** — `src/gsd/__tests__/mutation-gate.test.ts`:
-
-```ts
-import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { evaluateMutationGate } from "../mutation-gate.js";
-
-function planningDir(cwd: string): string {
-  const d = join(cwd, ".planning");
-  mkdirSync(d, { recursive: true });
-  return d;
-}
-function writeState(cwd: string, phase: string): void {
-  writeFileSync(
-    join(planningDir(cwd), "STATE.md"),
-    `# STATE\n\n| Field | Value |\n|---|---|\n| Phase | ${phase} |\n| Depth | heavy |\n`,
-    "utf8",
-  );
-}
-function writePlanVerify(cwd: string, verdict: string): void {
-  writeFileSync(join(planningDir(cwd), "PLAN-VERIFY.md"), `# PLAN-VERIFY\n\nverdict: ${verdict}\n`, "utf8");
-}
-
-describe("evaluateMutationGate", () => {
-  let cwd: string;
-  beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "gsd-gate-")); });
-
-  const heavy = { tier: "heavy", hardGateEnabled: true };
-
-  it("blocks edit_file on a heavy task before plan-review passes (phase=null)", () => {
-    const d = evaluateMutationGate(cwd, { ...heavy, toolName: "edit_file" });
-    expect(d.blocked).toBe(true);
-    expect(d.reason).toContain("gsd_status");
-  });
-
-  it("allows edit_file once phase=execute AND plan-verify=pass", () => {
-    writeState(cwd, "execute");
-    writePlanVerify(cwd, "pass");
-    expect(evaluateMutationGate(cwd, { ...heavy, toolName: "edit_file" }).blocked).toBe(false);
-  });
-
-  it("blocks edit_file when phase=execute but plan-verify=revise", () => {
-    writeState(cwd, "execute");
-    writePlanVerify(cwd, "revise");
-    expect(evaluateMutationGate(cwd, { ...heavy, toolName: "edit_file" }).blocked).toBe(true);
-  });
-
-  it("never blocks gsd_* / respond_* / read tools", () => {
-    for (const toolName of ["gsd_plan", "gsd_discuss", "respond_report", "read_file", "grep"]) {
-      expect(evaluateMutationGate(cwd, { ...heavy, toolName }).blocked).toBe(false);
-    }
-  });
-
-  it("never blocks when tier is not heavy", () => {
-    expect(evaluateMutationGate(cwd, { tier: "standard", hardGateEnabled: true, toolName: "edit_file" }).blocked).toBe(false);
-  });
-
-  it("never blocks when the hard gate is disabled", () => {
-    expect(evaluateMutationGate(cwd, { tier: "heavy", hardGateEnabled: false, toolName: "edit_file" }).blocked).toBe(false);
-  });
-
-  it("never blocks a directAnswer turn", () => {
-    expect(evaluateMutationGate(cwd, { ...heavy, toolName: "edit_file", directAnswer: true }).blocked).toBe(false);
-  });
-});
-```
-
-- [ ] **Step 3: Run to verify it fails**
-
-Run: `bunx vitest run src/gsd/__tests__/mutation-gate.test.ts`
-Expected: FAIL — module not found.
-
-- [ ] **Step 4: Implement `src/gsd/mutation-gate.ts`**:
-
-```ts
-import { readPlanVerifyVerdict, readState } from "./workflow-engine.js";
-
-export interface MutationGateDecision {
-  blocked: boolean;
-  /** Directive shown to the model as a ToolResult when blocked. Empty when allowed. */
-  reason: string;
-}
-
-/** Tools the gate must never block: GSD workflow tools, terminal responders, read-only tools. */
-const NEVER_GATED_PREFIXES = ["gsd_", "respond_"];
-const NEVER_GATED_TOOLS = new Set([
-  "read_file",
-  "grep",
-  "glob",
-  "bash_output_get",
-  "gsd_status",
-]);
-
-function isNeverGated(toolName: string): boolean {
-  if (NEVER_GATED_TOOLS.has(toolName)) return true;
-  return NEVER_GATED_PREFIXES.some((p) => toolName.startsWith(p));
-}
-
-const GATE_DIRECTIVE =
-  "BLOCKED: this is a heavy task. GSD requires a reviewed plan before any code edit. " +
-  "Call gsd_status to orient, then gsd_discuss → gsd_plan → gsd_plan_review. " +
-  "Mutation tools unlock only after plan-review returns verdict: pass. " +
-  "If this task is genuinely trivial, call gsd_execute with force:true to override.";
-
-/**
- * Pure, synchronous gate. Returns {blocked:true,reason} when a mutation tool is
- * called on a heavy task before the GSD plan-review gate has passed. Never throws;
- * on any read error it fails OPEN (blocked:false) so a corrupt .planning/ never
- * bricks the turn — the deterministic caps still bound a runaway loop.
- */
+// src/gsd/mutation-gate.ts
+export interface MutationGateDecision { blocked: boolean; reason: string; }
 export function evaluateMutationGate(
   cwd: string,
-  opts: { tier: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
-): MutationGateDecision {
-  const allow = (): MutationGateDecision => ({ blocked: false, reason: "" });
-  if (!opts.hardGateEnabled) return allow();
-  if (opts.tier !== "heavy") return allow();
-  if (opts.directAnswer) return allow();
-  if (isNeverGated(opts.toolName)) return allow();
+  opts: { depth: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
+): MutationGateDecision;
 
+// src/gsd/verify-context.ts / verify-council-prompts.ts / verify-council.ts
+//   (unchanged from prior revision — see Tasks 9-10)
+```
+
+Reused verbatim (do NOT redefine): `readState`, `readPlanVerifyVerdict`, `canExecute`, `syncWorkflowContext`, `advancePhase`, `setStateField` (`workflow-engine.ts`); `extractStructuredVerdict`, `VERDICT_OUTPUT_CONTRACT` (`verdict-schema.ts`); `buildCouncilContextBundle`, `renderCouncilContextBlock`, `CouncilContextBundle` (`council-context.ts`); `resolvePlanCouncilLeader` (`council/leader.ts`); `planningArtifact` (`paths.ts`); `isGsdNativeEnabled` (`flags.ts`).
+
+---
+
+## Task 1: ✅ DONE — gsdGateBlocking on PipelineContext (commit 7b053e45)
+## Task 2: ✅ DONE — report/implementation auto-route mis-gate fix (commit 690e56a0)
+
+---
+
+### Task 3: Complexity assessment schema (`assessment-schema.ts`)
+
+**Files:** Create `src/gsd/assessment-schema.ts`, `src/gsd/__tests__/assessment-schema.test.ts`.
+
+**Interfaces:** Produces `ComplexityVerdictSchema`, `extractComplexityVerdict`, `ASSESSMENT_OUTPUT_CONTRACT`.
+
+- [ ] **Step 1: Failing test** — `src/gsd/__tests__/assessment-schema.test.ts`:
+
+```ts
+import { describe, expect, it } from "vitest";
+import { extractComplexityVerdict } from "../assessment-schema.js";
+
+describe("extractComplexityVerdict", () => {
+  it("extracts the last fenced complexity-verdict block", () => {
+    const raw = 'reasoning...\n```complexity-verdict\n{"depth":"heavy","autoCouncil":true,"rationale":"multi-file refactor"}\n```';
+    expect(extractComplexityVerdict(raw)).toEqual({ depth: "heavy", autoCouncil: true, rationale: "multi-file refactor" });
+  });
+  it("returns null when no valid verdict block is present", () => {
+    expect(extractComplexityVerdict("no json here")).toBeNull();
+  });
+  it("coerces a missing autoCouncil to false", () => {
+    const v = extractComplexityVerdict('```complexity-verdict\n{"depth":"quick"}\n```');
+    expect(v?.depth).toBe("quick");
+    expect(v?.autoCouncil).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run to fail**
+
+Run: `bunx vitest run src/gsd/__tests__/assessment-schema.test.ts` → FAIL (module missing).
+
+- [ ] **Step 3: Implement `src/gsd/assessment-schema.ts`** — reuse the extraction strategy of `verdict-schema.ts` (labeled fence → json fence → bare → brace-scan, last-wins). To avoid duplication, import the brace/fence scan helpers if `verdict-schema.ts` exports them; if they are private, keep this module self-contained with the same algorithm but a `complexity-verdict` label. Read `verdict-schema.ts` first:
+
+```ts
+import { z } from "zod";
+
+export const ComplexityVerdictSchema = z.object({
+  depth: z.enum(["quick", "standard", "heavy"]),
+  autoCouncil: z.boolean().catch(false),
+  rationale: z.string().catch(""),
+});
+export type ComplexityVerdict = z.infer<typeof ComplexityVerdictSchema>;
+
+// Extraction mirrors verdict-schema.ts: prefer the LAST fenced `complexity-verdict`
+// block, then json, then bare {...}. Model emits reasoning first, verdict last.
+const FENCE_RE = /```([a-zA-Z0-9_+-]+)?\s*\n([\s\S]*?)\n?```/g;
+function tryParse(s: string): ComplexityVerdict | null {
   try {
-    const state = readState(cwd);
-    const verdict = readPlanVerifyVerdict(cwd);
-    const gateOpen = state.phase === "execute" && verdict === "pass";
-    if (gateOpen) return allow();
-    return { blocked: true, reason: GATE_DIRECTIVE };
-  } catch (err) {
-    // Fail open — a broken .planning/ must not block real work. Log per No-Silent-Catch.
-    console.error(`[gsd] mutation-gate read failed, failing open: ${(err as Error).message}`);
-    return allow();
+    const r = ComplexityVerdictSchema.safeParse(JSON.parse(s.trim()));
+    return r.success ? r.data : null;
+  } catch {
+    return null;
   }
+}
+export function extractComplexityVerdict(raw: string): ComplexityVerdict | null {
+  if (!raw?.trim()) return null;
+  const fences: { label: string; body: string }[] = [];
+  for (const m of raw.matchAll(FENCE_RE)) fences.push({ label: (m[1] ?? "").toLowerCase(), body: m[2] ?? "" });
+  const buckets = [
+    fences.filter((f) => f.label === "complexity-verdict"),
+    fences.filter((f) => f.label === "json"),
+    fences.filter((f) => f.label !== "complexity-verdict" && f.label !== "json"),
+  ];
+  for (const bucket of buckets) {
+    for (let i = bucket.length - 1; i >= 0; i -= 1) {
+      const v = tryParse(bucket[i]!.body);
+      if (v) return v;
+    }
+  }
+  // Bare {...} right-to-left.
+  const idx: number[] = [];
+  for (let i = 0; i < raw.length; i += 1) if (raw[i] === "{") idx.push(i);
+  for (let k = idx.length - 1; k >= 0; k -= 1) {
+    let depth = 0;
+    for (let j = idx[k]!; j < raw.length; j += 1) {
+      if (raw[j] === "{") depth += 1;
+      else if (raw[j] === "}") { depth -= 1; if (depth === 0) { const v = tryParse(raw.slice(idx[k]!, j + 1)); if (v) return v; break; } }
+    }
+  }
+  return null;
+}
+
+export const ASSESSMENT_OUTPUT_CONTRACT = [
+  "",
+  "Emit your final decision as a fenced block in EXACTLY this shape — no prose inside the fence:",
+  "```complexity-verdict",
+  '{"depth":"quick|standard|heavy","autoCouncil":true|false,"rationale":"one short sentence"}',
+  "```",
+  '- "quick"    = trivial single-shot (typo, rename, read-and-explain). No plan/review needed.',
+  '- "standard" = ordinary feature/bugfix. Short plan → review → implement → verify.',
+  '- "heavy"    = architectural / multi-file / wide / ambiguous. Full discuss → plan → plan-review → verify.',
+  '- autoCouncil = true only when the task benefits from multi-perspective debate before implementation.',
+].join("\n");
+```
+
+- [ ] **Step 4: Run** → PASS. **Step 5: Commit** (`feat(gsd): complexity-verdict schema + extractor`).
+
+---
+
+### Task 4: Complexity assessor (`complexity-assessor.ts`)
+
+**Files:** Create `src/gsd/complexity-assessor.ts`, `src/gsd/__tests__/complexity-assessor.test.ts`. Modify `src/gsd/flags.ts` (add `isComplexityAssessorEnabled`), `src/gsd/index.ts` (export).
+
+**Interfaces:** see top block. Consumes `extractComplexityVerdict`, `ASSESSMENT_OUTPUT_CONTRACT`, `planningArtifact`, `resolvePlanCouncilLeader`.
+
+- [ ] **Step 1: Add the flag** to `flags.ts` (mirror `isGsdNativeEnabled`): default ON when native on, opt out with `MUONROI_GSD_ASSESSOR=0`.
+
+```ts
+export function isComplexityAssessorEnabled(): boolean {
+  if (!isGsdNativeEnabled()) return false;
+  return process.env.MUONROI_GSD_ASSESSOR !== "0";
 }
 ```
 
-- [ ] **Step 5: Run the gate tests**
-
-Run: `bunx vitest run src/gsd/__tests__/mutation-gate.test.ts`
-Expected: PASS (all 7).
-
-- [ ] **Step 6: Wire the gate into `tool-engine.ts`** at the write-mutex wrapper (~`:1042-1077`). Read that block first. The existing loop already skips read-only + `respond_*` tools; extend the wrapped `tool.execute` to consult the gate BEFORE running the mutation. Add near the top of the file's imports:
+- [ ] **Step 2: Failing test** — `src/gsd/__tests__/complexity-assessor.test.ts`:
 
 ```ts
-import { evaluateMutationGate } from "../gsd/mutation-gate.js";
-import { isGsdHardGateEnabled } from "../gsd/flags.js";
+import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../council/leader.js", () => ({ resolvePlanCouncilLeader: vi.fn(async () => ({ modelId: "leader" })) }));
+
+import { assessComplexity, shouldAssess } from "../complexity-assessor.js";
+
+describe("shouldAssess pre-filter", () => {
+  it("skips a high-confidence quick task", () => { expect(shouldAssess("quick", 0.95)).toBe(false); });
+  it("runs on any standard/heavy task", () => { expect(shouldAssess("standard", 0.95)).toBe(true); expect(shouldAssess("heavy", 0.9)).toBe(true); });
+  it("runs on a low-confidence quick task", () => { expect(shouldAssess("quick", 0.4)).toBe(true); });
+});
+
+describe("assessComplexity", () => {
+  let cwd: string;
+  beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "assess-")); });
+
+  it("short-circuits (assessed=false, keeps priorDepth) when pre-filter says skip", async () => {
+    const r = await assessComplexity({ cwd, raw: "fix typo", priorDepth: "quick", confidence: 0.95, sessionModelId: "m" });
+    expect(r.assessed).toBe(false);
+    expect(r.depth).toBe("quick");
+    expect(r.source).toBe("prefilter-skip");
+  });
+
+  it("runs the leader assessor and writes ASSESSMENT.md when the pre-filter passes", async () => {
+    const runAssessor = vi.fn(async () => '```complexity-verdict\n{"depth":"heavy","autoCouncil":true,"rationale":"multi-file"}\n```');
+    const r = await assessComplexity({ cwd, raw: "rebuild routing", priorDepth: "standard", confidence: 0.9, sessionModelId: "m", runAssessor });
+    expect(r.assessed).toBe(true);
+    expect(r.depth).toBe("heavy");
+    expect(r.autoCouncil).toBe(true);
+    expect(existsSync(join(cwd, ".planning", "ASSESSMENT.md"))).toBe(true);
+    expect(readFileSync(join(cwd, ".planning", "ASSESSMENT.md"), "utf8")).toContain("multi-file");
+  });
+
+  it("falls back to priorDepth (no throw) when the assessor emits no structured verdict", async () => {
+    const runAssessor = vi.fn(async () => "waffle, no verdict block");
+    const r = await assessComplexity({ cwd, raw: "x", priorDepth: "standard", confidence: 0.9, sessionModelId: "m", runAssessor });
+    expect(r.depth).toBe("standard");
+    expect(r.source).toBe("parse-failed-fallback");
+  });
+});
 ```
 
-Then inside the wrapper loop, replace the wrapped execute so it checks the gate first:
+- [ ] **Step 3: Run to fail.** **Step 4: Implement `src/gsd/complexity-assessor.ts`:**
 
 ```ts
-    const originalExecute = tool.execute;
-    tool.execute = async (input: any, context: any) => {
-      const gate = evaluateMutationGate(deps.bash.getCwd(), {
-        tier: depthTier,
-        toolName: name,
-        hardGateEnabled: isGsdHardGateEnabled(),
-        directAnswer: (pilCtx as { directAnswer?: boolean }).directAnswer === true,
-      });
-      if (gate.blocked) {
-        // Return a directive ToolResult (the safety-block pattern) — never throw,
-        // so the turn stays alive and the model self-corrects into gsd_plan.
-        return { output: gate.reason, isError: true };
-      }
-      return writeMutex.run(() => originalExecute(input, context));
-    };
-```
+import { writeFileSync } from "node:fs";
+import { resolvePlanCouncilLeader } from "../council/leader.js";
+import { ASSESSMENT_OUTPUT_CONTRACT, extractComplexityVerdict } from "./assessment-schema.js";
+import { ensurePlanningWorkspace } from "./config-bridge.js";
+import { planningArtifact } from "./paths.js";
 
-> `depthTier` is already computed at `tool-engine.ts:852-859`; `pilCtx` is in scope at the wrapper. Confirm the exact `ToolResult` shape the surrounding code returns for a blocked tool (grep the file for the bash `BLOCKED` return at ~`:2309-2368`) and match it — `{ output, isError: true }` is the expected shape but verify against that site.
+export interface AssessInput {
+  cwd: string;
+  raw: string;
+  priorDepth: "quick" | "standard" | "heavy";
+  confidence: number;
+  conversationDigest?: string;
+  eeContext?: string;
+  sessionModelId: string;
+  runAssessor?: (prompt: string) => Promise<string>;
+}
+export interface AssessResult {
+  depth: "quick" | "standard" | "heavy";
+  autoCouncil: boolean;
+  rationale: string;
+  assessed: boolean;
+  source: "assessor" | "prefilter-skip" | "parse-failed-fallback";
+  assessmentPath?: string;
+}
 
-- [ ] **Step 7: Export from `src/gsd/index.ts`**:
+const CONFIDENCE_FLOOR = 0.7;
 
-```ts
-export { evaluateMutationGate, type MutationGateDecision } from "./mutation-gate.js";
-export { isGsdHardGateEnabled } from "./flags.js";
-```
+/** Run the leader-tier assessor only when the fast layer1 call is uncertain or the task is non-trivial. */
+export function shouldAssess(priorDepth: string, confidence: number): boolean {
+  if (priorDepth === "standard" || priorDepth === "heavy") return true;
+  return confidence < CONFIDENCE_FLOOR; // low-confidence quick → double-check
+}
 
-- [ ] **Step 8: Typecheck + unit suite**
+function buildAssessorPrompt(input: AssessInput): string {
+  return [
+    "You are the complexity assessor — the highest-tier router for an autonomous coding agent.",
+    "Judge how much rigor this task needs and whether it warrants multi-perspective debate.",
+    "Be decisive: over-tiering wastes the user's time, under-tiering ships unreviewed risky changes.",
+    "",
+    `Fast classifier's first-pass depth: ${input.priorDepth} (confidence ${input.confidence.toFixed(2)}).`,
+    input.conversationDigest ? `\nRecent conversation:\n${input.conversationDigest}` : "",
+    input.eeContext ? `\nPrior experience (EE recall):\n${input.eeContext}` : "",
+    "",
+    "### Task",
+    input.raw,
+    ASSESSMENT_OUTPUT_CONTRACT,
+  ].join("\n");
+}
 
-Run: `bunx tsc --noEmit && bunx vitest run src/gsd/ src/pil/`
-Expected: 0 tsc errors; all green.
+function writeAssessment(cwd: string, r: { depth: string; autoCouncil: boolean; rationale: string }, leaderModelId: string): string {
+  ensurePlanningWorkspace(cwd, leaderModelId);
+  const path = planningArtifact(cwd, "ASSESSMENT.md");
+  writeFileSync(
+    path,
+    ["# ASSESSMENT", "", `depth: ${r.depth}`, `autoCouncil: ${r.autoCouncil}`, `leader: \`${leaderModelId}\``, "", "## Rationale", "", r.rationale || "(none)"].join("\n"),
+    "utf8",
+  );
+  return path;
+}
 
-- [ ] **Step 9: Commit**
-
-```bash
-git add src/gsd/mutation-gate.ts src/gsd/__tests__/mutation-gate.test.ts src/gsd/flags.ts src/gsd/index.ts src/orchestrator/tool-engine.ts
-git commit -m "feat(gsd): hard mutation gate blocks edits on heavy tasks until plan-review passes"
-```
-
----
-
-### Task 5: Escape hatches audit (env flag + directAnswer + --force)
-
-**Files:**
-- Modify: `src/gsd/__tests__/mutation-gate.test.ts` (add the `MUONROI_GSD_HARD_GATE` integration case)
-- Verify (no code change expected): `gsd_execute --force` path (`workflow-tools.ts:153,158`)
-
-> Task 4 already implemented the flag, directAnswer, and tier bypass. This task hardens the contract with an env-driven test and confirms `--force` still advances state so a forced execute opens the gate.
-
-- [ ] **Step 1: Write the env + force integration test** — append to `mutation-gate.test.ts`:
-
-```ts
-it("honors MUONROI_GSD_HARD_GATE=0 via isGsdHardGateEnabled", async () => {
-  const prev = process.env.MUONROI_GSD_HARD_GATE;
-  const prevNative = process.env.MUONROI_GSD_NATIVE; // ensure native is on so the flag is meaningful
-  try {
-    process.env.MUONROI_GSD_NATIVE = "1";
-    process.env.MUONROI_GSD_HARD_GATE = "0";
-    const { isGsdHardGateEnabled } = await import("../flags.js");
-    expect(isGsdHardGateEnabled()).toBe(false);
-    expect(evaluateMutationGate(cwd, { tier: "heavy", toolName: "edit_file", hardGateEnabled: isGsdHardGateEnabled() }).blocked).toBe(false);
-  } finally {
-    if (prev === undefined) delete process.env.MUONROI_GSD_HARD_GATE; else process.env.MUONROI_GSD_HARD_GATE = prev;
-    if (prevNative === undefined) delete process.env.MUONROI_GSD_NATIVE; else process.env.MUONROI_GSD_NATIVE = prevNative;
+/**
+ * Enrich the native depth decision. Pre-filter short-circuits trivial turns (no LLM cost);
+ * otherwise a leader-tier call reasons over the task + context and returns a structured
+ * verdict that OVERRIDES pilCtx.modelDepthTier. Never throws — degrades to priorDepth.
+ */
+export async function assessComplexity(input: AssessInput): Promise<AssessResult> {
+  if (!shouldAssess(input.priorDepth, input.confidence)) {
+    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "prefilter-skip" };
   }
-});
+  if (!input.runAssessor) {
+    // No runner (offline/test path without a fixture) — keep priorDepth, do not fabricate.
+    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "prefilter-skip" };
+  }
+  let raw = "";
+  try {
+    raw = await input.runAssessor(buildAssessorPrompt(input));
+  } catch (err) {
+    console.error(`[gsd] complexity assessor call failed, keeping priorDepth: ${(err as Error).message}`);
+    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "parse-failed-fallback" };
+  }
+  const verdict = extractComplexityVerdict(raw);
+  if (!verdict) {
+    console.error("[gsd] complexity assessor emitted no structured verdict — keeping priorDepth");
+    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "parse-failed-fallback" };
+  }
+  const leader = await resolvePlanCouncilLeader(input.sessionModelId);
+  const path = writeAssessment(input.cwd, verdict, leader.modelId);
+  return { depth: verdict.depth, autoCouncil: verdict.autoCouncil, rationale: verdict.rationale, assessed: true, source: "assessor", assessmentPath: path };
+}
 ```
 
-> Read `flags.ts` first to use the correct native-enable env var name (it may not be `MUONROI_GSD_NATIVE`). Match the actual name.
-
-- [ ] **Step 2: Run**
-
-Run: `bunx vitest run src/gsd/__tests__/mutation-gate.test.ts`
-Expected: PASS.
-
-- [ ] **Step 3: Confirm `gsd_execute --force` opens the gate** — trace: `gsd_execute` with `force:true` bypasses `canExecute` (`workflow-tools.ts:158`) and calls `advancePhase(cwd, "execute")` (`:164`). But the gate ALSO requires `readPlanVerifyVerdict === "pass"`. A forced execute on an unreviewed plan sets `phase=execute` but leaves verdict non-pass → gate still blocks. Decision: `--force` must be a full override. Add to `mutation-gate.ts` an override read: if `.planning/STATE.md` carries a forced-execute marker, open the gate. Simplest grounded approach — have `gsd_execute --force` write `setStateField(cwd, "Plan Verified", "yes")` alongside the phase advance, so the existing `readPlanVerifyVerdict` naturally returns pass. Implement in `workflow-tools.ts:156-166`:
-
-```ts
-    execute: async (input: any) => {
-      const gate = canExecute(cwd, depth);
-      if (!gate.allowed && !input.force) {
-        return json({ blocked: true, reason: gate.reason });
-      }
-      if (input.force && !gate.allowed) {
-        // Explicit override: record that the plan-verify gate was force-bypassed so the
-        // runtime mutation gate (evaluateMutationGate) also opens. Audited via STATE.md.
-        setStateField(cwd, "Plan Verified", "yes");
-      }
-      const host = getGsdLoopHost();
-      const ctx = loopHostContext(cwd, sessionModelId, depth);
-      await host.onExecuteStart(ctx);
-      advancePhase(cwd, "execute");
-      return json({ blocked: false, phase: "execute", forced: input.force === true });
-    },
-```
-
-- [ ] **Step 4: Write the force test** — new case in `src/gsd/__tests__/workflow-tools.test.ts` (read the file first for its harness):
-
-```ts
-it("gsd_execute force=true opens the mutation gate (sets Plan Verified=yes, phase=execute)", async () => {
-  // arrange a fresh .planning with no plan-review, call gsd_execute {force:true},
-  // then assert evaluateMutationGate(cwd,{tier:'heavy',toolName:'edit_file',hardGateEnabled:true}).blocked === false
-});
-```
-
-Fill the arrange/act with the file's existing tool-invocation helper.
-
-- [ ] **Step 5: Run + Commit**
-
-Run: `bunx vitest run src/gsd/__tests__/`
-Expected: PASS.
-
-```bash
-git add src/gsd/workflow-tools.ts src/gsd/__tests__/mutation-gate.test.ts src/gsd/__tests__/workflow-tools.test.ts
-git commit -m "feat(gsd): gsd_execute --force fully overrides the mutation gate (audited)"
-```
+- [ ] **Step 5: Run** → PASS. **Step 6: Export** from `index.ts` (`assessComplexity`, `shouldAssess`, `isComplexityAssessorEnabled`, types). **Step 7: tsc + commit** (`feat(gsd): leader-tier complexity assessor over the native depth slot`).
 
 ---
 
-### Task 6: Resolve auto-council ↔ GSD ordering
+### Task 5: Wire the assessor into the native depth sync
 
-**Files:**
-- Modify: `src/orchestrator/tool-engine.ts` (~`:626,638-642,695-701`)
-- Test: harness E2E deferred to Task 9; add a focused unit assertion here if the continuation ctx is unit-testable.
+**Files:** Modify `src/orchestrator/message-processor.ts:636-649`.
 
-**Background (UNPROVEN gap from investigation):** heavy tasks route to `runCouncilV2` and return early (`:703`), re-entering `processMessage` as a continuation (`:695-701`). If `complexityTier==="heavy"` does NOT survive onto the continuation `pilCtx`, the mutation gate never arms on the implementation turn.
+**Contract:** the assessor runs BEFORE `syncWorkflowContext`, overrides the depth that gets written to SDK STATE.md, and stashes `autoCouncil` on `pilCtx` for Task 8. The leader-tier `runAssessor` is built from the orchestrator's own task-runner (same mechanism plan-review uses via `taskToRunPerspectiveFn`, but single-shot). No new state store — it feeds the existing `syncWorkflowContext` call.
 
-- [ ] **Step 1: Verify whether heavy tier survives the continuation** — read `tool-engine.ts:695-701` and trace how the continuation `pilCtx` is built (`:696`). Determine empirically (add a temporary `console.error` of `pilCtx.complexityTier` on the continuation, run one heavy harness turn, then remove) whether the tier persists.
+- [ ] **Step 1:** Read `message-processor.ts:600-660` for the available deps (task runner, EE context, conversation). Determine how a single leader-tier call is issued here (reuse the same runner plan-review uses).
 
-- [ ] **Step 2: If the tier does NOT survive**, thread it through the continuation. At the auto-council early-return (~`:695-701`), carry the tier into the re-entry so the continuation `pilCtx.complexityTier` is `"heavy"`. Grep for how the continuation prompt/ctx is assembled and set `complexityTier` explicitly on the re-entered context. (If it DOES survive, skip to Step 3 — no code change, record the finding in the ledger.)
+- [ ] **Step 2:** Modify the depth-sync block (`:636-649`) to:
 
-- [ ] **Step 3: Ensure `shouldAutoCouncil` does not double-fire** — confirm at `:639` that `!isContinuation` already prevents council re-firing on the continuation turn (investigation confirms it does). No change; assert it in a comment.
+```ts
+    if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
+      try {
+        const cwd = deps.bash.getCwd();
+        const sessionModel = deps.session?.model ?? "unknown";
+        let depth: "quick" | "standard" | "heavy" =
+          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
+          ((pilCtx as { complexityTier?: "quick" | "standard" | "heavy" }).complexityTier ?? "standard");
+        let autoCouncilHint: boolean | undefined;
 
-- [ ] **Step 4: Typecheck + commit**
+        if (isComplexityAssessorEnabled()) {
+          const confidence = (pilCtx as { classifyConfidence?: number }).classifyConfidence ?? 1;
+          const assessed = await assessComplexity({
+            cwd,
+            raw: pilCtx.raw,
+            priorDepth: depth,
+            confidence,
+            eeContext: (pilCtx as { eeContext?: string }).eeContext,
+            sessionModelId: sessionModel,
+            runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
+          });
+          depth = assessed.depth;
+          if (assessed.assessed) autoCouncilHint = assessed.autoCouncil;
+          (pilCtx as { modelDepthTier?: string }).modelDepthTier = depth; // keep the native slot authoritative
+          (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil = autoCouncilHint;
+        }
 
-Run: `bunx tsc --noEmit && bunx vitest run src/orchestrator/`
-Expected: 0 errors; green.
-
-```bash
-git add src/orchestrator/tool-engine.ts
-git commit -m "fix(gsd): preserve heavy tier onto the auto-council continuation so the mutation gate arms"
+        getGsdLoopHost().ensureHost(cwd, sessionModel);
+        syncWorkflowContext(cwd, sessionModel, depth);
+      } catch (err) {
+        console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
+      }
+    }
 ```
+
+> `classifyConfidence` / `eeContext`: check whether layer1 already surfaces the classify confidence + EE block on `pilCtx`. If `classifyConfidence` is not present, thread `llmRes.confidence` from `layer1-intent.ts:790-792` onto `pilCtx` (small additive change to layer1 + `PipelineContext`) — that is the pre-filter signal. If threading is nontrivial, default `confidence` to a value that makes `shouldAssess` fire for standard/heavy (which it already does regardless of confidence) and only skip clearly-quick turns. `buildLeaderAssessorRunner` is a thin helper you write near this block: it wraps a single `runTask`/leader call returning the model's text.
+
+- [ ] **Step 3:** Add `gsdAutoCouncil?: boolean` and (if threaded) `classifyConfidence?: number` to `PipelineContext` (`src/pil/types.ts`).
+
+- [ ] **Step 4:** tsc + a focused message-processor test if one exists; else rely on the harness E2E (Task 11). Commit (`feat(gsd): assessor enriches the native depth sync before STATE write`).
 
 ---
 
-### Task 7: Verify-context bundle + verify perspectives + `runVerifyCouncil`
+### Task 6: Fold ASSESSMENT.md into the council context bundle
 
-**Files:**
-- Create: `src/gsd/verify-context.ts`
-- Create: `src/gsd/verify-council-prompts.ts`
-- Create: `src/gsd/verify-council.ts`
-- Create: `src/gsd/__tests__/verify-context.test.ts`, `src/gsd/__tests__/verify-council.test.ts`
-- Modify: `src/gsd/index.ts` (exports)
+**Files:** Modify `src/gsd/council-context.ts`; extend `src/gsd/__tests__/council-context.test.ts` (or create if absent).
 
-**Interfaces:** see the top-level Interfaces block. Reuses `buildCouncilContextBundle`, `renderCouncilContextBlock`, `extractStructuredVerdict`, `VERDICT_OUTPUT_CONTRACT`, `resolvePlanCouncilLeader`, `planningArtifact`, `readPlanVerifyVerdict`.
+**Contract (pipeline coherence):** the assessor's output is the next step's input — plan-review and verify councils MUST see the complexity rationale.
 
-- [ ] **Step 1: Write the verify-context test** — `src/gsd/__tests__/verify-context.test.ts`:
+- [ ] **Step 1: Failing test** — assert `buildCouncilContextBundle` surfaces an `assessment` field and `renderCouncilContextBlock` includes an "Assessment" section when `.planning/ASSESSMENT.md` exists.
+
+```ts
+it("includes the assessor rationale in the bundle + rendered block", () => {
+  // seed .planning/ASSESSMENT.md with depth+rationale, PLAN.md, STATE.md
+  const b = buildCouncilContextBundle(cwd, { depth: "heavy" });
+  expect(b.assessment).toContain("multi-file");
+  expect(renderCouncilContextBlock(b)).toContain("Complexity assessment");
+});
+```
+
+- [ ] **Step 2: Run to fail. Step 3: Implement** — in `council-context.ts`: add `assessment: string` to `CouncilContextBundle`; read `ASSESSMENT.md` via the existing `readArtifact` helper in `buildCouncilContextBundle`; add its char count to `totalChars`; render a `### Complexity assessment` section in `renderCouncilContextBlock` (cap ~600 chars) when non-empty.
+
+- [ ] **Step 4: Run → PASS. Step 5: Commit** (`feat(gsd): council context bundle carries the assessment rationale`).
+
+---
+
+### Task 7: Strengthen the heavy directive keyed on the assessed depth
+
+**Files:** Modify `src/pil/layer4-gsd.ts:164-171`; extend `layer4-gsd.test.ts`.
+
+Same as the prior revision's directive task, but the wording must reflect that depth was *assessed* (not blanket-forced): heavy → mandatory plan-review before edits; standard → recommend plan; quick → no directive.
+
+- [ ] **Step 1:** Failing test asserting heavy `enriched` contains "MANDATORY" + "gsd_plan_review" + "BLOCKED", `< 800` chars; standard contains a softer "plan → review" recommendation without "BLOCKED"; quick emits no gate directive.
+- [ ] **Step 2-3:** Reword `heavyLine` (`:164`) to the MANDATORY sequence (kept under `truncateToBudget(nativeHint, 200)`); ensure the standard branch stays advisory.
+- [ ] **Step 4-5:** Run → PASS; commit (`feat(gsd): directive reflects the assessed depth`).
+
+---
+
+### Task 8: Mutation gate delegating to SDK `canExecute` + auto-council consolidation
+
+**Files:** Create `src/gsd/mutation-gate.ts`, `src/gsd/__tests__/mutation-gate.test.ts`. Modify `src/gsd/flags.ts` (`isGsdHardGateEnabled`), `src/orchestrator/tool-engine.ts` (write-mutex wrapper ~`:1042-1077`; auto-council decision ~`:626,638-642`), `src/gsd/index.ts`.
+
+**No-workaround contract:** the gate MUST call the SDK's `canExecute(cwd, depth)` — it does not re-read phase/verdict itself. `canExecute` already fast-paths `quick` (allowed) and gates `standard`/`heavy` on plan-verify pass + phase, so depth drives everything.
+
+- [ ] **Step 1: Add `isGsdHardGateEnabled`** to `flags.ts` (default ON with native; opt out `MUONROI_GSD_HARD_GATE=0`).
+
+- [ ] **Step 2: Failing test** — `mutation-gate.test.ts`:
 
 ```ts
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { buildVerifyContextBundle } from "../verify-context.js";
+import { evaluateMutationGate } from "../mutation-gate.js";
 
-describe("buildVerifyContextBundle", () => {
-  let cwd: string;
-  beforeEach(() => {
-    cwd = mkdtempSync(join(tmpdir(), "gsd-vctx-"));
-    const d = join(cwd, ".planning");
-    mkdirSync(d, { recursive: true });
-    writeFileSync(join(d, "PLAN.md"), "# Plan\n\n## Acceptance\n- login returns a token\n", "utf8");
-    writeFileSync(join(d, "STATE.md"), "# STATE\n\n| Field | Value |\n|---|---|\n| Phase | verify |\n| Depth | heavy |\n", "utf8");
-    writeFileSync(join(d, "PLAN-VERIFY.md"), "verdict: pass\n", "utf8");
+function seed(cwd: string, phase: string, verdict: string, depth = "heavy") {
+  const d = join(cwd, ".planning"); mkdirSync(d, { recursive: true });
+  writeFileSync(join(d, "STATE.md"), `# STATE\n\n| Field | Value |\n|---|---|\n| Phase | ${phase} |\n| Depth | ${depth} |\n`, "utf8");
+  writeFileSync(join(d, "PLAN-VERIFY.md"), `verdict: ${verdict}\n`, "utf8");
+}
+const on = { hardGateEnabled: true };
+
+describe("evaluateMutationGate (delegates to canExecute)", () => {
+  let cwd: string; beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "gate-")); });
+
+  it("blocks edit_file at heavy depth before plan-review passes", () => {
+    seed(cwd, "plan", "revise");
+    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file" }).blocked).toBe(true);
   });
-
-  it("carries acceptance criteria, evidence, and diff into the bundle", () => {
-    const b = buildVerifyContextBundle(cwd, { depth: "heavy", evidence: "42 tests passed", diff: "diff --git a b\n+token" });
-    expect(b.base.acceptanceCriteria).toContain("login returns a token");
-    expect(b.evidence).toContain("42 tests passed");
-    expect(b.diff).toContain("token");
-    expect(b.planVerdict).toBe("pass");
-    expect(b.diffChars).toBeGreaterThan(0);
+  it("allows edit_file once canExecute allows (phase=execute + verdict=pass)", () => {
+    seed(cwd, "execute", "pass");
+    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file" }).blocked).toBe(false);
   });
-
-  it("degrades to empty diff/evidence without throwing", () => {
-    const b = buildVerifyContextBundle(cwd, { depth: "heavy" });
-    expect(b.diff).toBe("");
-    expect(b.evidence).toBe("");
+  it("never gates quick depth (canExecute fast-path)", () => {
+    seed(cwd, "plan", "revise", "quick");
+    expect(evaluateMutationGate(cwd, { ...on, depth: "quick", toolName: "edit_file" }).blocked).toBe(false);
+  });
+  it("never gates gsd_*/respond_*/read tools", () => {
+    seed(cwd, "plan", "revise");
+    for (const t of ["gsd_plan", "respond_report", "read_file", "grep"]) expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: t }).blocked).toBe(false);
+  });
+  it("never gates when disabled or directAnswer", () => {
+    seed(cwd, "plan", "revise");
+    expect(evaluateMutationGate(cwd, { depth: "heavy", toolName: "edit_file", hardGateEnabled: false }).blocked).toBe(false);
+    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file", directAnswer: true }).blocked).toBe(false);
   });
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `bunx vitest run src/gsd/__tests__/verify-context.test.ts`
-Expected: FAIL — module not found.
-
-- [ ] **Step 3: Implement `src/gsd/verify-context.ts`**:
+- [ ] **Step 3: Run to fail. Step 4: Implement `mutation-gate.ts`** — delegate to `canExecute`:
 
 ```ts
-import { buildCouncilContextBundle, type CouncilContextBundle } from "./council-context.js";
-import { readPlanVerifyVerdict } from "./workflow-engine.js";
+import { canExecute } from "./workflow-engine.js";
 
-export interface VerifyContextBundle {
-  base: CouncilContextBundle;
-  /** Implementation diff (caller supplies; empty when unavailable). */
-  diff: string;
-  diffChars: number;
-  /** Deterministic-floor evidence (test/lint/self-verify output). */
-  evidence: string;
-  /** The plan-verify verdict recorded before execution — sanity anchor. */
-  planVerdict: "pass" | "revise" | "block" | null;
-}
+export interface MutationGateDecision { blocked: boolean; reason: string; }
 
-const DIFF_CAP = 8000;
+const NEVER_GATED_PREFIXES = ["gsd_", "respond_"];
+const NEVER_GATED = new Set(["read_file", "grep", "glob", "bash_output_get", "gsd_status"]);
+function isNeverGated(t: string): boolean { return NEVER_GATED.has(t) || NEVER_GATED_PREFIXES.some((p) => t.startsWith(p)); }
 
-function cap(text: string, max: number): string {
-  const t = (text ?? "").trim();
-  return t.length <= max ? t : `${t.slice(0, max)}…[truncated]`;
-}
+const GATE_DIRECTIVE =
+  "BLOCKED: this task was assessed as non-trivial. GSD requires a reviewed plan before any code edit. " +
+  "Call gsd_status, then gsd_discuss → gsd_plan → gsd_plan_review. Mutation tools unlock only after " +
+  "plan-review returns verdict: pass. If this is genuinely trivial, call gsd_execute with force:true to override.";
 
-/**
- * Build the context a verify-council needs: the full plan bundle (acceptance
- * criteria are the verify contract) PLUS the implementation diff and the
- * deterministic-floor evidence. Reads are tolerant — missing inputs degrade to
- * empty strings, never throw.
- */
-export function buildVerifyContextBundle(
+/** Gate = the SDK's own canExecute. quick depth is fast-pathed by canExecute; standard/heavy gate on plan-verify. */
+export function evaluateMutationGate(
   cwd: string,
-  opts: { depth: string; evidence?: string; diff?: string },
-): VerifyContextBundle {
-  const base = buildCouncilContextBundle(cwd, { depth: opts.depth });
-  const diff = cap(opts.diff ?? "", DIFF_CAP);
-  const evidence = cap(opts.evidence ?? "", 4000);
-  return {
-    base,
-    diff,
-    diffChars: diff.length,
-    evidence,
-    planVerdict: readPlanVerifyVerdict(cwd),
-  };
-}
-```
-
-- [ ] **Step 4: Run**
-
-Run: `bunx vitest run src/gsd/__tests__/verify-context.test.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Implement `src/gsd/verify-council-prompts.ts`**:
-
-```ts
-import { renderCouncilContextBlock } from "./council-context.js";
-import type { VerifyContextBundle } from "./verify-context.js";
-import { VERDICT_OUTPUT_CONTRACT } from "./verdict-schema.js";
-
-export type VerifyPerspectiveId = "acceptance" | "correctness" | "regression" | "security";
-
-export interface VerifyPerspective {
-  id: VerifyPerspectiveId;
-  role: string;
-  mandate: string;
-}
-
-export const VERIFY_PERSPECTIVES: VerifyPerspective[] = [
-  {
-    id: "acceptance",
-    role: "acceptance auditor",
-    mandate: "For EACH acceptance criterion, cite the diff line or evidence that satisfies it. Any criterion without concrete evidence is a concern.",
-  },
-  {
-    id: "correctness",
-    role: "adversarial correctness reviewer",
-    mandate: "Try to REFUTE that the implementation works. Construct a concrete failing input or state. Default to a concern when uncertain.",
-  },
-  {
-    id: "regression",
-    role: "regression reviewer",
-    mandate: "Identify behavior OUTSIDE the task scope that the diff may have broken (removed guards, changed signatures, side effects).",
-  },
-  {
-    id: "security",
-    role: "security reviewer",
-    mandate: "Path traversal, secret handling, permission changes, dangerous shell patterns introduced by the diff.",
-  },
-];
-
-/** standard = acceptance + correctness; heavy = all four; quick = none (deterministic floor only). */
-export function verifyPerspectivesForDepth(depth: string): VerifyPerspective[] {
-  if (depth === "quick") return [];
-  if (depth === "standard") return VERIFY_PERSPECTIVES.filter((p) => p.id === "acceptance" || p.id === "correctness");
-  return VERIFY_PERSPECTIVES;
-}
-
-function renderBundle(bundle: VerifyContextBundle): string {
-  return [
-    renderCouncilContextBlock(bundle.base),
-    "",
-    "### Deterministic-floor evidence (tests/lint/self-verify)",
-    "",
-    bundle.evidence || "(no evidence supplied)",
-    "",
-    "### Implementation diff under review",
-    "",
-    "```diff",
-    bundle.diff || "(no diff supplied)",
-    "```",
-  ].join("\n");
-}
-
-export function buildVerifyPerspectivePrompt(p: VerifyPerspective, bundle: VerifyContextBundle): string {
-  return [
-    `You are the ${p.role} on a verify council judging whether an implementation meets its plan.`,
-    `Mandate: ${p.mandate}`,
-    "",
-    "The deterministic test floor has already PASSED. Your job is intent-vs-reality: does the code",
-    "actually achieve the plan's goal and acceptance criteria? Tests passing is necessary, not sufficient.",
-    "",
-    renderBundle(bundle),
-    "",
-    VERDICT_OUTPUT_CONTRACT,
-  ].join("\n");
-}
-
-export function buildVerifyDebateTopic(bundle: VerifyContextBundle): string {
-  return [
-    "Debate whether the implementation below satisfies the plan's goal and acceptance criteria.",
-    "The deterministic test floor already passed — focus on goal-achievement, missed acceptance criteria,",
-    "and regressions. Converge on a single merged verdict.",
-    "",
-    renderBundle(bundle),
-    "",
-    VERDICT_OUTPUT_CONTRACT,
-  ].join("\n");
-}
-```
-
-- [ ] **Step 6: Write the verify-council test** — `src/gsd/__tests__/verify-council.test.ts`:
-
-```ts
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-vi.mock("../../council/leader.js", () => ({
-  resolvePlanCouncilLeader: vi.fn(async () => ({ modelId: "leader-model" })),
-}));
-
-import { runVerifyCouncil } from "../verify-council.js";
-
-function seed(cwd: string): void {
-  const d = join(cwd, ".planning");
-  mkdirSync(d, { recursive: true });
-  writeFileSync(join(d, "PLAN.md"), "# Plan\n\n## Acceptance\n- returns a token\n", "utf8");
-  writeFileSync(join(d, "STATE.md"), "# STATE\n\n| Field | Value |\n|---|---|\n| Phase | verify |\n| Depth | heavy |\n", "utf8");
-  writeFileSync(join(d, "PLAN-VERIFY.md"), "verdict: pass\n", "utf8");
-}
-
-describe("runVerifyCouncil", () => {
-  let cwd: string;
-  beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "gsd-vc-")); seed(cwd); });
-
-  it("returns pass and writes VERIFY-COUNCIL.md when every perspective approves", async () => {
-    const runPerspectiveFn = vi.fn(async () => '```council-verdict\n{"verdict":"approve","concerns":[],"evidence":["token at L3"],"rationale":"ok"}\n```');
-    const res = await runVerifyCouncil({ cwd, sessionModelId: "sess-model", depth: "heavy", evidence: "42 passed", runPerspectiveFn });
-    expect(res.verdict).toBe("pass");
-    expect(res.skipped).toBe(false);
-    expect(existsSync(join(cwd, ".planning", "VERIFY-COUNCIL.md"))).toBe(true);
-  });
-
-  it("returns revise and collects concerns when a perspective flags a gap", async () => {
-    const runPerspectiveFn = vi.fn(async (_p, p) =>
-      p.id === "correctness"
-        ? '```council-verdict\n{"verdict":"revise","concerns":["null token on empty password"],"evidence":[],"rationale":"gap"}\n```'
-        : '```council-verdict\n{"verdict":"approve","concerns":[],"evidence":[],"rationale":"ok"}\n```',
-    );
-    const res = await runVerifyCouncil({ cwd, sessionModelId: "sess-model", depth: "heavy", runPerspectiveFn });
-    expect(res.verdict).toBe("revise");
-    expect(res.concerns.join(" ")).toContain("null token");
-  });
-
-  it("skips (verdict pass, skipped true) at quick depth — deterministic floor only", async () => {
-    const res = await runVerifyCouncil({ cwd, sessionModelId: "sess-model", depth: "quick" });
-    expect(res.skipped).toBe(true);
-    expect(res.verdict).toBe("pass");
-  });
-
-  it("forces revise (never silently approves) when the debate emits no structured verdict", async () => {
-    const runDebate = vi.fn(async () => "some prose with no fenced verdict block");
-    const res = await runVerifyCouncil({ cwd, sessionModelId: "sess-model", depth: "heavy", runDebate });
-    expect(res.verdict).toBe("revise");
-    expect(res.verdictSource).toBe("parse-failed");
-  });
-});
-```
-
-- [ ] **Step 7: Run to verify it fails**
-
-Run: `bunx vitest run src/gsd/__tests__/verify-council.test.ts`
-Expected: FAIL — module not found.
-
-- [ ] **Step 8: Implement `src/gsd/verify-council.ts`** (mirror `plan-council.ts` structure — debate path preferred, perspective path fallback, conservative parse-fail):
-
-```ts
-import { writeFileSync } from "node:fs";
-import { resolvePlanCouncilLeader } from "../council/leader.js";
-import { planningArtifact } from "./paths.js";
-import { extractStructuredVerdict } from "./verdict-schema.js";
-import { buildVerifyContextBundle } from "./verify-context.js";
-import {
-  buildVerifyDebateTopic,
-  buildVerifyPerspectivePrompt,
-  type VerifyPerspective,
-  verifyPerspectivesForDepth,
-} from "./verify-council-prompts.js";
-
-export type VerifyVerdict = "pass" | "revise" | "block";
-
-export interface VerifyCouncilResult {
-  skipped: boolean;
-  verdict: VerifyVerdict;
-  concerns: string[];
-  verifyCouncilPath?: string;
-  leaderModelId?: string;
-  verdictSource: "structured" | "heuristic-fallback" | "parse-failed";
-}
-
-export interface VerifyCouncilOpts {
-  cwd: string;
-  sessionModelId: string;
-  depth: string;
-  evidence?: string;
-  diff?: string;
-  runPerspectiveFn?: (prompt: string, p: VerifyPerspective) => Promise<string>;
-  runDebate?: (topic: string) => Promise<string>;
-}
-
-/** approve → pass; else the worst verdict wins (block > revise). */
-function mergeVerdict(verdicts: ("approve" | "revise" | "block")[]): VerifyVerdict {
-  if (verdicts.some((v) => v === "block")) return "block";
-  if (verdicts.some((v) => v === "revise")) return "revise";
-  return "pass";
-}
-
-function writeArtifact(cwd: string, verdict: VerifyVerdict, concerns: string[], leaderModelId: string, source: string): string {
-  const path = planningArtifact(cwd, "VERIFY-COUNCIL.md");
-  const content = [
-    "# VERIFY-COUNCIL",
-    "",
-    `verdict: ${verdict}`,
-    `leader: \`${leaderModelId}\``,
-    `verdictSource: ${source}`,
-    "",
-    "## Concerns",
-    concerns.length ? concerns.map((c) => `- ${c}`).join("\n") : "- (none)",
-  ].join("\n");
-  writeFileSync(path, content, "utf8");
-  return path;
-}
-
-/**
- * Independent council adjudication of an implementation against its plan.
- * Runs ONLY after the deterministic test floor passes (caller's contract).
- * Never silently approves: a missing structured verdict forces "revise".
- */
-export async function runVerifyCouncil(opts: VerifyCouncilOpts): Promise<VerifyCouncilResult> {
-  const perspectives = verifyPerspectivesForDepth(opts.depth);
-  if (perspectives.length === 0) {
-    return { skipped: true, verdict: "pass", concerns: [], verdictSource: "structured" };
-  }
-
-  const bundle = buildVerifyContextBundle(opts.cwd, { depth: opts.depth, evidence: opts.evidence, diff: opts.diff });
-  const leader = await resolvePlanCouncilLeader(opts.sessionModelId);
-
-  // ---- Debate path (production: runCouncilV2 synthesis) ----
-  if (opts.runDebate) {
-    let synthesis = "";
-    try {
-      synthesis = await opts.runDebate(buildVerifyDebateTopic(bundle));
-    } catch (err) {
-      console.error(`[gsd] verify-council debate failed: ${(err as Error).message}`);
-    }
-    const parsed = extractStructuredVerdict(synthesis);
-    if (!parsed) {
-      const concerns = ["Verify council leader emitted no structured verdict — forcing revision."];
-      const path = writeArtifact(opts.cwd, "revise", concerns, leader.modelId, "parse-failed");
-      return { skipped: false, verdict: "revise", concerns, verifyCouncilPath: path, leaderModelId: leader.modelId, verdictSource: "parse-failed" };
-    }
-    const verdict = mergeVerdict([parsed.verdict]);
-    const concerns = parsed.concerns.map(String);
-    const path = writeArtifact(opts.cwd, verdict, concerns, leader.modelId, "structured");
-    return { skipped: false, verdict, concerns, verifyCouncilPath: path, leaderModelId: leader.modelId, verdictSource: "structured" };
-  }
-
-  // ---- Perspective path (parallel sub-agents; tests use this) ----
-  if (!opts.runPerspectiveFn) {
-    // No runner at all — cannot adjudicate; conservatively pass (deterministic floor already gated).
-    return { skipped: true, verdict: "pass", concerns: [], verdictSource: "structured" };
-  }
-  const runFn = opts.runPerspectiveFn;
-  const results = await Promise.all(
-    perspectives.map(async (p) => {
-      try {
-        const raw = await runFn(buildVerifyPerspectivePrompt(p, bundle), p);
-        const parsed = extractStructuredVerdict(raw);
-        if (!parsed) {
-          console.error(`[gsd] verify-council perspective ${p.id} emitted no structured verdict — forcing revise`);
-          return { verdict: "revise" as const, concerns: [`${p.id}: no structured verdict (parse failed)`], parseFailed: true };
-        }
-        return { verdict: parsed.verdict, concerns: parsed.concerns.map(String), parseFailed: false };
-      } catch (err) {
-        console.error(`[gsd] verify-council perspective ${p.id} failed: ${(err as Error).message}`);
-        return { verdict: "revise" as const, concerns: [`${p.id}: perspective error — ${(err as Error).message}`], parseFailed: true };
-      }
-    }),
-  );
-  const verdict = mergeVerdict(results.map((r) => r.verdict));
-  const concerns = results.flatMap((r) => r.concerns);
-  const anyParseFailed = results.some((r) => r.parseFailed);
-  const source = anyParseFailed ? "parse-failed" : "structured";
-  const path = writeArtifact(opts.cwd, verdict, concerns, leader.modelId, source);
-  return { skipped: false, verdict, concerns, verifyCouncilPath: path, leaderModelId: leader.modelId, verdictSource: source };
-}
-```
-
-- [ ] **Step 9: Run the verify-council tests**
-
-Run: `bunx vitest run src/gsd/__tests__/verify-council.test.ts src/gsd/__tests__/verify-context.test.ts`
-Expected: PASS (all cases). Note the debate parse-fail case maps to `revise` (never silent approve).
-
-- [ ] **Step 10: Export from `src/gsd/index.ts`**:
-
-```ts
-export { runVerifyCouncil, type VerifyCouncilResult } from "./verify-council.js";
-export { buildVerifyContextBundle, type VerifyContextBundle } from "./verify-context.js";
-export { verifyPerspectivesForDepth, type VerifyPerspective } from "./verify-council-prompts.js";
-```
-
-- [ ] **Step 11: Typecheck + commit**
-
-Run: `bunx tsc --noEmit && bunx vitest run src/gsd/`
-Expected: 0 errors; green.
-
-```bash
-git add src/gsd/verify-context.ts src/gsd/verify-council-prompts.ts src/gsd/verify-council.ts src/gsd/__tests__/verify-context.test.ts src/gsd/__tests__/verify-council.test.ts src/gsd/index.ts
-git commit -m "feat(gsd): council-adjudicated verify layer (mirror of plan-council)"
-```
-
----
-
-### Task 8: Wire Layer-2 verify-council into `gsd_verify`
-
-**Files:**
-- Modify: `src/gsd/workflow-tools.ts:169-205` (`gsd_verify`)
-- Test: `src/gsd/__tests__/workflow-tools.test.ts`
-
-**Contract:** deterministic floor first. If `passed=false` OR no evidence → straight to debug/fail, NO council (cheap). If `passed=true` with evidence AND depth≠quick → run `runVerifyCouncil`; its verdict OVERRIDES the model's self-report: `pass`→review, `revise`/`block`→debug with concerns fed into VERIFY.md.
-
-- [ ] **Step 1: Write the failing test** — append to `src/gsd/__tests__/workflow-tools.test.ts` (read the file for its tool-invocation + opts harness; `runTask`/`runDebate` are injected via `GsdWorkflowToolOpts`):
-
-```ts
-it("gsd_verify runs verify-council when passed=true at heavy depth and honors its verdict", async () => {
-  // arrange: depth 'heavy', a .planning with PLAN.md acceptance + PLAN-VERIFY pass,
-  // inject runTask/runDebate opts whose synthesis returns a 'revise' council-verdict.
-  // act: call gsd_verify {passed:true, evidence:"tests green"}
-  // assert: returned phase is 'debug' (council revise overrode the model's passed=true),
-  //         and VERIFY-COUNCIL.md exists with verdict: revise.
-});
-
-it("gsd_verify skips council on passed=false (deterministic fail → debug, no council)", async () => {
-  // act: gsd_verify {passed:false}; assert phase 'debug' and NO VERIFY-COUNCIL.md written.
-});
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `bunx vitest run src/gsd/__tests__/workflow-tools.test.ts`
-Expected: FAIL — council not wired.
-
-- [ ] **Step 3: Wire it** — modify the `gsd_verify` execute body (`workflow-tools.ts:180-204`). After the deterministic-floor evidence check, before `onVerifyComplete`, run the council when the floor passed:
-
-```ts
-    execute: async (input: any) => {
-      const passed = input.passed === true;
-      if (passed && !input.evidence?.trim()) {
-        return json({ ok: false, error: "gsd_verify requires non-empty evidence when passed=true" });
-      }
-
-      // Layer 2: council adjudication ONLY when the deterministic floor passed at non-quick depth.
-      // The council verdict overrides the model's self-reported `passed` — this is the whole point:
-      // "tests green but doesn't meet the goal" is caught here.
-      let effectivePassed = passed;
-      let councilConcerns: string[] = [];
-      if (passed && depth !== "quick") {
-        try {
-          const { runVerifyCouncil } = await import("./verify-council.js");
-          const diff = await readImplementationDiff(cwd); // helper below
-          const council = await runVerifyCouncil({
-            cwd,
-            sessionModelId,
-            depth,
-            evidence: input.evidence?.trim(),
-            diff,
-            runPerspectiveFn: runTask ? taskToRunPerspectiveFn(runTask, sessionModelId) : undefined,
-            runDebate: opts.runDebate,
-          });
-          if (!council.skipped && council.verdict !== "pass") {
-            effectivePassed = false;
-            councilConcerns = council.concerns;
-          }
-        } catch (err) {
-          // Fail OPEN — a council failure must not block a genuinely-passing verify. Log per No-Silent-Catch.
-          console.error(`[gsd] verify-council wiring failed, honoring deterministic floor: ${(err as Error).message}`);
-        }
-      }
-
-      const verdictLine = effectivePassed ? "verdict: pass" : "verdict: fail";
-      const concernBlock = councilConcerns.length ? `\n\n## Council concerns\n${councilConcerns.map((c) => `- ${c}`).join("\n")}` : "";
-      if (input.evidence?.trim() || councilConcerns.length) {
-        writeFileSync(planningArtifact(cwd, "VERIFY.md"), `${verdictLine}\n\n${input.evidence?.trim() ?? ""}${concernBlock}\n`, "utf8");
-      }
-
-      const host = getGsdLoopHost();
-      const ctx = loopHostContext(cwd, sessionModelId, depth, {
-        sessionId,
-        verifyPassed: effectivePassed,
-        verifyEvidence: { evidence: input.evidence?.trim(), evidenceChars: input.evidence?.length ?? 0, passed: effectivePassed },
-      });
-      const verifyResult = await host.onVerifyComplete(ctx);
-      return json({ ok: true, phase: effectivePassed ? "review" : "debug", passed: effectivePassed, councilConcerns, loop: verifyResult });
-    },
-```
-
-Add the diff helper near the top of `workflow-tools.ts` (uses `git diff` via the deps? `gsd_verify` has no bash dep — read the plan's execute phase start). Simplest grounded approach: capture the diff from git HEAD in the cwd:
-
-```ts
-import { execFileSync } from "node:child_process";
-
-/** Best-effort implementation diff for the verify council. Empty on any failure — never throws. */
-async function readImplementationDiff(cwd: string): Promise<string> {
+  opts: { depth: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
+): MutationGateDecision {
+  const allow = { blocked: false, reason: "" };
+  if (!opts.hardGateEnabled || opts.directAnswer || isNeverGated(opts.toolName)) return allow;
   try {
-    return execFileSync("git", ["diff", "HEAD"], { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    const gate = canExecute(cwd, opts.depth);
+    return gate.allowed ? allow : { blocked: true, reason: GATE_DIRECTIVE };
   } catch (err) {
-    console.error(`[gsd] verify-council diff capture failed: ${(err as Error).message}`);
-    return "";
+    console.error(`[gsd] mutation-gate canExecute failed, failing open: ${(err as Error).message}`);
+    return allow; // fail open — a corrupt .planning must not brick the turn; caps still bound loops
   }
 }
 ```
 
-> `taskToRunPerspectiveFn` is already imported at `workflow-tools.ts:6` — reuse it (same adapter plan-review uses). Confirm `runTask` and `opts.runDebate` are in scope in `gsd_verify` (they are destructured/available via `GsdWorkflowToolOpts`).
+- [ ] **Step 5: Run → PASS. Step 6: Wire at the write-mutex wrapper** (`tool-engine.ts:~1042-1077`) — read the block first; add gate-check before `writeMutex.run(...)` returning `{ output: gate.reason, isError: true }` when blocked (match the exact blocked-`ToolResult` shape used by the bash `BLOCKED` return at `~:2309-2368`). Read `depth` from the SDK STATE (or from `depthTier` computed at `:852-859`, which now reflects the assessor's override since it flows through `modelDepthTier`). Pass `directAnswer` from `pilCtx`.
 
-- [ ] **Step 4: Run**
+- [ ] **Step 7: Consolidate auto-council** — at the `shouldAutoCouncil` decision (`~:626,638-642`), prefer the assessor's `pilCtx.gsdAutoCouncil` when present (the assessor is the intelligent router) over the raw heavy-tier heuristic. Keep the heuristic as fallback when the assessor didn't run. Add a focused comment; do not otherwise change council behavior.
 
-Run: `bunx vitest run src/gsd/__tests__/workflow-tools.test.ts`
-Expected: PASS — heavy passed=true with a revise council → phase `debug`; passed=false → debug, no council file.
-
-- [ ] **Step 5: Full gsd suite + typecheck**
-
-Run: `bunx tsc --noEmit && bunx vitest run src/gsd/`
-Expected: 0 errors; green.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/gsd/workflow-tools.ts src/gsd/__tests__/workflow-tools.test.ts
-git commit -m "feat(gsd): gsd_verify runs council adjudication on top of the deterministic floor"
-```
+- [ ] **Step 8: tsc + `bunx vitest run src/gsd/ src/orchestrator/`. Step 9: Commit** (`feat(gsd): native mutation gate via canExecute + assessor-driven auto-council`).
 
 ---
 
-### Task 9: Harness E2E — gated flow + verify-council + deadlock bound
+### Task 9: Verify-context + verify perspectives + `runVerifyCouncil`
 
-**Files:**
-- Create: `tests/harness/gsd-hard-gate.spec.ts`
-- Create: `tests/harness/fixtures/llm/gsd-hard-gate.json` (mock-LLM script)
+*(unchanged in substance from the prior revision — the verify-context `base` bundle now automatically carries `ASSESSMENT.md` via Task 6.)*
 
-**Verification per repo rule:** drive the real CLI via the harness (`spawnHarness`), not just unit mocks. Run in a **fresh greenfield temp cwd** (per the known-caveat about repo-root scan cost).
+**Files:** Create `src/gsd/verify-context.ts`, `src/gsd/verify-council-prompts.ts`, `src/gsd/verify-council.ts` + tests; export from `index.ts`.
 
-- [ ] **Step 1: Write the fixture** — `tests/harness/fixtures/llm/gsd-hard-gate.json` scripting a heavy task where the model first tries `edit_file` (must be blocked), then follows the gsd sequence (must unblock). Follow the shape in existing `tests/harness/fixtures/llm/*.json`.
-
-- [ ] **Step 2: Write the spec** — `tests/harness/gsd-hard-gate.spec.ts` using `spawnHarness({ cwd })` (fresh temp dir). Assert:
-  1. On a heavy prompt, a direct `edit_file` attempt returns the BLOCKED directive (via the tool result / a toast / `render_text`).
-  2. After `gsd_status → gsd_discuss → gsd_plan → gsd_plan_review` (council pass), an `edit_file` succeeds.
-  3. Deadlock bound: a model that repeats `edit_file` without planning trips the existing repetition guard → clean turn abort (no hang). Assert the turn ends within the spec timeout.
-
-```ts
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawnHarness } from "./helpers";
-
-describe("GSD hard gate E2E", () => {
-  let h: Awaited<ReturnType<typeof spawnHarness>>;
-  const cwd = mkdtempSync(join(tmpdir(), "gsd-e2e-"));
-  beforeAll(async () => {
-    h = await spawnHarness({ cwd, mockLlm: "gsd-hard-gate", env: { MUONROI_GSD_HARD_GATE: "1", MUONROI_GSD_NATIVE: "1" } });
-  }, 60_000);
-  afterAll(() => h?.stop());
-
-  it("blocks edit_file on a heavy task before plan-review, unblocks after", async () => {
-    // drive the fixture; assert BLOCKED directive then success. Use driver.wait_for on events.
-  });
-});
-```
-
-Fill the driver interactions to match the fixture. Use `driver.events()` for the gate/toast lifecycle (per the event-driven pattern in `tests/harness/events.spec.ts`).
-
-- [ ] **Step 3: Run on Windows (named pipe)**
-
-Run: `bunx vitest -c vitest.harness.config.ts run tests/harness/gsd-hard-gate.spec.ts`
-Expected: PASS.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add tests/harness/gsd-hard-gate.spec.ts tests/harness/fixtures/llm/gsd-hard-gate.json
-git commit -m "test(harness): E2E for GSD hard gate + verify-council + deadlock bound"
-```
+- [ ] Implement `buildVerifyContextBundle` (plan bundle + git diff + evidence + planVerdict), `verifyPerspectivesForDepth` (quick→[], standard→acceptance+correctness, heavy→+regression+security), `buildVerifyPerspectivePrompt`/`buildVerifyDebateTopic`, and `runVerifyCouncil` (debate path preferred; perspective path fallback; parse-fail → `revise`, never silent approve; writes `.planning/VERIFY-COUNCIL.md`). Use the exact code from the prior plan revision (see git history of this file, commit a0adf922) — signatures in the Interfaces block. TDD with the verify-context + verify-council test suites. Commit (`feat(gsd): council-adjudicated verify layer`).
 
 ---
 
-### Task 10: Document the gate contract + env flags
+### Task 10: Wire Layer-2 verify-council into `gsd_verify`
 
-**Files:**
-- Modify: `CLAUDE.md` (add a "GSD Hard Gate" section near the BB-aware `/ideal` section)
+**Files:** Modify `src/gsd/workflow-tools.ts:169-205`; extend `workflow-tools.test.ts`.
 
-- [ ] **Step 1: Add the doc section** covering: gate-open condition (`phase==="execute"` AND plan-verify `pass`, heavy tier only); the MANDATORY sequence; escape hatches (`MUONROI_GSD_HARD_GATE=0`, `gsd_execute --force`, non-heavy/directAnswer bypass); the two-layer verify (deterministic floor + `runVerifyCouncil`); artifact locations (`.planning/VERIFY-COUNCIL.md`). Keep it factual — cite the module paths (`src/gsd/mutation-gate.ts`, `src/gsd/verify-council.ts`).
+**Contract:** deterministic floor first (passed=false → debug, NO council). When passed=true at depth≠quick → `runVerifyCouncil` (with git diff via `execFileSync("git",["diff","HEAD"])`, fail-empty); its verdict OVERRIDES the model's self-report: `pass`→review, `revise`/`block`→debug with concerns written into VERIFY.md. Reuse `taskToRunPerspectiveFn` (already imported) + `opts.runDebate`. Council failure fails OPEN (honor the floor). Same code as the prior revision (commit a0adf922 history). TDD: heavy passed=true + revise-council → phase debug + VERIFY-COUNCIL.md; passed=false → debug, no council. Commit (`feat(gsd): gsd_verify runs council adjudication over the deterministic floor`).
 
-- [ ] **Step 2: Commit**
+---
 
-```bash
-git add CLAUDE.md
-git commit -m "docs: GSD hard-gate + council-verified verify contract"
-```
+### Task 11: Harness E2E — full native pipeline
+
+**Files:** Create `tests/harness/gsd-native-backbone.spec.ts` + `tests/harness/fixtures/llm/gsd-native-backbone.json`.
+
+Run in a fresh greenfield temp cwd (`spawnHarness({ cwd })`). Assert the whole chain: a heavy prompt → assessor sets heavy depth (ASSESSMENT.md written) → direct `edit_file` BLOCKED → after `gsd_discuss→gsd_plan→gsd_plan_review` (council pass) `edit_file` succeeds → `gsd_verify` passed=true runs verify-council → VERIFY-COUNCIL.md; plus a quick prompt that edits with NO gate; plus the deadlock bound (repeated edit_file without planning trips the repetition guard → clean abort). Env: `MUONROI_GSD_NATIVE=1 MUONROI_GSD_HARD_GATE=1 MUONROI_GSD_ASSESSOR=1`. Run on Windows named-pipe. Commit (`test(harness): native GSD backbone E2E`).
+
+---
+
+### Task 12: Document the native pipeline
+
+**Files:** Modify `CLAUDE.md`.
+
+Document the one-pipeline flow (assessor → SDK depth → workflow assembly → gate via canExecute → verify-council), artifact chain (`ASSESSMENT.md` → context bundle → `PLAN-VERIFY.md`/`VERIFY-COUNCIL.md`), env flags (`MUONROI_GSD_ASSESSOR`, `MUONROI_GSD_HARD_GATE`), escape hatches (`gsd_execute --force`, quick depth, directAnswer). Cite module paths. Commit (`docs: native GSD backbone contract`).
 
 ---
 
 ## Final gate (before push)
 
 - [ ] `bunx tsc --noEmit` — 0 errors
-- [ ] `bunx vitest run` — full suite 0 failures (Pre-Push Test Gate — no exceptions)
+- [ ] `bunx vitest run` — full suite 0 failures (no exceptions)
 - [ ] `bunx vitest -c vitest.harness.config.ts run tests/harness/` — harness green
-- [ ] `bun run lint:semantic` + `bun run lint:harness-skips` if UI/harness touched
+- [ ] `bun run lint:semantic` + `lint:harness-skips` if UI/harness touched
 - [ ] Self-verify Tier 1 on touched watched surfaces (`tool-engine.ts` is watched)
 
----
+## UNPROVEN carry-forwards (resolve during execution, do not assume)
 
-## Self-Review notes (author checklist — done)
-
-- **Spec coverage:** hard gate (T1-T6), verify-council (T7-T8), E2E (T9), docs (T10) — every thread from both the investigation report and the user's verify+council request has a task.
-- **Type consistency:** `evaluateMutationGate`, `VerifyContextBundle`, `VerifyCouncilResult`, `runVerifyCouncil` signatures match between the Interfaces block and each task body. `verifyPerspectivesForDepth` naming consistent throughout.
-- **UNPROVEN carry-forwards (must resolve during execution, not assume):**
-  1. T2 — confirm `IMPLEMENTATION_INTENT_RE` matches "plan to implement" WITHOUT false-positiving on "đọc và tóm tắt" (Step 4 gates this).
-  2. T6 — confirm heavy tier survives the auto-council continuation turn (Step 1 measures it empirically).
-  3. T8 — confirm `runTask` + `opts.runDebate` are in scope inside `gsd_verify` (they are on `GsdWorkflowToolOpts`; verify before wiring).
-  4. T4 Step 6 — confirm the exact blocked-`ToolResult` shape by matching the bash `BLOCKED` return site (`tool-engine.ts:~2309-2368`).
+1. T5 — whether layer1 surfaces `classifyConfidence`/`eeContext` on `pilCtx`; thread `llmRes.confidence` if absent. How a single leader-tier call is issued in message-processor (reuse plan-review's runner).
+2. T5/T8 — `depthTier` at `tool-engine.ts:852-859` must reflect the assessor's override (it reads `modelDepthTier`, which Task 5 overwrites — verify the ordering: assessor runs before the tool-assembly path).
+3. T8 — exact blocked-`ToolResult` shape (match the bash `BLOCKED` site ~`:2309-2368`).
+4. T3 — reuse vs re-implement the fence/brace scan from `verdict-schema.ts` (import if exported).
