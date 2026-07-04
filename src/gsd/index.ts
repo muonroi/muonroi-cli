@@ -1,6 +1,7 @@
+export { type AssessInput, type AssessResult, assessComplexity, shouldAssess } from "./complexity-assessor.js";
 export { buildPlanningConfig, ensurePlanningWorkspace } from "./config-bridge.js";
 export { fireGsdVerifyOutcome, logGsdNativeEvent, PLANNING_CHECKPOINT_QUERY } from "./ee-closure.js";
-export { isGsdNativeEnabled } from "./flags.js";
+export { isComplexityAssessorEnabled, isGsdNativeEnabled } from "./flags.js";
 export {
   dispatchInitProgress,
   dispatchLoopRenderHooks,
