@@ -5,10 +5,12 @@ import { getDefaultEEClient } from "../ee/intercept.js";
 import { emitMatches } from "../ee/render.js";
 import type { McpToolBundle } from "../mcp/runtime.js";
 import { buildMcpToolSet } from "../mcp/runtime.js";
+import { getModelInfo } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { statusBarStore } from "../state/status-bar-store.js";
 import { recordUsageEvent } from "../storage/index.js";
 import type { BashTool } from "../tools/bash.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
@@ -266,6 +268,29 @@ export function recordCouncilUsage(
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheReadTokens: usage.cachedInputTokens,
+    });
+
+    // Mirror council billing into the live StatusBar so cache-hit% / tokens /
+    // cost reflect the WHOLE session (council calls have ~0 cache; excluding
+    // them overstated the message-only cache ratio — session f24c28b6dcb3).
+    // ONLY the five cumulative billing counters — NEVER ctx_tokens/ctx_pct/
+    // model/provider, which describe the current MAIN-conversation call and
+    // would be clobbered by a small council sub-call.
+    const totalInput = usage.inputTokens;
+    const output = usage.outputTokens;
+    const cacheRead = usage.cachedInputTokens;
+    const info = getModelInfo(modelId);
+    const priceIn = info?.inputPrice ?? 0;
+    const priceCached = info?.cachedInputPrice ?? priceIn * 0.1;
+    const priceOut = info?.outputPrice ?? 0;
+    const nonCachedInput = Math.max(0, totalInput - cacheRead);
+    const turnCostMicros = nonCachedInput * priceIn + cacheRead * priceCached + output * priceOut;
+    const prev = statusBarStore.getState();
+    statusBarStore.setState({
+      in_tokens: prev.in_tokens + totalInput,
+      out_tokens: prev.out_tokens + output,
+      cache_read_tokens: (prev.cache_read_tokens ?? 0) + cacheRead,
+      session_usd: prev.session_usd + turnCostMicros / 1_000_000,
     });
   } catch (err) {
     logger.error("storage", "recordUsageEvent(council) failed — token cost not accounted", {
