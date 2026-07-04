@@ -510,6 +510,9 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // Agent mode gets write/edit/task/delegate tools
   if (mode === "agent") {
+    // Capture delegation functions for auto-routing logic below
+    const runTaskFn = opts?.runTask;
+    const runDelegationFn = opts?.runDelegation;
     // write_file
     tools.write_file = dynamicTool({
       description:
@@ -636,10 +639,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
     // task
     if (opts?.runTask) {
-      const runTask = opts.runTask;
       tools.task = dynamicTool({
         description:
-          "Delegate a focused foreground task to a sub-agent. Types: general (edit/execute), explore (read-only research), verify (sandbox validation), computer (desktop interaction).",
+          "Delegate a FOCUSED, SHORT foreground task to a sub-agent that blocks the current turn until complete. " +
+          "Use ONLY for quick edit/execute/verify work (default max ~12 rounds). " +
+          "For long research, exploration, or anything that may take many steps (explore agent), you MUST use the 'delegate' tool instead — it runs in true background and does not block. " +
+          "Using task for long work will cause stalls and timeouts.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -651,13 +656,25 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             prompt: { type: "string", description: "Detailed instructions for the sub-agent" },
             maxToolRounds: {
               type: "number",
-              description: "Optional maximum tool execution rounds (default is 12 for foreground tasks)",
+              description:
+                "Optional maximum tool execution rounds. For research/explore use delegate + higher values (default 60); low values (≤20) only for task.",
             },
           },
           required: ["agent", "description", "prompt"],
         }),
         execute: async (input: any) => {
-          const result = await runTask({
+          // Auto-route long research (explore agent or high round count) to true background delegation
+          // to prevent blocking the main turn and causing stall timeouts.
+          const isLongResearch =
+            input.agent === "explore" || (typeof input.maxToolRounds === "number" && input.maxToolRounds > 25);
+
+          const executor = isLongResearch && runDelegationFn ? runDelegationFn : runTaskFn;
+
+          if (!executor) {
+            return { success: false, output: "No delegation executor available." };
+          }
+
+          const result = await executor({
             agent: input.agent,
             description: input.description,
             prompt: input.prompt,
@@ -695,7 +712,11 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     if (opts?.runDelegation) {
       const runDelegation = opts.runDelegation;
       tools.delegate = dynamicTool({
-        description: "Launch a read-only background agent for longer research while you continue working.",
+        description:
+          "Launch a read-only BACKGROUND research agent (usually 'explore') that runs independently in a separate process. " +
+          "Use this for ANY long-running research, codebase exploration, analysis, or tasks with high maxToolRounds. " +
+          "Main session continues working immediately. Results are delivered later via notifications or delegation_read. " +
+          "This is the PREFERRED tool over 'task' for explore/research to avoid blocking and timeouts.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -704,7 +725,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             prompt: { type: "string", description: "Detailed research instructions" },
             maxToolRounds: {
               type: "number",
-              description: "Optional maximum tool execution rounds (default is 60 for explore delegations)",
+              description:
+                "Optional maximum tool execution rounds (high values like 60+ expected for background research; do not use task for high values).",
             },
           },
           required: ["agent", "description", "prompt"],

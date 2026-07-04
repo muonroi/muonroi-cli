@@ -488,7 +488,7 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Subscription version of DeepSeek's fast reasoning model.",
+      "description": "Subscription version of DeepSeek's fast reasoning model via OpenCode Go (Console Go proxy). Shares rate limits with other subscribers — heavy tool use or long sessions often hit 'Provider rate limit exceeded'. For sustained work prefer native `-m deepseek-v4-flash`.",
       "aliases": ["deepseek-v4-flash-go"],
       "supports_vision": false,
       "roles": ["research", "implement", "verify"]

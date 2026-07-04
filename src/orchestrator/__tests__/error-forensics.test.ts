@@ -96,4 +96,98 @@ describe("summarizeApiErrorForLog", () => {
     expect(out).not.toBeNull();
     expect(out!.requestParamKeys).toBeUndefined();
   });
+
+  it("captures per-assistant reasoning_content lengths (PII-safe) for Z.ai 1210 diagnosis", () => {
+    // The b8d363fa1b09 recurrence: uniform shape (all assistant turns carry
+    // reasoning_content) but Z.ai still rejected with 1210. The KEY-only
+    // signature is identical to a healthy call, so the differentiator MUST
+    // come from values — lengths are PII-safe and distinguish:
+    //   H1 cumulative reasoning budget exceeded (large totalReasoningChars)
+    //   H2 an empty-string reasoning_content on some turn (0 in the lens)
+    //   H3 oversized text/tool payload (large content length)
+    const err = new APICallError({
+      message: "Invalid API parameter, please check the documentation.",
+      url: "https://api.z.ai/api/coding/paas/v4/chat/completions",
+      requestBodyValues: {
+        model: "glm-4.7",
+        messages: [
+          { role: "user", content: "go" },
+          { role: "assistant", content: null, reasoning_content: "plan", tool_calls: [{ id: "a" }] },
+          { role: "tool", content: "r1" },
+          // tool-only turn — reasoning_content is an EMPTY STRING (H2 candidate)
+          { role: "assistant", content: null, reasoning_content: "", tool_calls: [{ id: "b" }] },
+          { role: "tool", content: "r2" },
+          // big-reasoning turn (H1 candidate)
+          { role: "assistant", content: null, reasoning_content: "x".repeat(5000), tool_calls: [{ id: "c" }] },
+        ],
+      },
+      statusCode: 400,
+      responseBody: '{"error":{"code":"1210","message":"Invalid API parameter"}}',
+    });
+    const out = summarizeApiErrorForLog(err);
+    expect(out).not.toBeNull();
+    expect(out!.assistantFieldKeys).toEqual(["content,reasoning_content,role,tool_calls"]);
+    // -1 marks a missing/non-string reasoning_content; here all are strings.
+    expect(out!.assistantReasoningLens).toEqual([4, 0, 5000]);
+    expect(out!.totalReasoningChars).toBe(5004);
+    expect(out!.assistantToolCallCounts).toEqual([1, 1, 1]);
+    expect(out!.toolMessageCount).toBe(2);
+    // No reasoning prose leaks — only char counts.
+    const serialized = JSON.stringify(out);
+    expect(serialized).not.toContain("plan");
+    expect(serialized).not.toContain("xxxx");
+  });
+
+  it("marks -1 for assistant turns missing reasoning_content (c0dcf9153803 shape)", () => {
+    const err = new APICallError({
+      message: "Invalid API parameter",
+      url: "https://api.z.ai/x",
+      requestBodyValues: {
+        messages: [
+          { role: "assistant", content: null, reasoning_content: "ok", tool_calls: [] },
+          { role: "assistant", content: null, tool_calls: [{ id: "z" }] }, // missing rc
+        ],
+      },
+      statusCode: 400,
+    });
+    const out = summarizeApiErrorForLog(err);
+    expect(out!.assistantReasoningLens).toEqual([2, -1]);
+    expect(out!.totalReasoningChars).toBe(2);
+  });
+
+  it("captures assistantToolCallCounts + parallel_tool_calls value for Z.ai H3 (many parallel tools)", () => {
+    // Mirrors 94827f75a69e + c7c4a6487847: one assistant emits 12 tool_calls,
+    // next request (with 12 role:tool) rejected 1210. config value + counts
+    // now persisted in DB so diagnosis does not require wire log.
+    const err = new APICallError({
+      message: "Invalid API parameter, please check the documentation.",
+      url: "https://api.z.ai/api/coding/paas/v4/chat/completions",
+      requestBodyValues: {
+        model: "glm-4.7",
+        messages: [
+          { role: "user", content: "do many things" },
+          {
+            role: "assistant",
+            content: "plan",
+            reasoning_content: "x".repeat(3889),
+            tool_calls: Array.from({ length: 12 }, (_, i) => ({ id: `t${i}` })),
+          },
+        ],
+        tool_choice: "auto",
+        parallel_tool_calls: true,
+        max_tokens: 4096,
+        temperature: 0.7,
+      },
+      statusCode: 400,
+      responseBody: '{"error":{"code":"1210","message":"Invalid API parameter"}}',
+    });
+    const out = summarizeApiErrorForLog(err);
+    expect(out).not.toBeNull();
+    expect(out!.assistantToolCallCounts).toEqual([12]);
+    expect(out!.toolMessageCount).toBe(0); // no tool results yet in this simulated request
+    expect(out!.configParamValues?.parallel_tool_calls).toBe(true);
+    expect(out!.configParamValues?.tool_choice).toBe("auto");
+    const ser = JSON.stringify(out);
+    expect(ser).not.toContain("do many things"); // no PII leak
+  });
 });
