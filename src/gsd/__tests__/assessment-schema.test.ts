@@ -68,4 +68,15 @@ describe("assessment-schema quality + enrichment", () => {
     expect(ASSESSMENT_OUTPUT_CONTRACT).toMatch(/enrichedPrompt/);
     expect(ASSESSMENT_OUTPUT_CONTRACT).toMatch(/noiseRisk/);
   });
+
+  it("a malformed quality object degrades enrichment only — depth still parses", () => {
+    const raw = [
+      "```complexity-verdict",
+      JSON.stringify({ depth: "heavy", autoCouncil: false, rationale: "x", quality: { verdict: "ok" } }),
+      "```",
+    ].join("\n");
+    const v = extractComplexityVerdict(raw);
+    expect(v?.depth).toBe("heavy"); // depth MUST survive
+    expect(v?.quality).toBeUndefined(); // malformed quality dropped, not fatal
+  });
 });

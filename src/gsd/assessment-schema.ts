@@ -27,7 +27,8 @@ export const ComplexityVerdictSchema = z.object({
       missing: z.array(z.string()).default([]),
       noiseRisk: z.enum(["low", "med", "high"]).default("low"),
     })
-    .optional(),
+    .optional()
+    .catch(undefined),
   enrichedPrompt: z.string().optional(),
 });
 export type ComplexityVerdict = z.infer<typeof ComplexityVerdictSchema>;
