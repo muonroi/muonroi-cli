@@ -115,8 +115,8 @@ export function isComplexityAssessorEnabled(): boolean;
 export interface MutationGateDecision { blocked: boolean; reason: string; }
 export function evaluateMutationGate(
   cwd: string,
-  opts: { depth: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
-): MutationGateDecision;
+  opts: { toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
+): MutationGateDecision;  // depth is read from readState(cwd).depth internally (SDK single source)
 
 // src/gsd/verify-context.ts / verify-council-prompts.ts / verify-council.ts
 //   (unchanged from prior revision — see Tasks 9-10)
@@ -524,37 +524,43 @@ function seed(cwd: string, phase: string, verdict: string, depth = "heavy") {
 }
 const on = { hardGateEnabled: true };
 
-describe("evaluateMutationGate (delegates to canExecute)", () => {
+describe("evaluateMutationGate (delegates to canExecute, depth from SDK STATE)", () => {
   let cwd: string; beforeEach(() => { cwd = mkdtempSync(join(tmpdir(), "gate-")); });
 
   it("blocks edit_file at heavy depth before plan-review passes", () => {
-    seed(cwd, "plan", "revise");
-    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file" }).blocked).toBe(true);
+    seed(cwd, "plan", "revise", "heavy");
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(true);
   });
   it("allows edit_file once canExecute allows (phase=execute + verdict=pass)", () => {
-    seed(cwd, "execute", "pass");
-    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file" }).blocked).toBe(false);
+    seed(cwd, "execute", "pass", "heavy");
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
   });
   it("never gates quick depth (canExecute fast-path)", () => {
     seed(cwd, "plan", "revise", "quick");
-    expect(evaluateMutationGate(cwd, { ...on, depth: "quick", toolName: "edit_file" }).blocked).toBe(false);
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
   });
   it("never gates gsd_*/respond_*/read tools", () => {
-    seed(cwd, "plan", "revise");
-    for (const t of ["gsd_plan", "respond_report", "read_file", "grep"]) expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: t }).blocked).toBe(false);
+    seed(cwd, "plan", "revise", "heavy");
+    for (const t of ["gsd_plan", "respond_report", "read_file", "grep"]) expect(evaluateMutationGate(cwd, { ...on, toolName: t }).blocked).toBe(false);
   });
   it("never gates when disabled or directAnswer", () => {
-    seed(cwd, "plan", "revise");
-    expect(evaluateMutationGate(cwd, { depth: "heavy", toolName: "edit_file", hardGateEnabled: false }).blocked).toBe(false);
-    expect(evaluateMutationGate(cwd, { ...on, depth: "heavy", toolName: "edit_file", directAnswer: true }).blocked).toBe(false);
+    seed(cwd, "plan", "revise", "heavy");
+    expect(evaluateMutationGate(cwd, { toolName: "edit_file", hardGateEnabled: false }).blocked).toBe(false);
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file", directAnswer: true }).blocked).toBe(false);
+  });
+  it("fails open when depth is unknown (no .planning → null depth)", () => {
+    // fresh cwd, no STATE.md → readState depth null → gate must NOT block (over-block forbidden)
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
   });
 });
 ```
 
+> Update the top Interfaces block signature to match: `evaluateMutationGate(cwd, { toolName, hardGateEnabled, directAnswer? })` (no `depth`).
+
 - [ ] **Step 3: Run to fail. Step 4: Implement `mutation-gate.ts`** — delegate to `canExecute`:
 
 ```ts
-import { canExecute } from "./workflow-engine.js";
+import { canExecute, readState } from "./workflow-engine.js";
 
 export interface MutationGateDecision { blocked: boolean; reason: string; }
 
@@ -567,15 +573,26 @@ const GATE_DIRECTIVE =
   "Call gsd_status, then gsd_discuss → gsd_plan → gsd_plan_review. Mutation tools unlock only after " +
   "plan-review returns verdict: pass. If this is genuinely trivial, call gsd_execute with force:true to override.";
 
-/** Gate = the SDK's own canExecute. quick depth is fast-pathed by canExecute; standard/heavy gate on plan-verify. */
+/**
+ * Gate = the SDK's own canExecute, keyed on the SDK STATE.md Depth (written by the
+ * turn's syncWorkflowContext in Task 5). Reading depth from readState — NOT from a
+ * caller-passed value or pilCtx — makes STATE.md the single source of truth and
+ * decouples the gate from pilCtx object propagation. quick depth is fast-pathed by
+ * canExecute; standard/heavy gate on plan-verify pass.
+ */
 export function evaluateMutationGate(
   cwd: string,
-  opts: { depth: string; toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
+  opts: { toolName: string; hardGateEnabled: boolean; directAnswer?: boolean },
 ): MutationGateDecision {
   const allow = { blocked: false, reason: "" };
   if (!opts.hardGateEnabled || opts.directAnswer || isNeverGated(opts.toolName)) return allow;
   try {
-    const gate = canExecute(cwd, opts.depth);
+    const depth = readState(cwd).depth;
+    // Fail OPEN on unknown depth: null STATE (not classified / native off mid-turn / write
+    // failed) or quick depth must NOT block — blocking on "we don't know" is the over-block
+    // the design forbids. Only an EXPLICIT standard/heavy depth arms the gate.
+    if (!depth || depth === "quick") return allow;
+    const gate = canExecute(cwd, depth);
     return gate.allowed ? allow : { blocked: true, reason: GATE_DIRECTIVE };
   } catch (err) {
     console.error(`[gsd] mutation-gate canExecute failed, failing open: ${(err as Error).message}`);
@@ -584,7 +601,7 @@ export function evaluateMutationGate(
 }
 ```
 
-- [ ] **Step 5: Run → PASS. Step 6: Wire at the write-mutex wrapper** (`tool-engine.ts:~1042-1077`) — read the block first; add gate-check before `writeMutex.run(...)` returning `{ output: gate.reason, isError: true }` when blocked (match the exact blocked-`ToolResult` shape used by the bash `BLOCKED` return at `~:2309-2368`). Read `depth` from the SDK STATE (or from `depthTier` computed at `:852-859`, which now reflects the assessor's override since it flows through `modelDepthTier`). Pass `directAnswer` from `pilCtx`.
+- [ ] **Step 5: Run → PASS. Step 6: Wire at the write-mutex wrapper** (`tool-engine.ts:~1042-1077`) — read the block first. Add the gate-check before `writeMutex.run(...)`; when blocked, return the ToolResult shape the downstream expects — **`{ success: false, output: gate.reason, error: gate.reason }`** (this is the shape the safety-block rewrite uses at `tool-engine.ts:2332,2359,2366` — `{ ...tr, success, output, error }`; a mutation tool's own failure result has this shape, so returning it makes the block indistinguishable from a normal tool error and the model reads the directive + self-corrects). Trace one normal `edit_file` failure result first to confirm the shape. `directAnswer` comes from `(pilCtx as {directAnswer?: boolean}).directAnswer` (in scope at the wrapper); if pilCtx isn't the same object, undefined is safe (gate still evaluates). Depth is NOT passed — the gate reads it from SDK STATE itself.
 
 - [ ] **Step 7: Consolidate auto-council** — at the `shouldAutoCouncil` decision (`~:626,638-642`), prefer the assessor's `pilCtx.gsdAutoCouncil` when present (the assessor is the intelligent router) over the raw heavy-tier heuristic. Keep the heuristic as fallback when the assessor didn't run. Add a focused comment; do not otherwise change council behavior.
 
