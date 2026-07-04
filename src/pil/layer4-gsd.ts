@@ -171,10 +171,16 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   if (native && !informational) {
     const cwd = process.cwd();
     const wf = readState(cwd);
-    const heavyLine = tier === "heavy" ? " Heavy: gsd_plan_review before edits." : "";
+    // Heavy is now a hard MANDATORY sequence (Task 8 wires the runtime mutation
+    // gate that actually BLOCKs edit_file/write_file/bash on this depth); standard
+    // stays advisory-only — never say BLOCKED for standard, the gate doesn't fire there.
+    const heavyLine =
+      tier === "heavy"
+        ? " MANDATORY (heavy): gsd_status → gsd_discuss → gsd_plan → gsd_plan_review BEFORE any edit_file/write_file/bash. Mutation tools are BLOCKED until plan-review passes. Start with gsd_status now."
+        : "";
     const nativeHint = [
       "[gsd-native] Tools: gsd_status, gsd_discuss, gsd_plan, gsd_plan_review, gsd_execute, gsd_verify, gsd_ship.",
-      `Depth=${tier}. standard/heavy: gsd_plan_review before gsd_execute; then gsd_verify → gsd_ship.${heavyLine}`,
+      `Depth=${tier}. standard/heavy: recommend gsd_plan_review before gsd_execute; then gsd_verify → gsd_ship.${heavyLine}`,
       wf.phase ? `phase=${wf.phase}` : "gsd_status bootstraps .planning/",
       wf.planVerified ? "plan-verified=yes" : "plan-verified=pending",
     ].join(" ");

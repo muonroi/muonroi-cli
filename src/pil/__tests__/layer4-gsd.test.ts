@@ -42,6 +42,48 @@ describe("layer4Gsd (native)", () => {
       else process.env.MUONROI_GSD_NATIVE = prev;
     }
   });
+
+  it("heavy directive is MANDATORY and names the blocking gate, under budget", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "heavy" }));
+      expect(result.enriched).toContain("MANDATORY");
+      expect(result.enriched).toContain("gsd_plan_review");
+      expect(result.enriched).toContain("BLOCKED");
+      expect(result.enriched.length).toBeLessThan(800);
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+
+  it("standard directive is advisory only, no BLOCKED", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "standard" }));
+      expect(result.enriched).toContain("gsd_plan_review");
+      expect(result.enriched).not.toContain("BLOCKED");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+
+  it("quick tier emits no gate directive", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "quick" }));
+      expect(result.enriched).not.toContain("MANDATORY");
+      expect(result.enriched).not.toContain("BLOCKED");
+      expect(result.enriched).not.toContain("gsd_plan_review before edits");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
 });
 
 describe("layer4Gsd (playbook)", () => {
