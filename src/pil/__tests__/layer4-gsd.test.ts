@@ -188,6 +188,30 @@ describe("layer4Gsd (playbook)", () => {
     expect(result.enriched).not.toContain("MANDATORY");
   });
 
+  it("treats a 'plan to implement' report as NON-informational (enters GSD, not the question path)", async () => {
+    // "make a plan to implement OAuth device flow" got tagged deliverableKind
+    // 'report' by the model (it's a plan/report deliverable), but the raw text
+    // is a real implementation request. isImplementationIntent must override
+    // the deliverable-kind informational shortcut so this still enters the
+    // STANDARD/HEAVY implement scaffold, not the QUESTION directive.
+    const raw = "make a plan to implement OAuth device flow";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "report" }),
+    );
+    expect(result.enriched).not.toContain("QUESTION / explanatory");
+  });
+
+  it("keeps a genuine summary report informational even with the implementation-intent guard", async () => {
+    // Guards against over-tightening: a real read/summarize prompt with no
+    // implementation-intent keywords must still route to the QUESTION
+    // directive (session 666630479c1a regression guard).
+    const raw = "đọc và tóm tắt kiến trúc module council";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "report" }),
+    );
+    expect(result.enriched).toContain("QUESTION / explanatory");
+  });
+
   it("Phase 2b: deliverableKind='code' is NOT informational even for a question-shaped prompt", async () => {
     // The raw text reads as a question — the legacy regex would mark it
     // informational. The model's deliverableKind='code' must override that so

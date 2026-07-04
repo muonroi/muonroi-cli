@@ -136,13 +136,23 @@ export async function layer4Gsd(ctx: PipelineContext): Promise<PipelineContext> 
   // read/summarize/architecture tasks (deliverableKind "report") down the heavy
   // council + AskUserQuestion path, over-asking on a task that just wanted a
   // written summary (session 666630479c1a: "Đọc và tóm tắt kiến trúc…" raised 2
-  // askcards + a council loop). Only when the model emitted no deliverable
-  // (deliverableKind null → legacy cascade) do we fall back to regex predicates:
+  // askcards + a council loop).
+  //
+  // BUT a "report" deliverable can still be a genuine implementation request the
+  // model mis-tagged (e.g. "make a plan to implement OAuth device flow" — the
+  // deliverable IS a plan/report, yet the raw prompt asks to implement). Without
+  // a guard this never entered GSD. isImplementationIntent re-checks the raw
+  // text so a real implementation ask overrides the deliverable-kind shortcut;
+  // a genuine summary/read prompt (no implementation keywords) still passes
+  // through as informational.
+  //
+  // Only when the model emitted no deliverable (deliverableKind null → legacy
+  // cascade) do we fall back to regex predicates:
   //   1. isMetaAnalysisPrompt — self/CLI evaluation, prior-turn reflection.
   //   2. taskType "general" classified as a real task by L1.
   //   3. question-shaped prompt that is NOT an implementation request.
   const informational = ctx.deliverableKind
-    ? ctx.deliverableKind !== "code"
+    ? ctx.deliverableKind !== "code" && !isImplementationIntent(ctx.raw)
     : isMetaAnalysisPrompt(ctx.raw) ||
       (ctx.taskType === "general" && ctx.intentKind === "task") ||
       (isQuestionLike(ctx.raw) && !isImplementationIntent(ctx.raw));
