@@ -31,10 +31,15 @@ export function evaluateMutationGate(
   if (!opts.hardGateEnabled || opts.directAnswer || isNeverGated(opts.toolName)) return allow;
   try {
     const depth = readState(cwd).depth;
-    // Fail OPEN on unknown depth: null STATE (not classified / native off mid-turn / write
-    // failed) or quick depth must NOT block — blocking on "we don't know" is the over-block
-    // the design forbids. Only an EXPLICIT standard/heavy depth arms the gate.
-    if (!depth || depth === "quick") return allow;
+    // Fail OPEN on anything but an EXPLICIT "heavy" depth. quick/standard/null all pass:
+    // - null STATE (not classified / native off mid-turn / write failed) → over-blocking on
+    //   "we don't know" is the failure mode the design forbids.
+    // - quick → trivial fast-path.
+    // - standard → ADVISORY only. The layer4 directive still nudges gsd_plan_review, but
+    //   hard-blocking every default-tier bash/edit until a plan-review pass over-reaches
+    //   ("hard thì mọi tier không tốt"). Only genuinely non-trivial work (heavy, incl. tasks
+    //   the leader-tier assessor UPGRADES to heavy) earns the hard gate.
+    if (!depth || depth === "quick" || depth === "standard") return allow;
     const gate = canExecute(cwd, depth);
     return gate.allowed ? allow : { blocked: true, reason: GATE_DIRECTIVE };
   } catch (err) {

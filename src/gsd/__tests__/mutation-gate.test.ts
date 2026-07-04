@@ -34,6 +34,13 @@ describe("evaluateMutationGate (delegates to canExecute, depth from SDK STATE)",
     seed(cwd, "plan", "revise", "quick");
     expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
   });
+  it("never gates standard depth — advisory only, hard gate is heavy-only", () => {
+    // standard is the default tier; hard-blocking every default bash/edit until a
+    // plan-review pass over-reaches. The directive still nudges; the gate does not block.
+    seed(cwd, "plan", "revise", "standard");
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "edit_file" }).blocked).toBe(false);
+    expect(evaluateMutationGate(cwd, { ...on, toolName: "bash" }).blocked).toBe(false);
+  });
   it("never gates gsd_*/respond_*/read tools", () => {
     seed(cwd, "plan", "revise", "heavy");
     for (const t of ["gsd_plan", "respond_report", "read_file", "grep"])

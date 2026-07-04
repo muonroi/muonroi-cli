@@ -169,10 +169,18 @@ reads depth via `readState(cwd).depth`, never off a propagated pilCtx field.
 2. **Council context** (`src/gsd/council-context.ts`) folds `ASSESSMENT.md`
    into `buildCouncilContextBundle`, so plan-review AND verify councils both see
    the assessment rationale — pipeline coherence.
-3. **Directive** (`src/pil/layer4-gsd.ts`) is keyed on the *assessed* depth:
-   heavy → MANDATORY `gsd_status → gsd_discuss → gsd_plan → gsd_plan_review`,
-   mutation tools BLOCKED until plan-review passes; standard → advisory
-   ("recommend gsd_plan_review", no BLOCKED); quick → no gate.
+3. **Directive** (`src/pil/layer4-gsd.ts`) is emitted during PIL prep — i.e.
+   *before* the assessor runs — so it is keyed on the layer1 classify depth,
+   NOT the assessed depth (the assessor override reaches the gate + `gsd_verify`
+   via STATE.md / `pilCtx.modelDepthTier`, not this directive). heavy →
+   MANDATORY `gsd_status → gsd_discuss → gsd_plan → gsd_plan_review`, mutation
+   tools BLOCKED until plan-review passes; standard → advisory
+   ("recommend gsd_plan_review", no BLOCKED); quick → no gate. The mutation
+   gate is coherent with this: it hard-blocks on **heavy only** (`quick` /
+   `standard` / null all fail open). standard stays advisory — hard-blocking
+   every default-tier bash/edit until a plan-review pass over-reaches; only
+   genuinely non-trivial work (heavy, including tasks the assessor UPGRADES to
+   heavy) earns the hard gate.
 4. **Mutation gate** (`src/gsd/mutation-gate.ts`) — `evaluateMutationGate` runs
    inside the tool-engine write-mutex wrapper (`src/orchestrator/tool-engine.ts`)
    before every non-read-only, non-`respond_`, non-`gsd_*` tool. It reads depth

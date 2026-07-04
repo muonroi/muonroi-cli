@@ -682,6 +682,14 @@ export class MessageProcessor {
               runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
             });
             depth = assessed.depth;
+            // Keep the native depth slot authoritative: write the assessed depth
+            // back to pilCtx.modelDepthTier so every downstream consumer that reads
+            // it (tool-engine depthTier -> gsd tool registration + gsd_verify depth
+            // + layer-derived tiering) sees the SAME value the mutation gate reads
+            // from STATE.md. Without this, the gate (readState().depth) and gsd_verify
+            // (pilCtx.modelDepthTier) diverge on any assessor override. Same pilCtx
+            // ref, and this block runs before executeToolEngine in the same turn.
+            pilCtx.modelDepthTier = depth;
             if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
           } catch (assessErr) {
             console.error(
