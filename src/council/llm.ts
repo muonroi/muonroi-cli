@@ -9,12 +9,14 @@ import { getProviderCapabilities } from "../providers/capabilities.js";
 import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import { createProviderFactoryAsync, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { recordUsageEvent } from "../storage/index.js";
 import type { BashTool } from "../tools/bash.js";
 import { createBuiltinTools as createTools } from "../tools/registry.js";
 import type { AgentMode, CouncilStatusPhase, StreamChunk } from "../types/index.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { projectCostUSD } from "../usage/estimator.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import { loadMcpServers } from "../utils/settings.js";
 import { withVisibleRetry } from "../utils/visible-retry.js";
 import { buildResearchSystemPrompt } from "./prompts.js";
@@ -237,6 +239,43 @@ function logCouncilCost(args: {
   return usage;
 }
 
+/**
+ * Record a council LLM call into the `usage_events` table with source="council".
+ *
+ * This is the SINGLE source of truth for council usage accounting: it fires from
+ * inside every council generate/debate/research call so ALL council entry points
+ * (the /council slash path, auto-council, and every /ideal phase — clarifier,
+ * research, generate, sprint) land in usage_events. Before this existed, only
+ * the loop-driver's `runDebate` call site externally wrapped usage recording, so
+ * `runCouncilV2` (/council + auto-council) and the non-debate /ideal phases never
+ * recorded — their token cost was invisible to session totals, the StatusBar,
+ * `usage forensics`, and the cost caps (root cause of session f24c28b6dcb3:
+ * council ran but produced 0 source="council" usage_events).
+ *
+ * Best-effort: a null sessionId (no chat session FK) or a DB failure must never
+ * break the council run, but per the No-Silent-Catch rule we log the failure.
+ */
+export function recordCouncilUsage(
+  sessionId: string | undefined,
+  modelId: string,
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens: number },
+): void {
+  if (!sessionId) return;
+  try {
+    recordUsageEvent(sessionId, "council", modelId, {
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cachedInputTokens,
+    });
+  } catch (err) {
+    logger.error("storage", "recordUsageEvent(council) failed — token cost not accounted", {
+      sessionId,
+      modelId,
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 // ── Mock-LLM bypass (agent harness / E2E tests) ──────────────────────────────
 //
 // When `globalThis.__muonroiMockLlm` is set (injected by --mock-llm startup),
@@ -342,6 +381,7 @@ export function createCouncilLLM(
           durationMs: durMs,
         });
         onUsage?.(callUsage);
+        recordCouncilUsage(sessionId, modelId, callUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "generate",
@@ -511,6 +551,7 @@ export function createCouncilLLM(
           stepCount: toolCalls.length,
         });
         onUsage?.(debateUsage);
+        recordCouncilUsage(sessionId, modelId, debateUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "debate",
@@ -665,6 +706,7 @@ export function createCouncilLLM(
           stepCount: (result.toolCalls ?? []).length,
         });
         onUsage?.(researchUsage);
+        recordCouncilUsage(sessionId, modelId, researchUsage);
         writeDebugRecord({
           ts: new Date().toISOString(),
           kind: "research",
