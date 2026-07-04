@@ -141,8 +141,7 @@ export function buildCouncilContextBundle(cwd: string, opts: BuildBundleOpts): C
   const priorConcerns = extractPriorConcerns(reviewMd);
   const hadPriorConcerns = (opts.revisionCycle ?? 0) > 0 && priorConcerns.length > 0;
 
-  const totalChars =
-    state.raw.length + contextMd.length + researchMd.length + reviewMd.length + planBody.length;
+  const totalChars = state.raw.length + contextMd.length + researchMd.length + reviewMd.length + planBody.length;
 
   return {
     state,
