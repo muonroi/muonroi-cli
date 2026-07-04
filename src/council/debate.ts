@@ -1,4 +1,5 @@
 import { getModelInfo } from "../models/registry.js";
+import { detectProviderForModel } from "../providers/runtime.js";
 import type { StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate } from "./llm.js";
@@ -272,6 +273,89 @@ async function openingWithRetry(
   return { text: "", attempts: MAX_OPENING_ATTEMPTS, error: lastError };
 }
 
+/**
+ * Pick a debate fallback model on a DIFFERENT provider than `failedModel`.
+ *
+ * When a participant's model fails BOTH same-model attempts (e.g. opencode-go
+ * proxy overload "Upstream request failed", or a param-reject that survives the
+ * adapter-level degrade), retrying the same endpoint just fails again — live
+ * session renders showed the same speaker dropped 3× in a row, silently
+ * shrinking the debate. Falling back to any pooled council model on another
+ * provider keeps that voice in the discussion. Returns undefined when every
+ * pooled model resolves to the same provider (nothing to fall back to).
+ */
+function pickDebateFallbackModel(failedModel: string, pool: string[]): string | undefined {
+  let failedProvider: string | undefined;
+  try {
+    failedProvider = detectProviderForModel(failedModel);
+  } catch {
+    failedProvider = undefined;
+  }
+  for (const candidate of pool) {
+    if (candidate === failedModel) continue;
+    let candidateProvider: string | undefined;
+    try {
+      candidateProvider = detectProviderForModel(candidate);
+    } catch {
+      continue;
+    }
+    if (candidateProvider && candidateProvider !== failedProvider) return candidate;
+  }
+  return undefined;
+}
+
+/**
+ * Marker the CouncilLLM.research catch-block embeds in its return string when a
+ * provider crashes (it returns a string, never throws — see llm.ts:737). Used
+ * to detect a failed research pass so we can fall back to another provider.
+ */
+const RESEARCH_FAILED_MARKER = "[Research failed:";
+
+/**
+ * Runs council research on `primaryModel`; if the provider crashes (the
+ * `[Research failed: …]` marker), retries ONCE on a pooled model resolving to a
+ * DIFFERENT provider before giving up. Mirrors {@link pickDebateFallbackModel}.
+ *
+ * Motivating evidence: session de4bafe5ecb7 routed research to opencode-go
+ * (Console Go "Upstream request failed") with no fallback. Research returned
+ * only the failure marker → participants had zero citations to tag → evidence
+ * density hard-zeroed → the debate scored "Low confidence 0%" despite being
+ * substantive. debateWithRetry already had cross-provider fallback; research
+ * did not.
+ */
+async function researchWithFallback(
+  llm: CouncilLLM,
+  primaryModel: string,
+  topic: string,
+  conversationContext: string,
+  signal: AbortSignal | undefined,
+  traceCb: (t: string) => void,
+  options: { internetFirst?: boolean },
+  fallbackPool: string[],
+): Promise<string> {
+  const primary = await llm.research(primaryModel, topic, conversationContext, signal, traceCb, options);
+  if (!primary.includes(RESEARCH_FAILED_MARKER) || signal?.aborted) return primary;
+
+  const fallbackModel = pickDebateFallbackModel(primaryModel, fallbackPool);
+  if (!fallbackModel) return primary;
+
+  traceCb(`[research] ${primaryModel} failed; retrying via ${fallbackModel} (different provider)`);
+  try {
+    const fb = await llm.research(fallbackModel, topic, conversationContext, signal, traceCb, options);
+    if (!fb.includes(RESEARCH_FAILED_MARKER)) {
+      traceCb(`[research] recovered via fallback ${fallbackModel}`);
+      return fb;
+    }
+    // Both providers failed — surface the primary's marker so the existing
+    // "research produced nothing" rendering still fires.
+    return primary;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    traceCb(`[research] fallback ${fallbackModel} also failed: ${msg}`);
+    return primary;
+  }
+}
+
 async function debateWithRetry(
   llm: CouncilLLM,
   model: string,
@@ -280,6 +364,7 @@ async function debateWithRetry(
   signal: AbortSignal | undefined,
   traceCb: (t: string) => void,
   toolBudget: ToolBudget,
+  fallbackPool: string[] = [],
 ): Promise<{
   text: string;
   toolCalls: Array<{ toolName: string; result?: unknown }>;
@@ -315,27 +400,50 @@ async function debateWithRetry(
   // Retry once — if first attempt was tool-enabled and came back empty, the
   // reasoning model likely hit the step cap on a tool call without producing
   // text. Retry WITHOUT tools to guarantee analytical output.
+  let retryError: string;
+  let retryToolCalls: Array<{ toolName: string; result?: unknown }> = [];
   try {
     const retry = await llm.debate(model, system, prompt, signal, traceCb, { enableVerificationTools: false });
     const text = (retry.text ?? "").trim();
     if (text.length > 0) {
       return { text: retry.text, toolCalls: retry.toolCalls ?? [], attempts: 2 };
     }
-    return {
-      text: "",
-      toolCalls: retry.toolCalls ?? [],
-      failureReason: `provider returned empty completion on both attempts (initial: ${firstError})`,
-      attempts: 2,
-    };
+    retryToolCalls = retry.toolCalls ?? [];
+    retryError = "provider returned empty completion";
   } catch (err) {
-    const retryMsg = err instanceof Error ? err.message : String(err);
-    return {
-      text: "",
-      toolCalls: [],
-      failureReason: `both attempts failed — initial: ${firstError}; retry: ${retryMsg}`,
-      attempts: 2,
-    };
+    retryError = err instanceof Error ? err.message : String(err);
   }
+
+  // Both same-model attempts failed. Before dropping this speaker from the
+  // debate, try ONE cross-provider fallback — the primary endpoint is either
+  // overloaded (opencode-go "Upstream request failed") or param-rejecting, and
+  // a third same-model hit would just fail identically. Skip when the caller
+  // aborted (user cancellation must not be papered over by a fallback call).
+  if (!signal?.aborted) {
+    const fallbackModel = pickDebateFallbackModel(model, fallbackPool);
+    if (fallbackModel) {
+      try {
+        const fb = await llm.debate(fallbackModel, system, prompt, signal, traceCb, {
+          enableVerificationTools: false,
+        });
+        const text = (fb.text ?? "").trim();
+        if (text.length > 0) {
+          traceCb(`[debate] ${model} failed both attempts; recovered via fallback ${fallbackModel}`);
+          return { text: fb.text, toolCalls: fb.toolCalls ?? [], attempts: 3 };
+        }
+      } catch (err) {
+        const fbMsg = err instanceof Error ? err.message : String(err);
+        traceCb(`[debate] fallback ${fallbackModel} for ${model} also failed: ${fbMsg}`);
+      }
+    }
+  }
+
+  return {
+    text: "",
+    toolCalls: retryToolCalls,
+    failureReason: `both attempts failed — initial: ${firstError}; retry: ${retryError}`,
+    attempts: 2,
+  };
 }
 
 export async function* runDebate(
@@ -344,6 +452,12 @@ export async function* runDebate(
   llm: CouncilLLM,
 ): AsyncGenerator<StreamChunk, DebateState, unknown> {
   const { leaderModelId, participants, conversationContext, signal, debatePlan } = config;
+  // Cross-provider fallback pool for debateWithRetry: leader + every
+  // participant model, deduped. When a speaker's model fails both same-model
+  // attempts, debateWithRetry retries once on the first pooled model whose
+  // provider differs, so an overloaded provider (opencode-go) can't silently
+  // drop a voice from the debate.
+  const fallbackPool = Array.from(new Set([leaderModelId, ...participants.map((p) => p.model)]));
   // Correlation id for the observe-only council-turn-length telemetry (groups
   // per-turn length samples by run). sessionId in production; a stable literal
   // for direct callers/tests that omit runId.
@@ -394,13 +508,15 @@ export async function* runDebate(
     const researchTraces: string[] = [];
     researchFindings = yield* tracedAsync(
       () =>
-        llm.research(
+        researchWithFallback(
+          llm,
           researchCandidate.model,
           spec.problemStatement,
           conversationContext,
           signal,
           (t) => researchTraces.push(t),
           { internetFirst },
+          fallbackPool,
         ),
       {
         phase: "research",
@@ -647,6 +763,7 @@ export async function* runDebate(
                   signal,
                   (t) => aTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
@@ -678,6 +795,7 @@ export async function* runDebate(
                   signal,
                   (t) => bTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;
@@ -715,6 +833,7 @@ export async function* runDebate(
                   signal,
                   (t) => aTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 aResponse = aResult.text;
                 aToolCalls = aResult.toolCalls;
@@ -748,6 +867,7 @@ export async function* runDebate(
                   signal,
                   (t) => bTraces.push(t),
                   toolBudget,
+                  fallbackPool,
                 );
                 bResponse = bResult.text;
                 bToolCalls = bResult.toolCalls;
@@ -968,8 +1088,15 @@ export async function* runDebate(
         const midTraces: string[] = [];
         const findings = yield* tracedAsync(
           () =>
-            llm.research(researchCandidate.model, evaluation.researchQuery!, enrichedContext, signal, (t) =>
-              midTraces.push(t),
+            researchWithFallback(
+              llm,
+              researchCandidate.model,
+              evaluation.researchQuery!,
+              enrichedContext,
+              signal,
+              (t) => midTraces.push(t),
+              {},
+              fallbackPool,
             ),
           {
             phase: "research",
@@ -1136,6 +1263,11 @@ export async function* runDebate(
   // we don't want a converged final round (which has fewer fact-claims to
   // tag) to wipe out evidence work done earlier in the debate.
   const finalEvidenceDensity = Math.max(cumulativeDensity, lastEvidenceDensity ?? 0);
+  // Count of claims participants explicitly TAGGED ([CONFIRMED]/[REFUTED]/
+  // [UNVERIFIED]) across the whole debate. Lets the confidence badge tell
+  // "measured 0% grounding" apart from "no tags emitted → not measurable"
+  // (session de4bafe5ecb7: substantive debate, zero tags → misleading 0%).
+  const finalTaggedClaims = countCitations(fullExchangeText) + countUnverified(fullExchangeText);
 
   return {
     spec,
@@ -1146,6 +1278,7 @@ export async function* runDebate(
     active,
     archive,
     finalEvidenceDensity,
+    finalTaggedClaims,
   };
 }
 

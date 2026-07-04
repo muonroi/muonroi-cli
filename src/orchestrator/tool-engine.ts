@@ -117,6 +117,8 @@ import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { decideStepRouting, eeSamrGuidance, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
+import { statusBarStore } from "../state/status-bar-store.js";
+import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../state/turn-trace.js";
 import {
   getNextMessageSequence,
   logInteraction,
@@ -131,8 +133,6 @@ import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
-import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
@@ -1760,7 +1760,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 }
                 if (_total > 0 && _ro === _total && _total <= 2) {
                   const _b = `[Tool batching: you called ${_total} read-only tool(s) last round. Calling them one-at-a-time wastes tokens and delays results. The SDK supports up to ~12 parallel tool calls. In the NEXT response, emit ALL pending read-only calls (read_file, grep, bash_output_get, etc.) in a SINGLE assistant turn — do NOT sequence them across multiple steps.]`;
-                  return withSteers({ messages: attachReminderToMessages(stripped, _b) });
+                  // Attach to `coalesced` (the B4-compacted history), NOT `stripped`:
+                  // read-only tools (read_file/grep/…) are exactly what triggers this
+                  // reminder, and returning `stripped` here silently discarded the
+                  // compaction computed above — so on any loop where the model emits
+                  // ≤2 read-only calls per step (DeepSeek does this constantly) older
+                  // tool results were never elided and cumulative input grew unbounded.
+                  return withSteers({ messages: attachReminderToMessages(coalesced, _b) });
                 }
               }
             }
@@ -1870,6 +1876,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               finishReason: getFinishReason(event),
               usage: stepUsage,
             });
+
             // Realtime status bar update per step
             if (stepUsage.inputTokens || stepUsage.outputTokens) {
               // O1 — thread THIS turn's providerOptions shape per step so every

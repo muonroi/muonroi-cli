@@ -24,9 +24,9 @@ const MAX_CARD_COLS = 100;
 const FALLBACK_THRESHOLD = 70;
 
 const REASON_LABELS: Record<HaltChunk["reason"], string> = {
-  no_recipe: "No verify recipe detected",
-  zero_coverage: "Zero test coverage detected",
-  budget_exhausted: "Token budget exhausted",
+  no_recipe: "No verification recipe found",
+  zero_coverage: "No test coverage found",
+  budget_exhausted: "Token budget used up",
 };
 
 export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: HaltRecoveryCardProps) {
@@ -75,7 +75,7 @@ export function HaltRecoveryCard({ halt, selectedIndex, terminalCols, theme }: H
             ))}
           </box>
           <text fg={theme.haltCardHint} marginTop={1}>
-            ↑↓ navigate · Enter select · Esc dismiss
+            ↑/↓ to browse · Enter to select · Esc to dismiss
           </text>
         </box>
       </box>

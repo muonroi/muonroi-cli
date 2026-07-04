@@ -18,7 +18,7 @@ vi.mock("../../usage/thresholds.js", () => ({
 vi.mock("../../usage/downgrade.js", () => ({
   subscribeDowngrade: () => () => {},
 }));
-vi.mock("../state/active-run.js", () => ({
+vi.mock("../../state/active-run.js", () => ({
   activeRunStore: {
     getState: () => ({ runId: null, flowDir: null, productSlug: null }),
     subscribe: () => () => {},
@@ -26,8 +26,8 @@ vi.mock("../state/active-run.js", () => ({
   },
 }));
 
+import type { SprintProgressSegment, StatusBarState } from "../../state/status-bar-store.js";
 import { renderSprintSegment, renderStatusBar } from "./index.js";
-import type { SprintProgressSegment, StatusBarState } from "./store.js";
 
 function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
   return {

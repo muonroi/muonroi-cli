@@ -82,21 +82,36 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     for (let i = 1; i <= 3; i++) {
       const p = join(payloadDir, `big${i}.txt`);
       const marker = `payload-${i}-${"ABCDEFGH".repeat(4)}\n`;
-      writeFileSync(p, marker + "x".repeat(LARGE_PAYLOAD_CHARS - marker.length), "utf8");
+      // Distinct bulk fill per file ('b','c','d') so each read is byte-distinct.
+      const fill = String.fromCharCode("a".charCodeAt(0) + i);
+      writeFileSync(p, marker + fill.repeat(LARGE_PAYLOAD_CHARS - marker.length), "utf8");
     }
 
     // 20_000 is the minimum the settings validator accepts. With ~30k tool
     // results, compaction triggers by sub-agent round 2.
     process.env.MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS = "20000";
     process.env.MUONROI_SUBAGENT_COMPACT_KEEP_LAST = "1";
+    // Disable the sub-agent cap's content-hash dedup: the harness re-processes
+    // each tool result through the cap, so the second pass would dedup a read
+    // against its own first pass ("[dup of call #N]") and collapse the 30k
+    // payload to a pointer stub BEFORE cumulative history grows past the B3
+    // threshold — masking the very compaction this spec verifies. Production
+    // keeps dedup ON (default); only this accumulation test opts out.
+    process.env.MUONROI_SUBAGENT_CAP_DEDUP = "0";
 
     handle = await spawnCostLeakHarness({
       provider: "deepseek",
       modelId: "deepseek-v4-flash",
       stream: [
         // Top-level: dispatch to sub-agent.
+        // Use a FOREGROUND agent type ("general"), NOT "explore": the task tool
+        // auto-routes agent==="explore" (and maxToolRounds>25) to the background
+        // `delegate` executor (src/tools/registry.ts:667), which runs detached and
+        // never issues a synchronous sub-agent streamText for the mock to record —
+        // that is why this spec previously saw only top-level calls. "general"
+        // blocks the turn and drives a real sub-agent loop through the mock.
         buildToolCallRound("task-1", "task", {
-          agent: "explore",
+          agent: "general",
           description: "scan source files",
           prompt: "read the three big payload files and summarize them",
         }),

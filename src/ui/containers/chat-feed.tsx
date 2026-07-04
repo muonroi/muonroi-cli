@@ -176,22 +176,11 @@ export function ChatFeed(props: ChatFeedProps) {
           ),
         )}
         {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-        {councilPhases.length > 0 && (
-          <Semantic id="council-phases" role="listbox" name="Council Phases">
-            <CouncilPhaseTimeline phases={councilPhases} theme={t} />
-          </Semantic>
-        )}
-        {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-        {/* Halt/init-new/point-to-existing/council-progress cards moved
-                          to render AFTER councilMessages below so the scrollbox's
-                          sticky-bottom auto-scroll reveals them — when council
-                          debate produces many tall bubbles they used to render
-                          above the viewport. */}
-        {councilStatuses.length > 0 && (
-          <Semantic id="council-status" role="listbox" name="Council Status">
-            <CouncilStatusList statuses={councilStatuses} theme={t} />
-          </Semantic>
-        )}
+        {/* Council debate now renders as a linear group-chat stream: context
+                          info-cards on top, then the message transcript, then the
+                          live phase/status/typing region pinned BELOW the messages
+                          (moved down from here) so new turns append at the tail
+                          instead of inserting above and shoving the thread up. */}
         {councilInfoCards.map((card: any, idx: any) => (
           <Semantic
             key={`sem-info-${idx}-${card.title}`}
@@ -251,6 +240,19 @@ export function ChatFeed(props: ChatFeedProps) {
             variant={p.variant}
           />
         ))}
+        {/* Live activity region — pinned below the transcript so the debate
+                          reads as one linear group chat (see reorder note above). */}
+        {councilPhases.length > 0 && (
+          <Semantic id="council-phases" role="listbox" name="Council Phases">
+            <CouncilPhaseTimeline phases={councilPhases} theme={t} />
+          </Semantic>
+        )}
+        {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+        {councilStatuses.length > 0 && (
+          <Semantic id="council-status" role="listbox" name="Council Status">
+            <CouncilStatusList statuses={councilStatuses} theme={t} />
+          </Semantic>
+        )}
         {/* Council question / preflight askcards render at the END of
                           the scrollbox (see below) so the bottom-sticky scroll
                           always anchors to the active question. Rendered here they
@@ -266,7 +268,9 @@ export function ChatFeed(props: ChatFeedProps) {
         {(reasoningActive || lastReasoningElapsedMs > 0) && (
           <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
             <text fg={t.textMuted}>
-              {reasoningActive ? "[Thought] Thinking..." : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
+              {reasoningActive
+                ? "[Thought] Thinking..."
+                : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
             </text>
             {streamReasoning ? (
               <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">

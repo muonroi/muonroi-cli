@@ -3,14 +3,14 @@ import type { CouncilQuestionData, CouncilQuestionOption, CouncilQuestionPhase }
 import type { Theme } from "../theme.js";
 
 const PHASE_LABEL: Record<CouncilQuestionPhase, string> = {
-  clarify: "Clarify",
-  preflight: "Pre-flight",
-  "plan-confirm": "Plan",
-  "post-debate": "Post-Debate",
-  "pil-interview": "Understanding",
-  "pil-acceptance": "Confirm Intent",
-  "tool-loop-cap": "Tool-loop guard",
-  "safety-override": "Safety override",
+  clarify: "Quick question",
+  preflight: "Pre-flight check",
+  "plan-confirm": "Plan review",
+  "post-debate": "Debate wrap-up",
+  "pil-interview": "Understanding your idea",
+  "pil-acceptance": "Confirm the goal",
+  "tool-loop-cap": "Tool-loop checkpoint",
+  "safety-override": "Safety check",
 };
 
 export interface CouncilQuestionAnswer {
@@ -93,7 +93,7 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
                 <box flexDirection="row">
                   <text fg={numberColor}>{`${cursor} ${i + 1}. `}</text>
                   <text fg={labelColor}>{opt.label}</text>
-                  {isRecommended && <text fg={t.planOptionCheck}>{"  (Recommended)"}</text>}
+                  {isRecommended && <text fg={t.planOptionCheck}>{"  (recommended)"}</text>}
                 </box>
                 {opt.description && (
                   <box paddingLeft={5}>
@@ -107,7 +107,7 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
 
         {freetext !== null && (
           <box flexDirection="column" paddingTop={1}>
-            <text fg={t.textMuted}>{"Type your answer · Enter to submit · Esc to go back"}</text>
+            <text fg={t.textMuted}>{"Type your answer · Enter to send · Esc to go back"}</text>
             <Semantic id="askcard-input" role="textbox" value={freetext}>
               <box paddingLeft={1} paddingRight={1} width={freetextInputWidth}>
                 <text fg={t.planInputText} bg={t.planInputBg}>
@@ -119,7 +119,7 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
         )}
 
         <box paddingTop={1}>
-          <text fg={t.textDim}>{"Enter to select · ↑/↓ to navigate · Esc to cancel"}</text>
+          <text fg={t.textDim}>{"↑/↓ to browse · Enter to select · Esc to cancel"}</text>
         </box>
       </box>
     </Semantic>
@@ -139,7 +139,7 @@ function legacyFallback(q: CouncilQuestionData): CouncilQuestionOption[] {
     .filter((s) => typeof s === "string" && s.trim().length > 0)
     .map((s) => ({ label: s.trim(), value: s.trim(), kind: "choice" as const }));
   if (choices.length === 0) {
-    choices.push({ label: "Answer", value: "", kind: "freetext", description: "Nhập câu trả lời" });
+    choices.push({ label: "Answer", value: "", kind: "freetext", description: "Type your answer here" });
   }
   return choices;
 }
@@ -235,7 +235,7 @@ export function reduceCardKey(
             // Sentinel-ish text: caller may special-case this prefix to pause
             // the council loop. For now we ship a clear default that records a
             // meaningful answer so the run keeps moving.
-            text: "Let me discuss this further before answering.",
+            text: "I'd like to talk this through a bit more before answering.",
             kind: "chat",
           },
         },

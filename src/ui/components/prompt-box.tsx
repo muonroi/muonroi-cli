@@ -1,10 +1,10 @@
-import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { KeyBinding, PasteEvent, TextareaRenderable } from "@opentui/core";
 import { useEffect, useState } from "react";
 import type { getModelInfo } from "../../models/registry.js";
 import type { MODES } from "../../types/index.js";
 import { PROMPT_LOADING_FRAMES } from "../constants.js";
 import type { TypeaheadState } from "../hooks/useTypeahead.js";
+import { Menu, TextBox } from "../primitives/index.js";
 import type { SlashMenuItem } from "../slash/menu-items.js";
 import type { Theme } from "../theme.js";
 import type { ContextStats } from "../types.js";
@@ -126,6 +126,17 @@ export function PromptBox({
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
+  // Single source of truth for composer focus — mirrored to BOTH the OpenTUI
+  // textarea (`focused`) and the semantic node (via TextBox `focused`). Keeping
+  // one expression avoids the two drifting apart (the harness would otherwise
+  // report a focus state that disagrees with what the textarea actually has).
+  const composerFocused =
+    !showModelPicker &&
+    !showSandboxPicker &&
+    !showWalletPicker &&
+    !showPlanQuestions &&
+    !showApiKeyModal &&
+    !blockPrompt;
 
   return (
     <box backgroundColor={t.backgroundPanel}>
@@ -160,9 +171,9 @@ export function PromptBox({
           </box>
         )}
         {showSlashMenu && slashItems && (
-          <Semantic id="slash-menu" role="menu" isModal name="Slash commands">
+          <Menu id="slash-menu" name="Slash commands">
             <SlashInlineMenu t={t} items={slashItems} selectedIndex={slashSelectedIndex ?? 0} />
-          </Semantic>
+          </Menu>
         )}
         {showSuggestions && typeahead && (
           <SuggestionOverlay t={t} suggestions={typeahead.suggestions} selectedIndex={typeahead.selectedIndex} />
@@ -180,9 +191,8 @@ export function PromptBox({
         >
           <PromptModeLabel t={t} modeInfo={modeInfo} isProcessing={isProcessing} />
           <box flexGrow={1}>
-            <Semantic
+            <TextBox
               id="composer"
-              role="textbox"
               // Mirror current composer text so external harness drivers
               // can read back what the user typed. Prefer the textarea's
               // actual plainText (ground truth) over composerValue (derived
@@ -190,27 +200,11 @@ export function PromptBox({
               // even while the slash menu is technically still open — was
               // hiding the trailing space inserted by Tab autocomplete.
               value={inputRef.current?.plainText ?? composerValue ?? ""}
-              focus={
-                !showModelPicker &&
-                !showSandboxPicker &&
-                !showWalletPicker &&
-                !showPlanQuestions &&
-                !showApiKeyModal &&
-                !blockPrompt
-                  ? true
-                  : undefined
-              }
+              focused={composerFocused}
             >
               <textarea
                 ref={inputRef}
-                focused={
-                  !showModelPicker &&
-                  !showSandboxPicker &&
-                  !showWalletPicker &&
-                  !showPlanQuestions &&
-                  !showApiKeyModal &&
-                  !blockPrompt
-                }
+                focused={composerFocused}
                 placeholder={
                   isProcessing ? "Queue a follow-up... (esc to interrupt)" : placeholder || "Message muonroi-cli..."
                 }
@@ -224,7 +218,7 @@ export function PromptBox({
                 onSubmit={onSubmit as unknown as () => void}
                 onPaste={onPaste as unknown as (event: PasteEvent) => void}
               />
-            </Semantic>
+            </TextBox>
           </box>
         </box>
       </box>

@@ -11,6 +11,20 @@ src/ui/**/*.test.tsx
 src/ui/status-bar/tier-badge.tsx
 src/ui/status-bar/usd-meter.tsx
 
+# Nested presentational sub-components rendered INSIDE an already-wrapped parent.
+# Their observable identity comes from the enclosing wrapper, so an own-Semantic
+# would create a duplicate/nested node:
+#   - message-view helpers + tool-result views render inside the `msg-{i}` listitem
+#     wrapped in src/ui/containers/chat-feed.tsx.
+#   - prompt-box's mode-label helper sits inside the composer panel (composer is
+#     wrapped via the TextBox primitive).
+src/ui/components/message-view.tsx
+src/ui/components/tool-result-views.tsx
+src/ui/components/prompt-box.tsx
+# Fragment dispatcher: renders child modals (each self-wraps with <Dialog isModal>);
+# its own `onSubmit` is a prop forwarded to those children, not a wired handler.
+src/ui/containers/modals-layer.tsx
+
 # Inline child components / primitives (no standalone observable identity needed).
 src/ui/components/council-leader-bubble.tsx
 src/ui/components/council-message-bubble.tsx

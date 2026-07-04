@@ -56,10 +56,10 @@ import {
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
+import { statusBarStore } from "../state/status-bar-store.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
@@ -327,7 +327,15 @@ export class StreamRunner {
     // tiered compression schedule. The cap is per-invocation; each sub-agent
     // gets a fresh budget.
     const subAgentCapBudget = getSubAgentBudgetChars();
-    const subAgentCap = wrapToolSetWithCap(childBaseToolsRaw, { maxCumulativeChars: subAgentCapBudget });
+    const subAgentCap = wrapToolSetWithCap(childBaseToolsRaw, {
+      maxCumulativeChars: subAgentCapBudget,
+      // Opt-out toggle (default ON). The cap dedups identical tool outputs by
+      // content hash; set MUONROI_SUBAGENT_CAP_DEDUP=0 to disable. Used by the
+      // B3 compaction E2E, where the harness re-processes each tool result and
+      // the self-dedup would otherwise collapse distinct reads into pointer
+      // stubs before cumulative history can grow enough to trigger compaction.
+      dedupRepeatOutputs: process.env.MUONROI_SUBAGENT_CAP_DEDUP !== "0",
+    });
     // Phase C3: layer cross-turn dedup ON TOP of the per-invocation cap. The
     // cap sees raw output (for accurate cumulative accounting); dedup sees
     // the already-trimmed output that will actually reach the model.

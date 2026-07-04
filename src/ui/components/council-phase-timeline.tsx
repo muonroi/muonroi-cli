@@ -7,6 +7,14 @@ const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 export interface CouncilPhaseTimelineProps {
   phases: CouncilPhaseEvent[];
   theme: Theme;
+  /**
+   * When false (default), completed phases fold into a single "N steps done"
+   * summary line and only the live (active/error) phase is shown — the
+   * aggressive-collapse UX. When true (Ctrl+O), the full done-trail is shown.
+   * Shares the council transcript's expand state so one toggle controls all
+   * council detail.
+   */
+  expanded?: boolean;
 }
 
 function Spinner() {
@@ -44,12 +52,36 @@ function useHeartbeat(tickMs = 1000): number {
   return Date.now();
 }
 
-export function CouncilPhaseTimeline({ phases, theme: t }: CouncilPhaseTimelineProps) {
+export function CouncilPhaseTimeline({ phases, theme: t, expanded = false }: CouncilPhaseTimelineProps) {
   const now = useHeartbeat(1000);
-  if (phases.length === 0) return null;
+  // Collapse per-round brackets: the "Clarification round N" / "Round N" phases
+  // duplicate the live status line ("Generating clarification questions (round
+  // N)"), stacking 3-4 near-identical spinner rows at council start. Keep only
+  // the coarse lifecycle phases here; round detail already rides on the status
+  // line label. Errors are always shown so a failed round stays visible.
+  const visible = phases.filter(
+    (p) => !((p.kind === "clarification_round" || p.kind === "round") && p.state !== "error"),
+  );
+  if (visible.length === 0) return null;
+
+  // Aggressive collapse (default): show only the live (active/error) phases as
+  // full rows; fold every completed phase into one "N steps done" summary line.
+  // Ctrl+O (expanded=true) restores the full done-trail. Errors are never
+  // folded — a failed phase always stays visible.
+  const live = visible.filter((p) => p.state === "active" || p.state === "error");
+  const doneCount = visible.length - live.length;
+  const rows = expanded ? visible : live;
+
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
-      {phases.map((p) => {
+      {!expanded && doneCount > 0 && (
+        <box>
+          <text fg={t.planOptionCheck}>✓</text>
+          <text fg={t.textDim}>{` ${doneCount} step${doneCount === 1 ? "" : "s"} done`}</text>
+          <text fg={t.textMuted}>{"  ·  Ctrl+O to expand"}</text>
+        </box>
+      )}
+      {rows.map((p) => {
         const isError = p.state === "error";
         const isDone = p.state === "done";
         const marker = isError ? "✗" : isDone ? "✓" : <Spinner />;

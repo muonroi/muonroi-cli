@@ -130,6 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Vision proxy now loads SiliconFlow API key from settings.json (previously only checked keychain + env var)
 - Provider switching no longer reuses wrong API key when routing to a different provider
+- Provider reasoning round-trip hardening — thinking/reasoning payloads preserved through provider strategy request/response reshaping <!-- scaffold entry: summarized from in-flight work; reconcile wording against git history before release -->
+- Parallel tool-call history reshaped into sequential single-call pairs for providers that reject multi-call assistant turns <!-- scaffold entry: summarized from in-flight work; reconcile wording against git history before release -->
 - RC version tags are published as GitHub prereleases (#268)
 
 ## [1.1.5-rc5] - 2026-04-15

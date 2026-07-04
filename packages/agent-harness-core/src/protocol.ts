@@ -1,6 +1,11 @@
 export const PROTOCOL_VERSION = "0.4.0" as const;
 
-export type Role =
+/**
+ * Known accessibility-style roles for semantic blocks. Closed vocabulary —
+ * `Role` (below) additionally admits namespaced `x-*` custom roles so new UI
+ * surfaces can be introduced without a protocol version bump (additive-only).
+ */
+export type KnownRole =
   | "dialog"
   | "textbox"
   | "listbox"
@@ -24,7 +29,20 @@ export type Role =
   | "menuitem"
   | "toast"
   | "tooltip"
-  | "region";
+  | "region"
+  // IDE / editor surfaces (added for the desktop frontend; harmless in the TUI)
+  | "editor"
+  | "diff"
+  | "gutter"
+  | "panel";
+
+/**
+ * A semantic role. Either a well-known {@link KnownRole} or a namespaced
+ * `x-<custom>` role. The `x-` prefix keeps custom roles greppable and prevents
+ * silent collisions with future well-known roles — additive versioning via the
+ * `tui.capabilities` handshake rather than a breaking protocol bump.
+ */
+export type Role = KnownRole | `x-${string}`;
 
 export type UINode = {
   id: string;

@@ -26,12 +26,30 @@ function isRetryableError(err: unknown): boolean {
   return msg.includes("rate limit") || msg.includes("too many requests") || msg.includes("timeout");
 }
 
+/**
+ * Optional UI sink for retry progress. The TUI registers one via
+ * {@link setRetryReporter}; without it (headless/CLI, tests) retries fall back
+ * to stderr. This exists because a raw `process.stderr.write` under OpenTUI's
+ * raw-mode alt-screen paints over wherever the cursor sits — the retry line was
+ * bleeding into the composer input frame (user-reported). Routing through a
+ * toast keeps it in the proper surface.
+ */
+type RetryReporter = (message: string, level: "warn" | "info") => void;
+let retryReporter: RetryReporter | null = null;
+
+export function setRetryReporter(fn: RetryReporter | null): void {
+  retryReporter = fn;
+}
+
 function defaultOnRetry(attempt: number, total: number, delayMs: number, error: Error): void {
   const reason =
     (error as { statusCode?: number }).statusCode === 429 ? "rate-limited (429)" : error.message.slice(0, 80);
-  process.stderr.write(
-    `[retry] ${reason} — waiting ${Math.round(delayMs / 1000)}s before attempt ${attempt + 1}/${total}\n`,
-  );
+  const message = `[retry] ${reason} — waiting ${Math.round(delayMs / 1000)}s before attempt ${attempt + 1}/${total}`;
+  if (retryReporter) {
+    retryReporter(message, "warn");
+    return;
+  }
+  process.stderr.write(`${message}\n`);
 }
 
 export async function withVisibleRetry<T>(fn: () => Promise<T>, opts: VisibleRetryOpts = {}): Promise<T> {

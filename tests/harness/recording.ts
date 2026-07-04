@@ -82,7 +82,15 @@ function promptCharCount(prompt: LanguageModelV3Prompt): number {
 }
 
 function inferRole(systemText: string): CallRole {
-  if (/^You are the\b.*\bsub-agent\b/i.test(systemText)) return "sub-agent";
+  // The sub-agent role line is "You are the {Type} sub-agent" (see
+  // src/orchestrator/prompts.ts). It used to be the first line of the system
+  // prompt, but an "[ENV] OS=…" preamble (and the AGENT OPERATING CONTRACT
+  // block) is now prepended, so a `^`-anchored match no longer fires and every
+  // sub-agent call was misclassified as top-level. Match the role line anywhere
+  // in the prompt but keep it on a single line ([^\n]*) so a top-level prompt
+  // that merely MENTIONS "sub-agent" in a tool description can't false-positive
+  // (those never contain the literal "You are the … sub-agent" phrase).
+  if (/You are the\b[^\n]*\bsub-agent\b/i.test(systemText)) return "sub-agent";
   if (systemText.length > 0) return "top-level";
   return "unknown";
 }

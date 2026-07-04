@@ -5,6 +5,13 @@ import type { ClarifiedSpec, PreflightResponder } from "./types.js";
 export interface RunPreflightOptions {
   repoEmpty?: boolean;
   researchOverridable?: boolean;
+  /**
+   * ROI: when the clarifier judged the spec ready (high confidence, no gaps),
+   * the approve card is a rubber-stamp. Show the Discussion Brief for
+   * transparency but auto-approve without blocking on a gate. Default false —
+   * an unready/low-confidence spec still surfaces the approve card.
+   */
+  autoApprove?: boolean;
 }
 
 export async function* runPreflight(
@@ -48,13 +55,26 @@ export async function* runPreflight(
         },
         { heading: "Scope", body: spec.scope || "Not specified" },
         {
-          heading: "Participants",
-          body: participants.map((p) => `- ${p.role} → ${p.model}`).join("\n"),
+          heading: "Panel",
+          body: participants.map((p) => `- ${p.model}`).join("\n"),
         },
         { heading: "Research phase", body: `${researchMode}${researchNote}` },
       ],
     },
   };
+
+  // ROI: skip the approve gate when the spec is already judged ready — show the
+  // brief above for transparency but don't block on a rubber-stamp.
+  if (options?.autoApprove === true) {
+    yield phaseDone({
+      phaseId: "phase:preflight",
+      kind: "preflight",
+      label: "Pre-flight review",
+      startedAt,
+      detail: "auto-approved (spec ready)",
+    });
+    return true;
+  }
 
   yield {
     type: "council_preflight" as StreamChunk["type"],

@@ -39,6 +39,14 @@ export interface ClarifiedSpec {
   }>;
   /** Populated by P6 when the spec is converted to a Backlog. */
   backlogId?: string;
+  /**
+   * Ongoing-task / conversation context captured at council entry. Attached in
+   * council/index.ts on BOTH the explicit `/council` path and auto-council, so
+   * every debate stage (not just the opening statement) stays anchored to the
+   * parent task and the decisions already made earlier in the session. Optional
+   * for backward compat — empty when the council runs with no prior context.
+   */
+  parentContext?: string;
 }
 
 // ── Preflight ────────────────────────────────────────────────────────────────
@@ -85,6 +93,12 @@ export interface DebateState {
   active: CouncilParticipant[]; // mutated positions from debate rounds — NEW (Phase 14 CQ-02)
   /** Evidence density from the final leader evaluation (0.0–1.0). Drives confidence badge. */
   finalEvidenceDensity?: number;
+  /**
+   * Total claims participants explicitly tagged ([CONFIRMED]/[REFUTED]/
+   * [UNVERIFIED]) across the debate. 0 = no evidence tags emitted, so density
+   * is unmeasurable rather than genuinely 0% — the badge distinguishes them.
+   */
+  finalTaggedClaims?: number;
   /** Role-indexed per-round positions for follow-up citations. */
   archive?: DebateArchiveEntry[];
 }
@@ -198,7 +212,38 @@ export interface EnhancedCouncilOutcome {
   planUpdate?: string;
   resolvedQuestion?: { question: string; answer: string };
   plan?: ActionPlan;
+  /**
+   * Model-first post-debate options. The leader synthesis picks 2-4 actions
+   * from the wired handler vocabulary that FIT this debate's intent (a bug
+   * investigation vs an evaluation vs a plan warrant different follow-ups),
+   * ordered best-first. Rendered as the post-debate askcard instead of the
+   * old fixed "accept / research / apply" template. Empty/absent → index.ts
+   * falls back to the deterministic option set.
+   */
+  nextActions?: Array<{ action: PostDebateActionId; label: string; reason?: string }>;
 }
+
+/**
+ * Post-debate actions the leader may recommend. Bounded to handlers wired in
+ * index.ts's post-debate switch — the model selects/orders/labels FROM this
+ * vocabulary, it cannot invent new actions. Context-only actions
+ * (retry_synthesis on failure, refine on empty sections) are added by index.ts,
+ * not the model.
+ */
+export type PostDebateActionId =
+  | "ask_followup"
+  | "generate_plan"
+  | "implement"
+  | "save_exit"
+  /**
+   * Persist the outcome and hand control back to the session with the synthesis
+   * enriched into the message history (appendCompletedTurn), so the agent keeps
+   * working on the ORIGINAL task using the debate's trusted conclusion as
+   * context. The right default for a pure discussion / hard-problem debate whose
+   * deliverable is the conclusion itself. Behaves like save_exit at the handler
+   * level (falls through to persistence) — the distinction is intent + framing.
+   */
+  | "continue_session";
 
 // ── Config ───────────────────────────────────────────────────────────────────
 

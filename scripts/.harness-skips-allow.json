@@ -28,5 +28,17 @@
     "line": 132,
     "reason": "end-to-end bb-retrieval timeout against unreachable EE — needs writable ~/.experience/config.json or env-based EE base-URL override in spawned TUI",
     "issue": "src/ee/bb-retrieval.ts EE base-URL is read from config file, not env var"
+  },
+  {
+    "path": "tests/harness/plan-resume-halt.spec.ts",
+    "line": 60,
+    "reason": "obsolete flow: build/plan prompts now route to a scaffolding dialog (init-new / point-to-existing) via isGreenfieldBuildTask before any LLM call, so the mock APPROVED PLAN fixture never fires and no chat listitem renders",
+    "issue": "rewrite the halt→'tiếp tục' resume-without-re-ask contract around the current scaffolding UX (src/pil/layer1-intent.ts:1080)"
+  },
+  {
+    "path": "tests/harness/plan-resume-halt.spec.ts",
+    "line": 71,
+    "reason": "obsolete flow: depends on the quarantined plan-emit step above; resume-after-halt cannot surface plan text because the prompt is intercepted by scaffolding routing",
+    "issue": "rewrite the halt→'tiếp tục' resume-without-re-ask contract around the current scaffolding UX (src/pil/layer1-intent.ts:1080)"
   }
 ]

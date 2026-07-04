@@ -43,6 +43,23 @@ describe("formatAnswerForLog", () => {
     ).toBe('override · productType="consumer-app"');
   });
 
+  it("choice: snake_case action id shows the human label only (no id leak)", () => {
+    // Post-debate actions (continue_session, save_exit…) are internal routing
+    // tokens — the user must see the label, never "continue_session · …".
+    expect(
+      formatAnswerForLog(
+        { kind: "choice", text: "continue_session" },
+        { selectedOptionLabel: "Tiếp tục phiên làm việc" },
+      ),
+    ).toBe("Tiếp tục phiên làm việc");
+    expect(
+      formatAnswerForLog(
+        { kind: "choice", text: "save_exit" },
+        { selectedOptionLabel: "Save this evaluation — the synthesis is the deliverable" },
+      ),
+    ).toBe("Save this evaluation");
+  });
+
   it("choice: when label === verb, no decoration (avoid 'accept · accept')", () => {
     expect(formatAnswerForLog({ kind: "choice", text: "accept" }, { selectedOptionLabel: "accept" })).toBe("accept");
   });

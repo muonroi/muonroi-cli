@@ -84,6 +84,12 @@ export interface RunCouncilOptions {
    * Typically <flowDir>/runs/<runId>. When absent the lock file is skipped.
    */
   runDir?: string;
+  /**
+   * Fired with the post-debate action the user chose (e.g. "continue_session",
+   * "save_exit"). Lets the caller (runCouncilV2) auto-continue an agent turn on
+   * "continue_session" instead of ending at the composer. Called at most once.
+   */
+  onPostDebateAction?: (action: string) => void;
 }
 
 export type PostDebateAction = "save_exit" | "generate_plan" | "refine" | "ask_followup" | "retry_synthesis";
@@ -187,7 +193,11 @@ export async function* runCouncil(
   }
   yield {
     type: "content",
-    content: `\n> Leader: \`${leaderModelId}\` · Participants: ${participants.map((p) => `\`${p.role}:${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
+    // Show models only — the `implement/verify/research` roles are internal
+    // cost-tier routing slots, NOT debate personas (those are task-adaptive and
+    // shown in the Debate Plan card once assigned). Printing the slot names here
+    // misleadingly implied implementation intent on analysis/decision topics.
+    content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
   };
 
   const baseContext = buildCouncilContext(messages);
@@ -259,13 +269,25 @@ export async function* runCouncil(
       yield { type: "content", content: `\n> Auto-council: skipping clarification (PIL pre-classified).\n` };
     }
 
+    // Guarantee context continuity on BOTH paths: the explicit `/council`
+    // clarifier (synthesizeSpec / inferSpecFromTopicOnly) does not always set
+    // parentContext, and the skip path sets it via buildSpecFromTopic. Attach it
+    // centrally here so every downstream debate stage sees the ongoing task
+    // context regardless of how the council was triggered.
+    if (!spec.parentContext) {
+      spec.parentContext = conversationContext?.trim() || undefined;
+    }
+
     // Cancelled during clarification — don't pop the preflight approval card.
     if (userAborted()) break;
 
     const researchNeeded = true;
+    // ROI: when the clarifier judged the spec ready (high confidence, no gaps),
+    // the approve card is a rubber-stamp — auto-approve after showing the brief.
     const preflightGen = runPreflight(spec, participants, researchNeeded, respondToPreflight, {
       repoEmpty: internetFirst,
       researchOverridable: true,
+      autoApprove: spec.ready === true,
     });
     let preflightResult: IteratorResult<StreamChunk, boolean>;
     do {
@@ -289,7 +311,7 @@ export async function* runCouncil(
   // Leader-LLM decides if research is required. If yes, give the user a chance
   // to skip — research is the slowest part of council and trivial questions
   // (e.g. "what did we just decide?") should not pay that cost.
-  let researchSkipOverride = false;
+  const researchSkipOverride = false;
   // Hoisted so the leader's research decision can be reused by runDebate instead
   // of re-running the classifier LLM call (see CouncilConfig.leaderNeedsResearch).
   // Stays undefined if the classifier throws — fail-open: runDebate re-evaluates.
@@ -303,40 +325,15 @@ export async function* runCouncil(
     } while (!needStep.done);
     leaderNeedsResearch = needStep.value;
 
+    // ROI: the leader already decided research is needed and the card's default
+    // was always "run research" — asking the user to confirm is a rubber-stamp
+    // (measured 0 information at real cost). Auto-proceed with research; the
+    // leaderNeedsResearch signal still flows to runDebate. researchSkipOverride
+    // stays false. (Deliberately no card — see council-UX ROI pass.)
     if (leaderNeedsResearch) {
-      const { randomUUID } = await import("crypto");
-      const overrideId = randomUUID();
-      yield {
-        type: "council_question",
-        content:
-          `\n## Research decision\nLeader recommends a research phase before debate` +
-          (internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)") +
-          `. Want to skip it?`,
-        councilQuestion: {
-          questionId: overrideId,
-          phase: "post-debate",
-          question: "Skip the research phase?",
-          context: internetFirst
-            ? "Workspace is empty — research will search the internet. Skip if you already have the answer."
-            : "Research will grep/read the codebase. Skip for trivial topics that don't need code evidence.",
-          isRequired: false,
-          options: [
-            {
-              label: "No — run research (recommended)",
-              description: "Leader thinks evidence is needed.",
-              value: "no",
-              kind: "choice",
-            },
-            { label: "Yes — skip research", description: "Go straight to debate.", value: "yes", kind: "choice" },
-          ],
-          defaultIndex: 0,
-        },
-      } as StreamChunk;
-      const overrideAnswer = await respondToQuestion(overrideId);
-      researchSkipOverride = overrideAnswer === "yes";
       yield {
         type: "content",
-        content: `\n  ↳ ${researchSkipOverride ? "Skipping research per user override." : "Running research."}\n`,
+        content: `\n  ↳ Leader recommends research${internetFirst ? " (internet-first — empty workspace)" : " (codebase-first)"} — running it.\n`,
       };
     }
   } catch (err) {
@@ -519,6 +516,10 @@ export async function* runCouncil(
   } while (!planResult.done);
   let { outcome, plan, synthesisText } = planResult.value;
   const synthesisFailReason = planResult.value.synthesisFailReason;
+  // Post-debate action the user picked (hoisted so the completed-status guard +
+  // the caller's auto-continue can both read it). Undefined until the card is
+  // answered.
+  let postDebateAction: string | undefined;
   stats.phases.push({ name: "planning", durationMs: Date.now() - planStart });
 
   // Log interaction: synthesis
@@ -552,7 +553,14 @@ export async function* runCouncil(
 
       // ── Confidence badge (CQ-6) ──────────────────────────────────────────
       const evidenceDensity = debateState.finalEvidenceDensity ?? 0;
+      const taggedClaims = debateState.finalTaggedClaims ?? 0;
       const synthesisFailed = !!synthesisFailReason || !outcome || synthesisText.trim().length < 20;
+      // "Not measured" ≠ "0%". When the debate emitted zero tagged claims the
+      // density formula returns 0 by convention, but that means grounding was
+      // never measured — not that every claim was refuted. Surfacing "Low 0%"
+      // there reads as a scoring failure on debates that are actually fine
+      // (session de4bafe5ecb7). Only applies when synthesis itself succeeded.
+      const confidenceNotMeasured = !synthesisFailed && taggedClaims === 0;
       const confidenceLevel: "high" | "medium" | "low" = synthesisFailed
         ? "low"
         : evidenceDensity >= 0.6
@@ -568,19 +576,23 @@ export async function* runCouncil(
       const confidenceReason: string = synthesisFailed
         ? (synthesisFailReason ??
           "The synthesizer produced no usable output. The debate exchanges above are still readable, but no structured outcome could be extracted.")
-        : confidenceLevel === "low"
-          ? `Only ${(evidenceDensity * 100).toFixed(0)}% of claims in the final round carried citations or were resolved — most positions remained asserted without backing evidence.`
-          : confidenceLevel === "medium"
-            ? `${(evidenceDensity * 100).toFixed(0)}% of claims carried citations or were resolved — some open points remain.`
-            : `${(evidenceDensity * 100).toFixed(0)}% of claims were cited or resolved.`;
+        : confidenceNotMeasured
+          ? "The debate produced no explicitly tagged claims ([CONFIRMED]/[REFUTED]/[UNVERIFIED]), so evidence grounding could not be measured — this is NOT a 0% score. The exchanges above may still be substantive; read them directly, or re-run with research enabled to force citations."
+          : confidenceLevel === "low"
+            ? `Only ${(evidenceDensity * 100).toFixed(0)}% of claims in the final round carried citations or were resolved — most positions remained asserted without backing evidence.`
+            : confidenceLevel === "medium"
+              ? `${(evidenceDensity * 100).toFixed(0)}% of claims carried citations or were resolved — some open points remain.`
+              : `${(evidenceDensity * 100).toFixed(0)}% of claims were cited or resolved.`;
 
       const confidenceBadge = synthesisFailed
         ? `❌ Synthesis failed — confidence cannot be computed`
-        : confidenceLevel === "high"
-          ? `✅ High confidence (evidence density ${evidenceDensity.toFixed(2)})`
-          : confidenceLevel === "medium"
-            ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
-            : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
+        : confidenceNotMeasured
+          ? `◐ Confidence not measured — the debate emitted no tagged claims`
+          : confidenceLevel === "high"
+            ? `✅ High confidence (evidence density ${evidenceDensity.toFixed(2)})`
+            : confidenceLevel === "medium"
+              ? `⚠ Medium confidence (evidence density ${evidenceDensity.toFixed(2)})`
+              : `⚠ Low confidence (evidence density ${evidenceDensity.toFixed(2)})`;
 
       // Recommendation surfaced to the user as the default action. The
       // implementation_plan-vs-decision/evaluation split lives in
@@ -596,68 +608,119 @@ export async function* runCouncil(
 
       const baseOptions: Array<{ label: string; description: string; value: string; kind: "choice" | "freetext" }> = [];
 
-      if (synthesisFailed) {
+      // Model-first post-debate options. The leader synthesis picks intent-fit
+      // next actions (a bug investigation, evaluation, plan, and pure discussion
+      // each warrant different follow-ups — the old fixed "accept / research /
+      // apply" menu was wrong regardless of intent). Fall back to the
+      // deterministic set on synthesis failure or when the model emitted none.
+      const modelActions =
+        !synthesisFailed && outcome?.nextActions && outcome.nextActions.length > 0 ? outcome.nextActions : null;
+
+      if (modelActions) {
+        for (const a of modelActions) {
+          // "implement" needs an existing plan; drop it if the debate produced none.
+          if (a.action === "implement" && !hasPlan) continue;
+          baseOptions.push({
+            label: a.label,
+            // Description is the model's own `reason` (model-first — no hardcoded
+            // per-action prose). If the model was terse and omitted it, repeat
+            // the label rather than inventing system copy.
+            description: a.reason && a.reason.length > 0 ? a.reason : a.label,
+            value: a.action,
+            kind: a.action === "ask_followup" ? "freetext" : "choice",
+          });
+        }
+        // Context-only option the model doesn't own — surfaced when the debate
+        // left shape sections empty.
+        if (hasEmptySections) {
+          baseOptions.push({
+            label: `Refine: ${refinementTopics.join(", ")}`,
+            description: `Answer questions about ${refinementTopics.length} unresolved aspect(s)`,
+            value: "refine",
+            kind: "choice",
+          });
+        }
+        // Guarantee an escape hatch even if the model omitted one.
+        if (!baseOptions.some((o) => o.value === "save_exit" || o.value === "continue_session")) {
+          baseOptions.push({
+            label: "Save & Exit",
+            description: "Save the debate outcome and finish",
+            value: "save_exit",
+            kind: "choice",
+          });
+        }
+      } else {
+        // ── Fallback: deterministic option set ──────────────────────────────
+        if (synthesisFailed) {
+          baseOptions.push({
+            label: "Retry Synthesis (compact)",
+            description:
+              "Re-synthesize from final positions only (drop full exchange history). Fastest recovery from provider timeouts.",
+            value: "retry_synthesis",
+            kind: "choice",
+          });
+        }
+
         baseOptions.push({
-          label: "Retry Synthesis (compact)",
-          description:
-            "Re-synthesize from final positions only (drop full exchange history). Fastest recovery from provider timeouts.",
-          value: "retry_synthesis",
+          label: "Save & Exit",
+          description: synthesisFailed
+            ? "Save raw debate exchanges as-is; no structured outcome will be persisted"
+            : "Save the debate outcome and finish",
+          value: "save_exit",
           kind: "choice",
         });
-      }
 
-      baseOptions.push({
-        label: "Save & Exit",
-        description: synthesisFailed
-          ? "Save raw debate exchanges as-is; no structured outcome will be persisted"
-          : "Save the debate outcome and finish",
-        value: "save_exit",
-        kind: "choice",
-      });
+        if (!hasPlan && !synthesisFailed) {
+          baseOptions.push({
+            label: "Lock plan and execute Sprint 1",
+            description:
+              "Commit the council outcome as the sprint plan and hand control to the sprint runner (planning → implementation → verification → judgment). Does NOT exit to /gsd.",
+            value: "generate_plan",
+            kind: "choice",
+          });
+        }
 
-      if (!hasPlan && !synthesisFailed) {
+        if (hasEmptySections && !synthesisFailed) {
+          baseOptions.push({
+            label: `Refine: ${refinementTopics.join(", ")}`,
+            description: `Answer questions about ${refinementTopics.length} unresolved aspect(s)`,
+            value: "refine",
+            kind: "choice",
+          });
+        }
+
+        // CQ-3: free-text follow-up to the council on the same debate context.
         baseOptions.push({
-          label: "Lock plan and execute Sprint 1",
-          description:
-            "Commit the council outcome as the sprint plan and hand control to the sprint runner (planning → implementation → verification → judgment). Does NOT exit to /gsd.",
-          value: "generate_plan",
-          kind: "choice",
+          label: "Ask Council a follow-up",
+          description: "Pose a new question that re-uses this debate's context (no new clarification).",
+          value: "ask_followup",
+          kind: "freetext",
         });
+
+        if (hasPlan) {
+          baseOptions.push({
+            label: "Start Implementation",
+            description: "Execute the action plan now",
+            value: "implement",
+            kind: "choice",
+          });
+        }
       }
 
-      if (hasEmptySections && !synthesisFailed) {
-        baseOptions.push({
-          label: `Refine: ${refinementTopics.join(", ")}`,
-          description: `Answer questions about ${refinementTopics.length} unresolved aspect(s)`,
-          value: "refine",
-          kind: "choice",
-        });
-      }
-
-      // CQ-3: free-text follow-up to the council on the same debate context.
-      baseOptions.push({
-        label: "Ask Council a follow-up",
-        description: "Pose a new question that re-uses this debate's context (no new clarification).",
-        value: "ask_followup",
-        kind: "freetext",
-      });
-
-      if (hasPlan) {
-        baseOptions.push({
-          label: "Start Implementation",
-          description: "Execute the action plan now",
-          value: "implement",
-          kind: "choice",
-        });
-      }
-
-      const defaultIndex = Math.max(
-        0,
-        baseOptions.findIndex((o) => o.value === recommendation.value),
-      );
+      // Model orders actions best-first (index 0 = recommended default); the
+      // fallback set uses the deterministic recommendation.
+      const defaultIndex = modelActions
+        ? 0
+        : Math.max(
+            0,
+            baseOptions.findIndex((o) => o.value === recommendation.value),
+          );
+      const recommendReason = modelActions
+        ? (baseOptions[0]?.description ?? recommendation.reason)
+        : recommendation.reason;
 
       const heading = synthesisFailed ? "## Debate Synthesis Failed" : "## Debate Synthesis Complete";
-      const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendation.reason}`;
+      const recommendLine = `**Recommended:** ${baseOptions[defaultIndex]?.label ?? recommendation.value} — ${recommendReason}`;
       const headerBlock = `${heading}\n\n> ${confidenceBadge}\n>\n> **Why:** ${confidenceReason}\n\n${recommendLine}\n\nLeader: \`${leaderModelId}\`. What would you like to do next?`;
 
       yield {
@@ -682,11 +745,19 @@ export async function* runCouncil(
       } as StreamChunk;
 
       const answer = await respondToQuestion(questionId);
-      yield { type: "content", content: `\n  ↳ ${answer}\n` };
+      postDebateAction = answer;
+      options?.onPostDebateAction?.(answer);
+      // Echo the human-readable option label, never the raw action id
+      // (`continue_session`, `save_exit`, …) — the id is an internal routing
+      // token users should never see. Free-text follow-ups (no matching option)
+      // echo verbatim.
+      const answeredLabel = baseOptions.find((o) => o.value === answer)?.label ?? answer;
+      yield { type: "content", content: `\n  ↳ ${answeredLabel}\n` };
 
       // Treat any non-empty answer that doesn't match a known choice value as a follow-up question.
       const knownValues = new Set([
         "save_exit",
+        "continue_session",
         "generate_plan",
         "refine",
         "ask_followup",
@@ -957,8 +1028,10 @@ export async function* runCouncil(
     }
   }
 
-  // Update session status to completed
-  if (sessionId) {
+  // Update session status to completed — EXCEPT when the user chose
+  // "continue_session", where the agent keeps working in this session; marking
+  // it completed here is what dropped it from the resume picker.
+  if (sessionId && postDebateAction !== "continue_session") {
     try {
       new SessionStore(options?.cwd ?? process.cwd()).setStatus(sessionId, "completed");
     } catch {

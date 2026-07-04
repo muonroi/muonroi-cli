@@ -1,5 +1,27 @@
 import { APICallError } from "@ai-sdk/provider";
+import { isProviderThinkingDegraded, markProviderThinkingDegrade } from "../providers/strategies/thinking-mode.js";
 import { STALL_ABORT_REASON } from "./stall-watchdog.js";
+
+/**
+ * Detect the generic, spec-undocumented param rejection from the z.ai GLM
+ * coding endpoint (HTTP 400 code 1210 "Invalid API parameter") and the
+ * opencode-go Console Go proxy (HTTP 400 invalid_request "Upstream request
+ * failed"). z.ai does NOT publish the exact constraint (verified 2026-07-02 vs
+ * docs.z.ai/api-reference/api-code — 1210 is an intentionally generic bucket),
+ * so no client transform can guarantee prevention. These are matched narrowly
+ * (400 + specific phrasing) so ordinary 400s stay non-transient.
+ */
+function isProviderParamReject(err: unknown): boolean {
+  const status = APICallError.isInstance(err)
+    ? err.statusCode
+    : ((err as { statusCode?: number; status?: number } | null)?.statusCode ??
+      (err as { status?: number } | null)?.status);
+  if (status !== 400) return false;
+  const message = err instanceof Error ? err.message : String(err);
+  const body = APICallError.isInstance(err) && typeof err.responseBody === "string" ? err.responseBody : "";
+  const hay = `${message}\n${body}`;
+  return /invalid api parameter|upstream request failed|unexpected end of JSON input|code"?\s*:?\s*1210/i.test(hay);
+}
 
 export interface TransientCheck {
   transient: boolean;
@@ -57,6 +79,20 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
     return { transient: true, reason: "timeout-error" };
   }
 
+  // z.ai / opencode-go generic param reject (1210 / "Upstream request failed"):
+  // give EXACTLY ONE retry with a degraded-but-valid body. The first sighting
+  // latches thinking OFF (markProviderThinkingDegrade) so the rebuilt request
+  // (factory re-invoked by withStreamRetry) sends the validator-safe shape;
+  // parallel tool_calls are already split by the transform. If it STILL rejects
+  // after we've degraded, stop retrying — the cause is beyond our client fix.
+  if (isProviderParamReject(err)) {
+    if (isProviderThinkingDegraded()) {
+      return { transient: false, reason: "provider-param-reject-after-degrade" };
+    }
+    markProviderThinkingDegrade();
+    return { transient: true, reason: "provider-param-reject-degrade-retry" };
+  }
+
   // AI SDK APICallError with statusCode
   if (APICallError.isInstance(err)) {
     const status = err.statusCode;
@@ -82,6 +118,11 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
   }
 
   const message = typeof e.message === "string" ? e.message : "";
+
+  // Rate limits (including wrapped messages from proxies like "Console Go")
+  if (/rate limit|rate-limited|429|too many requests/i.test(message)) {
+    return { transient: true, reason: "rate-limit-message" };
+  }
 
   // Malformed function/tool name errors — non-transient (own handler elsewhere)
   if (/invalid.*function.*name|function.*name.*invalid|malformed.*tool|NoSuchTool/i.test(message)) {

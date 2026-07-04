@@ -1,5 +1,5 @@
-import { Semantic } from "@muonroi/agent-harness-opentui";
 import type { CouncilInfoCard } from "../../types/index.js";
+import { ListItem } from "../primitives/index.js";
 import type { Theme } from "../theme.js";
 
 export interface CouncilInfoCardProps {
@@ -16,7 +16,7 @@ export function CouncilInfoCardView({ card, terminalCols, theme }: CouncilInfoCa
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
 
   return (
-    <Semantic id="info-card" role="listitem" name={card.title}>
+    <ListItem id="info-card" name={card.title}>
       <box flexDirection="column" marginBottom={1}>
         <box
           width={width}
@@ -39,6 +39,6 @@ export function CouncilInfoCardView({ card, terminalCols, theme }: CouncilInfoCa
           ))}
         </box>
       </box>
-    </Semantic>
+    </ListItem>
   );
 }
