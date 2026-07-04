@@ -1,31 +1,39 @@
 ---
-title: "muonroi-cli: An AI coding agent where the models argue before they answer"
+title: "Your AI coding CLI is expensive, forgetful, and overconfident. I built one that isn't."
 published: false
-description: "A BYOK terminal AI agent that debates high-stakes decisions across multiple models, routes each task to the cheapest capable model, remembers what it learned across sessions, and QA-tests its own TUI like a real user — for about $5/month."
+description: "Most AI coding agents burn $100/month, forget everything between sessions, and trust a single model that confidently gets it wrong. muonroi-cli fixes all three: multi-model debates, a memory that learns, and ~$5/month on your own keys."
 tags: ai, cli, opensource, productivity
 cover_image: https://raw.githubusercontent.com/muonroi/muonroi-cli/master/docs/demo.gif
 ---
 
-Most AI coding tools give you one model, one answer, and hope it's right.
+If you've been using AI coding agents for a while, you already know the three papercuts that never stop bleeding:
 
-**muonroi-cli** takes a different bet. It's a bring-your-own-key (BYOK) coding agent that lives in your terminal — built on Bun + React 19 + OpenTUI + the AI SDK v6 — and its whole design assumes that *one model, one shot* is the weakest way to use LLMs. Instead it routes each task to the model best suited for it, makes several models **argue with each other** before committing to a high-stakes decision, and remembers what it learned so it doesn't repeat mistakes next session.
+1. **The bill.** Every token routed through a premium model. $50–100/month before you notice.
+2. **The amnesia.** Every session starts from zero. The agent makes the *same* mistake it made last week, because it remembers nothing.
+3. **The overconfidence.** One model gives you one answer in a confident voice — and sometimes that answer is just wrong, with no second opinion in sight.
 
-Here's what actually makes it different.
+I got tired of all three and built **muonroi-cli** — a bring-your-own-key (BYOK) coding agent that lives in your terminal (Bun + React 19 + OpenTUI + AI SDK v6). Its entire design is a reaction to those papercuts: it makes several models from *different vendors* **argue with each other** before a high-stakes answer, it **remembers what it learned** so it stops repeating mistakes, and it routes each task to the cheapest capable model so the whole thing costs about **$5/month**.
 
-## TL;DR
+Here's each pain — and exactly how it's solved.
 
-- 🗣️ **Council** — different models from *different vendors* (DeepSeek, Z.ai GLM, Kimi) debate high-stakes questions with a verify-then-refute, cite-your-evidence protocol before you get an answer.
-- 🧠 **Experience Engine** — a self-curating brain that recalls prior gotchas *before* acting, warns you at the moment of risk, and gets sharper the more you use it. Shared across Claude/Codex/Gemini over MCP.
-- 💸 **~$5/month by design** — role-based routing + auto-compaction + sub-agent token caps + `usage forensics` attack cost from four sides.
-- 🤖 **`/ideal`** — an autonomous idea→ship loop (council → plan → implement → verify-gate, iterate on failure) with an always-on audit log.
-- 🧩 **Semantic blocks** — the agent QA-tests its *own* terminal UI as a real user, no screenshots/OCR.
-- 🔑 **BYOK, keys in your OS keychain** — 7 providers, OAuth, Bitwarden sync, encrypted cross-device export.
+## TL;DR — the pain → the fix
+
+| The papercut | How muonroi-cli fixes it |
+|---|---|
+| 🎲 One model, one overconfident answer | **Council** — models from *different vendors* (DeepSeek, Z.ai GLM, Kimi) debate with a verify-then-refute, cite-your-evidence protocol, then a judge scores confidence |
+| 🧠 Agent forgets everything, repeats mistakes | **Experience Engine** — a self-curating brain that recalls prior gotchas *before* acting and gets sharper each session. Shared across Claude/Codex/Gemini over MCP |
+| 💸 $50–100/month bill | **~$5/month by design** — role-based routing + auto-compaction + sub-agent token caps + `usage forensics` |
+| ⏳ Long sessions get slow and pricey | **Auto-compaction** after every turn keeps cost flat |
+| 🐛 UI regressions unit tests can't catch | **Semantic blocks** — the agent QA-tests its *own* terminal UI as a real user, no screenshots/OCR |
+| 🔒 Vendor lock-in, keys in plaintext | **BYOK** — 7 providers, keys in your OS keychain, OAuth, Bitwarden sync, encrypted cross-device export |
 
 ---
 
-## 1. Models that debate — the Council
+## Pain #1: One model gives you one confident answer — and sometimes it's wrong
 
-This is the headline feature, and it's not a gimmick. Run `/council <topic>` and muonroi-cli spins up a **structured, adversarial debate between different models from different vendors** before it answers you.
+You ask a hard architectural question. One model answers in a self-assured voice. There's no dissent, no second opinion, no one poking holes — so a plausible-but-wrong answer sails straight through. That's the single-model trap.
+
+**The fix — the Council.** Run `/council <topic>` and muonroi-cli spins up a **structured, adversarial debate between different models from different vendors** before it answers you.
 
 That last part matters. A debate is only worth running if the participants can actually *disagree* — and two instances of the same model tend to violently agree. So the council defaults to **`prefer_multi_provider: true`** and seats participants from distinct providers:
 
@@ -65,9 +73,11 @@ Every debate is persisted. `/council inspect <session-id>` replays the whole thi
 
 ---
 
-## 2. ~$5/month is a design goal, not an accident
+## Pain #2: Your AI coding bill is quietly $50–100/month
 
-Running every token through a premium model is how AI CLIs quietly cost $50–100/month. muonroi-cli treats cost as a first-class engineering constraint and attacks it from four directions at once:
+Every token routed through a premium model. Every long session getting pricier as context grows. A runaway sub-agent silently ballooning one call to hundreds of thousands of tokens. The bill creeps up and you can't even see where it went.
+
+**The fix — cost as a first-class constraint.** muonroi-cli attacks it from four directions at once:
 
 **1. Route by role.** The **Prompt Intelligence Layer (PIL)** classifies each turn (task type, complexity, domain) and maps it to a **role** — `leader`, `implement`, `verify`, or `research` — each pointing at whatever model you configured:
 
@@ -86,21 +96,25 @@ The premium model only appears for the parts that need it; the cheap, fast model
 
 **3. Cap the blast radius.** Sub-agents get hard token budgets, so a runaway delegation can't quietly balloon a single call to hundreds of thousands of input tokens.
 
-**4. Make leaks findable.** When something *does* look expensive, `usage forensics` (section 6) tells you exactly where the tokens went instead of leaving you to guess.
+**4. Make leaks findable.** When something *does* look expensive, `usage forensics` (Pain #6 below) tells you exactly where the tokens went instead of leaving you to guess.
 
 The result is real, measured, not aspirational: on your own keys, everyday use lands around **$5/month**. And it's genuinely multi-provider — DeepSeek, SiliconFlow, OpenAI, xAI, Z.ai and more, each with its own key. Keys live in your **OS keychain**, never plaintext config. Log in via **OAuth** (OpenAI/Google/xAI), sync from **Bitwarden**, or move an encrypted, passphrase-protected bundle between machines with `keys export` / `keys import`.
 
 ---
 
-## 3. Auto-compaction — long sessions stay cheap
+## Pain #3: The longer the session, the more every turn costs
 
-After *every* turn, context is silently compressed. Instead of your prompt cost creeping up as the conversation grows, it stays roughly flat. You don't manage it; it just happens. (There's a manual `/compact` if you want to force it.)
+Context grows with every message, and if nothing trims it, each turn re-sends the whole ballooning history — so a long, productive session gets slower and more expensive exactly when you're in flow.
+
+**The fix — auto-compaction.** After *every* turn, context is silently compressed. Instead of your prompt cost creeping up as the conversation grows, it stays roughly flat. You don't manage it; it just happens. (There's a manual `/compact` if you want to force it.)
 
 ---
 
-## 4. The Experience Engine — an agent that actually learns
+## Pain #4: Your agent forgets everything and repeats the same mistake
 
-This is the feature I'd point to if you only tried one thing. Most agents are amnesiacs: every session starts from zero, and every mistake is available to be made again tomorrow. muonroi-cli ships an **Experience Engine (EE)** — a persistent, self-curating behavioral brain that turns each session's decisions, gotchas, and corrections into knowledge the agent carries forward.
+You correct the agent. It nods, fixes it, and then next session — clean slate — it walks into the exact same trap, because it remembers nothing. Every conversation is Groundhog Day. This is the one that wastes the most of your time, quietly.
+
+**The fix — the Experience Engine.** This is the feature I'd point to if you only tried one thing. muonroi-cli ships an **Experience Engine (EE)** — a persistent, self-curating behavioral brain that turns each session's decisions, gotchas, and corrections into knowledge the agent carries forward.
 
 It's not a chat-history dump. It's a **learning flywheel** with real mechanics:
 
@@ -117,11 +131,11 @@ Memory that *changes the agent's behavior next time* — and gets more accurate 
 
 ---
 
-## 5. The agent QA-tests its own TUI — semantic blocks + the Agent Harness
+## Pain #5: UI regressions that unit tests can't catch (and screenshots are too flaky to)
 
-This one is unusual enough that it's worth its own section.
+A modal steals focus. A slash menu opens on the wrong item. A toast fires at the wrong level. Unit tests pass green — because none of that is function-level behavior — and you only find out when a user hits it. Screenshot/OCR testing is the usual escape hatch, and it's slow and flaky.
 
-muonroi-cli has an **agent harness** that drives its own terminal UI **as a real user would** — via structured JSON, with **no screenshots and no OCR**.
+**The fix — the agent QA-tests its own TUI.** muonroi-cli has an **agent harness** that drives its own terminal UI **as a real user would** — via structured JSON, with **no screenshots and no OCR**.
 
 The trick is **semantic blocks**. Every user-visible element is wrapped in a role-fixed primitive — `<Dialog>`, `<TextBox>`, `<ListItem>`, `<Menu>`, … — that emits an invisible semantic node (`id`, `role`, `name`, focus/selected/disabled state) into a live tree. An automated driver can then `query`, `press`, `type`, and `wait_for` against that tree the way a browser test queries the DOM — except it's a terminal UI. The primitives fix the `role` per component so it can't drift or be typo'd, and mirror interactive state (`focused`, `selected`) to the harness automatically — killing the single biggest source of UI/test drift. They're zero-cost: when the agent runtime is unset (normal user mode) they render nothing at all.
 
@@ -134,9 +148,11 @@ An agent that can test its own UI is an agent that can safely improve its own UI
 
 ---
 
-## 6. Cost-leak forensics — find out where the tokens went
+## Pain #6: "Why did that one prompt cost so much?" — and no way to tell
 
-When a prompt costs more than it should, you don't have to guess:
+Something spiked. Your usage graph has a bump. But which call? Which sub-agent? Which uncompacted history got re-sent? Most tools leave you guessing.
+
+**The fix — cost-leak forensics.** When a prompt costs more than it should, you don't have to guess:
 
 ```bash
 muonroi-cli usage forensics <session-id-prefix>
@@ -146,9 +162,11 @@ You get a per-event breakdown with inline anomaly flags tied to specific spend r
 
 ---
 
-## 7. `/ideal` — idea to ship, autonomously
+## Pain #7: "Autonomous" agents that either need constant babysitting — or run wild with no audit trail
 
-`/ideal` is the Council, the router, and the Experience Engine wired into one autonomous loop — the **Product Ideal Loop**. Give it a goal and it drives the whole build itself:
+Hands-off agents usually come in two bad flavors: the ones that stop and ask every five seconds (so not really autonomous), or the ones that YOLO through your repo with no record of what they touched (so not really safe).
+
+**The fix — `/ideal`, autonomous *and* accountable.** `/ideal` is the Council, the router, and the Experience Engine wired into one autonomous loop — the **Product Ideal Loop**. Give it a goal and it drives the whole build itself:
 
 - **Discovery & context** — it reads the target project, and when the goal is high-stakes it kicks off a **Council debate** to settle the design before writing a line of code.
 - **Plan → implement → verify** — it plans the work, implements it with the cheap `implement`-role model, then runs a **verification gate**. A failing gate doesn't get shrugged off: the loop *iterates again* with the failure as context until the work actually passes.
@@ -184,4 +202,8 @@ Full docs: **[docs.muonroi.com/docs/cli](https://docs.muonroi.com/docs/cli/overv
 
 ---
 
-*The pitch in one line: route each task to the right model, make the models argue when it matters, remember what you learned, and keep the bill around $5/month. If your AI CLI does none of those, muonroi-cli is worth a look.*
+*One line: it debates when the answer matters, remembers so it stops repeating mistakes, and keeps the bill around $5/month. If those three papercuts sound familiar, muonroi-cli was built for you.*
+
+---
+
+*Which of these papercuts hurts you the most right now? Tell me in the comments — and if you give it a spin, I'd love to hear what your monthly bill actually landed at.*
