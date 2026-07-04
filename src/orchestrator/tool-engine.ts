@@ -154,6 +154,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
+import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
 import { relaxCompactionSettings } from "./compaction";
 import type { CouncilManager } from "./council-manager.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
@@ -1175,7 +1176,44 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const mcpCapabilityBlock = buildMcpCapabilityBlock(Object.keys(tools));
         const systemWithCaps = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
 
-        const systemForModel = runtime.modelId.startsWith("claude")
+        // Task 3 — non-Claude prompt-cache prefix stability. On non-Claude the
+        // system is a single string; per-turn-dynamic content (dynamicSuffix +
+        // PIL suffix + MCP roster) that sits AFTER the byte-stable staticPrefix
+        // but BEFORE the conversation shifts the cached prefix and nukes the
+        // cache on PIL-active turns (session 47a774d272da: pil_active=1 ⟺
+        // cache_read=0). We keep the front byte-stable and relocate the dynamic
+        // tail into the trailing user message (variant b) — NOT a mid-conversation
+        // system-role message, which OpenAI-compatible providers (DeepSeek/GLM)
+        // do not reliably accept. Claude keeps its untouched two-block split.
+        const _isClaudeModel = runtime.modelId.startsWith("claude");
+        const { front: _nonClaudeFront, dynamicTail: _nonClaudeDynamicTail } = _isClaudeModel
+          ? { front: systemWithCaps, dynamicTail: "" }
+          : splitFrontAndDynamicTail({
+              modelId: runtime.modelId,
+              systemWithCaps,
+              staticPrefix: systemParts.staticPrefix,
+            });
+        // Only relocate when the enriched user message is actually present to
+        // receive the tail; otherwise fall back to the original single string so
+        // no instruction content is dropped.
+        const _willFoldDynamicTail =
+          !_isClaudeModel &&
+          _nonClaudeDynamicTail.trim().length > 0 &&
+          (deps.messages as unknown[]).includes(userModelMessage);
+
+        if (process.env.MUONROI_DEBUG_CACHE_PREFIX === "1") {
+          try {
+            console.error(
+              `[cache-prefix] model=${runtime.modelId} staticPrefixLen=${systemParts.staticPrefix.length} ` +
+                `frontLen=${_nonClaudeFront.length} dynTailLen=${_nonClaudeDynamicTail.length} ` +
+                `fold=${_willFoldDynamicTail} msgCount=${(deps.messages as unknown[]).length}`,
+            );
+          } catch (err) {
+            console.error(`[cache-prefix] log failed: ${(err as Error)?.message}`);
+          }
+        }
+
+        const systemForModel = _isClaudeModel
           ? [
               {
                 role: "system" as const,
@@ -1187,7 +1225,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 content: systemWithCaps.slice(systemParts.staticPrefix.length),
               },
             ]
-          : systemWithCaps;
+          : _willFoldDynamicTail
+            ? _nonClaudeFront
+            : systemWithCaps;
 
         // Capture prompt-size breakdown so recordUsage can attach it to the
         // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
@@ -1259,7 +1299,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Substitute the enriched user message for the current turn so the LLM sees PIL additions,
         // while leaving the DB-persisted `deps.messages` clean for future turns.
         const _messagesForCall = (deps.messages as any[]).map((m: any) =>
-          m === userModelMessage ? userEnrichedMessage : m,
+          m === userModelMessage
+            ? _willFoldDynamicTail
+              ? foldDynamicTailIntoUserMessage(userEnrichedMessage, _nonClaudeDynamicTail)
+              : userEnrichedMessage
+            : m,
         );
         if (wireDebug.enabled) {
           wireDebug.logRequest({
