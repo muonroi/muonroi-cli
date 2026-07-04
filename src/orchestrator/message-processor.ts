@@ -62,7 +62,7 @@ import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
 import { assessComplexity } from "../gsd/complexity-assessor.js";
-import { isComplexityAssessorEnabled, isGsdNativeEnabled } from "../gsd/flags.js";
+import { isComplexityAssessorEnabled, isGsdNativeEnabled, isPilGateEnrichEnabled } from "../gsd/flags.js";
 import { getGsdLoopHost } from "../gsd/loop-host.js";
 import { syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
@@ -422,7 +422,50 @@ function buildLeaderAssessorRunner(
     const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
     const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id, stats);
     // Small budget — this is a single classification, not a synthesis.
-    return llm.generate(leader.modelId, "You are a task complexity assessor.", prompt, 512);
+    return llm.generate(
+      leader.modelId,
+      "You are a task complexity assessor.",
+      prompt,
+      512,
+      undefined,
+      AbortSignal.timeout(PIL_GATE_DEADLINE_MS),
+    );
+  };
+}
+
+/**
+ * Turn-start PIL gate budget: the assessor + heavy-tier critics run BEFORE the
+ * model message is assembled, so they must be short — a slow gate call would
+ * delay every turn, not just heavy ones. `createCouncilLLM.generate` has no
+ * per-call timeout of its own (`llm.ts:331` defaults to 5 minutes), so this
+ * deadline is threaded explicitly as the `signal` arg on every gate call.
+ */
+const PIL_GATE_DEADLINE_MS = 2500;
+
+/**
+ * Heavy-tier gate critic runner (Task 4 `runGateCritics`). Reuses the council
+ * LLM (billed `source=council`, no cost leak) with the same tight deadline as
+ * the assessor — three critics run in parallel via `Promise.all` inside
+ * `runGateCritics`, each individually bounded by this signal.
+ */
+function buildGateCriticRunner(
+  deps: MessageProcessorDeps,
+  sessionModel: string,
+): import("../gsd/pil-gate-critic.js").RunCriticFn {
+  return async (prompt: string): Promise<string> => {
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const { resolvePlanCouncilLeader } = await import("../council/leader.js");
+    const leader = await resolvePlanCouncilLeader(sessionModel);
+    const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id, stats);
+    return llm.generate(
+      leader.modelId,
+      "You are a prompt-enrichment critic.",
+      prompt,
+      512,
+      undefined,
+      AbortSignal.timeout(PIL_GATE_DEADLINE_MS),
+    );
   };
 }
 
@@ -670,14 +713,21 @@ export class MessageProcessor {
         // but this inner try/catch is defensive fail-open insurance so even an
         // unexpected throw here keeps `depth` at its fast-classifier value —
         // syncWorkflowContext below is never skipped because of the assessor.
+        let brief = "";
         if (isComplexityAssessorEnabled()) {
           try {
+            const { buildGateContextBundle } = await import("../gsd/pil-gate-context.js");
+            const bundle = buildGateContextBundle({
+              cwd,
+              conversationDigest: deps.buildRecentTurnsSummary(),
+              brainData: pilCtx._brainData,
+            });
             const assessed = await assessComplexity({
               cwd,
               raw: pilCtx.raw,
               priorDepth: depth,
               confidence: pilCtx.confidence,
-              eeContext: undefined, // YAGNI — no new EE plumbing in this task
+              bundle,
               sessionModelId: sessionModel,
               runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
             });
@@ -691,13 +741,32 @@ export class MessageProcessor {
             // ref, and this block runs before executeToolEngine in the same turn.
             pilCtx.modelDepthTier = depth;
             if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
+
+            if (isPilGateEnrichEnabled() && assessed.enrichedPrompt) {
+              let verdict = assessed.quality?.verdict ?? "enriched";
+              brief = assessed.enrichedPrompt;
+              if (depth === "heavy") {
+                const { runGateCritics } = await import("../gsd/pil-gate-critic.js");
+                const critiqued = await runGateCritics({
+                  draftBrief: brief,
+                  draftVerdict: verdict,
+                  bundle,
+                  runCritic: buildGateCriticRunner(deps, sessionModel),
+                });
+                verdict = critiqued.verdict;
+                brief = critiqued.brief;
+              }
+              if (verdict === "adequate") brief = "";
+            }
           } catch (assessErr) {
-            console.error(
-              `[gsd-loop-host] complexity assessor threw unexpectedly, keeping fast-classifier depth: ${(assessErr as Error).message}`,
-            );
+            brief = "";
+            console.error(`[pil-gate] enrichment failed, using raw prompt: ${(assessErr as Error).message}`);
           }
         }
 
+        if (brief) {
+          pilCtx.enriched = `[PIL Gate brief]\n${brief.slice(0, 1500)}\n\n${pilCtx.enriched}`;
+        }
         getGsdLoopHost().ensureHost(cwd, sessionModel);
         syncWorkflowContext(cwd, sessionModel, depth);
       } catch (err) {
