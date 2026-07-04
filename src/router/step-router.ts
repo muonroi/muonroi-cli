@@ -31,6 +31,7 @@ import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo } from "../types/index.js";
 import { readTimeoutEnv } from "../utils/ee-logger.js";
 import { isModelDisabled, isProviderDisabled, loadUserSettings } from "../utils/settings.js";
+import { getRoutedModelByTier } from "./peak-hour.js";
 
 // ─── EE-guided SAMR override ─────────────────────────────────────────────────
 // EE_SAMR_TIMEOUT: per-call budget for consulting the EE brain about SAMR.
@@ -261,7 +262,7 @@ function resolveExecutionModel(
   excludeModelId: string,
 ): ModelInfo | undefined {
   // Try same provider first
-  const sameProvider = getModelByTier(tier, provider);
+  const sameProvider = getRoutedModelByTier(tier, provider);
   if (sameProvider && sameProvider.id !== excludeModelId) {
     // Guard: check provider-disabled and model-disabled (mirrors cross-provider branch)
     if (!isProviderDisabled(sameProvider.provider as ProviderId) && !isModelDisabled(sameProvider.id)) {
@@ -269,7 +270,7 @@ function resolveExecutionModel(
     }
   }
   // If no same-provider model in this tier, try any provider
-  const anyProvider = getModelByTier(tier);
+  const anyProvider = getRoutedModelByTier(tier);
   if (anyProvider && anyProvider.id !== excludeModelId) {
     // Only use cross-provider if the provider and model aren't disabled
     if (!isProviderDisabled(anyProvider.provider as ProviderId) && !isModelDisabled(anyProvider.id)) {

@@ -9,7 +9,7 @@
 
 import { Semantic } from "@muonroi/agent-harness-opentui";
 import * as React from "react";
-import { type SprintProgressSegment, type StatusBarState, statusBarStore } from "./store.js";
+import { type SprintProgressSegment, type StatusBarState, statusBarStore } from "../../state/status-bar-store.js";
 import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";
 

@@ -31,6 +31,77 @@ export function getCatalogHeaders(): Record<string, string> {
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+/** One peak window within a provider's local timezone (end_hour exclusive). */
+export interface CatalogPeakHourWindow {
+  start_hour: number;
+  end_hour: number;
+}
+
+/** Peak-hour rule for a provider — sourced from vendor docs via catalog API. */
+export interface CatalogProviderPeakHour {
+  source_url: string;
+  source_verified_at?: string;
+  timezone: string;
+  /** Single window — used when `windows` is absent (e.g. Z.ai 14–18). */
+  start_hour?: number;
+  end_hour?: number;
+  /** Multiple peak windows (e.g. DeepSeek official: 09–12 and 14–18 UTC+8). */
+  windows?: CatalogPeakHourWindow[];
+  sensitive_model_ids: string[];
+  fallback_model_id: string;
+  switch_fallback_providers?: string[];
+  peak_quota_multiplier?: number;
+  off_peak_quota_multiplier?: number;
+  policy_basis?: "official" | "heuristic";
+  policy_note?: string;
+}
+
+export interface CatalogProviderPolicy {
+  peak_hour?: CatalogProviderPeakHour;
+}
+
+/** Default council debate slot — one role mapped to a provider + model. */
+export interface CatalogCouncilParticipant {
+  role: "implement" | "verify" | "research";
+  provider: string;
+  tier?: "fast" | "balanced" | "premium";
+  model_id?: string;
+}
+
+export interface CatalogCouncilRouting {
+  /** Default true — spread implement/verify/research across providers when user has no roleModels. */
+  prefer_multi_provider?: boolean;
+  participants?: CatalogCouncilParticipant[];
+}
+
+/** One vision-backend slot for the text-only model proxy layer. */
+export interface CatalogVisionProxySlot {
+  provider: string;
+  model_id: string;
+}
+
+export interface CatalogVisionProxyRouting {
+  default?: CatalogVisionProxySlot;
+  ocr?: CatalogVisionProxySlot;
+  design?: CatalogVisionProxySlot;
+  fallback_chain?: CatalogVisionProxySlot[];
+}
+
+export interface CatalogRouting {
+  switch_provider_order?: string[];
+  council?: CatalogCouncilRouting;
+  vision_proxy?: CatalogVisionProxyRouting;
+}
+
+export interface CatalogDocument {
+  version: string;
+  updated_at: string;
+  description?: string;
+  models: CatalogModel[];
+  routing?: CatalogRouting;
+  provider_policies?: Record<string, CatalogProviderPolicy>;
+}
+
 export interface CatalogModel {
   id: string;
   name: string;
@@ -49,20 +120,14 @@ export interface CatalogModel {
   aliases?: string[];
   default_reasoning_effort?: string | null;
   supports_vision?: boolean;
-}
-
-interface CatalogResponse {
-  version: string;
-  updated_at: string;
-  models: CatalogModel[];
+  /** When false, model is selectable via -m but skipped by tier routing. */
+  tier_routing?: boolean;
+  /** Additional tiers for automatic routing (primary tier remains `tier`). */
+  routing_tiers?: string[];
+  roles?: string[];
 }
 
 // ─── Schema validation (catalog drift / corruption guard) ───────────────────
-// The catalog is the single source of truth for model + provider routing. A
-// silently-malformed catalog (truncated remote response, drifted bundled file,
-// hand-edit dropping a required price field) would otherwise poison every
-// tier→model resolution downstream. Validate the SHAPE we actually depend on;
-// unknown future fields are ignored (forward-compatible), not rejected.
 const CatalogModelSchema = z
   .object({
     id: z.string().min(1),
@@ -82,23 +147,101 @@ const CatalogModelSchema = z
     aliases: z.array(z.string()).optional(),
     default_reasoning_effort: z.string().nullable().optional(),
     supports_vision: z.boolean().optional(),
+    tier_routing: z.boolean().optional(),
+    routing_tiers: z.array(z.string()).optional(),
+    roles: z.array(z.string()).optional(),
   })
   .loose();
 
-const CatalogResponseSchema = z.object({
-  version: z.string(),
-  updated_at: z.string(),
-  models: z.array(CatalogModelSchema).min(1),
+const CatalogPeakHourWindowSchema = z.object({
+  start_hour: z.number().int().min(0).max(23),
+  end_hour: z.number().int().min(1).max(24),
 });
+
+const CatalogProviderPeakHourSchema = z
+  .object({
+    source_url: z.string().min(1),
+    source_verified_at: z.string().optional(),
+    timezone: z.string().min(1),
+    start_hour: z.number().int().min(0).max(23).optional(),
+    end_hour: z.number().int().min(1).max(24).optional(),
+    windows: z.array(CatalogPeakHourWindowSchema).min(1).optional(),
+    sensitive_model_ids: z.array(z.string().min(1)).min(1),
+    fallback_model_id: z.string().min(1),
+    switch_fallback_providers: z.array(z.string().min(1)).optional(),
+    peak_quota_multiplier: z.number().optional(),
+    off_peak_quota_multiplier: z.number().optional(),
+    policy_basis: z.enum(["official", "heuristic"]).optional(),
+    policy_note: z.string().optional(),
+  })
+  .refine((d) => (d.windows?.length ?? 0) > 0 || (d.start_hour != null && d.end_hour != null), {
+    message: "peak_hour requires windows or start_hour+end_hour",
+  })
+  .loose();
+
+const CatalogResponseSchema = z
+  .object({
+    version: z.string(),
+    updated_at: z.string(),
+    description: z.string().optional(),
+    models: z.array(CatalogModelSchema).min(1),
+    routing: z
+      .object({
+        switch_provider_order: z.array(z.string().min(1)).optional(),
+        council: z
+          .object({
+            prefer_multi_provider: z.boolean().optional(),
+            participants: z
+              .array(
+                z
+                  .object({
+                    role: z.enum(["implement", "verify", "research"]),
+                    provider: z.string().min(1),
+                    tier: z.enum(["fast", "balanced", "premium"]).optional(),
+                    model_id: z.string().min(1).optional(),
+                  })
+                  .loose(),
+              )
+              .optional(),
+          })
+          .optional(),
+        vision_proxy: z
+          .object({
+            default: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            ocr: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            design: z.object({ provider: z.string().min(1), model_id: z.string().min(1) }).optional(),
+            fallback_chain: z.array(z.object({ provider: z.string().min(1), model_id: z.string().min(1) })).optional(),
+          })
+          .optional(),
+      })
+      .optional(),
+    provider_policies: z
+      .record(
+        z.string(),
+        z
+          .object({
+            peak_hour: CatalogProviderPeakHourSchema.optional(),
+          })
+          .loose(),
+      )
+      .optional(),
+  })
+  .loose();
 
 /**
  * Best-effort validation for the REMOTE catalog: a transient bad response must
  * never break the CLI, so an invalid payload returns null and the caller falls
  * through to the trusted bundled catalog.
  */
-export function safeValidateCatalog(raw: unknown): CatalogModel[] | null {
+export function safeValidateCatalogDocument(raw: unknown): CatalogDocument | null {
   const parsed = CatalogResponseSchema.safeParse(raw);
-  return parsed.success ? (parsed.data.models as CatalogModel[]) : null;
+  if (!parsed.success) return null;
+  return parsed.data as CatalogDocument;
+}
+
+/** @deprecated Use safeValidateCatalogDocument — kept for callers that only need models. */
+export function safeValidateCatalog(raw: unknown): CatalogModel[] | null {
+  return safeValidateCatalogDocument(raw)?.models ?? null;
 }
 
 /**
@@ -107,7 +250,7 @@ export function safeValidateCatalog(raw: unknown): CatalogModel[] | null {
  * throw loudly with the validation issues rather than silently skipping it
  * (which would mask the defect as a confusing "cannot find catalog" later).
  */
-export function validateStaticCatalog(raw: unknown, source: string): CatalogModel[] {
+export function validateStaticCatalogDocument(raw: unknown, source: string): CatalogDocument {
   const parsed = CatalogResponseSchema.safeParse(raw);
   if (!parsed.success) {
     const issues = parsed.error.issues
@@ -116,19 +259,23 @@ export function validateStaticCatalog(raw: unknown, source: string): CatalogMode
       .join("; ");
     throw new Error(`Malformed catalog at ${source}: ${issues}`);
   }
-  return parsed.data.models as CatalogModel[];
+  return parsed.data as CatalogDocument;
 }
 
-let cachedModels: CatalogModel[] | null = null;
+export function validateStaticCatalog(raw: unknown, source: string): CatalogModel[] {
+  return validateStaticCatalogDocument(raw, source).models;
+}
+
+let cachedDocument: CatalogDocument | null = null;
 let cacheTimestamp = 0;
 
 /**
  * Try to load catalog.json from a given directory using createRequire.
  */
-function tryLoadCatalogViaRequire(dirUrl: string): CatalogResponse | null {
+function tryLoadCatalogViaRequire(dirUrl: string): unknown | null {
   try {
     const req = createRequire(dirUrl);
-    return req("./catalog.json") as CatalogResponse;
+    return req("./catalog.json");
   } catch {
     return null;
   }
@@ -137,11 +284,11 @@ function tryLoadCatalogViaRequire(dirUrl: string): CatalogResponse | null {
 /**
  * Try to load catalog.json by reading the file directly (fs).
  */
-function tryLoadCatalogViaFS(filePath: string): CatalogResponse | null {
+function tryLoadCatalogViaFS(filePath: string): unknown | null {
   try {
     if (fs.existsSync(filePath)) {
       const raw = fs.readFileSync(filePath, "utf-8");
-      return JSON.parse(raw) as CatalogResponse;
+      return JSON.parse(raw) as unknown;
     }
   } catch {
     // ignore
@@ -149,13 +296,11 @@ function tryLoadCatalogViaFS(filePath: string): CatalogResponse | null {
   return null;
 }
 
-export async function fetchCatalog(): Promise<CatalogModel[]> {
-  // Return cache if fresh
-  if (cachedModels && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
-    return cachedModels;
+export async function fetchCatalogDocument(): Promise<CatalogDocument> {
+  if (cachedDocument && Date.now() - cacheTimestamp < CACHE_TTL_MS) {
+    return cachedDocument;
   }
 
-  // Try CP endpoint with 3s timeout
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3000);
@@ -163,46 +308,34 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
     clearTimeout(timeout);
     if (res.ok) {
       const data = await res.json();
-      // Validate the remote payload before trusting it. An invalid/truncated
-      // response falls through to the bundled catalog rather than caching junk.
-      const models = safeValidateCatalog(data);
-      if (models) {
-        cachedModels = models;
+      const doc = safeValidateCatalogDocument(data);
+      if (doc) {
+        cachedDocument = doc;
         cacheTimestamp = Date.now();
-        return cachedModels;
+        return cachedDocument;
       }
     }
   } catch {
-    // CP unreachable — fall through to static
+    // remote unreachable — fall through to static
   }
 
-  // Fallback: try multiple paths to find static catalog.json
-  // Priority order: dist/models/ -> src/models/
   const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-
-  const searchPaths = [
-    // 1. Same directory as the built JS (dist/models/)
-    moduleDir,
-    // 2. src/models/ (for bun run dev from source)
-    path.resolve(moduleDir, "../src/models"),
-  ];
+  const searchPaths = [moduleDir, path.resolve(moduleDir, "../src/models")];
 
   for (const dir of searchPaths) {
-    // Try createRequire first (works in both bundled and module contexts)
     const viaRequire = tryLoadCatalogViaRequire(dir);
     if (viaRequire) {
-      cachedModels = validateStaticCatalog(viaRequire, path.join(dir, "catalog.json"));
+      cachedDocument = validateStaticCatalogDocument(viaRequire, path.join(dir, "catalog.json"));
       cacheTimestamp = Date.now();
-      return cachedModels;
+      return cachedDocument;
     }
 
-    // Try direct file read (more reliable in edge cases)
     const filePath = path.join(dir, "catalog.json");
     const viaFS = tryLoadCatalogViaFS(filePath);
     if (viaFS) {
-      cachedModels = validateStaticCatalog(viaFS, filePath);
+      cachedDocument = validateStaticCatalogDocument(viaFS, filePath);
       cacheTimestamp = Date.now();
-      return cachedModels;
+      return cachedDocument;
     }
   }
 
@@ -210,6 +343,10 @@ export async function fetchCatalog(): Promise<CatalogModel[]> {
     "Cannot find catalog.json. The package may be installed incorrectly. " +
       "Try reinstalling or setting MUONROI_API_KEY if you haven't already.",
   );
+}
+
+export async function fetchCatalog(): Promise<CatalogModel[]> {
+  return (await fetchCatalogDocument()).models;
 }
 
 export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
@@ -230,5 +367,8 @@ export function catalogModelToModelInfo(m: CatalogModel): ModelInfo {
     defaultReasoningEffort: (m.default_reasoning_effort as ReasoningEffort) ?? undefined,
     thinkingType: m.thinking_type as ModelInfo["thinkingType"],
     supportsVision: m.supports_vision ?? true,
+    tierRouting: m.tier_routing ?? true,
+    routingTiers: m.routing_tiers as ModelInfo["routingTiers"],
+    roles: m.roles,
   };
 }

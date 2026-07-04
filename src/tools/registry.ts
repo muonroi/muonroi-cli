@@ -7,10 +7,12 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { analyzeImageFromSource, askVisionProxy, listCachedImages } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
+import { loadMcpServers } from "../utils/settings.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { editFile, readFile, writeFile } from "./file.js";
@@ -26,6 +28,7 @@ import {
 } from "./git-safety.js";
 import { executeGrep } from "./grep.js";
 import { registerNativeMuonroiTools } from "./native-tools.js";
+import { registerNativeResearchTools } from "./research.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 
 interface ToolRegistryOpts {
@@ -35,6 +38,8 @@ interface ToolRegistryOpts {
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
+  /** L1 model depth tier — gates gsd_plan_review registration. */
+  depthTier?: "quick" | "standard" | "heavy";
   consultParentSession?: (question: string) => Promise<string>;
   /**
    * When false, the 3 vision-proxy tools (analyze_image, ask_vision_proxy,
@@ -51,6 +56,7 @@ interface ToolRegistryOpts {
    * isolated state (legacy per-closure behaviour).
    */
   sessionId?: string;
+  runDebate?: (topic: string) => Promise<string>;
 }
 
 /**
@@ -153,6 +159,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // One tracker per tool registry instance — shared across read/write/edit
   // calls in the same session. Enforces "must read before edit/overwrite".
   const fileTracker = new FileTracker();
+
+  // Native research tools (fetch_url, web_search) — always available.
+  // These are the in-process replacements for the old external MCP research servers.
+  registerNativeResearchTools(tools);
 
   // read_file
   tools.read_file = dynamicTool({
@@ -345,7 +355,23 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
       }
 
-      if (input.background) {
+      const isLongRunning = (c: string): boolean => {
+        const lower = c.toLowerCase().trim();
+        return (
+          /\bvite\b/.test(lower) ||
+          /\bnodemon\b/.test(lower) ||
+          /\bwebpack-dev-server\b/.test(lower) ||
+          /\bnext\s+dev\b/.test(lower) ||
+          /\bwatch\b/.test(lower) ||
+          /--watch\b/.test(lower) ||
+          /\b-w\b/.test(lower) ||
+          /\bdev-server\b/.test(lower) ||
+          /\blive-server\b/.test(lower) ||
+          /\bhttp-server\b/.test(lower)
+        );
+      };
+
+      if (input.background || isLongRunning(cmd)) {
         const result = await bash.startBackground(input.command);
         return formatResult(result);
       }
@@ -497,6 +523,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["file_path", "content"],
       }),
       execute: async (input: any) => {
+        if (!input?.file_path?.trim() || input.content === undefined || input.content === null) {
+          return {
+            success: false,
+            output:
+              'BLOCKED (empty-write_file): write_file requires non-empty "file_path" and "content". ' +
+              'Example: {"file_path":"src/foo.ts","content":"export const x = 1;\\n"}',
+          };
+        }
         const result = await writeFile(input.file_path, input.content, bash.getCwd(), fileTracker);
         return {
           success: result.success,
@@ -521,6 +555,20 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         required: ["file_path", "old_string", "new_string"],
       }),
       execute: async (input: any) => {
+        if (
+          !input?.file_path?.trim() ||
+          input.old_string === undefined ||
+          input.old_string === null ||
+          input.new_string === undefined ||
+          input.new_string === null
+        ) {
+          return {
+            success: false,
+            output:
+              "BLOCKED (empty-edit_file): edit_file requires file_path, old_string, and new_string. " +
+              'Example: {"file_path":"src/foo.ts","old_string":"a","new_string":"b"}',
+          };
+        }
         const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd(), fileTracker);
         return {
           success: result.success,
@@ -1080,6 +1128,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // and a seed-time bug once persisted a crashing vitest-worker command). The
     // muonroi-tools MCP server stays only for EXTERNAL agents. See native-tools.ts.
     registerNativeMuonroiTools(tools, { cwd: bash.getCwd() });
+
+    registerGsdWorkflowTools(tools, {
+      cwd: bash.getCwd(),
+      sessionModelId: opts?.modelId ?? "unknown",
+      sessionId: opts?.sessionId,
+      depth: opts?.depthTier ?? "standard",
+      runTask: opts?.runTask,
+      runDebate: opts?.runDebate,
+    });
   }
 
   // Vision proxy tools — only for text-only models (DeepSeek, etc.)
@@ -1088,11 +1145,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
     tools.analyze_image = dynamicTool({
       description:
-        "Proactively analyze an image file via the vision proxy. " +
-        "Use this IMMEDIATELY when you encounter any image file (.png, .jpg, .gif, .webp, .svg, etc.) " +
-        "or when the user references an image. You CANNOT see images — this tool is your eyes. " +
+        "Inspect an image and receive a <vision-observation> block — treat the result as your direct sight. " +
+        "Use IMMEDIATELY when you encounter any image file (.png, .jpg, .gif, .webp, .svg, etc.) " +
+        "or when the user references an image. Do not guess visual content. " +
         "Accepts file paths, data URIs, or base64 strings. " +
-        "Optionally provide a question to focus the analysis.",
+        "Optionally provide a question to focus the analysis (OCR, layout, specific UI element). " +
+        "If details remain unclear, call ask_vision_proxy or ask the user for another screenshot.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -1115,9 +1173,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
     tools.ask_vision_proxy = dynamicTool({
       description:
-        "Ask a follow-up question about a previously analyzed image, or analyze a new image with a specific question. " +
-        "Use this when you need to clarify visual details, compare elements, check colors, read text, etc. " +
-        "You can reference a cached image by ID, or provide a file path to analyze a new image.",
+        "Ask a follow-up about an image you are viewing (cached ID) or analyze a new file with a specific question. " +
+        "Returns a <vision-observation> — respond as if you saw it yourself. " +
+        "Use when any detail in a prior observation is unclear: zoom on a region, read text, compare colors, verify UI state. " +
+        "Reference a cached image by ID (from list_vision_cache) or provide a file path for a new image.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -1218,6 +1277,157 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   if (opts?.includeVisionTools === false) {
     for (const name of VISION_TOOL_NAMES) delete tools[name];
   }
+
+  // ── Agent introspection tools: help the inner agent discover capabilities ──
+  // These are always added last (after all filtering) so list_tools reflects reality.
+
+  tools.list_mcp_servers = dynamicTool({
+    description:
+      "List every MCP server in the current user config (enabled or not). Returns id, label, enabled, transport, endpoint, and recommended_native (if any). " +
+      "Use this to discover exactly what MCPs you have right now. For each MCP, see if there is a preferred native replacement (e.g. fetch_url instead of legacy fetch). " +
+      "Memory, playwright, figma removed from defaults. Only enabled servers contribute tools this turn.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    }),
+    execute: async () => {
+      const servers = loadMcpServers();
+
+      // Native replacement recommendations (helps agent choose better tools)
+      const RECOMMENDATIONS: Record<string, string | null> = {
+        fetch: "Prefer native fetch_url (faster, always available, no external spawn).",
+        tavily: "Prefer native web_search (direct Tavily API call, same results).",
+        context7: "Consider keeping for library docs, or cache important docs into Experience Engine for offline use.",
+        "muonroi-docs": null, // already our own controlled service
+        playwright: "Use for full browser interaction/screenshots only; fetch_url sufficient for most content needs.",
+        memory: "Use native ee_query / ee_write (Experience Engine) instead.",
+        figma: "Add manually only if needed; no native equivalent yet.",
+      };
+
+      const summary = servers.map((s) => {
+        const rec = RECOMMENDATIONS[s.id] ?? null;
+        return {
+          id: s.id,
+          label: s.label,
+          enabled: s.enabled,
+          transport: s.transport,
+          endpoint: s.url || (s.command ? `${s.command} ${(s.args || []).join(" ")}` : undefined),
+          recommended_native: rec,
+        };
+      });
+
+      return JSON.stringify({ count: summary.length, servers: summary }, null, 2);
+    },
+  });
+
+  tools.list_tools = dynamicTool({
+    description:
+      "Compact grouped summary of every tool available this turn. " +
+      "native = always-on builtins (fetch_url, web_search, bash, read_file, grep, ee_query, list_mcp_servers, list_tools, ...). " +
+      "mcp = tools from your enabled MCP servers (prefixed mcp_<server-id>__). " +
+      "Each line: name + short description (tells you purpose and rough usage). " +
+      "Call list_mcp_servers() to see your MCP sources, then this to see concrete tools + how to use them. Full parameter schemas are in the system tool list this turn.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        category: {
+          type: "string",
+          enum: ["all", "native", "mcp"],
+          description: "Optional filter.",
+        },
+      },
+      additionalProperties: false,
+    }),
+    execute: async (input: any) => {
+      const cat = (input?.category as string) || "all";
+      const grouped: { native: string[]; mcp: string[] } = { native: [], mcp: [] };
+
+      for (const [name, tool] of Object.entries(tools)) {
+        const t = tool as { description?: string };
+        const shortDesc = (t.description || "").split("\n")[0].slice(0, 140);
+        const entry = `${name}: ${shortDesc}`;
+        if (name.startsWith("mcp_")) {
+          if (cat === "all" || cat === "mcp") grouped.mcp.push(entry);
+        } else {
+          if (cat === "all" || cat === "native") grouped.native.push(entry);
+        }
+      }
+
+      grouped.native.sort();
+      grouped.mcp.sort();
+
+      return JSON.stringify(
+        {
+          total: Object.keys(tools).length,
+          native_count: grouped.native.length,
+          mcp_count: grouped.mcp.length,
+          ...grouped,
+          note: "Native tools are always preferred. MCP tools only from servers where enabled=true (see list_mcp_servers).",
+        },
+        null,
+        2,
+      );
+    },
+  });
+
+  tools.describe_tool = dynamicTool({
+    description:
+      "Get detailed usage information for a specific tool by name. Returns description, full input schema (parameters), and a short usage example or note. " +
+      "Call this when you need precise 'how to use' details for a tool (e.g. describe_tool with name='fetch_url' or name='mcp_context7__something'). " +
+      "This complements list_tools and list_mcp_servers.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Exact tool name (e.g. 'fetch_url', 'web_search', 'mcp_context7__search' or any from list_tools)",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    }),
+    execute: async (input: any) => {
+      const name = typeof input?.name === "string" ? input.name.trim() : "";
+      if (!name) return "ERROR: name is required";
+
+      const tool = (tools as any)[name];
+      if (!tool) {
+        return JSON.stringify(
+          {
+            name,
+            error: "Tool not found in current tool set. Use list_tools to see available names.",
+          },
+          null,
+          2,
+        );
+      }
+
+      const t = tool as { description?: string; inputSchema?: unknown };
+      const schema = t.inputSchema || (tool as any).parameters || null;
+
+      // Provide a minimal example note for common tools
+      const examples: Record<string, string> = {
+        fetch_url: 'Example: {"url": "https://example.com/docs", "format": "markdown"}',
+        web_search: 'Example: {"query": "muonroi building block best practices", "maxResults": 5}',
+        list_mcp_servers: "Call with no args: {}",
+        list_tools: 'Example: {"category": "native"}',
+      };
+
+      return JSON.stringify(
+        {
+          name,
+          description: t.description,
+          inputSchema: schema,
+          example: examples[name] || "See inputSchema above. Call with correct parameters.",
+          note: "Use the exact parameters from inputSchema when calling this tool.",
+        },
+        null,
+        2,
+      );
+    },
+  });
 
   return tools;
 }

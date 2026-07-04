@@ -1,7 +1,9 @@
-import { getModelByTier, getModelInfo, getModelsForProvider } from "../models/registry.js";
+import { resolveGsdPremiumModel } from "../gsd/model-tier.js";
+import { getCatalogCouncilRouting, getModelInfo, getModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
 
 const TIER_RANK: Record<string, number> = { fast: 1, balanced: 2, premium: 3 };
@@ -81,7 +83,7 @@ export function pickCouncilTaskModel(task: CouncilSubTask, leaderModelId: string
   } catch {
     return leaderModelId;
   }
-  const candidate = getModelByTier(targetTier, leaderProvider);
+  const candidate = getRoutedModelByTier(targetTier, leaderProvider);
 
   // Only accept a candidate that's on the same provider as the leader.
   // getModelByTier may fall back to "any provider" — reject that to avoid
@@ -135,6 +137,32 @@ async function isProviderReachable(provider: ProviderId): Promise<boolean> {
   return configured.includes(provider);
 }
 
+/** Plan-council leader — always premium-tier within session provider (telemetry: plan-council). */
+export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<LeaderResolution> {
+  const sessionProviderId = detectProviderForModel(sessionModelId);
+  const sessionDisabled = isProviderDisabled(sessionProviderId as ProviderId);
+  const sessionReachable = !sessionDisabled && (await isProviderReachable(sessionProviderId));
+  if (!sessionReachable) {
+    return { modelId: getRoleModel("leader") ?? sessionModelId };
+  }
+
+  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  if (catalogLeader) {
+    return { modelId: catalogLeader.id };
+  }
+
+  const premiumId = resolveGsdPremiumModel(sessionModelId);
+  const sessionTier = tierOf(sessionModelId);
+  const premiumTier = tierOf(premiumId);
+  if (premiumId !== sessionModelId && premiumTier && sessionTier && TIER_RANK[premiumTier] > TIER_RANK[sessionTier]) {
+    return { modelId: premiumId, promotedFrom: { modelId: sessionModelId, tier: sessionTier } };
+  }
+  if (premiumId !== sessionModelId) {
+    return { modelId: premiumId, defaulted: true };
+  }
+  return { modelId: sessionModelId, defaulted: true };
+}
+
 export async function resolveLeaderModelDetailed(sessionModelId: string): Promise<LeaderResolution> {
   const sessionProviderId = detectProviderForModel(sessionModelId);
   const configured = getRoleModel("leader");
@@ -145,6 +173,14 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
   const sessionReachable = !sessionDisabled && (await isProviderReachable(sessionProviderId));
   if (!sessionReachable) {
     return { modelId: configured ?? sessionModelId };
+  }
+
+  // 1. If not manually configured, and session provider has a catalog model with "leader" role, use it!
+  if (!configured) {
+    const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+    if (catalogLeader) {
+      return { modelId: catalogLeader.id };
+    }
   }
 
   // Build candidate set ON THE SESSION PROVIDER ONLY.
@@ -200,6 +236,9 @@ export async function resolveLeaderModelDetailed(sessionModelId: string): Promis
 export function resolveLeaderModel(sessionModelId: string): string {
   const configured = getRoleModel("leader");
   if (configured) return configured;
+  const sessionProviderId = detectProviderForModel(sessionModelId);
+  const catalogLeader = getModelsForProvider(sessionProviderId).find((m) => m.roles?.includes("leader"));
+  if (catalogLeader) return catalogLeader.id;
   // See resolveLeaderModelDetailed for why we no longer silently upgrade to
   // the premium tier on the session provider (user may not have access).
   return sessionModelId;
@@ -211,6 +250,56 @@ export function hasMultiProviderConfig(roleModels: Partial<Record<ModelRole, str
     if (modelId) providers.add(detectProviderForModel(modelId));
   }
   return providers.size >= 2;
+}
+
+/**
+ * Count debate roles available for auto-council gating.
+ * Uses explicit roleModels when ≥2 configured; otherwise catalog council slots.
+ */
+export function getEffectiveCouncilRoleCount(): number {
+  const explicit = Object.values(getRoleModels()).filter(Boolean).length;
+  if (explicit >= 2) return explicit;
+  const catalog = getCatalogCouncilRouting();
+  if (catalog?.participants?.length && catalog.participants.length >= 2) {
+    return catalog.participants.length;
+  }
+  return explicit;
+}
+
+async function resolveCatalogCouncilParticipants(): Promise<Array<{ role: ModelRole; model: string }>> {
+  const config = getCatalogCouncilRouting();
+  if (!config?.participants?.length) return [];
+
+  const candidates: Array<{ role: ModelRole; model: string }> = [];
+  const usedModels = new Set<string>();
+
+  for (const slot of config.participants) {
+    const role = slot.role;
+    const provider = slot.provider as ProviderId;
+    if (isProviderDisabled(provider)) continue;
+    if (!(await isProviderReachable(provider))) continue;
+
+    let modelId: string | undefined;
+    if (slot.model_id) {
+      const info = getModelInfo(slot.model_id);
+      if (info?.provider === provider) modelId = slot.model_id;
+    }
+    if (!modelId && slot.tier) {
+      const m = getRoutedModelByTier(slot.tier, provider);
+      if (m?.provider === provider) modelId = m.id;
+    }
+    if (!modelId) {
+      const models = getModelsForProvider(provider);
+      const routable = models.find((m) => m.tierRouting !== false);
+      modelId = routable?.id ?? models[0]?.id;
+    }
+    if (!modelId || usedModels.has(modelId)) continue;
+
+    candidates.push({ role, model: modelId });
+    usedModels.add(modelId);
+  }
+
+  return candidates.length >= 2 ? candidates : [];
 }
 
 export async function resolveParticipants(
@@ -232,6 +321,12 @@ export async function resolveParticipants(
       if (canReach) candidates.push({ role, model: modelId });
     }
     if (candidates.length >= 2) return candidates;
+  }
+
+  // Catalog-defined multi-provider lineup (default for deepseek+zai+opencode-go+xai stack).
+  if (preferMultiProvider) {
+    const catalogCandidates = await resolveCatalogCouncilParticipants();
+    if (catalogCandidates.length >= 2) return catalogCandidates;
   }
 
   const mainProviderId = detectProviderForModel(sessionModelId);
@@ -274,8 +369,11 @@ async function resolveSameProviderCandidates(
   const candidates: Array<{ role: ModelRole; model: string }> = [];
 
   for (const role of roles) {
-    const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
-    let picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
+    let picked = providerModels.find((m) => m.roles?.includes(role) && !usedModels.has(m.id));
+    if (!picked) {
+      const prefs = tierPreference[role] ?? ["balanced", "fast", "premium"];
+      picked = providerModels.find((m) => prefs.some((t) => m.tier === t) && !usedModels.has(m.id));
+    }
     if (!picked) picked = providerModels.find((m) => !usedModels.has(m.id));
     if (!picked) picked = providerModels[0];
 

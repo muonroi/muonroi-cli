@@ -32,7 +32,7 @@ describe("modal focus E2E", () => {
     // the composer. The composer's focus prop checks !showApiKeyModal among
     // the gating conditions (src/ui/app.tsx:6336-6345).
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash"],
       idleTimeoutMs: 20_000,
     });
     proc = ctx.proc;

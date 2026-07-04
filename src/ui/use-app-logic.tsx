@@ -26,6 +26,7 @@ import { buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js
 import { continueAsCouncil } from "../scaffold/continue-as-council.js";
 import { initNewProject } from "../scaffold/init-new.js";
 import { pointToExisting } from "../scaffold/point-to-existing.js";
+import { statusBarStore, wireStatusBar } from "../state/status-bar-store.js";
 import {
   appendCompaction,
   getNextMessageSequence,
@@ -86,6 +87,7 @@ import {
 import { discoverSkills, formatSkillsForChat } from "../utils/skills";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
+import { setRetryReporter } from "../utils/visible-retry.js";
 import { buildVerifyPrompt } from "../verify/entrypoint";
 import {
   buildSubagentBrowseRows,
@@ -159,7 +161,6 @@ import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal"
 import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
 import { StatusBar } from "./status-bar/index.js";
-import { statusBarStore, wireStatusBar } from "./status-bar/store.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark } from "./theme";
 import { relaunchWithSession } from "./utils/relaunch.js";
@@ -661,6 +662,15 @@ export function useAppLogic(props: AppLogicProps) {
     setActiveToast({ level, text, id: toastIdRef.current });
   }, []);
 
+  // Route visible-retry progress ("[retry] rate-limited (429) — waiting Xs …")
+  // through the toast surface. Without this it falls back to a raw
+  // process.stderr.write, which under OpenTUI's raw-mode alt-screen paints over
+  // the composer input frame (user-reported bad UX).
+  useEffect(() => {
+    setRetryReporter((message, level) => pushToast(level === "warn" ? "warn" : "info", message));
+    return () => setRetryReporter(null);
+  }, [pushToast]);
+
   // Stable handler ΓÇö only reads from refs, never recreated, so the patched
   // emitEvent reference below remains valid for the lifetime of the runtime.
   const handleHarnessEvent = useCallback(
@@ -1055,6 +1065,10 @@ export function useAppLogic(props: AppLogicProps) {
   const councilDoneAtRef = useRef<Map<string, number>>(new Map());
   const [councilPhases, setCouncilPhases] = useState<CouncilPhaseEvent[]>([]);
   const [councilMessages, setCouncilMessages] = useState<CouncilMessage[]>([]);
+  // Debate transcript pill: collapsed by default (shows a live tail while the
+  // debate runs, a one-line summary once done). Ctrl+O expands to the full
+  // back-and-forth. Synthesis renders outside the pill so it stays visible.
+  const [councilTranscriptExpanded, setCouncilTranscriptExpanded] = useState(false);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
@@ -3288,7 +3302,12 @@ export function useAppLogic(props: AppLogicProps) {
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
-                  if (cs.state === "start" && cs.label) {
+                  // Placeholder "composing…" bubbles only make sense for debate
+                  // speaker turns (opening/exchange) that later swap for a real
+                  // CouncilMessageBubble. For clarify/plan/research/evaluate/
+                  // synthesis the live status line already covers it, so a
+                  // placeholder there is redundant noise at council start.
+                  if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                     const placeholderRole = cs.label;
                     const isLeader = /^leader\b/i.test(placeholderRole);
                     const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
@@ -4098,7 +4117,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "council_status" && chunk.councilStatus) {
                     const cs = chunk.councilStatus;
-                    if (cs.state === "start" && cs.label) {
+                    // Placeholder "composing…" only for debate speaker turns
+                    // (opening/exchange) — see the council_status handler above.
+                    if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                       const placeholderRole = cs.label;
                       const isLeader = /^leader\b/i.test(placeholderRole);
                       const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
@@ -4351,7 +4372,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "council_status" && chunk.councilStatus) {
                     const cs = chunk.councilStatus;
-                    if (cs.state === "start" && cs.label) {
+                    // Placeholder "composing…" only for debate speaker turns
+                    // (opening/exchange) — see the council_status handler above.
+                    if (cs.state === "start" && cs.label && (cs.phase === "opening" || cs.phase === "exchange")) {
                       const placeholderRole = cs.label;
                       const isLeader = /^leader\b/i.test(placeholderRole);
                       const styleForRole = isLeader ? null : resolveStyle(placeholderRole);
@@ -4914,6 +4937,15 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Ctrl+O — toggle the council debate transcript pill between the collapsed
+      // summary/tail and the full back-and-forth. Global (unbound elsewhere); a
+      // no-op visually when no debate turns exist, so an unconditional toggle is
+      // safe and avoids threading councilMessages into this useCallback.
+      if (key.name === "o" && key.ctrl && !key.meta) {
+        setCouncilTranscriptExpanded((v) => !v);
+        return;
+      }
+
       // Point-to-existing form intercepts all input while open.
       if (pointToExistingForm) {
         if (pointToExistingForm.step === "input") {
@@ -5367,7 +5399,7 @@ export function useAppLogic(props: AppLogicProps) {
               ans.kind === "choice" || ans.kind === "freetext" ? cardOptions[cardIdx]?.label : undefined;
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
-            agent.respondToCouncilQuestion(qid, ans.text);
+            agent.respondToCouncilQuestion(qid, ans.text, pendingQuestion.question);
             setMessages((prev) => [
               ...prev,
               buildUserEntry(
@@ -5437,7 +5469,7 @@ export function useAppLogic(props: AppLogicProps) {
             setPendingCouncilQuestionSync(null);
             setCouncilCardStateSync(null);
             clearInterCardHeartbeat();
-            agent.respondToCouncilQuestion(qid, "");
+            agent.respondToCouncilQuestion(qid, "", pendingQuestion.question);
             // Task 2.4 ΓÇö emit askcard-cancel harness event (agent-mode only).
             try {
               agentRuntime?.emitEvent({
@@ -6782,7 +6814,7 @@ export function useAppLogic(props: AppLogicProps) {
       const qid = pendingCouncilQuestion.questionId;
       setPendingCouncilQuestionSync(null);
       setCouncilCardStateSync(null);
-      agent.respondToCouncilQuestion(qid, message.trim());
+      agent.respondToCouncilQuestion(qid, message.trim(), pendingCouncilQuestion.question);
       setMessages((prev) => [...prev, buildUserEntry(message.trim())]);
       return;
     }
@@ -6868,6 +6900,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilCardState,
     councilInfoCards,
     councilMessages,
+    councilTranscriptExpanded,
     councilPhases,
     councilPlaceholders,
     councilProgress,

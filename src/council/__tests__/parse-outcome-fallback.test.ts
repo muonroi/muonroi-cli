@@ -135,4 +135,42 @@ describe("parseOutcome — raw log + shape-based fallback (CQ-20)", () => {
     expect(result?.outcome?.sections?.strengths).toEqual(["- Fast startup", "- Low cost"]);
     expect(result?.outcome?.sections?.summary_text).toContain("The approach is solid overall.");
   });
+
+  it("Test 7: model-first nextActions — keeps valid vocabulary, drops junk", async () => {
+    const json = JSON.stringify({
+      type: "investigation",
+      summary: "The rerender cascade originates in the shared root context.",
+      nextActions: [
+        { action: "continue_session", label: "Keep working with this", reason: "Deliverable is the conclusion." },
+        { action: "generate_plan", label: "Draft the fix plan" }, // no reason — still valid
+        { action: "nuke_everything", label: "Invalid action" }, // not in vocabulary → dropped
+        { action: "save_exit", reason: "no label" }, // missing label → dropped
+        "not-an-object", // malformed → dropped
+      ],
+    });
+    const result = await runPlanningWith(json);
+    const actions = result?.outcome?.nextActions;
+    expect(actions).toBeDefined();
+    expect(actions?.map((a: { action: string }) => a.action)).toEqual(["continue_session", "generate_plan"]);
+    // Terse action (no reason) survives; reason stays undefined for index.ts to
+    // fall back to the label.
+    expect(actions?.[1]).toEqual({ action: "generate_plan", label: "Draft the fix plan", reason: undefined });
+  });
+
+  it("Test 8: no nextActions field → outcome.nextActions is undefined (fallback options)", async () => {
+    const json = JSON.stringify({ type: "decision", summary: "Go with option A for simplicity." });
+    const result = await runPlanningWith(json);
+    expect(result?.outcome).not.toBeNull();
+    expect(result?.outcome?.nextActions).toBeUndefined();
+  });
+
+  it("Test 9: nextActions present but all invalid → undefined (not an empty menu)", async () => {
+    const json = JSON.stringify({
+      type: "decision",
+      summary: "A long enough decision summary to parse correctly here.",
+      nextActions: [{ action: "bogus", label: "x" }],
+    });
+    const result = await runPlanningWith(json);
+    expect(result?.outcome?.nextActions).toBeUndefined();
+  });
 });

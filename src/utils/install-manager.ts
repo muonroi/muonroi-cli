@@ -279,7 +279,8 @@ export function detectInstallMethod(homeDir = os.homedir()): InstallMethod {
 
   // Not under node_modules and not launched by node/bun → standalone binary.
   const exeBase = ((process.execPath || "").replace(/\\/g, "/").split("/").pop() ?? "").toLowerCase();
-  if (!modPath.includes("/node_modules/") && !/^(node|bun)(\.exe)?$/.test(exeBase)) {
+  const isNodeOrBunRunner = /^(node|bun)(\.exe|-[\d.]+)?$/i.test(exeBase);
+  if (!modPath.includes("/node_modules/") && !isNodeOrBunRunner) {
     return "compiled";
   }
 

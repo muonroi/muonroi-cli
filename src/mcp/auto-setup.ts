@@ -32,6 +32,30 @@ function removeDeprecatedToolsMcp(servers: McpServerConfig[]): boolean {
   return true;
 }
 
+/**
+ * Remove deprecated external MCP servers that are no longer seeded by default.
+ *
+ * - memory: superseded by native Experience Engine (ee_query + ee_write)
+ * - playwright: heavy browser automation; native research tools (fetch_url/web_search) cover most needs. Can be added manually.
+ * - figma: requires API key + specific workflow; removed from defaults. Can be added manually if needed.
+ */
+function removeDeprecatedExternalMcps(servers: McpServerConfig[]): boolean {
+  const idsToRemove = new Set(["memory", "playwright", "figma"]);
+  let removed = false;
+  for (let i = servers.length - 1; i >= 0; i--) {
+    if (idsToRemove.has(servers[i].id)) {
+      servers.splice(i, 1);
+      removed = true;
+    }
+  }
+  if (removed) {
+    console.error(
+      "[mcp:auto-setup] removed deprecated external MCPs (memory/playwright/figma). Use native EE for memory; fetch_url + web_search for research. Add playwright/figma manually only if full integration required.",
+    );
+  }
+  return removed;
+}
+
 const DEFAULT_CONFIGS: McpServerConfig[] = [
   {
     // Authoritative source for the Muonroi ecosystem (BB/.NET template recipes,
@@ -45,52 +69,30 @@ const DEFAULT_CONFIGS: McpServerConfig[] = [
     url: "https://docs-mcp.muonroi.com/mcp",
   },
   {
-    id: "playwright",
-    label: "Playwright",
-    enabled: true,
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@playwright/mcp"],
-  },
-  {
-    id: "memory",
-    label: "Memory",
-    enabled: false,
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "@modelcontextprotocol/server-memory"],
-  },
-  {
-    id: "figma",
-    label: "Figma",
-    enabled: false,
-    transport: "stdio",
-    command: "npx",
-    args: ["-y", "figma-developer-mcp", "--stdio"],
-    env: { FIGMA_API_KEY: "" },
-  },
-  {
     id: "context7",
     label: "Context7 (Library Docs)",
     enabled: true,
     transport: "http",
     url: "https://mcp.context7.com/mcp",
   },
+  // fetch and tavily are now provided as *native* builtins (fetch_url / web_search).
+  // The external MCP versions are kept in the catalog for users who explicitly want them,
+  // but are no longer enabled by default for the inner agent.
   {
     id: "fetch",
-    label: "Fetch (URL → markdown)",
-    enabled: true,
+    label: "Fetch (URL → markdown) [MCP legacy]",
+    enabled: false,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "mcp-fetch-server"],
+    command: "bun",
+    args: ["x", "-y", "mcp-fetch-server"],
   },
   {
     id: "tavily",
-    label: "Tavily Web Search",
+    label: "Tavily Web Search [MCP legacy]",
     enabled: false,
     transport: "stdio",
-    command: "npx",
-    args: ["-y", "tavily-mcp"],
+    command: "bun",
+    args: ["x", "-y", "tavily-mcp"],
     env: { TAVILY_API_KEY: "" },
   },
 ];
@@ -116,10 +118,39 @@ function migrateServers(servers: McpServerConfig[]): boolean {
   return changed;
 }
 
+/**
+ * Migrate any legacy "npx" stdio entries (from older default seeds or manual config)
+ * to "bun x" form. npx shims frequently produce immediate "Connection closed"
+ * under Bun on Windows; bun x gives clean stdio pipes. Idempotent.
+ */
+function migrateNpxToBunx(servers: McpServerConfig[]): boolean {
+  let changed = false;
+  for (const server of servers) {
+    if (server.transport === "stdio" && server.command === "npx") {
+      server.command = "bun";
+      const rest = (server.args ?? []).filter((a) => a !== "-y");
+      server.args = ["x", "-y", ...rest];
+      changed = true;
+    }
+  }
+  if (changed) {
+    console.error(
+      "[mcp:auto-setup] migrated legacy npx-based MCP servers to bun x (fixes Connection closed on Bun/Windows)",
+    );
+  }
+  return changed;
+}
+
 export function ensureDefaultMcpServers(): McpServerConfig[] {
   try {
     const existing = loadMcpServers();
     let dirty = migrateServers(existing);
+
+    // Upgrade legacy npx runners (most important fix for "Connection closed" during warm-up).
+    if (migrateNpxToBunx(existing)) dirty = true;
+
+    // Remove deprecated external MCPs (memory/playwright/figma) — replaced by native or manual opt-in.
+    if (removeDeprecatedExternalMcps(existing)) dirty = true;
 
     // muonroi-tools is no longer self-spawned by the CLI — its capabilities
     // (ee_query/ee_feedback/ee_health/usage_forensics/lsp_query/setup_guide/

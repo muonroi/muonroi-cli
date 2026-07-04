@@ -44,6 +44,8 @@ export interface TaskRequest {
   description: string;
   prompt: string;
   maxToolRounds?: number;
+  /** When set, bypasses parent-tier cap and uses this model for the sub-agent. */
+  modelId?: string;
 }
 
 export interface TaskRun {
@@ -501,6 +503,11 @@ export interface ModelInfo {
   supportsReasoningEffort?: boolean;
   thinkingType?: "enabled" | "adaptive";
   supportsVision?: boolean;
+  /** When false, excluded from getModelByTier / automatic compaction routing. Default: routable. */
+  tierRouting?: boolean;
+  /** Extra tiers this model may satisfy in getModelByTier (primary tier remains `tier`). */
+  routingTiers?: ModelTier[];
+  roles?: string[];
 }
 
 export type AgentMode = "agent" | "plan" | "ask";

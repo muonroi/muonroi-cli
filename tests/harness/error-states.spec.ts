@@ -42,7 +42,7 @@ describe("error states E2E", { retry: 2 }, () => {
     const ctx = await spawnHarness({
       // Override --mock-llm to the error fixture dir. helpers.ts passes the
       // default dir first; commander uses the last --mock-llm value.
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash", "--mock-llm", ERROR_FIXTURES],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash", "--mock-llm", ERROR_FIXTURES],
       env: { MUONROI_NO_SHELL_HOLD: "1" },
     });
     proc = ctx.proc;

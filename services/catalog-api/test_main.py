@@ -179,3 +179,108 @@ def test_real_catalog_validates():
     cat = catalog_main.load_catalog(str(real))
     assert len(cat.models) > 0
     assert cat.version
+
+
+def test_real_catalog_provider_policies_peak_hour():
+    """Shipped catalog must expose vendor-sourced peak-hour rules for CLI routing."""
+    real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
+    catalog_main.load_catalog.cache_clear()
+    cat = catalog_main.load_catalog(str(real))
+    assert cat.provider_policies is not None
+    zai = cat.provider_policies.get("zai")
+    assert zai is not None and zai.peak_hour is not None
+    ph = zai.peak_hour
+    assert ph.timezone == "Asia/Shanghai"
+    assert ph.start_hour == 14
+    assert ph.end_hour == 18
+    assert "glm-5.2" in ph.sensitive_model_ids
+    assert ph.fallback_model_id == "glm-4.7"
+    assert ph.policy_basis is None or ph.policy_basis == "official"
+    ds = cat.provider_policies.get("deepseek")
+    assert ds is not None and ds.peak_hour is not None
+    assert ds.peak_hour.fallback_model_id == "deepseek-v4-flash"
+    assert ds.peak_hour.policy_basis == "official"
+    assert ds.peak_hour.windows is not None
+    assert len(ds.peak_hour.windows) == 2
+    assert ds.peak_hour.windows[0].start_hour == 9
+    assert ds.peak_hour.windows[0].end_hour == 12
+    assert ds.peak_hour.windows[1].start_hour == 14
+    assert ds.peak_hour.windows[1].end_hour == 18
+    assert cat.routing is not None
+    assert cat.routing.switch_provider_order == ["deepseek", "zai", "opencode-go", "xai"]
+    assert cat.routing.council is not None
+    assert cat.routing.council.prefer_multi_provider is True
+    assert len(cat.routing.council.participants or []) == 3
+    roles = {p.role for p in (cat.routing.council.participants or [])}
+    assert roles == {"implement", "verify", "research"}
+    assert cat.routing.vision_proxy is not None
+    assert cat.routing.vision_proxy.default is not None
+    assert cat.routing.vision_proxy.default.provider == "zai"
+    assert cat.routing.vision_proxy.default.model_id == "glm-4.6v-flash"
+    assert cat.routing.vision_proxy.design is not None
+    assert cat.routing.vision_proxy.design.model_id == "glm-5.2"
+    assert cat.routing.vision_proxy.fallback_chain is not None
+    assert len(cat.routing.vision_proxy.fallback_chain) >= 1
+
+
+def test_list_models_includes_provider_policies(client: TestClient, monkeypatch, tmp_path: Path):
+    catalog = {
+        "version": "9.9",
+        "updated_at": "2026-06-06",
+        "models": [
+            {
+                "id": "alpha-fast",
+                "name": "Alpha Fast",
+                "provider": "acme",
+                "tier": "fast",
+                "context_window": 128000,
+                "max_output_tokens": 8000,
+                "input_price_per_million": 0.1,
+                "output_price_per_million": 0.2,
+                "reasoning": False,
+                "description": "fast one",
+            },
+        ],
+        "routing": {"switch_provider_order": ["acme", "globex"]},
+        "provider_policies": {
+            "acme": {
+                "peak_hour": {
+                    "source_url": "https://example.com/policy",
+                    "timezone": "Asia/Shanghai",
+                    "start_hour": 14,
+                    "end_hour": 18,
+                    "sensitive_model_ids": ["alpha-fast"],
+                    "fallback_model_id": "alpha-fast",
+                }
+            }
+        },
+    }
+    p = tmp_path / "catalog.json"
+    p.write_text(json.dumps(catalog), encoding="utf-8")
+    monkeypatch.setenv("CATALOG_JSON_PATH", str(p))
+    catalog_main.load_catalog.cache_clear()
+    c = TestClient(catalog_main.app)
+    r = c.get("/api/v1/models")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["routing"]["switch_provider_order"] == ["acme", "globex"]
+    assert body["provider_policies"]["acme"]["peak_hour"]["start_hour"] == 14
+
+
+def test_real_catalog_zai_flash_excluded_from_tier_routing(monkeypatch):
+    """glm-4.7-flash must carry tier_routing=false so CLI compaction skips the free pool."""
+    real = Path(__file__).resolve().parents[2] / "src" / "models" / "catalog.json"
+    monkeypatch.setenv("CATALOG_JSON_PATH", str(real))
+    catalog_main.load_catalog.cache_clear()
+    cat = catalog_main.load_catalog(str(real))
+    flash = next(m for m in cat.models if m.id == "glm-4.7-flash")
+    assert flash.tier_routing is False
+    g47 = next(m for m in cat.models if m.id == "glm-4.7")
+    assert g47.tier == "balanced"
+    assert g47.routing_tiers == ["fast"]
+    g52 = next(m for m in cat.models if m.id == "glm-5.2")
+    g51 = next(m for m in cat.models if m.id == "glm-5.1")
+    assert cat.models.index(g52) < cat.models.index(g51)
+    assert g51.tier_routing is False
+    v5 = next(m for m in cat.models if m.id == "glm-5v-turbo")
+    assert v5.tier_routing is False

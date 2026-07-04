@@ -1,20 +1,9 @@
 import { useEffect, useState } from "react";
-import type { CouncilStatusData, CouncilStatusPhase } from "../../types/index.js";
+import type { CouncilStatusData } from "../../types/index.js";
 import type { Theme } from "../theme.js";
 
 const SPINNER_FRAMES = ["⬒", "⬔", "⬓", "⬕"];
 const DONE_HOLD_MS = 1500;
-
-const PHASE_LABEL: Record<CouncilStatusPhase, string> = {
-  clarify: "clarify",
-  plan_debate: "plan",
-  research: "research",
-  opening: "opening",
-  exchange: "exchange",
-  evaluate: "evaluate",
-  synthesis: "synthesis",
-  summary: "summary",
-};
 
 function Spinner() {
   const [frame, setFrame] = useState(0);
@@ -63,7 +52,6 @@ export function CouncilStatusList({ statuses, theme: t }: CouncilStatusListProps
               <text fg={markerColor}>{marker}</text>
               <text fg={labelColor}>{` ${s.label}`}</text>
               <text fg={t.textMuted}>{` ${meta}`}</text>
-              <text fg={t.textDim}>{`  [${PHASE_LABEL[s.phase]}]`}</text>
             </box>
             {s.detail && (
               <box paddingLeft={2}>

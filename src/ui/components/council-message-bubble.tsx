@@ -1,13 +1,16 @@
 import type { CouncilMessage } from "../../types/index.js";
 import type { Theme } from "../theme.js";
-import { computeBubbleLayout } from "./bubble-layout.js";
 import { truncateCodeBlocks } from "./code-block-truncate.js";
 import type { RoleStyle } from "./role-palette.js";
 
 export interface CouncilMessageBubbleProps {
   msg: CouncilMessage;
   terminalCols: number;
-  /** "left" | "right" — computed by usePairSideMap in container, NOT on the message */
+  /**
+   * Legacy left/right pairing hint. The debate now renders as a single linear
+   * group-chat stream (WhatsApp-style), so this is ignored — kept only for
+   * call-site/back-compat. Do not reintroduce side-based alignment.
+   */
   side: "left" | "right";
   /** Stable role → style resolver from useRolePalette */
   resolveStyle: (role: string) => RoleStyle;
@@ -45,66 +48,38 @@ export function buildQuoteLine(partnerLastText: string, partnerRole: string): st
   return `↪ ${partnerRole}: "${excerpt}${ellipsis}"`;
 }
 
-function FlatDebateBubble({ msg, style, theme }: { msg: CouncilMessage; style: RoleStyle; theme: Theme }) {
-  const header = buildHeader(msg, style);
-  const footer = buildFooter(msg);
-  return (
-    <box flexDirection="column" marginBottom={1}>
-      <text fg={style.color} attributes={1}>
-        {header}
-      </text>
-      <text fg={theme.text}>{msg.text.trim()}</text>
-      <text fg={theme.textMuted}>{footer}</text>
-    </box>
-  );
-}
-
+/**
+ * Linear group-chat message row. Every speaker renders the same way — a
+ * role-colored left bar + a bold role-colored header (`● Role · model`), the
+ * body, and a muted footer — appended in chronological order like a WhatsApp
+ * group chat. No left/right/bubble alignment: the reader follows one downward
+ * stream instead of a two-column ping-pong. The role color (from the shared
+ * palette) is the sole visual identity per speaker, so a long debate stays
+ * easy to track.
+ */
 export function CouncilMessageBubble({
   msg,
-  terminalCols,
-  side,
   resolveStyle,
   partnerLastText,
   partnerRole,
   theme,
 }: CouncilMessageBubbleProps) {
-  const layout = computeBubbleLayout(terminalCols);
   const style = resolveStyle(msg.speaker.role);
-
-  if (layout.fallback) {
-    return <FlatDebateBubble msg={msg} style={style} theme={theme} />;
-  }
-
-  const isRight = side === "right";
-  const indent = isRight ? layout.rightIndent : 0;
   const header = buildHeader(msg, style);
   const footer = buildFooter(msg);
   const bodyText = truncateCodeBlocks(msg.text.trim());
   const roundLabel = msg.round !== undefined ? `Round ${msg.round} · ` : "";
 
   return (
-    <box flexDirection="column" marginBottom={1}>
+    <box flexDirection="column" marginBottom={1} border={["left"]} borderColor={style.color} paddingLeft={2}>
       {partnerLastText && partnerRole && (
-        <box marginLeft={indent}>
-          <text fg={theme.textMuted}>{buildQuoteLine(partnerLastText, partnerRole)}</text>
-        </box>
+        <text fg={theme.textMuted}>{buildQuoteLine(partnerLastText, partnerRole)}</text>
       )}
-
-      <box
-        marginLeft={indent}
-        width={layout.bubbleCols}
-        borderStyle="single"
-        borderColor={style.color}
-        flexDirection="column"
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        <text fg={style.color} attributes={1}>
-          {header}
-        </text>
-        <text fg={theme.text}>{bodyText}</text>
-        <text fg={theme.textMuted}>{`${roundLabel}${footer}`}</text>
-      </box>
+      <text fg={style.color} attributes={1}>
+        {header}
+      </text>
+      <text fg={theme.text}>{bodyText}</text>
+      <text fg={theme.textMuted}>{`${roundLabel}${footer}`}</text>
     </box>
   );
 }

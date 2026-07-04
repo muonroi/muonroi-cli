@@ -21,6 +21,15 @@
 import type { GsdPhase } from "../gsd/types.js";
 import type { ComplexityTier } from "./complexity.js";
 
+/** When true and tier is standard/heavy, CHECK-PLAN points to gsd_plan_review tool. */
+export function buildNativeCheckPlanHint(): string {
+  return (
+    "  4. CHECK-PLAN — call gsd_plan_review (native council) BEFORE executing. " +
+    "Multi-perspective review spawns research/skeptic/architect sub-agents; leader synthesizes PLAN-VERIFY.md. " +
+    "gsd_execute is blocked until verdict: pass."
+  );
+}
+
 export interface DirectiveInput {
   /**
    * Model-decided work depth (agent-first — see layer1 `llm-classify`). Drives
@@ -64,6 +73,8 @@ export interface DirectiveInput {
    * the agent answered in English).
    */
   replyLanguage?: string;
+  /** When MUONROI_GSD_NATIVE=1, heavy/standard rubrics reference native tools. */
+  nativeGsd?: boolean;
 }
 
 export interface DirectiveOutput {
@@ -123,12 +134,15 @@ export function buildLanguageNudge(lang: string): string {
 
 function buildHeavy(input: DirectiveInput): string {
   const phaseHint = input.phase ? ` (hint: this reads like a "${input.phase}" task)` : "";
+  const checkPlan = input.nativeGsd
+    ? buildNativeCheckPlanHint()
+    : "  4. CHECK-PLAN — review your own plan BEFORE executing: does it cover the acceptance criteria, handle the edge cases, and match what the user actually asked? Revise until it does (update the todo_write list if steps change). Confirm with the user only if the plan diverges from their intent.";
   return [
     `${HEADER} This reads like a HEAVY task${phaseHint} — architectural, cross-cutting, multi-file, or with real unresolved design choices. Don't start editing yet; work through these phases:`,
     "  1. DISCUSS — surface the decisions/ambiguities that actually change the design. For the ones the prompt doesn't already answer, ask up front with AskUserQuestion (put your recommended option first; write the question text in the user's language). Skip questions the prompt already settles — don't interrogate.",
-    "  2. RESEARCH — gather the codebase facts the task depends on: read/grep the relevant modules, and dispatch parallel research Agents when the areas are independent. When you delegate, give each sub-agent a NON-overlapping scope and tell it the exact return shape you need (findings as file:line + a one-line conclusion) — only the sub's final synthesis re-enters your context. Ground every later decision in what you actually found, not assumptions.",
-    "  3. PLAN — write a concrete, numbered plan: the change per file, the order, and the acceptance criteria (how you'll know it's done). Then record the plan as a todo_write checklist (one item per step) so the user sees a live progress list.",
-    "  4. CHECK-PLAN — review your own plan BEFORE executing: does it cover the acceptance criteria, handle the edge cases, and match what the user actually asked? Revise until it does (update the todo_write list if steps change). Confirm with the user only if the plan diverges from their intent.",
+    "  2. RESEARCH — gather the codebase facts the task depends on: read/grep the relevant modules, and dispatch parallel research Agents when the areas are independent. When you delegate (via `delegate`), give each sub-agent a NON-overlapping scope and tell it the exact return shape you need. Regularly check background tasks and subagents using `delegation_list` / `delegation_read` (or `process_list` / `process_logs` for shell processes) to monitor progress, and terminate them with `delegation_kill` / `process_stop` if they are no longer needed.",
+    "  3. PLAN — write a concrete, numbered plan via gsd_plan (or PLAN.md): the change per file, the order, and the acceptance criteria (how you'll know it's done). Then record the plan as a todo_write checklist (one item per step) so the user sees a live progress list.",
+    checkPlan,
     "  5. IMPLEMENT — execute in atomic steps; parallelize independent work. Keep the todo_write list accurate: mark each item in_progress before you start it and completed when it lands (exactly ONE item in_progress at a time). When you're in a git repo, COMMIT each completed chunk before starting the next one (small, logically-scoped commits; message ends with the mandatory attribution line) — do NOT pile the whole task into one commit at the end.",
     "  6. VERIFY — run the relevant tests / lint / type-check and report evidence (command + result) before claiming done.",
     "This depth is a recommendation from how the task reads. If, once you look, it's genuinely smaller than it appears, say so and drop to the STANDARD flow rather than over-processing it.",
@@ -156,10 +170,13 @@ function buildStandard(input: DirectiveInput): string {
       "If the limits are blown and you still have no fix, STOP and report what you tried + why you're stuck.",
     ].join("\n");
   }
+  const checkStep = input.nativeGsd
+    ? "  2. CHECK — call gsd_plan_review (lightweight council: research + skeptic perspectives) before editing files."
+    : "  2. CHECK — sanity-check that plan against the real code (read the key files you named) and against the user's intent; fix the plan if reality differs. If a genuine ambiguity blocks you, ask ONE focused question via AskUserQuestion instead of guessing.";
   return [
     `${HEADER} This reads like a STANDARD task${phaseHint} — work like a senior engineer, but keep it lightweight:`,
-    "  1. PLAN — state a short, concrete plan: the files/functions you'll touch and in what order. A few bullets in your reply, not an essay. If it breaks into ≥3 steps, also record them with todo_write so the user gets a live checklist.",
-    "  2. CHECK — sanity-check that plan against the real code (read the key files you named) and against the user's intent; fix the plan if reality differs. If a genuine ambiguity blocks you, ask ONE focused question via AskUserQuestion instead of guessing.",
+    "  1. PLAN — state a short, concrete plan via gsd_plan: the files/functions you'll touch and in what order. A few bullets in your reply, not an essay. If it breaks into ≥3 steps, also record them with todo_write so the user gets a live checklist.",
+    checkStep,
     "  3. IMPLEMENT — execute the plan in small steps with the appropriate tools. If you made a todo_write checklist, keep it updated as you go (exactly one item in_progress at a time). When you're in a git repo, COMMIT each cohesive chunk as it lands (small commits; message ends with the mandatory attribution line) rather than batching everything into one final commit.",
     "  4. VERIFY — run the relevant tests / type-check / quick smoke and report evidence before claiming done.",
     "You don't need subagents or a discussion round for this. But if it turns out to be architectural or spans many files, escalate to the HEAVY flow (discuss → research → checked plan) rather than charging ahead.",

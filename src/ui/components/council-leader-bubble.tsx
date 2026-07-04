@@ -1,6 +1,5 @@
 import type { CouncilMessage } from "../../types/index.js";
 import { dark } from "../theme.js";
-import { computeBubbleLayout } from "./bubble-layout.js";
 
 export interface CouncilLeaderBubbleProps {
   msg: CouncilMessage;
@@ -12,29 +11,25 @@ export function buildLeaderHeader(round: number | undefined): string {
 }
 
 /**
- * Centered, narrow (40% width), gray-bordered bubble for leader evaluations.
+ * Leader evaluation, rendered as a linear group-chat row (matching the debate
+ * speakers) instead of a centered narrow bubble — a muted gray left bar marks
+ * it as the moderator's turn while keeping the single downward reading flow.
  */
-export function CouncilLeaderBubble({ msg, terminalCols }: CouncilLeaderBubbleProps) {
-  const layout = computeBubbleLayout(terminalCols);
-  const width = layout.leaderCols;
-  const centerIndent = Math.max(0, Math.floor((terminalCols - width) / 2));
+export function CouncilLeaderBubble({ msg }: CouncilLeaderBubbleProps) {
   const header = buildLeaderHeader(msg.round);
 
   return (
-    <box flexDirection="column" marginBottom={1} marginLeft={centerIndent}>
-      <box
-        width={width}
-        borderStyle="single"
-        borderColor={dark.councilLeaderBorder}
-        flexDirection="column"
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        <text fg={dark.textMuted} attributes={1}>
-          {header}
-        </text>
-        <text fg={dark.textMuted}>{msg.text.trim()}</text>
-      </box>
+    <box
+      flexDirection="column"
+      marginBottom={1}
+      border={["left"]}
+      borderColor={dark.councilLeaderBorder}
+      paddingLeft={2}
+    >
+      <text fg={dark.textMuted} attributes={1}>
+        {header}
+      </text>
+      <text fg={dark.textMuted}>{msg.text.trim()}</text>
     </box>
   );
 }

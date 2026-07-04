@@ -1,7 +1,11 @@
+import type { ProviderId } from "../providers/types.js";
 import type { ModelInfo, ReasoningEffort } from "../types";
-import { catalogModelToModelInfo, fetchCatalog } from "./catalog-client.js";
+import type { CatalogCouncilRouting, CatalogProviderPeakHour, CatalogVisionProxyRouting } from "./catalog-client.js";
+import { catalogModelToModelInfo, fetchCatalogDocument } from "./catalog-client.js";
 
 const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
+
+const DEFAULT_SWITCH_PROVIDER_ORDER: readonly ProviderId[] = ["deepseek", "zai", "opencode-go", "xai"];
 
 // ---------------------------------------------------------------------------
 // Centralized model registry — populated by loadCatalog() at boot
@@ -9,21 +13,46 @@ const ALL_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhig
 
 export let MODELS: ModelInfo[] = [];
 export let isLoading = true;
+export let SWITCH_PROVIDER_ORDER: readonly ProviderId[] = DEFAULT_SWITCH_PROVIDER_ORDER;
+const providerPeakHourRules = new Map<string, CatalogProviderPeakHour>();
+let catalogCouncilRouting: CatalogCouncilRouting | undefined;
+let catalogVisionProxyRouting: CatalogVisionProxyRouting | undefined;
 
 /**
- * Load models from centralized catalog (CP endpoint with static fallback).
- * Called once at boot. No provider API keys needed.
+ * Load models + routing policies from centralized catalog (API with static fallback).
  */
 export async function loadCatalog(): Promise<void> {
   isLoading = true;
   try {
-    const catalog = await fetchCatalog();
-    MODELS = catalog.map(catalogModelToModelInfo);
+    const doc = await fetchCatalogDocument();
+    MODELS = doc.models.map(catalogModelToModelInfo);
+    SWITCH_PROVIDER_ORDER = (doc.routing?.switch_provider_order as ProviderId[] | undefined) ?? [
+      ...DEFAULT_SWITCH_PROVIDER_ORDER,
+    ];
+    providerPeakHourRules.clear();
+    for (const [providerId, policy] of Object.entries(doc.provider_policies ?? {})) {
+      if (policy.peak_hour) providerPeakHourRules.set(providerId, policy.peak_hour);
+    }
+    catalogCouncilRouting = doc.routing?.council;
+    catalogVisionProxyRouting = doc.routing?.vision_proxy;
   } catch {
     // On total failure, MODELS stays empty — callers must handle
   } finally {
     isLoading = false;
   }
+}
+
+export function getProviderPeakHourRule(providerId: string): CatalogProviderPeakHour | undefined {
+  return providerPeakHourRules.get(providerId);
+}
+
+/** Catalog-defined default council lineup (multi-provider debate slots). */
+export function getCatalogCouncilRouting(): CatalogCouncilRouting | undefined {
+  return catalogCouncilRouting;
+}
+
+export function getVisionProxyRouting(): CatalogVisionProxyRouting | undefined {
+  return catalogVisionProxyRouting;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,12 +93,19 @@ export function getSupportedReasoningEfforts(modelId: string): ReasoningEffort[]
  * If no match for provider+tier, returns first model of that tier from any provider.
  * Returns undefined if no models in that tier exist.
  */
+function isTierRoutable(m: ModelInfo): boolean {
+  return m.tierRouting !== false;
+}
+
+function matchesTier(m: ModelInfo, tier: "fast" | "balanced" | "premium"): boolean {
+  return m.tier === tier || m.routingTiers?.includes(tier) === true;
+}
+
 export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
   if (preferProvider) {
-    const providerMatch = MODELS.find((m) => m.tier === tier && m.provider === preferProvider);
-    if (providerMatch) return providerMatch;
+    return MODELS.find((m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m));
   }
-  return MODELS.find((m) => m.tier === tier);
+  return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m));
 }
 
 export function getModelsForProvider(providerId: string): ModelInfo[] {

@@ -37,6 +37,7 @@ import {
   resolveModelRuntime as resolveRuntime,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
+import { statusBarStore } from "../state/status-bar-store.js";
 import {
   appendCompaction,
   appendMessages,
@@ -72,7 +73,6 @@ import type {
   VerifyRecipe,
   WorkspaceInfo,
 } from "../types/index";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
@@ -185,18 +185,66 @@ function isAnyProviderApiBase(url: string | null | undefined): boolean {
   return false;
 }
 
+const TITLE_SYSTEM_PROMPT = `You are a session-naming assistant. Given the first message a user sent to an AI coding assistant, produce a short session title.
+
+Rules:
+- 5-7 words that capture the essence of the request (the goal, not the phrasing).
+- Same language as the user's message (English request → English title, Vietnamese → Vietnamese, etc.).
+- Title Case for languages that use it; natural casing otherwise.
+- No surrounding quotes, no trailing punctuation, no emoji, no markdown.
+- Output ONLY the title text — nothing else.`;
+
+/** Deterministic fallback title: truncated first user message. */
+function fallbackTitle(userMessage: string): string {
+  return userMessage.slice(0, 60).trim() || "New session";
+}
+
+/** Strip quotes/backticks, collapse whitespace, drop trailing punctuation, cap at ~60 chars. */
+function sanitizeTitle(raw: string): string {
+  let t = raw.trim().split("\n")[0]?.trim() ?? "";
+  t = t.replace(/^["'`“”‘’]+|["'`“”‘’]+$/g, "");
+  t = t
+    .replace(/\s+/g, " ")
+    .replace(/[.,:;!?…]+$/g, "")
+    .trim();
+  if (t.length > 60) t = t.slice(0, 60).trim();
+  return t;
+}
+
 /**
- * Generate a session title using the Anthropic provider.
- * Kept as a lightweight stub for Phase 0 — title generation ships in Phase 1.
+ * Generate a session title with a single lightweight LLM call on the current
+ * session model. Falls back to a truncated first-message title on any failure.
  */
-function genTitle(
-  _provider: LegacyProvider,
+async function genTitle(
+  provider: LegacyProvider,
   userMessage: string,
+  modelId: string,
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
-  // Phase 0 stub: return a truncated version of the first user message as title.
-  // Phase 1 will replace this with a real LLM-based title generation call.
-  const title = userMessage.slice(0, 60).trim() || "New session";
-  return Promise.resolve({ title, modelId: getCurrentModel() });
+  try {
+    const { generateText } = await import("ai");
+    const runtime = resolveModelRuntime(provider, modelId);
+    const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
+
+    const { text, usage } = await generateText({
+      model: runtime.model,
+      system: TITLE_SYSTEM_PROMPT,
+      prompt: `User's first message:\n\n${snippet}\n\nTitle:`,
+      temperature: 0.3,
+      ...(runtime.modelInfo?.supportsMaxOutputTokens === false ? {} : { maxOutputTokens: 64 }),
+      ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    });
+
+    const title = sanitizeTitle(text ?? "");
+    if (title) {
+      return { title, modelId, usage };
+    }
+    console.error(`[orchestrator/genTitle] title generation returned empty text (model=${modelId}); using fallback`);
+  } catch (err) {
+    console.error(
+      `[orchestrator/genTitle] title generation failed (model=${modelId}): ${(err as Error)?.message}; using fallback`,
+    );
+  }
+  return { title: fallbackTitle(userMessage), modelId };
 }
 
 /**
@@ -503,7 +551,7 @@ export class Agent {
   setModel(model: string): void {
     this.modelId = normalizeModelId(model);
     const newProviderId = detectProviderForModel(this.modelId);
-    if (newProviderId !== this.providerId && this.apiKey) {
+    if (newProviderId !== this.providerId) {
       this.providerId = newProviderId;
       setProviderHint(this.providerId);
       // Drop this.baseURL when it points at a DIFFERENT provider's default
@@ -513,15 +561,26 @@ export class Agent {
       // siliconflow→ (via UI), this.baseURL was still api.deepseek.com from
       // startup, SiliconflowStrategy.createFactory was created with that
       // baseURL, requests landed at api.deepseek.com which rejected the SF-
-      // style model id ("deepseek-ai/DeepSeek-V4-Flash") with "supported API
+      // style model id ("deepseek-v4-flash") with "supported API
       // model names are deepseek-v4-pro or deepseek-v4-flash".
       // A user-supplied custom baseURL is preserved only when it does NOT
       // match any known provider's apiBase (i.e. it's a real override, not
       // a stale default).
       const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
-      const effectiveBaseURL = staleBaseURL ? undefined : (this.baseURL ?? undefined);
       if (staleBaseURL) this.baseURL = null;
-      this.provider = createProvider(this.providerId, this.apiKey, effectiveBaseURL);
+      // Provider changed — DEFER factory construction. The current this.apiKey
+      // belongs to the PREVIOUS provider (or is the "oauth" OAuth sentinel) and
+      // is invalid for the new one. Rebuilding here with it sent provider A's
+      // key to provider B → 401 "Authentication Fails, your api key … is
+      // invalid" on the next chat, for EVERY TUI provider switch (evidence:
+      // routing log routed to "deepseek-v4-flash via deepseek" with a
+      // non-deepseek key; and the "oauth" leak in session ff932f8568e8). Clear
+      // the stale key, null the provider, and re-arm _initOAuthProvider, which
+      // resolves the NEW provider's own key (or OAuth tokens) before the next
+      // turn (message-processor calls initOAuthProvider at turn start).
+      this.apiKey = null;
+      this.provider = null;
+      this._oauthInitDone = false;
     }
     if (this.sessionStore && this.session) {
       this.sessionStore.setModel(this.session.id, this.modelId);
@@ -679,7 +738,7 @@ export class Agent {
       return "New session";
     }
 
-    const generated = await genTitle(provider, userMessage);
+    const generated = await genTitle(provider, userMessage, this.modelId);
     this.recordUsage(generated.usage, "title", generated.modelId);
     if (this.sessionStore && this.session && !this.session.title && generated.title) {
       this.sessionStore.setTitle(this.session.id, generated.title);
@@ -903,6 +962,15 @@ export class Agent {
 
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
+
+    try {
+      const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+      const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
+      if (gsdSnap) return gsdSnap;
+    } catch (err) {
+      // fail-open to legacy todo_write args
+    }
+
     const argsJson = getLastTodoWriteArgs(this.session.id);
     if (!argsJson) return null;
     return snapshotFromTodoWriteArgs(argsJson);
@@ -1840,8 +1908,8 @@ export class Agent {
   // hooks used by orchestrator.agent.test.ts).
   // ========================================================================
 
-  respondToCouncilQuestion(questionId: string, answer: string): void {
-    this.councilManager.respondToQuestion(questionId, answer);
+  respondToCouncilQuestion(questionId: string, answer: string, questionText?: string): void {
+    this.councilManager.respondToQuestion(questionId, answer, questionText);
   }
 
   respondToCouncilPreflight(preflightId: string, approved: boolean): void {
@@ -1903,6 +1971,10 @@ export class Agent {
       logger.error("router", "runDir resolution failed (decisions.lock will be skipped)", { error: err });
     }
 
+    // Captures the post-debate action so we can auto-continue on
+    // "continue_session" (user chose to keep working with the debate result).
+    let chosenAction: string | undefined;
+
     try {
       const gen = runCouncil(
         topic,
@@ -1920,13 +1992,28 @@ export class Agent {
           councilStats, // NEW — share orchestrator's stats object with runCouncil (Phase 14 CQ-01)
           signal,
           runDir, // B1 — persist decisions.lock.md for the /council slash path
+          onPostDebateAction: (action) => {
+            chosenAction = action;
+          },
         },
       );
 
       let result: IteratorResult<StreamChunk, string | null>;
+      // Hold back runCouncil's terminal `done`. The /council slash consumer
+      // (use-app-logic.tsx) does `for await (chunk of gen) { if (chunk.type ===
+      // "done") break; }` — so forwarding runCouncil's end-of-debate `done`
+      // strands THIS generator before the continue_session auto-continue below
+      // ever runs (the generator is suspended at the yield and never resumes).
+      // Swallow it here and re-emit our own `done` after the optional
+      // continuation so the consumer terminates at the right boundary.
+      let innerDoneSeen = false;
       do {
         result = await gen.next();
         if (!result.done && result.value) {
+          if (result.value.type === "done") {
+            innerDoneSeen = true;
+            continue;
+          }
           yield result.value;
         }
       } while (!result.done);
@@ -1936,6 +2023,34 @@ export class Agent {
 
       if (options?.userModelMessage && synthesis) {
         this.appendCompletedTurn(options.userModelMessage, [{ role: "assistant", content: synthesis }]);
+      }
+
+      // "continue_session": keep working in THIS session with the debate result.
+      // Re-enter processMessage with the synthesis as context so the agent
+      // continues the original task — this also writes real message rows, which
+      // is what makes the session resumable (the /council slash path otherwise
+      // leaves no messages and is filtered from the resume picker). Guarded by
+      // ownsController so it fires ONLY on the top-level slash path, never when
+      // nested inside processMessage (auto-council) or drained by the runDebate
+      // tool — those callers manage their own continuation.
+      if (ownsController && chosenAction === "continue_session" && synthesis) {
+        yield { type: "content", content: "\n[Continuing with the debate conclusion…]\n" };
+        this.councilManager.setContinuation(true);
+        try {
+          // processMessage emits its own terminal `done`, which becomes the
+          // consumer's break boundary — so the UI stops AFTER the continuation
+          // turn, not before it.
+          yield* this.processMessage(
+            `Council debate completed. Conclusion:\n\n${synthesis}\n\nContinue the original task using this conclusion.`,
+            options?.observer,
+          );
+        } finally {
+          this.councilManager.setContinuation(false);
+        }
+      } else if (innerDoneSeen) {
+        // Non-continuation paths (save_exit, nested auto-council, sprint drain)
+        // still need the terminal `done` the consumer expects.
+        yield { type: "done" };
       }
     } finally {
       if (ownsController && this.abortController?.signal === signal) {
@@ -3260,29 +3375,71 @@ export class Agent {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
 
-    // Only upgrade when there is no explicit API key — OAuth is an alternative
-    // auth path, not an override when the user deliberately passed a key.
-    // The boot wizard in src/index.ts uses the literal "oauth" as a sentinel
-    // to signal "no API key but OAuth tokens exist", so treat that as "no
-    // key" here.
-    if (this.apiKey && this.apiKey !== "oauth") return;
+    // Re-resolve auth for the CURRENT provider. Runs when either:
+    //  (a) no explicit API key / the "oauth" sentinel is held — OAuth may
+    //      apply (the boot wizard in src/index.ts uses the literal "oauth" to
+    //      mean "no key but OAuth tokens exist"); OR
+    //  (b) setModel deferred provider construction on a provider switch
+    //      (this.provider === null) — the PREVIOUS provider's key was cleared
+    //      and must be re-resolved from the NEW provider's own credentials.
+    const providerDeferred = this.provider === null;
+    const keyIsSentinelOrEmpty = !this.apiKey || this.apiKey === "oauth";
+    if (!providerDeferred && !keyIsSentinelOrEmpty) return;
 
     try {
       const { listOAuthProviderIds } = await import("../providers/auth/registry.js");
       const ids = await listOAuthProviderIds();
-      if (!ids.includes(this.providerId)) return;
 
-      const effectiveBaseURL =
-        this.baseURL &&
-        this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
-          ? this.baseURL
-          : undefined;
-      const result = await createProviderFactoryAsync(this.providerId, {
-        baseURL: effectiveBaseURL ?? undefined,
-      });
-      this.provider = result.factory;
+      // OAuth path: the provider supports OAuth AND we don't hold a real API
+      // key, so inject subscription tokens as Bearer headers.
+      if (ids.includes(this.providerId) && keyIsSentinelOrEmpty) {
+        const effectiveBaseURL =
+          this.baseURL &&
+          this.baseURL !== (await import("../providers/endpoints.js").then((m) => m.apiBaseFor("anthropic")))
+            ? this.baseURL
+            : undefined;
+        const result = await createProviderFactoryAsync(this.providerId, {
+          baseURL: effectiveBaseURL ?? undefined,
+        });
+        this.apiKey = "oauth";
+        this.provider = result.factory;
+        return;
+      }
+
+      // API-key path: resolve THIS provider's own stored key. Reached when the
+      // provider isn't OAuth-capable, or when a provider switch deferred
+      // construction (we must swap in the NEW provider's key — never reuse the
+      // previous provider's, which 401'd on every TUI provider switch). If no
+      // key exists for a deferred switch, leave the provider null so
+      // requireProvider() surfaces a clear "API key required".
+      try {
+        const key = await loadKeyForProvider(this.providerId);
+        if (key) {
+          this.apiKey = key;
+          const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
+          if (staleBaseURL) this.baseURL = null;
+          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined);
+        } else if (providerDeferred) {
+          this.provider = null;
+        }
+      } catch (err) {
+        // ProviderKeyMissingError (or keychain failure) — no usable key. For a
+        // deferred provider switch, null the provider so the next turn fails
+        // loudly ("API key required") instead of 401-ing on a wrong/sentinel
+        // key. For a non-deferred empty-key case, leave the existing provider
+        // untouched (fail-open, as before).
+        if (providerDeferred) {
+          console.error(
+            `[orchestrator] no API key for provider '${this.providerId}' after model switch: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          this.provider = null;
+        }
+      }
     } catch {
-      // Fail-open — provider remains null; requireProvider() will surface the error
+      // Registry unavailable — fail-open; the existing provider (if any) is
+      // left untouched and requireProvider() will surface any error.
     }
   }
 

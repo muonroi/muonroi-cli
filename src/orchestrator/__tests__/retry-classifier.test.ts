@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { _resetProviderThinkingDegrade } from "../../providers/strategies/thinking-mode.js";
 import { classifyStreamError } from "../retry-classifier.js";
 import { STALL_ABORT_REASON } from "../stall-watchdog.js";
 
@@ -127,5 +128,41 @@ describe("classifyStreamError", () => {
     const err = new Error("some weird unexpected error");
     const result = classifyStreamError(err);
     expect(result.transient).toBe(false);
+  });
+});
+
+describe("classifyStreamError — z.ai/opencode-go param reject (1210) one-shot degrade", () => {
+  afterEach(() => _resetProviderThinkingDegrade());
+
+  it("a generic 400 (not a param-reject) stays non-transient", () => {
+    const err = Object.assign(new Error("Bad Request: something else"), { statusCode: 400 });
+    expect(classifyStreamError(err).transient).toBe(false);
+  });
+
+  it("first z.ai 1210 → transient (retry once, degraded); second → non-transient", () => {
+    const err = Object.assign(new Error("Invalid API parameter, please check the documentation."), {
+      statusCode: 400,
+    });
+    const first = classifyStreamError(err);
+    expect(first.transient).toBe(true);
+    expect(first.reason).toBe("provider-param-reject-degrade-retry");
+    // After the latch, a repeat rejection stops retrying (cause beyond client fix).
+    const second = classifyStreamError(err);
+    expect(second.transient).toBe(false);
+    expect(second.reason).toBe("provider-param-reject-after-degrade");
+  });
+
+  it("opencode-go 'Upstream request failed' 400 gets one degrade retry", () => {
+    const err = Object.assign(new Error("Error from provider (Console Go): Upstream request failed"), {
+      statusCode: 400,
+    });
+    expect(classifyStreamError(err).transient).toBe(true);
+  });
+
+  it("'unexpected end of JSON input' 400 (truncated tool args) gets one degrade retry", () => {
+    const err = Object.assign(new Error("error parsing parameters: unexpected end of JSON input"), {
+      statusCode: 400,
+    });
+    expect(classifyStreamError(err).transient).toBe(true);
   });
 });

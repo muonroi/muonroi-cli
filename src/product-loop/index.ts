@@ -12,9 +12,9 @@ import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import { defaultResolveChannelId, maybeAutoFire } from "../reporter/auto-fire.js";
+import { activeRunStore } from "../state/active-run.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
-import { activeRunStore } from "../ui/state/active-run.js";
 import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
@@ -231,6 +231,22 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     stack: flags.stack,
     createdAt: new Date(),
   });
+
+  if (opts.cwd) {
+    try {
+      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
+      if (isGsdNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+        ensureProductPlanningWorkspace(opts.cwd, {
+          idea,
+          sessionModelId: opts.sessionModelId,
+          runId,
+        });
+      }
+    } catch (err) {
+      console.error(`[ideal/hot-path] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+    }
+  }
 
   yield {
     type: "content",
@@ -669,6 +685,22 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     stack: flags.stack,
     createdAt: new Date(),
   });
+
+  if (opts.cwd) {
+    try {
+      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
+      if (isGsdNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+        ensureProductPlanningWorkspace(opts.cwd, {
+          idea,
+          sessionModelId: opts.sessionModelId,
+          runId,
+        });
+      }
+    } catch (err) {
+      console.error(`[ideal] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+    }
+  }
 
   // Surface a cost-vs-cap preview before the loop kicks off so $50 isn't
   // an arbitrary number — show predicted spend per sprint × max-sprints
@@ -1437,6 +1469,8 @@ async function* runPhasesPath(args: {
     remainingUsd: async () => Math.max(0, manifest.capUsd - (await getProductSpentUsd(ctx.runId))),
     awaitCustomerVerdict,
     sprintRunner,
+    projectCwd: ctx.cwd,
+    idea: ctx.idea,
   } as any);
 
   let phaseOutcome: { pass: boolean; reason?: string } = { pass: false };

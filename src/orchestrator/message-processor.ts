@@ -61,6 +61,9 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { isGsdNativeEnabled } from "../gsd/flags.js";
+import { getGsdLoopHost } from "../gsd/loop-host.js";
+import { syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -112,11 +115,18 @@ import {
   shouldDropParam,
 } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
-import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
+import {
+  canHandleImagesForTextOnlyModel,
+  needsVisionProxy,
+  planImageHandlingForTextOnlyModel,
+  proxyVision,
+} from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { decideStepRouting, eeSamrGuidance, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
+import { statusBarStore } from "../state/status-bar-store.js";
+import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../state/turn-trace.js";
 import {
   getLastApprovedPlan,
   getNextMessageSequence,
@@ -132,8 +142,6 @@ import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
-import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
@@ -625,6 +633,21 @@ export class MessageProcessor {
     }
     const { pilCtx, _stepCeiling, _pilStart, _naturalCeiling, _ceilingTaskType, _ceilingSize } = prepResult!;
 
+    if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
+      try {
+        const depth =
+          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
+          (pilCtx as { complexityTier?: string }).complexityTier ??
+          "standard";
+        const cwd = deps.bash.getCwd();
+        const sessionModel = deps.session?.model ?? "unknown";
+        getGsdLoopHost().ensureHost(cwd, sessionModel);
+        syncWorkflowContext(cwd, sessionModel, depth);
+      } catch (err) {
+        console.error(`[gsd-loop-host] turn sync failed: ${(err as Error).message}`);
+      }
+    }
+
     // Track whether forced-finalize is needed (set by stopWhen when the
     // ceiling fires). Read AFTER the streamText fullStream finishes.
     const _ceilingHit = false;
@@ -742,6 +765,11 @@ export class MessageProcessor {
     let turnModelId = deps.modelId;
     let taskHash: string | null = null;
     let routeReason: string | null = null;
+    const historyHasImages = deps.messages.some(
+      (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
+    );
+    const turnHasImages = (images?.length ?? 0) > 0;
+    let visionUnavailableNotice: string | null = null;
     const _routeStart = Date.now();
     try {
       const { decide } = await import("../router/decide.js");
@@ -781,11 +809,10 @@ export class MessageProcessor {
         // images to text, so there's no need to switch to a vision-capable
         // (and usually pricier / rate-limited) model.
         const defaultHasVisionProxy = needsVisionProxy(deps.modelId);
-        const historyHasImages = deps.messages.some(
-          (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
-        );
-        const turnHasImages = (images?.length ?? 0) > 0;
-        const skipVisionRoute = defaultHasVisionProxy && (turnHasImages || historyHasImages);
+        const imagesOnTurn = turnHasImages || historyHasImages;
+        const canHandleImages =
+          !defaultHasVisionProxy || !imagesOnTurn || (await canHandleImagesForTextOnlyModel(deps.modelId));
+        const skipVisionRoute = defaultHasVisionProxy && imagesOnTurn && canHandleImages;
         if (!skipVisionRoute) {
           turnModelId = routeDecision.model;
         }
@@ -818,6 +845,24 @@ export class MessageProcessor {
       if (!isProviderDisabled(deps.providerId as ProviderId)) {
         const eeRoute = await routeModel(userMessage, {}, deps.providerId).catch(() => null);
         taskHash = eeRoute?.taskHash ?? null;
+      }
+    }
+
+    if (needsVisionProxy(turnModelId) && (turnHasImages || historyHasImages)) {
+      const imageCount = turnHasImages ? images!.length : 1;
+      const plan = await planImageHandlingForTextOnlyModel({
+        primaryModelId: turnModelId,
+        imageCount,
+      });
+      if (plan.strategy === "native_model") {
+        turnModelId = plan.fallback.modelId;
+        routeReason = routeReason ? `${routeReason}; vision-native-fallback` : "vision-native-fallback";
+        yield {
+          type: "content",
+          content: `[Vision: routed to ${plan.fallback.modelId} — no proxy backend; using native image support]\n`,
+        };
+      } else if (plan.strategy === "unavailable") {
+        visionUnavailableNotice = plan.notice;
       }
     }
 
@@ -906,12 +951,39 @@ export class MessageProcessor {
     // still carry image parts — otherwise sending the conversation back to a
     // text-only provider (e.g. DeepSeek) fails with "unknown variant
     // `image_url`" once history contains an image from a prior turn.
-    if (needsVisionProxy(turnModelId)) {
-      const historyHasImages = deps.messages.some(
-        (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
-      );
-      const turnHasImages = (images?.length ?? 0) > 0;
-      if (turnHasImages || historyHasImages) {
+    if (needsVisionProxy(turnModelId) && (turnHasImages || historyHasImages)) {
+      const stripImagesFromMessages = (msgs: ModelMessage[]): ModelMessage[] =>
+        msgs.map((m) => {
+          if (!Array.isArray(m.content)) return m;
+          const textParts = (m.content as Array<{ type: string; text?: string }>).filter((p) => p.type === "text");
+          const joined = textParts.map((p) => p.text ?? "").join("\n");
+          return { ...m, content: joined || "[image removed — vision unavailable]" } as typeof m;
+        });
+
+      if (visionUnavailableNotice) {
+        yield {
+          type: "content",
+          content: "[Vision: cannot analyze images — no vision API key or vision model available]\n",
+        };
+        if (historyHasImages) {
+          deps.setMessages(
+            stripImagesFromMessages(deps.messages).map((m) => {
+              if (m.role !== "user" || typeof m.content !== "string") return m;
+              return { ...m, content: `${m.content}\n\n${visionUnavailableNotice}` };
+            }),
+          );
+        }
+        if (turnHasImages) {
+          userModelMessage = {
+            role: "user",
+            content: `${messageForDb}\n\n${visionUnavailableNotice}`,
+          };
+          userEnrichedMessage = {
+            role: "user",
+            content: `${messageForModel}\n\n${visionUnavailableNotice}`,
+          };
+        }
+      } else {
         try {
           if (historyHasImages) {
             const historyResult = await proxyVision(deps.messages, turnModelId, signal);
@@ -930,25 +1002,22 @@ export class MessageProcessor {
               userEnrichedMessage = proxyResult.messages[1];
               yield {
                 type: "content",
-                content: `[Vision proxy: ${proxyResult.imageCount} image(s) → ${turnModelId} via SiliconFlow]\n`,
+                content: `[Vision proxy: ${proxyResult.imageCount} image(s) analyzed for ${turnModelId}]\n`,
               };
             }
           }
-        } catch {
-          yield { type: "content", content: "[Vision proxy: failed, images dropped]\n" };
-          if (turnHasImages) {
-            userModelMessage = { role: "user", content: messageForDb };
-            userEnrichedMessage = { role: "user", content: messageForModel };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          console.warn(`[vision-proxy] message path failed: ${errMsg}`);
+          const notice = visionUnavailableNotice ?? `[vision unavailable: ${errMsg}]`;
+          yield { type: "content", content: "[Vision proxy: failed — images not sent to model]\n" };
+          if (historyHasImages) {
+            deps.setMessages(stripImagesFromMessages(deps.messages));
           }
-          // Strip image parts from history as a last-resort fallback so the
-          // request doesn't blow up at the provider serialization layer.
-          deps.setMessages(
-            deps.messages.map((m) => {
-              if (!Array.isArray(m.content)) return m;
-              const filtered = (m.content as Array<{ type: string }>).filter((p) => p.type !== "image");
-              return { ...m, content: filtered } as typeof m;
-            }),
-          );
+          if (turnHasImages) {
+            userModelMessage = { role: "user", content: `${messageForDb}\n\n${notice}` };
+            userEnrichedMessage = { role: "user", content: `${messageForModel}\n\n${notice}` };
+          }
         }
       }
     }

@@ -46,7 +46,7 @@ describe("ee-timeout E2E (Phase 21 / Plan 02)", () => {
 
   beforeAll(async () => {
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash"],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash"],
       // Aggressive BB timeout so any real retrieval (if EE configured on the
       // host) emits ee-timeout fast. Defaults are loose enough that this
       // wouldn't fire otherwise.

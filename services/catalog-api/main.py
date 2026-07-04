@@ -39,7 +39,8 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+from typing_extensions import Self
 
 
 # --------------------------------------------------------------------------- #
@@ -79,6 +80,73 @@ class CatalogModel(BaseModel):
     aliases: Optional[list[str]] = None
     default_reasoning_effort: Optional[str] = None
     supports_vision: Optional[bool] = None
+    tier_routing: Optional[bool] = True
+    routing_tiers: Optional[list[str]] = None
+
+
+class CatalogPeakHourWindow(BaseModel):
+    start_hour: int
+    end_hour: int
+
+
+class CatalogProviderPeakHour(BaseModel):
+    """Peak-hour routing rule — sourced from vendor docs, served via catalog API."""
+
+    source_url: str
+    source_verified_at: Optional[str] = None
+    timezone: str
+    start_hour: Optional[int] = None
+    end_hour: Optional[int] = None
+    windows: Optional[list[CatalogPeakHourWindow]] = None
+    sensitive_model_ids: list[str]
+    fallback_model_id: str
+    switch_fallback_providers: Optional[list[str]] = None
+    peak_quota_multiplier: Optional[float] = None
+    off_peak_quota_multiplier: Optional[float] = None
+    policy_basis: Optional[str] = None  # "official" | "heuristic"
+    policy_note: Optional[str] = None
+
+    @model_validator(mode="after")
+    def check_window_shape(self) -> Self:
+        if self.windows:
+            return self
+        if self.start_hour is not None and self.end_hour is not None:
+            return self
+        raise ValueError("peak_hour requires windows or start_hour+end_hour")
+
+
+class CatalogProviderPolicy(BaseModel):
+    peak_hour: Optional[CatalogProviderPeakHour] = None
+
+
+class CatalogCouncilParticipant(BaseModel):
+    role: str
+    provider: str
+    tier: Optional[str] = None
+    model_id: Optional[str] = None
+
+
+class CatalogCouncilRouting(BaseModel):
+    prefer_multi_provider: Optional[bool] = True
+    participants: Optional[list[CatalogCouncilParticipant]] = None
+
+
+class CatalogVisionProxySlot(BaseModel):
+    provider: str
+    model_id: str
+
+
+class CatalogVisionProxyRouting(BaseModel):
+    default: Optional[CatalogVisionProxySlot] = None
+    ocr: Optional[CatalogVisionProxySlot] = None
+    design: Optional[CatalogVisionProxySlot] = None
+    fallback_chain: Optional[list[CatalogVisionProxySlot]] = None
+
+
+class CatalogRouting(BaseModel):
+    switch_provider_order: Optional[list[str]] = None
+    council: Optional[CatalogCouncilRouting] = None
+    vision_proxy: Optional[CatalogVisionProxyRouting] = None
 
 
 class CatalogResponse(BaseModel):
@@ -86,6 +154,8 @@ class CatalogResponse(BaseModel):
     updated_at: str
     description: Optional[str] = None
     models: list[CatalogModel]
+    routing: Optional[CatalogRouting] = None
+    provider_policies: Optional[dict[str, CatalogProviderPolicy]] = None
 
 
 @lru_cache(maxsize=1)
@@ -103,7 +173,11 @@ def load_catalog(path_str: str) -> CatalogResponse:
 
 
 def _etag(payload: CatalogResponse) -> str:
-    basis = f"{payload.version}:{payload.updated_at}:{len(payload.models)}"
+    policy_keys = sorted((payload.provider_policies or {}).keys())
+    basis = (
+        f"{payload.version}:{payload.updated_at}:{len(payload.models)}:"
+        f"{','.join(policy_keys)}"
+    )
     return '"' + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16] + '"'
 
 
@@ -150,16 +224,6 @@ KNOWN_PRICING: dict[str, dict[str, float | None]] = {
     # DeepSeek native (api.deepseek.com) — verified 2026-06
     "deepseek-v4-flash": {"input": 0.27, "output": 1.1, "cachedInput": 0.027, "cacheWrite": None},
     "deepseek-v4-pro": {"input": 0.55, "output": 2.19, "cachedInput": 0.055, "cacheWrite": None},
-    # Google / Agy OAuth — sourced from Cloud Code pricing page
-    "gemini-3.5-flash-high": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.5-flash-medium": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.5-flash-low": {"input": 0.5, "output": 3.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.1-pro-high": {"input": 2.0, "output": 12.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3.1-pro-low": {"input": 2.0, "output": 12.0, "cachedInput": None, "cacheWrite": None},
-    "gemini-3-flash": {"input": 0.3, "output": 2.0, "cachedInput": None, "cacheWrite": None},
-    "claude-sonnet-4.6-thinking": {"input": 3.0, "output": 15.0, "cachedInput": None, "cacheWrite": None},
-    "claude-opus-4.6-thinking": {"input": 15.0, "output": 75.0, "cachedInput": None, "cacheWrite": None},
-    "gpt-oss-120b-medium": {"input": 0.2, "output": 0.8, "cachedInput": None, "cacheWrite": None},
     # xAI (Grok)
     "grok-4.3": {"input": 1.25, "output": 2.5, "cachedInput": None, "cacheWrite": None},
     "grok-build-0.1": {"input": 1.0, "output": 2.0, "cachedInput": None, "cacheWrite": None},
@@ -204,59 +268,6 @@ def _get_api_key(name: str) -> str | None:
         if val:
             return val
     return None
-
-
-async def _fetch_siliconflow_pricing(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
-    """Fetch model pricing from SiliconFlow API.
-
-    Response: { data: [ { id, input_price_per_million, output_price_per_million,
-                         cached_input_price_per_million, context_window, ... } ] }
-    """
-    result: dict[str, dict[str, Any]] = {}
-    key = _get_api_key("SILICONFLOW_API_KEY")
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-
-    try:
-        resp = await client.get(
-            "https://api.siliconflow.com/v1/models",
-            headers=headers,
-            timeout=httpx.Timeout(8.0),
-        )
-        if not resp.is_success:
-            print(f"  [SF] API returned {resp.status_code} — skipping live fetch", flush=True)
-            return result
-
-        body = resp.json()
-        models = body.get("data") or []
-        for raw in models:
-            mid = raw.get("id")
-            if not mid:
-                continue
-            inp = raw.get("input_price_per_million")
-            if inp is None:
-                continue  # no pricing data for this model
-
-            override: dict[str, Any] = {
-                "input_price_per_million": float(inp),
-                "output_price_per_million": float(raw.get("output_price_per_million", 0)),
-            }
-            ctx = raw.get("context_window")
-            if ctx is not None:
-                override["context_window"] = int(ctx)
-            cached = raw.get("cached_input_price_per_million")
-            if cached is not None:
-                override["cached_input_price_per_million"] = float(cached)
-            result[mid] = override
-
-        print(f"  [SF] Fetched {len(result)} models with pricing", flush=True)
-    except httpx.TimeoutException:
-        print("  [SF] Request timed out — skipping", flush=True)
-    except Exception as exc:
-        print(f"  [SF] Fetch failed: {exc}", flush=True)
-
-    return result
 
 
 async def _fetch_deepseek_pricing(client: httpx.AsyncClient) -> dict[str, dict[str, Any]]:
@@ -309,20 +320,12 @@ async def refresh_pricing() -> dict:
         print("[pricing] Refreshing live pricing...", flush=True)
 
         async with httpx.AsyncClient() as client:
-            sf_pricing = await _fetch_siliconflow_pricing(client)
-            await _fetch_deepseek_pricing(client)  # just validates, no pricing returned
+            await _fetch_deepseek_pricing(client)  # validates model list; pricing from KNOWN_PRICING
 
-        # Start with live SF pricing
         new_pricing: dict[str, dict[str, Any]] = {}
         changes: list[str] = []
 
-        for mid, override in sf_pricing.items():
-            new_pricing[mid] = dict(override)
-
-        # Apply known pricing as fallback for models NOT covered by live API
         for mid, p in KNOWN_PRICING.items():
-            if mid in new_pricing:
-                continue  # already covered by live API
             override: dict[str, Any] = {
                 "input_price_per_million": p["input"],
                 "output_price_per_million": p["output"],
@@ -494,6 +497,8 @@ def list_models(
         updated_at=cat.updated_at,
         description=cat.description,
         models=models,
+        routing=cat.routing,
+        provider_policies=cat.provider_policies,
     )
 
 

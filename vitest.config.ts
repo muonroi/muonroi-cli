@@ -24,6 +24,13 @@ export default defineConfig({
       },
     ],
   },
+  // zod v4 ships ESM-only; vitest's SSR transform fails to resolve the named
+  // `z` export at module-eval time when an importer (e.g. catalog-client) is
+  // itself transformed. Pre-bundle zod so the export is concrete. Without this,
+  // every suite that transitively imports catalog-client fails with
+  // "undefined is not an object (evaluating 'z.object')".
+  optimizeDeps: { include: ["zod"] },
+  ssr: { noExternal: ["zod"] },
   test: {
     fileParallelism: false,
     include: ["**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}", "tests/perf/**/*.bench.ts"],
@@ -54,6 +61,9 @@ export default defineConfig({
       // API that vitest's module loader cannot resolve). Run with: `bun test
       // src/ee/__tests__/export-transcripts.test.ts`.
       "src/ee/__tests__/export-transcripts.test.ts",
+      // transcript-fts.test.ts requires bun:sqlite (better-sqlite3 native build unavailable under vitest/node).
+      // Run with: `bun test src/storage/__tests__/transcript-fts.test.ts`.
+      "src/storage/__tests__/transcript-fts.test.ts",
     ],
     setupFiles: ["src/__test-stubs__/vitest-setup.ts"],
     testTimeout: 30_000,

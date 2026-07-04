@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as registry from "../models/registry.js";
+import * as keychain from "./keychain.js";
 import {
   analyzeImageFromSource,
   askVisionProxy,
@@ -8,9 +10,6 @@ import {
   listCachedImages,
   scrubImagePayloadsInMessages,
 } from "./mcp-vision-bridge.js";
-
-import * as registry from "../models/registry.js";
-import * as keychain from "./keychain.js";
 
 const realFetch = global.fetch;
 const mockFetch = vi.fn();
@@ -72,6 +71,7 @@ describe("bridgeMcpToolResult", () => {
 
     expect(result.proxied).toBe(true);
     expect(result.description).toContain("login page");
+    expect(result.description).toContain("<vision-observation>");
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
@@ -135,7 +135,11 @@ describe("bridgeMcpToolResult", () => {
 
   it("falls back gracefully when vision API fails — but still strips base64", async () => {
     const fakeBase64 = `iVBORw0KGgo${"A".repeat(600)}`;
-    mockFetch.mockResolvedValue({ ok: false, status: 500 });
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => "server error",
+    });
 
     const result = await bridgeMcpToolResult(
       "mcp_playwright__browser_take_screenshot",
@@ -240,7 +244,7 @@ describe("SVG fast-path", () => {
     expect(mockFetch).not.toHaveBeenCalled();
     expect(result.proxied).toBe(true);
     const out = JSON.stringify(result.output);
-    expect(out).toContain("fast-path");
+    expect(out).toContain("<vision-observation>");
     expect(out).toContain("rect");
   });
 });
@@ -282,7 +286,7 @@ describe("askVisionProxy", () => {
 
     const answer = await askVisionProxy("What color is the submit button?", imageId);
     expect(answer).toContain("submit button is blue");
-    expect(answer).toContain("Vision Proxy Answer");
+    expect(answer).toContain("<vision-observation>");
   });
 
   it("uses most recent image when no ID specified", async () => {
@@ -295,7 +299,7 @@ describe("askVisionProxy", () => {
 
     // Should use most recent cached image from previous tests
     const answer = await askVisionProxy("What color is the banner?");
-    expect(answer).toContain("Vision Proxy Answer");
+    expect(answer).toContain("<vision-observation>");
   });
 });
 
@@ -354,7 +358,8 @@ describe("getVisionGuidanceForTextOnly", () => {
     expect(guidance).toContain("analyze_image");
     expect(guidance).toContain("ask_vision_proxy");
     expect(guidance).toContain("list_vision_cache");
-    expect(guidance).toContain("PROACTIVE");
+    expect(guidance).toContain("<vision-observation>");
+    expect(guidance).toContain("direct sight");
     expect(guidance.length).toBeGreaterThan(200);
   });
 

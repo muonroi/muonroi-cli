@@ -232,9 +232,13 @@ async function squashSinceMarker(cwd: string, markerSha: string, title: string):
 // ─── PR body prompt ───────────────────────────────────────────────────────────
 
 const PR_BODY_SYSTEM =
-  "You are a developer writing a GitHub pull request body. " +
-  "Output ONLY the markdown body — no preamble, no code fences wrapping the whole output. " +
-  "Follow the template exactly. Be concise.";
+  "You are a senior engineer writing the description for your own pull request. " +
+  "Write for a busy reviewer: they should understand what this PR does, why it exists, and how to verify it " +
+  "within thirty seconds of reading — before they open a single file. " +
+  "Write in plain, confident prose. Prefer specific claims ('caps retry backoff at 30s') over vague ones " +
+  "('improves retry handling'). Never restate filenames or diffs mechanically — explain intent and effect. " +
+  "Do not pad, do not apologize, and do not invent changes that are not evidenced by the task data or diff. " +
+  "Output ONLY the finished markdown body — no preamble, no commentary, and no code fence wrapping the whole output.";
 
 function buildPrBodyPrompt(
   task: MaintenanceTask,
@@ -258,28 +262,34 @@ function buildPrBodyPrompt(
       : "";
 
   return [
-    "Generate a PR body for the following maintenance task.",
-    "Use the template below. Replace each placeholder with real content.",
+    "Write the pull request body for the maintenance task below.",
+    "Use exactly the section structure described here, in this order. Render real content for every section — no placeholders, no angle brackets in the output.",
     "Output ONLY the rendered markdown body — nothing else.",
     "",
-    "## Template",
+    "## Structure",
     "---",
     "## Summary",
-    "<copy task description verbatim — trim to 3-5 sentences>",
+    "Two to four sentences a reviewer can read in isolation: what problem this PR solves, why it matters now, and the shape of the fix. Ground it in the task description, but rewrite it as prose — do not paste the task text verbatim.",
     "",
     "## What changed",
-    "<bullet list inferred from diff hunks — focus on user-visible behavior, not file mechanics>",
+    "Three to six bullets describing observable behavior changes, ordered most-significant first. Each bullet states an effect ('X now does Y', 'Z no longer happens when W'), not a file operation. Infer these from the diff hunks; mention a file path only when it clarifies scope. If the diff is trivially small, two bullets are fine — do not pad.",
     "",
     "## Test plan",
-    "<bullet list from acceptance_criteria + regression tests run>",
+    "One bullet per acceptance criterion, phrased as a verifiable check the reviewer could repeat. Then list the regression tests that were run. If something was NOT verified, say so plainly rather than omitting it.",
     outsideSection ? "## Files outside declared impact radius" : "",
-    outsideSection ? "<list filesOutsideRadius>" : "",
+    outsideSection
+      ? "List each file from the task data below, and for each add a short honest note on why it was touched (or 'reason unclear from diff' if you cannot tell). These files deserve extra reviewer scrutiny — do not downplay them."
+      : "",
     concernsSection ? "## Review Concerns" : "",
-    concernsSection ? "<list reviewConcerns — these are non-blocking, for reviewer awareness>" : "",
+    concernsSection
+      ? "List each concern from the task data verbatim, one bullet each. These are non-blocking flags for reviewer awareness — preserve their meaning, do not soften or editorialize."
+      : "",
     "## Related",
-    "- Impact radius: <first 5 entries from impactRadius>",
-    "- Regression tests run: <first 5 entries from regressionTests>",
+    "- Impact radius: the first 5 entries from the impact radius in the task data",
+    "- Regression tests run: the first 5 entries from the regression tests in the task data",
     "---",
+    "",
+    "Rules: British understatement over marketing tone. No emoji. No headers beyond those specified. Keep the whole body under ~350 words unless the concerns/outside-radius sections force it longer.",
     "",
     "## Task data",
     `Kind: ${task.kind}`,

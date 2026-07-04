@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { needsVisionProxy, proxyVision } from "./vision-proxy.js";
-
 import * as registry from "../models/registry.js";
+import { needsVisionProxy, planImageHandlingForTextOnlyModel, proxyVision } from "./vision-proxy.js";
 
 // Mock will be set up in beforeEach
 
+import * as settings from "../utils/settings.js";
 import * as keychain from "./keychain.js";
 
 // Bun's test runner doesn't ship vi.stubGlobal — swap globalThis.fetch manually.
@@ -51,6 +51,56 @@ describe("needsVisionProxy", () => {
   });
 });
 
+describe("planImageHandlingForTextOnlyModel", () => {
+  beforeEach(async () => {
+    vi.mocked(registry.getModelInfo).mockRestore();
+    await registry.loadCatalog();
+  });
+
+  it("returns proxy when a vision-proxy chain provider has a key", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "xai") return "sk-xai-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("proxy");
+  });
+
+  it("returns native_model when proxy providers lack keys but another vision model is configured", async () => {
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "loadKeyForProvider").mockImplementation(async (p) => {
+      if (p === "opencode-go") return "sk-opencode-key-123456789012345678";
+      throw new Error("no key");
+    });
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("native_model");
+    if (plan.strategy === "native_model") {
+      expect(plan.fallback.provider).toBe("opencode-go");
+      expect(plan.fallback.modelId).toBe("opencode/glm-5.2");
+    }
+  });
+
+  it("returns unavailable when no vision keys at all", async () => {
+    vi.spyOn(keychain, "loadKeyForProvider").mockRejectedValue(new Error("no key"));
+    const plan = await planImageHandlingForTextOnlyModel({
+      primaryModelId: "deepseek-v4-flash",
+      imageCount: 1,
+    });
+    expect(plan.strategy).toBe("unavailable");
+    if (plan.strategy === "unavailable") {
+      expect(plan.notice).toContain("<vision-observation");
+      expect(plan.notice).toContain("Do NOT guess");
+    }
+  });
+});
+
 describe("proxyVision", () => {
   const fakeBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk";
 
@@ -76,7 +126,7 @@ describe("proxyVision", () => {
     expect(result.imageCount).toBe(0);
   });
 
-  it("proxies images through SiliconFlow for text-only model", async () => {
+  it("proxies images through catalog vision backend (Z.ai) for text-only model", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: () =>
@@ -104,11 +154,12 @@ describe("proxyVision", () => {
     expect(processed.role).toBe("user");
     const content = processed.content as Array<{ type: string; text: string }>;
     expect(content.every((p) => p.type === "text")).toBe(true);
-    expect(content.some((p) => p.text.includes("Vision Proxy"))).toBe(true);
+    expect(content.some((p) => p.text.includes("<vision-observation>"))).toBe(true);
     expect(content.some((p) => p.text.includes("login form"))).toBe(true);
+    expect(content.some((p) => p.text.includes("direct visual observation"))).toBe(true);
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "https://api.siliconflow.com/v1/chat/completions",
+      "https://api.z.ai/api/coding/paas/v4/chat/completions",
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({ Authorization: "Bearer sk-test-key-12345678901234567890" }),
@@ -116,9 +167,30 @@ describe("proxyVision", () => {
     );
 
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    // Primary model: lightest first so the fast-path returns quickly when the
-    // 8B endpoint is healthy. Fallback chain handles the heavier variants.
-    expect(body.model).toBe("Qwen/Qwen3-VL-8B-Instruct");
+    expect(body.model).toBe("glm-4.6v-flash");
+  });
+
+  it("returns unavailable envelope when no vision API keys configured", async () => {
+    const fetchSpy = vi.fn();
+    setFetch(fetchSpy as unknown as typeof globalThis.fetch);
+    vi.spyOn(keychain, "loadKeyForProvider").mockRejectedValue(new Error("no key"));
+
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: "analyze" },
+          { type: "image" as const, image: fakeBase64, mediaType: "image/png" },
+        ],
+      },
+    ];
+
+    const result = await proxyVision(messages, "deepseek-v4-flash");
+    expect(result.proxied).toBe(true);
+    const content = result.messages[0].content as Array<{ type: string; text: string }>;
+    expect(content.some((p) => p.text.includes('status="unavailable"'))).toBe(true);
+    expect(content.some((p) => p.text.includes("Do NOT guess"))).toBe(true);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("returns fallback description on API error", async () => {
@@ -174,7 +246,7 @@ describe("proxyVision", () => {
     const result = await proxyVision(messages, "deepseek-v4-flash");
     expect(result.imageCount).toBe(2);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
-    expect(content.some((p) => p.text.includes("2 images analyzed"))).toBe(true);
+    expect(content.some((p) => p.text.includes("these 2 images"))).toBe(true);
   });
 
   it("uses json_object response_format when user text signals design intent", async () => {
@@ -242,7 +314,7 @@ describe("proxyVision", () => {
     expect(mockFetch).not.toHaveBeenCalled();
     expect(result.proxied).toBe(true);
     const content = result.messages[0].content as Array<{ type: string; text: string }>;
-    expect(content.some((p) => p.text.includes("fast-path"))).toBe(true);
+    expect(content.some((p) => p.text.includes("<vision-observation>"))).toBe(true);
     expect(content.some((p) => p.text.includes("rect"))).toBe(true);
   });
 

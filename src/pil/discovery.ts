@@ -305,7 +305,7 @@ export function createModelClarificationProposer(providerFactory: any, modelId: 
 
       const sufficiency = scoreSufficiency({ rawText: input.raw });
       const forceDirective = !sufficiency.sufficient
-        ? `\nCRITICAL: A local heuristic determined this prompt is highly underspecified (missing: ${sufficiency.missing.join(", ")}). You MUST return at least one card asking the user to clarify these missing aspects. Do NOT return an empty array [] under any circumstances.`
+        ? `\nNote: a local heuristic flags this prompt as underspecified (missing: ${sufficiency.missing.join(", ")}). Show a clarifying card ONLY for a missing aspect that genuinely forks the deliverable and that you cannot resolve with a reasonable assumption. If you can proceed on a stated assumption, do so and return [].`
         : "";
 
       const special = isMetaAnalysisPrompt(input.raw)
@@ -324,19 +324,21 @@ ${contextStr}${forceDirective}
 You design question cards shown to the user *before* you start working.
 Each card is a structured question with selectable options.
 
-Rules:
-1. Ask ONLY what is genuinely blocking. Most well-scoped requests need 0 cards.
-2. If everything you need is inferable from the request + context above, OR the request is a plain question you can simply answer, return [] (empty array).
-3. If this is a follow-up or continuation of recent conversation history, assume context is already established and return [] unless there is a critical new ambiguity.
-4. Consider the provided language/framework/modules/EE patterns — never ask what the context already answers.${special}
-5. For each card, design the options however you want:
-   - Use kind="choice" for clickable buttons (recommendations, accept/adjust/cancel, etc.)
+Rules (ROI-gated — a card is worth showing ONLY when the user's answer changes WHAT you build and you genuinely cannot decide it for them):
+1. Ask ONLY when the user must chốt a fork you cannot resolve yourself AND getting it wrong is expensive or hard to reverse. High-ROI examples: which implementation direction / architecture to commit to, which of several REAL plan alternatives to pursue, an irreversible or destructive action, an intent so ambiguous that different readings produce materially different deliverables.
+2. If you already have a recommendation and the fork is low-stakes or reversible, DO NOT ask — proceed with your recommendation. A card that just asks the user to accept/confirm what you already recommend is pure noise: return [] and act on the recommendation.
+3. Prefer proceeding on a stated assumption over blocking. When you can reasonably assume the answer, state the assumption in your work instead of showing a card.
+4. If everything you need is inferable from the request + context above, OR the request is a plain question you can simply answer, return [] (empty array).
+5. If this is a follow-up or continuation of recent conversation history, assume context is already established and return [] unless there is a critical NEW fork.
+6. Consider the provided language/framework/modules/EE patterns — never ask what the context already answers.${special}
+7. Most well-scoped requests need 0 cards. For each card you DO show, design the options:
+   - Use kind="choice" for clickable buttons when there are REAL alternatives the user picks between
    - Use kind="freetext" when the user should type their own answer
    - Mark an option with isCancel:true when picking it should cancel the entire request
-   - Mark an option with isAdjust:true when picking it means the user wants to clarify further
-   - Set defaultIndex to the option most users would pick (0 = first)
-6. Return ONLY valid JSON array, nothing else.
-7. Max 3 cards.
+   - Mark an option with isAdjust:true when picking it means the user wants to refine further
+   - Set defaultIndex to your recommended option (0 = first)
+8. Return ONLY valid JSON array, nothing else.
+9. Max 3 cards — and only for genuine decision forks.
 
 JSON format:
 [{

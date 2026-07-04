@@ -8,7 +8,7 @@
  * Plan 06 (status bar) subscribes to DowngradeEvent for UI updates.
  */
 
-import { getModelByTier } from "../models/registry.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { getDefaultProvider } from "../utils/settings.js";
 
 function buildDowngradeChain(): ReadonlyArray<string> {
@@ -17,7 +17,7 @@ function buildDowngradeChain(): ReadonlyArray<string> {
   const seen = new Set<string>();
   const chain: string[] = [];
   for (const tier of tiers) {
-    const m = getModelByTier(tier, provider);
+    const m = getRoutedModelByTier(tier, provider);
     if (m && !seen.has(m.id)) {
       chain.push(m.id);
       seen.add(m.id);

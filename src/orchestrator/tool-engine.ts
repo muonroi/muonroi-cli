@@ -51,6 +51,7 @@
 //   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
 import { routeFeedback, routeModel } from "../ee/bridge.js";
@@ -116,6 +117,8 @@ import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
 import { decideStepRouting, eeSamrGuidance, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
+import { statusBarStore } from "../state/status-bar-store.js";
+import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../state/turn-trace.js";
 import {
   getNextMessageSequence,
   logInteraction,
@@ -130,8 +133,6 @@ import { createBuiltinTools } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
-import { isDebugEnabled, type PipelineStep, recordTurnTrace, type TurnTrace } from "../ui/slash/debug.js";
-import { statusBarStore } from "../ui/status-bar/store.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
@@ -141,7 +142,6 @@ import {
   getAutoCouncilMinRoles,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
-  getRoleModels,
   getSteerInjectionEnabled,
   getTopLevelCompactKeepLast,
   getTopLevelCompactThresholdChars,
@@ -613,8 +613,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // and stay productive. `plan` keeps the old behaviour (architectural
   // decisions deserve debate regardless of length).
   const autoCouncilTypes = new Set(["plan", "analyze"]);
-  const councilRoles = getRoleModels();
-  const configuredRoleCount = Object.values(councilRoles).filter(Boolean).length;
+  const configuredRoleCount = getEffectiveCouncilRoleCount();
   const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
@@ -841,6 +840,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           cachedImageCount: listCachedImages().length,
           priorTurnHadTools: (deps.messages as Array<{ role?: string }>).some((m) => m?.role === "tool"),
         });
+        const depthTier =
+          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
+          ((pilCtx as { complexityTier?: string | null }).complexityTier as
+            | "quick"
+            | "standard"
+            | "heavy"
+            | undefined) ??
+          "standard";
         const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
           runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
           runDelegation: (request, abortSignal) =>
@@ -848,8 +855,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           readDelegation: (id) => deps.readDelegation(id),
           listDelegations: () => deps.listDelegations(),
           modelId: turnModelId,
+          depthTier,
+          sessionId: deps.session?.id,
           includeVisionTools,
           consultParentSession: deps.consultParentSession,
+          runDebate: async (topic: string) => {
+            const gen = deps.runCouncilV2(topic, {
+              skipClarification: true,
+              userModelMessage: { role: "user", content: `/council ${topic}` },
+            });
+            for await (const chunk of gen) {
+              // Drain the generator
+            }
+            return deps.councilManager.lastSynthesis ?? "";
+          },
         });
         // Top-level cumulative cap state. We accumulate the raw tool set
         // (base + MCP + PIL response tools) across the assembly below,
@@ -1681,7 +1700,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // already consumes ~30-40% of the window, leaving little headroom.
             const isReasoningModel = runtime.modelInfo?.reasoning === true;
             const reasoningFillRatio = isReasoningModel
-              ? (contextWindowTokens > 0 && contextWindowTokens < 100_000 ? 0.2 : 0.3)
+              ? contextWindowTokens > 0 && contextWindowTokens < 100_000
+                ? 0.2
+                : 0.3
               : undefined;
             const compacted = compactSubAgentMessages(stripped, {
               thresholdChars: topLevelCompactThreshold,
@@ -1707,7 +1728,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // advance warning that was missing — agent can now decide to
             // summarize, finish, or request preservation. Fires when we did
             // NOT compact this step (compacted === stripped, restored by the
-                      const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
+            const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
             if (coalesced === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
               const _cp = buildCheckpointReminder(sn, true);
               const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
@@ -1739,7 +1760,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 }
                 if (_total > 0 && _ro === _total && _total <= 2) {
                   const _b = `[Tool batching: you called ${_total} read-only tool(s) last round. Calling them one-at-a-time wastes tokens and delays results. The SDK supports up to ~12 parallel tool calls. In the NEXT response, emit ALL pending read-only calls (read_file, grep, bash_output_get, etc.) in a SINGLE assistant turn — do NOT sequence them across multiple steps.]`;
-                  return withSteers({ messages: attachReminderToMessages(stripped, _b) });
+                  // Attach to `coalesced` (the B4-compacted history), NOT `stripped`:
+                  // read-only tools (read_file/grep/…) are exactly what triggers this
+                  // reminder, and returning `stripped` here silently discarded the
+                  // compaction computed above — so on any loop where the model emits
+                  // ≤2 read-only calls per step (DeepSeek does this constantly) older
+                  // tool results were never elided and cumulative input grew unbounded.
+                  return withSteers({ messages: attachReminderToMessages(coalesced, _b) });
                 }
               }
             }
@@ -1849,6 +1876,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               finishReason: getFinishReason(event),
               usage: stepUsage,
             });
+
             // Realtime status bar update per step
             if (stepUsage.inputTokens || stepUsage.outputTokens) {
               // O1 — thread THIS turn's providerOptions shape per step so every
@@ -2377,9 +2405,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // dedicated chunk so the sticky checklist panel can re-render
               // without parsing tool args itself. Skipped when the snapshot
               // doesn't parse (malformed args) so the UI is never poisoned.
-              if (tc.function.name === "todo_write" && tr.success) {
-                const snap = snapshotFromTodoWriteArgs(tc.function.arguments);
-                if (snap) yield { type: "task_list_update", taskListSnapshot: snap };
+              if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("gsd_"))) {
+                try {
+                  const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
+                  const snap = getTaskListSnapshotFromGsd(deps.bash.getCwd());
+                  if (snap) {
+                    yield { type: "task_list_update", taskListSnapshot: snap };
+                  } else if (tc.function.name === "todo_write") {
+                    const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
+                    if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
+                  }
+                } catch (err) {
+                  if (tc.function.name === "todo_write") {
+                    const snapLegacy = snapshotFromTodoWriteArgs(tc.function.arguments);
+                    if (snapLegacy) yield { type: "task_list_update", taskListSnapshot: snapLegacy };
+                  }
+                }
               }
               break;
             }
@@ -3845,15 +3886,17 @@ export function coalesceReadOnlyMessages(messages: any[]): any[] {
 
     if (isReadOnly) {
       const prev = coalescedGroups[coalescedGroups.length - 1];
-      const prevIsReadOnly = prev && (() => {
-        if (!prev.tool || !prev.assistant) return false;
-        const toolCalls = getToolCalls(prev.assistant);
-        if (toolCalls.length === 0) return false;
-        return toolCalls.every((tc: any) => {
-          const name = tc.toolName || tc.function?.name;
-          return name && READ_ONLY_TOOLS.has(name);
-        });
-      })();
+      const prevIsReadOnly =
+        prev &&
+        (() => {
+          if (!prev.tool || !prev.assistant) return false;
+          const toolCalls = getToolCalls(prev.assistant);
+          if (toolCalls.length === 0) return false;
+          return toolCalls.every((tc: any) => {
+            const name = tc.toolName || tc.function?.name;
+            return name && READ_ONLY_TOOLS.has(name);
+          });
+        })();
 
       if (prevIsReadOnly) {
         prev.assistant = mergeAssistantMessages(prev.assistant, group.assistant);

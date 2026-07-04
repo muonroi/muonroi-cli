@@ -127,4 +127,19 @@ describe("SemanticRegistry", () => {
     expect(snap.nodes).toHaveLength(1);
     expect(snap.nodes[0].id).toBe("orphan");
   });
+
+  it("update() patches fields in place WITHOUT rotating insertion order (the <Semantic> update-effect path)", () => {
+    const reg = createSemanticRegistry();
+    reg.register({ id: "a", role: "listitem" });
+    reg.register({ id: "b", role: "listitem" });
+    reg.register({ id: "c", role: "listitem" });
+
+    // Patch the first node — must stay first (queryAll order stability).
+    reg.update("a", { value: "patched", focus: true });
+
+    const snap = reg.snapshot();
+    expect(snap.nodes.map((n) => n.id)).toEqual(["a", "b", "c"]);
+    expect(snap.nodes[0]).toMatchObject({ id: "a", value: "patched", focus: true });
+    expect(snap.focus).toBe("a");
+  });
 });

@@ -110,7 +110,7 @@ export async function spawnCostLeakHarness(
   );
   const dumpPath = join(workDir, "calls.json");
 
-  const modelId = opts.modelId ?? "deepseek-ai/DeepSeek-V4-Flash";
+  const modelId = opts.modelId ?? "deepseek-v4-flash";
   const apiKey = opts.apiKey ?? "FAKE_KEY_FOR_TESTS";
 
   const ctx = await spawnHarness({

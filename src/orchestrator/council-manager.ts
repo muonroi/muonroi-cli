@@ -12,7 +12,7 @@
 // transposition where the field/method originally lived on Agent.
 
 import { generateText, type ModelMessage, stepCountIs } from "ai";
-import { getModelByTier, getModelsForProvider } from "../models/registry.js";
+import { getModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
   createProviderFactory,
@@ -21,6 +21,7 @@ import {
   shouldDropParam,
 } from "../providers/runtime.js";
 import { ALL_PROVIDER_IDS, type ProviderId } from "../providers/types.js";
+import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { appendSystemMessage } from "../storage/index.js";
 import type { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -96,7 +97,7 @@ export class CouncilManager {
   }
 
   // ---- Public responder API (delegated from Agent.respondToCouncilQuestion etc) ----
-  respondToQuestion(questionId: string, answer: string): void {
+  respondToQuestion(questionId: string, answer: string, questionText?: string): void {
     if (process.env.MUONROI_DEBUG_LEADER === "1") {
       process.stderr.write(
         `[responder] respondToCouncilQuestion: ${JSON.stringify({
@@ -111,6 +112,14 @@ export class CouncilManager {
     if (resolver) {
       resolver(answer);
       this._questionResolvers.delete(questionId);
+      if (questionText) {
+        import("../gsd/phase-sync.js")
+          .then(({ appendClarificationToContext }) => {
+            const cwd = this.deps.getBash().getCwd();
+            appendClarificationToContext(cwd, questionText, answer);
+          })
+          .catch(() => {});
+      }
     } else {
       // Headless auto-answer: response arrived before the generator registered
       // its resolver. Buffer it; `createQuestionResponder` will drain it.
@@ -508,7 +517,7 @@ export class CouncilManager {
       if (!isProviderDisabled(p)) {
         const key = await loadKeyForProvider(p).catch(() => null);
         if (key) {
-          const m = getModelByTier("balanced", p);
+          const m = getRoutedModelByTier("balanced", p);
           // Guard: getModelByTier may return a model from a different provider
           // when the preferred provider has no model for the requested tier.
           if (m && m.provider === p) return { modelId: m.id };

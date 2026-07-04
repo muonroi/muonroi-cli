@@ -67,7 +67,7 @@ describe("cost-leak TUI smoke — fixture + dump path works end-to-end", () => {
     // Override --mock-llm to our temp fixture dir (NOT the default fixtures
     // path picked by spawnHarness).
     const ctx = await spawnHarness({
-      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-ai/DeepSeek-V4-Flash", "--mock-llm", fixDir],
+      extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash", "--mock-llm", fixDir],
       env: {
         MUONROI_MOCK_MODEL_DUMP: dumpPath,
         MUONROI_NO_SHELL_HOLD: "1",

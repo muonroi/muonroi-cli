@@ -10,6 +10,7 @@ import type {
   NormalizedLspSettings,
 } from "../lsp/types";
 import {
+  getCatalogCouncilRouting,
   getEffectiveReasoningEffort,
   getFirstCatalogModel,
   getFirstCatalogProvider,
@@ -27,6 +28,19 @@ import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
+
+export type PeakHourMode = "downgrade" | "switch";
+
+export interface PeakHourPolicy {
+  /** Default true — peak-hour routing active. */
+  enabled?: boolean;
+  /**
+   * downgrade: same-provider only (per catalog provider_policies.peak_hour).
+   * switch: try catalog switch_fallback_providers first.
+   * Default: switch.
+   */
+  mode?: PeakHourMode;
+}
 
 export function getCatalogDefaultModel(): string {
   const provider = getDefaultProvider();
@@ -290,6 +304,11 @@ export interface UserSettings {
     /** Switch back to premium for final synthesis. Default: false. */
     premiumSynthesis?: boolean;
   };
+  /**
+   * Peak-hour routing for Z.ai (14:00–18:00 UTC+8 per docs) and DeepSeek
+   * (pro→flash downgrade in the same window to ease concurrency pressure).
+   */
+  peakHourPolicy?: PeakHourPolicy;
   /**
    * Reporter auto-fire settings (B2).
    * Controls whether the reporter posts to Discord automatically on sprint
@@ -1169,11 +1188,28 @@ export function getAutoCouncilMinRoles(): number {
 }
 
 export function isCouncilMultiProviderPreferred(): boolean {
-  return loadUserSettings().councilPreferMultiProvider ?? false;
+  const user = loadUserSettings().councilPreferMultiProvider;
+  if (user !== undefined) return user;
+  return getCatalogCouncilRouting()?.prefer_multi_provider ?? true;
 }
 
 export function getCouncilExperienceMode(): CouncilExperienceMode {
   return loadUserSettings().councilExperienceMode ?? "advisory";
+}
+
+export function normalizePeakHourPolicy(raw: unknown): PeakHourPolicy {
+  if (!raw || typeof raw !== "object") {
+    return { enabled: true, mode: "switch" };
+  }
+  const p = raw as PeakHourPolicy;
+  return {
+    enabled: p.enabled !== false,
+    mode: p.mode === "downgrade" ? "downgrade" : "switch",
+  };
+}
+
+export function getPeakHourPolicy(): PeakHourPolicy {
+  return normalizePeakHourPolicy(loadUserSettings().peakHourPolicy);
 }
 
 export function isCouncilCostAware(): boolean {

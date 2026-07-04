@@ -1,7 +1,7 @@
 {
-  "version": "2.2",
-  "updated_at": "2026-06-04",
-  "description": "Local fallback catalog: deepseek + siliconflow + openai (ChatGPT OAuth) + google (Agy via agy.exe OAuth + cloudcode-pa). Agy supports: Gemini 3.5 Flash (High/Medium/Low), Gemini 3.1 Pro (High/Low), Gemini 3 Flash, Claude Sonnet 4.6 (Thinking), Claude Opus 4.6 (Thinking), GPT-OSS 120B (Medium+). Non-Gemini models under google provider use Agy token for proxied access. Other providers unchanged. Pricing APPROXIMATE.",
+  "version": "2.11",
+  "updated_at": "2026-07-01",
+  "description": "Local fallback catalog: deepseek + zai + opencode-go + xai. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Pricing APPROXIMATE.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -17,9 +17,10 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Native DeepSeek V4 Flash. Tool-call capable. More expensive than SiliconFlow's hosted V4-Flash ($0.14/$0.28) — prefer SF unless rate-limited.",
+      "description": "Native DeepSeek V4 Flash. Tool-call capable. Primary fast-tier model for the deepseek provider.",
       "aliases": ["deepseek-flash-native"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "deepseek-v4-pro",
@@ -35,145 +36,10 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Native DeepSeek V4 Pro. Tool-call capable. Cheaper than SF-hosted V4-Pro ($1.74/$3.48) — this is the premium-tier default.",
+      "description": "Native DeepSeek V4 Pro. Tool-call capable. Premium-tier default for the deepseek provider.",
       "aliases": ["deepseek-pro-native"],
-      "supports_vision": false
-    },
-    {
-      "id": "deepseek-ai/DeepSeek-V4-Flash",
-      "name": "DeepSeek V4 Flash (via SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "fast",
-      "context_window": 1049000,
-      "max_output_tokens": 8000,
-      "input_price_per_million": 0.14,
-      "output_price_per_million": 0.28,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "DeepSeek V4 Flash on SiliconFlow — cheaper than native. 1M context. Reasoning_tokens share output budget.",
-      "aliases": ["deepseek-v4-flash-sf", "deepseek-flash-sf"],
-      "supports_vision": false
-    },
-    {
-      "id": "deepseek-ai/DeepSeek-V4-Pro",
-      "name": "DeepSeek V4 Pro (via SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "premium",
-      "context_window": 1049000,
-      "max_output_tokens": 16000,
-      "input_price_per_million": 1.74,
-      "output_price_per_million": 3.48,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "DeepSeek V4 Pro on SiliconFlow. Prefer native deepseek-v4-pro for cost ($0.55/$2.19) when key available.",
-      "aliases": ["deepseek-v4-pro-sf", "deepseek-pro-sf"],
-      "supports_vision": false
-    },
-    {
-      "id": "Qwen/Qwen3-8B",
-      "name": "Qwen3 8B (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "fast",
-      "context_window": 131072,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.06,
-      "output_price_per_million": 0.06,
-      "reasoning": false,
-      "thinking_type": "hybrid",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Cheapest tool-capable SiliconFlow model. Symmetric pricing — ideal for mechanical tool-execution loops. Supports thinking/non-thinking hybrid mode.",
-      "aliases": ["qwen3-8b-sf", "alibaba/Qwen3-8B"],
-      "supports_vision": false
-    },
-    {
-      "id": "Qwen/Qwen3-30B-A3B-Instruct-2507",
-      "name": "Qwen3 30B A3B Instruct (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "balanced",
-      "context_window": 262144,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.09,
-      "output_price_per_million": 0.3,
-      "reasoning": false,
-      "thinking_type": null,
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "MoE balanced default. 3B active params keeps cost low while 30B total gives strong instruction following + tool use. Recommended SF balanced pick.",
-      "aliases": ["qwen3-30b-instruct-sf", "alibaba/Qwen3-30B-A3B-Instruct-2507"],
-      "supports_vision": false
-    },
-    {
-      "id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-      "name": "Qwen3 Coder 30B A3B (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "balanced",
-      "context_window": 262144,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.07,
-      "output_price_per_million": 0.28,
-      "reasoning": false,
-      "thinking_type": null,
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Coding-specialized Qwen3 MoE. Cheaper than the generic Qwen3-30B variant. Use when pil.taskType is coding (router override pending).",
-      "aliases": ["qwen3-coder-sf", "qwen-coder-sf", "alibaba/Qwen3-Coder-30B-A3B-Instruct"],
-      "supports_vision": false
-    },
-    {
-      "id": "deepseek-ai/DeepSeek-V3.2",
-      "name": "DeepSeek V3.2 (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "balanced",
-      "context_window": 163840,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.27,
-      "output_price_per_million": 0.42,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Cheap DeepSeek reasoning option for balanced-tier turns that benefit from CoT. Tool-capable. Use when Qwen3-30B is not strong enough on reasoning.",
-      "aliases": ["deepseek-v3.2-sf"],
-      "supports_vision": false
-    },
-    {
-      "id": "deepseek-ai/DeepSeek-R1",
-      "name": "DeepSeek R1 (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "premium",
-      "context_window": 163840,
-      "max_output_tokens": 16384,
-      "input_price_per_million": 0.5,
-      "output_price_per_million": 2.18,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Cheaper premium reasoning alternative to V4-Pro. Tool-capable. Use when V4-Pro is rate-limited or for benchmark parity.",
-      "aliases": ["deepseek-r1-sf"],
-      "supports_vision": false
-    },
-    {
-      "id": "z-ai/GLM-4.6V",
-      "name": "GLM 4.6V Vision (SiliconFlow)",
-      "provider": "siliconflow",
-      "tier": "balanced",
-      "context_window": 131072,
-      "max_output_tokens": 4096,
-      "input_price_per_million": 0.3,
-      "output_price_per_million": 0.9,
-      "reasoning": false,
-      "thinking_type": null,
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Vision-language model with confirmed function-calling support. Use when the turn contains image attachments (router vision-override pending).",
-      "aliases": ["glm-4.6v-sf"],
-      "supports_vision": true
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"]
     },
     {
       "id": "gpt-5.4-mini",
@@ -190,7 +56,8 @@
       "default_reasoning_effort": "low",
       "description": "OpenAI GPT-5.4 mini via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-mini-oauth"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "gpt-5.4",
@@ -207,7 +74,8 @@
       "default_reasoning_effort": "medium",
       "description": "OpenAI GPT-5.4 via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.4-oauth"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "gpt-5.3-codex",
@@ -224,160 +92,8 @@
       "default_reasoning_effort": "medium",
       "description": "OpenAI GPT-5.3 Codex (coding-specialized) via ChatGPT subscription OAuth (chatgpt.com/backend-api/codex, Responses API). Subscription-billed — per-token price N/A (0 placeholder). Added to local fallback catalog so OAuth-granted OpenAI models resolve when the CP catalog endpoint is unreachable.",
       "aliases": ["gpt-5.3-codex-oauth", "codex"],
-      "supports_vision": false
-    },
-    {
-      "id": "gemini-3.5-flash-high",
-      "name": "Gemini 3.5 Flash (High)",
-      "provider": "google",
-      "tier": "fast",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 0.5,
-      "output_price_per_million": 3.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "high",
-      "description": "Agy-supported Gemini 3.5 Flash High via Agy OAuth (cloudcode-pa backend, not public Generative Language). Multimodal, 1M context. Matches official agy cli model list.",
-      "aliases": ["gemini-3.5-flash"],
-      "supports_vision": true
-    },
-    {
-      "id": "gemini-3.5-flash-medium",
-      "name": "Gemini 3.5 Flash (Medium)",
-      "provider": "google",
-      "tier": "balanced",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 0.5,
-      "output_price_per_million": 3.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Agy-supported Gemini 3.5 Flash Medium via Agy OAuth (cloudcode-pa). Multimodal, 1M context. Matches official agy cli model list.",
-      "aliases": ["gemini-3.5-flash-med"],
-      "supports_vision": true
-    },
-    {
-      "id": "gemini-3.5-flash-low",
-      "name": "Gemini 3.5 Flash (Low)",
-      "provider": "google",
-      "tier": "fast",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 0.5,
-      "output_price_per_million": 3.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "low",
-      "description": "Agy-supported Gemini 3.5 Flash Low via Agy OAuth (cloudcode-pa). Multimodal, 1M context. Matches official agy cli model list.",
-      "aliases": ["gemini-3.5-flash-low"],
-      "supports_vision": true
-    },
-    {
-      "id": "gemini-3.1-pro-high",
-      "name": "Gemini 3.1 Pro (High)",
-      "provider": "google",
-      "tier": "premium",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 2.0,
-      "output_price_per_million": 12.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "high",
-      "description": "Agy-supported Gemini 3.1 Pro High via Agy OAuth (cloudcode-pa backend). Strongest agentic Gemini. Matches official agy cli model list. Pricing approximate.",
-      "aliases": ["gemini-3.1-pro", "gemini-3.1-pro-preview"],
-      "supports_vision": true
-    },
-    {
-      "id": "gemini-3.1-pro-low",
-      "name": "Gemini 3.1 Pro (Low)",
-      "provider": "google",
-      "tier": "premium",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 2.0,
-      "output_price_per_million": 12.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "low",
-      "description": "Agy-supported Gemini 3.1 Pro Low via Agy OAuth (cloudcode-pa). Matches official agy cli model list.",
-      "aliases": ["gemini-3.1-pro-low"],
-      "supports_vision": true
-    },
-    {
-      "id": "gemini-3-flash",
-      "name": "Gemini 3 Flash",
-      "provider": "google",
-      "tier": "fast",
-      "context_window": 1048576,
-      "max_output_tokens": 65536,
-      "input_price_per_million": 0.3,
-      "output_price_per_million": 2.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Agy-supported Gemini 3 Flash via Agy OAuth (cloudcode-pa). Multimodal. Matches official agy cli model list.",
-      "aliases": ["gemini-3-flash"],
-      "supports_vision": true
-    },
-    {
-      "id": "claude-sonnet-4.6-thinking",
-      "name": "Claude Sonnet 4.6 (Thinking)",
-      "provider": "google",
-      "tier": "premium",
-      "context_window": 200000,
-      "max_output_tokens": 32000,
-      "input_price_per_million": 3.0,
-      "output_price_per_million": 15.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Agy-supported Claude Sonnet 4.6 Thinking via Agy OAuth (cloudcode-pa backend proxy). Matches official agy cli model list.",
-      "aliases": ["claude-sonnet-4-6-thinking", "claude-4.6-sonnet-thinking"],
-      "supports_vision": true
-    },
-    {
-      "id": "claude-opus-4.6-thinking",
-      "name": "Claude Opus 4.6 (Thinking)",
-      "provider": "google",
-      "tier": "premium",
-      "context_window": 200000,
-      "max_output_tokens": 32000,
-      "input_price_per_million": 15.0,
-      "output_price_per_million": 75.0,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Agy-supported Claude Opus 4.6 Thinking via Agy OAuth (cloudcode-pa backend proxy). Matches official agy cli model list.",
-      "aliases": ["claude-opus-4-6-thinking", "claude-4.6-opus-thinking"],
-      "supports_vision": true
-    },
-    {
-      "id": "gpt-oss-120b-medium",
-      "name": "GPT-OSS 120B (Medium)",
-      "provider": "google",
-      "tier": "balanced",
-      "context_window": 128000,
-      "max_output_tokens": 32000,
-      "input_price_per_million": 0.2,
-      "output_price_per_million": 0.8,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Agy-supported GPT-OSS 120B Medium via Agy OAuth (cloudcode-pa). Matches official agy cli model list.",
-      "aliases": ["gpt-oss-120b", "gpt-oss-medium"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify"]
     },
     {
       "id": "grok-4.3",
@@ -394,7 +110,8 @@
       "default_reasoning_effort": "medium",
       "description": "xAI's current flagship. Excellent agentic tool-calling, low hallucination, supports reasoning + non-reasoning mode. 1M token context. Recommended default for Grok CLI.",
       "aliases": ["grok-4.3", "grok-latest", "grok-4"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "grok-build-0.1",
@@ -411,6 +128,25 @@
       "default_reasoning_effort": null,
       "description": "Specialized fast coding model optimized for agentic coding workflows. The model powering Grok Build CLI. Well-suited for programming, debugging, and multi-step tasks.",
       "aliases": ["grok-build", "grok-code-fast", "grok-build-0.1"],
+      "supports_vision": true,
+      "roles": ["research", "implement"]
+    },
+    {
+      "id": "glm-4.6v-flash",
+      "name": "GLM 4.6V Flash (Z.ai Vision)",
+      "provider": "zai",
+      "tier": "fast",
+      "tier_routing": false,
+      "context_window": 128000,
+      "max_output_tokens": 8192,
+      "input_price_per_million": 0.3,
+      "output_price_per_million": 0.9,
+      "reasoning": false,
+      "thinking_type": null,
+      "supports_effort": false,
+      "default_reasoning_effort": null,
+      "description": "Z.ai vision model for screenshots, UI, diagrams. Primary backend for routing.vision_proxy (text-only models like DeepSeek). Explicit -m or proxy only — not tier routing.",
+      "aliases": ["glm-4.6v-flashx"],
       "supports_vision": true
     },
     {
@@ -418,6 +154,7 @@
       "name": "GLM 4.7 Flash (Z.ai)",
       "provider": "zai",
       "tier": "fast",
+      "tier_routing": false,
       "context_window": 203000,
       "max_output_tokens": 8000,
       "input_price_per_million": 0.0,
@@ -426,15 +163,17 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Free high-speed, cost-effective model for lightweight iterations.",
+      "description": "Z.ai free-tier model (separate rate-limit pool; NOT covered by GLM Coding Plan Pro/Lite/Max quota). Use glm-4.7 for subscription-backed coding. Explicit -m only — excluded from automatic tier routing and compaction.",
       "aliases": ["glm-4-flash", "glm-4-flashx", "glm-4.7-flashx"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "glm-4.5-air",
       "name": "GLM 4.5 Air (Z.ai)",
       "provider": "zai",
       "tier": "fast",
+      "tier_routing": false,
       "context_window": 131072,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.2,
@@ -443,15 +182,17 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Lightweight, highly cost-effective model.",
+      "description": "Z.ai pay-as-you-go API model (billed per token; NOT the GLM Coding Plan subscription pool). Explicit -m only.",
       "aliases": ["glm-4.5-airx"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research", "verify"]
     },
     {
       "id": "glm-4.7",
       "name": "GLM 4.7 (Z.ai)",
       "provider": "zai",
       "tier": "balanced",
+      "routing_tiers": ["fast"],
       "context_window": 203000,
       "max_output_tokens": 16000,
       "input_price_per_million": 0.6,
@@ -460,9 +201,10 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "High-performance coding model from the GLM-4 family.",
+      "description": "Recommended default for Z.ai GLM Coding Plan subscribers (Lite/Pro/Max). Primary balanced model; also routes as fast-tier for compaction/title (replaces glm-4.7-flash in auto-routing). Z.ai docs: use for routine tasks.",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement"]
     },
     {
       "id": "glm-5-turbo",
@@ -477,15 +219,17 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "High-throughput and long-chain agent task model, focusing on stability and efficiency.",
+      "description": "GLM Coding Plan model (Lite/Pro/Max). High-throughput agent tasks; consumes subscription quota (2-3x during peak for GLM-5 family per Z.ai policy).",
       "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "research", "verify"]
     },
     {
       "id": "glm-5v-turbo",
       "name": "GLM 5V Turbo Vision (Z.ai)",
       "provider": "zai",
       "tier": "balanced",
+      "tier_routing": false,
       "context_window": 128000,
       "max_output_tokens": 8192,
       "input_price_per_million": 0.3,
@@ -494,7 +238,7 @@
       "thinking_type": null,
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Multimodal version of GLM-5-Turbo, handling images and vision-based coding.",
+      "description": "Pay-as-you-go vision model — NOT included in GLM Coding Plan Pro (API returns 429). Use Z.ai Vision MCP on Coding Plan instead. Explicit -m only.",
       "aliases": [],
       "supports_vision": true
     },
@@ -503,6 +247,7 @@
       "name": "GLM 5 (Z.ai)",
       "provider": "zai",
       "tier": "balanced",
+      "tier_routing": false,
       "context_window": 203000,
       "max_output_tokens": 32000,
       "input_price_per_million": 1.0,
@@ -511,26 +256,10 @@
       "thinking_type": "enabled",
       "supports_effort": false,
       "default_reasoning_effort": null,
-      "description": "Base flagship model of the GLM-5 series. Strong planning capabilities.",
+      "description": "Legacy GLM-5 base model (not in the official Coding Plan trio). Use glm-4.7 / glm-5-turbo / glm-5.2. Explicit -m only.",
       "aliases": [],
-      "supports_vision": false
-    },
-    {
-      "id": "glm-5.1",
-      "name": "GLM 5.1 (Z.ai)",
-      "provider": "zai",
-      "tier": "premium",
-      "context_window": 203000,
-      "max_output_tokens": 32000,
-      "input_price_per_million": 1.4,
-      "output_price_per_million": 4.4,
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": true,
-      "default_reasoning_effort": "medium",
-      "description": "Z.ai fifth-generation model designed for long-horizon agentic tasks.",
-      "aliases": [],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "glm-5.2",
@@ -545,9 +274,29 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "Z.ai flagship MoE model with 1M-token context window. Excellent at coding and agentic tasks.",
+      "description": "GLM Coding Plan flagship for complex reasoning and large engineering (Z.ai: Opus-level). Default premium route; 3x peak / 2x off-peak quota per Z.ai policy.",
       "aliases": ["glm-5.2[1m]"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
+    },
+    {
+      "id": "glm-5.1",
+      "name": "GLM 5.1 (Z.ai)",
+      "provider": "zai",
+      "tier": "premium",
+      "tier_routing": false,
+      "context_window": 203000,
+      "max_output_tokens": 32000,
+      "input_price_per_million": 1.4,
+      "output_price_per_million": 4.4,
+      "reasoning": true,
+      "thinking_type": "enabled",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "Superseded by glm-5.2 for Coding Plan premium routing. Still callable via -m on the coding endpoint.",
+      "aliases": [],
+      "supports_vision": false,
+      "roles": ["implement", "research"]
     },
     {
       "id": "opencode/kimi-k2.7-code",
@@ -564,7 +313,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription model specialized for coding from Moonshot/Kimi.",
       "aliases": ["kimi-k2.7-code-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify"]
     },
     {
       "id": "opencode/kimi-k2.6",
@@ -581,7 +331,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of Moonshot's Kimi K2.6 model.",
       "aliases": ["kimi-k2.6-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research"]
     },
     {
       "id": "opencode/glm-5.2",
@@ -598,7 +349,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.2 MoE with 1M-token context window.",
       "aliases": ["glm-5.2-go"],
-      "supports_vision": true
+      "supports_vision": true,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "opencode/glm-5.1",
@@ -615,7 +367,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of GLM-5.1 fifth-generation model.",
       "aliases": ["glm-5.1-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "research"]
     },
     {
       "id": "opencode/minimax-m3",
@@ -666,7 +419,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of Qwen's top-tier reasoning coding model.",
       "aliases": ["qwen-3.7-max-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify"]
     },
     {
       "id": "opencode/qwen-3.7-plus",
@@ -683,7 +437,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of Qwen 3.7 Plus coding model.",
       "aliases": ["qwen-3.7-plus-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["implement", "verify", "research"]
     },
     {
       "id": "opencode/qwen-3.6-plus",
@@ -717,7 +472,8 @@
       "default_reasoning_effort": "medium",
       "description": "Subscription version of DeepSeek's flagship coding model.",
       "aliases": ["deepseek-v4-pro-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["leader", "implement", "verify", "research"]
     },
     {
       "id": "opencode/deepseek-v4-flash",
@@ -734,7 +490,8 @@
       "default_reasoning_effort": null,
       "description": "Subscription version of DeepSeek's fast reasoning model.",
       "aliases": ["deepseek-v4-flash-go"],
-      "supports_vision": false
+      "supports_vision": false,
+      "roles": ["research", "implement", "verify"]
     },
     {
       "id": "opencode/mimo-v2.5",
@@ -770,5 +527,69 @@
       "aliases": ["mimo-v2.5-pro-go"],
       "supports_vision": false
     }
-  ]
+  ],
+  "routing": {
+    "switch_provider_order": ["deepseek", "zai", "opencode-go", "xai"],
+    "vision_proxy": {
+      "default": { "provider": "zai", "model_id": "glm-4.6v-flash" },
+      "ocr": { "provider": "zai", "model_id": "glm-4.6v-flash" },
+      "design": { "provider": "zai", "model_id": "glm-5.2" },
+      "fallback_chain": [
+        { "provider": "xai", "model_id": "grok-build-0.1" },
+        { "provider": "zai", "model_id": "glm-5.2" }
+      ]
+    },
+    "council": {
+      "prefer_multi_provider": true,
+      "participants": [
+        {
+          "role": "implement",
+          "provider": "deepseek",
+          "tier": "balanced",
+          "model_id": "deepseek-v4-flash"
+        },
+        {
+          "role": "verify",
+          "provider": "zai",
+          "tier": "premium",
+          "model_id": "glm-5.2"
+        },
+        {
+          "role": "research",
+          "provider": "opencode-go",
+          "tier": "balanced",
+          "model_id": "opencode/kimi-k2.7-code"
+        }
+      ]
+    }
+  },
+  "provider_policies": {
+    "zai": {
+      "peak_hour": {
+        "source_url": "https://docs.z.ai/devpack/overview",
+        "source_verified_at": "2026-07-01",
+        "timezone": "Asia/Shanghai",
+        "start_hour": 14,
+        "end_hour": 18,
+        "peak_quota_multiplier": 3,
+        "off_peak_quota_multiplier": 2,
+        "sensitive_model_ids": ["glm-5.2", "glm-5-turbo", "glm-5", "glm-5.1", "glm-5v-turbo"],
+        "fallback_model_id": "glm-4.7",
+        "switch_fallback_providers": ["deepseek", "opencode-go", "xai"]
+      }
+    },
+    "deepseek": {
+      "peak_hour": {
+        "source_url": "https://api-docs.deepseek.com/quick_start/rate_limit",
+        "source_verified_at": "2026-07-01",
+        "timezone": "Asia/Shanghai",
+        "policy_basis": "official",
+        "policy_note": "Peak-valley pricing per DeepSeek Team announcement (mid-July V4 release). UTC: 01:00–04:00 and 06:00–10:00; UTC+8: 09:00–12:00 and 14:00–18:00. Peak prices 2x regular for v4-pro and v4-flash.",
+        "windows": [{ "start_hour": 9, "end_hour": 12 }, { "start_hour": 14, "end_hour": 18 }],
+        "sensitive_model_ids": ["deepseek-v4-pro"],
+        "fallback_model_id": "deepseek-v4-flash",
+        "switch_fallback_providers": ["zai", "opencode-go", "xai"]
+      }
+    }
+  }
 }

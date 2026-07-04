@@ -11,57 +11,24 @@
  *   /debug status — show current pipeline state without toggling
  */
 
-import { statusBarStore } from "../status-bar/store.js";
+import { statusBarStore } from "../../state/status-bar-store.js";
+import {
+  getAllTraces,
+  getLastTrace,
+  isDebugEnabled,
+  recordTurnTrace,
+  setDebugEnabled,
+  type TurnTrace,
+} from "../../state/turn-trace.js";
 import type { SlashHandler } from "./registry.js";
 import { registerSlash } from "./registry.js";
 
-let debugEnabled = false;
-const turnTraces: TurnTrace[] = [];
-
-export interface PipelineStep {
-  name: string;
-  duration_ms: number;
-  input_summary: string;
-  output_summary: string;
-  tokens_saved?: number;
-}
-
-export interface TurnTrace {
-  turn_id: number;
-  timestamp: number;
-  raw_prompt: string;
-  steps: PipelineStep[];
-  model_requested: string;
-  model_used: string;
-  routed: boolean;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cost_usd: number;
-  estimated_savings: SavingsEstimate;
-}
-
-export interface SavingsEstimate {
-  pil_tokens_saved: number;
-  cache_tokens_saved: number;
-  router_cost_saved_usd: number;
-  total_tokens_saved: number;
-  total_cost_saved_usd: number;
-}
-
-export function isDebugEnabled(): boolean {
-  return debugEnabled;
-}
-
-export function recordTurnTrace(trace: TurnTrace): void {
-  if (!debugEnabled) return;
-  turnTraces.push(trace);
-  if (turnTraces.length > 50) turnTraces.shift();
-}
-
-export function getLastTrace(): TurnTrace | null {
-  return turnTraces[turnTraces.length - 1] ?? null;
-}
+// Trace state (flag + ring buffer) + the PipelineStep/TurnTrace/SavingsEstimate
+// types now live in src/state/turn-trace.ts so the headless core can record
+// traces without importing src/ui. This file owns only formatting + the
+// /debug slash command. Re-export for existing UI-side importers.
+export type { PipelineStep, SavingsEstimate, TurnTrace } from "../../state/turn-trace.js";
+export { isDebugEnabled, recordTurnTrace };
 
 function formatTrace(trace: TurnTrace): string {
   const lines: string[] = [];
@@ -100,6 +67,7 @@ function formatTrace(trace: TurnTrace): string {
 
 function formatSessionSummary(): string {
   const s = statusBarStore.getState();
+  const turnTraces = getAllTraces();
   const totalSavings = turnTraces.reduce(
     (acc, t) => ({
       tokens: acc.tokens + t.estimated_savings.total_tokens_saved,
@@ -126,11 +94,11 @@ export const handleDebugSlash: SlashHandler = async (args, _ctx) => {
   const cmd = args[0]?.toLowerCase();
 
   if (cmd === "on") {
-    debugEnabled = true;
+    setDebugEnabled(true);
     return "Pipeline debug tracing: ON\nEach turn will show: PIL → Router → EE hooks → Model → Savings";
   }
   if (cmd === "off") {
-    debugEnabled = false;
+    setDebugEnabled(false);
     return "Pipeline debug tracing: OFF";
   }
   if (cmd === "status") {
@@ -143,8 +111,9 @@ export const handleDebugSlash: SlashHandler = async (args, _ctx) => {
   }
 
   // Toggle
-  debugEnabled = !debugEnabled;
-  if (debugEnabled) {
+  const next = !isDebugEnabled();
+  setDebugEnabled(next);
+  if (next) {
     return "Pipeline debug tracing: ON\nEach turn will show: PIL → Router → EE hooks → Model → Savings\n\nCommands: /debug off | /debug status | /debug last";
   }
   return "Pipeline debug tracing: OFF";
