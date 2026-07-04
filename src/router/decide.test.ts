@@ -20,7 +20,7 @@ vi.mock("../ee/bridge.js", () => ({
   routeTask: vi.fn().mockResolvedValue(null),
 }));
 
-globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai", "google"];
+globalThis.disabledProvidersList = ["deepseek", "openai", "xai"];
 
 vi.mock("../utils/settings.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../utils/settings.js")>();
@@ -83,7 +83,7 @@ describe("decide()", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai", "google"];
+    globalThis.disabledProvidersList = ["deepseek", "openai", "xai"];
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
     routerStore.setState({
       tier: "hot",
@@ -223,7 +223,7 @@ describe("provider constraint with PROVIDER_INHERIT", () => {
         taskHash: "test-hash",
       }),
     });
-    globalThis.disabledProvidersList = ["siliconflow", "deepseek", "openai", "xai", "google"];
+    globalThis.disabledProvidersList = ["deepseek", "openai", "xai"];
     setDefaultEEClient(createEEClient({ baseUrl: `http://localhost:${coldPremium.port}` }));
 
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";

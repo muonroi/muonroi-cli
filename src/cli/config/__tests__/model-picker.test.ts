@@ -6,7 +6,7 @@ const SAMPLE: PickerModel[] = [
   { id: "claude-opus-4-7", displayName: "claude-opus-4-7", provider: "anthropic", tier: "premium", capability: "text" },
   { id: "gpt-4o", displayName: "gpt-4o", provider: "openai", tier: "premium", capability: "text" },
   { id: "gpt-4-vision", displayName: "gpt-4-vision", provider: "openai", tier: "premium", capability: "vision" },
-  { id: "FLUX.1", displayName: "FLUX.1", provider: "siliconflow", capability: "image" },
+  { id: "FLUX.1", displayName: "FLUX.1", provider: "openai", capability: "image" },
   { id: "deepseek-v3", displayName: "deepseek-v3", provider: "deepseek", tier: "balanced", capability: "text" },
 ];
 

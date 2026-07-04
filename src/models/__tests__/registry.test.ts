@@ -125,11 +125,8 @@ describe("tier_routing catalog flag", () => {
     expect(resolveModelForTask("verify", "zai", "glm-5.2", lookup, { parentTier: "premium" })).toBe("glm-5.2");
   });
 
-  test("siliconflow and google models are absent from catalog", () => {
-    expect(getModelsForProvider("siliconflow")).toHaveLength(0);
-    expect(getModelsForProvider("google")).toHaveLength(0);
+  test("deepseek-ai namespaced model ids are absent from catalog", () => {
     expect(getModelInfo("deepseek-ai/DeepSeek-V4-Flash")).toBeUndefined();
-    expect(getModelInfo("gemini-3-flash")).toBeUndefined();
   });
 });
 

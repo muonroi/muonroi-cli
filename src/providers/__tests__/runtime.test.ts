@@ -27,14 +27,6 @@ describe("createProviderFactory", () => {
     expect(typeof result.factory).toBe("function");
   });
 
-  test("creates google factory", () => {
-    const result = createProviderFactory("google", {
-      apiKey: "google-test-api-key-long-enough-for-validation",
-    });
-    expect(result.id).toBe("google");
-    expect(typeof result.factory).toBe("function");
-  });
-
   test("creates deepseek factory via openai-compatible", () => {
     const result = createProviderFactory("deepseek", {
       apiKey: MOCK_KEY,
@@ -86,8 +78,6 @@ describe("detectProviderForModel", () => {
   test("detects deepseek via catalog", () => expect(detectProviderForModel("deepseek-v4-flash")).toBe("deepseek"));
   test("prefix fallback for unknown deepseek id", () =>
     expect(detectProviderForModel("deepseek-future-x")).toBe("deepseek"));
-  test("detects siliconflow via prefix fallback for qwen ids", () =>
-    expect(detectProviderForModel("Qwen/Qwen3-8B")).toBe("siliconflow"));
   test("deepseek-ai ids resolve to deepseek via prefix when absent from catalog", () =>
     expect(detectProviderForModel("deepseek-ai/DeepSeek-V4-Pro")).toBe("deepseek"));
   test("detects xai via prefix fallback", () => expect(detectProviderForModel("grok-3")).toBe("xai"));

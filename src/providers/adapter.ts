@@ -33,7 +33,6 @@
 import { createAnthropicAdapter } from "./anthropic.js";
 import { getOAuthProviderConfig } from "./auth/registry.js";
 import { apiBaseFor } from "./endpoints.js";
-import { createGeminiAdapter } from "./gemini.js";
 import { createOllamaAdapter } from "./ollama.js";
 import { createOpenAIAdapter } from "./openai.js";
 import { createOpenAICompatibleAdapter } from "./openai-compatible.js";
@@ -69,7 +68,7 @@ function createMockAdapter(id: ProviderId, mock: MockLlmInstance): Adapter {
  * appending one entry here — no `switch` / `if (id === ...)` anywhere else.
  *
  * Each entry receives the validated `ProviderConfig` and returns an Adapter.
- * OpenAI-compatible providers (deepseek/siliconflow/xai) share one factory
+ * OpenAI-compatible providers (deepseek/xai) share one factory
  * with provider-specific config tweaks; that is per-provider configuration,
  * not branching logic.
  */
@@ -79,9 +78,7 @@ const ADAPTER_FACTORIES: Record<ProviderId, AdapterFactory> = {
   anthropic: (config) => createAnthropicAdapter(config),
   // Synchronous path: API-key only (no OAuth auto-load). Use createAdapterAsync for OAuth.
   openai: (config) => createOpenAIAdapter(config),
-  google: (config) => createGeminiAdapter(config),
   deepseek: (config) => createOpenAICompatibleAdapter({ ...config, id: "deepseek" }),
-  siliconflow: (config) => createOpenAICompatibleAdapter({ ...config, id: "siliconflow" }),
   xai: (config) =>
     createOpenAICompatibleAdapter({ ...config, id: "xai", baseURL: config.baseURL ?? apiBaseFor("xai") }),
   ollama: (config) => createOllamaAdapter(config),
@@ -117,7 +114,7 @@ export function createAdapter(id: ProviderId, config: ProviderConfig): Adapter {
  * Dispatch is registry-driven — no `if (id === "openai")` branching. To add
  * OAuth for a new provider (Anthropic, etc.):
  *   1. Register the provider in `providers/auth/registry.ts`.
- *   2. Ensure its adapter honors `config.oauthHeaders` (see openai.ts/anthropic.ts/gemini.ts).
+ *   2. Ensure its adapter honors `config.oauthHeaders` (see openai.ts/anthropic.ts).
  *
  * Behavior per provider:
  *   - OAuth tokens present (auto-refreshed) → adapter built with Bearer headers,

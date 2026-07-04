@@ -271,9 +271,7 @@ export interface UserSettings {
   providers?: {
     anthropic?: ProviderKeyConfig;
     openai?: ProviderKeyConfig;
-    google?: ProviderKeyConfig;
     deepseek?: ProviderKeyConfig;
-    siliconflow?: ProviderKeyConfig;
     xai?: ProviderKeyConfig;
     ollama?: { baseURL?: string };
     zai?: ProviderKeyConfig;
@@ -629,27 +627,12 @@ export function getProviderConfigs(
     configs.openai = { apiKey: openaiKey, baseURL: p.openai?.baseURL };
   }
 
-  // Google Gemini
-  const googleKey = process.env.GOOGLE_API_KEY ?? p.google?.apiKey;
-  if (googleKey) {
-    configs.google = { apiKey: googleKey, baseURL: p.google?.baseURL };
-  }
-
   // DeepSeek
   const deepseekKey = process.env.DEEPSEEK_API_KEY ?? p.deepseek?.apiKey;
   if (deepseekKey) {
     configs.deepseek = {
       apiKey: deepseekKey,
       baseURL: p.deepseek?.baseURL ?? apiBaseFor("deepseek"),
-    };
-  }
-
-  // SiliconFlow
-  const siliconflowKey = process.env.SILICONFLOW_API_KEY ?? p.siliconflow?.apiKey;
-  if (siliconflowKey) {
-    configs.siliconflow = {
-      apiKey: siliconflowKey,
-      baseURL: p.siliconflow?.baseURL ?? apiBaseFor("siliconflow"),
     };
   }
 

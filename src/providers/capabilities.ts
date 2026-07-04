@@ -2,9 +2,9 @@
  * src/providers/capabilities.ts
  *
  * Per-provider capability flags. Each provider quirks differently:
- *   - DeepSeek / SiliconFlow models leak `<｜DSML｜>` control tokens into
+ *   - DeepSeek models leak `<｜DSML｜>` control tokens into
  *     JSON tool inputs, breaking Zod validation for plain-text schemas.
- *   - OpenAI / Anthropic / Google handle structured tool calls reliably.
+ *   - OpenAI / Anthropic handle structured tool calls reliably.
  *   - Local Ollama models vary wildly per checkpoint — treat conservatively.
  *
  * The PIL Layer 6 output module queries these flags before offering a
@@ -86,10 +86,10 @@ export interface ProviderCapabilities {
   /**
    * Transform conversation history before sending to the provider. Default is
    * identity (returns input by reference). Providers override when they
-   * reject specific message parts — e.g. SiliconFlow's DeepSeek thinking-mode
-   * endpoint returns HTTP 400 code 20015 when assistant `reasoning` parts are
+   * reject specific message parts — e.g. a DeepSeek thinking-mode endpoint
+   * that returns HTTP 400 code 20015 when assistant `reasoning` parts are
    * present, because @ai-sdk/openai-compatible does not serialize them as the
-   * `reasoning_content` field SiliconFlow expects.
+   * `reasoning_content` field the endpoint expects.
    */
   sanitizeHistory<T>(messages: readonly T[]): readonly T[];
   /**
@@ -257,7 +257,7 @@ class XAIProviderCapabilities extends ReliableProviderCapabilities {
 }
 
 /**
- * DeepSeek / SiliconFlow quirk: special tokens like `<｜DSML｜>` leak into
+ * DeepSeek quirk: special tokens like `<｜DSML｜>` leak into
  * tool-call JSON bodies, failing Zod validation. Plain-text schemas
  * (`respond_general`) are hit hardest because the model can't recover
  * from a malformed string field. Structured schemas (`respond_plan`,
@@ -269,10 +269,6 @@ class XAIProviderCapabilities extends ReliableProviderCapabilities {
  * malformed bodies before the model fell back to free-form text.
  */
 class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
-  /** Namespace used for openai-compatible providerOptions merge. Overridden by SiliconFlow. */
-  protected providerNamespace(): string {
-    return "deepseek";
-  }
   override supportsResponseTool(taskType: string): boolean {
     if (taskType === "general") return false;
     return true;
@@ -289,7 +285,7 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
   // `reasoning_content` on the wire — BUT only for turns that actually carry a
   // reasoning part. In a multi-step tool loop some assistant turns make a tool
   // call with NO reasoning (e.g. a quick todo_write), and those serialize
-  // WITHOUT a `reasoning_content` key. SiliconFlow's thinking-mode validator
+  // WITHOUT a `reasoning_content` key. A DeepSeek thinking-mode validator
   // then rejects the whole request (HTTP 400 / code 20015, verified on a live
   // wire body). The native round-trip is therefore necessary but NOT
   // sufficient. The real fix lives in the provider strategies'
@@ -298,19 +294,6 @@ class DeepSeekProviderCapabilities extends ReliableProviderCapabilities {
   // thinking via MUONROI_DEEPSEEK_DISABLE_THINKING=1 (fallback B).
   //
   // buildProviderOptions/sanitizeHistory inherit reliable no-op defaults.
-}
-
-/**
- * SiliconFlow shares DeepSeek's `<｜DSML｜>` tool-call quirk; everything else
- * (cache metric layout, signup URL pointer) differs only by namespace.
- */
-class SiliconflowProviderCapabilities extends DeepSeekProviderCapabilities {
-  protected override providerNamespace(): string {
-    return "siliconflow";
-  }
-  override consoleSignupURL(): string {
-    return consoleUrlFor("siliconflow");
-  }
 }
 
 /**
@@ -325,15 +308,6 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
   }
   override consoleSignupURL(): string {
     return consoleUrlFor("ollama");
-  }
-}
-
-/**
- * Google Gemini — defaults are reliable; only the console URL differs.
- */
-class GoogleProviderCapabilities extends ReliableProviderCapabilities {
-  override consoleSignupURL(): string {
-    return consoleUrlFor("google");
   }
 }
 
@@ -358,10 +332,8 @@ class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
 const CAPABILITIES: Record<ProviderId, ProviderCapabilities> = {
   anthropic: new AnthropicProviderCapabilities(),
   openai: new OpenAIProviderCapabilities(),
-  google: new GoogleProviderCapabilities(),
   xai: new XAIProviderCapabilities(),
   deepseek: new DeepSeekProviderCapabilities(),
-  siliconflow: new SiliconflowProviderCapabilities(),
   ollama: new OllamaProviderCapabilities(),
   zai: new ZaiProviderCapabilities(),
   "opencode-go": new OpenCodeGoProviderCapabilities(),

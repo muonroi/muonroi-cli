@@ -20,16 +20,8 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("openai → https://platform.openai.com/api-keys", () => {
       expect(getProviderCapabilities("openai").consoleSignupURL()).toBe("https://platform.openai.com/api-keys");
     });
-    it("google → https://aistudio.google.com/app/apikey", () => {
-      expect(getProviderCapabilities("google").consoleSignupURL()).toBe("https://aistudio.google.com/app/apikey");
-    });
     it("deepseek → https://platform.deepseek.com/api_keys", () => {
       expect(getProviderCapabilities("deepseek").consoleSignupURL()).toBe("https://platform.deepseek.com/api_keys");
-    });
-    it("siliconflow → https://cloud.siliconflow.com/account/ak", () => {
-      expect(getProviderCapabilities("siliconflow").consoleSignupURL()).toBe(
-        "https://cloud.siliconflow.com/account/ak",
-      );
     });
     it("xai → https://console.x.ai/", () => {
       expect(getProviderCapabilities("xai").consoleSignupURL()).toBe("https://console.x.ai/");
@@ -61,11 +53,6 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
       expect(layout.readField).toBe("cachedInputTokens");
       expect(layout.creationSupported).toBe(false);
     });
-    it("google → default cachedInputTokens layout", () => {
-      const layout = getProviderCapabilities("google").cacheMetricLayout();
-      expect(layout.readField).toBe("cachedInputTokens");
-      expect(layout.creationSupported).toBe(false);
-    });
     it("xai → default cachedInputTokens layout", () => {
       const layout = getProviderCapabilities("xai").cacheMetricLayout();
       expect(layout.readField).toBe("cachedInputTokens");
@@ -73,11 +60,6 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     });
     it("deepseek → promptCacheHitTokens layout, no creation", () => {
       const layout = getProviderCapabilities("deepseek").cacheMetricLayout();
-      expect(layout.readField).toBe("promptCacheHitTokens");
-      expect(layout.creationSupported).toBe(false);
-    });
-    it("siliconflow → inherits deepseek layout (promptCacheHitTokens)", () => {
-      const layout = getProviderCapabilities("siliconflow").cacheMetricLayout();
       expect(layout.readField).toBe("promptCacheHitTokens");
       expect(layout.creationSupported).toBe(false);
     });
@@ -100,17 +82,11 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
     it("openai → openai style", () => {
       expect(getProviderCapabilities("openai").systemPromptStyle()).toBe("openai");
     });
-    it("google → generic", () => {
-      expect(getProviderCapabilities("google").systemPromptStyle()).toBe("generic");
-    });
     it("xai → generic", () => {
       expect(getProviderCapabilities("xai").systemPromptStyle()).toBe("generic");
     });
     it("deepseek → generic", () => {
       expect(getProviderCapabilities("deepseek").systemPromptStyle()).toBe("generic");
-    });
-    it("siliconflow → generic (inherits deepseek default)", () => {
-      expect(getProviderCapabilities("siliconflow").systemPromptStyle()).toBe("generic");
     });
     it("ollama → generic", () => {
       expect(getProviderCapabilities("ollama").systemPromptStyle()).toBe("generic");
@@ -121,19 +97,9 @@ describe("ProviderCapabilities — G5 cosmetic methods", () => {
   });
 
   describe("ALL_PROVIDER_IDS single source of truth", () => {
-    it("contains exactly 9 providers in canonical order", async () => {
+    it("contains exactly 7 providers in canonical order", async () => {
       const { ALL_PROVIDER_IDS } = await import("../types.js");
-      expect(ALL_PROVIDER_IDS).toEqual([
-        "anthropic",
-        "openai",
-        "google",
-        "deepseek",
-        "siliconflow",
-        "xai",
-        "ollama",
-        "zai",
-        "opencode-go",
-      ]);
+      expect(ALL_PROVIDER_IDS).toEqual(["anthropic", "openai", "deepseek", "xai", "ollama", "zai", "opencode-go"]);
     });
     it("iterProviders returns the same canonical list", async () => {
       const { ALL_PROVIDER_IDS, iterProviders } = await import("../types.js");

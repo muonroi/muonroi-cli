@@ -88,41 +88,6 @@ export async function loadOAuthRegistry(): Promise<Partial<Record<ProviderId, OA
   }
 
   try {
-    const { agyOAuth, loadAgyTokensWithRefresh, loadCustomOAuthTokens } = await import("./gemini-oauth.js");
-    const { loadGcloudToken } = await import("./gcloud.js");
-
-    r.google = {
-      provider: agyOAuth,
-      displayName: "Agy",
-      // baseURL intentionally left undefined for the google provider.
-      // When OAuth tokens are present, the custom fetch-based provider in
-      // google.strategy.ts (Approach A) uses the user-specified baseURL from
-      // settings, or falls back to generativelanguage.googleapis.com/v1beta.
-      // The old hardcoded cloudcode-pa.googleapis.com endpoint is dead.
-      //
-      // Token loading chain (Approach B + C):
-      //   1. Custom OAuth client from env vars MUONROI_GOOGLE_CLIENT_ID/SECRET
-      //      or settings providers.google.oauthClientId/oauthClientSecret
-      //   2. gcloud ADC (~/.config/gcloud/application_default_credentials.json)
-      //   3. Agy OAuth tokens from ~/.gemini/oauth_creds.json (legacy)
-      loadTokensWithRefresh: async () => {
-        // Approach C: try custom OAuth client first (user-registered GCP client)
-        const custom = await loadCustomOAuthTokens().catch(() => null);
-        if (custom) return custom;
-
-        // Approach B: try gcloud ADC (works immediately after gcloud auth login)
-        const gcloud = await loadGcloudToken().catch(() => null);
-        if (gcloud) return gcloud;
-
-        // Legacy fallback: Agy tokens from ~/.gemini/oauth_creds.json
-        return loadAgyTokensWithRefresh();
-      },
-    };
-  } catch {
-    /* agy-oauth unavailable */
-  }
-
-  try {
     const { grokOAuth, loadGrokTokensWithRefresh } = await import("./grok-oauth.js");
     r.xai = {
       provider: grokOAuth,

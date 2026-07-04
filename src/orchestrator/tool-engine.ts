@@ -48,7 +48,7 @@
 //   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
 //   - A5 (message_seq write-ahead)          — persistMessageWriteAhead
 //   - O1 (providerOptions shape forensics)  — extractProviderOptionsShape
-//   - siliconflow reasoning-strip           — turnCaps.sanitizeHistory
+//   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { generateText, type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";

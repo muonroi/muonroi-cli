@@ -174,11 +174,10 @@ describe("getResponseToolSet — narrow gating (de-robotizing)", () => {
 
   it("drops respond_general when providerId is deepseek (token leak quirk)", () => {
     expect(getResponseToolSet(makeCtx("general", null), "deepseek")).toEqual({});
-    expect(getResponseToolSet(makeCtx("general", null), "siliconflow")).toEqual({});
   });
 
-  it("keeps respond_general for openai/anthropic/google", () => {
-    for (const id of ["openai", "anthropic", "google", "xai"] as const) {
+  it("keeps respond_general for openai/anthropic/xai", () => {
+    for (const id of ["openai", "anthropic", "xai"] as const) {
       const tools = getResponseToolSet(makeCtx("general", null), id);
       expect(Object.keys(tools)).toContain("respond_general");
     }

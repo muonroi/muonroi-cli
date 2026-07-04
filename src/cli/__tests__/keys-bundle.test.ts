@@ -5,7 +5,7 @@ describe("keys-bundle round-trip", () => {
   const sample = {
     providers: {
       deepseek: "sk-mock-deepseek-test-fixture-only",
-      siliconflow: "sk-mock-siliconflow-test-fixture-only",
+      xai: "xai-mock-test-fixture-only",
     },
   };
 

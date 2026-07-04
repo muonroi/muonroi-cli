@@ -9,20 +9,16 @@ import type { ProviderId } from "../types.js";
 import { AnthropicStrategy } from "./anthropic.strategy.js";
 import type { ProviderStrategy } from "./base.strategy.js";
 import { DeepSeekStrategy } from "./deepseek.strategy.js";
-import { GoogleStrategy } from "./google.strategy.js";
 import { OllamaStrategy } from "./ollama.strategy.js";
 import { OpenAIStrategy } from "./openai.strategy.js";
 import { OpenCodeGoStrategy } from "./opencode-go.strategy.js";
-import { SiliconflowStrategy } from "./siliconflow.strategy.js";
 import { XAIStrategy } from "./xai.strategy.js";
 import { ZaiStrategy } from "./zai.strategy.js";
 
 const STRATEGIES: Record<ProviderId, ProviderStrategy> = {
   anthropic: new AnthropicStrategy(),
   openai: new OpenAIStrategy(),
-  google: new GoogleStrategy(),
   deepseek: new DeepSeekStrategy(),
-  siliconflow: new SiliconflowStrategy(),
   xai: new XAIStrategy(),
   ollama: new OllamaStrategy(),
   zai: new ZaiStrategy(),

@@ -36,7 +36,7 @@ const STATIC_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   // Environment variable assignments for common API keys
   {
-    pattern: /(ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|DEEPSEEK_API_KEY)\s*=\s*\S+/g,
+    pattern: /(ANTHROPIC_API_KEY|OPENAI_API_KEY|DEEPSEEK_API_KEY)\s*=\s*\S+/g,
     replacement: "$1=***REDACTED***",
   },
   // Authorization Bearer header
