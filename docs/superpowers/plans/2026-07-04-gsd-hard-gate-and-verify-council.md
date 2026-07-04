@@ -398,9 +398,29 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
 
 **Contract:** the assessor runs BEFORE `syncWorkflowContext`, overrides the depth that gets written to SDK STATE.md, and stashes `autoCouncil` on `pilCtx` for Task 8. The leader-tier `runAssessor` is built from the orchestrator's own task-runner (same mechanism plan-review uses via `taskToRunPerspectiveFn`, but single-shot). No new state store — it feeds the existing `syncWorkflowContext` call.
 
-- [ ] **Step 1:** Read `message-processor.ts:600-660` for the available deps (task runner, EE context, conversation). Determine how a single leader-tier call is issued here (reuse the same runner plan-review uses).
+**Resolved (controller de-risk):** the native single-shot leader call is `createCouncilLLM(deps.bash, deps.mode, deps.session?.id).generate(leaderModelId, system, prompt, maxTokens)` (`src/council/llm.ts:341,348` — auto-records usage as source=council, no cost leak). Leader from `resolvePlanCouncilLeader(sessionModel)`. Confidence is already on `pilCtx.confidence` (`layer1-intent.ts:782` = `llmRes.confidence`) — NO threading needed (UNPROVEN #1 resolved). `deps.bash`/`deps.mode` are inherited from `TurnRunnerDepsBase` (`turn-runner-deps.ts:38-39`).
 
-- [ ] **Step 2:** Modify the depth-sync block (`:636-649`) to:
+The concrete runner helper (write it as a module-scope function in message-processor.ts, or inline):
+
+```ts
+function buildLeaderAssessorRunner(
+  deps: MessageProcessorDeps,
+  sessionModel: string,
+): (prompt: string) => Promise<string> {
+  return async (prompt: string) => {
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const { resolvePlanCouncilLeader } = await import("../council/leader.js");
+    const leader = await resolvePlanCouncilLeader(sessionModel);
+    const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id);
+    // Small budget — this is a single classification, not a synthesis.
+    return llm.generate(leader.modelId, "You are a task complexity assessor.", prompt, 512);
+  };
+}
+```
+
+- [ ] **Step 1:** Read `message-processor.ts:634-649` + confirm `createCouncilLLM`/`generate` signature at `src/council/llm.ts:341,348`. Confirm `deps.mode` + `deps.bash` are in scope in `processMessage`.
+
+- [ ] **Step 2:** Add the `buildLeaderAssessorRunner` helper (above) and modify the depth-sync block (`:636-649`) to:
 
 ```ts
     if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
@@ -413,7 +433,7 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
         let autoCouncilHint: boolean | undefined;
 
         if (isComplexityAssessorEnabled()) {
-          const confidence = (pilCtx as { classifyConfidence?: number }).classifyConfidence ?? 1;
+          const confidence = (pilCtx as { confidence?: number }).confidence ?? 1;
           const assessed = await assessComplexity({
             cwd,
             raw: pilCtx.raw,
@@ -437,9 +457,9 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
     }
 ```
 
-> `classifyConfidence` / `eeContext`: check whether layer1 already surfaces the classify confidence + EE block on `pilCtx`. If `classifyConfidence` is not present, thread `llmRes.confidence` from `layer1-intent.ts:790-792` onto `pilCtx` (small additive change to layer1 + `PipelineContext`) — that is the pre-filter signal. If threading is nontrivial, default `confidence` to a value that makes `shouldAssess` fire for standard/heavy (which it already does regardless of confidence) and only skip clearly-quick turns. `buildLeaderAssessorRunner` is a thin helper you write near this block: it wraps a single `runTask`/leader call returning the model's text.
+> `confidence` is already on `pilCtx` (`layer1-intent.ts:782`). `eeContext` is optional — pass `undefined` unless `pilCtx` already carries an EE block; do NOT add new EE plumbing in this task (YAGNI). Only clearly-quick high-confidence turns skip the assessor; standard/heavy always assess regardless of confidence (per `shouldAssess`).
 
-- [ ] **Step 3:** Add `gsdAutoCouncil?: boolean` and (if threaded) `classifyConfidence?: number` to `PipelineContext` (`src/pil/types.ts`).
+- [ ] **Step 3:** Add `gsdAutoCouncil?: boolean` to `PipelineContext` (`src/pil/types.ts`). (`confidence` already exists on the context.)
 
 - [ ] **Step 4:** tsc + a focused message-processor test if one exists; else rely on the harness E2E (Task 11). Commit (`feat(gsd): assessor enriches the native depth sync before STATE write`).
 
