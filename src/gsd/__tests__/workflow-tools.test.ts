@@ -81,6 +81,44 @@ describe("gsd workflow tools registry", () => {
     expect(parsed.error).toContain("evidence");
   });
 
+  it("gsd_verify runs verify-council when passed=true at heavy depth and honors its verdict", async () => {
+    const bash = new BashTool(tmp);
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    const planBody = "# Plan\n\n## Acceptance\n- returns a token\n";
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), planBody, "utf8");
+
+    const runDebate = async () =>
+      '```council-verdict\n{"verdict":"revise","concerns":["missing null-token guard"],"evidence":[],"rationale":"gap"}\n```';
+
+    const tools = createBuiltinTools(bash, "agent", {
+      modelId: "deepseek-v4-flash",
+      depthTier: "heavy",
+      runDebate,
+    });
+    const verify = tools.gsd_verify as unknown as {
+      execute: (input: Record<string, unknown>) => Promise<string>;
+    };
+    const out = await verify.execute({ passed: true, evidence: "42 tests passed" });
+    const parsed = JSON.parse(out) as { ok?: boolean; phase?: string; passed?: boolean; councilConcerns?: string[] };
+    expect(parsed.phase).toBe("debug");
+    expect(parsed.passed).toBe(false);
+    expect(parsed.councilConcerns?.join(" ")).toContain("null-token");
+    expect(existsSync(planningArtifact(tmp, "VERIFY-COUNCIL.md"))).toBe(true);
+  });
+
+  it("gsd_verify skips council on passed=false (deterministic fail → debug, no council)", async () => {
+    const bash = new BashTool(tmp);
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    const tools = createBuiltinTools(bash, "agent", { modelId: "deepseek-v4-flash", depthTier: "heavy" });
+    const verify = tools.gsd_verify as unknown as {
+      execute: (input: Record<string, unknown>) => Promise<string>;
+    };
+    const out = await verify.execute({ passed: false });
+    const parsed = JSON.parse(out) as { phase?: string };
+    expect(parsed.phase).toBe("debug");
+    expect(existsSync(planningArtifact(tmp, "VERIFY-COUNCIL.md"))).toBe(false);
+  });
+
   it("gsd_ship writes SHIP.md after verify pass", async () => {
     const bash = new BashTool(tmp);
     ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
