@@ -346,8 +346,9 @@ export class CouncilManager {
 
   /**
    * Build conversation context for council discussion from current session messages.
-   * Extracts: compaction summary, recent user messages, key decisions.
-   * Limited to ~3000 tokens to avoid excessive cost.
+   * Extracts: compaction summary, recent conversation (user + analytical assistant),
+   * key decisions/outcomes/plans.
+   * Limited to ~8000 tokens (~32K chars) to balance depth vs cost.
    */
   buildContext(): string {
     const messages = this.deps.getMessages();
@@ -364,36 +365,54 @@ export class CouncilManager {
       }
     }
 
-    // 2. Recent user messages (last 3-5 user turns)
-    const userMessages: string[] = [];
-    for (let i = messages.length - 1; i >= 0 && userMessages.length < 5; i--) {
+    // 2. Recent conversation turns — user + analytical assistant messages.
+    //    Previously only captured user messages, losing assistant analysis,
+    //    code changes, and decisions made during the session.
+    const conversationTurns: string[] = [];
+    for (let i = messages.length - 1; i >= 0 && conversationTurns.length < 8; i--) {
       const msg = messages[i];
       if (msg.role === "user") {
         const text = typeof msg.content === "string" ? msg.content : extractUserContent(msg.content);
         if (text.trim()) {
-          userMessages.unshift(`- ${text.slice(0, 2000).trim()}`);
+          conversationTurns.unshift(`[User] ${text.slice(0, 3000).trim()}`);
+        }
+      } else if (msg.role === "assistant") {
+        const text = typeof msg.content === "string" ? msg.content : extractUserContent(msg.content);
+        // Only include analytical assistant turns (≥80 chars of text — excludes pure tool-call results)
+        if (text.trim().length >= 80) {
+          conversationTurns.unshift(`[Assistant] ${text.slice(0, 1500).trim()}`);
         }
       }
     }
-    if (userMessages.length > 0) {
-      parts.push(`## Recent User Messages\n${userMessages.join("\n")}`);
+    if (conversationTurns.length > 0) {
+      parts.push(`## Recent Conversation\n${conversationTurns.join("\n\n")}`);
     }
 
-    // 3. Key decisions from council memory if available
-    const councilMemories: string[] = [];
+    // 3. Key decisions from system messages (task outcomes, council results, plans, etc.)
+    const decisionMsgs: string[] = [];
     for (const msg of messages) {
-      if (msg.role === "system" && typeof msg.content === "string" && msg.content.includes("[Council Memory]")) {
-        councilMemories.push(msg.content);
+      if (msg.role !== "system" || typeof msg.content !== "string") continue;
+      const c = msg.content;
+      if (
+        c.includes("[Council Memory]") ||
+        c.includes("[Council Decision]") ||
+        c.includes("[Council Action Items]") ||
+        c.includes("[Council Plan Update]") ||
+        c.includes("[Decision]") ||
+        c.includes("[Task Completed]") ||
+        c.includes("[NEEDS HUMAN REVIEW]")
+      ) {
+        decisionMsgs.push(c);
       }
     }
-    if (councilMemories.length > 0) {
-      parts.push(`## Previous Council Outcomes\n${councilMemories.slice(-2).join("\n\n")}`);
+    if (decisionMsgs.length > 0) {
+      parts.push(`## Key Decisions\n${decisionMsgs.slice(-4).join("\n\n")}`);
     }
 
     const combined = parts.join("\n\n---\n\n");
-    // Rough token estimate: char/4
-    if (combined.length > 12000) {
-      return `${combined.slice(0, 12000)}\n\n[... context truncated to fit token budget]`;
+    // ~8K token budget (char/4 ≈ token count; cap raised from original 12K chars)
+    if (combined.length > 32000) {
+      return `${combined.slice(0, 32000)}\n\n[... context truncated to fit token budget]`;
     }
     return combined;
   }

@@ -148,7 +148,7 @@ describe("CouncilManager — buildContext", () => {
     ];
     const m = new CouncilManager(makeDeps({ getMessages: () => msgs }));
     const ctx = m.buildContext();
-    expect(ctx).toContain("Previous Council Outcomes");
+    expect(ctx).toContain("Key Decisions");
     expect(ctx).toContain("previous outcome");
   });
 });

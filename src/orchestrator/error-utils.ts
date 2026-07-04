@@ -1,17 +1,17 @@
 import { APICallError } from "@ai-sdk/provider";
 
 const STATUS_MESSAGES: Record<number, string> = {
-  400: "The request was invalid. This may be caused by an unsupported parameter or model.",
-  401: "Authentication failed. Your API key may be invalid or expired.",
-  403: "Access denied. Your API key does not have permission for this request.",
-  404: "The requested model or endpoint was not found. Check your model name and base URL.",
-  408: "The request timed out. Please try again.",
-  422: "The request could not be processed. Check your message format or parameters.",
-  429: "Rate limit exceeded. Please wait a moment and try again.",
-  500: "The API server encountered an internal error. Please try again later.",
-  502: "The API server is temporarily unavailable. Please try again later.",
-  503: "The API service is temporarily overloaded. Please try again later.",
-  529: "The API service is overloaded. Please try again later.",
+  400: "The provider rejected this request as invalid — usually a parameter or model it doesn't support. Try switching models with `-m <model>`, or simplify the request and retry.",
+  401: "The provider didn't accept your API key — it may be missing, invalid, or expired. Run `keys login <provider>` to set a fresh key, then try again.",
+  403: "Your API key works, but it isn't allowed to make this request. Check your plan or key permissions on the provider's dashboard, or switch models with `-m <model>`.",
+  404: "The provider couldn't find that model or endpoint. Double-check the model name (see `models list`) and your base URL, then try again.",
+  408: "The request took too long and timed out. This is usually temporary — just try again.",
+  422: "The provider understood the request but couldn't process it. Check your message format and parameters, then retry — switching models with `-m <model>` can also help.",
+  429: "You're sending requests faster than the provider allows right now. Wait a moment and try again, or switch to another model with `-m <model>`.",
+  500: "Something went wrong on the provider's servers — not on your end. Give it a moment and try again later.",
+  502: "The provider's servers are temporarily unreachable. This usually clears up on its own — try again in a minute.",
+  503: "The provider is overloaded right now. Give it a minute and retry, or switch models with `-m <model>` in the meantime.",
+  529: "The provider is overloaded right now. Give it a minute and retry, or switch models with `-m <model>` in the meantime.",
 };
 
 export function isContextLimitError(error: unknown): boolean {
@@ -61,15 +61,29 @@ function routingSuffix(error: unknown, ctx: ApiErrorContext | undefined): string
   if (status === undefined && /insufficient balance|out of (balance|credit)/i.test(message)) {
     status = 402;
   }
-  if (status === undefined || !ROUTING_STATUSES.has(status)) return "";
+  const rawMsg = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const isConsoleGo = rawMsg.includes("console go") || ctx?.providerId === "opencode-go";
+  const isRateLimitMsg = /rate limit|rate-limited|429|too many requests/i.test(rawMsg);
+
+  // If we have model context and it's a routing error (by status or by message content)
+  if (!ctx?.modelId) return "";
+  if (!(status !== undefined && ROUTING_STATUSES.has(status)) && !isRateLimitMsg && !isConsoleGo) return "";
 
   const where = `routed to model "${ctx.modelId}"${ctx.providerId ? ` via provider "${ctx.providerId}"` : ""}`;
-  const hint =
-    status === 402
-      ? "out of balance/credit — top up the provider account, or switch model with `-m <model>`."
-      : status === 401 || status === 403
-        ? "not authenticated for this provider — run `keys login <provider>` (or set its API key), or switch model with `-m <model>`."
-        : "rate-limited — wait and retry, or switch model with `-m <model>`.";
+
+  let hint: string;
+  if (isConsoleGo && (isRateLimitMsg || status === 429)) {
+    hint =
+      "the Console Go proxy hit its own burst rate limit — this is separate from your web 'Rolling Usage' %, so the dashboard can look fine while the proxy still throttles. Wait a moment, use native DeepSeek with `-m deepseek-v4-flash`, or switch provider.";
+  } else if (status === 402) {
+    hint =
+      "this provider account is out of balance or credit. Top it up on the provider's site, or switch to another model with `-m <model>`.";
+  } else if (status === 401 || status === 403) {
+    hint =
+      "you're not authenticated for this provider. Run `keys login <provider>` (or set its API key), or switch to another model with `-m <model>`.";
+  } else {
+    hint = "the provider is rate-limiting you. Wait a moment and retry, or switch to another model with `-m <model>`.";
+  }
   return ` [${where}] — ${hint}`;
 }
 
@@ -79,7 +93,7 @@ export function humanizeApiError(error: unknown, ctx?: ApiErrorContext): string 
 
 function humanizeApiErrorBase(error: unknown): string {
   if (isMalformedFunctionNameError(error)) {
-    return "Model emitted a malformed tool call (function.name missing). Skipping this turn — please retry or rephrase.";
+    return "The model produced a malformed tool call (its function name was missing), so this turn was skipped. Just send your request again — rephrasing slightly often helps.";
   }
 
   if (APICallError.isInstance(error)) {
@@ -92,7 +106,9 @@ function humanizeApiErrorBase(error: unknown): string {
     // For 5xx prefer the canned "retry later" message + the status code; keep a
     // body detail only when it actually adds information.
     if (status && status >= 500) {
-      const canned = STATUS_MESSAGES[status] ?? "The API server returned an error. Please try again later.";
+      const canned =
+        STATUS_MESSAGES[status] ??
+        "The provider's servers returned an error — not something you did. Wait a bit and try again.";
       if (!detail || isOpaqueDetail(detail)) return `${canned} (HTTP ${status})`;
       return `${detail} (HTTP ${status})`;
     }
@@ -109,9 +125,9 @@ function humanizeApiErrorBase(error: unknown): string {
     const toolMatch = raw.match(/Tool\s+"?(\w+)"?\s+(?:is\s+)?not\s+found/i) ?? raw.match(/tool\s+(\w+)/i);
     const toolName = toolMatch?.[1] ?? "that tool";
     if (toolName === "search_web") {
-      return `"search_web" is not available. Use bash with curl for web requests, or delegate to an explore agent for research.`;
+      return `"search_web" isn't available here. For web requests, use bash with curl instead, or hand the research off to an explore agent.`;
     }
-    return `Tool "${toolName}" is not available. Check the TOOLS list in the system prompt for supported tools.`;
+    return `Tool "${toolName}" isn't available in this session. Check the TOOLS list in the system prompt to see which tools you can use.`;
   }
   return stripped;
 }
@@ -162,6 +178,35 @@ export interface ApiErrorForensics {
   urlHost: string | undefined;
   responseBodyTrunc: string | undefined;
   requestParamKeys: string[] | undefined;
+  /** Field-key signature per distinct assistant message shape (PII-safe).
+   * Diagnoses Z.ai 1210 / SiliconFlow 20015 "invalid parameter" rejections
+   * where the culprit is a missing/extra field on assistant turns in a
+   * multi-step tool loop (e.g. reasoning_content present on some turns but
+   * absent on tool-only turns). */
+  assistantFieldKeys: string[] | undefined;
+  /** Per-assistant-message char counts (PII-safe — lengths only, no text).
+   * Distinguishes the "uniform shape but still rejected" failure mode:
+   * H1 cumulative reasoning budget exceeded vs H2 empty reasoning_content
+   * string vs H3 oversized text/tool payload. Set when messages are present. */
+  assistantReasoningLens: number[] | undefined;
+  /** Total reasoning_content chars across assistant messages. */
+  totalReasoningChars: number | undefined;
+  /** Values of scalar SDK-config params (reasoning_effort, verbosity,
+   * tool_choice, response_format, max_tokens, temperature, top_p,
+   * frequency_penalty, presence_penalty, seed, stop, parallel_tool_calls).
+   * PII-safe (generation config, not prompt content) — pinpoints WHICH
+   * param value a provider rejects when the error is generic (Z.ai 1210,
+   * SiliconFlow 20015). */
+  configParamValues: Record<string, unknown> | undefined;
+  /** Per-assistant tool_calls counts (from assistant messages in the request
+   * that failed). Captures H3 for Z.ai 1210: a single assistant response
+   * emitting many parallel tool_calls (e.g. 8 or 12) → the follow-up request
+   * carrying that many role:tool results gets rejected by the coding endpoint
+   * with generic 1210. */
+  assistantToolCallCounts: number[] | undefined;
+  /** Count of role:"tool" messages in the failing request body. Complements
+   * assistantToolCallCounts to show the round-trip payload size for H3. */
+  toolMessageCount: number | undefined;
   isRetryable: boolean | undefined;
 }
 
@@ -175,9 +220,46 @@ export function summarizeApiErrorForLog(error: unknown): ApiErrorForensics | nul
   } catch {
     urlHost = undefined;
   }
-  let requestParamKeys: string[] | undefined;
-  if (error.requestBodyValues && typeof error.requestBodyValues === "object") {
-    requestParamKeys = Object.keys(error.requestBodyValues as Record<string, unknown>).sort();
+  const bodyValues =
+    error.requestBodyValues && typeof error.requestBodyValues === "object"
+      ? (error.requestBodyValues as { messages?: unknown; [k: string]: unknown })
+      : undefined;
+  const requestParamKeys = bodyValues ? Object.keys(bodyValues).sort() : undefined;
+  // Collect the distinct field-key signature across assistant wire messages.
+  // Only key NAMES are persisted — values may contain secrets/PII.
+  let assistantFieldKeys: string[] | undefined;
+  let assistantReasoningLens: number[] | undefined;
+  let assistantToolCallCounts: number[] | undefined;
+  let totalReasoningChars = 0;
+  let toolMessageCount = 0;
+  if (bodyValues && Array.isArray(bodyValues.messages)) {
+    const signatures = new Set<string>();
+    const rcLens: number[] = [];
+    const tcLens: number[] = [];
+    for (const m of bodyValues.messages) {
+      const msg = m as Record<string, unknown> | null;
+      if (msg?.role === "tool") {
+        toolMessageCount++;
+        continue;
+      }
+      if (msg?.role !== "assistant") continue;
+      const sig = Object.keys(msg ?? {})
+        .sort()
+        .join(",");
+      signatures.add(sig);
+      const rc = msg?.reasoning_content;
+      if (typeof rc === "string") {
+        rcLens.push(rc.length);
+        totalReasoningChars += rc.length;
+      } else {
+        rcLens.push(-1); // marker: reasoning_content missing/non-string on this turn
+      }
+      const tcs = Array.isArray(msg?.tool_calls) ? msg.tool_calls.length : 0;
+      tcLens.push(tcs);
+    }
+    if (signatures.size > 0) assistantFieldKeys = [...signatures].sort();
+    if (rcLens.length > 0) assistantReasoningLens = rcLens;
+    if (tcLens.length > 0) assistantToolCallCounts = tcLens;
   }
   const body = typeof error.responseBody === "string" ? error.responseBody : undefined;
   const responseBodyTrunc =
@@ -187,8 +269,44 @@ export function summarizeApiErrorForLog(error: unknown): ApiErrorForensics | nul
     urlHost,
     responseBodyTrunc,
     requestParamKeys,
+    assistantFieldKeys,
+    assistantReasoningLens,
+    totalReasoningChars: assistantReasoningLens ? totalReasoningChars : undefined,
+    configParamValues: bodyValues ? extractConfigParamValues(bodyValues) : undefined,
+    assistantToolCallCounts,
+    toolMessageCount: bodyValues && Array.isArray(bodyValues.messages) ? toolMessageCount : undefined,
     isRetryable: error.isRetryable,
   };
+}
+
+/**
+ * Scalar SDK-config params whose VALUES are PII-safe (generation config, not
+ * user prompt content). See `ApiErrorForensics.configParamValues`.
+ * Includes parallel_tool_calls because Z.ai GLM coding endpoint rejects
+ * high-parallelism tool call batches (observed 8-12 in one assistant turn)
+ * with generic 1210; capturing the value helps confirm if SDK overrode it.
+ */
+const CONFIG_PARAM_KEYS = [
+  "reasoning_effort",
+  "verbosity",
+  "tool_choice",
+  "response_format",
+  "max_tokens",
+  "temperature",
+  "top_p",
+  "frequency_penalty",
+  "presence_penalty",
+  "seed",
+  "stop",
+  "parallel_tool_calls",
+] as const;
+
+function extractConfigParamValues(body: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of CONFIG_PARAM_KEYS) {
+    if (k in body) out[k] = body[k] ?? null;
+  }
+  return out;
 }
 
 export { extractResponseDetail, STATUS_MESSAGES };
