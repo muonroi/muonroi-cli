@@ -61,6 +61,14 @@ export interface PipelineContext {
    */
   modelDepthTier?: ComplexityTier | null;
   /**
+   * Leader-tier complexity assessor's auto-council recommendation (Task 4
+   * `assessComplexity` / `src/gsd/complexity-assessor.ts`), set by the native
+   * depth-sync block in message-processor.ts BEFORE `syncWorkflowContext`.
+   * undefined when the assessor didn't run (prefilter-skip / disabled) or
+   * failed; consumed by the auto-council gate (Task 8).
+   */
+  gsdAutoCouncil?: boolean;
+  /**
    * Model-decided scope (agent-first replacement for the `mentionsEcosystemScope`
    * regex): true when the turn is about the Muonroi PLATFORM/ecosystem (BB/.NET,
    * building-block, rule engine, platform setup) where muonroi-docs is

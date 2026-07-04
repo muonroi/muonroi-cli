@@ -61,7 +61,8 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { isGsdNativeEnabled } from "../gsd/flags.js";
+import { assessComplexity } from "../gsd/complexity-assessor.js";
+import { isComplexityAssessorEnabled, isGsdNativeEnabled } from "../gsd/flags.js";
 import { getGsdLoopHost } from "../gsd/loop-host.js";
 import { syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
@@ -402,6 +403,30 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
 }
 
 /**
+ * Single-shot leader-tier LLM runner for the GSD complexity assessor
+ * (Task 4 `assessComplexity`). Mirrors the orchestrator's own council LLM
+ * construction (`createCouncilLLM` — see `runCouncil` / `runProductLoop` in
+ * orchestrator.ts) so the assessor call auto-records usage as
+ * `source=council` (no cost-leak) instead of a bespoke unaccounted call.
+ * Leader model resolution goes ONLY through `resolvePlanCouncilLeader` —
+ * Zero Hardcode Rule, no literal model/provider IDs here.
+ */
+function buildLeaderAssessorRunner(
+  deps: MessageProcessorDeps,
+  sessionModel: string,
+): (prompt: string) => Promise<string> {
+  return async (prompt: string) => {
+    const { createCouncilLLM } = await import("../council/llm.js");
+    const { resolvePlanCouncilLeader } = await import("../council/leader.js");
+    const leader = await resolvePlanCouncilLeader(sessionModel);
+    const stats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
+    const llm = createCouncilLLM(deps.bash, deps.mode, deps.session?.id, stats);
+    // Small budget — this is a single classification, not a synthesis.
+    return llm.generate(leader.modelId, "You are a task complexity assessor.", prompt, 512);
+  };
+}
+
+/**
  * MessageProcessor — extracted streaming turn loop.
  *
  * Lifecycle:
@@ -635,12 +660,36 @@ export class MessageProcessor {
 
     if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
       try {
-        const depth =
-          (pilCtx as { modelDepthTier?: "quick" | "standard" | "heavy" | null }).modelDepthTier ??
-          (pilCtx as { complexityTier?: string }).complexityTier ??
-          "standard";
         const cwd = deps.bash.getCwd();
         const sessionModel = deps.session?.model ?? "unknown";
+        let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
+
+        // Leader-tier assessor enrichment: OVERRIDES the fast-classifier depth
+        // before it's written to SDK STATE.md. `assessComplexity` itself never
+        // throws (every internal step is caught, degrading to `priorDepth`),
+        // but this inner try/catch is defensive fail-open insurance so even an
+        // unexpected throw here keeps `depth` at its fast-classifier value —
+        // syncWorkflowContext below is never skipped because of the assessor.
+        if (isComplexityAssessorEnabled()) {
+          try {
+            const assessed = await assessComplexity({
+              cwd,
+              raw: pilCtx.raw,
+              priorDepth: depth,
+              confidence: pilCtx.confidence,
+              eeContext: undefined, // YAGNI — no new EE plumbing in this task
+              sessionModelId: sessionModel,
+              runAssessor: buildLeaderAssessorRunner(deps, sessionModel), // single-shot leader call
+            });
+            depth = assessed.depth;
+            if (assessed.assessed) pilCtx.gsdAutoCouncil = assessed.autoCouncil;
+          } catch (assessErr) {
+            console.error(
+              `[gsd-loop-host] complexity assessor threw unexpectedly, keeping fast-classifier depth: ${(assessErr as Error).message}`,
+            );
+          }
+        }
+
         getGsdLoopHost().ensureHost(cwd, sessionModel);
         syncWorkflowContext(cwd, sessionModel, depth);
       } catch (err) {
