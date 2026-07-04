@@ -50,24 +50,50 @@ export function extractComplexityVerdict(raw: string): ComplexityVerdict | null 
       if (v) return v;
     }
   }
-  // Bare {...} right-to-left.
-  const idx: number[] = [];
-  for (let i = 0; i < raw.length; i += 1) if (raw[i] === "{") idx.push(i);
-  for (let k = idx.length - 1; k >= 0; k -= 1) {
+  // Bare {...} right-to-left, string-aware (skip braces inside quoted values —
+  // free-form `rationale` text may contain literal `{`/`}`).
+  const bare = findBareObjects(raw);
+  for (let i = bare.length - 1; i >= 0; i -= 1) {
+    const v = tryParse(bare[i]!);
+    if (v) return v;
+  }
+  return null;
+}
+
+/** Top-level {...} substrings via string-aware brace-balanced scan, in document order. */
+function findBareObjects(raw: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    if (raw[i] !== "{") {
+      i += 1;
+      continue;
+    }
     let depth = 0;
-    for (let j = idx[k]!; j < raw.length; j += 1) {
-      if (raw[j] === "{") depth += 1;
-      else if (raw[j] === "}") {
+    let inStr = false;
+    let esc = false;
+    let j = i;
+    for (; j < raw.length; j += 1) {
+      const ch = raw[j]!;
+      if (inStr) {
+        if (esc) esc = false;
+        else if (ch === "\\") esc = true;
+        else if (ch === '"') inStr = false;
+      } else if (ch === '"') {
+        inStr = true;
+      } else if (ch === "{") {
+        depth += 1;
+      } else if (ch === "}") {
         depth -= 1;
         if (depth === 0) {
-          const v = tryParse(raw.slice(idx[k]!, j + 1));
-          if (v) return v;
+          out.push(raw.slice(i, j + 1));
           break;
         }
       }
     }
+    i = j >= raw.length ? j : j + 1;
   }
-  return null;
+  return out;
 }
 
 export const ASSESSMENT_OUTPUT_CONTRACT = [

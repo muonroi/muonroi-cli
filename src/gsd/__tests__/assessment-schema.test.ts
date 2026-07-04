@@ -19,4 +19,18 @@ describe("extractComplexityVerdict", () => {
     expect(v?.depth).toBe("quick");
     expect(v?.autoCouncil).toBe(false);
   });
+  it("extracts a bare (unfenced) valid object", () => {
+    const raw = '{"depth":"quick","autoCouncil":false,"rationale":"ok"}';
+    expect(extractComplexityVerdict(raw)).toEqual({
+      depth: "quick",
+      autoCouncil: false,
+      rationale: "ok",
+    });
+  });
+  it("still extracts when rationale contains a literal brace", () => {
+    const raw = '{"depth":"quick","autoCouncil":false,"rationale":"handle the { edge case"}';
+    const v = extractComplexityVerdict(raw);
+    expect(v).not.toBeNull();
+    expect(v?.depth).toBe("quick");
+  });
 });
