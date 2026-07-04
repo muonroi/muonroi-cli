@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 400" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#495057"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1180" height="400" rx="14" fill="#f8f9fb"/>
+
+  <!-- Question -->
+  <rect x="24" y="168" width="150" height="64" rx="10" fill="#ffffff" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="99" y="196" text-anchor="middle" font-size="14" font-weight="600" fill="#212529">/council</text>
+  <text x="99" y="216" text-anchor="middle" font-size="13" fill="#495057">REST or gRPC?</text>
+
+  <!-- Leader -->
+  <rect x="210" y="162" width="150" height="76" rx="10" fill="#ffffff" stroke="#5c7cfa" stroke-width="2"/>
+  <text x="285" y="192" text-anchor="middle" font-size="14" font-weight="600" fill="#3b5bdb">Leader model</text>
+  <text x="285" y="212" text-anchor="middle" font-size="12" fill="#495057">clarify + plan stances</text>
+
+  <!-- Debate zone -->
+  <rect x="392" y="58" width="216" height="284" rx="14" fill="#eef1ff" stroke="#dbe4ff" stroke-width="1.5"/>
+  <text x="500" y="80" text-anchor="middle" font-size="12" font-weight="600" fill="#4263eb">Adversarial rounds (≤ 8)</text>
+  <text x="500" y="97" text-anchor="middle" font-size="11" fill="#5c7cfa">verify-then-refute · cite evidence</text>
+
+  <rect x="410" y="112" width="180" height="56" rx="10" fill="#ffffff" stroke="#4c6ef5" stroke-width="2"/>
+  <text x="500" y="135" text-anchor="middle" font-size="13" font-weight="600" fill="#3b5bdb">DeepSeek</text>
+  <text x="500" y="153" text-anchor="middle" font-size="11" fill="#495057">Pragmatist</text>
+
+  <rect x="410" y="182" width="180" height="56" rx="10" fill="#ffffff" stroke="#12b886" stroke-width="2"/>
+  <text x="500" y="205" text-anchor="middle" font-size="13" font-weight="600" fill="#099268">Z.ai GLM-5.2</text>
+  <text x="500" y="223" text-anchor="middle" font-size="11" fill="#495057">Performance Analyst</text>
+
+  <rect x="410" y="252" width="180" height="56" rx="10" fill="#ffffff" stroke="#f76707" stroke-width="2"/>
+  <text x="500" y="275" text-anchor="middle" font-size="13" font-weight="600" fill="#e8590c">Kimi (opencode-go)</text>
+  <text x="500" y="293" text-anchor="middle" font-size="11" fill="#495057">Experience Auditor</text>
+
+  <!-- Synthesis -->
+  <rect x="648" y="160" width="150" height="80" rx="10" fill="#ffffff" stroke="#5c7cfa" stroke-width="2"/>
+  <text x="723" y="190" text-anchor="middle" font-size="14" font-weight="600" fill="#3b5bdb">Synthesis</text>
+  <text x="723" y="210" text-anchor="middle" font-size="12" fill="#495057">structured JSON</text>
+
+  <!-- Judge -->
+  <polygon points="900,150 968,200 900,250 832,200" fill="#fff9db" stroke="#f59f00" stroke-width="2"/>
+  <text x="900" y="196" text-anchor="middle" font-size="12" font-weight="600" fill="#e67700">Confidence</text>
+  <text x="900" y="212" text-anchor="middle" font-size="12" fill="#495057">≥ 0.5 ?</text>
+
+  <!-- Answer / Review -->
+  <rect x="1010" y="118" width="150" height="54" rx="10" fill="#ffffff" stroke="#2f9e44" stroke-width="2"/>
+  <text x="1085" y="142" text-anchor="middle" font-size="13" font-weight="600" fill="#2b8a3e">Answer</text>
+  <text x="1085" y="160" text-anchor="middle" font-size="11" fill="#495057">+ evidence trail</text>
+
+  <rect x="1010" y="228" width="150" height="54" rx="10" fill="#ffffff" stroke="#e03131" stroke-width="2"/>
+  <text x="1085" y="252" text-anchor="middle" font-size="13" font-weight="600" fill="#c92a2a">Needs human</text>
+  <text x="1085" y="270" text-anchor="middle" font-size="11" fill="#495057">review</text>
+
+  <!-- Arrows -->
+  <g stroke="#495057" stroke-width="1.8" fill="none" marker-end="url(#arrow)">
+    <path d="M174,200 L206,200"/>
+    <path d="M360,200 L406,140"/>
+    <path d="M360,200 L406,210"/>
+    <path d="M360,200 L406,280"/>
+    <path d="M590,140 L644,190"/>
+    <path d="M590,210 L644,200"/>
+    <path d="M590,280 L644,215"/>
+    <path d="M798,200 L828,200"/>
+    <path d="M960,180 L1008,150"/>
+    <path d="M960,220 L1008,250"/>
+  </g>
+  <text x="985" y="150" text-anchor="middle" font-size="11" font-weight="600" fill="#2b8a3e">yes</text>
+  <text x="985" y="248" text-anchor="middle" font-size="11" font-weight="600" fill="#c92a2a">no</text>
+</svg>

@@ -14,10 +14,15 @@
  *     [--dry-run] \
  *     [--collection-filter bb-recipes]
  *
+ *   # From flowcore crawler output (manifest-driven GitHub + web docs):
+ *   bun run scripts/ingest-bb-to-ee.mts --docs-points /tmp/flowcore-docs-points.jsonl [--dry-run] [--ee-url ...]
+ *
  * Collections written:
  *   bb-behavioral        — per-row REPO_DEEP_MAP.md points + schema file points
  *   bb-recipes           — sample READMEs + template intents
  *   experience-principles — package-family rows + OSS-BOUNDARY hard rules
+ *   ecosystem            — Muonroi/BB internal docs (from flowcore)
+ *   external             — trusted 3rd-party lib/framework docs (from flowcore)
  */
 
 import { createHash } from "node:crypto";
@@ -39,6 +44,7 @@ const { values: args } = parseArgs({
     "dry-run": { type: "boolean", default: false },
     "collection-filter": { type: "string" },
     "ee-url": { type: "string", default: "https://experience.muonroi.com" },
+    "docs-points": { type: "string" },
     help: { type: "boolean", default: false },
   },
   allowPositionals: false,
@@ -48,13 +54,15 @@ if (args.help) {
   console.log(`
 Usage:
   bun run scripts/ingest-bb-to-ee.mts --bb-root <path> --templates-root <path> [--dry-run] [--collection-filter <col>]
+  bun run scripts/ingest-bb-to-ee.mts --docs-points <points.json|jsonl> [--dry-run] [--ee-url <url>]
 
 Options:
   --bb-root           Path to muonroi-building-block repo root
   --templates-root    Path to the directory containing Muonroi.*Template repos
   --dry-run           Print what would be ingested; no HTTP POST
-  --collection-filter Ingest only this collection (bb-behavioral | bb-recipes | experience-principles)
+  --collection-filter Ingest only this collection (bb-behavioral | bb-recipes | experience-principles | ecosystem | external)
   --ee-url            EE base URL (default: https://experience.muonroi.com)
+  --docs-points       Path to JSON or JSONL file of pre-chunked docs points from flowcore crawler (each: {id?, text, collection, payload?}). Enables manifest-driven GitHub+web ingestion.
 `);
   process.exit(0);
 }
@@ -64,6 +72,7 @@ const TEMPLATES_ROOT = args["templates-root"] ?? "D:/sources/Core";
 const DRY_RUN = args["dry-run"] ?? false;
 const COLLECTION_FILTER = args["collection-filter"] ?? null;
 const EE_URL = args["ee-url"] ?? "https://experience.muonroi.com";
+const DOCS_POINTS_PATH = args["docs-points"] ?? null;
 
 const STATE_FILE = resolve(process.cwd(), ".ee-ingest-state.json");
 
@@ -661,6 +670,7 @@ async function main() {
   console.log(`  Templates root:  ${TEMPLATES_ROOT}`);
   console.log(`  EE URL:          ${EE_URL}`);
   if (COLLECTION_FILTER) console.log(`  Collection filter: ${COLLECTION_FILTER}`);
+  if (DOCS_POINTS_PATH) console.log(`  Docs points (flowcore): ${DOCS_POINTS_PATH}`);
   console.log("");
 
   const state = loadState();
@@ -835,6 +845,59 @@ async function main() {
       tpl.nugetId === "Muonroi.BaseTemplate" ? "Muonroi.BaseTemplate" : `${tpl.nugetId}.Template`,
     );
     await ingestPoint(point, state, tplRoot, sha256(JSON.stringify(tpl)));
+  }
+
+  // ---- 3.6 Generic docs points (from flowcore harvester + adapters for GitHub/web manifest-driven crawl) ----
+  // Flowcore outputs standardized points (id?, text, collection "ecosystem"|"external", payload with source_id/url/version/crawled_at/trust/path etc).
+  // Reuses same deterministicId (if missing), incremental state (collection:id), throttle/backoff, /api/ingest-point.
+  // Supports JSON array or JSONL. Idempotent via pointHash; dedup marker contract: <!-- <col>:<source_id or url>:<sha16> --> (Layer 3 + PIL will use).
+  if (DOCS_POINTS_PATH) {
+    console.log(`Loading docs points from flowcore crawler: ${DOCS_POINTS_PATH}`);
+    let raw: string;
+    try {
+      raw = readFileSync(DOCS_POINTS_PATH, "utf8");
+    } catch (e) {
+      console.error(`  ERROR reading docs-points: ${e}`);
+      process.exit(1);
+    }
+    const lines = raw.trim().split(/\r?\n/).filter(Boolean);
+    let points: EEPoint[] = [];
+    if (lines.length === 1 && raw.trim().startsWith("[")) {
+      // JSON array
+      try { points = JSON.parse(raw); } catch { /* fall */ }
+    }
+    if (points.length === 0) {
+      // JSONL
+      for (const line of lines) {
+        try {
+          const p = JSON.parse(line);
+          if (p && typeof p.text === "string" && p.collection) points.push(p);
+        } catch {}
+      }
+    }
+    console.log(`  Parsed ${points.length} candidate docs points`);
+    let accepted = 0;
+    for (const rawP of points) {
+      if (!rawP.text || !rawP.collection) continue;
+      const col = (rawP.collection === "ecosystem" || rawP.collection === "external") ? rawP.collection : (COLLECTION_FILTER || "ecosystem");
+      if (COLLECTION_FILTER && col !== COLLECTION_FILTER) continue;
+      const srcForId = (rawP.payload && (rawP.payload.source_id || rawP.payload.url)) || rawP.id || "flowcore-doc";
+      let id = typeof rawP.id === "string" && rawP.id.length >= 16 ? rawP.id : deterministicId(String(srcForId), rawP.text);
+      const point: EEPoint = {
+        id,
+        text: rawP.text,
+        collection: col,
+        payload: {
+          ...(rawP.payload || {}),
+          ingested_via: "flowcore-docs-crawl",
+          crawled_at: (rawP.payload && rawP.payload.crawled_at) || new Date().toISOString(),
+        },
+      };
+      // Use docs-points path + id as pseudo fileKey for logging; actual incremental is per collection:id
+      await ingestPoint(point, state, `${DOCS_POINTS_PATH}:${id}`, sha256(rawP.text));
+      accepted++;
+    }
+    console.log(`  Accepted/processed ${accepted} docs points (ecosystem/external)`);
   }
 
   // ---- Save updated state ----

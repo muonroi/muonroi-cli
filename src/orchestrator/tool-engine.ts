@@ -1877,6 +1877,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               usage: stepUsage,
             });
 
+            // Pull any completed background delegations so their results can be
+            // injected (as system messages) for the *next* LLM step in this same turn.
+            // This improves "self wake" for background jobs without waiting for a new user turn.
+            void deps.consumeBackgroundNotifications?.().catch(() => {});
             // Realtime status bar update per step
             if (stepUsage.inputTokens || stepUsage.outputTokens) {
               // O1 — thread THIS turn's providerOptions shape per step so every

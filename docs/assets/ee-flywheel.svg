@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <marker id="arrow2" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4c6ef5"/>
+    </marker>
+    <marker id="arrow2b" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7.5" markerHeight="7.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f76707"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="980" height="640" rx="16" fill="#f8f9fb"/>
+
+  <!-- Cycle arrows (clockwise), drawn first so nodes sit on top -->
+  <g stroke="#4c6ef5" stroke-width="2.4" fill="none" marker-end="url(#arrow2)">
+    <!-- Recall -> Warning -->
+    <path d="M576,104 C648,118 692,140 706,174"/>
+    <!-- Warning -> Act -->
+    <path d="M722,242 C784,312 762,384 676,416"/>
+    <!-- Act -> Verdict (bottom closing arc) -->
+    <path d="M556,486 C520,556 444,558 402,490"/>
+    <!-- Verdict -> Reinforce -->
+    <path d="M322,420 C252,384 214,306 268,246"/>
+    <!-- Reinforce -> Recall -->
+    <path d="M302,178 C324,124 360,110 402,110"/>
+  </g>
+
+  <!-- Center hub -->
+  <circle cx="490" cy="300" r="72" fill="#ffffff" stroke="#dee2e6" stroke-width="1.5"/>
+  <text x="490" y="294" text-anchor="middle" font-size="15" font-weight="700" fill="#3b5bdb">Experience</text>
+  <text x="490" y="316" text-anchor="middle" font-size="15" font-weight="700" fill="#3b5bdb">Engine</text>
+
+  <!-- Node: Recall (top) -->
+  <rect x="405" y="47" width="170" height="62" rx="11" fill="#ffffff" stroke="#4c6ef5" stroke-width="2"/>
+  <text x="490" y="74" text-anchor="middle" font-size="14" font-weight="600" fill="#3b5bdb">Recall-first</text>
+  <text x="490" y="93" text-anchor="middle" font-size="12" fill="#495057">query the brain</text>
+
+  <!-- Node: Warning (upper right) -->
+  <rect x="635" y="179" width="175" height="62" rx="11" fill="#ffffff" stroke="#f59f00" stroke-width="2"/>
+  <text x="722" y="206" text-anchor="middle" font-size="14" font-weight="600" fill="#e67700">⚠ Warning fires</text>
+  <text x="722" y="225" text-anchor="middle" font-size="12" fill="#495057">at the moment of risk</text>
+
+  <!-- Node: Act (lower right) -->
+  <rect x="535" y="421" width="175" height="62" rx="11" fill="#ffffff" stroke="#12b886" stroke-width="2"/>
+  <text x="622" y="448" text-anchor="middle" font-size="14" font-weight="600" fill="#099268">Act with evidence</text>
+  <text x="622" y="467" text-anchor="middle" font-size="12" fill="#495057">not a blind guess</text>
+
+  <!-- Node: Verdict (lower left) -->
+  <rect x="270" y="421" width="175" height="62" rx="11" fill="#ffffff" stroke="#4c6ef5" stroke-width="2"/>
+  <text x="357" y="448" text-anchor="middle" font-size="14" font-weight="600" fill="#3b5bdb">Report verdict</text>
+  <text x="357" y="467" text-anchor="middle" font-size="11.5" fill="#495057">followed / ignored / noise</text>
+
+  <!-- Node: Reinforce (upper left) -->
+  <rect x="170" y="179" width="175" height="62" rx="11" fill="#ffffff" stroke="#12b886" stroke-width="2"/>
+  <text x="257" y="206" text-anchor="middle" font-size="14" font-weight="600" fill="#099268">Reinforce &amp; prune</text>
+  <text x="257" y="225" text-anchor="middle" font-size="12" fill="#495057">sharper next time</text>
+
+  <!-- Branch to Council -->
+  <path d="M710,462 C782,470 812,512 815,552" stroke="#f76707" stroke-width="2.4" fill="none" marker-end="url(#arrow2b)"/>
+  <rect x="700" y="558" width="232" height="52" rx="11" fill="#fff4e6" stroke="#f76707" stroke-width="2"/>
+  <text x="816" y="590" text-anchor="middle" font-size="13" font-weight="600" fill="#e8590c">→ Experience Auditor in Council</text>
+
+  <!-- Shared-brain note -->
+  <text x="52" y="580" font-size="12.5" fill="#868e96">One brain, shared over MCP:</text>
+  <text x="52" y="600" font-size="13" font-weight="700" fill="#495057">Claude · Codex · Gemini</text>
+</svg>
