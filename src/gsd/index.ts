@@ -1,7 +1,7 @@
 export { type AssessInput, type AssessResult, assessComplexity, shouldAssess } from "./complexity-assessor.js";
 export { buildPlanningConfig, ensurePlanningWorkspace } from "./config-bridge.js";
 export { fireGsdVerifyOutcome, logGsdNativeEvent, PLANNING_CHECKPOINT_QUERY } from "./ee-closure.js";
-export { isComplexityAssessorEnabled, isGsdNativeEnabled } from "./flags.js";
+export { isComplexityAssessorEnabled, isGsdHardGateEnabled, isGsdNativeEnabled } from "./flags.js";
 export {
   dispatchInitProgress,
   dispatchLoopRenderHooks,
@@ -18,6 +18,7 @@ export {
 } from "./gsd-dispatch.js";
 export { allLoopHostPoints, loadLoopHostContract } from "./gsd-runtime.js";
 export { createDefaultHostAdapter, GsdHostAdapter, GsdLoopHost, getGsdLoopHost } from "./host-adapter.js";
+export { evaluateMutationGate, type MutationGateDecision } from "./mutation-gate.js";
 export { orderPhasesForExecution, syncPhasePlanToRoadmap, topologicalPhaseOrder } from "./phase-dag.js";
 export {
   ensureTaskRoadmap,

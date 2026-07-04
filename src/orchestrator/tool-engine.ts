@@ -62,6 +62,8 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
+import { isGsdHardGateEnabled } from "../gsd/flags.js";
+import { evaluateMutationGate } from "../gsd/mutation-gate.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -623,7 +625,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // decisions deserve debate regardless of length).
   const autoCouncilTypes = new Set(["plan", "analyze"]);
   const configuredRoleCount = getEffectiveCouncilRoleCount();
-  const heavyTier = (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
+  // Task 8 Step 7: prefer the complexity assessor's own auto-council verdict
+  // (pilCtx.gsdAutoCouncil, set at message-processor.ts:685 when the assessor ran)
+  // over the raw heavy-tier heuristic below — the assessor already reasoned about
+  // depth + task shape, so its verdict is the more intelligent router. Fall back to
+  // the heuristic when the assessor didn't run (gsdAutoCouncil undefined).
+  const assessorAutoCouncil = (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil;
+  const heavyTier =
+    typeof assessorAutoCouncil === "boolean"
+      ? assessorAutoCouncil
+      : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
   const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
   const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
@@ -1061,6 +1072,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "ee_write",
         ]);
 
+        // Task 8: native GSD mutation gate. Read once per turn (not per call) since
+        // hardGateEnabled/directAnswer don't change mid-turn; the gate itself
+        // re-reads STATE.md per call (cheap fs read) so it stays live if the
+        // model advances phase/verdict mid-turn via gsd_* tools.
+        const gsdHardGateEnabled = isGsdHardGateEnabled();
+        const gsdDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer;
+
         for (const name of Object.keys(tools)) {
           const tool = tools[name];
           if (
@@ -1071,6 +1089,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ) {
             const originalExecute = tool.execute;
             tool.execute = async (input: any, context: any) => {
+              const gate = evaluateMutationGate(deps.bash.getCwd(), {
+                toolName: name,
+                hardGateEnabled: gsdHardGateEnabled,
+                directAnswer: gsdDirectAnswer,
+              });
+              if (gate.blocked) {
+                return { success: false, output: gate.reason, error: gate.reason };
+              }
               return writeMutex.run(() => originalExecute(input, context));
             };
           }
