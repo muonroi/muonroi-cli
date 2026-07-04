@@ -21,6 +21,14 @@ export const ComplexityVerdictSchema = z.object({
   depth: z.enum(["quick", "standard", "heavy"]),
   autoCouncil: z.boolean().catch(false),
   rationale: z.string().catch(""),
+  quality: z
+    .object({
+      verdict: z.enum(["adequate", "enriched", "needs-user"]),
+      missing: z.array(z.string()).default([]),
+      noiseRisk: z.enum(["low", "med", "high"]).default("low"),
+    })
+    .optional(),
+  enrichedPrompt: z.string().optional(),
 });
 export type ComplexityVerdict = z.infer<typeof ComplexityVerdictSchema>;
 
@@ -100,10 +108,19 @@ export const ASSESSMENT_OUTPUT_CONTRACT = [
   "",
   "Emit your final decision as a fenced block in EXACTLY this shape — no prose inside the fence:",
   "```complexity-verdict",
-  '{"depth":"quick|standard|heavy","autoCouncil":true|false,"rationale":"one short sentence"}',
+  '{"depth":"quick|standard|heavy","autoCouncil":true|false,"rationale":"one short sentence","quality":{"verdict":"adequate|enriched|needs-user","missing":["intent"|"target"|"scope"|"acceptance"],"noiseRisk":"low|med|high"},"enrichedPrompt":"the enriched brief, or empty string when adequate"}',
   "```",
   '- "quick"    = trivial single-shot (typo, rename, read-and-explain). No plan/review needed.',
   '- "standard" = ordinary feature/bugfix. Short plan → review → implement → verify.',
   '- "heavy"    = architectural / multi-file / wide / ambiguous. Full discuss → plan → plan-review → verify.',
   "- autoCouncil = true only when the task benefits from multi-perspective debate before implementation.",
+  "",
+  'Prompt-quality rubric — a prompt is "adequate" when these BLOCKERS are present or confidently derivable WITHOUT padding: (1) Intent/Outcome, (2) Target/Locus, (3) Scope boundary, (4) Acceptance.',
+  "Enrichment rules (SIGNAL over noise):",
+  '- Every added line MUST change what the coding agent does; if it does not, omit it. Over-enrichment is a FAILURE — set noiseRisk="high" and cut.',
+  '- NEVER assert a file path as fact. Any area reference is an UNVERIFIED HINT: write "likely area: <dir> (confirm via grep before anchoring)". You cannot see the codebase.',
+  '- verdict="adequate" -> enrichedPrompt="" (use the raw prompt).',
+  '- verdict="enriched" -> a brief that fills derivable gaps + hedged hints only.',
+  '- verdict="needs-user" -> a blocker is NOT derivable from context; keep the brief minimal and list the open question(s) under "OPEN QUESTIONS:".',
+  "Keep enrichedPrompt under 1500 characters.",
 ].join("\n");
