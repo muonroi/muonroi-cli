@@ -1,3 +1,5 @@
+import type { GateContextBundle } from "./pil-gate-context.js";
+
 export type GateVerdict = "adequate" | "enriched" | "needs-user";
 
 export interface CriticResult {
@@ -24,7 +26,7 @@ export function buildCriticPrompt(
   role: CriticRole,
   draftBrief: string,
   draftVerdict: GateVerdict,
-  bundle: { conversationDigest: string; eeContext: string; priorPlan: string },
+  bundle: GateContextBundle,
 ): string {
   return [
     `You are the ${role} critic for a prompt-enrichment gate. You may only TIGHTEN — downgrade the verdict and strip lines, never upgrade or add.`,
@@ -34,6 +36,7 @@ export function buildCriticPrompt(
     bundle.conversationDigest ? `Recent conversation:\n${bundle.conversationDigest}` : "(no recent conversation)",
     bundle.eeContext ? `EE recall:\n${bundle.eeContext}` : "(no EE recall)",
     bundle.priorPlan ? `Prior plan:\n${bundle.priorPlan}` : "(no prior plan)",
+    bundle.projectHints ? `Project hints:\n${bundle.projectHints}` : "(no project hints)",
     "",
     `Producer verdict: ${draftVerdict}`,
     "Producer brief:",
@@ -73,7 +76,7 @@ export function mergeCriticVerdicts(producer: GateVerdict, criticVerdicts: GateV
 export async function runGateCritics(args: {
   draftBrief: string;
   draftVerdict: GateVerdict;
-  bundle: { conversationDigest: string; eeContext: string; priorPlan: string };
+  bundle: GateContextBundle;
   runCritic: RunCriticFn;
 }): Promise<CriticResult> {
   const settled = await Promise.all(
