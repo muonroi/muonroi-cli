@@ -64,7 +64,7 @@ import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
 import { assessComplexity } from "../gsd/complexity-assessor.js";
 import { isComplexityAssessorEnabled, isGsdNativeEnabled, isPilGateEnrichEnabled } from "../gsd/flags.js";
 import { getGsdLoopHost } from "../gsd/loop-host.js";
-import { syncWorkflowContext } from "../gsd/workflow-engine.js";
+import { readState, syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -213,6 +213,7 @@ import {
   recordCompaction,
   recordElision,
 } from "./session-experience.js";
+import { shouldRunGate } from "./should-run-gate.js";
 import { attemptStallRescue, pushStallToolResult, type StallToolResult } from "./stall-rescue.js";
 import {
   createStallWatchdog,
@@ -701,9 +702,22 @@ export class MessageProcessor {
     }
     const { pilCtx, _stepCeiling, _pilStart, _naturalCeiling, _ceilingTaskType, _ceilingSize } = prepResult!;
 
-    if (isGsdNativeEnabled() && pilCtx.intentKind !== "chitchat") {
+    const cwd = deps.bash.getCwd();
+    if (
+      isGsdNativeEnabled() &&
+      shouldRunGate(pilCtx, () => {
+        try {
+          return readState(cwd).phase;
+        } catch (err) {
+          // Missing/corrupt .planning state is the normal "no active run" case, not an error.
+          console.error(
+            `[pil-gate] readState failed while checking resume phase (treating as no active run): ${(err as Error).message}`,
+          );
+          return null;
+        }
+      })
+    ) {
       try {
-        const cwd = deps.bash.getCwd();
         const sessionModel = deps.session?.model ?? "unknown";
         let depth: "quick" | "standard" | "heavy" = pilCtx.modelDepthTier ?? pilCtx.complexityTier ?? "standard";
 
