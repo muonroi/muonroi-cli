@@ -27,3 +27,12 @@ export function isGsdHardGateEnabled(): boolean {
   if (!isGsdNativeEnabled()) return false;
   return process.env.MUONROI_GSD_HARD_GATE !== "0";
 }
+
+/**
+ * PIL prompt-gate full-context enrichment (conversation digest, EE recall,
+ * prior PLAN.md excerpt) — default ON when native GSD is on. Opt out:
+ * MUONROI_PIL_GATE_ENRICH=0.
+ */
+export function isPilGateEnrichEnabled(): boolean {
+  return isGsdNativeEnabled() && process.env.MUONROI_PIL_GATE_ENRICH !== "0";
+}
