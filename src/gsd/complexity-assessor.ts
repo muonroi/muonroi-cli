@@ -11,6 +11,7 @@ export interface AssessInput {
   confidence: number;
   conversationDigest?: string;
   eeContext?: string;
+  bundle?: import("./pil-gate-context.js").GateContextBundle;
   sessionModelId: string;
   runAssessor?: (prompt: string) => Promise<string>;
 }
@@ -21,6 +22,8 @@ export interface AssessResult {
   assessed: boolean;
   source: "assessor" | "prefilter-skip" | "parse-failed-fallback";
   assessmentPath?: string;
+  quality?: { verdict: "adequate" | "enriched" | "needs-user"; missing: string[]; noiseRisk: "low" | "med" | "high" };
+  enrichedPrompt: string;
 }
 
 const CONFIDENCE_FLOOR = 0.7;
@@ -32,14 +35,18 @@ export function shouldAssess(priorDepth: string, confidence: number): boolean {
 }
 
 function buildAssessorPrompt(input: AssessInput): string {
+  const digest = input.bundle?.conversationDigest || input.conversationDigest || "";
+  const ee = input.bundle?.eeContext || input.eeContext || "";
+  const plan = input.bundle?.priorPlan || "";
   return [
     "You are the complexity assessor — the highest-tier router for an autonomous coding agent.",
-    "Judge how much rigor this task needs and whether it warrants multi-perspective debate.",
-    "Be decisive: over-tiering wastes the user's time, under-tiering ships unreviewed risky changes.",
+    "Judge how much rigor this task needs, whether it warrants multi-perspective debate, and enrich an under-specified prompt.",
+    "Be decisive: over-tiering wastes time, under-tiering ships unreviewed risk, over-enriching adds noise.",
     "",
     `Fast classifier's first-pass depth: ${input.priorDepth} (confidence ${input.confidence.toFixed(2)}).`,
-    input.conversationDigest ? `\nRecent conversation:\n${input.conversationDigest}` : "",
-    input.eeContext ? `\nPrior experience (EE recall):\n${input.eeContext}` : "",
+    digest ? `\nRecent conversation:\n${digest}` : "",
+    ee ? `\nPrior experience (EE recall):\n${ee}` : "",
+    plan ? `\nPrior plan (this task):\n${plan}` : "",
     "",
     "### Task",
     input.raw,
@@ -79,11 +86,25 @@ function writeAssessment(
  */
 export async function assessComplexity(input: AssessInput): Promise<AssessResult> {
   if (!shouldAssess(input.priorDepth, input.confidence)) {
-    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "prefilter-skip" };
+    return {
+      depth: input.priorDepth,
+      autoCouncil: false,
+      rationale: "",
+      assessed: false,
+      source: "prefilter-skip",
+      enrichedPrompt: "",
+    };
   }
   if (!input.runAssessor) {
     // No runner (offline/test path without a fixture) — keep priorDepth, do not fabricate.
-    return { depth: input.priorDepth, autoCouncil: false, rationale: "", assessed: false, source: "prefilter-skip" };
+    return {
+      depth: input.priorDepth,
+      autoCouncil: false,
+      rationale: "",
+      assessed: false,
+      source: "prefilter-skip",
+      enrichedPrompt: "",
+    };
   }
   let raw = "";
   try {
@@ -96,6 +117,7 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
       rationale: "",
       assessed: false,
       source: "parse-failed-fallback",
+      enrichedPrompt: "",
     };
   }
   const verdict = extractComplexityVerdict(raw);
@@ -107,11 +129,13 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
       rationale: "",
       assessed: false,
       source: "parse-failed-fallback",
+      enrichedPrompt: "",
     };
   }
   try {
     const leader = await resolvePlanCouncilLeader(input.sessionModelId);
     const path = writeAssessment(input.cwd, verdict, leader.modelId);
+    const brief = (verdict.enrichedPrompt ?? "").slice(0, 1500);
     return {
       depth: verdict.depth,
       autoCouncil: verdict.autoCouncil,
@@ -119,6 +143,8 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
       assessed: true,
       source: "assessor",
       assessmentPath: path,
+      quality: verdict.quality,
+      enrichedPrompt: brief,
     };
   } catch (err) {
     console.error(`[gsd] complexity assessor finalize failed, keeping priorDepth: ${(err as Error).message}`);
@@ -128,6 +154,7 @@ export async function assessComplexity(input: AssessInput): Promise<AssessResult
       rationale: "",
       assessed: false,
       source: "parse-failed-fallback",
+      enrichedPrompt: "",
     };
   }
 }

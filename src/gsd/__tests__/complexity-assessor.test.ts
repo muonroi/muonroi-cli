@@ -108,4 +108,54 @@ describe("assessComplexity", () => {
     expect(r.source).toBe("parse-failed-fallback");
     expect(existsSync(join(cwd, ".planning", "ASSESSMENT.md"))).toBe(false);
   });
+
+  it("passes bundle context into the assessor prompt and returns quality + enrichedPrompt", async () => {
+    let seenPrompt = "";
+    const res = await assessComplexity({
+      cwd,
+      raw: "fix the login bug",
+      priorDepth: "heavy",
+      confidence: 0.75,
+      sessionModelId: "test-model",
+      bundle: {
+        conversationDigest: "prior: user asked about oauth login",
+        eeContext: "- pattern: auth lives in providers",
+        priorPlan: "",
+        projectHints: "",
+        totalChars: 60,
+      },
+      runAssessor: async (prompt) => {
+        seenPrompt = prompt;
+        return [
+          "```complexity-verdict",
+          JSON.stringify({
+            depth: "heavy",
+            autoCouncil: false,
+            rationale: "auth change",
+            quality: { verdict: "enriched", missing: ["acceptance"], noiseRisk: "low" },
+            enrichedPrompt: "Intent: fix login\nLikely area: providers (confirm via grep before anchoring)",
+          }),
+          "```",
+        ].join("\n");
+      },
+    });
+    expect(seenPrompt).toContain("prior: user asked about oauth login");
+    expect(seenPrompt).toContain("auth lives in providers");
+    expect(res.quality?.verdict).toBe("enriched");
+    expect(res.enrichedPrompt).toContain("confirm via grep");
+  });
+
+  it("fail-open returns empty enrichedPrompt + priorDepth on parse failure", async () => {
+    const res = await assessComplexity({
+      cwd,
+      raw: "x",
+      priorDepth: "standard",
+      confidence: 0.75,
+      sessionModelId: "test-model",
+      runAssessor: async () => "garbage, no fenced block",
+    });
+    expect(res.depth).toBe("standard");
+    expect(res.enrichedPrompt).toBe("");
+    expect(res.quality).toBeUndefined();
+  });
 });
