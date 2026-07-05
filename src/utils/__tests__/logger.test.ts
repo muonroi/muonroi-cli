@@ -40,7 +40,12 @@ describe("logger utility", () => {
     });
 
     it("redacts google keys", () => {
-      const msg = "sending request with key AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q";
+      // Built from parts so the source contains no complete AIzaSy… literal —
+      // otherwise GitHub secret scanning flags this redaction fixture as a
+      // real Google API key. The concatenation reproduces the full pattern at
+      // runtime, so the regex under test is still exercised.
+      const fakeGoogleKey = `AIzaSy${"A1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6Q"}`;
+      const msg = `sending request with key ${fakeGoogleKey}`;
       expect(redactSecrets(msg)).toBe("sending request with key [REDACTED_API_KEY]");
     });
 
