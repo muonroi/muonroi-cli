@@ -99,6 +99,10 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         const { feedbackEE } = await import("../ee/search.js");
         const { sessionRecallLedger } = await import("../ee/recall-ledger.js");
         const result = await feedbackEE(id, collection, verdict, reason);
+        // A queued result (brain unreachable → durably enqueued) counts as success:
+        // the agent has discharged its rating, so clear the ledger regardless. This
+        // is what stops the mandatory-rating gate from looping while the brain is
+        // down — the previous "return early, don't clear" path re-nagged every turn.
         if (!result.ok) return errLine("feedback_failed", result.error ?? "feedback POST failed");
         const clearedId = result.resolvedId ?? id;
         sessionRecallLedger.clear(clearedId);
@@ -108,6 +112,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
           id: clearedId,
           verdict: result.verdict,
           ...(result.reason ? { reason: result.reason } : {}),
+          ...(result.queued ? { queued: true } : {}),
           pendingRemaining: sessionRecallLedger.pendingCount(),
         });
       } catch (e) {

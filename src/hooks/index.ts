@@ -267,7 +267,7 @@ export async function executeEventHooks(
               .join(",");
             if (pendingSha !== _lastRecallReminderSha) {
               _lastRecallReminderSha = pendingSha;
-              recallReminder = `⚠️ MANDATORY: ${pending.length} unrated EE recall(s) — call ee_feedback NOW before continuing.\n${formatPendingReminder(pending, { max: 5 })}`;
+              recallReminder = `↳ ${pending.length} unrated EE recall(s) — rate the one(s) you acted on when convenient (does not block the task; queued if the brain is down).\n${formatPendingReminder(pending, { max: 5 })}`;
             }
           } else {
             // All cleared — reset so next batch shows fresh
