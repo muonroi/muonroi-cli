@@ -929,6 +929,35 @@ export async function* tracedGenerate(
   return resultText;
 }
 
+/**
+ * Run {@link tracedGenerate} across a list of models, returning the first
+ * non-empty completion. A model that throws (e.g. a flaky proxy returning
+ * "Upstream request failed") or yields only whitespace advances to the next
+ * candidate; fallback attempts are labelled so the timeline shows the retry.
+ * Returns null when every candidate fails — the caller decides the degraded
+ * fallback (e.g. a single-criterion spec). Dedupes the model list in order.
+ */
+export async function* tracedGenerateWithFallback(
+  llm: CouncilLLM,
+  args: Omit<TracedGenerateArgs, "modelId"> & { models: string[] },
+): AsyncGenerator<StreamChunk, string | null, unknown> {
+  const seen = new Set<string>();
+  const models = args.models.filter((m) => m && !seen.has(m) && (seen.add(m), true));
+  for (let i = 0; i < models.length; i++) {
+    try {
+      const raw = yield* tracedGenerate(llm, {
+        ...args,
+        modelId: models[i],
+        label: i > 0 ? `${args.label} (fallback: ${models[i]})` : args.label,
+      });
+      if (raw?.trim()) return raw;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return null;
+}
+
 interface TracedAsyncArgs {
   phase: CouncilStatusPhase;
   label: string;

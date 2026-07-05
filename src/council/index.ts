@@ -299,6 +299,7 @@ export async function* runCouncil(
         options?.clarifyMaxRounds ?? EXPLICIT_COUNCIL_CLARIFY_ROUNDS,
         undefined,
         costAware,
+        participants.map((p) => p.model),
       );
       let clarifyResult: IteratorResult<StreamChunk, ClarifiedSpec>;
       do {

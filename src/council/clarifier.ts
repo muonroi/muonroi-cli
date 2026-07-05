@@ -1,7 +1,7 @@
 import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { pickCouncilTaskModel } from "./leader.js";
-import { tracedGenerate } from "./llm.js";
+import { tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import { buildClarificationPrompt, buildReadinessJudgePrompt, buildSpecSynthesisPrompt } from "./prompts.js";
 import type { ClarifiedSpec, CouncilLLM, QuestionResponder } from "./types.js";
@@ -263,6 +263,12 @@ export async function* runClarification(
    * the leader model if no cheaper model is cataloged. Default false.
    */
   costAware = false,
+  /**
+   * Healthy panel models to fall back to when the leader's cost-tier spec-synth
+   * model is on a failing proxy — keeps the spec's ≥3 observable criteria (and
+   * thus a meaningful leader eval) instead of degrading to one generic criterion.
+   */
+  fallbackModels: string[] = [],
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   // P5: use MAX_CLARIFY_ROUNDS (12) as the hard cap; respect explicit override
   // from callers that pass maxRounds (e.g. tests that want old 3-round behavior).
@@ -480,7 +486,7 @@ export async function* runClarification(
     detail: allQA.length > 0 ? `${allQA.length} Q&A` : "no clarification needed",
   });
 
-  const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm, costAware);
+  const spec = yield* synthesizeSpec(topic, conversationContext, allQA, leaderModelId, llm, costAware, fallbackModels);
 
   // P5: attach ready-gate metadata to the returned spec
   spec.confidenceScore = gateConfidence;
@@ -541,6 +547,7 @@ async function* inferSpecFromTopicOnly(
   leaderModelId: string,
   llm: CouncilLLM,
   costAware: boolean,
+  fallbackModels: string[] = [],
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   const system =
     `You are extracting an implicit specification from a short topic statement. ` +
@@ -565,16 +572,21 @@ async function* inferSpecFromTopicOnly(
   const prompt = `## Topic\n${topic}\n\n${conversationContext ? `## Context\n${conversationContext}\n` : ""}`;
 
   try {
+    // Model-fallback: the cost-tier synth model can sit on a flaky proxy
+    // (Console Go glm/kimi → "Upstream request failed"). Falling back to
+    // buildSpecFromTopic yields a single generic criterion, which makes the
+    // leader eval read a vague "1/1 criteria met". Retry on healthy panel models
+    // first so the spec keeps its ≥3 observable criteria.
     const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);
-    const raw = yield* tracedGenerate(llm, {
+    const raw = yield* tracedGenerateWithFallback(llm, {
       phase: "synthesis",
       label: "Inferring spec from topic (no clarification answers)",
-      modelId: synthModel,
+      models: [synthModel, ...fallbackModels],
       system,
       prompt,
       maxTokens: 1024,
     });
-    const match = raw.match(/\{[\s\S]*\}/);
+    const match = raw?.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<ClarifiedSpec>;
       const criteria =
@@ -606,12 +618,13 @@ async function* synthesizeSpec(
   leaderModelId: string,
   llm: CouncilLLM,
   costAware = false,
+  fallbackModels: string[] = [],
 ): AsyncGenerator<StreamChunk, ClarifiedSpec, unknown> {
   if (qa.length === 0) {
     // Clarifier asked 0 questions OR user skipped all of them. Use the LLM to
     // pull implicit criteria/constraints/scope from the topic alone instead of
     // returning the single-criterion fallback that makes leader-eval trivial.
-    return yield* inferSpecFromTopicOnly(topic, conversationContext, leaderModelId, llm, costAware);
+    return yield* inferSpecFromTopicOnly(topic, conversationContext, leaderModelId, llm, costAware, fallbackModels);
   }
 
   const { system, prompt } = buildSpecSynthesisPrompt(topic, conversationContext, qa);
@@ -623,16 +636,18 @@ async function* synthesizeSpec(
   }
 
   try {
+    // Model-fallback (see inferSpecFromTopicOnly): keep the ≥3-criteria spec even
+    // when the leader's cost-tier synth model is on a failing proxy.
     const synthModel = pickCouncilTaskModel("spec_synthesis", leaderModelId, costAware);
-    const raw = yield* tracedGenerate(llm, {
+    const raw = yield* tracedGenerateWithFallback(llm, {
       phase: "synthesis",
       label: "Synthesizing clarified spec",
-      modelId: synthModel,
+      models: [synthModel, ...fallbackModels],
       system,
       prompt,
       maxTokens: 2048,
     });
-    const match = raw.match(/\{[\s\S]*\}/);
+    const match = raw?.match(/\{[\s\S]*\}/);
     if (match) {
       const parsed = JSON.parse(match[0]) as Partial<ClarifiedSpec>;
       return {
