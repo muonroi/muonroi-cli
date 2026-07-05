@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const enqueueMock = vi.fn(async () => {});
+const enqueueMock = vi.fn(async (..._args: unknown[]) => {});
 
 vi.mock("./offline-queue.js", () => ({
   enqueue: (...args: unknown[]) => enqueueMock(...args),
