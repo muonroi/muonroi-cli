@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
-import { isContextRailEnabled } from "../gsd/flags.js";
+import { isContextRailEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -106,6 +106,7 @@ import {
   initialCardState,
   reduceCardKey,
 } from "./components/council-question-card.js";
+import { CouncilRoundGroup, CouncilRoundsOverview } from "./components/council-round-group.js";
 import { CouncilStatusList, reapStatuses, upsertStatus } from "./components/council-status-list.js";
 import { CouncilSynthesisBanner } from "./components/council-synthesis-banner.js";
 import { HaltRecoveryCard } from "./components/halt-recovery-card.js";
@@ -597,6 +598,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilRounds,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
@@ -963,29 +965,47 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         );
                       };
 
+                      // P6 — round-grouped transcript: only the running round
+                      // streams turns; done rounds collapse to a summary. Falls
+                      // back to the collapsible pill when no round records exist
+                      // (older paths / flag off).
+                      const roundGroupsActive = isRoundGroupsEnabled() && councilRounds.length > 0;
                       return (
                         <>
-                          {debateTurns.length > 0 && (
-                            <Semantic
-                              id="council-debate-pill"
-                              role="log"
-                              name="Council debate transcript"
-                              props={{
-                                expanded: councilTranscriptExpanded,
-                                active: debateActive,
-                                count: debateTurns.length,
-                              }}
-                            >
-                              <CouncilDebatePill
-                                count={debateTurns.length}
-                                active={debateActive}
-                                expanded={councilTranscriptExpanded}
-                                tailText={tailText}
-                                theme={t}
+                          {roundGroupsActive ? (
+                            <>
+                              <CouncilRoundsOverview rounds={councilRounds} theme={t} />
+                              {councilRounds.map((rec) => (
+                                <CouncilRoundGroup key={`round-${rec.round}`} record={rec} theme={t}>
+                                  {rec.state === "running"
+                                    ? debateTurns.filter(({ cm }) => cm.round === rec.round).map(renderTurn)
+                                    : null}
+                                </CouncilRoundGroup>
+                              ))}
+                            </>
+                          ) : (
+                            debateTurns.length > 0 && (
+                              <Semantic
+                                id="council-debate-pill"
+                                role="log"
+                                name="Council debate transcript"
+                                props={{
+                                  expanded: councilTranscriptExpanded,
+                                  active: debateActive,
+                                  count: debateTurns.length,
+                                }}
                               >
-                                {councilTranscriptExpanded ? debateTurns.map(renderTurn) : null}
-                              </CouncilDebatePill>
-                            </Semantic>
+                                <CouncilDebatePill
+                                  count={debateTurns.length}
+                                  active={debateActive}
+                                  expanded={councilTranscriptExpanded}
+                                  tailText={tailText}
+                                  theme={t}
+                                >
+                                  {councilTranscriptExpanded ? debateTurns.map(renderTurn) : null}
+                                </CouncilDebatePill>
+                              </Semantic>
+                            )
                           )}
                           {synthesisTurns.map(({ cm, idx }) => (
                             <Semantic

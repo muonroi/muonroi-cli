@@ -82,6 +82,12 @@ export interface LeaderEvaluation {
    * close to resolving the last unresolved point.
    */
   extendRounds?: number;
+  /**
+   * One-line focus/topic the leader sets for the NEXT round when the debate
+   * continues. Surfaced in the round-grouped transcript overview (P6). Optional
+   * — absent on convergence/stop.
+   */
+  nextRoundFocus?: string;
 }
 
 export interface DebateState {

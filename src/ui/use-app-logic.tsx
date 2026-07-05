@@ -43,6 +43,7 @@ import type {
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilQuestionOption,
+  CouncilRoundRecord,
   CouncilStatusData,
   Plan,
   PlanQuestion,
@@ -1077,6 +1078,19 @@ export function useAppLogic(props: AppLogicProps) {
   const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
   const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
     setCouncilMeta((prev) => ({ ...prev, ...patch }));
+  }, []);
+  // P5/P6 — per-round lifecycle records, upsert-merged by round number so a
+  // `running` record is overwritten by its `done` record in place.
+  const [councilRounds, setCouncilRounds] = useState<CouncilRoundRecord[]>([]);
+  const applyCouncilRound = useCallback((rec: CouncilRoundRecord) => {
+    setCouncilRounds((prev) => {
+      const idx = prev.findIndex((r) => r.round === rec.round);
+      if (idx < 0) return [...prev, rec];
+      const next = prev.slice();
+      // Preserve fields from the running record the done record may omit.
+      next[idx] = { ...next[idx], ...rec };
+      return next;
+    });
   }, []);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
@@ -2146,6 +2160,7 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilMessages([]);
     setCouncilInfoCards([]);
     setCouncilMeta({});
+    setCouncilRounds([]);
     setCouncilPlaceholders(new Map());
   }, []);
 
@@ -3362,6 +3377,9 @@ export function useAppLogic(props: AppLogicProps) {
               case "council_meta":
                 if (chunk.councilMeta) applyCouncilMetaPatch(chunk.councilMeta);
                 break;
+              case "council_round":
+                if (chunk.councilRound) applyCouncilRound(chunk.councilRound);
+                break;
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
@@ -4166,6 +4184,9 @@ export function useAppLogic(props: AppLogicProps) {
                   if (chunk.type === "council_meta" && chunk.councilMeta) {
                     applyCouncilMetaPatch(chunk.councilMeta);
                   }
+                  if (chunk.type === "council_round" && chunk.councilRound) {
+                    applyCouncilRound(chunk.councilRound);
+                  }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
                     setCouncilMessages((prev) => [...prev, cm]);
@@ -4423,6 +4444,9 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   if (chunk.type === "council_meta" && chunk.councilMeta) {
                     applyCouncilMetaPatch(chunk.councilMeta);
+                  }
+                  if (chunk.type === "council_round" && chunk.councilRound) {
+                    applyCouncilRound(chunk.councilRound);
                   }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
@@ -7014,6 +7038,7 @@ export function useAppLogic(props: AppLogicProps) {
     councilCardState,
     councilInfoCards,
     councilMeta,
+    councilRounds,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,

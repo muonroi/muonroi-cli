@@ -404,6 +404,41 @@ export interface CouncilInfoCard {
  * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
  * single `councilMeta` object, so any subset of fields may be present.
  */
+/**
+ * One debate round's lifecycle record for the round-grouped transcript (P5/P6).
+ * Emitted as `council_round` chunks: a `running` record at round start, then a
+ * `done` record (guaranteed on every loop exit) carrying the outcome. The UI
+ * upsert-merges by `round` (running → done overwrite).
+ */
+export interface CouncilRoundRecord {
+  round: number;
+  state: "running" | "done";
+  /** This round's focus, carried from the prior round's `nextRoundFocus`. */
+  topic?: string;
+  /** Role labels of the participants active this round. */
+  participants: string[];
+  /** Number of debate pairs exchanged this round. */
+  pairCount: number;
+  /** True when this round is beyond the leader's original planned budget. */
+  emergent: boolean;
+  /** Leader-evaluated criteria met / total (absent until the round is done). */
+  criteriaMet?: number;
+  criteriaTotal?: number;
+  /** Leader's one-sentence decision reason. */
+  leaderReason?: string;
+  /** What the leader / engine decided at the end of this round. */
+  leaderDecision?: "continue" | "stop" | "extend" | "aborted" | "circuit-break" | "eval-unavailable";
+  /** Topic the leader set for the NEXT round (drives the overview). */
+  nextRoundFocus?: string;
+}
+
+/**
+ * Incremental council metadata for the context rail (P3). Emitted as one or more
+ * `council_meta` chunks — the leader/panel/researchMode/costAware fields come
+ * from the council entrypoint, the round budget/ceiling from inside runDebate
+ * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
+ * single `councilMeta` object, so any subset of fields may be present.
+ */
 export interface CouncilMetaPatch {
   /** Leader model id driving the debate. */
   leader?: string;
@@ -444,6 +479,7 @@ export interface StreamChunk {
     | "council_message"
     | "council_info_card"
     | "council_meta"
+    | "council_round"
     | "done"
     | "error"
     | "reasoning"
@@ -469,6 +505,7 @@ export interface StreamChunk {
   councilMessage?: CouncilMessage;
   councilInfoCard?: CouncilInfoCard;
   councilMeta?: CouncilMetaPatch;
+  councilRound?: CouncilRoundRecord;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
   /** Populated when type === "halt". Contains structured recovery options. */
   haltChunk?: import("../product-loop/types.js").HaltChunk;

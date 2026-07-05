@@ -688,6 +688,9 @@ export async function* runDebate(
   // Stop debate entirely after two consecutive rounds where ≥50% of pairs fail
   // — the LLM is clearly under provider stress and more rounds won't help.
   let consecutiveRoundFailures = 0;
+  // P5 — topic carried from the prior round's leader nextRoundFocus, shown as the
+  // next round's heading in the round-grouped transcript.
+  let nextTopic: string | undefined;
 
   for (let round = 1; round <= maxRounds; round++) {
     // User cancelled mid-debate — stop before spending another round of
@@ -731,6 +734,29 @@ export async function* runDebate(
       roundCount = round - 1;
       break;
     }
+
+    // P5 — round lifecycle for the grouped transcript. `roundRec` closes over
+    // this round's participants/pairCount/emergent/topic; a running record now,
+    // a guaranteed done record on every exit below.
+    const roundParticipants = active.map((p) => p.role);
+    const roundEmergent = round > plannedMaxRounds;
+    const roundTopic = nextTopic;
+    const roundRec = (
+      state: "running" | "done",
+      patch: Partial<import("../types/index.js").CouncilRoundRecord> = {},
+    ): StreamChunk => ({
+      type: "council_round" as const,
+      councilRound: {
+        round,
+        state,
+        topic: roundTopic,
+        participants: roundParticipants,
+        pairCount: pairs.length,
+        emergent: roundEmergent,
+        ...patch,
+      },
+    });
+    yield roundRec("running");
 
     const pairResults = yield* tracedAsync(
       () =>
@@ -1045,6 +1071,7 @@ export async function* runDebate(
           type: "content",
           content: `\n> Circuit breaker: aborting debate after ${consecutiveRoundFailures} consecutive failure-heavy rounds — proceeding to synthesis with what we have.\n`,
         };
+        yield roundRec("done", { leaderDecision: "circuit-break", leaderReason: "provider stress — circuit breaker" });
         break;
       }
     } else {
@@ -1084,6 +1111,26 @@ export async function* runDebate(
           text: `${metCount}/${total} criteria met — ${evaluation.reason}`,
         },
       };
+
+      // P5 — guaranteed done record for this round. Decision reflects the
+      // LEADER's intent (extend / continue / stop); a later code-side convergence
+      // override that stops the loop is a separate mechanism and doesn't rewrite
+      // the leader's stated call. Carry the leader's nextRoundFocus to the next
+      // round's topic.
+      const leaderDecision =
+        typeof evaluation.extendRounds === "number" && evaluation.extendRounds > 0
+          ? ("extend" as const)
+          : evaluation.shouldContinue
+            ? ("continue" as const)
+            : ("stop" as const);
+      yield roundRec("done", {
+        criteriaMet: metCount,
+        criteriaTotal: total,
+        leaderReason: evaluation.reason,
+        leaderDecision,
+        nextRoundFocus: evaluation.nextRoundFocus,
+      });
+      nextTopic = evaluation.nextRoundFocus;
 
       if (evaluation.needsResearch && evaluation.researchQuery) {
         const midPhaseId = `phase:mid-research-${round}`;
@@ -1209,6 +1256,10 @@ export async function* runDebate(
         startedAt: evalStart,
         detail: "evaluation unavailable — continuing",
       });
+      // P5 — eval parse failed: still close the round with a done record so the
+      // grouped transcript never shows a round stuck "running".
+      yield roundRec("done", { leaderDecision: "eval-unavailable", leaderReason: "leader evaluation unavailable" });
+      nextTopic = undefined;
     }
 
     // Generate inter-round summary
@@ -1341,7 +1392,11 @@ async function* evaluateDebate(
       modelId,
       system,
       prompt,
-      maxTokens: 1024,
+      // Raised from 1024: nextRoundFocus is now the FIRST schema field, and the
+      // whole eval is parsed by a single JSON.parse that returns null on any
+      // truncation — a tight budget could clip the JSON and null the round's
+      // outcome. 1536 keeps the focus line + criteria array intact.
+      maxTokens: 1536,
     });
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
@@ -1377,6 +1432,11 @@ async function* evaluateDebate(
         evidenceDensity,
         disagreementResolved,
         extendRounds,
+        nextRoundFocus:
+          typeof (parsed as { nextRoundFocus?: unknown }).nextRoundFocus === "string" &&
+          (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            ? (parsed as { nextRoundFocus: string }).nextRoundFocus.trim()
+            : undefined,
       };
     }
   } catch {
