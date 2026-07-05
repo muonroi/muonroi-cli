@@ -33,7 +33,8 @@ export interface TransientCheck {
  *
  * Transient:
  *  - Network-level errors: ECONNREFUSED, ETIMEDOUT, ECONNRESET, EAI_AGAIN,
- *    "fetch failed", "Unable to connect", "socket hang up", "network"
+ *    "fetch failed", "Unable to connect", "socket hang up", "network",
+ *    "socket connection was closed unexpectedly" (Bun stream drop)
  *  - HTTP 408 (request timeout), 425 (too early), 429 (rate limit), 5xx
  *  - TypeError with "fetch failed" message (browser/bun/node fetch layer)
  *  - AbortSignal.timeout firing (err.name === "TimeoutError")
@@ -155,7 +156,11 @@ function isTransientStatusCode(code: number): boolean {
 }
 
 function isTransientMessage(message: string): boolean {
-  return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN|fetch failed|Unable to connect|network|socket hang up/i.test(
+  // "socket connection was closed unexpectedly" is Bun's fetch phrasing when a
+  // provider drops a streaming response mid-flight — a transient network drop,
+  // not a client error. Left unclassified it escapes as an unhandledRejection,
+  // which OpenTUI's handleError turns into an un-dismissable console overlay.
+  return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|EAI_AGAIN|fetch failed|Unable to connect|network|socket hang up|socket connection was closed|socket.*closed unexpectedly/i.test(
     message,
   );
 }

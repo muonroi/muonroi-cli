@@ -473,6 +473,14 @@ async function startInteractive(
 
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
+    // OpenTUI defaults openConsoleOnError:true — its process-level
+    // unhandledRejection/uncaughtException handler then calls console.show(),
+    // which focuses the debug console overlay and captures ALL keypresses.
+    // The overlay's keybindings have no hide/close action, so a stray rejection
+    // (e.g. a provider dropping a streaming socket) traps the user in a console
+    // they cannot dismiss. We surface errors in-band instead — keep it off.
+    // Toggle it deliberately with F12 (wired below).
+    openConsoleOnError: false,
     // We manage SIGINT ourselves (orchestrator abort → agent cleanup → renderer destroy).
     // Prevent OpenTUI from registering its own SIGINT/SIGTERM handler which would
     // call renderer.destroy() prematurely and race with our orderly shutdown.
@@ -488,6 +496,17 @@ async function startInteractive(
   // process.exit(1) (see the unhandledRejection handler above). Cleared in
   // restoreTerminalSync() the moment we begin tearing the terminal back down.
   setTuiActive(true);
+
+  // Deliberate debug-console toggle. With openConsoleOnError:false the overlay
+  // never auto-pops, so F12 is the ONLY way in — and, crucially, back out:
+  // console.toggle() hides it when it is visible+focused, so it can never trap.
+  try {
+    renderer.keyInput?.on("keypress", (key: { name?: string }) => {
+      if (key?.name === "f12") renderer.console.toggle();
+    });
+  } catch {
+    /* keyInput/console are best-effort dev affordances — never block boot */
+  }
 
   /**
    * Restore terminal to main-screen mode before the process exits.
