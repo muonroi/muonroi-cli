@@ -174,12 +174,21 @@ export function parseBrainProfile(raw: unknown, level: PrivacyLevel = BRAIN_TIER
 
 /**
  * Off the hot path (fire-and-forget boot warm), so a wide budget. The server's
- * brainExtractModel (DeepSeek-V3) takes ~9s for the structured dims extraction —
- * verified on the live VPS: 6s timed out, ~9s succeeded. 15s leaves headroom.
+ * brainExtractModel is a REASONING model (deepseek-v4-flash) and the who-am-i prompt is large
+ * (12 retrieved rules + the full dim-vocabulary schema), so the think+emit cycle runs ~10-15s
+ * — verified live that a 15s cap intermittently truncated to a timeout/null. 25s clears the
+ * tail; the cost is nil because this never blocks anything (background warm).
  */
-const BRAIN_CLASSIFY_TIMEOUT_MS = 15000;
-/** The dims JSON is tiny; cap output so the brain can't ramble into a timeout. */
-const BRAIN_CLASSIFY_MAX_TOKENS = 400;
+const BRAIN_CLASSIFY_TIMEOUT_MS = 25000;
+/**
+ * The dims JSON is tiny (~200 tokens), but the server's extract model (deepseek-v4-flash) is a
+ * REASONING model — its thinking tokens count against this same budget (landing in a separate
+ * reasoning_content field, not the JSON). A tight cap let the reasoning consume the budget and
+ * truncate the actual JSON to empty → intermittent null profiles. Give thinking ample headroom
+ * so the dims JSON always survives; extra tokens are only spent when the model reasons, and
+ * this is an off-hot-path boot warm.
+ */
+const BRAIN_CLASSIFY_MAX_TOKENS = 3000;
 
 export interface BrainWhoAmIDeps {
   searchByText: (text: string, collections: string[], topK: number) => Promise<Array<{ payload?: { text?: string } }>>;
