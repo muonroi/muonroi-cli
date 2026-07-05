@@ -596,6 +596,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     copyFlashId,
     councilCardState,
     councilInfoCards,
+    councilMeta,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,
@@ -732,6 +733,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     { label: "Mode", value: modeInfo?.label ?? "—" },
     { label: "Model", value: model ?? "—" },
   ];
+  // Council metadata rows (P3) — appended only when a debate has published them,
+  // so non-council sessions keep a lean rail.
+  if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
+  if (councilMeta?.panel?.length) {
+    railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
+  }
+  if (typeof councilMeta?.roundBudget === "number") {
+    const ceil = typeof councilMeta.roundCeiling === "number" ? ` / ${councilMeta.roundCeiling} max` : "";
+    railRows.push({ label: "Rounds", value: `${councilMeta.roundBudget}${ceil}` });
+  }
+  if (councilMeta?.researchMode !== undefined) {
+    railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
+  }
+  if (councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
 
   // Council metadata cards (phase timeline, product-status, statuses, info cards
   // like Clarified Spec / Discussion Brief / Debate Plan). Rendered INLINE in the

@@ -39,6 +39,7 @@ import type {
   ChatEntry,
   CouncilInfoCard,
   CouncilMessage,
+  CouncilMetaPatch,
   CouncilPhaseEvent,
   CouncilQuestionData,
   CouncilQuestionOption,
@@ -1071,6 +1072,12 @@ export function useAppLogic(props: AppLogicProps) {
   // back-and-forth. Synthesis renders outside the pill so it stays visible.
   const [councilTranscriptExpanded, setCouncilTranscriptExpanded] = useState(false);
   const [councilInfoCards, setCouncilInfoCards] = useState<CouncilInfoCard[]>([]);
+  // P3 — council metadata for the context rail (leader/panel/budget/research/
+  // cost), upsert-merged from incremental council_meta patches.
+  const [councilMeta, setCouncilMeta] = useState<CouncilMetaPatch>({});
+  const applyCouncilMetaPatch = useCallback((patch: CouncilMetaPatch) => {
+    setCouncilMeta((prev) => ({ ...prev, ...patch }));
+  }, []);
   const [councilPlaceholders, setCouncilPlaceholders] = useState<
     Map<string, { role: string; side: "left" | "right"; color: string; variant: "participant" | "leader" }>
   >(new Map());
@@ -2138,6 +2145,7 @@ export function useAppLogic(props: AppLogicProps) {
     // so clearing here loses nothing. Covers auto-council + slash paths.
     setCouncilMessages([]);
     setCouncilInfoCards([]);
+    setCouncilMeta({});
     setCouncilPlaceholders(new Map());
   }, []);
 
@@ -3351,6 +3359,9 @@ export function useAppLogic(props: AppLogicProps) {
                   setCouncilInfoCards((prev) => [...prev, card]);
                 }
                 break;
+              case "council_meta":
+                if (chunk.councilMeta) applyCouncilMetaPatch(chunk.councilMeta);
+                break;
               case "council_status":
                 if (chunk.councilStatus) {
                   const cs = chunk.councilStatus;
@@ -4152,6 +4163,9 @@ export function useAppLogic(props: AppLogicProps) {
                     setPendingCouncilPreflight(chunk.councilPreflight);
                     setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
                   }
+                  if (chunk.type === "council_meta" && chunk.councilMeta) {
+                    applyCouncilMetaPatch(chunk.councilMeta);
+                  }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
                     setCouncilMessages((prev) => [...prev, cm]);
@@ -4406,6 +4420,9 @@ export function useAppLogic(props: AppLogicProps) {
                     });
                     setPendingCouncilPreflight(chunk.councilPreflight);
                     setPreflightCardStateSync(initialCardState(buildPreflightQuestion(chunk.councilPreflight)));
+                  }
+                  if (chunk.type === "council_meta" && chunk.councilMeta) {
+                    applyCouncilMetaPatch(chunk.councilMeta);
                   }
                   if (chunk.type === "council_message" && chunk.councilMessage) {
                     const cm = chunk.councilMessage;
@@ -6996,6 +7013,7 @@ export function useAppLogic(props: AppLogicProps) {
     copyFlashId,
     councilCardState,
     councilInfoCards,
+    councilMeta,
     councilMessages,
     councilTranscriptExpanded,
     councilPhases,

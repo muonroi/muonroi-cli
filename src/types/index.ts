@@ -397,6 +397,28 @@ export interface CouncilInfoCard {
   sections: CouncilInfoCardSection[];
 }
 
+/**
+ * Incremental council metadata for the context rail (P3). Emitted as one or more
+ * `council_meta` chunks — the leader/panel/researchMode/costAware fields come
+ * from the council entrypoint, the round budget/ceiling from inside runDebate
+ * (locals invisible to the entrypoint). The UI upsert-merges each patch into a
+ * single `councilMeta` object, so any subset of fields may be present.
+ */
+export interface CouncilMetaPatch {
+  /** Leader model id driving the debate. */
+  leader?: string;
+  /** Panel member role labels. */
+  panel?: string[];
+  /** Planned round budget resolved for this debate. */
+  roundBudget?: number;
+  /** Hard ceiling rounds may extend to (emergent rounds). */
+  roundCeiling?: number;
+  /** Research mode enabled for this debate. */
+  researchMode?: boolean;
+  /** Cost-aware budgeting active. */
+  costAware?: boolean;
+}
+
 export interface CouncilMessage {
   kind: CouncilMessageKind;
   speaker: { role: string; model: string };
@@ -421,6 +443,7 @@ export interface StreamChunk {
     | "council_phase"
     | "council_message"
     | "council_info_card"
+    | "council_meta"
     | "done"
     | "error"
     | "reasoning"
@@ -445,6 +468,7 @@ export interface StreamChunk {
   councilPhase?: CouncilPhaseEvent;
   councilMessage?: CouncilMessage;
   councilInfoCard?: CouncilInfoCard;
+  councilMeta?: CouncilMetaPatch;
   productStatusCard?: import("../product-loop/types.js").ProductStatusCardData;
   /** Populated when type === "halt". Contains structured recovery options. */
   haltChunk?: import("../product-loop/types.js").HaltChunk;

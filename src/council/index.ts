@@ -199,6 +199,17 @@ export async function* runCouncil(
     // misleadingly implied implementation intent on analysis/decision topics.
     content: `\n> Leader: \`${leaderModelId}\` · Panel: ${participants.map((p) => `\`${p.model}\``).join(", ")}${costAware ? " · Cost-aware sub-tasks: ON" : ""}\n`,
   };
+  // P3 — mirror the leader/panel/cost metadata as a structured council_meta patch
+  // so the context rail can show it as rows instead of transcript spam. The round
+  // budget/ceiling arrive later from inside runDebate (locals unavailable here).
+  yield {
+    type: "council_meta",
+    councilMeta: {
+      leader: leaderModelId,
+      panel: participants.map((p) => p.model),
+      costAware,
+    },
+  };
 
   const baseContext = buildCouncilContext(messages);
   const projectInfo = options?.cwd ? await buildProjectSnapshot(options.cwd) : { snapshot: "", isEmpty: true };
@@ -324,6 +335,9 @@ export async function* runCouncil(
       if (!needStep.done && needStep.value) yield needStep.value;
     } while (!needStep.done);
     leaderNeedsResearch = needStep.value;
+    if (leaderNeedsResearch !== undefined) {
+      yield { type: "council_meta", councilMeta: { researchMode: leaderNeedsResearch } };
+    }
 
     // ROI: the leader already decided research is needed and the card's default
     // was always "run research" — asking the user to confirm is a rubber-stamp

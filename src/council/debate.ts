@@ -669,6 +669,16 @@ export async function* runDebate(
     type: "content",
     content: `\n> Leader-proposed debate budget: ${maxRounds} round${maxRounds === 1 ? "" : "s"}${ceilingNote}.\n`,
   };
+  // P3 — structured budget/ceiling for the context rail. These are locals here,
+  // invisible to the council entrypoint, so they ride a separate council_meta
+  // patch that the UI upsert-merges with the leader/panel patch.
+  yield {
+    type: "council_meta",
+    councilMeta: {
+      roundBudget: maxRounds,
+      roundCeiling: kindCapped ? effectiveCeiling : ABSOLUTE_MAX_ROUNDS,
+    },
+  };
 
   // Pairs that fail twice in a row are dropped from subsequent rounds so the
   // remaining participants don't keep retrying a broken model and inflating
