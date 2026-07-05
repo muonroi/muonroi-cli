@@ -745,25 +745,38 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   if (councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
   }
-  if (typeof councilMeta?.roundBudget === "number") {
-    const ceil = typeof councilMeta.roundCeiling === "number" ? ` / ${councilMeta.roundCeiling} max` : "";
-    railRows.push({ label: "Rounds", value: `${councilMeta.roundBudget}${ceil}` });
+  // Round budget is a CEILING the leader may stop under once the panel converges
+  // — not a commitment to run that many. Label it as a budget so it doesn't read
+  // as "3 of 3 done" next to a Progress row that stopped early.
+  const roundBudget = typeof councilMeta?.roundBudget === "number" ? councilMeta.roundBudget : undefined;
+  if (roundBudget !== undefined) {
+    const upTo =
+      typeof councilMeta?.roundCeiling === "number" && councilMeta.roundCeiling > roundBudget
+        ? ` (up to ${councilMeta.roundCeiling})`
+        : "";
+    railRows.push({ label: "Round budget", value: `${roundBudget} max${upTo}` });
   }
   if (councilMeta?.researchMode !== undefined) {
     railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
   }
   if (councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
-  // Live debate progress — the current round + its outcome/decision, so the rail
-  // reflects debate STATE (not just static metadata). Reads the latest round
-  // record published by runDebate.
+  // Live debate progress — current round vs budget + its outcome/decision, so the
+  // rail reflects debate STATE. A `stop` before the budget is an EARLY convergence,
+  // not a truncation — say so explicitly to resolve the "3 planned but 1 ran" look.
   if (councilRounds.length > 0) {
     const last = councilRounds[councilRounds.length - 1];
-    const parts = [`Round ${last.round}`];
+    const parts = [roundBudget ? `Round ${last.round}/${roundBudget}` : `Round ${last.round}`];
     if (last.state === "running") parts.push("running");
     if (typeof last.criteriaTotal === "number" && last.criteriaTotal >= 0) {
       parts.push(`${last.criteriaMet ?? 0}/${last.criteriaTotal} met`);
     }
-    if (last.leaderDecision && last.leaderDecision !== "eval-unavailable") parts.push(last.leaderDecision);
+    if (last.state === "done") {
+      if (last.leaderDecision === "stop") {
+        parts.push(roundBudget && last.round < roundBudget ? "converged — stopped early" : "converged");
+      } else if (last.leaderDecision && last.leaderDecision !== "eval-unavailable") {
+        parts.push(last.leaderDecision);
+      }
+    }
     railRows.push({ label: "Progress", value: parts.join(" · ") });
   }
 
