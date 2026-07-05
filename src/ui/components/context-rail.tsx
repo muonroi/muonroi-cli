@@ -45,7 +45,7 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
           Context
         </text>
         {rows.length > 0 && (
-          <box flexDirection="column">
+          <box flexDirection="column" flexShrink={0}>
             {rows.map((r) => (
               <box key={r.label} flexDirection="row">
                 <text fg={dark.textMuted}>{`${r.label}: `}</text>
@@ -54,7 +54,12 @@ export function ContextRail({ width, rows, children }: ContextRailProps) {
             ))}
           </box>
         )}
-        {children}
+        {children ? (
+          // biome-ignore lint/suspicious/noExplicitAny: OpenTUI stickyStart typing
+          <scrollbox flexGrow={1} stickyScroll={false} stickyStart={"top" as any}>
+            {children}
+          </scrollbox>
+        ) : null}
       </box>
     </Semantic>
   );

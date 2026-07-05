@@ -733,6 +733,37 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     { label: "Model", value: model ?? "—" },
   ];
 
+  // Council metadata cards (phase timeline, product-status, statuses, info cards
+  // like Clarified Spec / Discussion Brief / Debate Plan). Rendered INLINE in the
+  // transcript when the rail is off, or hoisted into the rail when it is on — so
+  // metadata stops pushing the live debate off screen. `cols` sizes the info
+  // cards to whichever container holds them.
+  const renderCouncilMeta = (cols: number) => (
+    <>
+      {councilPhases.length > 0 && (
+        <Semantic id="council-phases" role="listbox" name="Council Phases">
+          <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
+        </Semantic>
+      )}
+      {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
+      {councilStatuses.length > 0 && (
+        <Semantic id="council-status" role="listbox" name="Council Status">
+          <CouncilStatusList statuses={councilStatuses} theme={t} />
+        </Semantic>
+      )}
+      {councilInfoCards.map((card, idx) => (
+        <Semantic
+          key={`sem-info-${idx}-${card.title}`}
+          id={`council-card-${idx}`}
+          role="listitem"
+          name={card.title || `Council card ${idx}`}
+        >
+          <CouncilInfoCardView key={`info-card-${idx}-${card.title}`} card={card} terminalCols={cols} theme={t} />
+        </Semantic>
+      ))}
+    </>
+  );
+
   return (
     <SemanticProvider
       registry={
@@ -845,37 +876,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       ),
                     )}
                     {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
-                    {councilPhases.length > 0 && (
-                      <Semantic id="council-phases" role="listbox" name="Council Phases">
-                        <CouncilPhaseTimeline phases={councilPhases} theme={t} expanded={councilTranscriptExpanded} />
-                      </Semantic>
-                    )}
-                    {productStatus && <ProductStatusCard data={productStatus} theme={t} />}
-                    {/* Halt/init-new/point-to-existing/council-progress cards moved
-                      to render AFTER councilMessages below so the scrollbox's
-                      sticky-bottom auto-scroll reveals them ΓÇö when council
-                      debate produces many tall bubbles they used to render
-                      above the viewport. */}
-                    {councilStatuses.length > 0 && (
-                      <Semantic id="council-status" role="listbox" name="Council Status">
-                        <CouncilStatusList statuses={councilStatuses} theme={t} />
-                      </Semantic>
-                    )}
-                    {councilInfoCards.map((card, idx) => (
-                      <Semantic
-                        key={`sem-info-${idx}-${card.title}`}
-                        id={`council-card-${idx}`}
-                        role="listitem"
-                        name={card.title || `Council card ${idx}`}
-                      >
-                        <CouncilInfoCardView
-                          key={`info-card-${idx}-${card.title}`}
-                          card={card}
-                          terminalCols={width}
-                          theme={t}
-                        />
-                      </Semantic>
-                    ))}
+                    {/* Council metadata cards render here INLINE only when the
+                      rail is off; when the rail is on they are hoisted into it
+                      (see the <ContextRail> below) so they stop pushing the live
+                      debate above the viewport. Halt/init-new/point-to-existing
+                      cards still render AFTER councilMessages below so sticky-
+                      bottom reveals them. */}
+                    {!railActive && renderCouncilMeta(width)}
                     {(() => {
                       // Fold the debate back-and-forth (leader + debate + research
                       // turns) into a collapsible pill; render synthesis inline
@@ -1150,7 +1157,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   />
                 </box>
               </box>
-              {railActive && <ContextRail width={railWidth} rows={railRows} />}
+              {railActive && (
+                <ContextRail width={railWidth} rows={railRows}>
+                  {renderCouncilMeta(railWidth)}
+                </ContextRail>
+              )}
             </box>
             <box paddingLeft={2} paddingRight={2} flexShrink={0}>
               <StatusBar />
