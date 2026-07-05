@@ -141,6 +141,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  isCompactionSummaryMessage,
   isCompactionThrash,
   POST_TURN_MIN_TOKENS,
   prepareCompaction,
@@ -2921,17 +2922,23 @@ export class Agent {
           db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(parentSessionId, newSession.id);
           subSessionId = newSession.id;
 
-          let seedMessages: ModelMessage[] = [];
-          let seedSeqs: Array<number | null> = [];
+          // Seed the child with the parent's CURRENT working set — after a
+          // compaction that is already [summary, ...kept raw tail] (see the
+          // compactForContext assignment). Previously the compaction branch
+          // reseeded ONLY [summary], discarding the kept raw tail — so a forked
+          // council/debate saw a bare generic summary instead of the actual
+          // recent discussion the user pointed at ("debate THESE parts"), and
+          // drifted off-topic. Keep the tail; just guarantee the summary is
+          // present and persist the compaction row for the child's continuity.
+          const seedMessages: ModelMessage[] = [...this.messages];
+          const seedSeqs: Array<number | null> = [...this.messageSeqs];
           if (latest?.summary) {
-            const summaryMsg = createCompactionSummaryMessage(latest.summary);
-            seedMessages = [summaryMsg];
-            seedSeqs = [null];
+            if (!isCompactionSummaryMessage(seedMessages[0])) {
+              seedMessages.unshift(createCompactionSummaryMessage(latest.summary));
+              seedSeqs.unshift(null);
+            }
             const nextSeq = getNextMessageSequence(subSessionId);
             appendCompaction(subSessionId, nextSeq, latest.summary, latest.tokensBefore);
-          } else {
-            seedMessages = [...this.messages];
-            seedSeqs = [...this.messageSeqs];
           }
 
           // Add sub-session overlay system message
