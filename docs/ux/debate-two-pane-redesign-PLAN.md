@@ -415,3 +415,20 @@ a ≥3-round live debate (lock-phrase detector vetoes emergent rounds; hard to
 force live). Engine emit: verify a live `/council` still completes and emits a
 `done` record per round via the standalone driver (assert `councilRounds` all
 `state:'done'` at debate end). Do NOT rely on vitest for the interactive check.
+
+### P5 + P6 — DONE (2026-07-05, same session)
+
+- **P5 council_round emit — DONE.** `council_round` chunk + `CouncilRoundRecord`.
+  `runDebate` emits `running` at round start + guaranteed `done` on every exit
+  (leader-eval branch, evaluation-null else, circuit-breaker break). Leader-eval
+  gained `nextRoundFocus` (first schema field, maxTokens 1024→1536) → next round's
+  topic. Consumed/upsert-merged in all 3 loops; reset with council state.
+- **P6 round-grouped UI — DONE.** `CouncilRoundGroup` + `CouncilRoundsOverview`
+  behind `MUONROI_ROUND_GROUPS`. Running round streams turns; done rounds show an
+  expanded-inline summary (topic, members, criteria met/total, leader decision,
+  next focus). Overview: total/emergent/members. Falls back to `CouncilDebatePill`
+  when no round records. Verified live: `/council` → `council-rounds-overview`
+  (total=3, members=2) + `council-round-1/2/3` regions.
+
+**STATUS: all phases P0–P6 complete + verified live.** All 3 flags default OFF:
+`MUONROI_SCROLL_LOCK`, `MUONROI_CONTEXT_RAIL`, `MUONROI_ROUND_GROUPS`.
