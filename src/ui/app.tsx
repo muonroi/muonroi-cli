@@ -115,6 +115,7 @@ import {
   type InitNewFormState,
   initialInitNewFormState,
 } from "./components/init-new-form-card.js";
+import { JumpToLatestPill } from "./components/jump-to-latest-pill.js";
 import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
 import {
   initialPointToExistingFormState,
@@ -668,6 +669,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     scheduleRows,
     scheduleSearchQuery,
     scrollRef,
+    newSinceLock,
+    scrollLockedAway,
     sessionId,
     sessionPickerIndex,
     sessionPickerList,
@@ -745,7 +748,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             />
             <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
               {/* Scrollable messages */}
-              <Semantic id="log" role="log" props={{ scrollTop: scrollRef.current?.scrollTop ?? 0 }}>
+              <Semantic
+                id="log"
+                role="log"
+                props={{ scrollTop: scrollRef.current?.scrollTop ?? 0, locked: scrollLockedAway, newSinceLock }}
+              >
                 {/* biome-ignore lint/suspicious/noExplicitAny: OpenTUI type mismatch for stickyStart */}
                 <scrollbox ref={scrollRef} flexGrow={1} stickyScroll={true} stickyStart={"bottom" as any}>
                   {(() => {
@@ -1065,6 +1072,11 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   )}
                 </scrollbox>
               </Semantic>
+              {scrollLockedAway && (
+                <box flexShrink={0} alignItems="center" marginTop={0}>
+                  <JumpToLatestPill newSinceLock={newSinceLock} />
+                </box>
+              )}
               {btwState && <BtwOverlay state={btwState} theme={t} />}
               {/* TodoCard ΓÇö fixed bottom so agent text cannot push it up */}
               {taskListSnapshot && (

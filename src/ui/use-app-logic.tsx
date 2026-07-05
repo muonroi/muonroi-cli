@@ -199,6 +199,7 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
+import { isScrollLockEnabled } from "../gsd/flags.js";
 import {
   getEffectiveReasoningEffort,
   getModelByTier,
@@ -1257,6 +1258,64 @@ export function useAppLogic(props: AppLogicProps) {
   const historyIndexRef = useRef<number>(-1);
   const historyDraftRef = useRef<string>("");
   const scrollRef = useRef<ScrollBoxRenderable>(null);
+  // Scroll-lock (MUONROI_SCROLL_LOCK): while the user has scrolled up to read,
+  // suppress forced `scrollToBottom()` yanks and surface a jump-to-latest pill.
+  // Count of new appends suppressed since the user left the bottom.
+  const newSinceLockRef = useRef(0);
+  const [newSinceLock, setNewSinceLock] = useState(0);
+  const [scrollLockedAway, setScrollLockedAway] = useState(false);
+  // True when the user is pinned to (or near) the bottom. Mirrors OpenTUI's
+  // private `_hasManualScroll`: once the user scrolls up, sticky-bottom stops
+  // and this returns false, so our explicit scrolls back off. Falls back to a
+  // geometric at-bottom check if the private field is ever absent.
+  const isPinnedToBottom = useCallback((): boolean => {
+    const sb = scrollRef.current;
+    if (!sb) return true;
+    const manual = (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll;
+    if (typeof manual === "boolean") return !manual;
+    const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
+    return sb.scrollTop + vpH >= sb.scrollHeight - 2;
+  }, []);
+  // Soft scroll: respects scroll-lock. New content that arrives while the user
+  // reads history does NOT move the viewport; it just increments the pill count.
+  const scrollToBottom = useCallback(() => {
+    if (isScrollLockEnabled() && !isPinnedToBottom()) {
+      newSinceLockRef.current += 1;
+      setNewSinceLock(newSinceLockRef.current);
+      setScrollLockedAway(true);
+      return;
+    }
+    // Pinned (or lock off): scroll, and if the user had manually scrolled back
+    // to the bottom on their own, retire the jump-to-latest pill.
+    if (newSinceLockRef.current !== 0) {
+      newSinceLockRef.current = 0;
+      setNewSinceLock(0);
+      setScrollLockedAway(false);
+    }
+    try {
+      scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
+    } catch {
+      /* */
+    }
+  }, [isPinnedToBottom]);
+  // Hard scroll: re-arms native sticky and jumps to the latest line regardless
+  // of manual-scroll state. Used by explicit user actions (new prompt submit,
+  // jump-to-latest pill) that intend to return to the live tail.
+  const scrollToBottomForced = useCallback(() => {
+    const sb = scrollRef.current;
+    if (sb) {
+      try {
+        (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll = false;
+        sb.stickyScroll = true;
+        sb.scrollTo(sb.scrollHeight ?? 99999);
+      } catch {
+        /* */
+      }
+    }
+    newSinceLockRef.current = 0;
+    setNewSinceLock(0);
+    setScrollLockedAway(false);
+  }, []);
   const { width, height } = useTerminalDimensions();
   const processedInitial = useRef(false);
   const contentAccRef = useRef("");
@@ -1780,20 +1839,14 @@ export function useAppLogic(props: AppLogicProps) {
           setMessages((prev) => [...prev, buildAssistantEntry(formatScheduleDetails(schedule, status))]);
           setShowScheduleModal(false);
           setScheduleSearchQuery("");
-          setTimeout(() => {
-            try {
-              scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-            } catch {
-              /* */
-            }
-          }, 10);
+          setTimeout(scrollToBottomForced, 10);
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           setMessages((prev) => [...prev, buildAssistantEntry(`Failed to load schedule details: ${message}`)]);
         });
     },
-    [agent],
+    [agent, scrollToBottomForced],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: setSchedules is stable useState setter from useAgentEditor hook
@@ -1806,20 +1859,14 @@ export function useAppLogic(props: AppLogicProps) {
           setSchedules(latest);
           setScheduleModalIndex((index) => Math.max(0, Math.min(index, Math.max(0, latest.length - 1))));
           setMessages((prev) => [...prev, buildAssistantEntry(message)]);
-          setTimeout(() => {
-            try {
-              scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-            } catch {
-              /* */
-            }
-          }, 10);
+          setTimeout(scrollToBottomForced, 10);
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
           setMessages((prev) => [...prev, buildAssistantEntry(`Failed to remove schedule: ${message}`)]);
         });
     },
-    [agent],
+    [agent, scrollToBottomForced],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: all setters are stable useState setters from useAgentEditor hook
@@ -2066,14 +2113,6 @@ export function useAppLogic(props: AppLogicProps) {
   useEffect(() => {
     setScheduleModalIndex((idx) => Math.max(0, Math.min(idx, Math.max(0, scheduleRows.length - 1))));
   }, [scheduleRows.length]);
-
-  const scrollToBottom = useCallback(() => {
-    try {
-      scrollRef.current?.scrollTo(scrollRef.current?.scrollHeight ?? 99999);
-    } catch {
-      /* */
-    }
-  }, []);
 
   const clearLiveTurnUi = useCallback(() => {
     setStreamContent("");
@@ -4955,6 +4994,37 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
 
+      // Scroll-lock navigation (MUONROI_SCROLL_LOCK). Composer-aware: only act
+      // when the prompt input is empty, so End/PageUp/PageDown still edit text
+      // while composing. End re-pins to the live tail; PageUp/PageDown page the
+      // transcript by one viewport without disturbing the composer.
+      if (isScrollLockEnabled() && !key.ctrl && !key.meta) {
+        const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
+        if (composerEmpty && (key.name === "pageup" || key.name === "pagedown" || key.name === "end")) {
+          const sb = scrollRef.current;
+          if (key.name === "end") {
+            scrollToBottomForced();
+            return;
+          }
+          if (sb) {
+            const vpH = (sb.viewport as unknown as { height?: number }).height ?? 10;
+            const page = Math.max(1, vpH - 1);
+            try {
+              sb.scrollBy(key.name === "pageup" ? -page : page);
+            } catch {
+              /* */
+            }
+            // Paging up leaves the tail; paging back to bottom clears the pill.
+            if (key.name === "pagedown" && isPinnedToBottom()) {
+              newSinceLockRef.current = 0;
+              setNewSinceLock(0);
+              setScrollLockedAway(false);
+            }
+          }
+          return;
+        }
+      }
+
       // Point-to-existing form intercepts all input while open.
       if (pointToExistingForm) {
         if (pointToExistingForm.step === "input") {
@@ -6678,6 +6748,8 @@ export function useAppLogic(props: AppLogicProps) {
       sessionPickerIndex,
       setShowSessionPicker,
       setSessionPickerIndex,
+      scrollToBottomForced,
+      isPinnedToBottom,
     ],
   );
   useKeyboard(handleKey);
@@ -6846,6 +6918,9 @@ export function useAppLogic(props: AppLogicProps) {
     if (displayedModel && displayedModel !== agent.getModel()) {
       agent.setModel(displayedModel);
     }
+    // Submitting a fresh prompt is an explicit "engage the live tail" action —
+    // re-pin even if the user had scrolled up to read history (scroll-lock).
+    scrollToBottomForced();
     processMessage(enhancedMessage, displayText, images.length > 0 ? images : undefined);
   }, [
     agent,
@@ -6855,6 +6930,7 @@ export function useAppLogic(props: AppLogicProps) {
     processMessage,
     replacePasteBlocks,
     scrollToBottom,
+    scrollToBottomForced,
     pendingCouncilQuestion?.questionId,
     pendingCouncilQuestion,
     setShowSlashMenuSync,
@@ -6983,6 +7059,9 @@ export function useAppLogic(props: AppLogicProps) {
     scheduleRows,
     scheduleSearchQuery,
     scrollRef,
+    scrollToBottomForced,
+    newSinceLock,
+    scrollLockedAway,
     sessionId,
     sessionPickerIndex,
     sessionPickerList,
