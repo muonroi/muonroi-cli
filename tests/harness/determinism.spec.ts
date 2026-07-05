@@ -88,6 +88,7 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
     let mountedSeen = false;
     let inputSent = false;
     let awaitingReply = false;
+    let replySeen = false;
     let settled = false;
 
     function settle() {
@@ -158,6 +159,16 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
           }
           if (inputSent) {
             frames.push(msg as unknown as LiveFrame);
+            // The assistant reply (msg-1) is the true steady-state marker. Track
+            // its arrival so the settle can anchor on the idle that follows the
+            // reply, never a spurious pre-reply idle. Under load an idle can fire
+            // between Enter and the mock turn; capturing then yields a msg-0-only
+            // final frame that diverges from runs where the reply landed first
+            // (the observed 3-vs-2 CI scatter). Gating on replySeen converges all
+            // runs on the post-reply frame.
+            if (!replySeen && line.includes('"id":"msg-1"')) {
+              replySeen = true;
+            }
           }
         } else if (msg.t === "idle") {
           if (!inputSent) {
@@ -176,17 +187,18 @@ async function runOnce(useFakeClock: boolean): Promise<FrameTrace> {
               if (!settled) settle();
             }, REPLY_BUDGET_MS);
           } else if (awaitingReply) {
-            // First idle AFTER input = the assistant turn has FULLY completed and
-            // the loop is quiet again (input markActivity in Phase 8 suppresses a
-            // spurious idle between Enter and the reply). This is the only
-            // deterministic settle point: anchoring on idle — a real lifecycle
-            // boundary — instead of "200ms after msg-1's id first appears"
-            // guarantees every captured trailing frame is POST-completion (msg-1
-            // fully rendered), never a mid-stream partial. The short grace lets
-            // the final post-process tick flush; any frames within it are
-            // steady-state-identical, so capturing the last is reproducible across
-            // runs. Falls back to the safety timer if this idle never comes (e.g.
-            // mock-model never replied).
+            // Idle AFTER input. Only settle once the assistant reply (msg-1) has
+            // actually rendered — markActivity is meant to suppress the spurious
+            // idle between Enter and the reply, but under full-suite CI contention
+            // it can still slip through, and settling on it captures a msg-0-only
+            // final frame that diverges from runs where the reply landed first.
+            // Ignoring pre-reply idles anchors the settle on a real lifecycle
+            // boundary that is guaranteed POST-completion (msg-1 fully rendered),
+            // never a mid-stream partial. The short grace lets the final
+            // post-process tick flush; frames within it are steady-state-identical
+            // so capturing the last is reproducible across runs. Falls back to the
+            // safety timer if the reply never comes (e.g. mock-model never replied).
+            if (!replySeen) return;
             awaitingReply = false;
             clearTimeout(safetyTimer);
             setTimeout(settle, 250);
@@ -254,7 +266,12 @@ describe(`determinism: ${N}× identical LiveFrame final state`, () => {
     async function runWithRetry(): Promise<FrameTrace> {
       for (let attempt = 0; attempt < 2; attempt++) {
         const trace = await runOnce(true);
-        if (trace.length > 0 && trace[0]?.includes('"id":"msg-0"')) return trace;
+        // Require the assistant reply (msg-1), not just the echoed user message
+        // (msg-0): a safety-timer fallback that fired on a pre-reply idle yields a
+        // msg-0-only trace, which is exactly the divergent value we must not admit
+        // into the cross-run comparison. Retry until the steady state includes the
+        // reply.
+        if (trace.length > 0 && trace[0]?.includes('"id":"msg-1"')) return trace;
       }
       return await runOnce(true);
     }
