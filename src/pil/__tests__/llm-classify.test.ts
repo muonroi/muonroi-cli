@@ -58,6 +58,37 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     expect(result?.intentKind).toBe("task");
   });
 
+  it("injects the recent-conversation digest so a terse follow-up is classified in context", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("plan,concise,task,report,heavy") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+
+    const digest = "[user]: phân tích PIL pipeline nặng | [assistant]: đã phân tích 5 tầng chi tiết";
+    const result = await classify("ok từ các phần đó debate mode lên plan", { recentTurns: digest });
+    expect(result?.taskType).toBe("plan");
+
+    // The prompt actually sent to the model must carry the digest + the framing
+    // that tells it to classify the NEW message (not the conversation block).
+    // "NEW USER MESSAGE" is unique to the injected block (the system prompt never
+    // uses that phrase), so it distinguishes injected-context from no-context.
+    const sent = JSON.stringify(handle.calls);
+    expect(sent).toContain("NEW USER MESSAGE");
+    expect(sent).toContain("phân tích PIL pipeline nặng");
+  });
+
+  it("omits the conversation block entirely when no recentTurns is provided", async () => {
+    const handle = installMockModel({ fixture: { stream: textOnlyStream("debug,concise") } });
+    cleanup = handle.uninstall;
+    const factory = (() => handle.model) as never;
+    const classify = createLlmClassifier(factory, "deepseek-v4-flash");
+    await classify("fix the failing build");
+    const sent = JSON.stringify(handle.calls);
+    // The injected-block marker must be absent; the system prompt's mention of a
+    // '[RECENT CONVERSATION]' block does not use this phrase.
+    expect(sent).not.toContain("NEW USER MESSAGE");
+  });
+
   it("returns null when the reply cannot be parsed", async () => {
     const handle = installMockModel({ fixture: { stream: textOnlyStream("¯\\_(ツ)_/¯") } });
     cleanup = handle.uninstall;

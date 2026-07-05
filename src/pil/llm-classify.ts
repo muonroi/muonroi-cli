@@ -90,7 +90,20 @@ export interface LlmClassifyResult {
   replyLanguage: string | null;
 }
 
-export type LlmClassifyFn = (prompt: string, signal?: AbortSignal) => Promise<LlmClassifyResult | null>;
+/**
+ * Options for a classify call. `recentTurns` is a compact digest of the last
+ * few conversation turns; when present the classifier uses it ONLY to resolve
+ * back-references in the new message (e.g. "từ các phần đó", "làm tiếp", "this")
+ * so a terse follow-up that points at heavy prior work is not mis-scored as a
+ * trivial one-liner. Without it the classifier sees the bare prompt and is blind
+ * to context — the documented "chấm điểm chỉ dựa only prompt" failure.
+ */
+export interface LlmClassifyOptions {
+  recentTurns?: string | null;
+  signal?: AbortSignal;
+}
+
+export type LlmClassifyFn = (prompt: string, opts?: LlmClassifyOptions) => Promise<LlmClassifyResult | null>;
 
 const LLM_CLASSIFY_TIMEOUT_MS = 2500;
 
@@ -172,6 +185,7 @@ const KNOWN_CLASSIFY_WORDS = new Set<string>([
 
 const SYSTEM_PROMPT =
   "You classify user prompts for a coding assistant. Reply with ONE line of SEVEN lowercase words separated by commas: <taskType>,<style>,<intent>,<deliverable>,<depth>,<scope>,<lang>\n\n" +
+  "The message may be preceded by a '[RECENT CONVERSATION]' block. Use it ONLY to resolve what a terse follow-up refers to (e.g. 'từ các phần đó', 'làm tiếp', 'debate mode đi', 'this one'); then classify the NEW message. Crucially, if the new message points back at heavy prior work, its depth is the depth of THAT work — a short sentence like 'ok debate these parts and plan improvements' is NOT quick just because it is short. Never classify the conversation block itself.\n\n" +
   "taskType ∈ { refactor | debug | plan | analyze | documentation | generate | general }\n" +
   "style ∈ { concise | balanced | detailed }\n" +
   "intent ∈ { task | chat } — 'chat' ONLY for a pure greeting, thanks, or acknowledgement with NO work request (e.g. 'hi', 'cảm ơn nhé', 'ok great'). EVERYTHING else is 'task', including questions about code or the CLI, 'are you done?', and requests to call a tool. When unsure, choose 'task'.\n" +
@@ -289,7 +303,9 @@ function parseResponse(raw: string): LlmClassifyResult | null {
  * fail-open (keep prior taskType, do not block the turn).
  */
 export function createLlmClassifier(factory: ProviderFactory, modelId: string): LlmClassifyFn {
-  return async function classify(prompt: string, signal?: AbortSignal): Promise<LlmClassifyResult | null> {
+  return async function classify(prompt: string, opts?: LlmClassifyOptions): Promise<LlmClassifyResult | null> {
+    const signal = opts?.signal;
+    const recentTurns = opts?.recentTurns;
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -322,11 +338,21 @@ export function createLlmClassifier(factory: ProviderFactory, modelId: string): 
         });
         providerOptions = mergeProviderOptions(runtime.providerOptions, lowEffort);
       }
+      // Prepend a bounded recent-conversation block so the classifier can
+      // resolve back-references in a terse follow-up ("từ các phần đó",
+      // "làm tiếp", "this") instead of scoring the isolated sentence. The
+      // framing makes clear the depth still reflects the NEW message's actual
+      // work — including work it points back at — not the whole transcript.
+      const trimmedRecent = recentTurns?.trim();
+      const promptWithContext = trimmedRecent
+        ? `[RECENT CONVERSATION — reference only, do NOT classify this]\n${trimmedRecent.slice(0, 800)}\n\n` +
+          `[NEW USER MESSAGE — classify THIS; if it refers back to the conversation above, judge the depth of the work it actually entails]\n${prompt.slice(0, 600)}`
+        : prompt.slice(0, 600);
       const result = streamText({
         model: runtime.model,
         abortSignal: combinedSignal,
         system: SYSTEM_PROMPT,
-        prompt: prompt.slice(0, 600),
+        prompt: promptWithContext,
         ...(dropMaxTokens ? {} : { maxOutputTokens: maxOut }),
         ...(providerOptions ? { providerOptions } : {}),
       });
@@ -498,6 +524,14 @@ export async function classifySubSessionAction(
   contextInfo?: {
     currentChars: number;
     threshold: number;
+    /**
+     * Compact digest of recent conversation turns. The router's system prompt
+     * says it decides "based on the conversation history" — without this the
+     * history was never actually supplied and the router judged the prompt in
+     * isolation, so a follow-up like "ok làm phần đó đi" could not be told apart
+     * from a fresh unrelated task. Supplying it makes the claim true.
+     */
+    recentTurns?: string | null;
   },
   signal?: AbortSignal,
 ): Promise<SubSessionRouteResult | null> {
@@ -538,10 +572,15 @@ export async function classifySubSessionAction(
 
     let promptWithContext = prompt.slice(0, 1000);
     if (contextInfo) {
+      const recent = contextInfo.recentTurns?.trim();
+      const historyBlock = recent
+        ? `[CONVERSATION HISTORY — for context; the prompt may continue or reference it]\n${recent.slice(0, 800)}\n\n`
+        : "";
       promptWithContext =
         `[SESSION METADATA]\n` +
         `Current session size: ${contextInfo.currentChars} characters.\n` +
         `Rotation threshold: ${contextInfo.threshold} characters.\n\n` +
+        `${historyBlock}` +
         `[USER PROMPT]\n${promptWithContext}`;
     }
 

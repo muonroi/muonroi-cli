@@ -486,6 +486,13 @@ export interface Layer1Options {
    * Passed in (not read here) to keep layer1 off the EE/profile import path.
    */
   profileStyleBaseline?: OutputStyle | null;
+  /**
+   * Compact digest of the last few conversation turns. Forwarded to the LLM
+   * classifier so a terse follow-up that back-references heavy prior work
+   * ("từ các phần đó", "làm tiếp") is scored on the real work, not the isolated
+   * sentence. null/undefined ⇒ classifier sees the bare prompt (old behaviour).
+   */
+  recentTurns?: string | null;
 }
 
 // Explicit command/tool-execution signals (EN + VI). When any fires the turn
@@ -688,7 +695,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
       let llmRes: LlmClassifyResult | null = null;
       let classifyError: string | null = null;
       try {
-        llmRes = await opts.llmFallback(ctx.raw);
+        llmRes = await opts.llmFallback(ctx.raw, { recentTurns: opts.recentTurns });
       } catch (err) {
         classifyError = (err as Error)?.message ?? String(err);
       }
@@ -1287,7 +1294,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
     if (llmFallbackEligible) {
       pass4LlmAttempted = true;
       try {
-        const llmRes = await opts.llmFallback!(ctx.raw);
+        const llmRes = await opts.llmFallback!(ctx.raw, { recentTurns: opts.recentTurns });
         if (llmRes) {
           pass4LlmSucceeded = true;
           taskType = llmRes.taskType;

@@ -105,7 +105,13 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   // (cached, fail-open → null when EE/profile absent or privacy off). Passed into
   // layer1 so the hot layer stays off the EE/profile import path (arch boundary).
   const profileStyleBaseline = outputStyleFromProfile(getWhoAmIProfile());
-  await timed("layer1-intent", (c) => layer1Intent(c, { llmFallback: options?.llmFallback, profileStyleBaseline }));
+  await timed("layer1-intent", (c) =>
+    layer1Intent(c, {
+      llmFallback: options?.llmFallback,
+      profileStyleBaseline,
+      recentTurns: options?.recentTurnsSummary,
+    }),
+  );
 
   // Layer 1.5: deterministic complexity-size classification. Pure heuristic,
   // no LLM call, no network. Consumed by 4B (step ceiling matrix) and 4A

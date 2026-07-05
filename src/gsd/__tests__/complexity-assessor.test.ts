@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../council/leader.js", () => ({ resolvePlanCouncilLeader: vi.fn(async () => ({ modelId: "leader" })) }));
 
@@ -18,6 +18,42 @@ describe("shouldAssess pre-filter", () => {
   });
   it("runs on a low-confidence quick task", () => {
     expect(shouldAssess("quick", 0.4)).toBe(true);
+  });
+
+  describe("continuation raises the skip bar for quick", () => {
+    const prev = process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR;
+      else process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR = prev;
+    });
+
+    it("first-turn (no prior context) still skips a mid-confidence quick", () => {
+      delete process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR;
+      // 0.75 ≥ base floor 0.7 → skip when there is no conversation to reference.
+      expect(shouldAssess("quick", 0.75, false)).toBe(false);
+    });
+
+    it("continuation double-checks the SAME mid-confidence quick (default floor 0.85)", () => {
+      delete process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR;
+      // The exact classifier default (0.75) on a follow-up now gets the leader check.
+      expect(shouldAssess("quick", 0.75, true)).toBe(true);
+    });
+
+    it("continuation still skips a very-high-confidence quick", () => {
+      delete process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR;
+      expect(shouldAssess("quick", 0.9, true)).toBe(false);
+    });
+
+    it("honours the env override for the continuation floor", () => {
+      process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR = "0.7"; // = base → disables the extra bar
+      expect(shouldAssess("quick", 0.75, true)).toBe(false);
+    });
+
+    it("clamps an out-of-range env floor into [0.7, 1]", () => {
+      process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR = "5";
+      // clamped to 1 → any quick continuation below full confidence is checked.
+      expect(shouldAssess("quick", 0.99, true)).toBe(true);
+    });
   });
 });
 

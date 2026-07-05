@@ -2805,7 +2805,16 @@ export class Agent {
     } else {
       try {
         const { classifySubSessionAction } = await import("../pil/llm-classify.js");
-        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage);
+        // Feed the recent-conversation digest so the router can actually honour
+        // its "decide based on the conversation history" contract — otherwise a
+        // continuation ("ok làm phần đó đi") is judged in isolation and can be
+        // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
+        // on the session-size metadata block the ROTATE_SESSION rule relies on.
+        const routeResult = await classifySubSessionAction(this.requireProvider(), this.modelId, userMessage, {
+          currentChars,
+          threshold,
+          recentTurns: this._buildRecentTurnsSummary(),
+        });
         if (routeResult) {
           routeAction = routeResult.action;
           logger.info("orchestrator", "Routing action selected for user message", {

@@ -28,10 +28,32 @@ export interface AssessResult {
 
 const CONFIDENCE_FLOOR = 0.7;
 
-/** Run the leader-tier assessor only when the fast layer1 call is uncertain or the task is non-trivial. */
-export function shouldAssess(priorDepth: string, confidence: number): boolean {
+/**
+ * Continuation turns get a HIGHER confidence bar before a `quick` verdict is
+ * trusted enough to skip the leader check. A terse follow-up ("làm tiếp", "từ
+ * các phần đó ...") can point at heavy prior work yet read as trivially simple
+ * in isolation, so the fast classifier's `quick` is less reliable here even
+ * with the recent-conversation digest now fed to it (defense in depth). Default
+ * 0.85; env MUONROI_GSD_CONTINUATION_CONF_FLOOR overrides (clamped to
+ * [CONFIDENCE_FLOOR, 1]). Set it to CONFIDENCE_FLOOR to disable the extra bar.
+ */
+function continuationConfidenceFloor(): number {
+  const raw = Number.parseFloat(process.env.MUONROI_GSD_CONTINUATION_CONF_FLOOR ?? "");
+  if (!Number.isFinite(raw)) return 0.85;
+  return Math.min(1, Math.max(CONFIDENCE_FLOOR, raw));
+}
+
+/**
+ * Run the leader-tier assessor only when the fast layer1 call is uncertain or
+ * the task is non-trivial. `hasPriorContext` = there is a recent-conversation
+ * digest (a continuation turn); such turns raise the skip bar so a
+ * context-dependent follow-up mis-scored as `quick` still gets the
+ * context-aware leader check rather than silently skipping it.
+ */
+export function shouldAssess(priorDepth: string, confidence: number, hasPriorContext = false): boolean {
   if (priorDepth === "standard" || priorDepth === "heavy") return true;
-  return confidence < CONFIDENCE_FLOOR; // low-confidence quick → double-check
+  const floor = hasPriorContext ? continuationConfidenceFloor() : CONFIDENCE_FLOOR;
+  return confidence < floor; // low-confidence quick → double-check
 }
 
 function buildAssessorPrompt(input: AssessInput): string {
@@ -85,7 +107,8 @@ function writeAssessment(
  * verdict that OVERRIDES pilCtx.modelDepthTier. Never throws — degrades to priorDepth.
  */
 export async function assessComplexity(input: AssessInput): Promise<AssessResult> {
-  if (!shouldAssess(input.priorDepth, input.confidence)) {
+  const hasPriorContext = !!(input.bundle?.conversationDigest || input.conversationDigest || "").trim();
+  if (!shouldAssess(input.priorDepth, input.confidence, hasPriorContext)) {
     return {
       depth: input.priorDepth,
       autoCouncil: false,
