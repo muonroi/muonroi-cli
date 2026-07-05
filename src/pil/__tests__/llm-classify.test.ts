@@ -160,7 +160,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     cleanup = handle.uninstall;
 
     const factory = (() => handle.model) as never;
-    const classify = createLlmClassifier(factory, "Qwen/Qwen3-8B"); // reasoning:false
+    const classify = createLlmClassifier(factory, "deepseek-chat-lite"); // non-catalog, reasoning:false
     await classify("add a new endpoint");
 
     const call = handle.calls[0] as { maxOutputTokens?: number };

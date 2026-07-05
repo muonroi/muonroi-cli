@@ -1,7 +1,7 @@
 /**
  * Verifies the wire-debug message summarizer redacts content but preserves
  * structural shape needed to diagnose provider-specific failures
- * (e.g. SiliconFlow reasoning_content round-trip).
+ * (e.g. DeepSeek reasoning_content round-trip).
  */
 import { describe, expect, it } from "vitest";
 import { _internals } from "../wire-debug.js";

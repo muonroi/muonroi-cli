@@ -23,9 +23,7 @@ describe("loadKeyForProvider", () => {
     // Clear env vars
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
-    delete process.env.GOOGLE_API_KEY;
     delete process.env.DEEPSEEK_API_KEY;
-    delete process.env.SILICONFLOW_API_KEY;
     delete process.env.OLLAMA_API_KEY;
   });
 
@@ -56,10 +54,11 @@ describe("loadKeyForProvider", () => {
     expect(key).toBe("sk-ant-test-key-long-enough-for-validation");
   });
 
-  it("reads from GOOGLE_API_KEY env var", async () => {
-    process.env.GOOGLE_API_KEY = "AIzaSyB_test_key_longer_than_twenty";
-    const key = await loadKeyForProvider("google");
-    expect(key).toBe("AIzaSyB_test_key_longer_than_twenty");
+  it("reads from DEEPSEEK_API_KEY env var", async () => {
+    const fake = "deepseek-mock-key-longer-than-twenty";
+    process.env.DEEPSEEK_API_KEY = fake;
+    const key = await loadKeyForProvider("deepseek");
+    expect(key).toBe(fake);
   });
 });
 
@@ -69,9 +68,7 @@ describe("firstAvailableProvider", () => {
   beforeEach(() => {
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.OPENAI_API_KEY;
-    delete process.env.GOOGLE_API_KEY;
     delete process.env.DEEPSEEK_API_KEY;
-    delete process.env.SILICONFLOW_API_KEY;
     delete process.env.OLLAMA_API_KEY;
   });
 

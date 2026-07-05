@@ -50,8 +50,6 @@ export function createProviderFactory(
  * For OpenAI: loads stored OAuth tokens (auto-refreshing if expiring) and injects
  * them as Authorization / ChatGPT-Account-ID headers so subscription-backed
  * ChatGPT Plus/Pro accounts work without an API key.
- * For Google: loads stored Agy OAuth tokens and injects Authorization header
- * so users can authenticate via their Google account without a GOOGLE_API_KEY.
  * Falls back to API-key path when no tokens are stored.
  * All other providers: identical to createProviderFactory.
  */
@@ -74,13 +72,12 @@ export async function createProviderFactoryAsync(
         // override the OAuth backend and produce a 401 "Missing scopes:
         // api.responses.write" when the subscription token hits the platform
         // API. Fall back to opts.baseURL only when the OAuth provider declares
-        // no dedicated backend (cfg.baseURL undefined, e.g. some Gemini flows).
+        // no dedicated backend (cfg.baseURL undefined).
         //
         // However, a user-specified baseURL in settings (e.g. switching to a
         // different backend after an OAuth provider is killed) MUST override
-        // the hardcoded OAuth default. This lets users migrate from the old
-        // cloudcode-pa.googleapis.com endpoint to a new proxy/backend without
-        // modifying source.
+        // the hardcoded OAuth default. This lets users migrate to a new
+        // proxy/backend without modifying source.
         const { loadUserSettings } = await import("../utils/settings.js");
         const userSettings = loadUserSettings();
         const userBaseURL = userSettings?.providers?.[id]?.baseURL;
@@ -120,7 +117,7 @@ interface MockRuntimeGlobals {
 export function resolveModelRuntime(factory: ProviderFactory, modelId: string): ResolvedModelRuntime {
   // Resolve aliases (e.g. "deepseek-v4-flash") to the provider-native id
   // (e.g. "deepseek-v4-flash") BEFORE invoking the factory.
-  // Without this, SiliconFlow / DeepSeek / xAI reject the request because
+  // Without this, DeepSeek / xAI reject the request because
   // the alias is not a valid model id on their API.
   const mockGlobals = globalThis as MockRuntimeGlobals;
   const modelInfo = getModelInfo(modelId);
@@ -303,9 +300,7 @@ export function detectProviderForModel(modelId: string): ProviderId {
   const id = modelId.toLowerCase();
   if (id.startsWith("deepseek")) return "deepseek";
   if (id.startsWith("gpt-") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")) return "openai";
-  if (id.startsWith("gemini") || id.startsWith("models/gemini")) return "google";
   if (id.startsWith("grok")) return "xai";
-  if (id.includes("qwen") || id.includes("internlm")) return "siliconflow";
   if (id.includes("glm") || id.startsWith("z-ai") || id.startsWith("zai")) return "zai";
   if (id.startsWith("opencode")) return "opencode-go";
   if (id.startsWith("llama") || id.startsWith("mistral") || id.startsWith("phi-")) return "ollama";

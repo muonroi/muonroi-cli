@@ -49,6 +49,8 @@ export interface PipelineContext {
   sessionId?: string | null;
   /** GSD-native triage tier (set by layer4 — sourced from modelDepthTier when present). */
   complexityTier?: ComplexityTier | null;
+  /** True when layer4 classified this turn as a heavy GSD task the mutation gate must block until plan-review passes. */
+  gsdGateBlocking?: boolean | null;
   /**
    * Model-decided work depth (quick | standard | heavy), set by layer1's
    * model-first classifier (the 5th classify word). This is the agent-first
@@ -58,6 +60,14 @@ export interface PipelineContext {
    * the word OR the legacy cascade ran → layer4 falls back accordingly.
    */
   modelDepthTier?: ComplexityTier | null;
+  /**
+   * Leader-tier complexity assessor's auto-council recommendation (Task 4
+   * `assessComplexity` / `src/gsd/complexity-assessor.ts`), set by the native
+   * depth-sync block in message-processor.ts BEFORE `syncWorkflowContext`.
+   * undefined when the assessor didn't run (prefilter-skip / disabled) or
+   * failed; consumed by the auto-council gate (Task 8).
+   */
+  gsdAutoCouncil?: boolean;
   /**
    * Model-decided scope (agent-first replacement for the `mentionsEcosystemScope`
    * regex): true when the turn is about the Muonroi PLATFORM/ecosystem (BB/.NET,

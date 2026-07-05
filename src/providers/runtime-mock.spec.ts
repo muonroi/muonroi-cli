@@ -37,7 +37,7 @@ describe("resolveModelRuntime mock hook", () => {
     uninstall = null;
   });
 
-  // Use deepseek-v4-pro — catalog scope is currently deepseek + siliconflow.
+  // Use deepseek-v4-pro — a catalog-backed model.
   // See src/models/catalog.README.md for why other providers were removed.
   const MODEL_ID = "deepseek-v4-pro";
   const PROVIDER_KEY = "deepseek";

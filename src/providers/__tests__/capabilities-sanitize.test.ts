@@ -1,6 +1,6 @@
 /**
  * sanitizeHistory coverage — every provider now returns the input array by
- * reference. The previous DeepSeek/SiliconFlow strip was removed once
+ * reference. The previous DeepSeek strip was removed once
  * reasoning-roundtrip.test.ts proved AI SDK 2.0.42 serializes assistant
  * reasoning parts as `reasoning_content` natively. Stripping them BEFORE the
  * send would re-introduce the original HTTP 400 code 20015 by breaking the
@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 import { getProviderCapabilities } from "../capabilities.js";
 import type { ProviderId } from "../types.js";
 
-const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "google", "xai", "deepseek", "siliconflow", "ollama"];
+const ALL_PROVIDERS: ProviderId[] = ["anthropic", "openai", "xai", "deepseek", "ollama"];
 
 describe("ProviderCapabilities.sanitizeHistory — identity for every provider", () => {
   for (const p of ALL_PROVIDERS) {
@@ -54,12 +54,6 @@ describe("ProviderCapabilities.sanitizeHistory — identity for every provider",
 
   it("deepseek still drops respond_general tool (separate quirk from reasoning)", () => {
     const caps = getProviderCapabilities("deepseek");
-    expect(caps.supportsResponseTool("general")).toBe(false);
-    expect(caps.supportsResponseTool("plan")).toBe(true);
-  });
-
-  it("siliconflow still drops respond_general tool (separate quirk from reasoning)", () => {
-    const caps = getProviderCapabilities("siliconflow");
     expect(caps.supportsResponseTool("general")).toBe(false);
     expect(caps.supportsResponseTool("plan")).toBe(true);
   });

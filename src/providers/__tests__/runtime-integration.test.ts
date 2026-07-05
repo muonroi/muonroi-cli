@@ -12,7 +12,7 @@ beforeAll(async () => {
 });
 
 // Detection cases use catalog hits for active providers (deepseek/zai/xai)
-// and prefix-fallback for legacy ids (anthropic/openai/siliconflow).
+// and prefix-fallback for legacy ids (anthropic/openai).
 describe("model → provider detection", () => {
   const cases: Array<[string, ProviderId]> = [
     ["claude-sonnet-4-6", "anthropic"],
@@ -23,7 +23,6 @@ describe("model → provider detection", () => {
     ["deepseek-v4-flash", "deepseek"],
     ["deepseek-v4-pro", "deepseek"],
     ["deepseek-ai/DeepSeek-V4-Pro", "deepseek"],
-    ["alibaba/Qwen3-8B", "siliconflow"],
     ["grok-3", "xai"],
     ["grok-3-mini", "xai"],
   ];
@@ -50,11 +49,6 @@ describe("end-to-end: create factory + resolve runtime", () => {
     expect(runtime.modelInfo?.provider).toBe("deepseek");
     // DeepSeek capability does not inject anthropic-style thinking opts.
     expect(runtime.providerOptions?.anthropic).toBeUndefined();
-  });
-
-  test("siliconflow model not in catalog throws on resolve", () => {
-    const pf = createProviderFactory("siliconflow", { apiKey: MOCK_KEY });
-    expect(() => resolveModelRuntime(pf.factory, "Qwen/Qwen3-8B")).toThrow("not found in catalog");
   });
 
   test("openai model not in catalog throws", () => {

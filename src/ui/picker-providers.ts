@@ -10,7 +10,7 @@ import type { ProviderId } from "../providers/types.js";
  * previously hidden because `configuredProviders` stayed pinned to the splash
  * list (app.tsx never re-applied the async `getConfiguredProviders()` result).
  *
- * Providers with no catalog models (anthropic/ollama/google in the default
+ * Providers with no catalog models (anthropic/ollama in the default
  * catalog) are excluded — they cannot be routed to and would render as dead
  * chips with an empty model list. (xai now ships catalog models, so a
  * configured/OAuth-logged-in xai surfaces here.)

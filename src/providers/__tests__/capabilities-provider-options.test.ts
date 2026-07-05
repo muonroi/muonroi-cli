@@ -181,7 +181,7 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
   });
 
   describe("Providers without buildProviderOptions overrides — return undefined", () => {
-    for (const id of ["google", "ollama"] as const) {
+    for (const id of ["ollama"] as const) {
       it(`${id}: returns undefined for any context`, () => {
         const caps = getProviderCapabilities(id);
         const model = baseModel({ provider: id, supportsReasoningEffort: true, thinkingType: "enabled" });
@@ -192,13 +192,13 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
     }
   });
 
-  // DeepSeek/SiliconFlow no longer override buildProviderOptions.
+  // DeepSeek no longer overrides buildProviderOptions.
   // The previous RC#1 workaround (disable thinking entirely) was removed
   // after reasoning-roundtrip.test.ts proved that @ai-sdk/openai-compatible
   // 2.0.42 correctly serializes assistant reasoning parts as
   // `reasoning_content` on the wire — satisfying the DeepSeek thinking_mode
   // guide requirement natively.
-  describe("DeepSeek / SiliconFlow — reasoning round-trips natively (no override)", () => {
+  describe("DeepSeek — reasoning round-trips natively (no override)", () => {
     it("deepseek: returns undefined regardless of thinkingType", () => {
       const caps = getProviderCapabilities("deepseek");
       expect(
@@ -209,15 +209,6 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
       ).toBeUndefined();
       expect(caps.buildProviderOptions({ model: baseModel({ provider: "deepseek" }) })).toBeUndefined();
       expect(caps.buildProviderOptions({ model: undefined })).toBeUndefined();
-    });
-    it("siliconflow: returns undefined regardless of thinkingType", () => {
-      const caps = getProviderCapabilities("siliconflow");
-      expect(
-        caps.buildProviderOptions({
-          model: baseModel({ provider: "siliconflow", thinkingType: "enabled" }),
-        }),
-      ).toBeUndefined();
-      expect(caps.buildProviderOptions({ model: baseModel({ provider: "siliconflow" }) })).toBeUndefined();
     });
   });
 

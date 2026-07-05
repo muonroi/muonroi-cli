@@ -98,9 +98,6 @@ describe("callWarmRoute bridge cascade", () => {
     await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "openai" });
     expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("codex");
 
-    await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "google" });
-    expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("gemini");
-
     await callWarmRoute("t", { tenantId: "default", cwd: "/tmp", defaultProvider: "anthropic" });
     expect(mockBridgeRouteModel.mock.calls.at(-1)?.[2]).toBe("claude");
 

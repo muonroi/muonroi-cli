@@ -1,11 +1,13 @@
 import type { ModelMessage } from "ai";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildEffectiveTranscript, type PersistedCompaction } from "../storage/transcript-view";
+import { getAutoCompactMinNewTokens } from "../utils/settings";
 import {
   COMPACTION_META_MAX_OUTPUT_TOKENS,
   COMPACTION_SUMMARY_HEADER,
   createCompactionSummaryMessage,
   findCutPoint,
+  isCompactionThrash,
   metaCompactionMaxTokens,
   prepareCompaction,
   serializeConversation,
@@ -226,5 +228,24 @@ describe("metaCompactionMaxTokens — meta summary cap (tunable, session 2b7a102
       expect(metaCompactionMaxTokens(), bad).toBe(COMPACTION_META_MAX_OUTPUT_TOKENS);
     }
     delete process.env.MUONROI_META_COMPACT_MAX_TOKENS;
+  });
+});
+
+describe("getAutoCompactMinNewTokens", () => {
+  it("defaults to 20000", () => {
+    expect(getAutoCompactMinNewTokens()).toBe(20_000);
+  });
+});
+
+describe("isCompactionThrash — cross-turn anti-thrash predicate (session ff932f8568e8)", () => {
+  it("skips a compaction ~14K after the last (the observed thrash)", () => {
+    // last compaction dropped to ~36K; next turn at ~50K → 14K new < 20K floor
+    expect(isCompactionThrash(50_613, 36_600, 20_000)).toBe(true);
+  });
+  it("allows compaction once enough new tokens accumulate", () => {
+    expect(isCompactionThrash(60_000, 36_600, 20_000)).toBe(false);
+  });
+  it("never skips the first compaction of a session", () => {
+    expect(isCompactionThrash(300_000, null, 20_000)).toBe(false);
   });
 });

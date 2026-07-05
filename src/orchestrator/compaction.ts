@@ -3,11 +3,10 @@ import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import type { ProviderFactory as LegacyProvider } from "../providers/runtime.js";
 import { requireRuntimeProvider, resolveModelRuntime } from "../providers/runtime.js";
+import { logger } from "../utils/logger.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { containsEncryptedReasoning } from "./reasoning";
 import { countTokens } from "./token-counter.js";
-
-import { logger } from "../utils/logger.js";
 
 /**
  * A single action the compaction proposer model wants to take on one message.
@@ -422,6 +421,19 @@ export function shouldCompactContext(
   settings: CompactionSettings,
 ): boolean {
   return contextTokens > contextWindow - settings.reserveTokens;
+}
+
+/**
+ * Cross-turn anti-thrash guard: true when a post-turn compaction should be
+ * SKIPPED because too few new tokens have accumulated since the last
+ * compaction's `tokensAfter` — i.e. the cache-reset cost would not be
+ * amortized (observed: session ff932f8568e8 re-compacted after only ~14K
+ * new tokens against a 20K floor).
+ *
+ * `lastAfter === null` means no prior compaction this session — never skip.
+ */
+export function isCompactionThrash(tokens: number, lastAfter: number | null, minNew: number): boolean {
+  return lastAfter !== null && tokens - lastAfter < minNew;
 }
 
 function isValidCutPoint(message: ModelMessage): boolean {

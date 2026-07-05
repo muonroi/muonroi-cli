@@ -233,10 +233,15 @@ describe("loop-driver audit logging", () => {
     expect(typeof data.elapsedMs).toBe("number");
   });
 
-  // Wrapped CouncilLLM must record usage_events when the underlying debate
-  // implementation invokes its onUsage callback. Without this, /ideal runs
-  // ship with zero token accounting (the exact symptom we hit in 8a35be).
-  it("records a usage_events row for each council LLM call", async () => {
+  // Architecture guard: council usage_events recording (source="council") now
+  // happens at the single source of truth inside createCouncilLLM
+  // (src/council/llm.ts → recordCouncilUsage), NOT via a loop-driver-local
+  // wrapper. The driver must therefore hand runDebate the UNWRAPPED ctx.llm —
+  // identity, not a wrapper — so /ideal debate calls are recorded exactly once
+  // by the real CouncilLLM and never double-counted here. See council-usage.test.ts
+  // for the recording behavior itself. Regression this guards: the deleted
+  // wrapLLMForUsageTracking wrapper double-recording every debate call.
+  it("passes the unwrapped ctx.llm to runDebate (recording is centralized in createCouncilLLM)", async () => {
     const debateState = {
       spec: mockSpec,
       exchangeLogs: new Map(),
@@ -245,61 +250,27 @@ describe("loop-driver audit logging", () => {
       researchFindings: "",
       active: [],
     };
-    // Simulate the actual CouncilLLM by capturing the wrapped onUsage callback
-    // and firing it with a usage payload. We need to access ctx.llm AFTER it's
-    // been wrapped by wrapLLMForUsageTracking, so we drive runDebate through
-    // its mocked generator.
     const ctx = buildCtx();
-    const innerDebate = vi
-      .fn()
-      .mockImplementation(
-        (
-          _model: string,
-          _system: string,
-          _prompt: string,
-          _signal: unknown,
-          _trace: unknown,
-          _opts: unknown,
-          onUsage: ((u: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => void) | undefined,
-        ) => {
-          onUsage?.({ inputTokens: 1200, outputTokens: 800, cachedInputTokens: 400 });
-          return Promise.resolve({ text: "response", toolCalls: [] });
-        },
-      );
-    // biome-ignore lint/suspicious/noExplicitAny: assigning to mock llm
-    (ctx.llm as any).debate = innerDebate;
+    let receivedLlm: unknown;
 
     // biome-ignore lint/correctness/useYield: mock generator returns immediately
     (runDebate as ReturnType<typeof vi.fn>).mockImplementation(async function* (
       _spec: unknown,
       runOpts: { topic: string; conversationContext: string; leaderModelId: string; participants: unknown[] },
-      llm: {
-        debate: (
-          m: string,
-          s: string,
-          p: string,
-          sig?: unknown,
-          tr?: unknown,
-          o?: unknown,
-          onUsage?: (u: { inputTokens: number; outputTokens: number; cachedInputTokens: number }) => void,
-        ) => Promise<{ text: string }>;
-      },
+      llm: unknown,
     ) {
-      // Drive ONE debate call through the wrapped llm to trigger the recorder.
-      await llm.debate("deepseek-flash", "sys", "prompt", undefined, undefined, undefined);
+      receivedLlm = llm;
       void runOpts;
       return debateState;
     });
 
     await drain(runLoopDriver(ctx));
 
-    const calls = (recordUsageEvent as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.length).toBeGreaterThanOrEqual(1);
-    const first = calls[0]!;
-    expect(first[0]).toBe("audit-session"); // sessionId
-    expect(first[1]).toBe("council"); // source
-    expect(first[2]).toBe("deepseek-flash"); // modelId
-    expect(first[3]).toEqual({ inputTokens: 1200, outputTokens: 800, cacheReadTokens: 400 });
+    // The driver must forward the exact ctx.llm object — no wrapper indirection.
+    expect(receivedLlm).toBe(ctx.llm);
+    // And the driver itself must never record usage_events; that is the real
+    // CouncilLLM's job now (this mock ctx.llm never fires it).
+    expect((recordUsageEvent as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 
   // logInteraction throwing must never blow up the driver — audit is best-effort.

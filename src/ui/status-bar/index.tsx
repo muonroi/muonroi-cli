@@ -10,6 +10,7 @@
 import { Semantic } from "@muonroi/agent-harness-opentui";
 import * as React from "react";
 import { type SprintProgressSegment, type StatusBarState, statusBarStore } from "../../state/status-bar-store.js";
+import { computeCacheHitPct } from "./cache-hit.js";
 import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";
 
@@ -62,7 +63,11 @@ export function renderStatusBar(s: StatusBarState): React.ReactElement {
       : s.ctx_tokens !== undefined
         ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]`
         : "";
-  const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${s.cache_read_tokens ? ` ⊚${fmtTokens(s.cache_read_tokens)}` : ""}${ctxFill}`;
+  const hitPct = computeCacheHitPct(s);
+  const cacheSeg = s.cache_read_tokens
+    ? ` ⊚${fmtTokens(s.cache_read_tokens)}${hitPct !== null ? ` ${hitPct}%` : ""}`
+    : "";
+  const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${cacheSeg}${ctxFill}`;
   const ee = EE_DOT[s.ee_status] ?? EE_DOT.unknown;
 
   const slots: React.ReactNode[] = [

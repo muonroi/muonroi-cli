@@ -3,10 +3,10 @@ import { runDebate } from "../council/debate.js";
 import { resolveLeaderModelDetailed, resolveParticipants } from "../council/leader.js";
 import { phaseStart } from "../council/phase-events.js";
 import { runPreflight } from "../council/preflight.js";
-import type { ClarifiedSpec, CouncilCallUsage, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
+import type { ClarifiedSpec, CouncilLLM, CouncilParticipant, DebateState } from "../council/types.js";
 import { fetchBBContext, inferBBFromPrompt, renderBBContextBlock } from "../ee/bb-retrieval.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { logInteraction, recordUsageEvent } from "../storage/index.js";
+import { logInteraction } from "../storage/index.js";
 import type { CouncilInfoCard, StreamChunk } from "../types/index.js";
 import { isCouncilMultiProviderPreferred } from "../utils/settings.js";
 import { extractAssumptionsFromDebate, mergeAssumptions, renderLedgerSummary } from "./assumption-ledger.js";
@@ -21,51 +21,13 @@ import { SEED_DIMENSIONS } from "./seed-questions.js";
 import { deriveTasksFromSpec, writeTasks } from "./typed-artifacts.js";
 import type { DriverContext, DriverResult, ProductSpec, ProductStatusCardData, Stage } from "./types.js";
 
-/**
- * Wraps a CouncilLLM so every debate/research/generate call records a
- * usage_events row with source="council". debate.ts callers don't pass an
- * onUsage callback today, so the only place we can intercept is here, by
- * injecting our recorder into each method invocation before forwarding.
- * The original onUsage (if any) is still called.
- */
-function wrapLLMForUsageTracking(llm: CouncilLLM, ctx: DriverContext): CouncilLLM {
-  const sid = ctx.sessionId ?? ctx.runId;
-  const recorder = (modelId: string) => (usage: CouncilCallUsage) => {
-    try {
-      recordUsageEvent(sid, "council", modelId, {
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadTokens: usage.cachedInputTokens,
-      });
-    } catch {
-      /* best-effort — never block the debate */
-    }
-  };
-  return {
-    generate: (modelId, system, prompt, maxTokens, onUsage, signal) =>
-      llm.generate(
-        modelId,
-        system,
-        prompt,
-        maxTokens,
-        (u) => {
-          recorder(modelId)(u);
-          onUsage?.(u);
-        },
-        signal,
-      ),
-    debate: (modelId, system, prompt, signal, persistTrace, options, onUsage) =>
-      llm.debate(modelId, system, prompt, signal, persistTrace, options, (u) => {
-        recorder(modelId)(u);
-        onUsage?.(u);
-      }),
-    research: (modelId, topic, conversationContext, signal, persistTrace, options, onUsage) =>
-      llm.research(modelId, topic, conversationContext, signal, persistTrace, options, (u) => {
-        recorder(modelId)(u);
-        onUsage?.(u);
-      }),
-  };
-}
+// Council usage_events recording (source="council") now happens at the single
+// source of truth inside createCouncilLLM (src/council/llm.ts → recordCouncilUsage),
+// so it covers EVERY council entry point — the /council slash path, auto-council,
+// and all /ideal phases (clarifier, research, generate, sprint) — not just this
+// driver's runDebate call site. The former loop-driver-local wrapper only wrapped
+// the debate llm and double-counted nothing else; recording at the source removes
+// both the leak and the risk of a double count here.
 
 /**
  * Best-effort interaction_logs writer for the loop-driver. Swallows failures
@@ -566,7 +528,7 @@ export async function* runLoopDriver(ctx: DriverContext): AsyncGenerator<StreamC
             leaderModelId,
             participants,
           },
-          wrapLLMForUsageTracking(ctx.llm, ctx),
+          ctx.llm,
         );
 
         // Suppress raw debate content so the user is not confused by inter-role

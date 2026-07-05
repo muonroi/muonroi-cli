@@ -2087,6 +2087,15 @@ export function useAppLogic(props: AppLogicProps) {
     setActiveSubagent(null);
     setLiveTurnSourceLabel(null);
     contentAccRef.current = "";
+    // Collapse the ephemeral council transcript to the persisted [Council
+    // Decision] message on every turn end. These three arrays are append-only
+    // and rendered as a block BELOW the timestamp-sorted messages list, so
+    // leaving them populated makes a later message render ABOVE the stale
+    // council block (looks "swallowed"). Synthesis is persisted independently,
+    // so clearing here loses nothing. Covers auto-council + slash paths.
+    setCouncilMessages([]);
+    setCouncilInfoCards([]);
+    setCouncilPlaceholders(new Map());
   }, []);
 
   const finishTurnProcessing = useCallback(() => {

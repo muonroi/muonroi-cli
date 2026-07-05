@@ -57,12 +57,6 @@ describe("ProviderCapabilities — G1 flag methods", () => {
       const model2 = baseModel({ provider: "deepseek" });
       expect(caps.supportsClientTools(model2)).toBe(true);
     });
-
-    it("SiliconFlow subclass inherits default", () => {
-      const caps = getProviderCapabilities("siliconflow");
-      const model = baseModel({ provider: "siliconflow" });
-      expect(caps.supportsClientTools(model)).toBe(true);
-    });
   });
 
   describe("usesResponsesAPI", () => {
@@ -141,7 +135,7 @@ describe("ProviderCapabilities — G1 flag methods", () => {
   });
 
   describe("all providers — defaults applied uniformly", () => {
-    for (const id of ["anthropic", "openai", "google", "xai", "deepseek", "siliconflow", "ollama"] as const) {
+    for (const id of ["anthropic", "openai", "xai", "deepseek", "ollama"] as const) {
       it(`${id}: bare model → supportsClientTools=true, usesResponsesAPI=false, acceptsParam(*)=true`, () => {
         const caps = getProviderCapabilities(id);
         const model = baseModel({ provider: id });

@@ -1,6 +1,6 @@
 /**
  * Real-fix proof for the "reasoning_content must be passed back" rejection
- * that previously hit DeepSeek/SiliconFlow (HTTP 400 code 20015).
+ * that previously hit DeepSeek (HTTP 400 code 20015).
  *
  * The previous workaround (commit 42d5440, May 2026) disabled thinking mode
  * entirely because @ai-sdk/openai-compatible reportedly did not serialize
@@ -66,35 +66,6 @@ async function drain(stream: AsyncIterable<unknown>): Promise<void> {
 }
 
 describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
-  it("siliconflow: serializes assistant reasoning part as reasoning_content in request body", async () => {
-    const capture: { current: CapturedRequest | null } = { current: null };
-    const provider = makeStubProvider("siliconflow", capture);
-    const model = provider("deepseek-v4-flash");
-
-    const result = streamText({
-      model,
-      messages: [
-        { role: "user", content: "What is 2+2?" },
-        {
-          role: "assistant",
-          content: [
-            { type: "reasoning", text: "The user is asking basic arithmetic; the answer is four." },
-            { type: "text", text: "4" },
-          ],
-        },
-        { role: "user", content: "Now what is 2+3?" },
-      ],
-    });
-    await drain(result.fullStream);
-
-    expect(capture.current).not.toBeNull();
-    const body = capture.current!.body as { messages: Array<Record<string, unknown>> };
-    const assistantMsg = body.messages.find((m) => m.role === "assistant");
-    expect(assistantMsg, "assistant message must be present in wire body").toBeDefined();
-    expect(assistantMsg!.reasoning_content).toBe("The user is asking basic arithmetic; the answer is four.");
-    expect(assistantMsg!.content).toBe("4");
-  });
-
   it("deepseek: serializes assistant reasoning part as reasoning_content in request body", async () => {
     const capture: { current: CapturedRequest | null } = { current: null };
     const provider = makeStubProvider("deepseek", capture);
@@ -137,13 +108,13 @@ describe("reasoning_content round-trip — AI SDK 2.0.42 wire shape", () => {
   });
 
   // NOTE: the bare provider correctly omits reasoning_content when a turn has
-  // no reasoning part — but that is exactly the shape SiliconFlow's
-  // thinking-mode validator rejects (code 20015) in a mixed history. The
-  // strategy's transformRequestBody backfills it; see the dedicated describe
-  // block below ("transformThinkingModeBody — backfill / disable").
+  // no reasoning part — but that is exactly the shape a DeepSeek thinking-mode
+  // validator rejects (code 20015) in a mixed history. The strategy's
+  // transformRequestBody backfills it; see the dedicated describe block below
+  // ("transformThinkingModeBody — backfill / disable").
   it("emits no reasoning_content key when there are no reasoning parts (no false positives)", async () => {
     const capture: { current: CapturedRequest | null } = { current: null };
-    const provider = makeStubProvider("siliconflow", capture);
+    const provider = makeStubProvider("deepseek", capture);
     const model = provider("deepseek-v4-flash");
 
     const result = streamText({

@@ -42,6 +42,48 @@ describe("layer4Gsd (native)", () => {
       else process.env.MUONROI_GSD_NATIVE = prev;
     }
   });
+
+  it("heavy directive is MANDATORY and names the blocking gate, under budget", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "heavy" }));
+      expect(result.enriched).toContain("MANDATORY");
+      expect(result.enriched).toContain("gsd_plan_review");
+      expect(result.enriched).toContain("BLOCKED");
+      expect(result.enriched.length).toBeLessThan(800);
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+
+  it("standard directive is advisory only, no BLOCKED", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "standard" }));
+      expect(result.enriched).toContain("gsd_plan_review");
+      expect(result.enriched).not.toContain("BLOCKED");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
+
+  it("quick tier emits no gate directive", async () => {
+    const prev = process.env.MUONROI_GSD_NATIVE;
+    delete process.env.MUONROI_GSD_NATIVE;
+    try {
+      const result = await layer4Gsd(makeCtx({ modelDepthTier: "quick" }));
+      expect(result.enriched).not.toContain("MANDATORY");
+      expect(result.enriched).not.toContain("BLOCKED");
+      expect(result.enriched).not.toContain("gsd_plan_review before edits");
+    } finally {
+      if (prev === undefined) delete process.env.MUONROI_GSD_NATIVE;
+      else process.env.MUONROI_GSD_NATIVE = prev;
+    }
+  });
 });
 
 describe("layer4Gsd (playbook)", () => {
@@ -188,6 +230,30 @@ describe("layer4Gsd (playbook)", () => {
     expect(result.enriched).not.toContain("MANDATORY");
   });
 
+  it("treats a 'plan to implement' report as NON-informational (enters GSD, not the question path)", async () => {
+    // "make a plan to implement OAuth device flow" got tagged deliverableKind
+    // 'report' by the model (it's a plan/report deliverable), but the raw text
+    // is a real implementation request. isImplementationIntent must override
+    // the deliverable-kind informational shortcut so this still enters the
+    // STANDARD/HEAVY implement scaffold, not the QUESTION directive.
+    const raw = "make a plan to implement OAuth device flow";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "report" }),
+    );
+    expect(result.enriched).not.toContain("QUESTION / explanatory");
+  });
+
+  it("keeps a genuine summary report informational even with the implementation-intent guard", async () => {
+    // Guards against over-tightening: a real read/summarize prompt with no
+    // implementation-intent keywords must still route to the QUESTION
+    // directive (session 666630479c1a regression guard).
+    const raw = "đọc và tóm tắt kiến trúc module council";
+    const result = await layer4Gsd(
+      makeCtx({ raw, enriched: raw, taskType: "analyze", intentKind: "task", deliverableKind: "report" }),
+    );
+    expect(result.enriched).toContain("QUESTION / explanatory");
+  });
+
   it("Phase 2b: deliverableKind='code' is NOT informational even for a question-shaped prompt", async () => {
     // The raw text reads as a question — the legacy regex would mark it
     // informational. The model's deliverableKind='code' must override that so
@@ -226,6 +292,18 @@ describe("layer4Gsd (playbook)", () => {
     // getWhoAmIProfile defaults to null in the mock — the phase must be unchanged.
     const result = await layer4Gsd(makeCtx({ gsdPhase: "discuss", raw: "do the thing" }));
     expect(result.gsdPhase).toBe("discuss");
+  });
+
+  it("sets gsdGateBlocking=true when the model classifies depth=heavy", async () => {
+    const result = await layer4Gsd(
+      makeCtx({ raw: "refactor the entire auth subsystem end to end", modelDepthTier: "heavy" }),
+    );
+    expect(result.gsdGateBlocking).toBe(true);
+  });
+
+  it("leaves gsdGateBlocking falsy on a quick/standard ctx", async () => {
+    const result = await layer4Gsd(makeCtx({ raw: "what does this function do?", modelDepthTier: "quick" }));
+    expect(result.gsdGateBlocking).toBeFalsy();
   });
 
   it("uses ctx.gsdPhase from L1 (unified path) without calling routeTask", async () => {
