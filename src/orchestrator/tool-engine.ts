@@ -183,7 +183,8 @@ import {
   shouldInjectRepetitionReminder,
 } from "./repetition-detector.js";
 import { classifyStreamError } from "./retry-classifier.js";
-import type { SafetyBlockKind, SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
+import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
+import { parseSafetyBlock, shouldAutoAllowYolo } from "./safety-intercept.js";
 import {
   forcedFinalize,
   getSessionLastTask,
@@ -2340,10 +2341,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // the global __muonroiSafetyApproved map so registry.ts's
               // bash.execute bypasses the block on the retry.
               const _outputText = [tr.output, tr.error].filter((x): x is string => typeof x === "string").join("\n");
-              const _blockMatch = _outputText.match(/^BLOCKED \(([^)]+)\):\s*(.*)/);
-              if (_blockMatch && part.toolName === "bash") {
-                const _blockKind = _blockMatch[1] as SafetyBlockKind;
-                const _blockReason = _blockMatch[2];
+              const _parsedBlock = parseSafetyBlock(_outputText);
+              if (_parsedBlock && part.toolName === "bash") {
+                const _blockKind = _parsedBlock.kind;
+                const _blockReason = _parsedBlock.reason;
                 const _command =
                   typeof part.input === "object" && part.input != null
                     ? String((part.input as Record<string, unknown>).command ?? "")
@@ -2357,15 +2358,32 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 if (_blockKind === "empty-bash") {
                   tr = { ...tr, success: false, error: _outputText, output: _outputText };
                 } else {
-                  const _verdict = deps.askSafetyOverride
-                    ? await deps.askSafetyOverride({
-                        kind: _blockKind,
-                        toolName: part.toolName,
-                        blockedItem: _command,
-                        reason: _blockReason,
-                        source: "bash.execute",
-                      })
-                    : { action: "block" as const };
+                  // yolo mode auto-approves lower-severity blocks (git-safety /
+                  // dangerous) so "don't ask me" actually stops asking — but a
+                  // catastrophic, irreversible command STILL shows the askcard,
+                  // even in yolo. Everything else surfaces the interactive
+                  // safety-override card via deps.askSafetyOverride (registered
+                  // by the TUI); when no handler is wired (headless / batch),
+                  // that resolves to { action: "block" }, preserving the
+                  // backward-compatible hard-stop for non-interactive runs.
+                  let _verdict: SafetyOverrideVerdict;
+                  if (shouldAutoAllowYolo(_blockKind, deps.permissionMode)) {
+                    _verdict = { action: "allow-once" };
+                    yield {
+                      type: "content",
+                      content: `[yolo: auto-approved blocked command: ${_blockKind}]\n`,
+                    };
+                  } else {
+                    _verdict = deps.askSafetyOverride
+                      ? await deps.askSafetyOverride({
+                          kind: _blockKind,
+                          toolName: part.toolName,
+                          blockedItem: _command,
+                          reason: _blockReason,
+                          source: "bash.execute",
+                        })
+                      : { action: "block" as const };
+                  }
                   if (_verdict.action === "allow-once" || _verdict.action === "allow-session") {
                     // Store approval so registry.ts can bypass the block on retry.
                     const _globalSafety = globalThis as typeof globalThis & {
