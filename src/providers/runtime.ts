@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
 import type { ModelInfo } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { getReasoningEffortForModel } from "../utils/settings.js";
 import { getProviderCapabilities } from "./capabilities.js";
 import { getProviderStrategy } from "./strategies/registry.js";
@@ -14,6 +15,15 @@ export type ProviderFactory = ((modelId: string) => any) & {
   defaultProviderOptions?: Record<string, unknown>;
   /** AI SDK top-level call params to strip (backend doesn't accept them). */
   unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
+  /**
+   * The provider this factory talks to. Stamped by createProviderFactory so a
+   * caller that blindly reuses one provider's factory with a model from a
+   * DIFFERENT provider can be detected and auto-corrected in resolveModelRuntime
+   * (see the factory registry below) — otherwise the request would hit the wrong
+   * endpoint (e.g. a gateway-routed model POSTed straight to a native API,
+   * bypassing the configured gateway).
+   */
+  providerId?: ProviderId;
 };
 
 export interface ProviderFactoryResult {
@@ -33,6 +43,23 @@ export interface ResolvedModelRuntime {
 }
 
 /**
+ * Session-scoped registry of the most-recently-built factory per provider.
+ * resolveModelRuntime consults this to auto-correct a factory/model provider
+ * mismatch: when a caller reuses provider A's factory to run a model that
+ * belongs to provider B (a real hazard in sub-task paths like compaction that
+ * inherit the parent session's factory), we substitute B's real factory if one
+ * was built this session. Single-orchestrator invariant (v1, see CQ-16a) makes
+ * a module-level map safe. Last-built wins, so a /model key change that rebuilds
+ * a provider's factory transparently refreshes the entry.
+ */
+const providerFactoryRegistry = new Map<ProviderId, ProviderFactory>();
+
+/** Test seam: clear the registry between cases so entries never leak across specs. */
+export function __resetProviderFactoryRegistry(): void {
+  providerFactoryRegistry.clear();
+}
+
+/**
  * Phase 12.2-G4: thin dispatcher delegating to the provider strategy registry.
  * Each provider's SDK wiring + `factory.responses` + `defaultProviderOptions`
  * baseline lives in `src/providers/strategies/<provider>.strategy.ts`.
@@ -42,7 +69,10 @@ export function createProviderFactory(
   opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
 ): ProviderFactoryResult {
   const strategy = getProviderStrategy(id);
-  return { id, factory: strategy.createFactory(opts) };
+  const factory = strategy.createFactory(opts);
+  factory.providerId = id;
+  providerFactoryRegistry.set(id, factory);
+  return { id, factory };
 }
 
 /**
@@ -126,6 +156,33 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   if (!providerId && !mockGlobals.__muonroiMockModel) {
     throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
   }
+
+  // Factory/model provider guard (Layer 2). A caller that reuses one provider's
+  // factory to run a model from another provider (e.g. compaction inheriting the
+  // parent session's native factory for a gateway-routed model) would otherwise
+  // POST to the wrong endpoint. If the passed factory is stamped for a different
+  // provider AND we built the correct one this session, substitute it so the
+  // request lands on the right backend; otherwise keep going (Part 3's wire-id
+  // normalization keeps it valid) but log the mismatch so it is never silent.
+  let effectiveFactory = factory;
+  if (providerId && factory.providerId && factory.providerId !== providerId) {
+    const correct = providerFactoryRegistry.get(providerId);
+    if (correct) {
+      effectiveFactory = correct;
+      logger.debug("orchestrator", "Redirected model to its own provider factory", {
+        modelId: canonicalId,
+        modelProvider: providerId,
+        factoryProvider: factory.providerId,
+      });
+    } else {
+      logger.warn("orchestrator", "Factory/model provider mismatch; no factory for model's provider", {
+        modelId: canonicalId,
+        modelProvider: providerId,
+        factoryProvider: factory.providerId,
+      });
+    }
+  }
+
   const userEffort = getReasoningEffortForModel(modelId);
   const mockModel = mockGlobals.__muonroiMockModel;
 
@@ -157,12 +214,12 @@ export function resolveModelRuntime(factory: ProviderFactory, modelId: string): 
   } else {
     const strategy = getProviderStrategy(providerId!);
     resolved = strategy.resolve({
-      factory,
+      factory: effectiveFactory,
       modelId: canonicalId,
       modelInfo,
       reasoningEffort: userEffort,
     });
-    providerLevelDefaults = factory.defaultProviderOptions;
+    providerLevelDefaults = effectiveFactory.defaultProviderOptions;
   }
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject
