@@ -583,7 +583,7 @@ export async function* runDebate(
   const openings = yield* tracedAsync(() => Promise.all(openingPromises), {
     phase: "opening",
     label: `Generating opening statements (${participants.length} participants in parallel)`,
-    detail: participants.map((p) => p.role).join(", "),
+    detail: participants.map((p) => p.stance?.name ?? p.model).join(", "),
   });
 
   yield { type: "content", content: "\n── Opening Analysis ──\n" };
@@ -738,7 +738,11 @@ export async function* runDebate(
     // P5 — round lifecycle for the grouped transcript. `roundRec` closes over
     // this round's participants/pairCount/emergent/topic; a running record now,
     // a guaranteed done record on every exit below.
-    const roundParticipants = active.map((p) => p.role);
+    // Surface the task-adaptive persona (or model id), never the internal
+    // implement/verify/research cost-tier slot — that slot is a routing detail
+    // that misleads on analysis/decision topics (observed session dd34c59c63e9:
+    // an "evaluation" debate showed a bogus "implement" member).
+    const roundParticipants = active.map((p) => p.stance?.name ?? p.model);
     const roundEmergent = round > plannedMaxRounds;
     const roundTopic = nextTopic;
     const roundRec = (
@@ -930,7 +934,7 @@ export async function* runDebate(
       {
         phase: "exchange",
         label: `Discussion round ${round} (${pairs.length} pair${pairs.length === 1 ? "" : "s"})`,
-        detail: pairs.map((p) => `${p.a.role}↔${p.b.role}`).join(", "),
+        detail: pairs.map((p) => `${p.a.stance?.name ?? p.a.model}↔${p.b.stance?.name ?? p.b.model}`).join(", "),
       },
     );
 
@@ -1087,7 +1091,39 @@ export async function* runDebate(
       label: `Leader evaluation (round ${round})`,
     });
     const allExchangeText = [...exchangeLogs.values()].flat().slice(-8).join("\n\n");
-    const evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    let evaluation = yield* evaluateDebate(spec, allExchangeText, round, leaderModelId, llm, costAware);
+    // Eval robustness: the leader's cost-tier eval model can be on a flaky proxy
+    // (Console Go glm/kimi → "Upstream request failed") while panel models on
+    // other providers stay healthy. Rather than surface "evaluation unavailable"
+    // and lose the round outcome, retry the eval on each healthy model in the
+    // fallback pool before giving up. Bounded (pool is small) and only runs on the
+    // failure path, so successful evals pay nothing.
+    if (!evaluation) {
+      // Which model the primary eval already tried (skip re-hitting it). Defensive
+      // against a partially-mocked leader module in tests — if we can't resolve
+      // it, skip the fallback loop rather than throw.
+      let firstTried: string | null = null;
+      try {
+        firstTried = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+      } catch {
+        firstTried = null;
+      }
+      if (firstTried) {
+        for (const fallbackModel of fallbackPool) {
+          if (fallbackModel === firstTried) continue;
+          evaluation = yield* evaluateDebate(
+            spec,
+            allExchangeText,
+            round,
+            leaderModelId,
+            llm,
+            costAware,
+            fallbackModel,
+          );
+          if (evaluation) break;
+        }
+      }
+    }
 
     if (evaluation) {
       if (typeof evaluation.evidenceDensity === "number") {
@@ -1257,8 +1293,11 @@ export async function* runDebate(
         detail: "evaluation unavailable — continuing",
       });
       // P5 — eval parse failed: still close the round with a done record so the
-      // grouped transcript never shows a round stuck "running".
-      yield roundRec("done", { leaderDecision: "eval-unavailable", leaderReason: "leader evaluation unavailable" });
+      // grouped transcript never shows a round stuck "running". Do NOT set
+      // leaderReason here — the "eval-unavailable" DECISION_LABEL already conveys
+      // it, and a redundant reason line rendered the message twice on the card
+      // (observed session dd34c59c63e9).
+      yield roundRec("done", { leaderDecision: "eval-unavailable" });
       nextTopic = undefined;
     }
 
@@ -1382,13 +1421,20 @@ async function* evaluateDebate(
   leaderModelId: string,
   llm: CouncilLLM,
   costAware = false,
+  // When set, evaluate with this exact model instead of the cost-tier pick — used
+  // by the call-site fallback loop to re-run a round eval on a healthy panel model
+  // after the leader's provider rejected the eval payload (Console Go "Upstream
+  // request failed" on glm/kimi; observed session dd34c59c63e9).
+  modelOverride?: string,
 ): AsyncGenerator<StreamChunk, LeaderEvaluation | null, unknown> {
   try {
     const { system, prompt } = buildLeaderEvaluationPrompt({ spec, exchangeLogs: exchangeText, round });
-    const modelId = pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
+    const modelId = modelOverride ?? pickCouncilTaskModel("evaluate_round", leaderModelId, costAware);
     const raw = yield* tracedGenerate(llm, {
       phase: "evaluate",
-      label: `Leader evaluating round ${round}`,
+      label: modelOverride
+        ? `Leader evaluating round ${round} (fallback: ${modelOverride})`
+        : `Leader evaluating round ${round}`,
       modelId,
       system,
       prompt,

@@ -430,5 +430,41 @@ force live). Engine emit: verify a live `/council` still completes and emits a
   when no round records. Verified live: `/council` → `council-rounds-overview`
   (total=3, members=2) + `council-round-1/2/3` regions.
 
-**STATUS: all phases P0–P6 complete + verified live.** All 3 flags default OFF:
-`MUONROI_SCROLL_LOCK`, `MUONROI_CONTEXT_RAIL`, `MUONROI_ROUND_GROUPS`.
+**STATUS: all phases P0–P6 complete + verified live.** All 3 flags now default ON
+(baked): `MUONROI_SCROLL_LOCK`, `MUONROI_CONTEXT_RAIL`, `MUONROI_ROUND_GROUPS`
+(opt out with `=0`).
+
+## 14. Upgrade pass (session 2026-07-05, from live-council feedback on `dd34c59c63e9`)
+
+Evidence-driven fixes after driving real councils (`kimi-k2.7-code`/`glm-5.2` via
+opencode-go). Root-cause split: 32/32 debate+synthesis calls succeeded while
+eval/clarification calls failed → NOT a provider outage but Console Go rejecting
+the larger eval/clarify payloads for glm/kimi.
+
+- **U1.1 role leak — DONE.** `debate.ts` round members + opening/exchange phase
+  details used the internal `implement/verify/research` slot; now use
+  `stance?.name ?? model` (persona/model only). The slot never reaches the UI.
+- **U1.2 rail topic + progress — DONE.** `CouncilMetaPatch.topic` added + emitted
+  in `council/index.ts`; `app.tsx` railRows gains a **Topic** row and a live
+  **Progress** row (`Round x · met/total · decision`) from `councilRounds`.
+- **U1.3 single eval-unavailable — DONE.** `debate.ts` no longer sets a redundant
+  `leaderReason` on the eval-unavailable round record (the `DECISION_LABEL`
+  already conveys it) — killed the doubled line on the round card.
+- **U2 eval-fallback — DONE.** When `evaluateDebate` returns null (leader provider
+  rejects the eval payload), retry on each healthy model in `fallbackPool`
+  before emitting eval-unavailable. Fail-safe: skips the loop if the primary
+  model can't be resolved (preserves the partially-mocked test path).
+- **U3 task-aware panel — DONE.** New `selectTaskAwarePanel` (`panel-select.ts`):
+  the leader reads the task and picks 2–4 models from the reachable pool
+  (`buildCouncilCandidatePool` in `leader.ts`), validated against the pool
+  (Zero-Hardcode). Behind `MUONROI_TASK_AWARE_PANEL` (default ON), always
+  fails open to `resolveParticipants`.
+- **Redundancy fix (rail vs inline) — DONE.** `RunCouncilOptions.suppressInlineMeta`
+  threaded from the TUI (`isContextRailEnabled()`) so the leader/panel summary is
+  not duplicated inline + rail. Railless sinks keep the inline summary.
+
+**Verified:** `bunx tsc --noEmit` clean; 622 unit tests pass (incl. all 203
+council); live mock driver — rail shows Topic + Progress, no `implement` in
+members, eval-unavailable renders once. Task-aware SELECTION needs a healthy
+leader provider to observe a task-specific roster (fail-open proven on mock).
+`CouncilStatusPhase` gained `panel_select`.

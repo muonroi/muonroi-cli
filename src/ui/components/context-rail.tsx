@@ -30,7 +30,18 @@ export interface ContextRailProps {
  */
 export function ContextRail({ width, rows, children }: ContextRailProps) {
   return (
-    <Semantic id="context-rail" role="region" name="Context" props={{ rowCount: rows.length }}>
+    <Semantic
+      id="context-rail"
+      role="region"
+      name="Context"
+      // labels/values exposed for harness assertions (rail rows are plain <text>,
+      // not semantic nodes, so they don't otherwise show in the snapshot tree).
+      props={{
+        rowCount: rows.length,
+        labels: rows.map((r) => r.label).join(","),
+        values: rows.map((r) => r.value).join(" | "),
+      }}
+    >
       <box
         flexShrink={0}
         width={width}

@@ -737,6 +737,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   ];
   // Council metadata rows (P3) — appended only when a debate has published them,
   // so non-council sessions keep a lean rail.
+  if (councilMeta?.topic) {
+    const t = councilMeta.topic.trim();
+    railRows.push({ label: "Topic", value: t.length > 90 ? `${t.slice(0, 89)}…` : t });
+  }
   if (councilMeta?.leader) railRows.push({ label: "Leader", value: councilMeta.leader });
   if (councilMeta?.panel?.length) {
     railRows.push({ label: "Panel", value: `${councilMeta.panel.length}: ${councilMeta.panel.join(", ")}` });
@@ -749,6 +753,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     railRows.push({ label: "Research", value: councilMeta.researchMode ? "on" : "off" });
   }
   if (councilMeta?.costAware) railRows.push({ label: "Cost-aware", value: "on" });
+  // Live debate progress — the current round + its outcome/decision, so the rail
+  // reflects debate STATE (not just static metadata). Reads the latest round
+  // record published by runDebate.
+  if (councilRounds.length > 0) {
+    const last = councilRounds[councilRounds.length - 1];
+    const parts = [`Round ${last.round}`];
+    if (last.state === "running") parts.push("running");
+    if (typeof last.criteriaTotal === "number" && last.criteriaTotal >= 0) {
+      parts.push(`${last.criteriaMet ?? 0}/${last.criteriaTotal} met`);
+    }
+    if (last.leaderDecision && last.leaderDecision !== "eval-unavailable") parts.push(last.leaderDecision);
+    railRows.push({ label: "Progress", value: parts.join(" · ") });
+  }
 
   // Council metadata cards (phase timeline, product-status, statuses, info cards
   // like Clarified Spec / Discussion Brief / Debate Plan). Rendered INLINE in the

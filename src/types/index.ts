@@ -287,6 +287,7 @@ export interface CouncilQuestionData {
 
 export type CouncilStatusPhase =
   | "clarify"
+  | "panel_select"
   | "plan_debate"
   | "research"
   | "opening"
@@ -440,6 +441,8 @@ export interface CouncilRoundRecord {
  * single `councilMeta` object, so any subset of fields may be present.
  */
 export interface CouncilMetaPatch {
+  /** The debate topic / question under discussion (shown at the top of the rail). */
+  topic?: string;
   /** Leader model id driving the debate. */
   leader?: string;
   /** Panel member role labels. */

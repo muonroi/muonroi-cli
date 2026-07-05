@@ -72,6 +72,45 @@ export function CouncilPhaseTimeline({ phases, theme: t, expanded = false }: Cou
   const doneCount = visible.length - live.length;
   const rows = expanded ? visible : live;
 
+  // Split off error phases so identical provider failures can be folded into one
+  // row instead of N repeated blocks. A flaky proxy (Console Go glm/kimi) makes
+  // clarify + spec-infer + eval all fail with the SAME message — rendered raw
+  // that spammed the (narrow) context rail. Non-error rows keep their order.
+  const nonErrorRows = rows.filter((p) => p.state !== "error");
+  const errorRows = rows.filter((p) => p.state === "error");
+  const errorGroups: Array<{ message: string; phases: CouncilPhaseEvent[] }> = [];
+  for (const p of errorRows) {
+    const message = p.errorMessage ?? "(failed)";
+    const existing = errorGroups.find((g) => g.message === message);
+    if (existing) existing.phases.push(p);
+    else errorGroups.push({ message, phases: [p] });
+  }
+
+  const renderRow = (p: CouncilPhaseEvent) => {
+    const isDone = p.state === "done";
+    const marker = isDone ? "✓" : <Spinner />;
+    const markerColor = isDone ? t.planOptionCheck : t.accent;
+    const labelColor = isDone ? t.textMuted : t.text;
+    const liveElapsedMs =
+      p.state === "active" && typeof p.startedAt === "number" ? Math.max(0, now - p.startedAt) : p.elapsedMs;
+    const elapsed = formatElapsed(liveElapsedMs);
+    const meta = elapsed ? ` (${elapsed})` : isDone ? "" : " …";
+    return (
+      <box key={p.phaseId} flexDirection="column">
+        <box>
+          <text fg={markerColor}>{marker}</text>
+          <text fg={labelColor}>{` ${p.label}`}</text>
+          {meta && <text fg={t.textDim}>{meta}</text>}
+        </box>
+        {p.detail && (
+          <box paddingLeft={2}>
+            <text fg={t.textMuted}>{`└ ${truncate(p.detail, 100)}`}</text>
+          </box>
+        )}
+      </box>
+    );
+  };
+
   return (
     <box flexDirection="column" paddingLeft={2} paddingTop={0} flexShrink={0}>
       {!expanded && doneCount > 0 && (
@@ -81,35 +120,24 @@ export function CouncilPhaseTimeline({ phases, theme: t, expanded = false }: Cou
           <text fg={t.textMuted}>{"  ·  Ctrl+O to expand"}</text>
         </box>
       )}
-      {rows.map((p) => {
-        const isError = p.state === "error";
-        const isDone = p.state === "done";
-        const marker = isError ? "✗" : isDone ? "✓" : <Spinner />;
-        const markerColor = isError ? t.diffRemovedFg : isDone ? t.planOptionCheck : t.accent;
-        const labelColor = isError ? t.diffRemovedFg : isDone ? t.textMuted : t.text;
-        // For active phases with a startedAt, derive elapsed from wall-clock
-        // so the displayed time keeps counting up between emitter updates.
-        const liveElapsedMs =
-          p.state === "active" && typeof p.startedAt === "number" ? Math.max(0, now - p.startedAt) : p.elapsedMs;
-        const elapsed = formatElapsed(liveElapsedMs);
-        const meta = elapsed ? ` (${elapsed})` : isDone ? "" : " …";
+      {nonErrorRows.map(renderRow)}
+      {errorGroups.map((g) => {
+        // One header per unique error; when >1 phase shares it, name the count
+        // and list the affected steps compactly instead of repeating the message.
+        const first = g.phases[0];
+        const label =
+          g.phases.length === 1
+            ? first.label
+            : `${g.phases.length} steps failed: ${g.phases.map((p) => p.label).join(", ")}`;
         return (
-          <box key={p.phaseId} flexDirection="column">
+          <box key={`err-${first.phaseId}`} flexDirection="column">
             <box>
-              <text fg={markerColor}>{marker}</text>
-              <text fg={labelColor}>{` ${p.label}`}</text>
-              {meta && <text fg={t.textDim}>{meta}</text>}
+              <text fg={t.diffRemovedFg}>✗</text>
+              <text fg={t.diffRemovedFg}>{` ${truncate(label, 100)}`}</text>
             </box>
-            {p.detail && (
-              <box paddingLeft={2}>
-                <text fg={t.textMuted}>{`└ ${truncate(p.detail, 100)}`}</text>
-              </box>
-            )}
-            {p.errorMessage && (
-              <box paddingLeft={2}>
-                <text fg={t.diffRemovedFg}>{`└ ${truncate(p.errorMessage, 100)}`}</text>
-              </box>
-            )}
+            <box paddingLeft={2}>
+              <text fg={t.diffRemovedFg}>{`└ ${truncate(g.message, 100)}`}</text>
+            </box>
           </box>
         );
       })}
