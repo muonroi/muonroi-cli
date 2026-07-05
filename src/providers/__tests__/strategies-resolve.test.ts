@@ -13,6 +13,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type { ModelInfo } from "../../types/index.js";
 import type { ProviderFactory } from "../runtime.js";
+import { toWireModelId } from "../strategies/base.strategy.js";
 import { OpenAIStrategy } from "../strategies/openai.strategy.js";
 import { getProviderStrategy } from "../strategies/registry.js";
 
@@ -98,6 +99,40 @@ describe("strategy.resolve()", () => {
     expect(chat).toHaveBeenCalledWith("gpt-4o-mini");
     expect(resp).not.toHaveBeenCalled();
     expect(result.providerOptions).toBeUndefined();
+  });
+
+  test("opencode/ routing prefix is stripped from the wire id, catalog id preserved", () => {
+    // Regression: the compaction proposer resolved compactModelId
+    // "opencode/deepseek-v4-flash" but ran it through the parent's native
+    // DeepSeek factory. Without stripping, api.deepseek.com rejected the raw
+    // prefixed id with HTTP 400. The wire id must be native; the returned
+    // modelId must remain the catalog id for usage attribution.
+    const strategy = getProviderStrategy("deepseek");
+    const { factory, chat, resp } = makeFactory();
+    const modelInfo: ModelInfo = {
+      id: "opencode/deepseek-v4-flash",
+      name: "DeepSeek V4 Flash (OpenCode Go)",
+      contextWindow: 128_000,
+      inputPrice: 0,
+      outputPrice: 0,
+      reasoning: true,
+      description: "",
+      provider: "deepseek",
+    };
+    const result = strategy.resolve({ factory, modelId: modelInfo.id, modelInfo });
+    expect(chat).toHaveBeenCalledWith("deepseek-v4-flash");
+    expect(chat).not.toHaveBeenCalledWith("opencode/deepseek-v4-flash");
+    expect(resp).not.toHaveBeenCalled();
+    expect(result.modelId).toBe("opencode/deepseek-v4-flash");
+  });
+
+  test("toWireModelId strips only the opencode/ prefix, leaves native ids intact", () => {
+    expect(toWireModelId("opencode/deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    expect(toWireModelId("opencode/glm-5.2")).toBe("glm-5.2");
+    expect(toWireModelId("deepseek-v4-flash")).toBe("deepseek-v4-flash");
+    expect(toWireModelId("gpt-5.4")).toBe("gpt-5.4");
+    // Only a leading segment prefix — never a substring elsewhere.
+    expect(toWireModelId("foo-opencode/bar")).toBe("foo-opencode/bar");
   });
 
   test("unsupportedParams from factory propagates onto runtime", () => {
